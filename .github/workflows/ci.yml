@@ -27,6 +27,8 @@ jobs:
           cache: npm
       - name: Install frontend dependencies
         run: npm ci
+      - name: Lint and type-check frontend
+        run: npm run lint
       - name: Type-check and build frontend
         run: npm run build
       - name: Frontend unit tests

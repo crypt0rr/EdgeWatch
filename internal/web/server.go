@@ -835,9 +835,21 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	go func() {
-		scan, events, runErr := s.App.RunJobRecord(context.Background(), record)
+		// Reload immediately before execution so an edit accepted between the
+		// HTTP response and goroutine start runs the current immutable revision
+		// instead of returning an optimistic 202 for a stale snapshot.
+		latest, getErr := s.Store.GetJob(context.Background(), id)
+		if getErr != nil {
+			s.Log.Error("manual scan could not reload job", "job_id", id, "error", getErr)
+			return
+		}
+		if latest.Archived {
+			s.Log.Info("manual scan skipped because job was archived", "job_id", id)
+			return
+		}
+		scan, events, runErr := s.App.RunJobRecord(context.Background(), latest)
 		if runErr != nil {
-			s.Log.Error("manual scan failed", "job", record.Job.Name, "scan_id", scan.ID, "error", runErr)
+			s.Log.Error("manual scan failed", "job", latest.Job.Name, "scan_id", scan.ID, "error", runErr)
 		}
 		s.broadcast(map[string]any{"type": "scan.completed", "job_id": id, "scan_id": scan.ID, "status": scan.Status, "events": len(events)})
 	}()

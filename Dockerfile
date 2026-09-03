@@ -10,7 +10,7 @@ ARG TARGETOS
 ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/edgewatch ./cmd/edgewatch
 
-FROM alpine:3.22
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates nmap tzdata \
     && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets \
     && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets

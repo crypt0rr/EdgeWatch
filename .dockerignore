@@ -1,5 +1,6 @@
 .git
 .github
+dist
 edgewatch
 config.yaml
 notification-urls.txt

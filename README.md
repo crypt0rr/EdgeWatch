@@ -24,11 +24,15 @@ It is a small Go daemon around [Nmap](https://nmap.org/) with durable SQLite sta
 3. Start EdgeWatch:
 
    ```console
+   mkdir -p data
+   docker compose pull
    docker compose up -d
    docker compose logs -f edgewatch
    ```
 
-The Compose service uses host networking so IPv4 and IPv6 scans follow the host's routes. It exposes no listening port, drops all Linux capabilities except `NET_RAW`, uses a read-only root filesystem, and stores state in the `edgewatch-data` volume. It does **not** use privileged mode.
+The Compose service pulls the published GHCR image and uses host networking so IPv4 and IPv6 scans follow the host's routes. It exposes no listening port, drops all Linux capabilities except `NET_RAW`, uses a read-only root filesystem, and stores state in the local `./data` directory. It does **not** use privileged mode. Run `docker compose pull` explicitly when you want to update the `latest` image.
+
+This deployment intentionally starts with fresh state in `./data`; it does not automatically migrate or read the previous Docker-managed `edgewatch-data` volume. Keep that old volume until you have confirmed the new deployment is working, then remove it separately if it is no longer needed.
 
 Check status or run a scan manually:
 
@@ -66,7 +70,9 @@ Configuration is strict and versioned. Unknown keys and unsafe values fail start
 edgewatch config validate --config config.yaml
 ```
 
-Each named job has its own schedule, target set, protocols, ports, timeout, and baseline policy. Standard five-field cron expressions and IANA timezone names are used. Missed schedules are not backfilled and a job never overlaps itself.
+Each named job has its own schedule, target set, protocols, ports, timeout, baseline policy, and host-discovery policy. Standard five-field cron expressions and IANA timezone names are used. Missed schedules are not backfilled and a job never overlaps itself.
+
+`assume_alive` defaults to `true`, which passes `-Pn` to Nmap and avoids relying on ICMP or other host-discovery probes. Set it to `false` for a job when Nmap host discovery is preferred. If discovery reports an expected target as down or omits it, the scan fails safely instead of treating the target as having no open ports.
 
 Notification URLs can be listed directly, referenced as an entire environment value such as `${SHOUTRRR_URL}`, or read from `notifications.urls_file`. A secrets file is recommended because many Shoutrrr URLs contain credentials. URLs are redacted from logs and command output.
 
@@ -91,7 +97,7 @@ Commands accept `--config PATH`; data-producing commands accept `--output json`.
 
 ## Operations
 
-- Back up the named volume or the SQLite database while EdgeWatch is stopped. If online backup is required, use SQLite's backup tooling rather than copying only the main database file while WAL mode is active.
+- Back up `./data` or `./data/edgewatch.db` while EdgeWatch is stopped. If online backup is required, use SQLite's backup tooling rather than copying only the main database file while WAL mode is active.
 - Normalized scan history is retained for 90 days by default. Baselines, active incidents, and audit events remain.
 - Notification deliveries are persisted and retried three times. A failing destination does not block other destinations.
 - `edgewatch health` verifies the daemon heartbeat used by the container healthcheck.

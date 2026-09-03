@@ -28,8 +28,7 @@ func TestParsePorts(t *testing.T) {
 func TestLoadDefaultsAndStrictFields(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	yaml := `version: 1
-database: ` + filepath.Join(dir, "db.sqlite") + `
+	yaml := `database: ` + filepath.Join(dir, "db.sqlite") + `
 retention: 90d
 jobs:
   - name: public
@@ -45,17 +44,45 @@ jobs:
 	if err != nil {
 		t.Fatal(err)
 	}
+	if cfg.Version != 1 {
+		t.Fatalf("version default %d", cfg.Version)
+	}
 	if cfg.Retention.Value() != 90*24*time.Hour {
 		t.Fatalf("retention %s", cfg.Retention.Value())
 	}
-	if cfg.Jobs[0].Baseline.Samples != 1 || !cfg.Jobs[0].RunsOnStart() {
+	if cfg.Jobs[0].Baseline.Samples != 1 || !cfg.Jobs[0].AssumesAlive() || !cfg.Jobs[0].RunsOnStart() {
 		t.Fatal("defaults not applied")
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(yaml, "tcp:", "assume_alive: false\n    tcp:", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Jobs[0].AssumesAlive() {
+		t.Fatal("explicit assume_alive=false was not applied")
 	}
 	if err := os.WriteFile(path, []byte(strings.Replace(yaml, "tcp:", "unknown: true\n    tcp:", 1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("unknown field accepted")
+	}
+}
+
+func TestSecurityHashIncludesAssumeAlive(t *testing.T) {
+	trueValue, falseValue := true, false
+	base := Job{Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1, AssumeAlive: &trueValue, TCP: &Protocol{Ports: "443", Mode: "syn"}}
+	changed := base
+	changed.AssumeAlive = &falseValue
+	if base.SecurityHash() == changed.SecurityHash() {
+		t.Fatal("assume_alive change did not alter security hash")
+	}
+	withoutField := base
+	withoutField.AssumeAlive = nil
+	if base.SecurityHash() != withoutField.SecurityHash() {
+		t.Fatal("omitted assume_alive does not resolve to the default")
 	}
 }
 

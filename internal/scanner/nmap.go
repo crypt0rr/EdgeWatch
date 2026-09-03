@@ -61,7 +61,7 @@ func (n *Nmap) Scan(ctx context.Context, job config.Job) (model.Snapshot, error)
 		}
 		if job.TCP != nil {
 			snap.Scopes = append(snap.Scopes, model.Scope{Target: rt.Name, Protocol: "tcp", Ports: job.TCP.Ports, ServiceDetection: job.TCP.ServiceDetection})
-			units, err := n.scanProtocol(ctx, rt, "tcp", *job.TCP, job.Timing)
+			units, err := n.scanProtocol(ctx, rt, "tcp", *job.TCP, job.Timing, job.AssumesAlive())
 			if err != nil {
 				return model.Snapshot{}, fmt.Errorf("target %s tcp: %w", rt.Name, err)
 			}
@@ -69,7 +69,7 @@ func (n *Nmap) Scan(ctx context.Context, job config.Job) (model.Snapshot, error)
 		}
 		if job.UDP != nil {
 			snap.Scopes = append(snap.Scopes, model.Scope{Target: rt.Name, Protocol: "udp", Ports: job.UDP.Ports, ServiceDetection: job.UDP.ServiceDetection})
-			units, err := n.scanProtocol(ctx, rt, "udp", *job.UDP, job.Timing)
+			units, err := n.scanProtocol(ctx, rt, "udp", *job.UDP, job.Timing, job.AssumesAlive())
 			if err != nil {
 				return model.Snapshot{}, fmt.Errorf("target %s udp: %w", rt.Name, err)
 			}
@@ -135,7 +135,7 @@ func incrementIP(ip net.IP) {
 	}
 }
 
-func (n *Nmap) scanProtocol(ctx context.Context, target resolvedTarget, protocol string, pc config.Protocol, timing string) ([]model.Unit, error) {
+func (n *Nmap) scanProtocol(ctx context.Context, target resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool) ([]model.Unit, error) {
 	byFamily := map[int][]string{4: {}, 6: {}}
 	for _, address := range target.Addresses {
 		if strings.Contains(address, ":") {
@@ -150,21 +150,7 @@ func (n *Nmap) scanProtocol(ctx context.Context, target resolvedTarget, protocol
 		if len(addresses) == 0 {
 			continue
 		}
-		args := []string{"-Pn", "-n", "-oX", "-", "-p", pc.Ports, timingArg(timing)}
-		if family == 6 {
-			args = append(args, "-6")
-		}
-		if protocol == "udp" {
-			args = append(args, "-sU")
-		} else if pc.Mode == "connect" {
-			args = append(args, "-sT")
-		} else {
-			args = append(args, "-sS")
-		}
-		if pc.ServiceDetection {
-			args = append(args, "-sV", "--version-light")
-		}
-		args = append(args, addresses...)
+		args := nmapArgs(family, protocol, pc, timing, assumeAlive, addresses)
 		cmd := exec.CommandContext(ctx, n.Path, args...)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
@@ -200,6 +186,27 @@ func (n *Nmap) scanProtocol(ctx context.Context, target resolvedTarget, protocol
 		units = append(units, unit)
 	}
 	return units, nil
+}
+
+func nmapArgs(family int, protocol string, pc config.Protocol, timing string, assumeAlive bool, addresses []string) []string {
+	args := []string{"-n", "-oX", "-", "-p", pc.Ports, timingArg(timing)}
+	if assumeAlive {
+		args = append(args, "-Pn")
+	}
+	if family == 6 {
+		args = append(args, "-6")
+	}
+	if protocol == "udp" {
+		args = append(args, "-sU")
+	} else if pc.Mode == "connect" {
+		args = append(args, "-sT")
+	} else {
+		args = append(args, "-sS")
+	}
+	if pc.ServiceDetection {
+		args = append(args, "-sV", "--version-light")
+	}
+	return append(args, addresses...)
 }
 
 func timingArg(profile string) string {

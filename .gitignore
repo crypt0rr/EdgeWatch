@@ -1,5 +1,6 @@
 /edgewatch
 /dist/
+/data/
 /config.yaml
 /notification-urls.txt
 *.db

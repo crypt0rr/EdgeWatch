@@ -58,6 +58,7 @@ type Job struct {
 	Schedule         string    `yaml:"schedule"`
 	Timezone         string    `yaml:"timezone"`
 	RunOnStart       *bool     `yaml:"run_on_start"`
+	AssumeAlive      *bool     `yaml:"assume_alive"`
 	Targets          []string  `yaml:"targets"`
 	MaxExpandedHosts int       `yaml:"max_expanded_hosts"`
 	TCP              *Protocol `yaml:"tcp"`
@@ -146,6 +147,10 @@ func applyDefaults(c *Config) {
 		}
 		if j.Timeout == 0 {
 			j.Timeout = Duration(time.Hour)
+		}
+		if j.AssumeAlive == nil {
+			assumeAlive := true
+			j.AssumeAlive = &assumeAlive
 		}
 		if j.Baseline.Samples == 0 {
 			j.Baseline.Samples = 1
@@ -308,13 +313,16 @@ func PortContains(raw string, port int) bool {
 
 func (j Job) RunsOnStart() bool { return j.RunOnStart == nil || *j.RunOnStart }
 
+func (j Job) AssumesAlive() bool { return j.AssumeAlive == nil || *j.AssumeAlive }
+
 func (j Job) SecurityHash() string {
 	type securityJob struct {
-		Targets  []string
-		Max      int
-		TCP, UDP *Protocol
+		Targets     []string
+		Max         int
+		AssumeAlive bool
+		TCP, UDP    *Protocol
 	}
-	v := securityJob{append([]string(nil), j.Targets...), j.MaxExpandedHosts, j.TCP, j.UDP}
+	v := securityJob{append([]string(nil), j.Targets...), j.MaxExpandedHosts, j.AssumesAlive(), j.TCP, j.UDP}
 	sort.Strings(v.Targets)
 	b, _ := yaml.Marshal(v)
 	h := sha256.Sum256(b)

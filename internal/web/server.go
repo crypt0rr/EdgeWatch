@@ -597,6 +597,10 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		s.jobEvents(w, r, id)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "baseline" && r.Method == http.MethodGet {
+		s.jobBaseline(w, r, id)
+		return
+	}
 	if len(parts) == 3 && parts[1] == "baseline" && parts[2] == "reset" && r.Method == http.MethodPost {
 		s.resetBaseline(w, r, id)
 		return
@@ -1026,6 +1030,42 @@ func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, id string)
 	offset, limit := queryOffset(r), queryLimit(r)
 	pageItems, page := pageSlice(items, offset, limit)
 	writeJSON(w, 200, map[string]any{"job_id": id, "job": record.Job.Name, "incidents": pageItems, "pagination": page})
+}
+
+// jobBaseline exposes the current comparison state without requiring clients
+// to fetch the full job record. Baseline units are paginated because a broad
+// CIDR can produce a large snapshot; the scope metadata remains intact on
+// every page.
+func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, id string) {
+	record, err := s.Store.GetJob(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		return
+	}
+	state, err := s.Store.RuntimeState(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		return
+	}
+	value := map[string]any{
+		"job_id":        id,
+		"job":           record.Job.Name,
+		"revision":      record.Revision,
+		"security_hash": record.Job.SecurityHash(),
+		"baseline":      baselineJSON(state),
+	}
+	if state.Baseline == nil {
+		value["snapshot"] = nil
+		value["pagination"] = paginationJSON(queryOffset(r), queryLimit(r), 0)
+		writeJSON(w, http.StatusOK, value)
+		return
+	}
+	offset, limit := queryOffset(r), queryLimit(r)
+	units, page := pageSlice(state.Baseline.Units, offset, limit)
+	snapshot := *state.Baseline
+	snapshot.Units = units
+	value["snapshot"], value["pagination"] = snapshot, page
+	writeJSON(w, http.StatusOK, value)
 }
 
 func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, id string) {

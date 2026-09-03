@@ -453,5 +453,26 @@ func TestHistoryEndpointsExposePaginationAndScopedResults(t *testing.T) {
 	if len(events.Events) != 2 || events.Pagination["total"] != float64(3) {
 		t.Fatalf("unexpected paginated events: %#v", events)
 	}
+	if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &model.Snapshot{Units: []model.Unit{
+			{Target: "127.0.0.1", Protocol: "tcp"},
+			{Target: "127.0.0.2", Protocol: "tcp"},
+		}}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp = setup(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline?limit=1&offset=1", "", "")
+	var baseline struct {
+		Snapshot   *model.Snapshot `json:"snapshot"`
+		Pagination map[string]any  `json:"pagination"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&baseline); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if baseline.Snapshot == nil || len(baseline.Snapshot.Units) != 1 || baseline.Pagination["total"] != float64(2) {
+		t.Fatalf("unexpected paginated baseline: %#v", baseline)
+	}
 	_ = login
 }

@@ -129,7 +129,7 @@ The tag publishes:
 
 Stable releases at version 1.0.0 or newer also receive a major tag such as `:1`. Prerelease tags such as `v0.1.0-rc.1` never update `latest`.
 
-The workflow links the package to this repository so its access permissions can be inherited. GHCR still creates the first package as private, even for a public repository. After the first release, set the package visibility to public on its package settings page if anonymous pulls are required.
+The workflow links the package to this repository so its access permissions can be inherited. Package visibility is controlled by GHCR package settings; verify it after the first release and set it to public if anonymous pulls are required. The `v0.1.0` package published for this repository is currently public.
 
 ## License
 

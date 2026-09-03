@@ -1,0 +1,8 @@
+/edgewatch
+/dist/
+/config.yaml
+/notification-urls.txt
+*.db
+*.db-shm
+*.db-wal
+coverage.out

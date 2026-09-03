@@ -1,0 +1,4 @@
+# Add one Shoutrrr service URL per line. An empty file disables notifications.
+# Examples and supported services: https://containrrr.dev/shoutrrr/v0.8/services/overview/
+# ntfy://username:password@ntfy.sh/topic
+# discord://token@webhook-id

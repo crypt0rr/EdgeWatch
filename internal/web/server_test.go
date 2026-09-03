@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -475,4 +476,88 @@ func TestHistoryEndpointsExposePaginationAndScopedResults(t *testing.T) {
 		t.Fatalf("unexpected paginated baseline: %#v", baseline)
 	}
 	_ = login
+}
+
+func TestLifecycleEndpointsRequireCurrentRevision(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	hash, err := auth.PasswordHash("correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAdmin(ctx, store.Admin{Username: "admin", PasswordHash: hash, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := app.New(cfg, s, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := httptest.NewServer(NewServer(a, s, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
+	defer h.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	loginRequest, _ := http.NewRequest(http.MethodPost, h.URL+"/api/v1/auth/login", strings.NewReader(`{"password":"correct horse battery staple"}`))
+	loginRequest.Header.Set("Content-Type", "application/json")
+	loginResponse, err := client.Do(loginRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var login struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(loginResponse.Body).Decode(&login); err != nil {
+		loginResponse.Body.Close()
+		t.Fatal(err)
+	}
+	loginResponse.Body.Close()
+	if login.CSRF == "" {
+		t.Fatal("missing CSRF token")
+	}
+	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "lifecycle-api", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(path, body string) *http.Response {
+		req, requestErr := http.NewRequest(http.MethodPost, h.URL+path, strings.NewReader(body))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-CSRF-Token", login.CSRF)
+		response, requestErr := client.Do(req)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		return response
+	}
+	response := request("/api/v1/jobs/"+record.ID+"/pause", `{}`)
+	if response.StatusCode != http.StatusBadRequest {
+		response.Body.Close()
+		t.Fatalf("missing revision returned %d", response.StatusCode)
+	}
+	response.Body.Close()
+	changed := record.Job
+	changed.Timeout = config.Duration(2 * time.Minute)
+	updated, _, err := s.UpdateJob(ctx, record.ID, record.Revision, changed, true, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response = request("/api/v1/jobs/"+record.ID+"/pause", fmt.Sprintf(`{"revision":%d}`, record.Revision))
+	if response.StatusCode != http.StatusConflict {
+		response.Body.Close()
+		t.Fatalf("stale pause returned %d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = request("/api/v1/jobs/"+record.ID+"/pause", fmt.Sprintf(`{"revision":%d}`, updated.Revision))
+	if response.StatusCode != http.StatusNoContent {
+		response.Body.Close()
+		t.Fatalf("current pause returned %d", response.StatusCode)
+	}
+	response.Body.Close()
 }

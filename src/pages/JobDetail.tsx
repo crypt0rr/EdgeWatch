@@ -70,11 +70,11 @@ export function JobDetail() {
   }
   async function archive() {
     if (!window.confirm('Archive this job? History will be kept.')) return
-    await archiveJob(id)
+    await archiveJob(id, value.revision)
     navigate('/jobs')
   }
   async function restore() {
-    await restoreJob(id)
+    await restoreJob(id, value.revision)
     client.invalidateQueries({ queryKey: ['job', id] })
     client.invalidateQueries({ queryKey: ['jobs'] })
   }

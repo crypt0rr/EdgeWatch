@@ -453,6 +453,18 @@ func boolInt(v bool) int {
 }
 
 func (s *Store) SetJobArchived(ctx context.Context, id string, archived bool) error {
+	return s.setJobArchived(ctx, id, archived, nil)
+}
+
+// SetJobArchivedWithRevision applies an archive or restore transition only
+// when the caller still holds the current immutable job revision. Lifecycle
+// actions are state mutations too, so stale browser views must not silently
+// overwrite a newer edit.
+func (s *Store) SetJobArchivedWithRevision(ctx context.Context, id string, archived bool, expectedRevision int64) error {
+	return s.setJobArchived(ctx, id, archived, &expectedRevision)
+}
+
+func (s *Store) setJobArchived(ctx context.Context, id string, archived bool, expectedRevision *int64) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -461,6 +473,9 @@ func (s *Store) SetJobArchived(ctx context.Context, id string, archived bool) er
 	current, err := getJobTx(ctx, tx, id)
 	if err != nil {
 		return err
+	}
+	if expectedRevision != nil && current.Revision != *expectedRevision {
+		return ErrConflict
 	}
 	if current.Archived == archived {
 		return tx.Commit()
@@ -489,6 +504,16 @@ func (s *Store) SetJobArchived(ctx context.Context, id string, archived bool) er
 }
 
 func (s *Store) SetJobEnabled(ctx context.Context, id string, enabled bool) error {
+	return s.setJobEnabled(ctx, id, enabled, nil)
+}
+
+// SetJobEnabledWithRevision applies a pause or resume transition only when
+// the caller still holds the current immutable job revision.
+func (s *Store) SetJobEnabledWithRevision(ctx context.Context, id string, enabled bool, expectedRevision int64) error {
+	return s.setJobEnabled(ctx, id, enabled, &expectedRevision)
+}
+
+func (s *Store) setJobEnabled(ctx context.Context, id string, enabled bool, expectedRevision *int64) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -497,6 +522,9 @@ func (s *Store) SetJobEnabled(ctx context.Context, id string, enabled bool) erro
 	current, err := getJobTx(ctx, tx, id)
 	if err != nil {
 		return err
+	}
+	if expectedRevision != nil && current.Revision != *expectedRevision {
+		return ErrConflict
 	}
 	if current.Archived {
 		return fmt.Errorf("%w: job %s", ErrNotFound, id)

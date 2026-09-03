@@ -424,6 +424,10 @@ type jobPayload struct {
 	ConfirmRebaseline   bool             `json:"confirm_rebaseline,omitempty"`
 }
 
+type lifecyclePayload struct {
+	Revision *int64 `json:"revision"`
+}
+
 func (p jobPayload) config() (config.Job, error) {
 	job := config.Job{Name: strings.TrimSpace(p.Name), Schedule: strings.TrimSpace(p.Schedule), Timezone: strings.TrimSpace(p.Timezone), RunOnStart: p.RunOnStart, AssumeAlive: p.AssumeAlive, Targets: p.Targets, MaxExpandedHosts: p.MaxExpandedHosts, Timing: p.Timing}
 	if p.Timeout != "" {
@@ -763,8 +767,22 @@ func protocolSummary(p *config.Protocol) string {
 }
 
 func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, id string, archive bool) {
-	if err := s.Store.SetJobArchived(r.Context(), id, archive); err != nil {
-		writeError(w, 404, "not_found", "job not found", nil)
+	var payload lifecyclePayload
+	if !decodeJSON(w, r, &payload) {
+		return
+	}
+	if payload.Revision == nil {
+		writeError(w, http.StatusBadRequest, "revision_required", "job revision is required", nil)
+		return
+	}
+	if err := s.Store.SetJobArchivedWithRevision(r.Context(), id, archive, *payload.Revision); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "conflict", "job was modified; reload before changing its lifecycle", nil)
+		} else if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		}
 		return
 	}
 	s.App.RefreshSchedules()
@@ -808,8 +826,22 @@ func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, id stri
 }
 
 func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, id string, enabled bool) {
-	if err := s.Store.SetJobEnabled(r.Context(), id, enabled); err != nil {
-		writeError(w, 404, "not_found", "job not found", nil)
+	var payload lifecyclePayload
+	if !decodeJSON(w, r, &payload) {
+		return
+	}
+	if payload.Revision == nil {
+		writeError(w, http.StatusBadRequest, "revision_required", "job revision is required", nil)
+		return
+	}
+	if err := s.Store.SetJobEnabledWithRevision(r.Context(), id, enabled, *payload.Revision); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "conflict", "job was modified; reload before changing its lifecycle", nil)
+		} else if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		}
 		return
 	}
 	s.App.RefreshSchedules()

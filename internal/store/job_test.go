@@ -132,6 +132,47 @@ func TestJobLifecycleChangesInvalidateStaleEditors(t *testing.T) {
 	}
 }
 
+func TestLifecycleActionsRequireCurrentRevision(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("lifecycle-actions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := record.Job
+	changed.Timeout = config.Duration(2 * time.Minute)
+	updated, _, err := s.UpdateJob(ctx, record.ID, record.Revision, changed, true, false, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetJobArchivedWithRevision(ctx, record.ID, true, record.Revision); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale archive was accepted: %v", err)
+	}
+	if err := s.SetJobArchivedWithRevision(ctx, record.ID, true, updated.Revision); err != nil {
+		t.Fatalf("current archive failed: %v", err)
+	}
+	if err := s.SetJobArchivedWithRevision(ctx, record.ID, false, updated.Revision); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale restore was accepted: %v", err)
+	}
+	archived, err := s.GetJob(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetJobArchivedWithRevision(ctx, record.ID, false, archived.Revision); err != nil {
+		t.Fatalf("current restore failed: %v", err)
+	}
+	restored, err := s.GetJob(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetJobEnabledWithRevision(ctx, record.ID, true, restored.Revision); err != nil {
+		t.Fatalf("current resume failed: %v", err)
+	}
+	if err := s.SetJobEnabledWithRevision(ctx, record.ID, false, restored.Revision); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale pause was accepted: %v", err)
+	}
+}
+
 func TestManagedRuntimeIsolatedFromLegacyState(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

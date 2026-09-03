@@ -1,0 +1,48 @@
+version: 1
+database: /var/lib/edgewatch/edgewatch.db
+retention: 90d
+
+scheduler:
+  max_concurrent_scans: 1
+
+notifications:
+  # Prefer a Docker secret-style file with one Shoutrrr URL per line.
+  # urls_file: /run/secrets/edgewatch-notification-urls
+  urls: []
+
+jobs:
+  - name: public-tcp
+    schedule: "0 */6 * * *"
+    timezone: Europe/Amsterdam
+    run_on_start: true
+    targets:
+      - 192.0.2.10
+      - 2001:db8::10
+      - edge.example.com
+    max_expanded_hosts: 256
+    tcp:
+      ports: "1-65535"
+      mode: syn
+      service_detection: false
+    timing: balanced
+    timeout: 1h
+    baseline:
+      samples: 2
+    change:
+      confirmations: 1
+
+  - name: common-udp
+    schedule: "0 3 * * 0"
+    timezone: Europe/Amsterdam
+    run_on_start: false
+    targets:
+      - edge.example.com
+    udp:
+      ports: "53,67-69,123,161-162,500,1900,4500,5353"
+      service_detection: true
+    timing: conservative
+    timeout: 6h
+    baseline:
+      samples: 3
+    change:
+      confirmations: 2

@@ -1,0 +1,20 @@
+version: 1
+database: /var/lib/edgewatch/edgewatch.db
+notifications:
+  urls: []
+jobs:
+  - name: loopback
+    schedule: "0 0 * * *"
+    run_on_start: false
+    targets: ["127.0.0.1", "::1"]
+    tcp:
+      ports: "1"
+      mode: syn
+    udp:
+      ports: "9"
+    timing: fast
+    timeout: 30s
+    baseline:
+      samples: 1
+    change:
+      confirmations: 1

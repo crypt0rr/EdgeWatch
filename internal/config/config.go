@@ -1,0 +1,322 @@
+package config
+
+import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
+	"net"
+	"os"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/robfig/cron/v3"
+	"gopkg.in/yaml.v3"
+)
+
+type Duration time.Duration
+
+func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
+	raw := node.Value
+	if strings.HasSuffix(raw, "d") {
+		days, err := strconv.ParseFloat(strings.TrimSuffix(raw, "d"), 64)
+		if err != nil {
+			return fmt.Errorf("invalid duration %q: %w", node.Value, err)
+		}
+		*d = Duration(days * float64(24*time.Hour))
+		return nil
+	}
+	v, err := time.ParseDuration(raw)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", node.Value, err)
+	}
+	*d = Duration(v)
+	return nil
+}
+func (d Duration) Value() time.Duration { return time.Duration(d) }
+
+type Config struct {
+	Version       int           `yaml:"version"`
+	Database      string        `yaml:"database"`
+	Retention     Duration      `yaml:"retention"`
+	Scheduler     Scheduler     `yaml:"scheduler"`
+	Notifications Notifications `yaml:"notifications"`
+	Jobs          []Job         `yaml:"jobs"`
+}
+type Scheduler struct {
+	MaxConcurrent int `yaml:"max_concurrent_scans"`
+}
+type Notifications struct {
+	URLs     []string `yaml:"urls"`
+	URLsFile string   `yaml:"urls_file"`
+}
+type Job struct {
+	Name             string    `yaml:"name"`
+	Schedule         string    `yaml:"schedule"`
+	Timezone         string    `yaml:"timezone"`
+	RunOnStart       *bool     `yaml:"run_on_start"`
+	Targets          []string  `yaml:"targets"`
+	MaxExpandedHosts int       `yaml:"max_expanded_hosts"`
+	TCP              *Protocol `yaml:"tcp"`
+	UDP              *Protocol `yaml:"udp"`
+	Timing           string    `yaml:"timing"`
+	Timeout          Duration  `yaml:"timeout"`
+	Baseline         Baseline  `yaml:"baseline"`
+	Change           Change    `yaml:"change"`
+}
+type Protocol struct {
+	Ports            string `yaml:"ports"`
+	Mode             string `yaml:"mode,omitempty"`
+	ServiceDetection bool   `yaml:"service_detection"`
+}
+type Baseline struct {
+	Samples int `yaml:"samples"`
+}
+type Change struct {
+	Confirmations int `yaml:"confirmations"`
+}
+
+var envOnly = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
+
+func Load(path string) (*Config, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	var cfg Config
+	if err := dec.Decode(&cfg); err != nil {
+		return nil, err
+	}
+	applyDefaults(&cfg)
+	for i, raw := range cfg.Notifications.URLs {
+		if match := envOnly.FindStringSubmatch(raw); match != nil {
+			value, ok := os.LookupEnv(match[1])
+			if !ok {
+				return nil, fmt.Errorf("environment variable %s is not set", match[1])
+			}
+			cfg.Notifications.URLs[i] = value
+		}
+	}
+	if cfg.Notifications.URLsFile != "" {
+		secret, err := os.ReadFile(cfg.Notifications.URLsFile)
+		if err != nil {
+			return nil, fmt.Errorf("read notification URLs file: %w", err)
+		}
+		for _, line := range strings.Split(string(secret), "\n") {
+			line = strings.TrimSpace(line)
+			if line != "" && !strings.HasPrefix(line, "#") {
+				cfg.Notifications.URLs = append(cfg.Notifications.URLs, line)
+			}
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	return &cfg, nil
+}
+
+func applyDefaults(c *Config) {
+	if c.Version == 0 {
+		c.Version = 1
+	}
+	if c.Database == "" {
+		c.Database = "/var/lib/edgewatch/edgewatch.db"
+	}
+	if c.Retention == 0 {
+		c.Retention = Duration(90 * 24 * time.Hour)
+	}
+	if c.Scheduler.MaxConcurrent == 0 {
+		c.Scheduler.MaxConcurrent = 1
+	}
+	for i := range c.Jobs {
+		j := &c.Jobs[i]
+		if j.Timezone == "" {
+			j.Timezone = "UTC"
+		}
+		if j.MaxExpandedHosts == 0 {
+			j.MaxExpandedHosts = 256
+		}
+		if j.Timing == "" {
+			j.Timing = "balanced"
+		}
+		if j.Timeout == 0 {
+			j.Timeout = Duration(time.Hour)
+		}
+		if j.Baseline.Samples == 0 {
+			j.Baseline.Samples = 1
+		}
+		if j.Change.Confirmations == 0 {
+			j.Change.Confirmations = 1
+		}
+		if j.TCP != nil && j.TCP.Mode == "" {
+			j.TCP.Mode = "syn"
+		}
+	}
+}
+
+func (c Config) Validate() error {
+	if c.Version != 1 {
+		return fmt.Errorf("unsupported config version %d", c.Version)
+	}
+	if c.Database == "" {
+		return fmt.Errorf("database path is required")
+	}
+	if c.Retention.Value() < 24*time.Hour {
+		return fmt.Errorf("retention must be at least 24h")
+	}
+	if c.Scheduler.MaxConcurrent < 1 || c.Scheduler.MaxConcurrent > 64 {
+		return fmt.Errorf("max_concurrent_scans must be between 1 and 64")
+	}
+	seen := map[string]bool{}
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	for _, j := range c.Jobs {
+		if j.Name == "" || seen[j.Name] {
+			return fmt.Errorf("job names must be non-empty and unique: %q", j.Name)
+		}
+		seen[j.Name] = true
+		if _, err := time.LoadLocation(j.Timezone); err != nil {
+			return fmt.Errorf("job %s: invalid timezone: %w", j.Name, err)
+		}
+		if _, err := parser.Parse(j.Schedule); err != nil {
+			return fmt.Errorf("job %s: invalid schedule: %w", j.Name, err)
+		}
+		if len(j.Targets) == 0 {
+			return fmt.Errorf("job %s: at least one target is required", j.Name)
+		}
+		if j.TCP == nil && j.UDP == nil {
+			return fmt.Errorf("job %s: tcp or udp must be configured", j.Name)
+		}
+		if j.MaxExpandedHosts < 1 || j.MaxExpandedHosts > 1_000_000 {
+			return fmt.Errorf("job %s: max_expanded_hosts out of range", j.Name)
+		}
+		if j.Baseline.Samples < 1 || j.Baseline.Samples > 100 {
+			return fmt.Errorf("job %s: baseline samples must be 1..100", j.Name)
+		}
+		if j.Change.Confirmations < 1 || j.Change.Confirmations > 100 {
+			return fmt.Errorf("job %s: change confirmations must be 1..100", j.Name)
+		}
+		if j.Timeout.Value() < time.Second {
+			return fmt.Errorf("job %s: timeout must be at least 1s", j.Name)
+		}
+		if j.Timing != "conservative" && j.Timing != "balanced" && j.Timing != "fast" {
+			return fmt.Errorf("job %s: timing must be conservative, balanced, or fast", j.Name)
+		}
+		targets := map[string]bool{}
+		for _, target := range j.Targets {
+			if err := validateTarget(target); err != nil {
+				return fmt.Errorf("job %s: %w", j.Name, err)
+			}
+			canonical := strings.ToLower(target)
+			if targets[canonical] {
+				return fmt.Errorf("job %s: duplicate target %q", j.Name, target)
+			}
+			targets[canonical] = true
+		}
+		if j.TCP != nil {
+			if _, err := ParsePorts(j.TCP.Ports); err != nil {
+				return fmt.Errorf("job %s tcp: %w", j.Name, err)
+			}
+			if j.TCP.Mode != "syn" && j.TCP.Mode != "connect" {
+				return fmt.Errorf("job %s: tcp mode must be syn or connect", j.Name)
+			}
+		}
+		if j.UDP != nil {
+			if _, err := ParsePorts(j.UDP.Ports); err != nil {
+				return fmt.Errorf("job %s udp: %w", j.Name, err)
+			}
+			if j.UDP.Mode != "" {
+				return fmt.Errorf("job %s: udp mode is not configurable", j.Name)
+			}
+		}
+	}
+	return nil
+}
+
+func validateTarget(target string) error {
+	if net.ParseIP(target) != nil {
+		return nil
+	}
+	if _, _, err := net.ParseCIDR(target); err == nil {
+		return nil
+	}
+	if len(target) > 253 || strings.ContainsAny(target, " /\\\t\n\r") {
+		return fmt.Errorf("invalid target %q", target)
+	}
+	for _, label := range strings.Split(target, ".") {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return fmt.Errorf("invalid target %q", target)
+		}
+		for _, r := range label {
+			if !(r == '-' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+				return fmt.Errorf("invalid target %q", target)
+			}
+		}
+	}
+	return nil
+}
+
+func ParsePorts(raw string) ([]int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, fmt.Errorf("ports are required")
+	}
+	set := map[int]bool{}
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		parts := strings.Split(item, "-")
+		if len(parts) > 2 {
+			return nil, fmt.Errorf("invalid port expression %q", item)
+		}
+		start, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return nil, fmt.Errorf("invalid port %q", parts[0])
+		}
+		end := start
+		if len(parts) == 2 {
+			end, err = strconv.Atoi(parts[1])
+			if err != nil {
+				return nil, fmt.Errorf("invalid port %q", parts[1])
+			}
+		}
+		if start < 1 || end > 65535 || end < start {
+			return nil, fmt.Errorf("port range %q must be within 1..65535", item)
+		}
+		for p := start; p <= end; p++ {
+			set[p] = true
+		}
+	}
+	ports := make([]int, 0, len(set))
+	for p := range set {
+		ports = append(ports, p)
+	}
+	sort.Ints(ports)
+	return ports, nil
+}
+
+func PortContains(raw string, port int) bool {
+	ports, err := ParsePorts(raw)
+	if err != nil {
+		return false
+	}
+	i := sort.SearchInts(ports, port)
+	return i < len(ports) && ports[i] == port
+}
+
+func (j Job) RunsOnStart() bool { return j.RunOnStart == nil || *j.RunOnStart }
+
+func (j Job) SecurityHash() string {
+	type securityJob struct {
+		Targets  []string
+		Max      int
+		TCP, UDP *Protocol
+	}
+	v := securityJob{append([]string(nil), j.Targets...), j.MaxExpandedHosts, j.TCP, j.UDP}
+	sort.Strings(v.Targets)
+	b, _ := yaml.Marshal(v)
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}

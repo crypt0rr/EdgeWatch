@@ -9,6 +9,7 @@ import { JobEditor } from './pages/JobEditor'
 import { JobDetail } from './pages/JobDetail'
 import { Login, Setup } from './pages/Auth'
 import { Security } from './pages/Security'
+import { Pagination } from './components/Pagination'
 import './tailwind.css'
 import './styles.css'
 
@@ -48,7 +49,11 @@ function Jobs() {
 
 function protocolSummary(job: { job: { tcp?: { ports: string }; udp?: { ports: string } } }) { return [job.job.tcp && `TCP ${job.job.tcp.ports}`, job.job.udp && `UDP ${job.job.udp.ports}`].filter(Boolean).join(' · ') }
 
-function Incidents() { const incidents = useQuery({ queryKey: ['incidents'], queryFn: listIncidents }); return <section className="page"><div className="page-heading"><div><p className="eyebrow">Change tracking</p><h1>Incidents</h1><p className="muted">Confirmed changes detected against active baselines.</p></div></div>{incidents.isLoading ? <Loading /> : incidents.data?.incidents.length ? <div className="table-card"><table><thead><tr><th>Job</th><th>Target</th><th>Change</th><th>Severity</th><th>Last seen</th></tr></thead><tbody>{incidents.data.incidents.map((row, i) => <tr key={`${row.job_id}-${i}`}><td><strong>{row.job}</strong></td><td>{row.incident.change.target}</td><td>{row.incident.change.kind}{row.incident.change.port ? ` / ${row.incident.change.protocol}:${row.incident.change.port}` : ''}</td><td><span className={`pill ${row.incident.change.severity === 'critical' ? 'red' : 'amber'}`}>{row.incident.change.severity}</span></td><td>{new Date(row.incident.last_seen_at).toLocaleString()}</td></tr>)}</tbody></table></div> : <Empty icon={<ClipboardList />} title="No active incidents" body="EdgeWatch will show confirmed port, service, or DNS changes here." />}</section> }
+function Incidents() {
+  const [offset, setOffset] = useState(0)
+  const incidents = useQuery({ queryKey: ['incidents', offset], queryFn: () => listIncidents(offset) })
+  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Change tracking</p><h1>Incidents</h1><p className="muted">Confirmed changes detected against active baselines.</p></div></div>{incidents.isLoading ? <Loading /> : incidents.data?.incidents.length ? <><div className="table-card"><table><thead><tr><th>Job</th><th>Target</th><th>Change</th><th>Severity</th><th>Last seen</th></tr></thead><tbody>{incidents.data.incidents.map((row, i) => <tr key={`${row.job_id}-${row.incident.change.key ?? i}`}><td><strong>{row.job}</strong></td><td>{row.incident.change.target}</td><td>{row.incident.change.kind}{row.incident.change.port ? ` / ${row.incident.change.protocol}:${row.incident.change.port}` : ''}</td><td><span className={`pill ${row.incident.change.severity === 'critical' ? 'red' : 'amber'}`}>{row.incident.change.severity}</span></td><td>{new Date(row.incident.last_seen_at).toLocaleString()}</td></tr>)}</tbody></table></div><Pagination page={incidents.data.pagination} onChange={setOffset} /></> : <Empty icon={<ClipboardList />} title="No active incidents" body="EdgeWatch will show confirmed port, service, or DNS changes here." />}</section>
+}
 
 function ProtectedApp() { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate]); if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; return <Shell username={session.data?.username ?? 'admin'} onLogout={async () => { await apiLogout(); setCSRF(''); queryClient.clear(); navigate('/login') }} /> }
 

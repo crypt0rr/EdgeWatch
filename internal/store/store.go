@@ -89,23 +89,21 @@ func migrate(db *sql.DB) error {
 	if version > schemaVersion {
 		return fmt.Errorf("database schema version %d is newer than supported version %d", version, schemaVersion)
 	}
-	if version < 2 {
-		tx, err := db.Begin()
-		if err != nil {
+	// Databases created by the pre-web daemon already contain the legacy schema
+	// but some early builds did not persist PRAGMA user_version. Treat those as
+	// the version-1 baseline before applying the web migration.
+	if version == 0 {
+		if _, err := db.Exec("PRAGMA user_version = 1"); err != nil {
 			return err
 		}
-		defer tx.Rollback()
-		for _, statement := range []string{
+		version = 1
+	}
+	migrations := map[int][]string{
+		2: {
 			"ALTER TABLE scans ADD COLUMN job_id TEXT",
 			"ALTER TABLE scans ADD COLUMN job_revision INTEGER",
 			"ALTER TABLE events ADD COLUMN job_id TEXT",
-		} {
-			if _, err := tx.Exec(statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-				return err
-			}
-		}
-		if _, err := tx.Exec(`
-CREATE TABLE IF NOT EXISTS jobs (
+			`CREATE TABLE IF NOT EXISTS jobs (
  id TEXT PRIMARY KEY,
  name TEXT NOT NULL UNIQUE,
  definition_json BLOB NOT NULL,
@@ -114,10 +112,10 @@ CREATE TABLE IF NOT EXISTS jobs (
  revision INTEGER NOT NULL DEFAULT 1,
  created_at TEXT NOT NULL,
  updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS jobs_active ON jobs(archived, enabled, name);
-CREATE INDEX IF NOT EXISTS events_job_id_time ON events(job_id, created_at DESC);
-CREATE TABLE IF NOT EXISTS job_revisions (
+);`,
+			"CREATE INDEX IF NOT EXISTS jobs_active ON jobs(archived, enabled, name)",
+			"CREATE INDEX IF NOT EXISTS events_job_id_time ON events(job_id, created_at DESC)",
+			`CREATE TABLE IF NOT EXISTS job_revisions (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  job_id TEXT NOT NULL,
  revision INTEGER NOT NULL,
@@ -126,14 +124,14 @@ CREATE TABLE IF NOT EXISTS job_revisions (
  created_at TEXT NOT NULL,
  UNIQUE(job_id, revision),
  FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
-);
-CREATE TABLE IF NOT EXISTS job_runtime (
+);`,
+			`CREATE TABLE IF NOT EXISTS job_runtime (
  job_id TEXT PRIMARY KEY,
  state_json BLOB NOT NULL,
  updated_at TEXT NOT NULL,
  FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
-);
-CREATE TABLE IF NOT EXISTS admins (
+);`,
+			`CREATE TABLE IF NOT EXISTS admins (
  id INTEGER PRIMARY KEY CHECK(id=1),
  username TEXT NOT NULL DEFAULT 'admin',
  password_hash TEXT NOT NULL,
@@ -141,40 +139,55 @@ CREATE TABLE IF NOT EXISTS admins (
  totp_enabled INTEGER NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL,
  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS sessions (
+);`,
+			`CREATE TABLE IF NOT EXISTS sessions (
  id_hash TEXT PRIMARY KEY,
  created_at TEXT NOT NULL,
  last_seen_at TEXT NOT NULL,
  expires_at TEXT NOT NULL,
  csrf_token TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at);
-CREATE TABLE IF NOT EXISTS recovery_codes (
+);`,
+			"CREATE INDEX IF NOT EXISTS sessions_expiry ON sessions(expires_at)",
+			`CREATE TABLE IF NOT EXISTS recovery_codes (
  id_hash TEXT PRIMARY KEY,
  used_at TEXT
-);
-CREATE TABLE IF NOT EXISTS security_audit (
+);`,
+			`CREATE TABLE IF NOT EXISTS security_audit (
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  action TEXT NOT NULL,
  detail TEXT NOT NULL DEFAULT '',
  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS setup_tokens (
+);`,
+			`CREATE TABLE IF NOT EXISTS setup_tokens (
  id INTEGER PRIMARY KEY CHECK(id=1),
  token_hash TEXT NOT NULL,
  expires_at TEXT NOT NULL,
  used_at TEXT
-);
-`); err != nil {
+);`,
+		},
+	}
+	for next := version + 1; next <= schemaVersion; next++ {
+		statements, ok := migrations[next]
+		if !ok {
+			return fmt.Errorf("missing migration for schema version %d", next)
+		}
+		tx, err := db.Begin()
+		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec("PRAGMA user_version = 2"); err != nil {
+		defer tx.Rollback()
+		for _, statement := range statements {
+			if _, err := tx.Exec(statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return err
+			}
+		}
+		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", next)); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		version = next
 	}
 	return nil
 }
@@ -199,6 +212,9 @@ var (
 	ErrConflict           = errors.New("resource was modified by another request")
 	ErrRebaselineRequired = errors.New("security-relevant job changes require rebaseline confirmation")
 	ErrJobScanActive      = errors.New("job has an active scan")
+	// ErrJobRevisionChanged is returned when a scan was queued with an older
+	// immutable job revision. The caller must reload the job before starting it.
+	ErrJobRevisionChanged = errors.New("job revision changed before scan started")
 )
 
 // JobRecord is the durable, web-managed representation of a scan job.
@@ -279,6 +295,33 @@ func (s *Store) GetJob(ctx context.Context, id string) (JobRecord, error) {
 	return r, nil
 }
 
+// getJobTx is the transaction-safe equivalent of GetJob. Keeping the read in
+// the same transaction as a write is important for optimistic concurrency and
+// scan lease coordination: database/sql is configured with one connection, so
+// a lease cannot slip between the revision check and the update commit.
+func getJobTx(ctx context.Context, tx *sql.Tx, id string) (JobRecord, error) {
+	var r JobRecord
+	var raw []byte
+	var created, updated string
+	var enabled, archived int
+	err := tx.QueryRowContext(ctx, `SELECT id,name,definition_json,enabled,archived,revision,created_at,updated_at FROM jobs WHERE id=?`, id).
+		Scan(&r.ID, &r.Job.Name, &raw, &enabled, &archived, &r.Revision, &created, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return r, fmt.Errorf("%w: job %s", ErrNotFound, id)
+	}
+	if err != nil {
+		return r, err
+	}
+	job, err := unmarshalJob(raw)
+	if err != nil {
+		return r, err
+	}
+	r.Job = job
+	r.Enabled, r.Archived = enabled != 0, archived != 0
+	r.CreatedAt, r.UpdatedAt = scanTime(created), scanTime(updated)
+	return r, nil
+}
+
 func (s *Store) GetJobByName(ctx context.Context, name string) (JobRecord, error) {
 	var id string
 	err := s.DB.QueryRowContext(ctx, `SELECT id FROM jobs WHERE name=?`, name).Scan(&id)
@@ -326,55 +369,83 @@ func (s *Store) ListJobs(ctx context.Context, includeArchived bool) ([]JobRecord
 // UpdateJob uses optimistic concurrency. The returned bool reports whether
 // the security hash changed and therefore requires rebaseline confirmation.
 func (s *Store) UpdateJob(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool) (JobRecord, bool, error) {
+	record, changed, _, err := s.UpdateJobWithEvents(ctx, id, expectedRevision, job, enabled, archived, confirmRebaseline)
+	return record, changed, err
+}
+
+// UpdateJobWithEvents updates a managed job and, when its security scope
+// changes, clears its runtime comparison state in the same transaction. The
+// returned events are already persisted atomically with the new revision; the
+// web layer can queue notifications and publish them after the commit.
+func (s *Store) UpdateJobWithEvents(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool) (JobRecord, bool, []model.Event, error) {
 	job = config.NormalizeJob(job)
 	if err := config.ValidateJob(job); err != nil {
-		return JobRecord{}, false, err
-	}
-	current, err := s.GetJob(ctx, id)
-	if err != nil {
-		return JobRecord{}, false, err
-	}
-	if expectedRevision != current.Revision {
-		return JobRecord{}, false, ErrConflict
-	}
-	scopeChanged := current.Job.SecurityHash() != job.SecurityHash()
-	if scopeChanged {
-		active, activeErr := s.JobActive(ctx, id)
-		if activeErr != nil {
-			return JobRecord{}, false, activeErr
-		}
-		if active {
-			return JobRecord{}, false, ErrJobScanActive
-		}
-		if !confirmRebaseline {
-			return current, true, ErrRebaselineRequired
-		}
+		return JobRecord{}, false, nil, err
 	}
 	raw, err := marshalJob(job)
 	if err != nil {
-		return JobRecord{}, false, err
+		return JobRecord{}, false, nil, err
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return JobRecord{}, false, nil, err
+	}
+	defer tx.Rollback()
+	current, err := getJobTx(ctx, tx, id)
+	if err != nil {
+		return JobRecord{}, false, nil, err
+	}
+	if expectedRevision != current.Revision {
+		return JobRecord{}, false, nil, ErrConflict
+	}
+	scopeChanged := current.Job.SecurityHash() != job.SecurityHash()
+	if scopeChanged {
+		active, activeErr := jobActiveTx(ctx, tx, id, time.Now().UTC())
+		if activeErr != nil {
+			return JobRecord{}, false, nil, activeErr
+		}
+		if active {
+			return JobRecord{}, false, nil, ErrJobScanActive
+		}
+		if !confirmRebaseline {
+			return current, true, nil, ErrRebaselineRequired
+		}
 	}
 	now := time.Now().UTC()
 	next := current.Revision + 1
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return JobRecord{}, false, err
-	}
-	defer tx.Rollback()
 	result, err := tx.ExecContext(ctx, `UPDATE jobs SET name=?,definition_json=?,enabled=?,archived=?,revision=?,updated_at=? WHERE id=? AND revision=?`, job.Name, raw, boolInt(enabled), boolInt(archived), next, now.Format(time.RFC3339Nano), id, expectedRevision)
 	if err != nil {
-		return JobRecord{}, false, err
+		return JobRecord{}, false, nil, err
 	}
 	if n, _ := result.RowsAffected(); n != 1 {
-		return JobRecord{}, false, ErrConflict
+		return JobRecord{}, false, nil, ErrConflict
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO job_revisions(job_id,revision,definition_json,security_hash,created_at) VALUES(?,?,?,?,?)`, id, next, raw, job.SecurityHash(), now.Format(time.RFC3339Nano)); err != nil {
-		return JobRecord{}, false, err
+		return JobRecord{}, false, nil, err
+	}
+	var events []model.Event
+	if scopeChanged {
+		stateRaw, marshalErr := json.Marshal(emptyState())
+		if marshalErr != nil {
+			return JobRecord{}, false, nil, marshalErr
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?) ON CONFLICT(job_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at`, id, stateRaw, now.Format(time.RFC3339Nano)); err != nil {
+			return JobRecord{}, false, nil, err
+		}
+		event := model.Event{Type: "baseline-reset", JobID: id, Job: job.Name, Message: "Baseline collection reset", CreatedAt: now}
+		eventRaw, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			return JobRecord{}, false, nil, marshalErr
+		}
+		if _, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,job_id,scan_id,payload_json,created_at) VALUES(?,?,?,?,?,?)`, event.Type, event.Job, event.JobID, event.ScanID, eventRaw, now.Format(time.RFC3339Nano)); err != nil {
+			return JobRecord{}, false, nil, err
+		}
+		events = append(events, event)
 	}
 	if err = tx.Commit(); err != nil {
-		return JobRecord{}, false, err
+		return JobRecord{}, false, nil, err
 	}
-	return JobRecord{ID: id, Job: job, Enabled: enabled, Archived: archived, Revision: next, CreatedAt: current.CreatedAt, UpdatedAt: now}, scopeChanged, nil
+	return JobRecord{ID: id, Job: job, Enabled: enabled, Archived: archived, Revision: next, CreatedAt: current.CreatedAt, UpdatedAt: now}, scopeChanged, events, nil
 }
 
 func boolInt(v bool) int {
@@ -407,14 +478,19 @@ func (s *Store) SetJobEnabled(ctx context.Context, id string, enabled bool) erro
 }
 
 func (s *Store) DeleteJob(ctx context.Context, id string) error {
-	record, err := s.GetJob(ctx, id)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	record, err := getJobTx(ctx, tx, id)
 	if err != nil {
 		return err
 	}
 	if !record.Archived {
 		return errors.New("job must be archived before permanent deletion")
 	}
-	active, err := s.JobActive(ctx, id)
+	active, err := jobActiveTx(ctx, tx, id, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -422,27 +498,27 @@ func (s *Store) DeleteJob(ctx context.Context, id string) error {
 		return ErrJobScanActive
 	}
 	var scans int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, id).Scan(&scans); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, id).Scan(&scans); err != nil {
 		return err
 	}
 	if scans > 0 {
 		return errors.New("job has retained scan history; archive it instead")
 	}
 	var events int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE job_id=?`, id).Scan(&events); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE job_id=?`, id).Scan(&events); err != nil {
 		return err
 	}
 	if events > 0 {
 		return errors.New("job has retained event history; archive it instead")
 	}
-	result, err := s.DB.ExecContext(ctx, `DELETE FROM jobs WHERE id=?`, id)
+	result, err := tx.ExecContext(ctx, `DELETE FROM jobs WHERE id=?`, id)
 	if err != nil {
 		return err
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
 		return fmt.Errorf("%w: job %s", ErrNotFound, id)
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) JobActive(ctx context.Context, id string) (bool, error) {
@@ -451,16 +527,43 @@ func (s *Store) JobActive(ctx context.Context, id string) (bool, error) {
 	return n > 0, err
 }
 
-func (s *Store) ListJobScans(ctx context.Context, jobID string, limit int) ([]model.Scan, error) {
+func jobActiveTx(ctx context.Context, tx *sql.Tx, id string, now time.Time) (bool, error) {
+	var n int
+	err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_leases WHERE job=? AND expires_at>?`, id, now.UTC().Format(time.RFC3339Nano)).Scan(&n)
+	return n > 0, err
+}
+
+type Page[T any] struct {
+	Items []T
+	Total int
+}
+
+func normalizePage(limit, offset int) (int, int) {
 	if limit <= 0 || limit > 1000 {
 		limit = 50
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json FROM scans WHERE job_id=? ORDER BY finished_at DESC LIMIT ?`, jobID, limit)
+	if offset < 0 {
+		offset = 0
+	}
+	return limit, offset
+}
+
+func (s *Store) ListJobScans(ctx context.Context, jobID string, limit int) ([]model.Scan, error) {
+	page, err := s.ListJobScansPage(ctx, jobID, limit, 0)
+	return page.Items, err
+}
+
+func (s *Store) ListJobScansPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Scan], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[model.Scan]
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
 	if err != nil {
-		return nil, err
+		return page, err
 	}
 	defer rows.Close()
-	var out []model.Scan
 	for rows.Next() {
 		var v model.Scan
 		var jid sql.NullString
@@ -468,7 +571,7 @@ func (s *Store) ListJobScans(ctx context.Context, jobID string, limit int) ([]mo
 		var started, finished string
 		var snapshot []byte
 		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &snapshot); err != nil {
-			return nil, err
+			return page, err
 		}
 		if jid.Valid {
 			v.JobID = jid.String
@@ -478,11 +581,11 @@ func (s *Store) ListJobScans(ctx context.Context, jobID string, limit int) ([]mo
 		}
 		v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
 		if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
-			return nil, err
+			return page, err
 		}
-		out = append(out, v)
+		page.Items = append(page.Items, v)
 	}
-	return out, rows.Err()
+	return page, rows.Err()
 }
 
 func (s *Store) RuntimeState(ctx context.Context, jobID string) (model.JobState, error) {
@@ -623,23 +726,33 @@ func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {
 }
 
 func (s *Store) ListScans(ctx context.Context, job string, limit int) ([]model.Scan, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 50
-	}
+	page, err := s.ListScansPage(ctx, job, limit, 0)
+	return page.Items, err
+}
+
+func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int) (Page[model.Scan], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[model.Scan]
 	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json FROM scans`
+	countQuery := `SELECT COUNT(*) FROM scans`
 	args := []any{}
+	countArgs := []any{}
 	if job != "" {
 		query += ` WHERE job=?`
 		args = append(args, job)
+		countQuery += ` WHERE job=?`
+		countArgs = append(countArgs, job)
 	}
-	query += ` ORDER BY finished_at DESC LIMIT ?`
-	args = append(args, limit)
+	if err := s.DB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	query += ` ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
 	rows, err := s.DB.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return page, err
 	}
 	defer rows.Close()
-	var out []model.Scan
 	for rows.Next() {
 		var v model.Scan
 		var jobID sql.NullString
@@ -647,7 +760,7 @@ func (s *Store) ListScans(ctx context.Context, job string, limit int) ([]model.S
 		var started, finished string
 		var snapshot []byte
 		if err := rows.Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &snapshot); err != nil {
-			return nil, err
+			return page, err
 		}
 		if jobID.Valid {
 			v.JobID = jobID.String
@@ -658,69 +771,85 @@ func (s *Store) ListScans(ctx context.Context, job string, limit int) ([]model.S
 		v.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
 		v.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)
 		if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
-			return nil, err
+			return page, err
 		}
-		out = append(out, v)
+		page.Items = append(page.Items, v)
 	}
-	return out, rows.Err()
+	return page, rows.Err()
 }
 
 func (s *Store) ListEvents(ctx context.Context, job string, limit int) ([]model.Event, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 50
-	}
+	page, err := s.ListEventsPage(ctx, job, limit, 0)
+	return page.Items, err
+}
+
+func (s *Store) ListEventsPage(ctx context.Context, job string, limit, offset int) (Page[model.Event], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[model.Event]
 	query := `SELECT payload_json FROM events`
+	countQuery := `SELECT COUNT(*) FROM events`
 	args := []any{}
+	countArgs := []any{}
 	if job != "" {
 		query += ` WHERE job=?`
 		args = append(args, job)
+		countQuery += ` WHERE job=?`
+		countArgs = append(countArgs, job)
 	}
-	query += ` ORDER BY created_at DESC LIMIT ?`
-	args = append(args, limit)
+	if err := s.DB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	query += ` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
 	rows, err := s.DB.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, err
+		return page, err
 	}
 	defer rows.Close()
-	var events []model.Event
 	for rows.Next() {
 		var raw []byte
 		if err := rows.Scan(&raw); err != nil {
-			return nil, err
+			return page, err
 		}
 		var event model.Event
 		if err := json.Unmarshal(raw, &event); err != nil {
-			return nil, err
+			return page, err
 		}
-		events = append(events, event)
+		page.Items = append(page.Items, event)
 	}
-	return events, rows.Err()
+	return page, rows.Err()
 }
 
 // ListJobEvents returns only events written by the immutable managed job ID.
 // Name-based ListEvents is retained for legacy CLI history compatibility.
 func (s *Store) ListJobEvents(ctx context.Context, jobID string, limit int) ([]model.Event, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 50
+	page, err := s.ListJobEventsPage(ctx, jobID, limit, 0)
+	return page.Items, err
+}
+
+func (s *Store) ListJobEventsPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Event], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[model.Event]
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
+		return page, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT payload_json FROM events WHERE job_id=? ORDER BY created_at DESC LIMIT ?`, jobID, limit)
+	rows, err := s.DB.QueryContext(ctx, `SELECT payload_json FROM events WHERE job_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
 	if err != nil {
-		return nil, err
+		return page, err
 	}
 	defer rows.Close()
-	var events []model.Event
 	for rows.Next() {
 		var raw []byte
 		if err := rows.Scan(&raw); err != nil {
-			return nil, err
+			return page, err
 		}
 		var event model.Event
 		if err := json.Unmarshal(raw, &event); err != nil {
-			return nil, err
+			return page, err
 		}
-		events = append(events, event)
+		page.Items = append(page.Items, event)
 	}
-	return events, rows.Err()
+	return page, rows.Err()
 }
 
 func (s *Store) FailedDeliveries(ctx context.Context) (int, error) {
@@ -931,6 +1060,44 @@ func (s *Store) AcquireJobLease(ctx context.Context, job, owner string, expires 
 		return fmt.Errorf("%w: %s", ErrJobBusy, job)
 	}
 	return nil
+}
+
+// AcquireJobLeaseForRevision atomically verifies that the queued scan still
+// refers to the current managed job revision and acquires its lease. A job
+// edit and a scan start therefore cannot cross between the revision check and
+// the lease write: either the edit observes the lease, or the scan observes
+// the newer revision and is rejected before it can touch runtime state.
+func (s *Store) AcquireJobLeaseForRevision(ctx context.Context, job, owner string, revision int64, expires time.Time) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var current int64
+	var archived int
+	err = tx.QueryRowContext(ctx, `SELECT revision,archived FROM jobs WHERE id=?`, job).Scan(&current, &archived)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: job %s", ErrNotFound, job)
+	}
+	if err != nil {
+		return err
+	}
+	if archived != 0 {
+		return errors.New("archived jobs cannot run")
+	}
+	if current != revision {
+		return ErrJobRevisionChanged
+	}
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `INSERT INTO job_leases(job,owner,expires_at) VALUES(?,?,?) ON CONFLICT(job) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at WHERE job_leases.expires_at < ?`, job, owner, expires.UTC().Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	changed, _ := result.RowsAffected()
+	if changed == 0 {
+		return fmt.Errorf("%w: %s", ErrJobBusy, job)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ReleaseJobLease(ctx context.Context, job, owner string) error {

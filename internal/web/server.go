@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -573,6 +574,14 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		s.jobScan(w, r, id, parts[2])
 		return
 	}
+	if len(parts) == 4 && parts[1] == "scans" && parts[3] == "results" && r.Method == http.MethodGet {
+		s.jobScanResults(w, r, id, parts[2])
+		return
+	}
+	if len(parts) == 4 && parts[1] == "scans" && parts[3] == "changes" && r.Method == http.MethodGet {
+		s.jobScanChanges(w, r, id, parts[2])
+		return
+	}
 	if len(parts) == 2 && parts[1] == "incidents" && r.Method == http.MethodGet {
 		s.jobIncidents(w, r, id)
 		return
@@ -635,7 +644,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 	if p.Enabled != nil {
 		enabled = *p.Enabled
 	}
-	record, changed, err := s.Store.UpdateJob(r.Context(), id, p.Revision, job, enabled, current.Archived, p.ConfirmRebaseline)
+	record, changed, events, err := s.Store.UpdateJobWithEvents(r.Context(), id, p.Revision, job, enabled, current.Archived, p.ConfirmRebaseline)
 	if errors.Is(err, store.ErrConflict) {
 		writeError(w, 409, "conflict", "job was modified; reload before saving", nil)
 		return
@@ -657,7 +666,12 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	if changed {
-		_, _ = s.Store.ResetRuntime(r.Context(), id, record.Job.Name)
+		if err := s.App.Notifier.Queue(r.Context(), events); err != nil {
+			s.Log.Warn("baseline reset notification deferred", "job_id", id, "error", err)
+		}
+		for _, event := range events {
+			s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
+		}
 		_ = s.Store.Audit(r.Context(), "job.rebaseline_requested", id)
 	}
 	s.App.RefreshSchedules()
@@ -814,12 +828,16 @@ func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	limit := queryLimit(r)
-	scans, err := s.Store.ListJobScans(r.Context(), id, limit)
+	offset := queryOffset(r)
+	page, err := s.Store.ListJobScansPage(r.Context(), id, limit, offset)
 	if err != nil {
 		writeError(w, 500, "store", err.Error(), nil)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"scans": scans})
+	if page.Items == nil {
+		page.Items = []model.Scan{}
+	}
+	writeJSON(w, 200, map[string]any{"scans": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 
 func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID string) {
@@ -833,22 +851,67 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID stri
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
 	}
-	value := map[string]any{"scan": scan}
+	offset, limit := queryOffset(r), queryLimit(r)
+	value := map[string]any{"scan": scan, "changes": []model.Change{}, "changes_pagination": paginationJSON(offset, limit, 0)}
 	state, stateErr := s.Store.RuntimeState(r.Context(), id)
 	if scan.Status == "success" && stateErr == nil && state.Baseline != nil {
-		value["changes"] = engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+		changes := engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+		value["changes"], value["changes_pagination"] = pageSlice(changes, offset, limit)
 	}
 	value["current_security_hash"] = record.Job.SecurityHash()
 	writeJSON(w, http.StatusOK, value)
 }
+
+func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, id, scanID string) {
+	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		return
+	}
+	scan, err := s.Store.GetScan(r.Context(), scanID)
+	if err != nil || scan.JobID != id {
+		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		return
+	}
+	offset, limit := queryOffset(r), queryLimit(r)
+	results, page := pageSlice(scan.Snapshot.Units, offset, limit)
+	writeJSON(w, http.StatusOK, map[string]any{"results": results, "pagination": page})
+}
+
+func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scanID string) {
+	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		return
+	}
+	scan, err := s.Store.GetScan(r.Context(), scanID)
+	if err != nil || scan.JobID != id {
+		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		return
+	}
+	state, err := s.Store.RuntimeState(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		return
+	}
+	changes := []model.Change{}
+	if scan.Status == "success" && state.Baseline != nil {
+		changes = engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+	}
+	offset, limit := queryOffset(r), queryLimit(r)
+	items, page := pageSlice(changes, offset, limit)
+	writeJSON(w, http.StatusOK, map[string]any{"changes": items, "pagination": page})
+}
 func (s *Server) listScans(w http.ResponseWriter, r *http.Request) {
 	limit := queryLimit(r)
-	scans, err := s.Store.ListScans(r.Context(), r.URL.Query().Get("job"), limit)
+	offset := queryOffset(r)
+	page, err := s.Store.ListScansPage(r.Context(), r.URL.Query().Get("job"), limit, offset)
 	if err != nil {
 		writeError(w, 500, "store", err.Error(), nil)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"scans": scans})
+	if page.Items == nil {
+		page.Items = []model.Scan{}
+	}
+	writeJSON(w, 200, map[string]any{"scans": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 
 func (s *Server) getScan(w http.ResponseWriter, r *http.Request, id string) {
@@ -877,17 +940,31 @@ func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request) {
 			out = append(out, map[string]any{"job_id": job.ID, "job": job.Job.Name, "incident": incident})
 		}
 	}
-	writeJSON(w, 200, map[string]any{"incidents": out})
+	sort.Slice(out, func(i, j int) bool {
+		left, _ := out[i]["incident"].(model.Incident)
+		right, _ := out[j]["incident"].(model.Incident)
+		if out[i]["job"].(string) != out[j]["job"].(string) {
+			return out[i]["job"].(string) < out[j]["job"].(string)
+		}
+		return left.Change.Key < right.Change.Key
+	})
+	offset, limit := queryOffset(r), queryLimit(r)
+	items, page := pageSlice(out, offset, limit)
+	writeJSON(w, 200, map[string]any{"incidents": items, "pagination": page})
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, job string) {
 	if jobID := r.URL.Query().Get("job_id"); jobID != "" {
-		events, err := s.Store.ListJobEvents(r.Context(), jobID, queryLimit(r))
+		offset, limit := queryOffset(r), queryLimit(r)
+		page, err := s.Store.ListJobEventsPage(r.Context(), jobID, limit, offset)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"events": events})
+		if page.Items == nil {
+			page.Items = []model.Event{}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"events": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 		return
 	}
 	if job != "" {
@@ -895,12 +972,16 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, job string) 
 			job = record.Job.Name
 		}
 	}
-	events, err := s.Store.ListEvents(r.Context(), job, queryLimit(r))
+	offset, limit := queryOffset(r), queryLimit(r)
+	page, err := s.Store.ListEventsPage(r.Context(), job, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+	if page.Items == nil {
+		page.Items = []model.Event{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 
 func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, id string) {
@@ -908,12 +989,16 @@ func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
 		return
 	}
-	events, err := s.Store.ListJobEvents(r.Context(), id, queryLimit(r))
+	offset, limit := queryOffset(r), queryLimit(r)
+	page, err := s.Store.ListJobEventsPage(r.Context(), id, limit, offset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+	if page.Items == nil {
+		page.Items = []model.Event{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"events": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, id string) {
 	record, err := s.Store.GetJob(r.Context(), id)
@@ -926,7 +1011,14 @@ func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, id string)
 		writeError(w, 500, "store", err.Error(), nil)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"job_id": id, "job": record.Job.Name, "incidents": state.Incidents})
+	items := make([]model.Incident, 0, len(state.Incidents))
+	for _, incident := range state.Incidents {
+		items = append(items, incident)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Change.Key < items[j].Change.Key })
+	offset, limit := queryOffset(r), queryLimit(r)
+	pageItems, page := pageSlice(items, offset, limit)
+	writeJSON(w, 200, map[string]any{"job_id": id, "job": record.Job.Name, "incidents": pageItems, "pagination": page})
 }
 
 func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, id string) {
@@ -1069,6 +1161,47 @@ func queryLimit(r *http.Request) int {
 	}
 	return n
 }
+
+func queryOffset(r *http.Request) int {
+	n, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if n < 0 {
+		return 0
+	}
+	// Keep offsets bounded so an accidental huge value cannot turn into an
+	// expensive SQLite scan. Clients can continue walking pages from zero.
+	if n > 10_000_000 {
+		return 10_000_000
+	}
+	return n
+}
+
+func paginationJSON(offset, limit, total int) map[string]any {
+	hasMore := offset+limit < total
+	var next any
+	if hasMore {
+		next = offset + limit
+	}
+	return map[string]any{"limit": limit, "offset": offset, "total": total, "has_more": hasMore, "next_offset": next}
+}
+
+func pageSlice[T any](items []T, offset, limit int) ([]T, map[string]any) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 50
+	}
+	total := len(items)
+	if offset >= total {
+		return []T{}, paginationJSON(offset, limit, total)
+	}
+	end := offset + limit
+	if end > total {
+		end = total
+	}
+	return items[offset:end], paginationJSON(offset, limit, total)
+}
+
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	dec := json.NewDecoder(r.Body)

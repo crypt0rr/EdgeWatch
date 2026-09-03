@@ -9,8 +9,8 @@ export function Dashboard() {
   const navigate = useNavigate()
   const [notifyState, setNotifyState] = useState('')
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: () => listJobs(false) })
-  const scans = useQuery({ queryKey: ['scans'], queryFn: listScans, refetchInterval: 15000 })
-  const incidents = useQuery({ queryKey: ['incidents'], queryFn: listIncidents, refetchInterval: 15000 })
+  const scans = useQuery({ queryKey: ['scans'], queryFn: () => listScans(0, 20), refetchInterval: 15000 })
+  const incidents = useQuery({ queryKey: ['incidents'], queryFn: () => listIncidents(0, 20), refetchInterval: 15000 })
   const setup = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus })
   const running = scans.data?.scans.filter(s => s.status === 'running').length ?? 0
   const ready = jobs.data?.jobs.filter(j => j.baseline.status === 'complete').length ?? 0

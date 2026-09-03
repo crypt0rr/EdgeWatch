@@ -22,22 +22,25 @@ import {
   runJob,
   scanDetail,
 } from '../api'
+import { Pagination } from '../components/Pagination'
 
 export function JobDetail() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const client = useQueryClient()
   const [selectedScan, setSelectedScan] = useState('')
+  const [scanOffset, setScanOffset] = useState(0)
+  const [changeOffset, setChangeOffset] = useState(0)
   const job = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id) })
   const scans = useQuery({
-    queryKey: ['job-scans', id],
-    queryFn: () => jobScans(id),
+    queryKey: ['job-scans', id, scanOffset],
+    queryFn: () => jobScans(id, scanOffset),
     enabled: !!id,
     refetchInterval: 10000,
   })
   const detail = useQuery({
-    queryKey: ['scan-detail', id, selectedScan],
-    queryFn: () => scanDetail(id, selectedScan),
+    queryKey: ['scan-detail', id, selectedScan, changeOffset],
+    queryFn: () => scanDetail(id, selectedScan, changeOffset),
     enabled: !!selectedScan,
   })
 
@@ -157,7 +160,7 @@ export function JobDetail() {
                 <button
                   className={selectedScan === scan.id ? 'scan-row selected' : 'scan-row'}
                   key={scan.id}
-                  onClick={() => setSelectedScan(scan.id)}
+                  onClick={() => { setSelectedScan(scan.id); setChangeOffset(0) }}
                 >
                   <span className={scan.status === 'success' ? 'activity-dot success' : 'activity-dot fail'} />
                   <div>
@@ -173,6 +176,7 @@ export function JobDetail() {
               ))}
             </div>
           ) : <div className="inline-empty">No scans have run yet.</div>}
+          <Pagination page={scans.data?.pagination} onChange={setScanOffset} />
 
           {selectedScan && detail.data && (
             <div className="scan-detail">
@@ -200,6 +204,7 @@ export function JobDetail() {
                   ))}
                 </div>
               ) : <div className="inline-empty">No changes detected.</div>}
+              <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} />
             </div>
           )}
         </div>

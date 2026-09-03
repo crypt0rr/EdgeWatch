@@ -12,3 +12,6 @@ node_modules
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
+vitest.config.ts
+playwright.config.ts
+e2e

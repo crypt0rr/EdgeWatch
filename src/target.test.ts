@@ -4,8 +4,11 @@ import { cidrWarning, duplicateTarget, targetKind } from './target'
 describe('target helpers', () => {
   it('detects IP, CIDR, and DNS rows', () => {
     expect(targetKind(' 192.0.2.10 ')).toBe('IP')
+    expect(targetKind('2001:db8::1')).toBe('IP')
     expect(targetKind('192.0.2.0/24')).toBe('CIDR')
     expect(targetKind('router.example.com')).toBe('DNS')
+    expect(targetKind('deadbeef')).toBe('DNS')
+    expect(targetKind('not a target')).toBe('Target')
   })
 
   it('warns about broad and invalid CIDRs', () => {

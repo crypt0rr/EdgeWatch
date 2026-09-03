@@ -2,8 +2,9 @@ export function targetKind(value: string) {
   const target = value.trim()
   if (!target) return ''
   if (target.includes('/')) return 'CIDR'
-  if (/^[0-9a-f:]+$/i.test(target) || /^\d+(\.\d+){3}$/.test(target)) return 'IP'
-  if (target.includes('.')) return 'DNS'
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(target)) return 'IP'
+  if (target.includes(':') && /^[0-9a-f:]+$/i.test(target)) return 'IP'
+  if (/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i.test(target)) return 'DNS'
   return 'Target'
 }
 

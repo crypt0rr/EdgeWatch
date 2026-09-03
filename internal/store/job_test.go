@@ -40,6 +40,23 @@ func TestManagedJobRevisionAndScopeConfirmation(t *testing.T) {
 	if err != nil || !scopeChanged || updated.Revision != 2 {
 		t.Fatalf("update %#v changed=%v err=%v", updated, scopeChanged, err)
 	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Baseline != nil || state.BaselineScanID != "" {
+		t.Fatalf("scope update did not clear runtime state: %#v", state)
+	}
+	events, err := s.ListJobEvents(ctx, record.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || events[0].Type != "baseline-reset" {
+		t.Fatalf("scope update did not persist reset event: %#v", events)
+	}
+	if err := s.AcquireJobLeaseForRevision(ctx, record.ID, "stale-scan", 1, time.Now().Add(time.Minute)); !errors.Is(err, ErrJobRevisionChanged) {
+		t.Fatalf("stale revision acquired a lease: %v", err)
+	}
 }
 
 func TestManagedScopeEditIsBlockedWhileScanning(t *testing.T) {

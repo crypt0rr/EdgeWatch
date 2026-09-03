@@ -13,3 +13,5 @@ vite.config.js
 vite.config.d.ts
 /internal/webui/dist/*
 !/internal/webui/dist/.gitkeep
+test-results/
+playwright-report/

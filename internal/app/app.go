@@ -104,7 +104,13 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	if managed {
 		leaseKey = jobID
 	}
-	if err := a.Store.AcquireJobLease(ctx, leaseKey, scan.ID, started.Add(job.Timeout.Value()+time.Minute)); err != nil {
+	var leaseErr error
+	if managed {
+		leaseErr = a.Store.AcquireJobLeaseForRevision(ctx, leaseKey, scan.ID, revision, started.Add(job.Timeout.Value()+time.Minute))
+	} else {
+		leaseErr = a.Store.AcquireJobLease(ctx, leaseKey, scan.ID, started.Add(job.Timeout.Value()+time.Minute))
+	}
+	if err := leaseErr; err != nil {
 		if errors.Is(err, store.ErrJobBusy) {
 			return model.Scan{}, nil, scanner.ErrBusy
 		}

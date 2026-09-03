@@ -1,4 +1,4 @@
-import type { Incident, Job, JobForm, Scan } from './types'
+import type { Change, Incident, Job, JobForm, Pagination, Scan, Unit } from './types'
 
 let csrf = ''
 export function setCSRF(value: string) { csrf = value }
@@ -40,8 +40,11 @@ export const resumeJob = (id: string) => api(`/jobs/${id}/resume`, { method: 'PO
 export const runJob = (id: string) => api<{ status: string }>(`/jobs/${id}/run`, { method: 'POST' })
 export const resetBaseline = (id: string) => api(`/jobs/${id}/baseline/reset`, { method: 'POST' })
 export const approveBaseline = (jobId: string, scanId: string) => api(`/jobs/${jobId}/baseline/approve`, { method: 'POST', body: JSON.stringify({ scan_id: scanId }) })
-export const jobScans = (id: string) => api<{ scans: Scan[] }>(`/jobs/${id}/scans?limit=100`)
-export const scanDetail = (jobId: string, scanId: string) => api<{ scan: Scan; changes?: { kind: string; target: string; protocol?: string; port?: number; old?: string; new?: string; severity: string }[]; current_security_hash: string }>(`/jobs/${jobId}/scans/${scanId}`)
-export const listScans = () => api<{ scans: Scan[] }>('/scans?limit=20')
-export const listIncidents = () => api<{ incidents: Incident[] }>('/incidents')
+export const jobScans = (id: string, offset = 0, limit = 20) => api<{ scans: Scan[]; pagination: Pagination }>(`/jobs/${id}/scans?limit=${limit}&offset=${offset}`)
+export const scanDetail = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ scan: Scan; changes: Change[]; changes_pagination: Pagination; current_security_hash: string }>(`/jobs/${jobId}/scans/${scanId}?limit=${limit}&offset=${offset}`)
+export const scanResults = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ results: Unit[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/results?limit=${limit}&offset=${offset}`)
+export const scanChanges = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ changes: Change[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/changes?limit=${limit}&offset=${offset}`)
+export const listScans = (offset = 0, limit = 20) => api<{ scans: Scan[]; pagination: Pagination }>(`/scans?limit=${limit}&offset=${offset}`)
+export const listIncidents = (offset = 0, limit = 20) => api<{ incidents: Incident[]; pagination: Pagination }>(`/incidents?limit=${limit}&offset=${offset}`)
+export const listEvents = (offset = 0, limit = 20, jobId?: string) => api<{ events: unknown[]; pagination: Pagination }>(`/events?limit=${limit}&offset=${offset}${jobId ? `&job_id=${encodeURIComponent(jobId)}` : ''}`)
 export const notificationTest = () => api<{ sent: number }>('/notifications/test', { method: 'POST' })

@@ -145,3 +145,37 @@ func TestPrunePreservesLegacyAndManagedBaselines(t *testing.T) {
 		t.Fatal("unreferenced old scan was not pruned")
 	}
 }
+
+func TestHistoryPagesHaveStableMetadataAndOrdering(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("paged"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().UTC()
+	for i := 0; i < 3; i++ {
+		if err := s.SaveScan(ctx, model.Scan{ID: string(rune('a' + i)), JobID: record.ID, JobRevision: 1, Job: record.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", Snapshot: model.Snapshot{}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+			return []model.Event{{Type: "page", Job: record.Job.Name, CreatedAt: when}}, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := s.ListJobScansPage(ctx, record.ID, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 3 || len(page.Items) != 2 || page.Items[0].ID != "b" || page.Items[1].ID != "a" {
+		t.Fatalf("unexpected scan page: total=%d items=%#v", page.Total, page.Items)
+	}
+	events, err := s.ListJobEventsPage(ctx, record.ID, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events.Total != 3 || len(events.Items) != 2 {
+		t.Fatalf("unexpected event page: total=%d items=%#v", events.Total, events.Items)
+	}
+}

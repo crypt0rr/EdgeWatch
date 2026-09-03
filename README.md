@@ -135,14 +135,17 @@ go test -race ./...
 go vet ./...
 npm ci
 npm run build
+npm run test:e2e
 go build ./cmd/edgewatch
 ```
 
-For local integration scans, install Nmap and run only against controlled test listeners.
+`npm run test:e2e` starts a local Vite preview and exercises setup, login, and
+the TCP/UDP job builder in Chromium with deterministic API fixtures. For local
+integration scans, install Nmap and run only against controlled test listeners.
 
 ## Releases
 
-GitHub Actions verifies every pull request and push to `main`, including race-enabled Go tests and AMD64/ARM64 container builds. Releases are intentionally tag-driven; no additional registry credentials are required because the workflow uses the repository-scoped `GITHUB_TOKEN`.
+GitHub Actions verifies every pull request and push to `main`, including race-enabled Go tests, browser acceptance tests, and AMD64/ARM64 container builds. Releases are intentionally tag-driven; no additional registry credentials are required because the workflow uses the repository-scoped `GITHUB_TOKEN`.
 
 Create and push a semantic-version tag when the commit on `main` is ready:
 

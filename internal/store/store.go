@@ -611,9 +611,24 @@ func (s *Store) UpdateRuntime(ctx context.Context, jobID string, fn func(*model.
 		return nil, err
 	}
 	defer tx.Rollback()
+	events, err := updateRuntimeTx(ctx, tx, jobID, fn)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+// updateRuntimeTx applies a runtime state transition and persists its events
+// on the caller's transaction. Keeping the state read, event writes, and any
+// caller-provided validation in one transaction prevents stale approvals from
+// crossing a job-scope change.
+func updateRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	var raw []byte
 	state := emptyState()
-	err = tx.QueryRowContext(ctx, `SELECT state_json FROM job_runtime WHERE job_id=?`, jobID).Scan(&raw)
+	err := tx.QueryRowContext(ctx, `SELECT state_json FROM job_runtime WHERE job_id=?`, jobID).Scan(&raw)
 	if err == nil {
 		if err = json.Unmarshal(raw, &state); err != nil {
 			return nil, err
@@ -642,9 +657,6 @@ func (s *Store) UpdateRuntime(ctx context.Context, jobID string, fn func(*model.
 			return nil, err
 		}
 	}
-	if err = tx.Commit(); err != nil {
-		return nil, err
-	}
 	return events, nil
 }
 
@@ -665,20 +677,32 @@ func (s *Store) ResetRuntime(ctx context.Context, jobID, name string) ([]model.E
 }
 
 func (s *Store) ApproveRuntime(ctx context.Context, jobID, name string, scan model.Scan) ([]model.Event, error) {
-	if scan.Status != "success" {
-		return nil, fmt.Errorf("scan %s is not successful", scan.ID)
+	if scan.ID == "" {
+		return nil, errors.New("scan ID is required")
 	}
-	record, err := s.GetJob(ctx, jobID)
+	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
-	if scan.JobID != jobID || scan.ConfigHash != record.Job.SecurityHash() {
+	defer tx.Rollback()
+	record, err := getJobTx(ctx, tx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	stored, err := getScanTx(ctx, tx, scan.ID)
+	if err != nil {
+		return nil, err
+	}
+	if stored.Status != "success" {
+		return nil, fmt.Errorf("scan %s is not successful", stored.ID)
+	}
+	if stored.JobID != jobID || stored.ConfigHash != record.Job.SecurityHash() {
 		return nil, errors.New("scan does not belong to the current job scope")
 	}
-	return s.UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
-		state.Baseline = &scan.Snapshot
-		state.BaselineScanID = scan.ID
-		state.BaselineConfigHash = scan.ConfigHash
+	events, err := updateRuntimeTx(ctx, tx, jobID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &stored.Snapshot
+		state.BaselineScanID = stored.ID
+		state.BaselineConfigHash = stored.ConfigHash
 		state.Candidate = nil
 		state.CandidateHash = ""
 		state.CandidateCount = 0
@@ -686,8 +710,15 @@ func (s *Store) ApproveRuntime(ctx context.Context, jobID, name string, scan mod
 		state.Pending = map[string]model.Pending{}
 		state.Incidents = map[string]model.Incident{}
 		state.FingerprintCandidates = map[string]model.ValueCount{}
-		return []model.Event{{Type: "baseline-approved", Job: name, ScanID: scan.ID, Message: "Baseline manually approved", CreatedAt: time.Now().UTC()}}, nil
+		return []model.Event{{Type: "baseline-approved", Job: name, ScanID: stored.ID, Message: "Baseline manually approved", CreatedAt: time.Now().UTC()}}, nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
 func (s *Store) SaveScan(ctx context.Context, scan model.Scan) error {
@@ -719,6 +750,30 @@ func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {
 	}
 	v.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
 	v.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)
+	if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
+		return v, err
+	}
+	return v, nil
+}
+
+func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {
+	var v model.Scan
+	var started, finished string
+	var snapshot []byte
+	var jobID sql.NullString
+	var revision sql.NullInt64
+	err := tx.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json FROM scans WHERE id=?`, id).
+		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &snapshot)
+	if err != nil {
+		return v, err
+	}
+	if jobID.Valid {
+		v.JobID = jobID.String
+	}
+	if revision.Valid {
+		v.JobRevision = revision.Int64
+	}
+	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
 	if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
 		return v, err
 	}

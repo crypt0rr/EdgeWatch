@@ -54,6 +54,17 @@ func TestManagedJobRevisionAndScopeConfirmation(t *testing.T) {
 	if len(events) != 1 || events[0].Type != "baseline-reset" {
 		t.Fatalf("scope update did not persist reset event: %#v", events)
 	}
+	staleScan := model.Scan{
+		ID: "stale-approval", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name,
+		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "success",
+		ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{},
+	}
+	if err := s.SaveScan(ctx, staleScan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApproveRuntime(ctx, record.ID, updated.Job.Name, staleScan); err == nil {
+		t.Fatal("stale scan was approved after the job scope changed")
+	}
 	if err := s.AcquireJobLeaseForRevision(ctx, record.ID, "stale-scan", 1, time.Now().Add(time.Minute)); !errors.Is(err, ErrJobRevisionChanged) {
 		t.Fatalf("stale revision acquired a lease: %v", err)
 	}

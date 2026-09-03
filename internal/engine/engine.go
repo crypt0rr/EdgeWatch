@@ -17,22 +17,35 @@ type Engine struct{ Store *store.Store }
 
 func (e *Engine) Success(ctx context.Context, job config.Job, scan model.Scan) ([]model.Event, error) {
 	return e.Store.UpdateState(ctx, job.Name, func(state *model.JobState) ([]model.Event, error) {
-		state.ConsecutiveFailures = 0
-		state.LastFailureAlert = 0
-		now := scan.FinishedAt
-		if state.Baseline == nil {
-			events := advanceCandidate(state, scan, job.Baseline.Samples, false)
-			return events, nil
-		}
-		learnMissingFingerprints(state, scan.Snapshot, job.Baseline.Samples)
-		changes := Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
-		events := applyChanges(state, job.Name, scan.ID, changes, job.Change.Confirmations, now)
-		if state.BaselineConfigHash != scan.ConfigHash {
-			candidateEvents := advanceCandidate(state, scan, job.Baseline.Samples, true)
-			events = append(events, candidateEvents...)
-		}
-		return events, nil
+		return processSuccess(state, job, scan)
 	})
+}
+
+// SuccessForJob is the database-backed equivalent used by web-managed jobs.
+// Its state key is the immutable job ID while event payloads keep the name
+// users recognize.
+func (e *Engine) SuccessForJob(ctx context.Context, jobID string, job config.Job, scan model.Scan) ([]model.Event, error) {
+	return e.Store.UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
+		return processSuccess(state, job, scan)
+	})
+}
+
+func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, error) {
+	state.ConsecutiveFailures = 0
+	state.LastFailureAlert = 0
+	now := scan.FinishedAt
+	if state.Baseline == nil {
+		events := advanceCandidate(state, scan, job.Baseline.Samples, false)
+		return events, nil
+	}
+	learnMissingFingerprints(state, scan.Snapshot, job.Baseline.Samples)
+	changes := Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+	events := applyChanges(state, job.Name, scan.ID, changes, job.Change.Confirmations, now)
+	if state.BaselineConfigHash != scan.ConfigHash {
+		candidateEvents := advanceCandidate(state, scan, job.Baseline.Samples, true)
+		events = append(events, candidateEvents...)
+	}
+	return events, nil
 }
 
 func advanceCandidate(state *model.JobState, scan model.Scan, required int, merge bool) []model.Event {
@@ -184,13 +197,23 @@ func setBaselineService(snapshot *model.Snapshot, target, protocol string, port 
 
 func (e *Engine) Failure(ctx context.Context, job string, scan model.Scan) ([]model.Event, error) {
 	return e.Store.UpdateState(ctx, job, func(state *model.JobState) ([]model.Event, error) {
-		state.ConsecutiveFailures++
-		if state.ConsecutiveFailures == 3 || state.ConsecutiveFailures-state.LastFailureAlert >= 10 {
-			state.LastFailureAlert = state.ConsecutiveFailures
-			return []model.Event{{Type: "scan-failure", Job: job, ScanID: scan.ID, Message: fmt.Sprintf("%d consecutive scan failures; latest: %s", state.ConsecutiveFailures, scan.Error), CreatedAt: scan.FinishedAt}}, nil
-		}
-		return nil, nil
+		return processFailure(state, job, scan)
 	})
+}
+
+func (e *Engine) FailureForJob(ctx context.Context, jobID, job string, scan model.Scan) ([]model.Event, error) {
+	return e.Store.UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
+		return processFailure(state, job, scan)
+	})
+}
+
+func processFailure(state *model.JobState, job string, scan model.Scan) ([]model.Event, error) {
+	state.ConsecutiveFailures++
+	if state.ConsecutiveFailures == 3 || state.ConsecutiveFailures-state.LastFailureAlert >= 10 {
+		state.LastFailureAlert = state.ConsecutiveFailures
+		return []model.Event{{Type: "scan-failure", Job: job, ScanID: scan.ID, Message: fmt.Sprintf("%d consecutive scan failures; latest: %s", state.ConsecutiveFailures, scan.Error), CreatedAt: scan.FinishedAt}}, nil
+	}
+	return nil, nil
 }
 
 type item struct {

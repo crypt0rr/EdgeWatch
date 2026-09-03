@@ -1,9 +1,14 @@
 .git
 .github
 dist
+internal/webui/dist
 data
 edgewatch
 config.yaml
 notification-urls.txt
 *.db*
 coverage.out
+node_modules
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts

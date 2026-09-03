@@ -1,10 +1,19 @@
 # syntax=docker/dockerfile:1.27@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
+FROM --platform=$BUILDPLATFORM node:24.8.0-alpine3.22@sha256:3e843c608bb5232f39ecb2b25e41214b958b0795914707374c8acc28487dea17 AS frontend
+WORKDIR /src
+COPY package.json package-lock.json ./
+RUN npm ci
+COPY index.html tsconfig.json tsconfig.node.json vite.config.ts ./
+COPY src ./src
+RUN npm run build
+
 FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates=20260611-r0 git=2.54.0-r0
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+COPY --from=frontend /src/internal/webui/dist ./internal/webui/dist
 ARG VERSION=dev
 ARG TARGETOS
 ARG TARGETARCH

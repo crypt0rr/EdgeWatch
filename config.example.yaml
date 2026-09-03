@@ -1,6 +1,11 @@
 database: /var/lib/edgewatch/edgewatch.db
 retention: 90d
 
+# The administration UI is loopback-only in v0.3. Access it on the Docker
+# host at http://127.0.0.1:8080 or through an SSH tunnel.
+web:
+  listen: 127.0.0.1:8080
+
 scheduler:
   max_concurrent_scans: 1
 
@@ -9,41 +14,33 @@ notifications:
   # urls_file: /run/secrets/edgewatch-notification-urls
   urls: []
 
-jobs:
-  - name: public-tcp
-    schedule: "0 */6 * * *"
-    timezone: Europe/Amsterdam
-    run_on_start: true
-    assume_alive: true # set false to use Nmap host discovery
-    targets:
-      - 192.0.2.10
-      - 2001:db8::10
-      - edge.example.com
-    max_expanded_hosts: 256
-    tcp:
-      ports: "1-65535"
-      mode: syn
-      service_detection: false
-    timing: balanced
-    timeout: 1h
-    baseline:
-      samples: 2
-    change:
-      confirmations: 1
-
-  - name: common-udp
-    schedule: "0 3 * * 0"
-    timezone: Europe/Amsterdam
-    run_on_start: false
-    assume_alive: true # set false to use Nmap host discovery
-    targets:
-      - edge.example.com
-    udp:
-      ports: "53,67-69,123,161-162,500,1900,4500,5353"
-      service_detection: true
-    timing: conservative
-    timeout: 6h
-    baseline:
-      samples: 3
-    change:
-      confirmations: 2
+# Jobs are created and scheduled from the web interface. YAML jobs from older
+# releases are intentionally not imported; they remain inactive with a
+# startup warning so they can be recreated and reviewed explicitly.
+# The commented examples below document the available scope settings only.
+#
+# jobs:
+#   - name: public-tcp
+#     schedule: "0 */6 * * *"
+#     timezone: Europe/Amsterdam
+#     run_on_start: true
+#     assume_alive: true # set false to use Nmap host discovery
+#     targets: ["192.0.2.10", "edge.example.com"]
+#     max_expanded_hosts: 256
+#     tcp: {ports: "1-65535", mode: syn, service_detection: false}
+#     timing: balanced
+#     timeout: 1h
+#     baseline: {samples: 2}
+#     change: {confirmations: 1}
+#
+#   - name: common-udp
+#     schedule: "0 3 * * 0"
+#     timezone: Europe/Amsterdam
+#     run_on_start: false
+#     assume_alive: true # set false to use Nmap host discovery
+#     targets: ["192.0.2.10"]
+#     udp: {ports: "53,123,161", service_detection: true}
+#     timing: conservative
+#     timeout: 6h
+#     baseline: {samples: 3}
+#     change: {confirmations: 2}

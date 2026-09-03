@@ -107,3 +107,41 @@ func TestOutboxRetriesAndCompletes(t *testing.T) {
 		t.Fatal("sent delivery remained due")
 	}
 }
+
+func TestPrunePreservesLegacyAndManagedBaselines(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	for _, id := range []string{"legacy-baseline", "managed-baseline", "discard"} {
+		if err := s.SaveScan(ctx, model.Scan{ID: id, Job: "legacy", StartedAt: old, FinishedAt: old, Status: "success", Snapshot: model.Snapshot{}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.UpdateState(ctx, "legacy", func(state *model.JobState) ([]model.Event, error) {
+		state.BaselineScanID = "legacy-baseline"
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	managed, err := s.CreateJob(ctx, testJob("managed"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateRuntime(ctx, managed.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.BaselineScanID = "managed-baseline"
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Prune(ctx, time.Now().UTC().Add(-24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"legacy-baseline", "managed-baseline"} {
+		if _, err := s.GetScan(ctx, id); err != nil {
+			t.Fatalf("baseline scan %s was pruned: %v", id, err)
+		}
+	}
+	if _, err := s.GetScan(ctx, "discard"); err == nil {
+		t.Fatal("unreferenced old scan was not pruned")
+	}
+}

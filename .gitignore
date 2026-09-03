@@ -7,3 +7,9 @@
 *.db-shm
 *.db-wal
 coverage.out
+node_modules/
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+/internal/webui/dist/*
+!/internal/webui/dist/.gitkeep

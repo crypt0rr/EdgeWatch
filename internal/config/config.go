@@ -43,8 +43,16 @@ type Config struct {
 	Database      string        `yaml:"database"`
 	Retention     Duration      `yaml:"retention"`
 	Scheduler     Scheduler     `yaml:"scheduler"`
+	Web           Web           `yaml:"web"`
 	Notifications Notifications `yaml:"notifications"`
 	Jobs          []Job         `yaml:"jobs"`
+}
+
+// Web contains the local administrative HTTP listener settings. The v0.3
+// appliance deliberately only permits loopback listeners; users who need
+// remote access should put a TLS reverse proxy or an SSH tunnel in front of it.
+type Web struct {
+	Listen string `yaml:"listen"`
 }
 type Scheduler struct {
 	MaxConcurrent int `yaml:"max_concurrent_scans"`
@@ -134,6 +142,9 @@ func applyDefaults(c *Config) {
 	if c.Scheduler.MaxConcurrent == 0 {
 		c.Scheduler.MaxConcurrent = 1
 	}
+	if c.Web.Listen == "" {
+		c.Web.Listen = "127.0.0.1:8080"
+	}
 	for i := range c.Jobs {
 		j := &c.Jobs[i]
 		if j.Timezone == "" {
@@ -176,6 +187,9 @@ func (c Config) Validate() error {
 	}
 	if c.Scheduler.MaxConcurrent < 1 || c.Scheduler.MaxConcurrent > 64 {
 		return fmt.Errorf("max_concurrent_scans must be between 1 and 64")
+	}
+	if err := validateWebListen(c.Web.Listen); err != nil {
+		return err
 	}
 	seen := map[string]bool{}
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
@@ -238,6 +252,50 @@ func (c Config) Validate() error {
 				return fmt.Errorf("job %s: udp mode is not configurable", j.Name)
 			}
 		}
+	}
+	return nil
+}
+
+// ValidateJob validates a job using the same rules as a complete configuration.
+// It is used by the web API before a job is persisted.
+func ValidateJob(j Job) error {
+	c := Config{
+		Version:   1,
+		Database:  "web-managed",
+		Retention: Duration(24 * time.Hour),
+		Scheduler: Scheduler{MaxConcurrent: 1},
+		Web:       Web{Listen: "127.0.0.1:8080"},
+		Jobs:      []Job{j},
+	}
+	applyDefaults(&c)
+	return c.Validate()
+}
+
+// NormalizeJob applies the same defaults used when loading YAML.
+func NormalizeJob(j Job) Job {
+	c := Config{Jobs: []Job{j}}
+	applyDefaults(&c)
+	j = c.Jobs[0]
+	j.Name = strings.TrimSpace(j.Name)
+	j.Schedule = strings.TrimSpace(j.Schedule)
+	j.Timezone = strings.TrimSpace(j.Timezone)
+	for i := range j.Targets {
+		j.Targets[i] = strings.TrimSpace(j.Targets[i])
+	}
+	return j
+}
+
+func validateWebListen(listen string) error {
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil || host == "" || port == "" {
+		return fmt.Errorf("web.listen must be a host:port address")
+	}
+	if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("web.listen must be a loopback address")
+	}
+	value, err := strconv.Atoi(port)
+	if err != nil || value < 1 || value > 65535 {
+		return fmt.Errorf("web.listen port must be between 1 and 65535")
 	}
 	return nil
 }

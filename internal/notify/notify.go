@@ -55,7 +55,7 @@ func (n *Notifier) Drain(ctx context.Context) error {
 		if !ok {
 			sendErr = errors.New("notification destination is no longer configured")
 		} else {
-			sendErr = send(url, engine.FormatEvent(d.Event))
+			sendErr = safeSend(url, engine.FormatEvent(d.Event))
 		}
 		if err := n.Store.DeliveryResult(ctx, d.ID, sendErr); err != nil {
 			all = append(all, err)
@@ -75,10 +75,23 @@ func send(url, message string) error {
 	errs := sender.Send(message, &types.Params{"title": "EdgeWatch"})
 	return errors.Join(errs...)
 }
+
+// safeSend deliberately strips provider errors before they reach logs, the
+// outbox, or the CLI. Shoutrrr providers may echo a destination URL (and its
+// credentials) in their error text, so a short destination fingerprint is the
+// most useful diagnostic that can be retained safely.
+func safeSend(url, message string) error {
+	if err := send(url, message); err != nil {
+		id := hashURL(url)
+		return fmt.Errorf("notification delivery failed (%s)", id[:12])
+	}
+	return nil
+}
+
 func (n *Notifier) Test() error {
 	var errs []error
 	for _, url := range n.URLs {
-		if err := send(url, "EdgeWatch notification test"); err != nil {
+		if err := safeSend(url, "EdgeWatch notification test"); err != nil {
 			errs = append(errs, err)
 		}
 	}

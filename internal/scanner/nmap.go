@@ -86,6 +86,9 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 	for _, raw := range job.Targets {
 		if ip := net.ParseIP(raw); ip != nil {
 			count++
+			if count > job.MaxExpandedHosts {
+				return nil, fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts)
+			}
 			out = append(out, resolvedTarget{Name: ip.String(), Addresses: []string{ip.String()}})
 			continue
 		}

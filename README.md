@@ -32,6 +32,8 @@ It is a small Go daemon around [Nmap](https://nmap.org/) with durable SQLite sta
 
 The Compose service pulls the published GHCR image and uses host networking so IPv4 and IPv6 scans follow the host's routes. It exposes no listening port, drops all Linux capabilities except `NET_RAW`, uses a read-only root filesystem, and stores state in the local `./data` directory. It does **not** use privileged mode. Run `docker compose pull` explicitly when you want to update the `latest` image.
 
+For reproducible production deployments, replace `latest` in `compose.yaml` with an immutable release tag and digest after reviewing the published image. Keep `latest` for installations that intentionally follow stable releases.
+
 This deployment intentionally starts with fresh state in `./data`; it does not automatically migrate or read the previous Docker-managed `edgewatch-data` volume. Keep that old volume until you have confirmed the new deployment is working, then remove it separately if it is no longer needed.
 
 Check status or run a scan manually:
@@ -105,7 +107,7 @@ Commands accept `--config PATH`; data-producing commands accept `--output json`.
 
 ## Development
 
-Go 1.27 or newer is required.
+Go 1.27.1 or newer is required.
 
 ```console
 go test -race ./...

@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useForm } from 'react-hook-form'
+import { zodResolver } from '@hookform/resolvers/zod'
+import { z } from 'zod'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, ChevronDown, Info, Plus, Save, Trash2, TriangleAlert } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
@@ -22,6 +24,21 @@ const blank: JobForm = {
   enabled: true,
 }
 
+const jobFormSchema = z.object({
+  name: z.string().trim().min(1, 'A name is required.'),
+  schedule: z.string().trim().min(1, 'A cron schedule is required.'),
+  timezone: z.string().trim().min(1, 'A timezone is required.'),
+  run_on_start: z.boolean().optional(),
+  assume_alive: z.boolean().optional(),
+  max_expanded_hosts: z.number().int('Use a whole number of hosts.').min(1, 'Use at least one host.').max(1_000_000, 'The expansion limit is too high.'),
+  timing: z.string().refine((value) => ['conservative', 'balanced', 'fast'].includes(value), 'Choose a valid timing profile.'),
+  timeout: z.string().trim().min(1, 'A scan timeout is required.'),
+  baseline_samples: z.number().int('Use a whole number of samples.').min(1, 'Use at least one baseline sample.').max(100, 'Use no more than 100 baseline samples.'),
+  change_confirmations: z.number().int('Use a whole number of confirmations.').min(1, 'Use at least one confirmation.').max(100, 'Use no more than 100 confirmations.'),
+  enabled: z.boolean().optional(),
+})
+type JobFormFields = z.infer<typeof jobFormSchema>
+
 export function JobEditor() {
   const { id } = useParams()
   const edit = !!id
@@ -33,8 +50,12 @@ export function JobEditor() {
   const [udp, setUDP] = useState<Protocol | undefined>()
   const [scheduleEnabled, setScheduleEnabled] = useState(true)
   const [error, setError] = useState('')
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
-  const { register, handleSubmit, reset, watch, setValue } = useForm<JobForm>({ defaultValues: blank })
+  const { register, handleSubmit, reset, watch, setValue, formState: { errors: formErrors } } = useForm<JobFormFields>({
+    defaultValues: blank,
+    resolver: zodResolver(jobFormSchema),
+  })
   const schedule = watch('schedule')
   const timing = watch('timing')
 
@@ -47,18 +68,22 @@ export function JobEditor() {
     setScheduleEnabled(existing.data.enabled)
   }, [existing.data, reset])
 
-  const save = async (values: JobForm, confirm = false) => {
+  const save = async (values: JobFormFields, confirm = false) => {
+    setFieldErrors({})
     const normalizedTargets = targets.map((value) => value.trim()).filter(Boolean)
     const duplicate = duplicateTarget(normalizedTargets)
     if (duplicate) {
+      setFieldErrors({ targets: `Target ${duplicate} is listed more than once.` })
       setError(`Target ${duplicate} is listed more than once.`)
       return
     }
     if (!normalizedTargets.length) {
+      setFieldErrors({ targets: 'Add at least one IP, CIDR, or DNS target.' })
       setError('Add at least one IP, CIDR, or DNS target.')
       return
     }
     if (!tcp && !udp) {
+      setFieldErrors({ protocols: 'Enable TCP, UDP, or both scan types.' })
       setError('Enable TCP, UDP, or both scan types.')
       return
     }
@@ -75,6 +100,13 @@ export function JobEditor() {
       navigate(edit ? `/jobs/${id}` : '/jobs')
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Could not save job'
+      if (err instanceof APIError && err.code === 'validation_failed') {
+        const details = Object.entries(err.details ?? {}).reduce<Record<string, string>>((out, [key, value]) => {
+          if (typeof value === 'string') out[key] = value
+          return out
+        }, {})
+        setFieldErrors(details)
+      }
       if (!confirm && (message.includes('rebaseline') || (err instanceof APIError && err.code === 'rebaseline_confirmation_required'))) {
         const changes = err instanceof APIError && Array.isArray(err.details?.changes) ? err.details.changes.filter((change): change is string => typeof change === 'string') : []
         const summary = changes.length ? `\n\nScope changes:\n• ${changes.join('\n• ')}` : ''
@@ -111,7 +143,7 @@ export function JobEditor() {
         <div className="editor-main">
           <div className="panel form-panel">
             <div className="panel-heading"><div><h2>Basics</h2><p className="muted">A name and the systems this job should watch.</p></div></div>
-            <label>Job name<input {...register('name', { required: 'A name is required' })} placeholder="Production edge" /></label>
+            <label>Job name<input {...register('name')} placeholder="Production edge" />{(formErrors.name?.message || fieldErrors.name) && <small className="field-error">{formErrors.name?.message || fieldErrors.name}</small>}</label>
             <div className="field-section">
               <div className="field-title"><span>Targets</span><span className="field-help">IP · CIDR · DNS</span></div>
               <p className="helper">One target per row. CIDRs are expanded at scan time and DNS names are resolved for every scan.</p>
@@ -120,8 +152,9 @@ export function JobEditor() {
               </div>
               <button type="button" className="text-button add-target" onClick={() => setTargets((items) => [...items, ''])}><Plus size={15} /> Add target</button>
               {targets.some((target) => cidrWarning(target)) && <div className="notice warning"><TriangleAlert size={16} /><span>{targets.map(cidrWarning).find(Boolean)}</span></div>}
+              {fieldErrors.targets && <small className="field-error">{fieldErrors.targets}</small>}
             </div>
-            <label className="inline-field">Maximum expanded hosts <span className="input-suffix"><input type="number" min={1} max={1000000} {...register('max_expanded_hosts', { valueAsNumber: true })} /><em>hosts</em></span></label>
+            <label className="inline-field">Maximum expanded hosts <span className="input-suffix"><input type="number" min={1} max={1000000} {...register('max_expanded_hosts', { valueAsNumber: true })} /><em>hosts</em></span>{(formErrors.max_expanded_hosts?.message || fieldErrors.max_expanded_hosts) && <small className="field-error">{formErrors.max_expanded_hosts?.message || fieldErrors.max_expanded_hosts}</small>}</label>
             <div className="notice"><Info size={16} /><span>Large CIDRs can take a long time to scan. The expansion limit protects the host from accidental wide scopes.</span></div>
           </div>
 
@@ -129,13 +162,17 @@ export function JobEditor() {
             <div className="panel-heading"><div><h2>Scan types</h2><p className="muted">Enable one or both protocols and set their options independently.</p></div></div>
             <ProtocolCard label="TCP" enabled={!!tcp} onToggle={(enabled) => setTCP(enabled ? { ports: '1-1024', mode: 'syn', service_detection: false } : undefined)} protocol={tcp} setProtocol={setTCP} />
             <ProtocolCard label="UDP" enabled={!!udp} onToggle={(enabled) => setUDP(enabled ? { ports: '53', service_detection: true } : undefined)} protocol={udp} setProtocol={setUDP} />
+            {fieldErrors.protocols && <small className="field-error">{fieldErrors.protocols}</small>}
+            {fieldErrors.tcp && <small className="field-error">{fieldErrors.tcp}</small>}
+            {fieldErrors.udp && <small className="field-error">{fieldErrors.udp}</small>}
+            {fieldErrors.ports && <small className="field-error">{fieldErrors.ports}</small>}
           </div>
 
           <div className="panel form-panel">
             <div className="panel-heading"><div><h2>Baseline & change detection</h2><p className="muted">Stable samples prevent one-off network noise from becoming an incident.</p></div></div>
             <div className="two-fields">
-              <label>Baseline samples<input type="number" min={1} max={100} {...register('baseline_samples', { valueAsNumber: true })} /><small>Scans required before the baseline is ready.</small></label>
-              <label>Change confirmations<input type="number" min={1} max={100} {...register('change_confirmations', { valueAsNumber: true })} /><small>Matching scans before an incident opens.</small></label>
+              <label>Baseline samples<input type="number" min={1} max={100} {...register('baseline_samples', { valueAsNumber: true })} />{(formErrors.baseline_samples?.message || fieldErrors.baseline) && <small className="field-error">{formErrors.baseline_samples?.message || fieldErrors.baseline}</small>}<small>Scans required before the baseline is ready.</small></label>
+              <label>Change confirmations<input type="number" min={1} max={100} {...register('change_confirmations', { valueAsNumber: true })} />{(formErrors.change_confirmations?.message || fieldErrors.confirmations) && <small className="field-error">{formErrors.change_confirmations?.message || fieldErrors.confirmations}</small>}<small>Matching scans before an incident opens.</small></label>
             </div>
           </div>
         </div>
@@ -144,13 +181,13 @@ export function JobEditor() {
           <div className="panel form-panel sticky">
             <div className="panel-heading"><div><h2>Schedule</h2><p className="muted">When should this job run?</p></div><ChevronDown size={17} className="muted-icon" /></div>
             <label>Preset<select value={presetFor(schedule)} onChange={(event) => { if (event.target.value !== 'custom') setValue('schedule', event.target.value) }}><option value="0 */6 * * *">Every 6 hours</option><option value="0 * * * *">Every hour</option><option value="0 3 * * *">Daily at 03:00</option><option value="0 3 * * 0">Weekly on Sunday</option><option value="custom">Custom cron</option></select></label>
-            <label>Five-field cron<input {...register('schedule', { required: true })} placeholder="minute hour day month weekday" /><small>Uses the server’s standard cron parser.</small></label>
-            <label>Timezone<input {...register('timezone', { required: true })} placeholder="Europe/Amsterdam" /></label>
+            <label>Five-field cron<input {...register('schedule')} placeholder="minute hour day month weekday" />{(formErrors.schedule?.message || fieldErrors.schedule) && <small className="field-error">{formErrors.schedule?.message || fieldErrors.schedule}</small>}<small>Uses the server’s standard cron parser.</small></label>
+            <label>Timezone<input {...register('timezone')} placeholder="Europe/Amsterdam" />{(formErrors.timezone?.message || fieldErrors.timezone) && <small className="field-error">{formErrors.timezone?.message || fieldErrors.timezone}</small>}</label>
             <label className="switch-row"><input type="checkbox" checked={scheduleEnabled} onChange={(event) => setScheduleEnabled(event.target.checked)} /><span><strong>Schedule enabled</strong><small>Pause future scheduled runs without archiving this job.</small></span></label>
             <label className="switch-row"><input type="checkbox" {...register('run_on_start')} /><span><strong>Run on startup</strong><small>Start a scan when EdgeWatch launches.</small></span></label>
             <label className="switch-row"><input type="checkbox" {...register('assume_alive')} /><span><strong>Assume targets are alive</strong><small>Use Nmap <code>-Pn</code>. Turn off to use host discovery.</small></span></label>
             <label>Timing profile<select {...register('timing')}><option value="conservative">Conservative (T2)</option><option value="balanced">Balanced (T3)</option><option value="fast">Fast (T4)</option></select></label>
-            <label>Scan timeout<input {...register('timeout', { required: true })} placeholder="1h" /><small>Examples: 30m, 1h, 2d.</small></label>
+            <label>Scan timeout<input {...register('timeout')} placeholder="1h" />{(formErrors.timeout?.message || fieldErrors.timeout) && <small className="field-error">{formErrors.timeout?.message || fieldErrors.timeout}</small>}<small>Examples: 30m, 1h, 2d.</small></label>
             {timing === 'fast' && <div className="notice warning"><TriangleAlert size={16} /><span>Fast timing can miss responses on congested or filtered networks.</span></div>}
             {error && <div className="form-error" role="alert">{error}</div>}
             <button disabled={saving} className="button primary wide" type="submit"><Save size={16} />{saving ? 'Saving…' : edit ? 'Save changes' : 'Create job'}</button>

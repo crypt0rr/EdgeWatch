@@ -116,6 +116,10 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		}
 		return model.Scan{}, nil, err
 	}
+	// Publish lifecycle updates to the web console without persisting them as
+	// alert events. This keeps SSE subscribers responsive even when a scan has
+	// no baseline or incident event to emit.
+	a.emitEvents([]model.Event{{Type: "scan.started", JobID: jobID, Job: job.Name, ScanID: scan.ID, Message: "Scan started", CreatedAt: started}})
 	defer func() {
 		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer releaseCancel()
@@ -137,6 +141,7 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	if err := a.Store.SaveScan(persistCtx, scan); err != nil {
 		return scan, nil, err
 	}
+	completionEvent := model.Event{Type: "scan.completed", JobID: jobID, Job: job.Name, ScanID: scan.ID, Message: "Scan " + scan.Status, CreatedAt: scan.FinishedAt}
 	var events []model.Event
 	var err error
 	if scanErr != nil {
@@ -152,13 +157,24 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 			events, err = a.Engine.Success(persistCtx, job, scan)
 		}
 	}
+	if managed && errors.Is(err, store.ErrJobRevisionChanged) {
+		// Keep the scan in immutable history, but do not let a result from a
+		// superseded security scope seed or mutate the current baseline. A
+		// lifecycle-only revision retains the same hash and is still accepted.
+		a.Logger.Info("scan completed for superseded security scope; runtime state unchanged", "job", job.Name, "scan_id", scan.ID)
+		events, err = nil, nil
+	}
 	if err != nil {
+		a.emitEvents([]model.Event{completionEvent})
 		return scan, nil, err
 	}
 	if err = a.Notifier.Queue(persistCtx, events); err != nil {
+		a.emitEvents(events)
+		a.emitEvents([]model.Event{completionEvent})
 		return scan, events, err
 	}
 	a.emitEvents(events)
+	a.emitEvents([]model.Event{completionEvent})
 	if err := a.Notifier.Drain(persistCtx); err != nil {
 		a.Logger.Warn("notification delivery deferred for retry", "job", job.Name)
 	}

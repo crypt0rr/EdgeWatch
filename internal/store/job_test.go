@@ -151,6 +151,59 @@ func TestManagedRuntimeIsolatedFromLegacyState(t *testing.T) {
 	}
 }
 
+func TestManagedRuntimeRejectsSupersededSecurityScope(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("superseded"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHash := record.Job.SecurityHash()
+	changed := record.Job
+	changed.Targets = []string{"127.0.0.2"}
+	if _, _, err := s.UpdateJob(ctx, record.ID, record.Revision, changed, true, false, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateRuntimeForScan(ctx, record.ID, oldHash, func(state *model.JobState) ([]model.Event, error) {
+		state.BaselineScanID = "stale"
+		return nil, nil
+	}); !errors.Is(err, ErrJobRevisionChanged) {
+		t.Fatalf("superseded scan changed runtime state: %v", err)
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.BaselineScanID != "" {
+		t.Fatalf("stale scan mutated current runtime: %#v", state)
+	}
+}
+
+func TestManagedRuntimeAcceptsLifecycleRevisionWithSameScope(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("lifecycle-runtime"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetJobEnabled(ctx, record.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateRuntimeForScan(ctx, record.ID, record.Job.SecurityHash(), func(state *model.JobState) ([]model.Event, error) {
+		state.BaselineScanID = "lifecycle-scan"
+		return nil, nil
+	}); err != nil {
+		t.Fatalf("lifecycle-only revision rejected a compatible scan: %v", err)
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.BaselineScanID != "lifecycle-scan" {
+		t.Fatalf("compatible scan did not update runtime: %#v", state)
+	}
+}
+
 func TestManagedEventsAreIsolatedFromLegacyName(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

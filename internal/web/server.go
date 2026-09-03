@@ -209,7 +209,14 @@ func (s *Server) withAuth(w http.ResponseWriter, r *http.Request, fn func(http.R
 func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 	_, err := s.Store.GetAdmin(r.Context())
 	configured := err == nil
-	status := map[string]any{"configured": configured, "username": "admin", "password_requirements": auth.PasswordRequirements()}
+	status := map[string]any{
+		"configured":                configured,
+		"username":                  "admin",
+		"password_requirements":     auth.PasswordRequirements(),
+		"notification_destinations": len(s.App.Config.Notifications.URLs),
+		"retention":                 s.App.Config.Retention.Value().String(),
+		"max_concurrent_scans":      s.App.Config.Scheduler.MaxConcurrent,
+	}
 	if len(s.App.Config.Jobs) > 0 {
 		legacy := make([]string, 0, len(s.App.Config.Jobs))
 		for _, job := range s.App.Config.Jobs {
@@ -446,7 +453,7 @@ func parseDuration(raw string) (time.Duration, error) {
 
 func jobJSON(record store.JobRecord, state model.JobState) map[string]any {
 	p := fromConfig(record.Job)
-	return map[string]any{"id": record.ID, "revision": record.Revision, "enabled": record.Enabled, "archived": record.Archived, "created_at": record.CreatedAt, "updated_at": record.UpdatedAt, "security_hash": record.Job.SecurityHash(), "job": p, "baseline": baselineJSON(state)}
+	return map[string]any{"id": record.ID, "revision": record.Revision, "enabled": record.Enabled, "archived": record.Archived, "created_at": record.CreatedAt, "updated_at": record.UpdatedAt, "security_hash": record.Job.SecurityHash(), "job": p, "baseline": baselineJSON(state, record.Job.SecurityHash())}
 }
 
 func fromConfig(j config.Job) jobPayload {
@@ -460,11 +467,15 @@ func fromConfig(j config.Job) jobPayload {
 	return p
 }
 
-func baselineJSON(state model.JobState) map[string]any {
+func baselineJSON(state model.JobState, currentHash string) map[string]any {
 	if state.Baseline == nil {
 		return map[string]any{"status": "collecting", "samples": state.CandidateCount, "attempts": state.CandidateAttempts}
 	}
-	return map[string]any{"status": "complete", "scan_id": state.BaselineScanID, "config_hash": state.BaselineConfigHash, "incidents": len(state.Incidents), "pending": len(state.Pending)}
+	status := "complete"
+	if currentHash != "" && state.BaselineConfigHash != "" && state.BaselineConfigHash != currentHash {
+		status = "updating"
+	}
+	return map[string]any{"status": status, "scan_id": state.BaselineScanID, "config_hash": state.BaselineConfigHash, "samples": state.CandidateCount, "attempts": state.CandidateAttempts, "incidents": len(state.Incidents), "pending": len(state.Pending)}
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
@@ -1052,7 +1063,7 @@ func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, id string) 
 		"job":           record.Job.Name,
 		"revision":      record.Revision,
 		"security_hash": record.Job.SecurityHash(),
-		"baseline":      baselineJSON(state),
+		"baseline":      baselineJSON(state, record.Job.SecurityHash()),
 	}
 	if state.Baseline == nil {
 		value["snapshot"] = nil
@@ -1081,6 +1092,9 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, id string
 	}
 	_ = s.App.Notifier.Queue(r.Context(), events)
 	_ = s.Store.Audit(r.Context(), "baseline.reset", id)
+	for _, event := range events {
+		s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
+	}
 	writeJSON(w, 200, map[string]any{"events": events})
 }
 
@@ -1108,6 +1122,9 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, id stri
 	}
 	_ = s.App.Notifier.Queue(r.Context(), events)
 	_ = s.Store.Audit(r.Context(), "baseline.approved", id)
+	for _, event := range events {
+		s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
+	}
 	writeJSON(w, 200, map[string]any{"events": events})
 }
 

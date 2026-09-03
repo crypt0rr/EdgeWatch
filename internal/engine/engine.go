@@ -25,7 +25,7 @@ func (e *Engine) Success(ctx context.Context, job config.Job, scan model.Scan) (
 // Its state key is the immutable job ID while event payloads keep the name
 // users recognize.
 func (e *Engine) SuccessForJob(ctx context.Context, jobID string, job config.Job, scan model.Scan) ([]model.Event, error) {
-	return e.Store.UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
+	return e.Store.UpdateRuntimeForScan(ctx, jobID, scan.ConfigHash, func(state *model.JobState) ([]model.Event, error) {
 		return processSuccess(state, job, scan)
 	})
 }
@@ -202,7 +202,7 @@ func (e *Engine) Failure(ctx context.Context, job string, scan model.Scan) ([]mo
 }
 
 func (e *Engine) FailureForJob(ctx context.Context, jobID, job string, scan model.Scan) ([]model.Event, error) {
-	return e.Store.UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
+	return e.Store.UpdateRuntimeForScan(ctx, jobID, scan.ConfigHash, func(state *model.JobState) ([]model.Event, error) {
 		return processFailure(state, job, scan)
 	})
 }

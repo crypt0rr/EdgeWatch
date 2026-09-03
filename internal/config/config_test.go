@@ -53,7 +53,7 @@ jobs:
 	if cfg.Retention.Value() != 90*24*time.Hour {
 		t.Fatalf("retention %s", cfg.Retention.Value())
 	}
-	if cfg.Jobs[0].Baseline.Samples != 1 || !cfg.Jobs[0].AssumesAlive() || !cfg.Jobs[0].RunsOnStart() {
+	if cfg.Jobs[0].Baseline.Samples != 1 || !cfg.Jobs[0].AssumesAlive() || !cfg.Jobs[0].RunsOnStart() || cfg.Jobs[0].RunOnStart == nil || cfg.Jobs[0].AssumeAlive == nil {
 		t.Fatal("defaults not applied")
 	}
 	if err := os.WriteFile(path, []byte(strings.Replace(yaml, "tcp:", "assume_alive: false\n    tcp:", 1)), 0o600); err != nil {

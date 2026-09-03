@@ -147,6 +147,10 @@ func applyDefaults(c *Config) {
 	}
 	for i := range c.Jobs {
 		j := &c.Jobs[i]
+		if j.RunOnStart == nil {
+			runOnStart := true
+			j.RunOnStart = &runOnStart
+		}
 		if j.Timezone == "" {
 			j.Timezone = "UTC"
 		}

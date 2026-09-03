@@ -70,10 +70,6 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	if _, err := db.Exec(legacySchema); err != nil {
-		db.Close()
-		return nil, err
-	}
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, err
@@ -89,16 +85,12 @@ func migrate(db *sql.DB) error {
 	if version > schemaVersion {
 		return fmt.Errorf("database schema version %d is newer than supported version %d", version, schemaVersion)
 	}
-	// Databases created by the pre-web daemon already contain the legacy schema
-	// but some early builds did not persist PRAGMA user_version. Treat those as
-	// the version-1 baseline before applying the web migration.
-	if version == 0 {
-		if _, err := db.Exec("PRAGMA user_version = 1"); err != nil {
-			return err
-		}
-		version = 1
-	}
 	migrations := map[int][]string{
+		// Version 1 is the pre-web daemon schema. Keeping it as a real
+		// migration means a brand-new database and an existing legacy database
+		// follow the same transactional path instead of relying on a one-shot
+		// schema bootstrap outside the migration runner.
+		1: {legacySchema},
 		2: {
 			"ALTER TABLE scans ADD COLUMN job_id TEXT",
 			"ALTER TABLE scans ADD COLUMN job_revision INTEGER",
@@ -381,6 +373,11 @@ func (s *Store) UpdateJobWithEvents(ctx context.Context, id string, expectedRevi
 	job = config.NormalizeJob(job)
 	if err := config.ValidateJob(job); err != nil {
 		return JobRecord{}, false, nil, err
+	}
+	// Archived jobs are never schedulable, regardless of what a stale or
+	// hand-crafted request places in the enabled field.
+	if archived {
+		enabled = false
 	}
 	raw, err := marshalJob(job)
 	if err != nil {
@@ -670,6 +667,43 @@ func (s *Store) UpdateRuntime(ctx context.Context, jobID string, fn func(*model.
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+// UpdateRuntimeForScan applies a runtime transition only when the scan was
+// produced for the job's current security scope. A scan can legitimately
+// finish after a schedule, pause, or archive revision changes because those
+// lifecycle edits do not alter the monitored scope. Conversely, a scope edit
+// must never allow an in-flight result from the previous scope to seed or
+// mutate the new baseline. The security-hash check and state write share one
+// transaction so an edit cannot slip between validation and persistence.
+func (s *Store) UpdateRuntimeForScan(ctx context.Context, jobID, securityHash string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var raw []byte
+	if err := tx.QueryRowContext(ctx, `SELECT definition_json FROM jobs WHERE id=?`, jobID).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: job %s", ErrNotFound, jobID)
+		}
+		return nil, err
+	}
+	job, err := unmarshalJob(raw)
+	if err != nil {
+		return nil, err
+	}
+	if securityHash == "" || job.SecurityHash() != securityHash {
+		return nil, ErrJobRevisionChanged
+	}
+	events, err := updateRuntimeTx(ctx, tx, jobID, fn)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return events, nil

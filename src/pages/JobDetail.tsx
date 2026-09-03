@@ -183,7 +183,7 @@ export function JobDetail() {
               <div className="panel-heading">
                 <div>
                   <h3>Scan diff</h3>
-                  <p className="muted">{detail.data.changes?.length ?? 0} changes against the current baseline.</p>
+                  <p className="muted">{detail.data.changes_pagination?.total ?? detail.data.changes?.length ?? 0} changes against the current baseline.</p>
                 </div>
                 <button className="icon-button" onClick={() => setSelectedScan('')} aria-label="Close scan detail">×</button>
               </div>

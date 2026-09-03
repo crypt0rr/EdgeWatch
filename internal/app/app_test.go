@@ -128,3 +128,40 @@ func TestManagedSchedulerReconcilesCreateUpdateAndArchive(t *testing.T) {
 		t.Fatalf("entries after archive: %d", len(a.entries))
 	}
 }
+
+func TestManagedScanPublishesLifecycleEvents(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Scanner = schedulerFake{}
+	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "events", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []model.Event
+	a.SetEventHandler(func(event model.Event) { events = append(events, event) })
+	if _, _, err := a.RunJobRecord(ctx, record); err != nil {
+		t.Fatal(err)
+	}
+	if len(events) < 2 || events[0].Type != "scan.started" {
+		t.Fatalf("unexpected lifecycle events: %#v", events)
+	}
+	var completed *model.Event
+	for i := range events {
+		if events[i].Type == "scan.completed" {
+			completed = &events[i]
+			break
+		}
+	}
+	if completed == nil || events[0].ScanID == "" || events[0].ScanID != completed.ScanID || events[0].JobID != record.ID {
+		t.Fatalf("lifecycle event metadata not linked: %#v", events)
+	}
+}

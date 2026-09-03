@@ -9,13 +9,16 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/app"
+	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/web"
 	"github.com/robfig/cron/v3"
 )
 
@@ -35,7 +38,7 @@ func run(args []string) error {
 	cmd := args[0]
 	action := ""
 	rest := args[1:]
-	if cmd == "config" || cmd == "baseline" || cmd == "notify" {
+	if cmd == "config" || cmd == "baseline" || cmd == "notify" || cmd == "admin" {
 		if len(rest) == 0 {
 			return usage()
 		}
@@ -52,6 +55,7 @@ func run(args []string) error {
 	scanID := fs.String("scan-id", "", "scan ID")
 	limit := fs.Int("limit", 50, "history limit")
 	nmapPath := fs.String("nmap", "nmap", "Nmap executable")
+	passwordFile := fs.String("password-file", "", "file containing a new administrator password")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -82,16 +86,16 @@ func run(args []string) error {
 	defer stop()
 	switch cmd {
 	case "daemon":
-		return application.Daemon(ctx)
+		return runDaemon(ctx, application, cfg.Web.Listen, s, logger)
 	case "scan":
 		if *jobName == "" {
 			return errors.New("--job is required")
 		}
-		job, err := application.Job(*jobName)
+		record, err := s.GetJobByName(ctx, *jobName)
 		if err != nil {
-			return err
+			return fmt.Errorf("unknown managed job %q; YAML jobs are inactive and must be recreated in the web console", *jobName)
 		}
-		scan, events, err := application.RunJob(ctx, job)
+		scan, events, err := application.RunJobRecord(ctx, record)
 		if printErr := printValue(*output, map[string]any{"scan": scan, "events": events}); printErr != nil {
 			return printErr
 		}
@@ -115,6 +119,8 @@ func run(args []string) error {
 			return errors.New("expected: notify test")
 		}
 		return application.Notifier.Test()
+	case "admin":
+		return adminAction(ctx, action, s, *passwordFile)
 	case "health":
 		return s.Healthy(ctx)
 	default:
@@ -124,8 +130,66 @@ func run(args []string) error {
 
 func usage() error {
 	fmt.Fprintln(os.Stderr, `Usage: edgewatch <command> [options]
-Commands: daemon, config validate, scan, status, history, baseline approve|reset, notify test, health, version`)
+	Commands: daemon, config validate, scan, status, history, baseline approve|reset, notify test, admin reset-password|disable-totp, health, version`)
 	return errors.New("invalid or missing command")
+}
+
+func adminAction(ctx context.Context, action string, s *store.Store, passwordFile string) error {
+	admin, err := s.GetAdmin(ctx)
+	if err != nil {
+		return errors.New("administrator is not configured")
+	}
+	switch action {
+	case "reset-password":
+		if passwordFile == "" {
+			return errors.New("--password-file is required")
+		}
+		raw, err := os.ReadFile(passwordFile)
+		if err != nil {
+			return err
+		}
+		password := string(raw)
+		password = strings.TrimRight(password, "\r\n")
+		hash, err := auth.PasswordHash(password)
+		if err != nil {
+			return err
+		}
+		admin.PasswordHash, admin.UpdatedAt = hash, time.Now().UTC()
+		if err := s.SaveAdmin(ctx, admin); err != nil {
+			return err
+		}
+		if err := s.DeleteAllSessions(ctx); err != nil {
+			return err
+		}
+		return s.Audit(ctx, "admin.password_reset", "password reset from host CLI")
+	case "disable-totp":
+		admin.TOTPEnabled, admin.TOTPSecret, admin.UpdatedAt = false, "", time.Now().UTC()
+		if err := s.SaveAdmin(ctx, admin); err != nil {
+			return err
+		}
+		if err := s.SaveRecoveryCodes(ctx, nil); err != nil {
+			return err
+		}
+		if err := s.DeleteAllSessions(ctx); err != nil {
+			return err
+		}
+		return s.Audit(ctx, "admin.totp_disabled", "TOTP disabled from host CLI")
+	default:
+		return errors.New("expected: admin reset-password|disable-totp")
+	}
+}
+
+func runDaemon(ctx context.Context, application *app.App, listen string, s *store.Store, logger *slog.Logger) error {
+	server := web.NewServer(application, s, logger)
+	errCh := make(chan error, 2)
+	go func() { errCh <- application.Daemon(ctx) }()
+	go func() { errCh <- server.ListenAndServe(ctx, listen) }()
+	select {
+	case err := <-errCh:
+		return err
+	case <-ctx.Done():
+		return nil
+	}
 }
 func printValue(format string, v any) error {
 	if format == "json" {
@@ -154,7 +218,7 @@ func normalizedConfig(cfg *config.Config) map[string]any {
 	for _, j := range cfg.Jobs {
 		jobs = append(jobs, map[string]any{"name": j.Name, "schedule": j.Schedule, "timezone": j.Timezone, "targets": j.Targets, "security_hash": j.SecurityHash()})
 	}
-	return map[string]any{"valid": true, "version": cfg.Version, "database": cfg.Database, "jobs": jobs, "notification_destinations": len(cfg.Notifications.URLs)}
+	return map[string]any{"valid": true, "version": cfg.Version, "database": cfg.Database, "web_listen": cfg.Web.Listen, "jobs": jobs, "legacy_jobs_inactive": len(jobs) > 0, "notification_destinations": len(cfg.Notifications.URLs)}
 }
 
 func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, output string) error {
@@ -177,7 +241,44 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 	if err != nil {
 		return err
 	}
+	managed, err := s.ListJobs(ctx, true)
+	if err != nil {
+		return err
+	}
+	managedNames := map[string]bool{}
+	for _, record := range managed {
+		managedNames[record.Job.Name] = true
+		if filter != "" && record.Job.Name != filter {
+			continue
+		}
+		state, err := s.RuntimeState(ctx, record.ID)
+		if err != nil {
+			return err
+		}
+		progress := "complete"
+		if state.Baseline == nil {
+			progress = fmt.Sprintf("%d/%d", state.CandidateCount, record.Job.Baseline.Samples)
+		} else if state.BaselineConfigHash != record.Job.SecurityHash() {
+			progress = fmt.Sprintf("updating %d/%d", state.CandidateCount, record.Job.Baseline.Samples)
+		}
+		entry := row{Name: record.Job.Name, Schedule: record.Job.Schedule, Timezone: record.Job.Timezone, BaselineScanID: state.BaselineScanID, BaselineProgress: progress, ActiveIncidents: len(state.Incidents), ConsecutiveFailures: state.ConsecutiveFailures, FailedDeliveries: failedDeliveries}
+		if scans, listErr := s.ListJobScans(ctx, record.ID, 1); listErr != nil {
+			return listErr
+		} else if len(scans) == 1 {
+			entry.LastScanID, entry.LastScanStatus = scans[0].ID, scans[0].Status
+			entry.LastScanFinished = scans[0].FinishedAt.Format(time.RFC3339)
+		}
+		location, _ := time.LoadLocation(record.Job.Timezone)
+		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+		if schedule, parseErr := parser.Parse(record.Job.Schedule); parseErr == nil {
+			entry.NextRun = schedule.Next(time.Now().In(location)).Format(time.RFC3339)
+		}
+		rows = append(rows, entry)
+	}
 	for _, j := range cfg.Jobs {
+		if managedNames[j.Name] {
+			continue
+		}
 		if filter != "" && j.Name != filter {
 			continue
 		}
@@ -216,38 +317,34 @@ func baseline(ctx context.Context, action string, s *store.Store, a *app.App, jo
 	if job == "" {
 		return errors.New("--job is required")
 	}
-	if _, err := a.Job(job); err != nil {
-		return err
-	}
-	var events []model.Event
-	var err error
-	switch action {
-	case "approve":
-		if scanID == "" {
-			return errors.New("--scan-id is required")
+	if record, managedErr := s.GetJobByName(ctx, job); managedErr == nil {
+		var events []model.Event
+		var err error
+		switch action {
+		case "approve":
+			if scanID == "" {
+				return errors.New("--scan-id is required")
+			}
+			scan, getErr := s.GetScan(ctx, scanID)
+			if getErr != nil {
+				return getErr
+			}
+			if scan.JobID != record.ID || scan.ConfigHash != record.Job.SecurityHash() {
+				return errors.New("scan does not match the current managed job")
+			}
+			events, err = s.ApproveRuntime(ctx, record.ID, record.Job.Name, scan)
+		case "reset":
+			events, err = s.ResetRuntime(ctx, record.ID, record.Job.Name)
+		default:
+			return errors.New("expected: baseline approve|reset")
 		}
-		scan, getErr := s.GetScan(ctx, scanID)
-		if getErr != nil {
-			return getErr
+		if err != nil {
+			return err
 		}
-		jobConfig, getErr := a.Job(job)
-		if getErr != nil {
-			return getErr
+		if err = a.Notifier.Queue(ctx, events); err != nil {
+			return err
 		}
-		if scan.ConfigHash != jobConfig.SecurityHash() {
-			return errors.New("scan does not match the current security-relevant job configuration")
-		}
-		events, err = s.Approve(ctx, job, scan)
-	case "reset":
-		events, err = s.ResetBaseline(ctx, job)
-	default:
-		return errors.New("expected: baseline approve|reset")
+		return printValue(output, events)
 	}
-	if err != nil {
-		return err
-	}
-	if err = a.Notifier.Queue(ctx, events); err != nil {
-		return err
-	}
-	return printValue(output, events)
+	return fmt.Errorf("unknown managed job %q; YAML jobs are inactive and must be recreated in the web console", job)
 }

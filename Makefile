@@ -1,6 +1,10 @@
-.PHONY: build test check
+.PHONY: build frontend test check
 
-build:
+frontend:
+	npm ci
+	npm run build
+
+build: frontend
 	go build -trimpath -o edgewatch ./cmd/edgewatch
 
 test:
@@ -10,3 +14,4 @@ check:
 	gofmt -w cmd internal
 	go vet ./...
 	go test -race ./...
+	npm run lint

@@ -47,10 +47,13 @@ jobs:
 	if cfg.Version != 1 {
 		t.Fatalf("version default %d", cfg.Version)
 	}
+	if cfg.Web.Listen != "127.0.0.1:8080" {
+		t.Fatalf("web listener default %q", cfg.Web.Listen)
+	}
 	if cfg.Retention.Value() != 90*24*time.Hour {
 		t.Fatalf("retention %s", cfg.Retention.Value())
 	}
-	if cfg.Jobs[0].Baseline.Samples != 1 || !cfg.Jobs[0].AssumesAlive() || !cfg.Jobs[0].RunsOnStart() {
+	if cfg.Jobs[0].Baseline.Samples != 1 || !cfg.Jobs[0].AssumesAlive() || !cfg.Jobs[0].RunsOnStart() || cfg.Jobs[0].RunOnStart == nil || cfg.Jobs[0].AssumeAlive == nil {
 		t.Fatal("defaults not applied")
 	}
 	if err := os.WriteFile(path, []byte(strings.Replace(yaml, "tcp:", "assume_alive: false\n    tcp:", 1)), 0o600); err != nil {
@@ -68,6 +71,22 @@ jobs:
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("unknown field accepted")
+	}
+}
+
+func TestWebListenerMustBeLoopback(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := `database: ` + filepath.Join(dir, "db.sqlite") + `
+retention: 90d
+web:
+  listen: 0.0.0.0:8080
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "loopback") {
+		t.Fatalf("expected loopback validation error, got %v", err)
 	}
 }
 

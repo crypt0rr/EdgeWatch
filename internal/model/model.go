@@ -39,7 +39,9 @@ type Snapshot struct {
 
 type Scan struct {
 	ID          string    `json:"id"`
+	JobID       string    `json:"job_id,omitempty"`
 	Job         string    `json:"job"`
+	JobRevision int64     `json:"job_revision,omitempty"`
 	StartedAt   time.Time `json:"started_at"`
 	FinishedAt  time.Time `json:"finished_at"`
 	Status      string    `json:"status"`
@@ -94,6 +96,7 @@ type JobState struct {
 
 type Event struct {
 	Type      string    `json:"type"`
+	JobID     string    `json:"job_id,omitempty"`
 	Job       string    `json:"job"`
 	ScanID    string    `json:"scan_id,omitempty"`
 	Message   string    `json:"message"`

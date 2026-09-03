@@ -1,0 +1,51 @@
+import type { Change, Incident, Job, JobForm, Pagination, Scan, Unit } from './types'
+
+let csrf = ''
+export function setCSRF(value: string) { csrf = value }
+export class APIError extends Error {
+  code?: string
+  details?: Record<string, unknown>
+  constructor(message: string, code?: string, details?: Record<string, unknown>) {
+    super(message)
+    this.name = 'APIError'
+    this.code = code
+    this.details = details
+  }
+}
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers)
+  if (init.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
+  if (csrf && init.method && init.method !== 'GET') headers.set('X-CSRF-Token', csrf)
+  const response = await fetch(`/api/v1${path}`, { ...init, headers, credentials: 'same-origin' })
+  if (response.status === 204) return undefined as T
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) throw new APIError(body?.error?.message || 'Request failed', body?.error?.code, body?.error?.details)
+  return body as T
+}
+export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; legacy_yaml_jobs?: string[]; password_requirements: { minimum_length: number }; notification_destinations: number; retention: string; max_concurrent_scans: number }>('/setup/status')
+export const getSession = () => api<{ username: string; csrf_token: string; totp_enabled: boolean }>('/auth/session')
+export const login = (password: string, otp?: string, recovery_code?: string) => api<{ username: string; csrf_token: string; totp_required: boolean }>('/auth/login', { method: 'POST', body: JSON.stringify({ password, otp, recovery_code }) })
+export const setup = (token: string, password: string) => api('/setup', { method: 'POST', body: JSON.stringify({ token, password }) })
+export const logout = () => api('/auth/logout', { method: 'POST' })
+export const logoutAllSessions = () => api('/auth/sessions', { method: 'DELETE' })
+export const listJobs = (archived = false) => api<{ jobs: Job[] }>(`/jobs?include_archived=${archived}`)
+export const getJob = (id: string) => api<Job>(`/jobs/${id}`)
+export const createJob = (job: JobForm) => api<Job>('/jobs', { method: 'POST', body: JSON.stringify(job) })
+export const updateJob = (id: string, revision: number, job: JobForm, confirm_rebaseline = false) => api<Job>(`/jobs/${id}`, { method: 'PUT', body: JSON.stringify({ ...job, revision, confirm_rebaseline }) })
+export const archiveJob = (id: string, revision: number) => api(`/jobs/${id}/archive`, { method: 'POST', body: JSON.stringify({ revision }) })
+export const restoreJob = (id: string, revision: number) => api(`/jobs/${id}/restore`, { method: 'POST', body: JSON.stringify({ revision }) })
+export const deleteJob = (id: string, confirm_name: string) => api(`/jobs/${id}?permanent=true`, { method: 'DELETE', body: JSON.stringify({ confirm_name }) })
+export const pauseJob = (id: string, revision: number) => api(`/jobs/${id}/pause`, { method: 'POST', body: JSON.stringify({ revision }) })
+export const resumeJob = (id: string, revision: number) => api(`/jobs/${id}/resume`, { method: 'POST', body: JSON.stringify({ revision }) })
+export const runJob = (id: string) => api<{ status: string }>(`/jobs/${id}/run`, { method: 'POST' })
+export const resetBaseline = (id: string) => api(`/jobs/${id}/baseline/reset`, { method: 'POST' })
+export const approveBaseline = (jobId: string, scanId: string) => api(`/jobs/${jobId}/baseline/approve`, { method: 'POST', body: JSON.stringify({ scan_id: scanId }) })
+export const jobScans = (id: string, offset = 0, limit = 20) => api<{ scans: Scan[]; pagination: Pagination }>(`/jobs/${id}/scans?limit=${limit}&offset=${offset}`)
+export const jobBaseline = (id: string, offset = 0, limit = 50) => api<{ job_id: string; job: string; revision: number; security_hash: string; baseline: Job['baseline']; snapshot: { units: Unit[]; scopes: { target: string; protocol: string; ports: string; service_detection: boolean }[]; dns?: Record<string, string[]> } | null; pagination: Pagination }>(`/jobs/${id}/baseline?limit=${limit}&offset=${offset}`)
+export const scanDetail = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ scan: Scan; changes: Change[]; changes_pagination: Pagination; current_security_hash: string }>(`/jobs/${jobId}/scans/${scanId}?limit=${limit}&offset=${offset}`)
+export const scanResults = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ results: Unit[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/results?limit=${limit}&offset=${offset}`)
+export const scanChanges = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ changes: Change[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/changes?limit=${limit}&offset=${offset}`)
+export const listScans = (offset = 0, limit = 20) => api<{ scans: Scan[]; pagination: Pagination }>(`/scans?limit=${limit}&offset=${offset}`)
+export const listIncidents = (offset = 0, limit = 20) => api<{ incidents: Incident[]; pagination: Pagination }>(`/incidents?limit=${limit}&offset=${offset}`)
+export const listEvents = (offset = 0, limit = 20, jobId?: string) => api<{ events: unknown[]; pagination: Pagination }>(`/events?limit=${limit}&offset=${offset}${jobId ? `&job_id=${encodeURIComponent(jobId)}` : ''}`)
+export const notificationTest = () => api<{ sent: number }>('/notifications/test', { method: 'POST' })

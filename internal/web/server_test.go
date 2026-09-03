@@ -97,7 +97,7 @@ func TestConsoleSetupLoginCreateAndRun(t *testing.T) {
 	if loginResult.CSRF == "" {
 		t.Fatal("missing csrf token")
 	}
-	req, _ := http.NewRequest(http.MethodPost, h.URL+"/api/v1/jobs", strings.NewReader(`{"name":"local","schedule":"0 * * * *","timezone":"UTC","targets":["127.0.0.1"],"tcp":{"ports":"1","mode":"connect"},"timeout":"1m","timing":"balanced","baseline_samples":1,"change_confirmations":1,"max_expanded_hosts":256}`))
+	req, _ := http.NewRequest(http.MethodPost, h.URL+"/api/v1/jobs", strings.NewReader(`{"name":"local","schedule":"0 * * * *","timezone":"UTC","targets":["127.0.0.1"],"tcp":{"ports":"1","mode":"connect"},"timeout":"1m","timing":"balanced","baseline_samples":1,"change_confirmations":1,"max_expanded_hosts":256,"enabled":false}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-CSRF-Token", loginResult.CSRF)
 	resp, err = client.Do(req)
@@ -108,12 +108,17 @@ func TestConsoleSetupLoginCreateAndRun(t *testing.T) {
 		t.Fatalf("create status %d", resp.StatusCode)
 	}
 	var created struct {
-		ID string `json:"id"`
+		ID       string `json:"id"`
+		Revision int64  `json:"revision"`
+		Enabled  bool   `json:"enabled"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&created)
 	resp.Body.Close()
 	if created.ID == "" {
 		t.Fatal("missing job id")
+	}
+	if created.Revision != 2 || created.Enabled {
+		t.Fatalf("created paused job returned stale lifecycle state: %#v", created)
 	}
 	resp = post("/api/v1/jobs/"+created.ID+"/run", "{}", loginResult.CSRF)
 	if resp.StatusCode != http.StatusAccepted {

@@ -88,6 +88,50 @@ func TestManagedScopeEditIsBlockedWhileScanning(t *testing.T) {
 	}
 }
 
+func TestJobLifecycleChangesInvalidateStaleEditors(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("lifecycle"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetJobEnabled(ctx, record.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := s.GetJob(ctx, record.ID); err != nil {
+		t.Fatal(err)
+	} else if current.Revision != record.Revision+1 || current.Enabled {
+		t.Fatalf("pause did not create a new revision: %#v", current)
+	}
+	if _, _, err := s.UpdateJob(ctx, record.ID, record.Revision, record.Job, true, false, true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale edit after pause was accepted: %v", err)
+	}
+
+	if err := s.SetJobArchived(ctx, record.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := s.GetJob(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if archived.Revision != record.Revision+2 || !archived.Archived || archived.Enabled {
+		t.Fatalf("archive did not create a new revision: %#v", archived)
+	}
+	if _, _, err := s.UpdateJob(ctx, record.ID, record.Revision+1, record.Job, false, false, true); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale edit after archive was accepted: %v", err)
+	}
+	if err := s.SetJobArchived(ctx, record.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := s.GetJob(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.Revision != record.Revision+3 || restored.Archived || restored.Enabled {
+		t.Fatalf("restore changed unexpected lifecycle state: %#v", restored)
+	}
+}
+
 func TestManagedRuntimeIsolatedFromLegacyState(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

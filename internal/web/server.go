@@ -510,7 +510,14 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 			return
 		}
-		record.Enabled = false
+		// Lifecycle changes advance the immutable revision too, so reload the
+		// record before returning it rather than handing the browser a stale
+		// revision that its first edit would immediately reject.
+		record, err = s.Store.GetJob(r.Context(), record.ID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+			return
+		}
 	}
 	s.App.RefreshSchedules()
 	_ = s.Store.Audit(r.Context(), "job.created", record.ID)

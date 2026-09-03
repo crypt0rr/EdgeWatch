@@ -420,7 +420,7 @@ func (s *Store) UpdateJobWithEvents(ctx context.Context, id string, expectedRevi
 	if n, _ := result.RowsAffected(); n != 1 {
 		return JobRecord{}, false, nil, ErrConflict
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO job_revisions(job_id,revision,definition_json,security_hash,created_at) VALUES(?,?,?,?,?)`, id, next, raw, job.SecurityHash(), now.Format(time.RFC3339Nano)); err != nil {
+	if err = appendJobRevisionTx(ctx, tx, id, next, raw, job.SecurityHash(), now); err != nil {
 		return JobRecord{}, false, nil, err
 	}
 	var events []model.Event
@@ -456,25 +456,79 @@ func boolInt(v bool) int {
 }
 
 func (s *Store) SetJobArchived(ctx context.Context, id string, archived bool) error {
-	result, err := s.DB.ExecContext(ctx, `UPDATE jobs SET archived=?,enabled=CASE WHEN ?=1 THEN 0 ELSE enabled END,updated_at=? WHERE id=?`, boolInt(archived), boolInt(archived), time.Now().UTC().Format(time.RFC3339Nano), id)
+	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n == 0 {
-		return fmt.Errorf("%w: job %s", ErrNotFound, id)
+	defer tx.Rollback()
+	current, err := getJobTx(ctx, tx, id)
+	if err != nil {
+		return err
 	}
-	return nil
+	if current.Archived == archived {
+		return tx.Commit()
+	}
+	now := time.Now().UTC()
+	next := current.Revision + 1
+	enabled := current.Enabled
+	if archived {
+		enabled = false
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE jobs SET archived=?,enabled=?,revision=?,updated_at=? WHERE id=? AND revision=?`, boolInt(archived), boolInt(enabled), next, now.Format(time.RFC3339Nano), id, current.Revision)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return ErrConflict
+	}
+	raw, err := marshalJob(current.Job)
+	if err != nil {
+		return err
+	}
+	if err := appendJobRevisionTx(ctx, tx, id, next, raw, current.Job.SecurityHash(), now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) SetJobEnabled(ctx context.Context, id string, enabled bool) error {
-	result, err := s.DB.ExecContext(ctx, `UPDATE jobs SET enabled=?,updated_at=? WHERE id=? AND archived=0`, boolInt(enabled), time.Now().UTC().Format(time.RFC3339Nano), id)
+	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if n, _ := result.RowsAffected(); n == 0 {
+	defer tx.Rollback()
+	current, err := getJobTx(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if current.Archived {
 		return fmt.Errorf("%w: job %s", ErrNotFound, id)
 	}
-	return nil
+	if current.Enabled == enabled {
+		return tx.Commit()
+	}
+	now := time.Now().UTC()
+	next := current.Revision + 1
+	result, err := tx.ExecContext(ctx, `UPDATE jobs SET enabled=?,revision=?,updated_at=? WHERE id=? AND revision=? AND archived=0`, boolInt(enabled), next, now.Format(time.RFC3339Nano), id, current.Revision)
+	if err != nil {
+		return err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return ErrConflict
+	}
+	raw, err := marshalJob(current.Job)
+	if err != nil {
+		return err
+	}
+	if err := appendJobRevisionTx(ctx, tx, id, next, raw, current.Job.SecurityHash(), now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func appendJobRevisionTx(ctx context.Context, tx *sql.Tx, jobID string, revision int64, raw []byte, securityHash string, createdAt time.Time) error {
+	_, err := tx.ExecContext(ctx, `INSERT INTO job_revisions(job_id,revision,definition_json,security_hash,created_at) VALUES(?,?,?,?,?)`, jobID, revision, raw, securityHash, createdAt.UTC().Format(time.RFC3339Nano))
+	return err
 }
 
 func (s *Store) DeleteJob(ctx context.Context, id string) error {

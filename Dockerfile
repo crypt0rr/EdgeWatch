@@ -15,6 +15,5 @@ RUN apk add --no-cache ca-certificates nmap tzdata \
     && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets \
     && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets
 COPY --from=build /out/edgewatch /usr/local/bin/edgewatch
-VOLUME ["/var/lib/edgewatch"]
 ENTRYPOINT ["edgewatch"]
 CMD ["daemon", "--config", "/etc/edgewatch/config.yaml"]

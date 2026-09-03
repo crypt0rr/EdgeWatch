@@ -3,7 +3,11 @@ package scanner
 import (
 	"context"
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -54,5 +58,36 @@ func TestAggregatePrefersConfirmedOpen(t *testing.T) {
 	got := aggregate(target, parsed, "udp")
 	if got.Ports[0].State != "open" {
 		t.Fatalf("got %s", got.Ports[0].State)
+	}
+}
+
+func TestNmapArgsHostDiscovery(t *testing.T) {
+	protocol := config.Protocol{Ports: "22", Mode: "syn"}
+	addresses := []string{"192.0.2.1"}
+
+	withAssumption := nmapArgs(4, "tcp", protocol, "balanced", true, addresses)
+	if !slices.Contains(withAssumption, "-Pn") {
+		t.Fatalf("assume_alive=true args: %v", withAssumption)
+	}
+
+	withDiscovery := nmapArgs(4, "tcp", protocol, "balanced", false, addresses)
+	if slices.Contains(withDiscovery, "-Pn") {
+		t.Fatalf("assume_alive=false args: %v", withDiscovery)
+	}
+}
+
+func TestScanProtocolFailsWhenDiscoveryOmitsHost(t *testing.T) {
+	dir := t.TempDir()
+	nmapPath := filepath.Join(dir, "nmap")
+	output := `<?xml version="1.0"?><nmaprun><host><status state="down"/><address addr="192.0.2.1" addrtype="ipv4"/></host><runstats><finished exit="success"/></runstats></nmaprun>`
+	script := "#!/bin/sh\nprintf '%s' '" + output + "'\n"
+	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := New(nmapPath)
+	target := resolvedTarget{Name: "192.0.2.1", Addresses: []string{"192.0.2.1"}}
+	_, err := n.scanProtocol(context.Background(), target, "tcp", config.Protocol{Ports: "22", Mode: "syn"}, "balanced", false)
+	if err == nil || !strings.Contains(err.Error(), "omitted expected address") {
+		t.Fatalf("expected safe discovery failure, got %v", err)
 	}
 }

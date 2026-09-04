@@ -25,5 +25,10 @@ If the key is lost or replaced, web-managed destinations become unavailable;
 they cannot be recovered from the database alone. Restore the original key and
 database together, or delete and recreate the affected destinations after
 confirming that the old credentials are revoked. A database upgraded to schema
-4 must not be opened by an older EdgeWatch binary; downgrade by restoring the
+5 must not be opened by an older EdgeWatch binary; downgrade by restoring the
 complete pre-upgrade `./data` backup before starting the old version.
+
+Retention pruning deliberately keeps the security audit log indefinitely.
+Only completed scans, historical events, sent or terminally failed outbox
+deliveries, and superseded job revisions are eligible for automatic removal;
+active baselines, current revisions, and pending deliveries are protected.

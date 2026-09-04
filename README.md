@@ -61,6 +61,13 @@ ssh -L 8080:127.0.0.1:8080 user@docker-host
 - Create all monitoring jobs in the web console. The YAML `jobs` section is
   not used for scheduling.
 
+Retention applies to completed scans, events, sent notification deliveries,
+terminally failed deliveries, and superseded job revisions. Active baselines,
+the current revision of every job, pending/retryable deliveries, and the
+security audit log are retained; audit records are intentionally indefinite.
+The daemon logs the row counts removed from each retention class at startup
+and during its daily pruning pass.
+
 The web job editor supports individual IP addresses, CIDRs, DNS names, target
 expansion limits, independent TCP and UDP scans, ports `1-65535`, TCP SYN or
 connect mode, service detection, timing, timeouts, cron schedules, timezones,
@@ -127,12 +134,13 @@ starting the new image. SQLite uses WAL mode, so copy the database only while
 EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
-The schema migration from the v0.3 database is additive, but it is
+The schema migration from the v0.3 database is additive (the current schema is
+version 5), but it is
 forward-only: an older binary refuses a newer schema. To roll back, stop the
 new service, restore the entire pre-upgrade `./data` directory and deployment
 configuration, then start the previous image. Do not point an older image at
-the upgraded database. The current schema is version 4. The previous named
-Docker volume, if one exists, is not read or migrated automatically.
+the upgraded database. The previous named Docker volume, if one exists, is
+not read or migrated automatically.
 
 ## Development
 

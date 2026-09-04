@@ -1,5 +1,26 @@
 import type { Change, Incident, Job, JobForm, Pagination, Scan, Unit } from './types'
 
+export type NotificationDestination = {
+  id: string
+  name: string
+  provider: string
+  source: 'deployment' | 'web' | string
+  enabled: boolean
+  locked: boolean
+  read_only: boolean
+  revision?: number
+  created_at?: string
+  updated_at?: string
+  error_code?: string
+}
+export type NotificationStatus = {
+  deployment: number
+  managed: number
+  active: number
+  locked: number
+  key_state: string
+}
+
 let csrf = ''
 export function setCSRF(value: string) { csrf = value }
 export class APIError extends Error {
@@ -49,3 +70,9 @@ export const listScans = (offset = 0, limit = 20) => api<{ scans: Scan[]; pagina
 export const listIncidents = (offset = 0, limit = 20) => api<{ incidents: Incident[]; pagination: Pagination }>(`/incidents?limit=${limit}&offset=${offset}`)
 export const listEvents = (offset = 0, limit = 20, jobId?: string) => api<{ events: unknown[]; pagination: Pagination }>(`/events?limit=${limit}&offset=${offset}${jobId ? `&job_id=${encodeURIComponent(jobId)}` : ''}`)
 export const notificationTest = () => api<{ sent: number }>('/notifications/test', { method: 'POST' })
+export const listNotificationDestinations = () => api<{ destinations: NotificationDestination[]; status: NotificationStatus }>('/notifications/destinations')
+export const getNotificationDestination = (id: string) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`)
+export const createNotificationDestination = (name: string, url: string, password: string, enabled = true) => api<NotificationDestination>('/notifications/destinations', { method: 'POST', body: JSON.stringify({ name, url, password, enabled }) })
+export const updateNotificationDestination = (id: string, revision: number, name: string, password: string, options: { url?: string; enabled?: boolean } = {}) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ name, revision, password, ...options }) })
+export const deleteNotificationDestination = (id: string, revision: number, password: string) => api<void>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ revision, password }) })
+export const testNotificationDestination = (id: string) => api<{ sent: number }>(`/notifications/destinations/${encodeURIComponent(id)}/test`, { method: 'POST' })

@@ -19,6 +19,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -560,4 +561,141 @@ func TestLifecycleEndpointsRequireCurrentRevision(t *testing.T) {
 		t.Fatalf("current pause returned %d", response.StatusCode)
 	}
 	response.Body.Close()
+}
+
+func TestNotificationAPIIsWriteOnlyAndUsesOptimisticConcurrency(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	database := filepath.Join(dir, "edgewatch.db")
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	hash, err := auth.PasswordHash("correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAdmin(ctx, store.Admin{Username: "admin", PasswordHash: hash, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	deploymentURL := "generic://localhost/deployment?disabletls=yes&template=json"
+	cfg := &config.Config{Version: 1, Database: database, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}, Notifications: config.Notifications{URLs: []string{deploymentURL}}}
+	a, err := app.New(cfg, s, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := httptest.NewServer(NewServer(a, s, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
+	defer h.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	request := func(method, path, body, csrf string) *http.Response {
+		req, requestErr := http.NewRequest(method, h.URL+path, strings.NewReader(body))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if csrf != "" {
+			req.Header.Set("X-CSRF-Token", csrf)
+		}
+		response, requestErr := client.Do(req)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		return response
+	}
+	response := request(http.MethodPost, "/api/v1/auth/login", `{"password":"correct horse battery staple"}`, "")
+	if response.StatusCode != http.StatusOK {
+		response.Body.Close()
+		t.Fatalf("login status %d", response.StatusCode)
+	}
+	var login struct {
+		CSRF string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&login); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	managedURL := "generic://localhost/managed?disabletls=yes&template=json"
+	response = request(http.MethodPost, "/api/v1/notifications/destinations", `{"name":"Operations","url":"`+managedURL+`","password":"correct horse battery staple"}`, login.CSRF)
+	if response.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("create status %d: %s", response.StatusCode, body)
+	}
+	createdBody, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if strings.Contains(string(createdBody), managedURL) || strings.Contains(string(createdBody), `"url"`) {
+		t.Fatalf("create response exposed URL: %s", createdBody)
+	}
+	var created notify.DestinationView
+	if err := json.Unmarshal(createdBody, &created); err != nil {
+		t.Fatal(err)
+	}
+	if created.ID == "" || created.Revision != 1 || created.Source != "web" {
+		t.Fatalf("unexpected created destination: %#v", created)
+	}
+	var ciphertext []byte
+	if err := s.DB.QueryRow(`SELECT ciphertext FROM managed_notifications WHERE id=?`, created.ID).Scan(&ciphertext); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(ciphertext), managedURL) {
+		t.Fatal("managed URL was stored in plaintext")
+	}
+	response = request(http.MethodGet, "/api/v1/notifications/destinations", "", "")
+	body, _ := io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || strings.Contains(string(body), managedURL) || strings.Contains(string(body), deploymentURL) || strings.Contains(string(body), `"url"`) {
+		t.Fatalf("notification listing leaked URL: status=%d body=%s", response.StatusCode, body)
+	}
+	if !strings.Contains(string(body), `"source":"deployment"`) || !strings.Contains(string(body), `"source":"web"`) {
+		t.Fatalf("listing did not retain both destination sources: %s", body)
+	}
+	response = request(http.MethodPut, "/api/v1/notifications/destinations/"+created.ID, `{"name":"Operations","password":"correct horse battery staple","revision":99}`, login.CSRF)
+	if response.StatusCode != http.StatusConflict {
+		response.Body.Close()
+		t.Fatalf("stale notification update status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	secretURL := "unknown://secret-token@example.invalid/path"
+	response = request(http.MethodPost, "/api/v1/notifications/destinations", `{"name":"Bad","url":"`+secretURL+`","password":"correct horse battery staple"}`, login.CSRF)
+	body, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadRequest || strings.Contains(string(body), "secret-token") {
+		t.Fatalf("invalid URL response leaked input: status=%d body=%s", response.StatusCode, body)
+	}
+	response = request(http.MethodPost, "/api/v1/notifications/destinations", `{"name":"Wrong password","url":"`+managedURL+`","password":"incorrect password"}`, login.CSRF)
+	if response.StatusCode != http.StatusUnauthorized {
+		response.Body.Close()
+		t.Fatalf("wrong password status %d", response.StatusCode)
+	}
+	response.Body.Close()
+	response = request(http.MethodPut, "/api/v1/notifications/destinations/"+created.ID, `{"name":"Operations","password":"correct horse battery staple","revision":1,"enabled":false}`, login.CSRF)
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("disable status %d: %s", response.StatusCode, body)
+	}
+	response.Body.Close()
+	rows, err := s.DB.Query(`SELECT detail FROM security_audit WHERE action LIKE 'notifications.%'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var detail string
+		if err := rows.Scan(&detail); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(detail, managedURL) || strings.Contains(detail, "secret-token") {
+			t.Fatalf("notification URL leaked into audit detail: %s", detail)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 }

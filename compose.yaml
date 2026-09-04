@@ -17,6 +17,8 @@ services:
       - ./config.yaml:/etc/edgewatch/config.yaml:ro
       # Uncomment after creating notification-urls.txt and enabling urls_file in config.yaml.
       # - ./notification-urls.txt:/run/secrets/edgewatch-notification-urls:ro
+      # Uncomment when using notifications.encryption_key_file in config.yaml.
+      # - ./notification-encryption.key:/run/secrets/edgewatch-notification-key:ro
       - ./data:/var/lib/edgewatch:rw
     deploy:
       resources:

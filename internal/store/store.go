@@ -17,7 +17,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-type Store struct{ DB *sql.DB }
+type Store struct {
+	DB   *sql.DB
+	Path string
+}
 
 var ErrJobBusy = errors.New("job is already running")
 
@@ -50,7 +53,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 2
+const schemaVersion = 3
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -74,7 +77,7 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{DB: db}, nil
+	return &Store{DB: db, Path: path}, nil
 }
 
 func migrate(db *sql.DB) error {
@@ -156,6 +159,20 @@ func migrate(db *sql.DB) error {
  expires_at TEXT NOT NULL,
  used_at TEXT
 );`,
+		},
+		3: {
+			`CREATE TABLE IF NOT EXISTS managed_notifications (
+ id TEXT PRIMARY KEY,
+ name TEXT NOT NULL UNIQUE,
+ provider TEXT NOT NULL,
+ ciphertext BLOB NOT NULL,
+ nonce BLOB NOT NULL,
+ enabled INTEGER NOT NULL DEFAULT 1,
+ revision INTEGER NOT NULL DEFAULT 1,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);`,
+			"CREATE INDEX IF NOT EXISTS managed_notifications_enabled ON managed_notifications(enabled, name)",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {

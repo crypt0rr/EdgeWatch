@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { APIError, api, listScans, setCSRF } from './api'
+import { APIError, api, createNotificationDestination, listScans, setCSRF, updateNotificationDestination } from './api'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -30,5 +30,24 @@ describe('API pagination contract', () => {
     await expect(request).rejects.toBeInstanceOf(APIError)
     await expect(request).rejects.toMatchObject({ code: 'conflict', details: { revision: 2 } })
     expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
+  })
+})
+
+describe('notification API contract', () => {
+  it('uses write-only named destination payloads and revision updates', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify({ id: 'dest-1', name: 'Ops', provider: 'generic', source: 'web', enabled: true, locked: false, read_only: false, revision: 2 }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    setCSRF('csrf-token')
+
+    await createNotificationDestination('Ops', 'generic://localhost/ops?disabletls=yes', 'correct horse battery staple')
+    const createBody = JSON.parse(String(fetchMock.mock.calls[0][1]?.body)) as Record<string, unknown>
+    expect(createBody).toMatchObject({ name: 'Ops', url: 'generic://localhost/ops?disabletls=yes', password: 'correct horse battery staple', enabled: true })
+    expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
+
+    await updateNotificationDestination('dest-1', 1, 'Ops', 'correct horse battery staple', { enabled: false })
+    expect(String(fetchMock.mock.calls[1][0])).toContain('/notifications/destinations/dest-1')
+    const updateBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as Record<string, unknown>
+    expect(updateBody).toMatchObject({ revision: 1, name: 'Ops', password: 'correct horse battery staple', enabled: false })
+    expect(updateBody.url).toBeUndefined()
   })
 })

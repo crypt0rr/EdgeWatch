@@ -47,7 +47,16 @@ type Scanner interface {
 }
 
 func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logger) (*App, error) {
-	n, err := notify.New(s, cfg.Notifications.URLs)
+	var n *notify.Notifier
+	var err error
+	if cfg.Notifications.EncryptionKeyFile != "" {
+		// An explicitly configured path is operator-managed. It must already
+		// contain a valid key; the notifier only generates the default key next
+		// to the database when no override is configured.
+		n, err = notify.NewWithKeyFile(s, cfg.Notifications.URLs, cfg.Notifications.EncryptionKeyFile)
+	} else {
+		n, err = notify.New(s, cfg.Notifications.URLs)
+	}
 	if err != nil {
 		return nil, err
 	}

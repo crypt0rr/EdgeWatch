@@ -9,6 +9,7 @@ import { JobEditor } from './pages/JobEditor'
 import { JobDetail } from './pages/JobDetail'
 import { Login, Setup } from './pages/Auth'
 import { Security } from './pages/Security'
+import { Notifications } from './pages/Notifications'
 import { Pagination } from './components/Pagination'
 import './tailwind.css'
 import './styles.css'
@@ -28,6 +29,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
     { to: '/', label: 'Overview', icon: Gauge },
     { to: '/jobs', label: 'Jobs', icon: Boxes },
     { to: '/incidents', label: 'Incidents', icon: Activity },
+    { to: '/notifications', label: 'Notifications', icon: Bell },
     { to: '/security', label: 'Security', icon: ShieldCheck },
   ]
   return <div className="app-shell">
@@ -37,7 +39,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
       <div className="sidebar-bottom"><div className="user-chip"><span className="avatar">A</span><span><strong>{username}</strong><small>Administrator</small></span></div><button className="nav-link quiet" onClick={onLogout}><LogOut size={17} />Sign out</button></div>
     </aside>
     {open && <button aria-label="Close navigation" className="backdrop" onClick={() => setOpen(false)} />}
-    <main className="main"><header className="topbar"><button aria-label="Open navigation" className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><div className="breadcrumb">{location.pathname === '/' ? 'Overview' : location.pathname.split('/').filter(Boolean).map(v => v[0].toUpperCase() + v.slice(1)).join(' / ')}</div><div className="topbar-actions"><span className="status-dot"><i /> Engine online</span><Bell size={18} /></div></header><div className="content"><Routes><Route path="/" element={<Dashboard />} /><Route path="/jobs" element={<Jobs />} /><Route path="/jobs/new" element={<JobEditor />} /><Route path="/jobs/:id" element={<JobDetail />} /><Route path="/jobs/:id/edit" element={<JobEditor />} /><Route path="/incidents" element={<Incidents />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></div></main>
+    <main className="main"><header className="topbar"><button aria-label="Open navigation" className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><div className="breadcrumb">{location.pathname === '/' ? 'Overview' : location.pathname.split('/').filter(Boolean).map(v => v[0].toUpperCase() + v.slice(1)).join(' / ')}</div><div className="topbar-actions"><span className="status-dot"><i /> Engine online</span><Bell size={18} /></div></header><div className="content"><Routes><Route path="/" element={<Dashboard />} /><Route path="/jobs" element={<Jobs />} /><Route path="/jobs/new" element={<JobEditor />} /><Route path="/jobs/:id" element={<JobDetail />} /><Route path="/jobs/:id/edit" element={<JobEditor />} /><Route path="/incidents" element={<Incidents />} /><Route path="/notifications" element={<Notifications />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></div></main>
   </div>
 }
 

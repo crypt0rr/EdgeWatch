@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -75,6 +76,37 @@ func TestSessionAuthenticationAndCSRF(t *testing.T) {
 	r.Header.Set("X-CSRF-Token", session.CSRFToken)
 	if !m.CheckCSRF(r, session) {
 		t.Fatal("valid CSRF token rejected")
+	}
+}
+
+func TestConfirmPasswordUsesGenericErrorsAndRateLimit(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := NewManager(s)
+	ctx := context.Background()
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/notifications/destinations", nil)
+	request.RemoteAddr = "127.0.0.1:9876"
+	if err := m.ConfirmPassword(ctx, request, "wrong password"); err == nil || strings.Contains(err.Error(), "admin") {
+		t.Fatalf("unexpected wrong-password error: %v", err)
+	}
+	if err := m.ConfirmPassword(ctx, request, "correct horse battery staple"); err != nil {
+		t.Fatalf("correct password rejected: %v", err)
+	}
+	for i := 0; i < 5; i++ {
+		_ = m.ConfirmPassword(ctx, request, "wrong password")
+	}
+	if err := m.ConfirmPassword(ctx, request, "correct horse battery staple"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("rate-limit error = %v", err)
 	}
 }
 

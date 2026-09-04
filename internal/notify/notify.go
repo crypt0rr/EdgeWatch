@@ -409,11 +409,45 @@ func (n *Notifier) destinationSnapshot() map[string]string {
 	return out
 }
 
+// destinationKeys returns the destinations that were enabled when an event
+// was created. A managed destination may be locked because its encryption key
+// is temporarily unavailable; its durable outbox entry must still be created
+// so Drain can defer it until the key is restored.
+func (n *Notifier) destinationKeys() map[string]struct{} {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	out := make(map[string]struct{}, len(n.fileURLs)+len(n.managed))
+	for id := range n.fileURLs {
+		out[id] = struct{}{}
+	}
+	for id, entry := range n.managed {
+		if entry.record.Enabled {
+			out[managedKey(id, entry.record.Revision)] = struct{}{}
+		}
+	}
+	return out
+}
+
+// QueueDestinations reloads metadata and returns enabled destination keys for
+// an atomic event transition. Keys are opaque hashes or managed revisions.
+func (n *Notifier) QueueDestinations(ctx context.Context) ([]string, error) {
+	if err := n.Reload(ctx); err != nil {
+		return nil, err
+	}
+	keys := n.destinationKeys()
+	out := make([]string, 0, len(keys))
+	for key := range keys {
+		out = append(out, key)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 func (n *Notifier) Queue(ctx context.Context, events []model.Event) error {
 	if err := n.Reload(ctx); err != nil {
 		return err
 	}
-	destinations := n.destinationSnapshot()
+	destinations := n.destinationKeys()
 	for _, event := range events {
 		for destination := range destinations {
 			if err := n.Store.QueueEvent(ctx, destination, event); err != nil {
@@ -431,7 +465,9 @@ func (n *Notifier) Drain(ctx context.Context) error {
 		return err
 	}
 	destinations := n.destinationSnapshot()
-	deliveries, err := n.Store.ClaimDueDeliveries(ctx, 100, uuid.NewString())
+	// Keep one pass short enough that a provider outage cannot make the daemon
+	// heartbeat stale. The application worker will pick up the next batch.
+	deliveries, err := n.Store.ClaimDueDeliveries(ctx, 4, uuid.NewString())
 	if err != nil {
 		return err
 	}

@@ -733,12 +733,36 @@ func (s *Store) RuntimeState(ctx context.Context, jobID string) (model.JobState,
 }
 
 func (s *Store) UpdateRuntime(ctx context.Context, jobID string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	return s.updateRuntime(ctx, jobID, "", nil, fn)
+}
+
+func (s *Store) UpdateRuntimeWithOutbox(ctx context.Context, jobID string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	return s.updateRuntime(ctx, jobID, "", destinations, fn)
+}
+
+func (s *Store) updateRuntime(ctx context.Context, jobID, securityHash string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	events, err := updateRuntimeTx(ctx, tx, jobID, fn)
+	if securityHash != "" {
+		var raw []byte
+		if err := tx.QueryRowContext(ctx, `SELECT definition_json FROM jobs WHERE id=?`, jobID).Scan(&raw); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("%w: job %s", ErrNotFound, jobID)
+			}
+			return nil, err
+		}
+		job, err := unmarshalJob(raw)
+		if err != nil {
+			return nil, err
+		}
+		if job.SecurityHash() != securityHash {
+			return nil, ErrJobRevisionChanged
+		}
+	}
+	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, destinations, fn)
 	if err != nil {
 		return nil, err
 	}
@@ -756,31 +780,36 @@ func (s *Store) UpdateRuntime(ctx context.Context, jobID string, fn func(*model.
 // mutate the new baseline. The security-hash check and state write share one
 // transaction so an edit cannot slip between validation and persistence.
 func (s *Store) UpdateRuntimeForScan(ctx context.Context, jobID, securityHash string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-	var raw []byte
-	if err := tx.QueryRowContext(ctx, `SELECT definition_json FROM jobs WHERE id=?`, jobID).Scan(&raw); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("%w: job %s", ErrNotFound, jobID)
-		}
-		return nil, err
-	}
-	job, err := unmarshalJob(raw)
-	if err != nil {
-		return nil, err
-	}
-	if securityHash == "" || job.SecurityHash() != securityHash {
-		return nil, ErrJobRevisionChanged
-	}
+	return s.updateRuntime(ctx, jobID, securityHash, nil, fn)
+}
+
+// UpdateRuntimeForScanWithOutbox persists the state transition, event rows,
+// and destination-specific outbox rows in one transaction. Destinations are
+// captured before the transaction by the notifier and contain only opaque
+// destination identifiers, never URLs.
+func (s *Store) UpdateRuntimeForScanWithOutbox(ctx context.Context, jobID, securityHash string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	return s.updateRuntime(ctx, jobID, securityHash, destinations, fn)
+}
+
+func updateRuntimeTxWithOutbox(ctx context.Context, tx *sql.Tx, jobID string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	events, err := updateRuntimeTx(ctx, tx, jobID, fn)
 	if err != nil {
 		return nil, err
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
+	if len(destinations) == 0 || len(events) == 0 {
+		return events, nil
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, event := range events {
+		payload, marshalErr := json.Marshal(event)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		for _, destination := range destinations {
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, destination, payload, now); err != nil {
+				return nil, err
+			}
+		}
 	}
 	return events, nil
 }
@@ -1340,8 +1369,9 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	// contain immutable historical definitions and may be discarded after their
 	// retention window because scans retain their own snapshots.
 	result, err = tx.ExecContext(ctx, `DELETE FROM job_revisions
-		WHERE created_at < ?
-		AND revision < COALESCE((SELECT MAX(current.revision) FROM jobs AS current WHERE current.id = job_revisions.job_id), revision)`, cutoff)
+			WHERE created_at < ?
+			AND revision < COALESCE((SELECT MAX(current.revision) FROM jobs AS current WHERE current.id = job_revisions.job_id), revision)
+			AND NOT EXISTS (SELECT 1 FROM scans WHERE scans.job_id = job_revisions.job_id AND scans.job_revision = job_revisions.revision)`, cutoff)
 	if err != nil {
 		return stats, err
 	}

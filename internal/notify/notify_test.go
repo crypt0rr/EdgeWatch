@@ -308,6 +308,13 @@ func TestManagedNotificationLocksWhenKeyIsUnavailable(t *testing.T) {
 	if queued != 1 {
 		t.Fatalf("deployment notification was not queued while managed key was locked: %d", queued)
 	}
+	var managedQueued int
+	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM outbox WHERE destination=?`, managedKey(created.ID, created.Revision)).Scan(&managedQueued); err != nil {
+		t.Fatal(err)
+	}
+	if managedQueued != 1 {
+		t.Fatalf("managed notification was dropped while key was locked: %d", managedQueued)
+	}
 	if err := locked.TestDestination(created.ID); !errors.Is(err, ErrManagedNotificationLocked) {
 		t.Fatalf("locked test error = %v", err)
 	}

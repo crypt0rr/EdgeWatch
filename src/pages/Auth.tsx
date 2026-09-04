@@ -1,12 +1,12 @@
 import { FormEvent, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { Eye, EyeOff, LockKeyhole, Wifi } from 'lucide-react'
 import { login, setCSRF, setup } from '../api'
 
 export function Login() {
-  const navigate = useNavigate(); const queryClient = useQueryClient(); const [password, setPassword] = useState(''); const [otp, setOtp] = useState(''); const [recovery, setRecovery] = useState(''); const [showRecovery, setShowRecovery] = useState(false); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
-  async function submit(event: FormEvent) { event.preventDefault(); setError(''); setBusy(true); try { const value = await login(password, otp, showRecovery ? recovery : undefined); setCSRF(value.csrf_token); await queryClient.invalidateQueries({ queryKey: ['session'] }); await queryClient.invalidateQueries({ queryKey: ['setup-status'] }); navigate('/') } catch (err) { setError(err instanceof Error ? err.message : 'Unable to sign in') } finally { setBusy(false) } }
+  const navigate = useNavigate(); const location = useLocation(); const queryClient = useQueryClient(); const [password, setPassword] = useState(''); const [otp, setOtp] = useState(''); const [recovery, setRecovery] = useState(''); const [showRecovery, setShowRecovery] = useState(false); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
+  async function submit(event: FormEvent) { event.preventDefault(); setError(''); setBusy(true); try { const value = await login(password, otp, showRecovery ? recovery : undefined); setCSRF(value.csrf_token); await queryClient.invalidateQueries({ queryKey: ['session'] }); await queryClient.invalidateQueries({ queryKey: ['setup-status'] }); const from = (location.state as { from?: { pathname?: string; search?: string } } | null)?.from; navigate(from?.pathname ? `${from.pathname}${from.search ?? ''}` : '/') } catch (err) { setError(err instanceof Error ? err.message : 'Unable to sign in') } finally { setBusy(false) } }
   return <AuthFrame eyebrow="Welcome back" title="Sign in to EdgeWatch" subtitle="Review your network surface and respond to changes."><form onSubmit={submit} className="auth-form"><label>Password<input autoFocus type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" required /></label><label>{showRecovery ? 'Recovery code' : 'Authenticator code'}<input inputMode={showRecovery ? 'text' : 'numeric'} value={showRecovery ? recovery : otp} onChange={e => showRecovery ? setRecovery(e.target.value) : setOtp(e.target.value)} placeholder={showRecovery ? 'AB12CD34EF' : '123456'} autoComplete="one-time-code" /></label>{error && <div className="form-error">{error}</div>}<button disabled={busy} className="button primary wide" type="submit">{busy ? 'Signing in…' : 'Sign in'}</button><button type="button" className="link-button" onClick={() => setShowRecovery(v => !v)}>{showRecovery ? 'Use authenticator code' : 'Use a recovery code'}</button></form></AuthFrame>
 }
 

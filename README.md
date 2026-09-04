@@ -139,8 +139,8 @@ version 5), but it is
 forward-only: an older binary refuses a newer schema. To roll back, stop the
 new service, restore the entire pre-upgrade `./data` directory and deployment
 configuration, then start the previous image. Do not point an older image at
-the upgraded database. The current schema is version 4. The previous named
-Docker volume, if one exists, is not read or migrated automatically.
+the upgraded database. The previous named Docker volume, if one exists, is
+not read or migrated automatically.
 
 ## Development
 

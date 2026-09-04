@@ -75,7 +75,9 @@ expansion limits, independent TCP and UDP scans, ports `1-65535`, TCP SYN or
 connect mode, service detection, timing, timeouts, cron schedules, timezones,
 pause/resume controls, and a preflight Nmap work estimate. Broad scans are
 guarded by the scheduler probe budget; enable the explicit high-cost override
-only when the additional load is understood.
+only when the additional load is understood. Active scans expose completed
+probe/process counts in the dashboard and can be canceled without changing a
+baseline or opening/recovering incidents.
 
 `assume_alive` defaults to `true` and passes `-Pn` to Nmap. Set it to `false`
 when host discovery is required. If discovery reports an expected target as

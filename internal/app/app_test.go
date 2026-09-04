@@ -13,6 +13,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/robfig/cron/v3"
 )
@@ -27,6 +28,23 @@ func (schedulerFake) Scan(context.Context, config.Job) (model.Snapshot, error) {
 type blockingScanner struct {
 	started chan struct{}
 	release chan struct{}
+}
+
+type progressBlockingScanner struct {
+	started chan struct{}
+}
+
+func (s *progressBlockingScanner) Version(context.Context) string { return "progress" }
+func (s *progressBlockingScanner) Scan(ctx context.Context, job config.Job) (model.Snapshot, error) {
+	return s.ScanWithProgress(ctx, job, nil)
+}
+func (s *progressBlockingScanner) ScanWithProgress(ctx context.Context, _ config.Job, report scanner.ProgressReporter) (model.Snapshot, error) {
+	if report != nil {
+		report(scanner.Progress{TotalProbes: 2, TotalInvocations: 1, Phase: "scanning"})
+	}
+	close(s.started)
+	<-ctx.Done()
+	return model.Snapshot{}, ctx.Err()
 }
 
 func (s *blockingScanner) Version(context.Context) string { return "blocking" }
@@ -274,6 +292,62 @@ func TestActiveScansReportsInFlightManagedScan(t *testing.T) {
 	}
 	if active := a.ActiveScans(); len(active) != 0 {
 		t.Fatalf("completed scan remained active: %#v", active)
+	}
+}
+
+func TestHighCostManagedScanReportsProgressAndCanBeCanceled(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1, MaxProbeCount: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocking := &progressBlockingScanner{started: make(chan struct{})}
+	a.Scanner = blocking
+	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "high-cost", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced", AllowHighCost: true}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	var scan model.Scan
+	go func() {
+		scan, _, _ = a.RunJobRecord(ctx, record)
+		close(done)
+	}()
+	select {
+	case <-blocking.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("high-cost scan did not start")
+	}
+	active := a.ActiveScans()
+	if len(active) != 1 || active[0].TotalProbes != 2 || active[0].ProgressPercent != 0 || active[0].Phase != "scanning" {
+		t.Fatalf("unexpected progress snapshot: %#v", active)
+	}
+	if err := a.CancelScan(active[0].ID); err != nil {
+		t.Fatalf("cancel scan: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled scan did not finish")
+	}
+	if scan.Status != "canceled" || scan.Error != "scan canceled" {
+		t.Fatalf("unexpected canceled scan: %#v", scan)
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Baseline != nil || state.CandidateCount != 0 || len(state.Incidents) != 0 {
+		t.Fatalf("canceled scan mutated baseline state: %#v", state)
+	}
+	if active := a.ActiveScans(); len(active) != 0 {
+		t.Fatalf("canceled scan remained active: %#v", active)
 	}
 }
 

@@ -44,6 +44,12 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 		return nil, fmt.Errorf("scan is required")
 	}
 	return e.Store.FinalizeManagedScan(ctx, scan, jobID, scan.ConfigHash, destinations, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
+		if current.Status == "canceled" {
+			// Operator cancellation is an intentional terminal outcome, not a
+			// scanner health failure. Keep the immutable history row but leave
+			// baseline, candidate, and incident state unchanged.
+			return nil, nil
+		}
 		if current.Status == "success" {
 			if state.Baseline != nil {
 				current.BaselineScanID = state.BaselineScanID

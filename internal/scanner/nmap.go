@@ -26,6 +26,22 @@ type Nmap struct {
 	Resolver Resolver
 }
 
+// Progress describes the bounded, operator-facing work completed by a scan.
+// Counts are based on resolved addresses and ports, and are deliberately
+// estimates of Nmap probes rather than an SLA for network response time.
+type Progress struct {
+	CompletedProbes      int64
+	TotalProbes          int64
+	CompletedInvocations int64
+	TotalInvocations     int64
+	Phase                string
+}
+
+// ProgressReporter receives scan progress after resolution and each completed
+// Nmap invocation. Implementations must not retain or call it after Scan
+// returns.
+type ProgressReporter func(Progress)
+
 func New(path string) *Nmap {
 	if path == "" {
 		path = "nmap"
@@ -56,10 +72,21 @@ func (n *Nmap) Version(ctx context.Context) string {
 }
 
 func (n *Nmap) Scan(ctx context.Context, job config.Job) (model.Snapshot, error) {
+	return n.ScanWithProgress(ctx, job, nil)
+}
+
+// ScanWithProgress is the cancellable scanner entry point used by the web
+// console. The legacy Scan method delegates here so test and plugin scanners
+// do not need to implement progress reporting.
+func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report ProgressReporter) (model.Snapshot, error) {
+	reportProgress(report, Progress{Phase: "resolving"})
 	targets, err := n.resolve(ctx, job)
 	if err != nil {
 		return model.Snapshot{}, err
 	}
+	totalProbes, totalInvocations := progressTotals(targets, job)
+	progress := Progress{TotalProbes: totalProbes, TotalInvocations: totalInvocations, Phase: "scanning"}
+	reportProgress(report, progress)
 	snap := model.Snapshot{DNS: map[string][]string{}}
 	for _, rt := range targets {
 		if rt.Hostname {
@@ -70,7 +97,11 @@ func (n *Nmap) Scan(ctx context.Context, job config.Job) (model.Snapshot, error)
 		for _, rt := range targets {
 			snap.Scopes = append(snap.Scopes, model.Scope{Target: rt.Name, Protocol: "tcp", Ports: job.TCP.Ports, ServiceDetection: job.TCP.ServiceDetection})
 		}
-		units, err := n.scanProtocolBatch(ctx, targets, "tcp", *job.TCP, job.Timing, job.AssumesAlive())
+		units, err := n.scanProtocolBatchProgress(ctx, targets, "tcp", *job.TCP, job.Timing, job.AssumesAlive(), func(invocations, probes int64) {
+			progress.CompletedInvocations += invocations
+			progress.CompletedProbes += probes
+			reportProgress(report, progress)
+		})
 		if err != nil {
 			return model.Snapshot{}, fmt.Errorf("tcp scan: %w", err)
 		}
@@ -80,14 +111,73 @@ func (n *Nmap) Scan(ctx context.Context, job config.Job) (model.Snapshot, error)
 		for _, rt := range targets {
 			snap.Scopes = append(snap.Scopes, model.Scope{Target: rt.Name, Protocol: "udp", Ports: job.UDP.Ports, ServiceDetection: job.UDP.ServiceDetection})
 		}
-		units, err := n.scanProtocolBatch(ctx, targets, "udp", *job.UDP, job.Timing, job.AssumesAlive())
+		units, err := n.scanProtocolBatchProgress(ctx, targets, "udp", *job.UDP, job.Timing, job.AssumesAlive(), func(invocations, probes int64) {
+			progress.CompletedInvocations += invocations
+			progress.CompletedProbes += probes
+			reportProgress(report, progress)
+		})
 		if err != nil {
 			return model.Snapshot{}, fmt.Errorf("udp scan: %w", err)
 		}
 		snap.Units = append(snap.Units, units...)
 	}
 	snap.Normalize()
+	progress.CompletedInvocations = progress.TotalInvocations
+	progress.CompletedProbes = progress.TotalProbes
+	progress.Phase = "complete"
+	reportProgress(report, progress)
 	return snap, nil
+}
+
+func reportProgress(report ProgressReporter, progress Progress) {
+	if report != nil {
+		report(progress)
+	}
+}
+
+func progressTotals(targets []resolvedTarget, job config.Job) (probes, invocations int64) {
+	for _, item := range []struct {
+		protocol string
+		config.Protocol
+	}{
+		{protocol: "tcp", Protocol: valueProtocol(job.TCP)},
+		{protocol: "udp", Protocol: valueProtocol(job.UDP)},
+	} {
+		if item.Protocol.Ports == "" {
+			continue
+		}
+		ports, err := config.ParsePorts(item.Protocol.Ports)
+		if err != nil {
+			continue
+		}
+		factor := int64(1)
+		if item.ServiceDetection {
+			factor = 2
+		}
+		byFamily := map[int]map[string]struct{}{4: {}, 6: {}}
+		for _, target := range targets {
+			for _, address := range target.Addresses {
+				family := 4
+				if strings.Contains(address, ":") {
+					family = 6
+				}
+				byFamily[family][address] = struct{}{}
+			}
+		}
+		for _, addresses := range byFamily {
+			count := int64(len(addresses))
+			invocations += int64((len(addresses) + nmapBatchSize - 1) / nmapBatchSize)
+			probes += count * int64(len(ports)) * factor
+		}
+	}
+	return probes, invocations
+}
+
+func valueProtocol(protocol *config.Protocol) config.Protocol {
+	if protocol == nil {
+		return config.Protocol{}
+	}
+	return *protocol
 }
 
 func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, error) {
@@ -154,6 +244,10 @@ func (n *Nmap) scanProtocol(ctx context.Context, target resolvedTarget, protocol
 }
 
 func (n *Nmap) scanProtocolBatch(ctx context.Context, targets []resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool) ([]model.Unit, error) {
+	return n.scanProtocolBatchProgress(ctx, targets, protocol, pc, timing, assumeAlive, nil)
+}
+
+func (n *Nmap) scanProtocolBatchProgress(ctx context.Context, targets []resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool, report func(int64, int64)) ([]model.Unit, error) {
 	byFamily := map[int][]string{4: {}, 6: {}}
 	seen := map[string]bool{}
 	for _, target := range targets {
@@ -199,6 +293,14 @@ func (n *Nmap) scanProtocolBatch(ctx context.Context, targets []resolvedTarget, 
 					return nil, fmt.Errorf("nmap output omitted expected address %s", address)
 				}
 				all[address] = unit
+			}
+			if report != nil {
+				ports, _ := config.ParsePorts(pc.Ports)
+				factor := int64(1)
+				if pc.ServiceDetection {
+					factor = 2
+				}
+				report(1, int64(len(batch))*int64(len(ports))*factor)
 			}
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -110,6 +111,45 @@ func TestStopRunWaitsForManualManagedRun(t *testing.T) {
 	}
 	if len(scans) != 1 || scans[0].Status != "success" {
 		t.Fatalf("manual scan was not persisted before shutdown: %#v", scans)
+	}
+}
+
+func TestDaemonReturnsWhenLeaseIsLost(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.heartbeatInterval = 10 * time.Millisecond
+	done := make(chan error, 1)
+	go func() { done <- a.Daemon(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var owner string
+		if scanErr := s.DB.QueryRowContext(ctx, `SELECT owner FROM daemon_lease WHERE id=1`).Scan(&owner); scanErr == nil && owner != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("daemon did not acquire its lease")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE daemon_lease SET owner='other' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "daemon lease lost") {
+			t.Fatalf("daemon returned unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon did not return after losing its lease")
 	}
 }
 

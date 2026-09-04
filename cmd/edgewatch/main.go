@@ -324,6 +324,11 @@ func baseline(ctx context.Context, action string, s *store.Store, a *app.App, jo
 	if record, managedErr := s.GetJobByName(ctx, job); managedErr == nil {
 		var events []model.Event
 		var err error
+		var destinations []string
+		destinations, err = a.Notifier.QueueDestinations(ctx)
+		if err != nil {
+			return err
+		}
 		switch action {
 		case "approve":
 			if scanID == "" {
@@ -336,18 +341,16 @@ func baseline(ctx context.Context, action string, s *store.Store, a *app.App, jo
 			if scan.JobID != record.ID || scan.ConfigHash != record.Job.SecurityHash() {
 				return errors.New("scan does not match the current managed job")
 			}
-			events, err = s.ApproveRuntime(ctx, record.ID, record.Job.Name, scan)
+			events, err = s.ApproveRuntimeWithOutbox(ctx, record.ID, record.Job.Name, scan, destinations)
 		case "reset":
-			events, err = s.ResetRuntime(ctx, record.ID, record.Job.Name)
+			events, err = s.ResetRuntimeWithOutbox(ctx, record.ID, record.Job.Name, destinations)
 		default:
 			return errors.New("expected: baseline approve|reset")
 		}
 		if err != nil {
 			return err
 		}
-		if err = a.Notifier.Queue(ctx, events); err != nil {
-			return err
-		}
+		a.WakeDelivery()
 		return printValue(output, events)
 	}
 	return fmt.Errorf("unknown managed job %q; YAML jobs are inactive and must be recreated in the web console", job)

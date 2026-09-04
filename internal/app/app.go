@@ -20,28 +20,29 @@ import (
 )
 
 type App struct {
-	Config       *config.Config
-	Store        *store.Store
-	Scanner      Scanner
-	Engine       *engine.Engine
-	Notifier     *notify.Notifier
-	Logger       *slog.Logger
-	active       sync.Map
-	wg           sync.WaitGroup
-	runMu        sync.Mutex
-	runCtx       context.Context
-	runCancel    context.CancelFunc
-	runAccepting bool
-	runStarted   bool
-	sem          chan struct{}
-	nmapVersion  string
-	scheduleMu   sync.Mutex
-	cron         *cron.Cron
-	entries      map[string]cron.EntryID
-	scheduleWake chan struct{}
-	eventMu      sync.RWMutex
-	eventHandler func(model.Event)
-	deliveryWake chan struct{}
+	Config            *config.Config
+	Store             *store.Store
+	Scanner           Scanner
+	Engine            *engine.Engine
+	Notifier          *notify.Notifier
+	Logger            *slog.Logger
+	active            sync.Map
+	wg                sync.WaitGroup
+	runMu             sync.Mutex
+	runCtx            context.Context
+	runCancel         context.CancelFunc
+	runAccepting      bool
+	runStarted        bool
+	sem               chan struct{}
+	nmapVersion       string
+	scheduleMu        sync.Mutex
+	cron              *cron.Cron
+	entries           map[string]cron.EntryID
+	scheduleWake      chan struct{}
+	eventMu           sync.RWMutex
+	eventHandler      func(model.Event)
+	deliveryWake      chan struct{}
+	heartbeatInterval time.Duration
 }
 
 // ErrShuttingDown is returned when a new asynchronous managed scan cannot be
@@ -79,7 +80,7 @@ func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logge
 	sc := scanner.New(nmapPath)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return &App{Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), entries: map[string]cron.EntryID{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1)}, nil
+	return &App{Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), entries: map[string]cron.EntryID{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second}, nil
 }
 
 func (a *App) Job(name string) (config.Job, error) {
@@ -297,7 +298,13 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 
 func (a *App) Daemon(ctx context.Context) error {
 	boundCtx, owned := a.BeginRun(ctx)
-	ctx = boundCtx
+	// Keep daemon-owned work on a child context so an internal error can stop
+	// cron callbacks and the delivery worker before Daemon returns to its
+	// supervisor. The application run context is cancelled by StopRun after
+	// both daemon and HTTP goroutines have been joined.
+	daemonCtx, daemonCancel := context.WithCancel(boundCtx)
+	ctx = daemonCtx
+	defer daemonCancel()
 	if owned {
 		defer a.StopRun()
 	}
@@ -322,12 +329,31 @@ func (a *App) Daemon(ctx context.Context) error {
 		return err
 	}
 	c.Start()
-	heartbeat := time.NewTicker(30 * time.Second)
+	heartbeatEvery := a.heartbeatInterval
+	if heartbeatEvery <= 0 {
+		heartbeatEvery = 30 * time.Second
+	}
+	heartbeat := time.NewTicker(heartbeatEvery)
 	prune := time.NewTicker(24 * time.Hour)
 	defer heartbeat.Stop()
 	defer prune.Stop()
-	deliveryDone := a.startDeliveryWorker(ctx)
-	defer func() { <-deliveryDone }()
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	deliveryDone := a.startDeliveryWorker(workerCtx)
+	defer func() {
+		// Cancel before joining. This ordering is required on heartbeat/lease
+		// errors, where the parent context may still be live. Cancelling the
+		// daemon context also releases any scheduled scan that c.Stop waits on.
+		daemonCancel()
+		workerCancel()
+		a.scheduleMu.Lock()
+		if a.cron == c {
+			a.cron = nil
+		}
+		a.scheduleMu.Unlock()
+		stopped := c.Stop()
+		<-stopped.Done()
+		<-deliveryDone
+	}()
 	a.wakeDelivery()
 	if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
 		a.Logger.Error("startup history pruning failed", "error", err)
@@ -337,11 +363,6 @@ func (a *App) Daemon(ctx context.Context) error {
 	for {
 		select {
 		case <-ctx.Done():
-			a.scheduleMu.Lock()
-			a.cron = nil
-			a.scheduleMu.Unlock()
-			stopped := c.Stop()
-			<-stopped.Done()
 			return nil
 		case <-heartbeat.C:
 			if err := a.Store.Heartbeat(ctx, owner); err != nil {
@@ -486,6 +507,13 @@ func (a *App) wakeDelivery() {
 	case a.deliveryWake <- struct{}{}:
 	default:
 	}
+}
+
+// WakeDelivery asks the daemon-owned delivery worker to process newly queued
+// notification intent promptly. It is safe for callers used by the web API
+// when the daemon is not running; the periodic worker remains the fallback.
+func (a *App) WakeDelivery() {
+	a.wakeDelivery()
 }
 
 func (a *App) startDeliveryWorker(ctx context.Context) <-chan struct{} {

@@ -674,7 +674,15 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 	if p.Enabled != nil {
 		enabled = *p.Enabled
 	}
-	record, changed, events, err := s.Store.UpdateJobWithEvents(r.Context(), id, p.Revision, job, enabled, current.Archived, p.ConfirmRebaseline)
+	var destinations []string
+	if scopeChanged && p.ConfirmRebaseline {
+		destinations, err = s.App.Notifier.QueueDestinations(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
+			return
+		}
+	}
+	record, changed, events, err := s.Store.UpdateJobWithEventsWithOutbox(r.Context(), id, p.Revision, job, enabled, current.Archived, p.ConfirmRebaseline, destinations)
 	if errors.Is(err, store.ErrConflict) {
 		writeError(w, 409, "conflict", "job was modified; reload before saving", nil)
 		return
@@ -696,12 +704,10 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	if changed {
-		if err := s.App.Notifier.Queue(r.Context(), events); err != nil {
-			s.Log.Warn("baseline reset notification deferred", "job_id", id, "error", err)
-		}
 		for _, event := range events {
 			s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
 		}
+		s.App.WakeDelivery()
 		_ = s.Store.Audit(r.Context(), "job.rebaseline_requested", id)
 	}
 	s.App.RefreshSchedules()
@@ -1129,12 +1135,17 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, id string
 		writeError(w, 404, "not_found", "job not found", nil)
 		return
 	}
-	events, err := s.Store.ResetRuntime(r.Context(), id, record.Job.Name)
+	destinations, err := s.App.Notifier.QueueDestinations(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
+		return
+	}
+	events, err := s.Store.ResetRuntimeWithOutbox(r.Context(), id, record.Job.Name, destinations)
 	if err != nil {
 		writeError(w, 500, "store", err.Error(), nil)
 		return
 	}
-	_ = s.App.Notifier.Queue(r.Context(), events)
+	s.App.WakeDelivery()
 	_ = s.Store.Audit(r.Context(), "baseline.reset", id)
 	for _, event := range events {
 		s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
@@ -1159,12 +1170,17 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, 400, "invalid_scan", "scan does not belong to this job or current scope", nil)
 		return
 	}
-	events, err := s.Store.ApproveRuntime(r.Context(), id, record.Job.Name, scan)
+	destinations, err := s.App.Notifier.QueueDestinations(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
+		return
+	}
+	events, err := s.Store.ApproveRuntimeWithOutbox(r.Context(), id, record.Job.Name, scan, destinations)
 	if err != nil {
 		writeError(w, 400, "approve_failed", err.Error(), nil)
 		return
 	}
-	_ = s.App.Notifier.Queue(r.Context(), events)
+	s.App.WakeDelivery()
 	_ = s.Store.Audit(r.Context(), "baseline.approved", id)
 	for _, event := range events {
 		s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})

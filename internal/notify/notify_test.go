@@ -180,6 +180,40 @@ func TestSafeSendRedactsProviderErrors(t *testing.T) {
 	}
 }
 
+func TestSafeSendContextStopsWaitingWhenCallerCancels(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := "generic://" + parsed.Host + "/edgewatch?disabletls=yes&template=json"
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- safeSendContext(ctx, destination, "test") }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("notification send did not reach the provider")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled send error = %v, want context cancellation", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("cancelled notification send continued waiting for the provider")
+	}
+	close(release)
+}
+
 func TestManagedNotificationCRUDEncryptsAndCancelsOldDeliveries(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

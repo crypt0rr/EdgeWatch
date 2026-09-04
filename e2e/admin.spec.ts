@@ -30,6 +30,14 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       await json({ username: 'admin', csrf_token: csrf, totp_enabled: false })
       return
     }
+    if (path === '/status' && method === 'GET') {
+      await json({ configured: true, username: 'admin', notification_destinations: 0, notifications: { deployment: 0, managed: 0, active: 0, locked: 0, key_state: 'not_required' }, retention: '90d', max_concurrent_scans: 1 })
+      return
+    }
+    if (path === '/scans/active' && method === 'GET') {
+      await json({ scans: [] })
+      return
+    }
     if (path === '/setup' && method === 'POST') {
       configured = true
       await json({ configured: true }, 201)

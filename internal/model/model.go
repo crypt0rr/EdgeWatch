@@ -48,7 +48,40 @@ type Scan struct {
 	Error       string    `json:"error,omitempty"`
 	NmapVersion string    `json:"nmap_version,omitempty"`
 	ConfigHash  string    `json:"config_hash"`
-	Snapshot    Snapshot  `json:"snapshot"`
+	// BaselineScanID and BaselineConfigHash identify the comparison used when
+	// this scan was processed. Changes is the immutable scan-time diff; list
+	// endpoints intentionally use ScanSummary instead of loading it.
+	BaselineScanID     string   `json:"baseline_scan_id,omitempty"`
+	BaselineConfigHash string   `json:"baseline_config_hash,omitempty"`
+	Changes            []Change `json:"changes,omitempty"`
+	Snapshot           Snapshot `json:"snapshot"`
+}
+
+// ScanSummary is the metadata needed for history and dashboard lists. Full
+// snapshots remain available through the scan detail/results endpoints and are
+// intentionally not loaded for paginated list responses.
+type ScanSummary struct {
+	ID          string    `json:"id"`
+	JobID       string    `json:"job_id,omitempty"`
+	Job         string    `json:"job"`
+	JobRevision int64     `json:"job_revision,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
+	FinishedAt  time.Time `json:"finished_at"`
+	Status      string    `json:"status"`
+	Error       string    `json:"error,omitempty"`
+	NmapVersion string    `json:"nmap_version,omitempty"`
+	ConfigHash  string    `json:"config_hash"`
+}
+
+// ActiveScan describes a scan that has acquired its lease and is currently
+// executing. It intentionally contains metadata only; the result is not
+// persisted until the scanner reaches a terminal state.
+type ActiveScan struct {
+	ID          string    `json:"id"`
+	JobID       string    `json:"job_id,omitempty"`
+	Job         string    `json:"job"`
+	JobRevision int64     `json:"job_revision,omitempty"`
+	StartedAt   time.Time `json:"started_at"`
 }
 
 type Change struct {

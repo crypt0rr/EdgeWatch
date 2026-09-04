@@ -135,7 +135,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 5), but it is
+version 6), but it is
 forward-only: an older binary refuses a newer schema. To roll back, stop the
 new service, restore the entire pre-upgrade `./data` directory and deployment
 configuration, then start the previous image. Do not point an older image at

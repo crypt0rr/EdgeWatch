@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 5
+const schemaVersion = 6
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -197,6 +197,11 @@ func migrate(db *sql.DB) error {
 			"CREATE INDEX IF NOT EXISTS events_created_at ON events(created_at)",
 			"CREATE INDEX IF NOT EXISTS job_revisions_created_at ON job_revisions(created_at)",
 			"CREATE INDEX IF NOT EXISTS outbox_sent_at ON outbox(sent_at)",
+		},
+		6: {
+			"ALTER TABLE scans ADD COLUMN baseline_scan_id TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE scans ADD COLUMN baseline_config_hash TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE scans ADD COLUMN changes_json BLOB NOT NULL DEFAULT '[]'",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
@@ -698,7 +703,7 @@ func (s *Store) ListJobScansPage(ctx context.Context, jobID string, limit, offse
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -708,8 +713,9 @@ func (s *Store) ListJobScansPage(ctx context.Context, jobID string, limit, offse
 		var jid sql.NullString
 		var revision sql.NullInt64
 		var started, finished string
-		var snapshot []byte
-		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &snapshot); err != nil {
+		var snapshot, changesJSON []byte
+		var baselineScanID, baselineConfigHash string
+		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot); err != nil {
 			return page, err
 		}
 		if jid.Valid {
@@ -719,9 +725,48 @@ func (s *Store) ListJobScansPage(ctx context.Context, jobID string, limit, offse
 			v.JobRevision = revision.Int64
 		}
 		v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
+		v.BaselineScanID, v.BaselineConfigHash = baselineScanID, baselineConfigHash
+		if len(changesJSON) > 0 && string(changesJSON) != "null" {
+			if err := json.Unmarshal(changesJSON, &v.Changes); err != nil {
+				return page, err
+			}
+		}
 		if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
 			return page, err
 		}
+		page.Items = append(page.Items, v)
+	}
+	return page, rows.Err()
+}
+
+// ListJobScanSummariesPage returns only the metadata needed by a paginated
+// history view. Full snapshots are intentionally left to GetScan/results.
+func (s *Store) ListJobScanSummariesPage(ctx context.Context, jobID string, limit, offset int) (Page[model.ScanSummary], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[model.ScanSummary]
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var v model.ScanSummary
+		var jid sql.NullString
+		var revision sql.NullInt64
+		var started, finished string
+		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash); err != nil {
+			return page, err
+		}
+		if jid.Valid {
+			v.JobID = jid.String
+		}
+		if revision.Valid {
+			v.JobRevision = revision.Int64
+		}
+		v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
 		page.Items = append(page.Items, v)
 	}
 	return page, rows.Err()
@@ -986,23 +1031,32 @@ func (s *Store) ApproveRuntimeWithOutbox(ctx context.Context, jobID, name string
 }
 
 func (s *Store) SaveScan(ctx context.Context, scan model.Scan) error {
-	b, err := json.Marshal(scan.Snapshot)
+	snapshot, err := json.Marshal(scan.Snapshot)
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.ExecContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		scan.ID, nullString(scan.JobID), nullInt64(scan.JobRevision), scan.Job, scan.StartedAt.UTC().Format(time.RFC3339Nano), scan.FinishedAt.UTC().Format(time.RFC3339Nano), scan.Status, scan.Error, scan.NmapVersion, scan.ConfigHash, b)
+	changes := scan.Changes
+	if changes == nil {
+		changes = []model.Change{}
+	}
+	changesJSON, err := json.Marshal(changes)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.ExecContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		scan.ID, nullString(scan.JobID), nullInt64(scan.JobRevision), scan.Job, scan.StartedAt.UTC().Format(time.RFC3339Nano), scan.FinishedAt.UTC().Format(time.RFC3339Nano), scan.Status, scan.Error, scan.NmapVersion, scan.ConfigHash, scan.BaselineScanID, scan.BaselineConfigHash, changesJSON, snapshot)
 	return err
 }
 
 func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {
 	var v model.Scan
 	var started, finished string
-	var snapshot []byte
+	var snapshot, changesJSON []byte
+	var baselineScanID, baselineConfigHash string
 	var jobID sql.NullString
 	var revision sql.NullInt64
-	err := s.DB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json FROM scans WHERE id=?`, id).
-		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &snapshot)
+	err := s.DB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE id=?`, id).
+		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot)
 	if err != nil {
 		return v, err
 	}
@@ -1014,6 +1068,12 @@ func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {
 	}
 	v.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
 	v.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)
+	v.BaselineScanID, v.BaselineConfigHash = baselineScanID, baselineConfigHash
+	if len(changesJSON) > 0 && string(changesJSON) != "null" {
+		if err := json.Unmarshal(changesJSON, &v.Changes); err != nil {
+			return v, err
+		}
+	}
 	if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
 		return v, err
 	}
@@ -1023,11 +1083,12 @@ func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {
 func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {
 	var v model.Scan
 	var started, finished string
-	var snapshot []byte
+	var snapshot, changesJSON []byte
+	var baselineScanID, baselineConfigHash string
 	var jobID sql.NullString
 	var revision sql.NullInt64
-	err := tx.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json FROM scans WHERE id=?`, id).
-		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &snapshot)
+	err := tx.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE id=?`, id).
+		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot)
 	if err != nil {
 		return v, err
 	}
@@ -1038,6 +1099,12 @@ func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {
 		v.JobRevision = revision.Int64
 	}
 	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
+	v.BaselineScanID, v.BaselineConfigHash = baselineScanID, baselineConfigHash
+	if len(changesJSON) > 0 && string(changesJSON) != "null" {
+		if err := json.Unmarshal(changesJSON, &v.Changes); err != nil {
+			return v, err
+		}
+	}
 	if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
 		return v, err
 	}
@@ -1052,7 +1119,7 @@ func (s *Store) ListScans(ctx context.Context, job string, limit int) ([]model.S
 func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int) (Page[model.Scan], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Scan]
-	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json FROM scans`
+	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans`
 	countQuery := `SELECT COUNT(*) FROM scans`
 	args := []any{}
 	countArgs := []any{}
@@ -1077,8 +1144,9 @@ func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int
 		var jobID sql.NullString
 		var revision sql.NullInt64
 		var started, finished string
-		var snapshot []byte
-		if err := rows.Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &snapshot); err != nil {
+		var snapshot, changesJSON []byte
+		var baselineScanID, baselineConfigHash string
+		if err := rows.Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot); err != nil {
 			return page, err
 		}
 		if jobID.Valid {
@@ -1089,9 +1157,60 @@ func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int
 		}
 		v.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
 		v.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)
+		v.BaselineScanID, v.BaselineConfigHash = baselineScanID, baselineConfigHash
+		if len(changesJSON) > 0 && string(changesJSON) != "null" {
+			if err := json.Unmarshal(changesJSON, &v.Changes); err != nil {
+				return page, err
+			}
+		}
 		if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
 			return page, err
 		}
+		page.Items = append(page.Items, v)
+	}
+	return page, rows.Err()
+}
+
+// ListScanSummariesPage is the metadata-only counterpart to ListScansPage.
+// Filtering remains name-based for compatibility with legacy CLI callers.
+func (s *Store) ListScanSummariesPage(ctx context.Context, job string, limit, offset int) (Page[model.ScanSummary], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[model.ScanSummary]
+	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash FROM scans`
+	countQuery := `SELECT COUNT(*) FROM scans`
+	args := []any{}
+	countArgs := []any{}
+	if job != "" {
+		query += ` WHERE job=?`
+		args = append(args, job)
+		countQuery += ` WHERE job=?`
+		countArgs = append(countArgs, job)
+	}
+	if err := s.DB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	query += ` ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := s.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var v model.ScanSummary
+		var jobID sql.NullString
+		var revision sql.NullInt64
+		var started, finished string
+		if err := rows.Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash); err != nil {
+			return page, err
+		}
+		if jobID.Valid {
+			v.JobID = jobID.String
+		}
+		if revision.Valid {
+			v.JobRevision = revision.Int64
+		}
+		v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
 		page.Items = append(page.Items, v)
 	}
 	return page, rows.Err()

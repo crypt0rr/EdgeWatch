@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"regexp"
@@ -93,6 +94,41 @@ type Change struct {
 var envOnly = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
 
 func Load(path string) (*Config, error) {
+	cfg, err := decode(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := resolveNotifications(cfg); err != nil {
+		return nil, err
+	}
+	// YAML jobs are retained only as inactive migration hints. Their shape is
+	// still decoded strictly, but semantic validation belongs to web-managed
+	// jobs and must not prevent an installation from starting.
+	if err := cfg.ValidateDeployment(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// LoadForAdmin reads only the deployment values required to open the database
+// for host-authorized recovery commands. It deliberately skips notification
+// secret loading, web-listener validation, and inactive legacy-job validation so
+// recovery remains available when monitor configuration is broken.
+func LoadForAdmin(path string) (*Config, error) {
+	cfg, err := decode(path)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Version != 1 {
+		return nil, fmt.Errorf("unsupported config version %d", cfg.Version)
+	}
+	if cfg.Database == "" {
+		return nil, fmt.Errorf("database path is required")
+	}
+	return cfg, nil
+}
+
+func decode(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -103,12 +139,23 @@ func Load(path string) (*Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, err
 	}
+	var trailing yaml.Node
+	if err := dec.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("configuration must contain exactly one YAML document")
+		}
+		return nil, fmt.Errorf("read trailing YAML document: %w", err)
+	}
 	applyDefaults(&cfg)
+	return &cfg, nil
+}
+
+func resolveNotifications(cfg *Config) error {
 	for i, raw := range cfg.Notifications.URLs {
 		if match := envOnly.FindStringSubmatch(raw); match != nil {
 			value, ok := os.LookupEnv(match[1])
 			if !ok {
-				return nil, fmt.Errorf("environment variable %s is not set", match[1])
+				return fmt.Errorf("environment variable %s is not set", match[1])
 			}
 			cfg.Notifications.URLs[i] = value
 		}
@@ -116,7 +163,7 @@ func Load(path string) (*Config, error) {
 	if cfg.Notifications.URLsFile != "" {
 		secret, err := os.ReadFile(cfg.Notifications.URLsFile)
 		if err != nil {
-			return nil, fmt.Errorf("read notification URLs file: %w", err)
+			return fmt.Errorf("read notification URLs file: %w", err)
 		}
 		for _, line := range strings.Split(string(secret), "\n") {
 			line = strings.TrimSpace(line)
@@ -125,10 +172,7 @@ func Load(path string) (*Config, error) {
 			}
 		}
 	}
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
-	return &cfg, nil
+	return nil
 }
 
 func applyDefaults(c *Config) {
@@ -182,19 +226,7 @@ func applyDefaults(c *Config) {
 }
 
 func (c Config) Validate() error {
-	if c.Version != 1 {
-		return fmt.Errorf("unsupported config version %d", c.Version)
-	}
-	if c.Database == "" {
-		return fmt.Errorf("database path is required")
-	}
-	if c.Retention.Value() < 24*time.Hour {
-		return fmt.Errorf("retention must be at least 24h")
-	}
-	if c.Scheduler.MaxConcurrent < 1 || c.Scheduler.MaxConcurrent > 64 {
-		return fmt.Errorf("max_concurrent_scans must be between 1 and 64")
-	}
-	if err := validateWebListen(c.Web.Listen); err != nil {
+	if err := c.ValidateDeployment(); err != nil {
 		return err
 	}
 	seen := map[string]bool{}
@@ -262,6 +294,28 @@ func (c Config) Validate() error {
 				return fmt.Errorf("job %s: udp mode is not configurable", j.Name)
 			}
 		}
+	}
+	return nil
+}
+
+// ValidateDeployment checks only settings used to run the appliance itself.
+// YAML jobs are intentionally excluded because those entries are inactive in
+// web-managed mode.
+func (c Config) ValidateDeployment() error {
+	if c.Version != 1 {
+		return fmt.Errorf("unsupported config version %d", c.Version)
+	}
+	if c.Database == "" {
+		return fmt.Errorf("database path is required")
+	}
+	if c.Retention.Value() < 24*time.Hour {
+		return fmt.Errorf("retention must be at least 24h")
+	}
+	if c.Scheduler.MaxConcurrent < 1 || c.Scheduler.MaxConcurrent > 64 {
+		return fmt.Errorf("max_concurrent_scans must be between 1 and 64")
+	}
+	if err := validateWebListen(c.Web.Listen); err != nil {
+		return err
 	}
 	return nil
 }

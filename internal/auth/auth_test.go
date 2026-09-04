@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -107,6 +108,36 @@ func TestConfirmPasswordUsesGenericErrorsAndRateLimit(t *testing.T) {
 	}
 	if err := m.ConfirmPassword(ctx, request, "correct horse battery staple"); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("rate-limit error = %v", err)
+	}
+}
+
+func TestAuthLimiterBoundsRotatingSourcesAndExpiresEntries(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := NewManager(s)
+	now := time.Unix(1_700_000_000, 0).UTC()
+	m.Now = func() time.Time { return now }
+	for i := 0; i < authLimiterMaxEntries+500; i++ {
+		m.failed(fmt.Sprintf("rotating-source-%d", i))
+	}
+	m.mu.Lock()
+	count := m.limiterEntryCountLocked()
+	m.mu.Unlock()
+	if count > authLimiterMaxEntries {
+		t.Fatalf("limiter grew beyond cap: %d", count)
+	}
+
+	now = now.Add(authFailureWindow + time.Second)
+	if !m.allow("rotating-source-0") {
+		t.Fatal("expired limiter entry remained blocked")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if got := m.limiterEntryCountLocked(); got != 0 {
+		t.Fatalf("expired limiter entries were not swept: %d", got)
 	}
 }
 

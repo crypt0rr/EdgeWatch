@@ -62,7 +62,14 @@ func run(args []string) error {
 	if cmd == "help" {
 		return usage()
 	}
-	cfg, err := config.Load(*configPath)
+	loadConfig := config.Load
+	if cmd == "admin" {
+		// Host recovery must not depend on monitor-only configuration such as
+		// Shoutrrr destinations, encryption keys, listener settings, or legacy
+		// YAML job semantics.
+		loadConfig = config.LoadForAdmin
+	}
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		return err
 	}
@@ -77,6 +84,9 @@ func run(args []string) error {
 		return err
 	}
 	defer s.Close()
+	if cmd == "admin" {
+		return adminAction(context.Background(), action, s, *passwordFile)
+	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	application, err := app.New(cfg, s, *nmapPath, logger)
 	if err != nil {
@@ -119,8 +129,6 @@ func run(args []string) error {
 			return errors.New("expected: notify test")
 		}
 		return application.Notifier.Test()
-	case "admin":
-		return adminAction(ctx, action, s, *passwordFile)
 	case "health":
 		return s.Healthy(ctx)
 	default:
@@ -155,25 +163,10 @@ func adminAction(ctx context.Context, action string, s *store.Store, passwordFil
 			return err
 		}
 		admin.PasswordHash, admin.UpdatedAt = hash, time.Now().UTC()
-		if err := s.SaveAdmin(ctx, admin); err != nil {
-			return err
-		}
-		if err := s.DeleteAllSessions(ctx); err != nil {
-			return err
-		}
-		return s.Audit(ctx, "admin.password_reset", "password reset from host CLI")
+		return s.SaveAdminSecurity(ctx, admin, nil, false, true, "admin.password_reset", "password reset from host CLI")
 	case "disable-totp":
 		admin.TOTPEnabled, admin.TOTPSecret, admin.UpdatedAt = false, "", time.Now().UTC()
-		if err := s.SaveAdmin(ctx, admin); err != nil {
-			return err
-		}
-		if err := s.SaveRecoveryCodes(ctx, nil); err != nil {
-			return err
-		}
-		if err := s.DeleteAllSessions(ctx); err != nil {
-			return err
-		}
-		return s.Audit(ctx, "admin.totp_disabled", "TOTP disabled from host CLI")
+		return s.SaveAdminSecurity(ctx, admin, []string{}, true, true, "admin.totp_disabled", "TOTP disabled from host CLI")
 	default:
 		return errors.New("expected: admin reset-password|disable-totp")
 	}

@@ -31,6 +31,8 @@ export function JobDetail() {
   const [selectedScan, setSelectedScan] = useState('')
   const [scanOffset, setScanOffset] = useState(0)
   const [changeOffset, setChangeOffset] = useState(0)
+  const [actionError, setActionError] = useState('')
+  const [actionBusy, setActionBusy] = useState('')
   const job = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id) })
   const scans = useQuery({
     queryKey: ['job-scans', id, scanOffset],
@@ -52,37 +54,86 @@ export function JobDetail() {
   }
 
   const value = job.data
+  function reportActionError(err: unknown, fallback: string) {
+    setActionError(err instanceof Error ? err.message : fallback)
+  }
   async function run() {
-    await runJob(id)
-    client.invalidateQueries({ queryKey: ['job-scans', id] })
-    client.invalidateQueries({ queryKey: ['jobs'] })
+    setActionError('')
+    setActionBusy('run')
+    try {
+      await runJob(id)
+      await client.invalidateQueries({ queryKey: ['job-scans', id] })
+      await client.invalidateQueries({ queryKey: ['jobs'] })
+    } catch (err) {
+      reportActionError(err, 'Could not start the scan.')
+    } finally {
+      setActionBusy('')
+    }
   }
   async function reset() {
     if (!window.confirm('Reset this baseline? New scans will be learned before changes are reported.')) return
-    await resetBaseline(id)
-    client.invalidateQueries({ queryKey: ['job', id] })
+    setActionError('')
+    setActionBusy('reset')
+    try {
+      await resetBaseline(id)
+      await client.invalidateQueries({ queryKey: ['job', id] })
+    } catch (err) {
+      reportActionError(err, 'Could not reset the baseline.')
+    } finally {
+      setActionBusy('')
+    }
   }
   async function approve() {
     if (!detail.data || !window.confirm('Use this successful scan as the baseline for the current scope?')) return
-    await approveBaseline(id, detail.data.scan.id)
-    client.invalidateQueries({ queryKey: ['job', id] })
-    setSelectedScan('')
+    setActionError('')
+    setActionBusy('approve')
+    try {
+      await approveBaseline(id, detail.data.scan.id)
+      await client.invalidateQueries({ queryKey: ['job', id] })
+      setSelectedScan('')
+    } catch (err) {
+      reportActionError(err, 'Could not approve this baseline.')
+    } finally {
+      setActionBusy('')
+    }
   }
   async function archive() {
     if (!window.confirm('Archive this job? History will be kept.')) return
-    await archiveJob(id, value.revision)
-    navigate('/jobs')
+    setActionError('')
+    setActionBusy('archive')
+    try {
+      await archiveJob(id, value.revision)
+      navigate('/jobs')
+    } catch (err) {
+      reportActionError(err, 'Could not archive this job.')
+      setActionBusy('')
+    }
   }
   async function restore() {
-    await restoreJob(id, value.revision)
-    client.invalidateQueries({ queryKey: ['job', id] })
-    client.invalidateQueries({ queryKey: ['jobs'] })
+    setActionError('')
+    setActionBusy('restore')
+    try {
+      await restoreJob(id, value.revision)
+      await client.invalidateQueries({ queryKey: ['job', id] })
+      await client.invalidateQueries({ queryKey: ['jobs'] })
+    } catch (err) {
+      reportActionError(err, 'Could not restore this job.')
+    } finally {
+      setActionBusy('')
+    }
   }
   async function permanentlyDelete() {
     const confirmation = window.prompt(`Type ${value.job.name} to permanently delete this archived job and all retained history.`)
     if (confirmation !== value.job.name) return
-    await deleteJob(id, confirmation)
-    navigate('/jobs')
+    setActionError('')
+    setActionBusy('delete')
+    try {
+      await deleteJob(id, confirmation)
+      navigate('/jobs')
+    } catch (err) {
+      reportActionError(err, 'Could not permanently delete this job.')
+      setActionBusy('')
+    }
   }
 
   const selectedScanCanBeBaseline = Boolean(
@@ -105,15 +156,16 @@ export function JobDetail() {
           <p className="muted">Revision {value.revision} · Updated {new Date(value.updated_at).toLocaleString()}</p>
         </div>
         <div className="heading-actions">
-          <button className="button secondary" onClick={run} disabled={value.archived}>
-            <Play size={16} /> Scan now
+          <button className="button secondary" onClick={run} disabled={value.archived || !!actionBusy}>
+            <Play size={16} /> {actionBusy === 'run' ? 'Starting…' : 'Scan now'}
           </button>
-          <button className="button secondary" onClick={() => navigate(`/jobs/${id}/edit`)}>
+          <button className="button secondary" onClick={() => navigate(`/jobs/${id}/edit`)} disabled={!!actionBusy}>
             <Edit3 size={16} /> Edit
           </button>
-          {value.archived ? <><button className="button secondary" onClick={restore}>Restore</button><button className="button danger" onClick={permanentlyDelete}>Delete permanently</button></> : <button className="icon-button danger" aria-label="Archive job" onClick={archive}><Archive size={17} /></button>}
+          {value.archived ? <><button className="button secondary" onClick={restore} disabled={!!actionBusy}>{actionBusy === 'restore' ? 'Restoring…' : 'Restore'}</button><button className="button danger" onClick={permanentlyDelete} disabled={!!actionBusy}>{actionBusy === 'delete' ? 'Deleting…' : 'Delete permanently'}</button></> : <button className="icon-button danger" aria-label="Archive job" onClick={archive} disabled={!!actionBusy}><Archive size={17} /></button>}
         </div>
       </div>
+      {actionError && <div className="form-error banner" role="alert">{actionError}</div>}
 
       <div className="detail-summary">
         <div className="summary-card">
@@ -167,7 +219,7 @@ export function JobDetail() {
                     <strong>{new Date(scan.finished_at).toLocaleString()}</strong>
                     <span>
                       {scan.status === 'success'
-                        ? `${scan.snapshot.units.reduce((n, unit) => n + (unit.ports?.length ?? 0), 0)} open ports observed`
+                        ? 'Completed successfully · Open results to inspect the snapshot'
                         : scan.error}
                     </span>
                   </div>
@@ -183,14 +235,14 @@ export function JobDetail() {
               <div className="panel-heading">
                 <div>
                   <h3>Scan diff</h3>
-                  <p className="muted">{detail.data.changes_pagination?.total ?? detail.data.changes?.length ?? 0} changes against the current baseline.</p>
+                  <p className="muted">{detail.data.changes_pagination?.total ?? detail.data.changes?.length ?? 0} {detail.data.comparison_source === 'scan_time' ? 'changes recorded at scan time.' : 'changes against the current baseline.'}</p>
                 </div>
                 <button className="icon-button" onClick={() => setSelectedScan('')} aria-label="Close scan detail">×</button>
               </div>
               {selectedScanCanBeBaseline && (
                 <div className="baseline-approval">
                   <span className="muted">This successful scan matches the current security scope.</span>
-                  <button className="button secondary" onClick={approve}>Use as baseline</button>
+                  <button className="button secondary" onClick={approve} disabled={!!actionBusy}>{actionBusy === 'approve' ? 'Approving…' : 'Use as baseline'}</button>
                 </div>
               )}
               {detail.data.changes?.length ? (
@@ -238,7 +290,7 @@ export function JobDetail() {
               </>
             )}
           </div>
-          <button className="button secondary" onClick={reset}><RotateCcw size={16} /> Reset baseline</button>
+          <button className="button secondary" onClick={reset} disabled={!!actionBusy}><RotateCcw size={16} /> {actionBusy === 'reset' ? 'Resetting…' : 'Reset baseline'}</button>
         </div>
       </div>
     </section>

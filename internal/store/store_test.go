@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -44,6 +46,24 @@ func TestScanStateAndEventPersistence(t *testing.T) {
 	}
 }
 
+func TestScanComparisonMetadataRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	wantChange := model.Change{Key: "port|127.0.0.1|tcp|443", Kind: "port", Severity: "critical", Target: "127.0.0.1", Protocol: "tcp", Port: 443, Old: "closed", New: "open"}
+	want := model.Scan{ID: "comparison-scan", Job: "job", StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: "scope-hash", BaselineScanID: "baseline-scan", BaselineConfigHash: "baseline-hash", Changes: []model.Change{wantChange}, Snapshot: model.Snapshot{}}
+	if err := s.SaveScan(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetScan(ctx, want.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.BaselineScanID != want.BaselineScanID || got.BaselineConfigHash != want.BaselineConfigHash || len(got.Changes) != 1 || got.Changes[0] != wantChange {
+		t.Fatalf("comparison metadata did not round-trip: %#v", got)
+	}
+}
+
 func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -72,6 +92,112 @@ func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
 	state, err := s.RuntimeState(ctx, record.ID)
 	if err != nil || state.ConsecutiveFailures != 3 {
 		t.Fatalf("runtime state: %#v %v", state, err)
+	}
+}
+
+func TestSaveAdminSecurityRollsBackCredentialAndSessionsTogether(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	oldHash := "old-password-hash"
+	newHash := "new-password-hash"
+	admin := Admin{Username: "admin", PasswordHash: oldHash, CreatedAt: now, UpdatedAt: now}
+	if err := s.SaveAdmin(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(ctx, "session-hash", "csrf", now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`CREATE TRIGGER fail_security_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	admin.PasswordHash, admin.UpdatedAt = newHash, now.Add(time.Minute)
+	if err := s.SaveAdminSecurity(ctx, admin, nil, false, true, "admin.password_changed", "password changed"); err == nil {
+		t.Fatal("security mutation unexpectedly committed with a failing audit insert")
+	}
+	var sessions int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM sessions`).Scan(&sessions); err != nil {
+		t.Fatal(err)
+	}
+	if sessions != 1 {
+		t.Fatalf("session revocation was not rolled back: %d", sessions)
+	}
+	got, err := s.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.PasswordHash != oldHash {
+		t.Fatal("administrator password changed despite transaction rollback")
+	}
+}
+
+func TestSaveAdminSecurityRollsBackTOTPWhenRecoveryCodesFail(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	hash := "original-password-hash"
+	admin := Admin{Username: "admin", PasswordHash: hash, CreatedAt: now, UpdatedAt: now}
+	if err := s.SaveAdmin(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`CREATE TRIGGER fail_recovery_codes BEFORE INSERT ON recovery_codes BEGIN SELECT RAISE(ABORT, 'recovery codes unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	admin.TOTPSecret, admin.TOTPEnabled, admin.UpdatedAt = "JBSWY3DPEHPK3PXP", true, now.Add(time.Minute)
+	if err := s.SaveAdminSecurity(ctx, admin, []string{"code-hash"}, true, false, "admin.totp_enabled", "TOTP enabled"); err == nil {
+		t.Fatal("TOTP mutation unexpectedly committed with a failing recovery-code insert")
+	}
+	got, err := s.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TOTPEnabled || got.TOTPSecret != "" {
+		t.Fatalf("TOTP state changed despite transaction rollback: %#v", got)
+	}
+	count, err := s.RecoveryCodeCount(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("recovery codes changed despite transaction rollback: %d", count)
+	}
+}
+
+func TestSaveAdminSecurityRevokesSessionsOnSuccessfulTOTPChange(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	admin := Admin{Username: "admin", PasswordHash: "password-hash", CreatedAt: now, UpdatedAt: now}
+	if err := s.SaveAdmin(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(ctx, "session-hash", "csrf", now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	admin.TOTPSecret, admin.TOTPEnabled, admin.UpdatedAt = "JBSWY3DPEHPK3PXP", true, now.Add(time.Minute)
+	if err := s.SaveAdminSecurity(ctx, admin, []string{"code-hash"}, true, true, "admin.totp_enabled", "TOTP enabled"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetSession(ctx, "session-hash"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("session remained after TOTP change: %v", err)
+	}
+	if count, err := s.RecoveryCodeCount(ctx); err != nil || count != 1 {
+		t.Fatalf("recovery code count = %d, err=%v", count, err)
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE action=?`, "admin.totp_enabled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatal("audit count query returned no row")
+	}
+	var audits int
+	if err := rows.Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("audit rows = %d, want one", audits)
 	}
 }
 
@@ -431,6 +557,20 @@ func TestHistoryPagesHaveStableMetadataAndOrdering(t *testing.T) {
 	}
 	if page.Total != 3 || len(page.Items) != 2 || page.Items[0].ID != "b" || page.Items[1].ID != "a" {
 		t.Fatalf("unexpected scan page: total=%d items=%#v", page.Total, page.Items)
+	}
+	summaryPage, err := s.ListJobScanSummariesPage(ctx, record.ID, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summaryPage.Total != 3 || len(summaryPage.Items) != 2 || summaryPage.Items[0].ID != "b" || summaryPage.Items[1].ID != "a" {
+		t.Fatalf("unexpected scan summary page: total=%d items=%#v", summaryPage.Total, summaryPage.Items)
+	}
+	rawSummary, err := json.Marshal(summaryPage.Items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(rawSummary, []byte(`"snapshot"`)) {
+		t.Fatal("scan summary unexpectedly contains a snapshot")
 	}
 	events, err := s.ListJobEventsPage(ctx, record.ID, 2, 1)
 	if err != nil {

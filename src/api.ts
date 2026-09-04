@@ -1,4 +1,4 @@
-import type { Change, Incident, Job, JobForm, Pagination, Scan, Unit } from './types'
+import type { ActiveScan, Change, Incident, Job, JobForm, Pagination, Scan, ScanSummary, Unit } from './types'
 
 export type NotificationDestination = {
   id: string
@@ -43,7 +43,9 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!response.ok) throw new APIError(body?.error?.message || 'Request failed', body?.error?.code, body?.error?.details)
   return body as T
 }
-export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; legacy_yaml_jobs?: string[]; password_requirements: { minimum_length: number }; notification_destinations: number; retention: string; max_concurrent_scans: number }>('/setup/status')
+export type AdminStatus = { configured: boolean; username: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; live_updates?: { history_size: number; dropped_events: number } }
+export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; password_requirements: { minimum_length: number } }>('/setup/status')
+export const adminStatus = () => api<AdminStatus>('/status')
 export const getSession = () => api<{ username: string; csrf_token: string; totp_enabled: boolean }>('/auth/session')
 export const login = (password: string, otp?: string, recovery_code?: string) => api<{ username: string; csrf_token: string; totp_required: boolean }>('/auth/login', { method: 'POST', body: JSON.stringify({ password, otp, recovery_code }) })
 export const setup = (token: string, password: string) => api('/setup', { method: 'POST', body: JSON.stringify({ token, password }) })
@@ -61,12 +63,13 @@ export const resumeJob = (id: string, revision: number) => api(`/jobs/${id}/resu
 export const runJob = (id: string) => api<{ status: string }>(`/jobs/${id}/run`, { method: 'POST' })
 export const resetBaseline = (id: string) => api(`/jobs/${id}/baseline/reset`, { method: 'POST' })
 export const approveBaseline = (jobId: string, scanId: string) => api(`/jobs/${jobId}/baseline/approve`, { method: 'POST', body: JSON.stringify({ scan_id: scanId }) })
-export const jobScans = (id: string, offset = 0, limit = 20) => api<{ scans: Scan[]; pagination: Pagination }>(`/jobs/${id}/scans?limit=${limit}&offset=${offset}`)
+export const jobScans = (id: string, offset = 0, limit = 20) => api<{ scans: ScanSummary[]; pagination: Pagination }>(`/jobs/${id}/scans?limit=${limit}&offset=${offset}`)
 export const jobBaseline = (id: string, offset = 0, limit = 50) => api<{ job_id: string; job: string; revision: number; security_hash: string; baseline: Job['baseline']; snapshot: { units: Unit[]; scopes: { target: string; protocol: string; ports: string; service_detection: boolean }[]; dns?: Record<string, string[]> } | null; pagination: Pagination }>(`/jobs/${id}/baseline?limit=${limit}&offset=${offset}`)
-export const scanDetail = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ scan: Scan; changes: Change[]; changes_pagination: Pagination; current_security_hash: string }>(`/jobs/${jobId}/scans/${scanId}?limit=${limit}&offset=${offset}`)
+export const scanDetail = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ scan: Scan; changes: Change[]; changes_pagination: Pagination; current_security_hash: string; comparison_source?: string; baseline_scan_id?: string }>(`/jobs/${jobId}/scans/${scanId}?limit=${limit}&offset=${offset}`)
 export const scanResults = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ results: Unit[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/results?limit=${limit}&offset=${offset}`)
 export const scanChanges = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ changes: Change[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/changes?limit=${limit}&offset=${offset}`)
-export const listScans = (offset = 0, limit = 20) => api<{ scans: Scan[]; pagination: Pagination }>(`/scans?limit=${limit}&offset=${offset}`)
+export const listScans = (offset = 0, limit = 20) => api<{ scans: ScanSummary[]; pagination: Pagination }>(`/scans?limit=${limit}&offset=${offset}`)
+export const activeScans = () => api<{ scans: ActiveScan[] }>('/scans/active')
 export const listIncidents = (offset = 0, limit = 20) => api<{ incidents: Incident[]; pagination: Pagination }>(`/incidents?limit=${limit}&offset=${offset}`)
 export const listEvents = (offset = 0, limit = 20, jobId?: string) => api<{ events: unknown[]; pagination: Pagination }>(`/events?limit=${limit}&offset=${offset}${jobId ? `&job_id=${encodeURIComponent(jobId)}` : ''}`)
 export const notificationTest = () => api<{ sent: number }>('/notifications/test', { method: 'POST' })

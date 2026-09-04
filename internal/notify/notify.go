@@ -23,6 +23,8 @@ import (
 
 var ErrManagedNotificationLocked = errors.New("managed notification is locked")
 
+const notificationWorkers = 4
+
 type DestinationView struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
@@ -459,7 +461,12 @@ func (n *Notifier) Queue(ctx context.Context, events []model.Event) error {
 }
 
 func (n *Notifier) Drain(ctx context.Context) error {
-	n.drainMu.Lock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := lockContext(ctx, &n.drainMu); err != nil {
+		return err
+	}
 	defer n.drainMu.Unlock()
 	if err := n.Reload(ctx); err != nil {
 		return err
@@ -471,39 +478,90 @@ func (n *Notifier) Drain(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	var all []error
+	workers := notificationWorkers
+	if len(deliveries) < workers {
+		workers = len(deliveries)
+	}
+	if workers == 0 {
+		return nil
+	}
+	jobs := make(chan store.Delivery)
+	results := make(chan error, len(deliveries))
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for delivery := range jobs {
+				results <- n.deliverOne(ctx, delivery, destinations)
+			}
+		}()
+	}
 	for _, delivery := range deliveries {
-		// Refresh before each send so an update/delete that happened after the
-		// batch was claimed cannot use the stale URL from the first snapshot.
-		if strings.HasPrefix(delivery.Destination, "managed:") {
-			if reloadErr := n.Reload(ctx); reloadErr != nil {
-				all = append(all, reloadErr)
-				_ = n.Store.DeferDelivery(ctx, delivery.ID, delivery.ClaimToken, "managed notification state unavailable", time.Minute)
-				continue
-			}
-			destinations = n.destinationSnapshot()
+		select {
+		case jobs <- delivery:
+		case <-ctx.Done():
+			// Unsent claims are left for the normal claim lease to expire. This
+			// avoids marking them delivered when a caller canceled the pass.
 		}
-		raw, ok := destinations[delivery.Destination]
-		var sendErr error
-		if !ok {
-			if strings.HasPrefix(delivery.Destination, "managed:") {
-				if deferErr := n.Store.DeferDelivery(ctx, delivery.ID, delivery.ClaimToken, "managed notification is locked or no longer configured", time.Minute); deferErr != nil && !errors.Is(deferErr, store.ErrDeliveryClaimLost) {
-					all = append(all, deferErr)
-				}
-				continue
-			}
-			sendErr = errors.New("notification destination is no longer configured")
-		} else {
-			sendErr = safeSend(raw, engine.FormatEvent(delivery.Event))
-		}
-		if resultErr := n.Store.DeliveryResultClaim(ctx, delivery.ID, delivery.ClaimToken, sendErr); resultErr != nil && !errors.Is(resultErr, store.ErrDeliveryClaimLost) {
-			all = append(all, resultErr)
-		}
-		if sendErr != nil {
-			all = append(all, sendErr)
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
+	var all []error
+	for err := range results {
+		if err != nil && !errors.Is(err, store.ErrDeliveryClaimLost) {
+			all = append(all, err)
 		}
 	}
 	return errors.Join(all...)
+}
+
+func lockContext(ctx context.Context, mu *sync.Mutex) error {
+	for {
+		if mu.TryLock() {
+			return nil
+		}
+		timer := time.NewTimer(10 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
+}
+
+func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, destinations map[string]string) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	// Refresh before each managed send so an update/delete after the batch was
+	// claimed cannot use the stale URL from the first snapshot.
+	if strings.HasPrefix(delivery.Destination, "managed:") {
+		if reloadErr := n.Reload(ctx); reloadErr != nil {
+			deferErr := n.Store.DeferDelivery(ctx, delivery.ID, delivery.ClaimToken, "managed notification state unavailable", time.Minute)
+			return errors.Join(reloadErr, deferErr)
+		}
+		destinations = n.destinationSnapshot()
+	}
+	raw, ok := destinations[delivery.Destination]
+	var sendErr error
+	if !ok {
+		if strings.HasPrefix(delivery.Destination, "managed:") {
+			return n.Store.DeferDelivery(ctx, delivery.ID, delivery.ClaimToken, "managed notification is locked or no longer configured", time.Minute)
+		}
+		sendErr = errors.New("notification destination is no longer configured")
+	} else {
+		sendErr = safeSendContext(ctx, raw, engine.FormatEvent(delivery.Event))
+	}
+	resultErr := n.Store.DeliveryResultClaim(ctx, delivery.ID, delivery.ClaimToken, sendErr)
+	return errors.Join(sendErr, resultErr)
 }
 
 func send(rawURL, message string) error {
@@ -521,11 +579,35 @@ func send(rawURL, message string) error {
 // credentials) in their error text, so a short destination fingerprint is the
 // most useful diagnostic that can be retained safely.
 func safeSend(rawURL, message string) error {
-	if err := send(rawURL, message); err != nil {
+	return safeSendContext(context.Background(), rawURL, message)
+}
+
+func safeSendContext(ctx context.Context, rawURL, message string) error {
+	if err := sendContext(ctx, rawURL, message); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		id := hashURL(rawURL)
 		return fmt.Errorf("notification delivery failed (%s)", id[:12])
 	}
 	return nil
+}
+
+func sendContext(ctx context.Context, rawURL, message string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	result := make(chan error, 1)
+	go func() { result <- send(rawURL, message) }()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (n *Notifier) Test() error {
@@ -535,12 +617,51 @@ func (n *Notifier) Test() error {
 // TestContext refreshes the managed destination cache first so an operator
 // restoring an external key can verify it without restarting the daemon.
 func (n *Notifier) TestContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if err := n.Reload(ctx); err != nil {
 		return err
 	}
+	snapshot := n.destinationSnapshot()
+	urls := make([]string, 0, len(snapshot))
+	for _, rawURL := range snapshot {
+		urls = append(urls, rawURL)
+	}
+	sort.Strings(urls)
+	workers := notificationWorkers
+	if len(urls) < workers {
+		workers = len(urls)
+	}
+	if workers == 0 {
+		return nil
+	}
+	testCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	jobs := make(chan string)
+	results := make(chan error, len(urls))
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for rawURL := range jobs {
+				results <- safeSendContext(testCtx, rawURL, "EdgeWatch notification test")
+			}
+		}()
+	}
+	for _, rawURL := range urls {
+		select {
+		case jobs <- rawURL:
+		case <-testCtx.Done():
+		}
+	}
+	close(jobs)
+	wg.Wait()
+	close(results)
 	var all []error
-	for _, rawURL := range n.destinationSnapshot() {
-		if err := safeSend(rawURL, "EdgeWatch notification test"); err != nil {
+	for err := range results {
+		if err != nil {
 			all = append(all, err)
 		}
 	}
@@ -564,5 +685,5 @@ func (n *Notifier) TestDestinationContext(ctx context.Context, id string) error 
 	if entry.locked {
 		return ErrManagedNotificationLocked
 	}
-	return safeSend(entry.url, "EdgeWatch notification test")
+	return safeSendContext(ctx, entry.url, "EdgeWatch notification test")
 }

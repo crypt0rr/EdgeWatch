@@ -18,11 +18,51 @@ const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 50
 
 function Shell({ username, onLogout }: { username: string; onLogout: () => void }) {
   const [open, setOpen] = useState(false)
+  const [liveState, setLiveState] = useState<'connecting' | 'live' | 'reconnecting'>('connecting')
   const location = useLocation()
   const client = useQueryClient()
   useEffect(() => {
     const stream = new EventSource('/api/v1/stream')
-    stream.onmessage = () => { void client.invalidateQueries() }
+    stream.onopen = () => setLiveState('live')
+    stream.onerror = () => setLiveState('reconnecting')
+    stream.onmessage = (message) => {
+      try {
+        const event = JSON.parse(message.data) as { type?: string; job_id?: string }
+        switch (event.type) {
+          case 'scan.started':
+          case 'scan.completed':
+            void client.invalidateQueries({ queryKey: ['active-scans'] })
+            void client.invalidateQueries({ queryKey: ['scans'] })
+            if (event.job_id) void client.invalidateQueries({ queryKey: ['job-scans', event.job_id] })
+            break
+          case 'changes-detected':
+          case 'incident-opened':
+          case 'incident-closed':
+            void client.invalidateQueries({ queryKey: ['incidents'] })
+            if (event.job_id) void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+            break
+          case 'job.created':
+          case 'job.updated':
+          case 'job.archived':
+          case 'job.restored':
+          case 'job.deleted':
+            void client.invalidateQueries({ queryKey: ['jobs'] })
+            if (event.job_id) void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+            break
+          case 'notification.changed':
+            void client.invalidateQueries({ queryKey: ['notifications'] })
+            void client.invalidateQueries({ queryKey: ['admin-status'] })
+            break
+          case 'refresh_required':
+          default:
+            // Unknown events and a replay gap deliberately trigger a full
+            // refresh so a newly deployed server cannot leave stale UI state.
+            void client.invalidateQueries()
+        }
+      } catch {
+        void client.invalidateQueries()
+      }
+    }
     return () => stream.close()
   }, [client])
   const links = [
@@ -39,7 +79,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
       <div className="sidebar-bottom"><div className="user-chip"><span className="avatar">A</span><span><strong>{username}</strong><small>Administrator</small></span></div><button className="nav-link quiet" onClick={onLogout}><LogOut size={17} />Sign out</button></div>
     </aside>
     {open && <button aria-label="Close navigation" className="backdrop" onClick={() => setOpen(false)} />}
-    <main className="main"><header className="topbar"><button aria-label="Open navigation" className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><div className="breadcrumb">{location.pathname === '/' ? 'Overview' : location.pathname.split('/').filter(Boolean).map(v => v[0].toUpperCase() + v.slice(1)).join(' / ')}</div><div className="topbar-actions"><span className="status-dot"><i /> Engine online</span><Bell size={18} /></div></header><div className="content"><Routes><Route path="/" element={<Dashboard />} /><Route path="/jobs" element={<Jobs />} /><Route path="/jobs/new" element={<JobEditor />} /><Route path="/jobs/:id" element={<JobDetail />} /><Route path="/jobs/:id/edit" element={<JobEditor />} /><Route path="/incidents" element={<Incidents />} /><Route path="/notifications" element={<Notifications />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></div></main>
+    <main className="main"><header className="topbar"><button aria-label="Open navigation" className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><div className="breadcrumb">{location.pathname === '/' ? 'Overview' : location.pathname.split('/').filter(Boolean).map(v => v[0].toUpperCase() + v.slice(1)).join(' / ')}</div><div className="topbar-actions"><span className="status-dot"><i /> {liveState === 'live' ? 'Live updates' : liveState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}</span><Bell size={18} /></div></header><div className="content"><Routes><Route path="/" element={<Dashboard />} /><Route path="/jobs" element={<Jobs />} /><Route path="/jobs/new" element={<JobEditor />} /><Route path="/jobs/:id" element={<JobDetail />} /><Route path="/jobs/:id/edit" element={<JobEditor />} /><Route path="/incidents" element={<Incidents />} /><Route path="/notifications" element={<Notifications />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></div></main>
   </div>
 }
 

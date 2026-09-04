@@ -45,6 +45,39 @@ type releaseOnlyScanner struct {
 	release chan struct{}
 }
 
+func TestScanWorkBudgetIsCheckedBeforeLease(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1, MaxProbeCount: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "budget", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _, err = a.RunJobRecord(ctx, record)
+	var budgetErr *ScanWorkBudgetError
+	if !errors.As(err, &budgetErr) {
+		t.Fatalf("expected budget error, got %v", err)
+	}
+	active, err := s.JobActive(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active {
+		t.Fatal("budget rejection acquired a lease")
+	}
+	if _, err := s.ListJobScans(ctx, record.ID, 10); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func (s *releaseOnlyScanner) Version(context.Context) string { return "release-only" }
 func (s *releaseOnlyScanner) Scan(context.Context, config.Job) (model.Snapshot, error) {
 	close(s.started)

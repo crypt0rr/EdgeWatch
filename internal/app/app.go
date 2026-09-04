@@ -52,6 +52,40 @@ type App struct {
 // accepted because the daemon is stopping.
 var ErrShuttingDown = errors.New("application is shutting down")
 
+// ErrScanWorkBudget is returned before a lease is acquired when a job's
+// estimated probe count exceeds the deployment guard and the job has not
+// explicitly opted into high-cost work.
+var ErrScanWorkBudget = errors.New("estimated scan work exceeds the configured probe budget")
+
+type ScanWorkBudgetError struct {
+	Estimate config.WorkEstimate
+	Budget   int64
+}
+
+func (e *ScanWorkBudgetError) Error() string {
+	return fmt.Sprintf("%v: estimated %d probes exceeds budget %d", ErrScanWorkBudget, e.Estimate.Probes, e.Budget)
+}
+
+func (e *ScanWorkBudgetError) Unwrap() error { return ErrScanWorkBudget }
+
+func (a *App) CheckScanWorkBudget(job config.Job) (config.WorkEstimate, error) {
+	estimate, err := config.EstimateJobWork(job)
+	if err != nil {
+		return estimate, err
+	}
+	if job.AllowHighCost {
+		return estimate, nil
+	}
+	budget := a.Config.Scheduler.MaxProbeCount
+	if budget <= 0 {
+		budget = config.DefaultMaxProbeCount
+	}
+	if estimate.Probes > budget {
+		return estimate, &ScanWorkBudgetError{Estimate: estimate, Budget: budget}
+	}
+	return estimate, nil
+}
+
 // Scanner is the small boundary used by the application. Production uses
 // Nmap; tests and future scan engines can provide deterministic implementations
 // without changing scheduling or baseline behavior.
@@ -207,6 +241,10 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	case <-ctx.Done():
 		return model.Scan{}, nil, ctx.Err()
 	}
+	estimate, err := a.CheckScanWorkBudget(job)
+	if err != nil {
+		return model.Scan{}, nil, err
+	}
 	started := time.Now().UTC()
 	scan := model.Scan{ID: scanner.NewID(started), JobID: jobID, JobRevision: revision, Job: job.Name, StartedAt: started, ConfigHash: job.SecurityHash(), NmapVersion: a.nmapVersion}
 	leaseKey := job.Name
@@ -225,7 +263,7 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		}
 		return model.Scan{}, nil, err
 	}
-	a.running.Store(scan.ID, model.ActiveScan{ID: scan.ID, JobID: jobID, Job: job.Name, JobRevision: revision, StartedAt: started})
+	a.running.Store(scan.ID, model.ActiveScan{ID: scan.ID, JobID: jobID, Job: job.Name, JobRevision: revision, StartedAt: started, EstimatedProbes: estimate.Probes, NmapInvocations: estimate.NmapInvocations, EstimatedSeconds: estimate.EstimatedSeconds})
 	defer a.running.Delete(scan.ID)
 	// Publish lifecycle updates to the web console without persisting them as
 	// alert events. This keeps SSE subscribers responsive even when a scan has
@@ -249,57 +287,45 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	}
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer persistCancel()
-	if managed && scanErr == nil {
-		// Capture the comparison context before the engine mutates runtime state.
-		// The scan record then remains reproducible even after a later baseline
-		// reset or scope change.
-		state, stateErr := a.Store.RuntimeState(persistCtx, jobID)
-		if stateErr != nil {
-			return scan, nil, stateErr
-		}
-		if state.Baseline != nil {
-			scan.BaselineScanID = state.BaselineScanID
-			scan.BaselineConfigHash = state.BaselineConfigHash
-			scan.Changes = engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
-		}
-	}
-	if err := a.Store.SaveScan(persistCtx, scan); err != nil {
-		return scan, nil, err
-	}
 	completionEvent := model.Event{Type: "scan.completed", JobID: jobID, Job: job.Name, ScanID: scan.ID, Message: "Scan " + scan.Status, CreatedAt: scan.FinishedAt}
 	var destinations []string
 	if managed {
 		var destinationErr error
 		destinations, destinationErr = a.Notifier.QueueDestinations(persistCtx)
 		if destinationErr != nil {
+			// Preserve the completed scan even when notification configuration
+			// cannot be read. Runtime state is deliberately left unchanged,
+			// matching the pre-transaction behavior.
+			if saveErr := a.Store.SaveScan(persistCtx, scan); saveErr != nil {
+				return scan, nil, saveErr
+			}
 			return scan, nil, destinationErr
 		}
 	}
 	var events []model.Event
-	var err error
-	if scanErr != nil {
-		if managed {
-			events, err = a.Engine.FailureForJobWithDestinations(persistCtx, jobID, job.Name, scan, destinations)
-		} else {
-			events, err = a.Engine.Failure(persistCtx, job.Name, scan)
-		}
+	var finalizeErr error
+	if managed {
+		events, finalizeErr = a.Engine.FinalizeManagedScan(persistCtx, jobID, job, &scan, destinations)
 	} else {
-		if managed {
-			events, err = a.Engine.SuccessForJobWithDestinations(persistCtx, jobID, job, scan, destinations)
+		if err := a.Store.SaveScan(persistCtx, scan); err != nil {
+			return scan, nil, err
+		}
+		if scanErr != nil {
+			events, finalizeErr = a.Engine.Failure(persistCtx, job.Name, scan)
 		} else {
-			events, err = a.Engine.Success(persistCtx, job, scan)
+			events, finalizeErr = a.Engine.Success(persistCtx, job, scan)
 		}
 	}
-	if managed && errors.Is(err, store.ErrJobRevisionChanged) {
+	if managed && errors.Is(finalizeErr, store.ErrJobRevisionChanged) {
 		// Keep the scan in immutable history, but do not let a result from a
 		// superseded security scope seed or mutate the current baseline. A
 		// lifecycle-only revision retains the same hash and is still accepted.
 		a.Logger.Info("scan completed for superseded security scope; runtime state unchanged", "job", job.Name, "scan_id", scan.ID)
-		events, err = nil, nil
+		events, finalizeErr = nil, nil
 	}
-	if err != nil {
+	if finalizeErr != nil {
 		a.emitEvents([]model.Event{completionEvent})
-		return scan, nil, err
+		return scan, nil, finalizeErr
 	}
 	a.emitEvents(events)
 	a.emitEvents([]model.Event{completionEvent})
@@ -398,6 +424,11 @@ func (a *App) Daemon(ctx context.Context) error {
 		<-deliveryDone
 	}()
 	a.wakeDelivery()
+	if removed, err := a.Store.DeleteExpiredSessions(ctx, time.Now().UTC()); err != nil {
+		a.Logger.Error("startup expired-session cleanup failed", "error", err)
+	} else if removed > 0 {
+		a.Logger.Info("startup expired sessions pruned", "sessions", removed)
+	}
 	if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
 		a.Logger.Error("startup history pruning failed", "error", err)
 	} else if stats.Total() > 0 {
@@ -412,6 +443,11 @@ func (a *App) Daemon(ctx context.Context) error {
 				return err
 			}
 		case <-prune.C:
+			if removed, err := a.Store.DeleteExpiredSessions(ctx, time.Now().UTC()); err != nil {
+				a.Logger.Error("expired-session cleanup failed", "error", err)
+			} else if removed > 0 {
+				a.Logger.Info("expired sessions pruned", "sessions", removed)
+			}
 			if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
 				a.Logger.Error("history pruning failed", "error", err)
 			} else {

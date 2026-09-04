@@ -12,6 +12,8 @@ web:
 
 scheduler:
   max_concurrent_scans: 1
+  # Approximate probes permitted per run unless a job opts into high-cost work.
+  max_probe_count: 5000000
 
 notifications:
   # Prefer a Docker secret-style file with one Shoutrrr URL per line.
@@ -35,6 +37,7 @@ notifications:
 #     assume_alive: true # set false to use Nmap host discovery
 #     targets: ["192.0.2.10", "edge.example.com"]
 #     max_expanded_hosts: 256
+#     allow_high_cost: false # override the scheduler probe budget deliberately
 #     tcp: {ports: "1-65535", mode: syn, service_detection: false}
 #     timing: balanced
 #     timeout: 1h

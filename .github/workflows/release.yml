@@ -161,3 +161,142 @@ jobs:
           subject-name: ${{ env.REGISTRY_IMAGE }}
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
+
+  smoke:
+    name: Verify published release
+    needs: [binaries, image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Verify GitHub release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          assets="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')"
+          test "$assets" -ge 3
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -q 'checksums.txt'
+      - name: Log in to GHCR for immutable image verification
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull and inspect the semver image
+        run: |
+          image_tag="${GITHUB_REF_NAME#v}"
+          image="${{ env.REGISTRY_IMAGE }}:${image_tag}"
+          echo "IMAGE=$image" >> "$GITHUB_ENV"
+          docker pull "$image"
+          docker buildx imagetools inspect "$image" | tee image-manifest.txt
+          grep -q 'linux/amd64' image-manifest.txt
+          grep -q 'linux/arm64' image-manifest.txt
+      - name: Verify binary version and configuration
+        run: |
+          expected="EdgeWatch ${GITHUB_REF_NAME#v}"
+          test "$(docker run --rm "$IMAGE" version)" = "$expected"
+          smoke_dir="$(mktemp -d)"
+          mkdir -p "$smoke_dir/data"
+          # The disposable directory must also work on rootless Docker
+          # runners, where container UID 0 is mapped away from the host user.
+          chmod 0777 "$smoke_dir/data"
+          printf '%s\n' \
+            'database: /var/lib/edgewatch/edgewatch.db' \
+            'retention: 24h' \
+            'web:' \
+            '  listen: 127.0.0.1:18080' \
+            'scheduler:' \
+            '  max_concurrent_scans: 1' \
+            '  max_probe_count: 1000' \
+            'notifications:' \
+            '  urls: []' > "$smoke_dir/config.yaml"
+          docker run --rm \
+            -v "$smoke_dir/config.yaml:/etc/edgewatch/config.yaml:ro" \
+            -v "$smoke_dir/data:/var/lib/edgewatch" \
+            "$IMAGE" config validate --config /etc/edgewatch/config.yaml --output json
+      - name: Verify embedded web assets and disposable SQLite state
+        run: |
+          smoke_dir="$(mktemp -d)"
+          mkdir -p "$smoke_dir/data"
+          chmod 0777 "$smoke_dir/data"
+          printf '%s\n' \
+            'database: /var/lib/edgewatch/edgewatch.db' \
+            'retention: 24h' \
+            'web:' \
+            '  listen: 127.0.0.1:18080' \
+            'scheduler:' \
+            '  max_concurrent_scans: 1' \
+            '  max_probe_count: 1000' \
+            'notifications:' \
+            '  urls: []' > "$smoke_dir/config.yaml"
+          container="$(docker run -d --network host \
+            -v "$smoke_dir/config.yaml:/etc/edgewatch/config.yaml:ro" \
+            -v "$smoke_dir/data:/var/lib/edgewatch" \
+            "$IMAGE" daemon --config /etc/edgewatch/config.yaml)"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --max-time 2 http://127.0.0.1:18080/ | grep -q 'EdgeWatch'; then
+              break
+            fi
+            sleep 2
+            if [ "$attempt" = 30 ]; then
+              docker logs "$container"
+              exit 1
+            fi
+          done
+          docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml
+          test -s "$smoke_dir/data/edgewatch.db"
+      - name: Verify disposable Compose deployment
+        run: |
+          smoke_dir="$(mktemp -d)"
+          mkdir -p "$smoke_dir/data"
+          chmod 0777 "$smoke_dir/data"
+          printf '%s\n' \
+            'database: /var/lib/edgewatch/edgewatch.db' \
+            'retention: 24h' \
+            'web:' \
+            '  listen: 127.0.0.1:18080' \
+            'scheduler:' \
+            '  max_concurrent_scans: 1' \
+            '  max_probe_count: 1000' \
+            'notifications:' \
+            '  urls: []' > "$smoke_dir/config.yaml"
+          printf '%s\n' \
+            'services:' \
+            '  edgewatch:' \
+            "    image: $IMAGE" \
+            '    network_mode: host' \
+            '    cap_drop:' \
+            '      - ALL' \
+            '    cap_add:' \
+            '      - NET_RAW' \
+            '    security_opt:' \
+            '      - no-new-privileges:true' \
+            '    read_only: true' \
+            '    tmpfs:' \
+            '      - /tmp:size=32m,mode=1777' \
+            '    volumes:' \
+            "      - $smoke_dir/config.yaml:/etc/edgewatch/config.yaml:ro" \
+            "      - $smoke_dir/data:/var/lib/edgewatch:rw" > "$smoke_dir/compose.yaml"
+          project="edgewatch-smoke-${GITHUB_RUN_ID}"
+          cleanup() {
+            docker compose -p "$project" -f "$smoke_dir/compose.yaml" down --volumes --remove-orphans >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          docker compose -p "$project" -f "$smoke_dir/compose.yaml" up -d --quiet-pull
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent --max-time 2 http://127.0.0.1:18080/ | grep -q 'EdgeWatch'; then
+              break
+            fi
+            sleep 2
+            if [ "$attempt" = 30 ]; then
+              docker compose -p "$project" -f "$smoke_dir/compose.yaml" logs
+              exit 1
+            fi
+          done
+          docker compose -p "$project" -f "$smoke_dir/compose.yaml" exec -T edgewatch edgewatch health --config /etc/edgewatch/config.yaml
+          cleanup
+          trap - EXIT
+          test -s "$smoke_dir/data/edgewatch.db"

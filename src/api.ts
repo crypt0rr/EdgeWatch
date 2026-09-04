@@ -43,7 +43,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!response.ok) throw new APIError(body?.error?.message || 'Request failed', body?.error?.code, body?.error?.details)
   return body as T
 }
-export type AdminStatus = { configured: boolean; username: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; live_updates?: { history_size: number; dropped_events: number } }
+export type AdminStatus = { configured: boolean; username: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; max_probe_count?: number; live_updates?: { history_size: number; dropped_events: number } }
 export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; password_requirements: { minimum_length: number } }>('/setup/status')
 export const adminStatus = () => api<AdminStatus>('/status')
 export const getSession = () => api<{ username: string; csrf_token: string; totp_enabled: boolean }>('/auth/session')

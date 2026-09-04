@@ -5,7 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +24,138 @@ func openTestStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
+}
+
+func TestOpenEnforcesPrivateSQLiteModes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "edgewatch.db")
+	if err := os.WriteFile(path, []byte{}, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.DB.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	if err := assertPrivateMode(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(context.Background(), `CREATE TABLE IF NOT EXISTS permission_probe (id INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	for _, sidecar := range []string{path + "-wal", path + "-shm"} {
+		if _, statErr := os.Lstat(sidecar); statErr == nil {
+			if err := assertPrivateMode(sidecar); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// Existing database files are repaired on every startup, not only when
+	// SQLite creates a new file.
+	if err := os.Chmod(path, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := assertPrivateMode(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenEnforcesPrivateModeForSQLiteURI(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "uri.db")
+	dsn := "file:" + path + "?mode=rwc"
+	s, err := Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.DB.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	if err := assertPrivateMode(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(dsn); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("SQLite URI was treated as a literal filename: stat=%v", err)
+	}
+}
+
+func TestOpenSupportsLocalhostSQLiteURI(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "localhost.db")
+	s, err := Open("file://localhost" + path + "?mode=rwc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := assertPrivateMode(path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenSupportsSQLiteMemoryURI(t *testing.T) {
+	s, err := Open("file::memory:?cache=shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if s.authKeyPath != "" {
+		t.Fatalf("memory database unexpectedly selected auth key path %q", s.authKeyPath)
+	}
+}
+
+func TestOpenRejectsSQLiteSidecarSymlink(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "symlink.db")
+	if err := os.WriteFile(path+"-wal", []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path + "-wal"); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "outside-wal")
+	if err := os.WriteFile(target, []byte("sentinel"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path+"-wal"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(path); err == nil || !strings.Contains(err.Error(), "symbolic link") {
+		t.Fatalf("sidecar symlink was accepted: %v", err)
+	}
+}
+
+func TestSQLiteMemoryPathDetectionDoesNotSkipFilesystemNames(t *testing.T) {
+	if !isSQLiteMemoryPath(":memory:") || !isSQLiteMemoryPath("file:shared?mode=memory&cache=shared") {
+		t.Fatal("memory SQLite paths were not recognized")
+	}
+	for _, path := range []string{"/tmp/mode=memory.db", "file:disk.db?mode=rwc"} {
+		if isSQLiteMemoryPath(path) {
+			t.Fatalf("filesystem SQLite path was misclassified as memory: %s", path)
+		}
+	}
+}
+
+func assertPrivateMode(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if mode := info.Mode().Perm(); mode&0o077 != 0 || mode&0o700 != 0o600 {
+		return fmt.Errorf("%s mode is %o, want 0600", path, mode)
+	}
+	return nil
 }
 
 func TestScanStateAndEventPersistence(t *testing.T) {
@@ -64,6 +200,66 @@ func TestScanComparisonMetadataRoundTrips(t *testing.T) {
 	}
 }
 
+func TestScanComparisonQueryDoesNotLoadSnapshot(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	large := model.Snapshot{Units: []model.Unit{{Target: "127.0.0.1", Protocol: "tcp", Ports: make([]model.PortState, 4096)}}}
+	for i := range large.Units[0].Ports {
+		large.Units[0].Ports[i] = model.PortState{Port: i + 1, State: "open", Evidence: []string{"127.0.0.1"}}
+	}
+	scan := model.Scan{ID: "metadata-only", JobID: "job", Job: "job", StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: "scope", BaselineScanID: "baseline", BaselineConfigHash: "scope", Changes: []model.Change{{Key: "port|127.0.0.1|tcp|1", Kind: "port", Severity: "critical", Target: "127.0.0.1", Protocol: "tcp", Port: 1, Old: "closed", New: "open"}}, Snapshot: large}
+	if err := s.SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	summary, changes, err := s.GetScanComparison(ctx, scan.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ID != scan.ID || summary.BaselineScanID != scan.BaselineScanID || len(changes) != 1 {
+		t.Fatalf("unexpected metadata comparison: %#v %#v", summary, changes)
+	}
+}
+
+func TestScanChangesPagePaginatesWithoutLoadingSnapshot(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	changes := []model.Change{
+		{Key: "port|127.0.0.1|tcp|1", Kind: "port", Severity: "critical", Target: "127.0.0.1", Protocol: "tcp", Port: 1, Old: "closed", New: "open"},
+		{Key: "port|127.0.0.1|tcp|2", Kind: "port", Severity: "critical", Target: "127.0.0.1", Protocol: "tcp", Port: 2, Old: "closed", New: "open"},
+		{Key: "port|127.0.0.1|tcp|3", Kind: "port", Severity: "critical", Target: "127.0.0.1", Protocol: "tcp", Port: 3, Old: "closed", New: "open"},
+	}
+	large := model.Snapshot{Units: []model.Unit{{Target: "127.0.0.1", Protocol: "tcp", Ports: make([]model.PortState, 8192)}}}
+	if err := s.SaveScan(ctx, model.Scan{ID: "paged-changes", JobID: "job", Job: "job", StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: "scope", BaselineScanID: "baseline", BaselineConfigHash: "scope", Changes: changes, Snapshot: large}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.ListScanChangesPage(ctx, "paged-changes", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != len(changes) || len(page.Items) != 1 || page.Items[0].Port != 2 {
+		t.Fatalf("unexpected paged changes: %#v", page)
+	}
+}
+
+func TestScanResultsPagePaginatesSnapshotUnits(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	units := []model.Unit{
+		{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}},
+		{Target: "192.0.2.2", Protocol: "tcp", Ports: []model.PortState{{Port: 2, State: "open"}}},
+	}
+	if err := s.SaveScan(ctx, model.Scan{ID: "paged-results", JobID: "job", Job: "job", StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: "scope", Snapshot: model.Snapshot{Units: units}}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.ListScanResultsPage(ctx, "paged-results", 1, 1)
+	if err != nil || page.Total != len(units) || len(page.Items) != 1 || page.Items[0].Target != "192.0.2.2" {
+		t.Fatalf("unexpected paged results: %#v, err=%v", page, err)
+	}
+}
+
 func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -92,6 +288,248 @@ func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
 	state, err := s.RuntimeState(ctx, record.ID)
 	if err != nil || state.ConsecutiveFailures != 3 {
 		t.Fatalf("runtime state: %#v %v", state, err)
+	}
+}
+
+func TestEventPayloadsAreBoundedWithOverflowSummary(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("bounded-event"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	changes := make([]model.Change, 5000)
+	for i := range changes {
+		changes[i] = model.Change{Key: "port|127.0.0.1|tcp|" + strconv.Itoa(i+1), Kind: "port", Severity: "critical", Target: "127.0.0.1", Protocol: "tcp", Port: i + 1, Old: "closed", New: "open"}
+	}
+	events, err := s.UpdateRuntimeWithOutbox(ctx, record.ID, []string{"destination"}, func(state *model.JobState) ([]model.Event, error) {
+		return []model.Event{{Type: "changes-detected", Job: record.Job.Name, Changes: changes, CreatedAt: time.Now().UTC()}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || !events[0].ChangesTruncated || events[0].ChangesCount != len(changes) || len(events[0].Changes) != 0 {
+		t.Fatalf("event was not summarized: %#v", events[0])
+	}
+	var eventPayload, outboxPayload []byte
+	if err := s.DB.QueryRowContext(ctx, `SELECT payload_json FROM events WHERE job_id=?`, record.ID).Scan(&eventPayload); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT payload_json FROM outbox WHERE destination=?`, "destination").Scan(&outboxPayload); err != nil {
+		t.Fatal(err)
+	}
+	if len(eventPayload) > model.EventPayloadLimit || len(outboxPayload) > model.EventPayloadLimit {
+		t.Fatalf("payload exceeds limit: event=%d outbox=%d", len(eventPayload), len(outboxPayload))
+	}
+	var stored model.Event
+	if err := json.Unmarshal(eventPayload, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if !stored.ChangesTruncated || stored.ChangesCount != len(changes) {
+		t.Fatalf("stored overflow summary missing: %#v", stored)
+	}
+}
+
+func TestDeleteExpiredSessionsKeepsActiveSessions(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	if err := s.CreateSession(ctx, "expired", "csrf-expired", now.Add(-2*time.Hour), now.Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(ctx, "active", "csrf-active", now.Add(-time.Minute), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := s.DeleteExpiredSessions(ctx, now)
+	if err != nil || removed != 1 {
+		t.Fatalf("removed sessions = %d, err=%v", removed, err)
+	}
+	if _, err := s.GetSession(ctx, "expired"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired session still exists: %v", err)
+	}
+	if _, err := s.GetSession(ctx, "active"); err != nil {
+		t.Fatalf("active session was removed: %v", err)
+	}
+}
+
+func TestIncidentPagesUseSQLiteJSONPagination(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	first, err := s.CreateJob(ctx, testJob("incident-a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.CreateJob(ctx, testJob("incident-b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	makeState := func(jobID string, port int) error {
+		_, err := s.UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
+			state.Incidents[fmt.Sprintf("port|127.0.0.1|tcp|%d", port)] = model.Incident{Change: model.Change{Key: fmt.Sprintf("port|127.0.0.1|tcp|%d", port), Target: "127.0.0.1", Protocol: "tcp", Port: port, Old: "closed", New: "open", Severity: "critical"}, OpenedAt: now, LastSeenAt: now}
+			return nil, nil
+		})
+		return err
+	}
+	if err := makeState(first.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := makeState(second.ID, 2); err != nil {
+		t.Fatal(err)
+	}
+	jobPage, err := s.ListJobIncidentsPage(ctx, first.ID, 1, 0)
+	if err != nil || jobPage.Total != 1 || len(jobPage.Items) != 1 || jobPage.Items[0].Change.Port != 1 {
+		t.Fatalf("job incident page = %#v, err=%v", jobPage, err)
+	}
+	globalPage, err := s.ListIncidentsPage(ctx, 1, 1)
+	if err != nil || globalPage.Total != 2 || len(globalPage.Items) != 1 || globalPage.Items[0].Job != "incident-b" {
+		t.Fatalf("global incident page = %#v, err=%v", globalPage, err)
+	}
+}
+
+func TestSessionAuditFailureRollsBackAuthenticationMutation(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if _, err := s.DB.Exec(`CREATE TRIGGER fail_session_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	err := s.CreateSessionWithAudit(ctx, "session", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour), "admin.login", "successful login")
+	if !errors.Is(err, ErrAuditUnavailable) {
+		t.Fatalf("expected audit failure, got %v", err)
+	}
+	if _, err := s.GetSession(ctx, "session"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("session committed despite audit failure: %v", err)
+	}
+}
+
+func TestFinalizeManagedScanCommitsScanAndRuntimeTogether(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("finalize"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	scan := model.Scan{
+		ID: "finalize-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name,
+		StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(),
+		Snapshot: model.Snapshot{},
+	}
+	events, err := s.FinalizeManagedScan(ctx, &scan, record.ID, scan.ConfigHash, nil, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
+		state.BaselineScanID = current.ID
+		return []model.Event{{Type: "finalized", Job: current.Job, ScanID: current.ID, Message: "finalized", CreatedAt: now}}, nil
+	})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("finalization: %#v %v", events, err)
+	}
+	if _, err := s.GetScan(ctx, scan.ID); err != nil {
+		t.Fatalf("scan was not persisted: %v", err)
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.BaselineScanID != scan.ID {
+		t.Fatalf("runtime state was not persisted with scan: %#v", state)
+	}
+	history, err := s.ListJobEvents(ctx, record.ID, 10)
+	if err != nil || len(history) != 1 || history[0].JobID != record.ID {
+		t.Fatalf("event was not persisted with scan: %#v %v", history, err)
+	}
+}
+
+func TestFinalizeManagedScanRetainsSupersededScan(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("superseded-finalize"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldHash := record.Job.SecurityHash()
+	changed := record.Job
+	changed.Targets = []string{"127.0.0.2"}
+	if _, _, err := s.UpdateJob(ctx, record.ID, record.Revision, changed, true, false, true); err != nil {
+		t.Fatal(err)
+	}
+	scan := model.Scan{
+		ID: "superseded-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name,
+		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "success",
+		ConfigHash: oldHash, Snapshot: model.Snapshot{},
+	}
+	_, err = s.FinalizeManagedScan(ctx, &scan, record.ID, oldHash, nil, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
+		t.Fatal("superseded scan mutated runtime")
+		return nil, nil
+	})
+	if !errors.Is(err, ErrJobRevisionChanged) {
+		t.Fatalf("expected superseded revision error, got %v", err)
+	}
+	if _, err := s.GetScan(ctx, scan.ID); err != nil {
+		t.Fatalf("superseded scan was not retained: %v", err)
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.BaselineScanID != "" {
+		t.Fatalf("superseded scan mutated runtime state: %#v", state)
+	}
+}
+
+func TestFinalizeManagedScanSerializesWithBaselineReset(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("finalize-reset"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := model.Scan{
+		ID: "finalize-reset-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name,
+		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "success",
+		ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{},
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	finalizeDone := make(chan error, 1)
+	go func() {
+		_, finalizeErr := s.FinalizeManagedScan(ctx, &scan, record.ID, scan.ConfigHash, nil, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
+			close(entered)
+			<-release
+			state.BaselineScanID = current.ID
+			return nil, nil
+		})
+		finalizeDone <- finalizeErr
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("finalization callback did not start")
+	}
+	resetDone := make(chan error, 1)
+	go func() {
+		_, resetErr := s.ResetRuntime(ctx, record.ID, record.Job.Name)
+		resetDone <- resetErr
+	}()
+	select {
+	case err := <-resetDone:
+		t.Fatalf("baseline reset interleaved with finalization: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-finalizeDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-resetDone; err != nil {
+		t.Fatal(err)
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.BaselineScanID != "" {
+		t.Fatalf("reset did not apply after serialized finalization: %#v", state)
+	}
+	if _, err := s.GetScan(ctx, scan.ID); err != nil {
+		t.Fatalf("scan was not persisted: %v", err)
 	}
 }
 

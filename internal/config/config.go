@@ -57,7 +57,8 @@ type Web struct {
 	AuthKeyFile string `yaml:"auth_key_file"`
 }
 type Scheduler struct {
-	MaxConcurrent int `yaml:"max_concurrent_scans"`
+	MaxConcurrent int   `yaml:"max_concurrent_scans"`
+	MaxProbeCount int64 `yaml:"max_probe_count"`
 }
 type Notifications struct {
 	URLs              []string `yaml:"urls"`
@@ -78,6 +79,7 @@ type Job struct {
 	Timeout          Duration  `yaml:"timeout"`
 	Baseline         Baseline  `yaml:"baseline"`
 	Change           Change    `yaml:"change"`
+	AllowHighCost    bool      `yaml:"allow_high_cost,omitempty"`
 }
 type Protocol struct {
 	Ports            string `yaml:"ports"`
@@ -188,6 +190,9 @@ func applyDefaults(c *Config) {
 	if c.Scheduler.MaxConcurrent == 0 {
 		c.Scheduler.MaxConcurrent = 1
 	}
+	if c.Scheduler.MaxProbeCount == 0 {
+		c.Scheduler.MaxProbeCount = DefaultMaxProbeCount
+	}
 	if c.Web.Listen == "" {
 		c.Web.Listen = "127.0.0.1:8080"
 	}
@@ -272,7 +277,7 @@ func (c Config) Validate() error {
 			if err := validateTarget(target); err != nil {
 				return fmt.Errorf("job %s: %w", j.Name, err)
 			}
-			canonical := strings.ToLower(target)
+			canonical := CanonicalTarget(target)
 			if targets[canonical] {
 				return fmt.Errorf("job %s: duplicate target %q", j.Name, target)
 			}
@@ -314,6 +319,13 @@ func (c Config) ValidateDeployment() error {
 	if c.Scheduler.MaxConcurrent < 1 || c.Scheduler.MaxConcurrent > 64 {
 		return fmt.Errorf("max_concurrent_scans must be between 1 and 64")
 	}
+	probeBudget := c.Scheduler.MaxProbeCount
+	if probeBudget == 0 {
+		probeBudget = DefaultMaxProbeCount
+	}
+	if probeBudget < 1 || probeBudget > 100_000_000 {
+		return fmt.Errorf("max_probe_count must be between 1 and 100000000")
+	}
 	if err := validateWebListen(c.Web.Listen); err != nil {
 		return err
 	}
@@ -344,9 +356,176 @@ func NormalizeJob(j Job) Job {
 	j.Schedule = strings.TrimSpace(j.Schedule)
 	j.Timezone = strings.TrimSpace(j.Timezone)
 	for i := range j.Targets {
-		j.Targets[i] = strings.TrimSpace(j.Targets[i])
+		j.Targets[i] = CanonicalTarget(j.Targets[i])
 	}
 	return j
+}
+
+// CanonicalTarget gives semantically equivalent IP and network inputs one
+// stable identity. Host-bit CIDRs are masked, single-host CIDRs collapse to
+// their IP form, IPs use net.IP.String's compressed representation, and DNS
+// names are case-insensitive. The canonical form is persisted in web-managed
+// jobs so scanner output and baseline keys remain deterministic.
+func CanonicalTarget(target string) string {
+	target = strings.TrimSpace(target)
+	if ip := net.ParseIP(target); ip != nil {
+		return ip.String()
+	}
+	if _, network, err := net.ParseCIDR(target); err == nil {
+		if ones, bits := network.Mask.Size(); ones == bits {
+			return network.IP.String()
+		}
+		return network.String()
+	}
+	return strings.ToLower(target)
+}
+
+const (
+	// DefaultMaxProbeCount is a conservative product-level guard for one
+	// execution. Jobs may explicitly opt into a larger workload with
+	// allow_high_cost; the estimate is still shown before every run.
+	DefaultMaxProbeCount int64 = 5_000_000
+	workBatchSize        int64 = 128
+)
+
+// WorkEstimate describes the approximate cost of a job before DNS resolution
+// and scanning. DNS names are counted as one address (and marked unknown) so
+// the estimate is deterministic and useful in the editor without performing
+// network I/O. Service detection uses a two-probe multiplier.
+type WorkEstimate struct {
+	Hosts            int64 `json:"hosts"`
+	TCPPorts         int   `json:"tcp_ports"`
+	UDPPorts         int   `json:"udp_ports"`
+	Probes           int64 `json:"probes"`
+	NmapInvocations  int64 `json:"nmap_invocations"`
+	EstimatedSeconds int64 `json:"estimated_seconds"`
+	UnknownDNS       int   `json:"unknown_dns"`
+}
+
+// EstimateJobWork computes a bounded preflight estimate from validated job
+// intent. It never resolves DNS or expands every address, so it is safe to
+// call from API requests and before a scan lease is acquired.
+func EstimateJobWork(j Job) (WorkEstimate, error) {
+	j = NormalizeJob(j)
+	var estimate WorkEstimate
+	var ipv4, ipv6, unknown int64
+	for _, target := range j.Targets {
+		if ip := net.ParseIP(target); ip != nil {
+			estimate.Hosts = saturatingAdd(estimate.Hosts, 1)
+			if ip.To4() != nil {
+				ipv4 = saturatingAdd(ipv4, 1)
+			} else {
+				ipv6 = saturatingAdd(ipv6, 1)
+			}
+			continue
+		}
+		if _, network, err := net.ParseCIDR(target); err == nil {
+			bits := networkAddressCount(network)
+			estimate.Hosts = saturatingAdd(estimate.Hosts, bits)
+			if network.IP.To4() != nil {
+				ipv4 = saturatingAdd(ipv4, bits)
+			} else {
+				ipv6 = saturatingAdd(ipv6, bits)
+			}
+			continue
+		}
+		// DNS expansion depends on the resolver at run time. Count one logical
+		// address and account for both address families in process estimates.
+		estimate.Hosts = saturatingAdd(estimate.Hosts, 1)
+		unknown++
+	}
+	estimate.UnknownDNS = int(minInt64(unknown, int64(^uint(0)>>1)))
+	if j.TCP != nil {
+		ports, err := ParsePorts(j.TCP.Ports)
+		if err != nil {
+			return estimate, fmt.Errorf("tcp: %w", err)
+		}
+		estimate.TCPPorts = len(ports)
+	}
+	if j.UDP != nil {
+		ports, err := ParsePorts(j.UDP.Ports)
+		if err != nil {
+			return estimate, fmt.Errorf("udp: %w", err)
+		}
+		estimate.UDPPorts = len(ports)
+	}
+	var probes int64
+	if j.TCP != nil {
+		factor := int64(1)
+		if j.TCP.ServiceDetection {
+			factor = 2
+		}
+		probes = saturatingAdd(probes, saturatingMul(saturatingMul(estimate.Hosts, int64(estimate.TCPPorts)), factor))
+	}
+	if j.UDP != nil {
+		factor := int64(1)
+		if j.UDP.ServiceDetection {
+			factor = 2
+		}
+		probes = saturatingAdd(probes, saturatingMul(saturatingMul(estimate.Hosts, int64(estimate.UDPPorts)), factor))
+	}
+	estimate.Probes = probes
+	for _, addresses := range []int64{ipv4, ipv6} {
+		estimate.NmapInvocations = saturatingAdd(estimate.NmapInvocations, ceilDiv(addresses, workBatchSize))
+	}
+	if unknown > 0 {
+		estimate.NmapInvocations = saturatingAdd(estimate.NmapInvocations, saturatingMul(ceilDiv(unknown, workBatchSize), 2))
+	}
+	// This is intentionally a rough operator-facing estimate, not an SLA. It
+	// scales with probes and process launches while remaining stable across
+	// machines and provider timing.
+	estimate.EstimatedSeconds = maxInt64(1, saturatingAdd(ceilDiv(probes, 20_000), estimate.NmapInvocations))
+	return estimate, nil
+}
+
+func networkAddressCount(network *net.IPNet) int64 {
+	ones, bits := network.Mask.Size()
+	if ones < 0 || bits-ones >= 62 {
+		return int64(^uint64(0) >> 1)
+	}
+	return int64(1) << uint(bits-ones)
+}
+
+func saturatingAdd(a, b int64) int64 {
+	if b > 0 && a > int64(^uint64(0)>>1)-b {
+		return int64(^uint64(0) >> 1)
+	}
+	return a + b
+}
+
+func saturatingMul(a, b int64) int64 {
+	if a <= 0 || b <= 0 {
+		return 0
+	}
+	if a > int64(^uint64(0)>>1)/b {
+		return int64(^uint64(0) >> 1)
+	}
+	return a * b
+}
+
+func ceilDiv(a, b int64) int64 {
+	if a <= 0 {
+		return 0
+	}
+	result := a / b
+	if a%b != 0 {
+		result++
+	}
+	return result
+}
+
+func maxInt64(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func validateWebListen(listen string) error {

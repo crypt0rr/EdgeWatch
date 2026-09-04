@@ -47,6 +47,54 @@ func TestCreateJobWithEnabledPersistsPausedStateAtomically(t *testing.T) {
 	}
 }
 
+func TestAuditedMutationsRollBackWhenAuditInsertFails(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	base, err := s.CreateJob(ctx, testJob("audited-base"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`CREATE TRIGGER fail_audited_mutation BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateJobWithEnabledAndAudit(ctx, testJob("audited-new"), true, AuditEntry{Action: "job.created", Detail: "audited-new"}); !errors.Is(err, ErrAuditUnavailable) {
+		t.Fatalf("expected audited create failure, got %v", err)
+	}
+	if _, err := s.GetJobByName(ctx, "audited-new"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("job committed despite audit failure: %v", err)
+	}
+
+	updated := base.Job
+	updated.Name = "audited-renamed"
+	if _, _, _, err := s.UpdateJobWithEventsWithOutboxAndAudit(ctx, base.ID, base.Revision, updated, true, false, false, nil, AuditEntry{Action: "job.updated", Detail: base.ID}); !errors.Is(err, ErrAuditUnavailable) {
+		t.Fatalf("expected audited update failure, got %v", err)
+	}
+	current, err := s.GetJob(ctx, base.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Revision != base.Revision || current.Job.Name != base.Job.Name {
+		t.Fatalf("job changed despite audit failure: %#v", current)
+	}
+
+	if _, err := s.UpdateRuntime(ctx, base.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.BaselineScanID = "baseline"
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResetRuntimeWithOutboxAndAudit(ctx, base.ID, base.Job.Name, nil, AuditEntry{Action: "baseline.reset", Detail: base.ID}); !errors.Is(err, ErrAuditUnavailable) {
+		t.Fatalf("expected audited reset failure, got %v", err)
+	}
+	state, err := s.RuntimeState(ctx, base.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.BaselineScanID != "baseline" {
+		t.Fatalf("baseline reset committed despite audit failure: %#v", state)
+	}
+}
+
 func TestManagedJobRevisionAndScopeConfirmation(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

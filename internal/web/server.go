@@ -13,7 +13,6 @@ import (
 	"net"
 	"net/http"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -35,14 +34,15 @@ type Server struct {
 	Auth  *auth.Manager
 	Log   *slog.Logger
 
-	mu          sync.Mutex
-	subscribers map[chan sseMessage]struct{}
-	history     []sseMessage
-	nextEventID uint64
-	dropped     uint64
-	pendingTOTP map[string]pendingTOTP
-	testMu      sync.Mutex
-	testLast    map[string]time.Time
+	mu           sync.Mutex
+	subscribers  map[chan sseMessage]struct{}
+	history      []sseMessage
+	historyBytes int
+	nextEventID  uint64
+	dropped      uint64
+	pendingTOTP  map[string]pendingTOTP
+	testMu       sync.Mutex
+	testLast     map[string]time.Time
 }
 
 type sseMessage struct {
@@ -175,11 +175,15 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/auth/totp" && r.Method == http.MethodDelete:
 		s.totpDisable(w, r, session)
 	case path == "/auth/sessions" && r.Method == http.MethodDelete:
-		if err := s.Auth.Store.DeleteAllSessions(r.Context()); err != nil {
+		if err := s.Auth.Store.DeleteAllSessionsWithAudit(r.Context(), "admin.sessions_revoked", "all sessions revoked"); err != nil {
+			if errors.Is(err, store.ErrAuditUnavailable) {
+				s.auditFailure(err, "admin.sessions_revoked")
+				writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "sessions were not revoked because the security audit could not be recorded", nil)
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 			return
 		}
-		_ = s.Store.Audit(r.Context(), "admin.sessions_revoked", "all sessions revoked")
 		writeJSON(w, http.StatusNoContent, nil)
 	case path == "/status" && r.Method == http.MethodGet:
 		s.adminStatus(w, r)
@@ -258,6 +262,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		"notifications":             notificationStatus,
 		"retention":                 s.App.Config.Retention.Value().String(),
 		"max_concurrent_scans":      s.App.Config.Scheduler.MaxConcurrent,
+		"max_probe_count":           s.App.Config.Scheduler.MaxProbeCount,
 	}
 	if len(s.App.Config.Jobs) > 0 {
 		legacy := make([]string, 0, len(s.App.Config.Jobs))
@@ -281,6 +286,11 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Auth.SetupRequest(r.Context(), r, input.Token, input.Password); err != nil {
+		if errors.Is(err, store.ErrAuditUnavailable) {
+			s.auditFailure(err, "admin.setup")
+			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "setup could not be completed because the security audit is unavailable", nil)
+			return
+		}
 		writeError(w, http.StatusBadRequest, "setup_failed", err.Error(), nil)
 		return
 	}
@@ -299,6 +309,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	raw, admin, err := s.Auth.Login(r.Context(), r, input.Password, input.OTP, input.Recovery)
 	if err != nil {
+		if errors.Is(err, store.ErrAuditUnavailable) {
+			s.auditFailure(err, "admin.login")
+			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "login could not be completed because the security audit is unavailable", nil)
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "login_failed", err.Error(), nil)
 		return
 	}
@@ -308,9 +323,17 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	s.Auth.Logout(r.Context(), r)
-	_ = s.Store.Audit(r.Context(), "admin.logout", "session ended")
+	err := s.Auth.Logout(r.Context(), r)
 	auth.ClearSessionCookie(w)
+	if err != nil {
+		if errors.Is(err, store.ErrAuditUnavailable) {
+			s.auditFailure(err, "admin.logout")
+			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "logout could not be recorded by the security audit", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		return
+	}
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -343,6 +366,9 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 	}
 	admin.PasswordHash, admin.UpdatedAt = hash, time.Now().UTC()
 	if err := s.Store.SaveAdminSecurity(r.Context(), admin, nil, false, true, "admin.password_changed", "password changed"); err != nil {
+		if s.writeAuditUnavailable(w, err, "admin.password_changed") {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "save_failed", err.Error(), nil)
 		return
 	}
@@ -403,6 +429,9 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 	}
 	admin.TOTPSecret, admin.TOTPEnabled, admin.UpdatedAt = pending.Secret, true, time.Now().UTC()
 	if err := s.Store.SaveAdminSecurity(r.Context(), admin, hashes, true, true, "admin.totp_enabled", "TOTP enabled"); err != nil {
+		if s.writeAuditUnavailable(w, err, "admin.totp_enabled") {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
 		return
 	}
@@ -423,6 +452,9 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 	}
 	admin.TOTPEnabled, admin.TOTPSecret, admin.UpdatedAt = false, "", time.Now().UTC()
 	if err := s.Store.SaveAdminSecurity(r.Context(), admin, []string{}, true, true, "admin.totp_disabled", "TOTP disabled"); err != nil {
+		if s.writeAuditUnavailable(w, err, "admin.totp_disabled") {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
 		return
 	}
@@ -452,6 +484,7 @@ type jobPayload struct {
 	Archived            bool             `json:"archived,omitempty"`
 	Revision            int64            `json:"revision,omitempty"`
 	ConfirmRebaseline   bool             `json:"confirm_rebaseline,omitempty"`
+	AllowHighCost       bool             `json:"allow_high_cost,omitempty"`
 }
 
 type lifecyclePayload struct {
@@ -459,7 +492,7 @@ type lifecyclePayload struct {
 }
 
 func (p jobPayload) config() (config.Job, error) {
-	job := config.Job{Name: strings.TrimSpace(p.Name), Schedule: strings.TrimSpace(p.Schedule), Timezone: strings.TrimSpace(p.Timezone), RunOnStart: p.RunOnStart, AssumeAlive: p.AssumeAlive, Targets: p.Targets, MaxExpandedHosts: p.MaxExpandedHosts, Timing: p.Timing}
+	job := config.Job{Name: strings.TrimSpace(p.Name), Schedule: strings.TrimSpace(p.Schedule), Timezone: strings.TrimSpace(p.Timezone), RunOnStart: p.RunOnStart, AssumeAlive: p.AssumeAlive, Targets: p.Targets, MaxExpandedHosts: p.MaxExpandedHosts, Timing: p.Timing, AllowHighCost: p.AllowHighCost}
 	if p.Timeout != "" {
 		d, err := parseDuration(p.Timeout)
 		if err != nil {
@@ -487,11 +520,12 @@ func parseDuration(raw string) (time.Duration, error) {
 
 func jobJSON(record store.JobRecord, state model.JobState) map[string]any {
 	p := fromConfig(record.Job)
-	return map[string]any{"id": record.ID, "revision": record.Revision, "enabled": record.Enabled, "archived": record.Archived, "created_at": record.CreatedAt, "updated_at": record.UpdatedAt, "security_hash": record.Job.SecurityHash(), "job": p, "baseline": baselineJSON(state, record.Job.SecurityHash())}
+	estimate, _ := config.EstimateJobWork(record.Job)
+	return map[string]any{"id": record.ID, "revision": record.Revision, "enabled": record.Enabled, "archived": record.Archived, "created_at": record.CreatedAt, "updated_at": record.UpdatedAt, "security_hash": record.Job.SecurityHash(), "job": p, "baseline": baselineJSON(state, record.Job.SecurityHash()), "scan_estimate": estimate}
 }
 
 func fromConfig(j config.Job) jobPayload {
-	p := jobPayload{Name: j.Name, Schedule: j.Schedule, Timezone: j.Timezone, RunOnStart: j.RunOnStart, AssumeAlive: j.AssumeAlive, Targets: j.Targets, MaxExpandedHosts: j.MaxExpandedHosts, Timing: j.Timing, Timeout: j.Timeout.Value().String(), BaselineSamples: j.Baseline.Samples, ChangeConfirmations: j.Change.Confirmations}
+	p := jobPayload{Name: j.Name, Schedule: j.Schedule, Timezone: j.Timezone, RunOnStart: j.RunOnStart, AssumeAlive: j.AssumeAlive, Targets: j.Targets, MaxExpandedHosts: j.MaxExpandedHosts, Timing: j.Timing, Timeout: j.Timeout.Value().String(), BaselineSamples: j.Baseline.Samples, ChangeConfirmations: j.Change.Confirmations, AllowHighCost: j.AllowHighCost}
 	if j.TCP != nil {
 		p.TCP = &protocolPayload{Ports: j.TCP.Ports, Mode: j.TCP.Mode, ServiceDetection: j.TCP.ServiceDetection}
 	}
@@ -545,8 +579,11 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	if p.Enabled != nil {
 		enabled = *p.Enabled
 	}
-	record, err := s.Store.CreateJobWithEnabled(r.Context(), job, enabled)
+	record, err := s.Store.CreateJobWithEnabledAndAudit(r.Context(), job, enabled, store.AuditEntry{Action: "job.created", Detail: job.Name})
 	if err != nil {
+		if s.writeAuditUnavailable(w, err, "job.created") {
+			return
+		}
 		if isUnique(err) {
 			writeError(w, 409, "conflict", "job name is already in use", nil)
 		} else {
@@ -555,7 +592,6 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.App.RefreshSchedules()
-	_ = s.Store.Audit(r.Context(), "job.created", record.ID)
 	state, _ := s.Store.RuntimeState(r.Context(), record.ID)
 	s.broadcast(map[string]any{"type": "job.created", "job_id": record.ID})
 	writeJSON(w, http.StatusCreated, jobJSON(record, state))
@@ -706,7 +742,11 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 	}
-	record, changed, events, err := s.Store.UpdateJobWithEventsWithOutbox(r.Context(), id, p.Revision, job, enabled, current.Archived, p.ConfirmRebaseline, destinations)
+	audits := []store.AuditEntry{{Action: "job.updated", Detail: id}}
+	if scopeChanged {
+		audits = append([]store.AuditEntry{{Action: "job.rebaseline_requested", Detail: id}}, audits...)
+	}
+	record, changed, events, err := s.Store.UpdateJobWithEventsWithOutboxAndAudit(r.Context(), id, p.Revision, job, enabled, current.Archived, p.ConfirmRebaseline, destinations, audits...)
 	if errors.Is(err, store.ErrConflict) {
 		writeError(w, 409, "conflict", "job was modified; reload before saving", nil)
 		return
@@ -720,6 +760,9 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	if err != nil {
+		if s.writeAuditUnavailable(w, err, "job.updated") {
+			return
+		}
 		if isUnique(err) {
 			writeError(w, 409, "conflict", "job name is already in use", nil)
 		} else {
@@ -732,10 +775,8 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 			s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
 		}
 		s.App.WakeDelivery()
-		_ = s.Store.Audit(r.Context(), "job.rebaseline_requested", id)
 	}
 	s.App.RefreshSchedules()
-	_ = s.Store.Audit(r.Context(), "job.updated", id)
 	state, _ := s.Store.RuntimeState(r.Context(), id)
 	s.broadcast(map[string]any{"type": "job.updated", "job_id": id})
 	writeJSON(w, 200, jobJSON(record, state))
@@ -809,7 +850,11 @@ func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, id string, a
 		writeError(w, http.StatusBadRequest, "revision_required", "job revision is required", nil)
 		return
 	}
-	if err := s.Store.SetJobArchivedWithRevision(r.Context(), id, archive, *payload.Revision); err != nil {
+	action := map[bool]string{true: "job.archived", false: "job.restored"}[archive]
+	if err := s.Store.SetJobArchivedWithRevisionAndAudit(r.Context(), id, archive, *payload.Revision, store.AuditEntry{Action: action, Detail: id}); err != nil {
+		if s.writeAuditUnavailable(w, err, action) {
+			return
+		}
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, "conflict", "job was modified; reload before changing its lifecycle", nil)
 		} else if errors.Is(err, store.ErrNotFound) {
@@ -820,8 +865,7 @@ func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, id string, a
 		return
 	}
 	s.App.RefreshSchedules()
-	_ = s.Store.Audit(r.Context(), map[bool]string{true: "job.archived", false: "job.restored"}[archive], id)
-	s.broadcast(map[string]any{"type": map[bool]string{true: "job.archived", false: "job.restored"}[archive], "job_id": id})
+	s.broadcast(map[string]any{"type": action, "job_id": id})
 	writeJSON(w, 204, nil)
 }
 
@@ -845,7 +889,10 @@ func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusConflict, "archive_required", "archive the job before permanently deleting it", nil)
 		return
 	}
-	if err := s.Store.DeleteJob(r.Context(), id); err != nil {
+	if err := s.Store.DeleteJobWithAudit(r.Context(), id, store.AuditEntry{Action: "job.deleted", Detail: id}); err != nil {
+		if s.writeAuditUnavailable(w, err, "job.deleted") {
+			return
+		}
 		if errors.Is(err, store.ErrJobScanActive) {
 			writeError(w, http.StatusConflict, "job_active", err.Error(), nil)
 		} else {
@@ -854,7 +901,6 @@ func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 	s.App.RefreshSchedules()
-	_ = s.Store.Audit(r.Context(), "job.deleted", id)
 	s.broadcast(map[string]any{"type": "job.deleted", "job_id": id})
 	writeJSON(w, http.StatusNoContent, nil)
 }
@@ -868,7 +914,11 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, id string, en
 		writeError(w, http.StatusBadRequest, "revision_required", "job revision is required", nil)
 		return
 	}
-	if err := s.Store.SetJobEnabledWithRevision(r.Context(), id, enabled, *payload.Revision); err != nil {
+	action := map[bool]string{true: "job.resumed", false: "job.paused"}[enabled]
+	if err := s.Store.SetJobEnabledWithRevisionAndAudit(r.Context(), id, enabled, *payload.Revision, store.AuditEntry{Action: action, Detail: id}); err != nil {
+		if s.writeAuditUnavailable(w, err, action) {
+			return
+		}
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, "conflict", "job was modified; reload before changing its lifecycle", nil)
 		} else if errors.Is(err, store.ErrNotFound) {
@@ -879,7 +929,6 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, id string, en
 		return
 	}
 	s.App.RefreshSchedules()
-	_ = s.Store.Audit(r.Context(), map[bool]string{true: "job.resumed", false: "job.paused"}[enabled], id)
 	writeJSON(w, 204, nil)
 }
 
@@ -891,6 +940,15 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	if record.Archived {
 		writeError(w, 409, "archived", "archived jobs cannot run", nil)
+		return
+	}
+	if estimate, budgetErr := s.App.CheckScanWorkBudget(record.Job); budgetErr != nil {
+		var workErr *app.ScanWorkBudgetError
+		if errors.As(budgetErr, &workErr) {
+			writeError(w, http.StatusUnprocessableEntity, "scan_work_budget_exceeded", budgetErr.Error(), map[string]any{"estimate": workErr.Estimate, "budget": workErr.Budget, "allow_high_cost": record.Job.AllowHighCost})
+			return
+		}
+		writeError(w, http.StatusBadRequest, "scan_work_estimate_failed", budgetErr.Error(), map[string]any{"estimate": estimate})
 		return
 	}
 	if active, activeErr := s.Store.JobActive(r.Context(), id); activeErr != nil {
@@ -942,28 +1000,44 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID stri
 		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
 		return
 	}
-	scan, err := s.Store.GetScan(r.Context(), scanID)
-	if err != nil || scan.JobID != id {
+	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
+	if err != nil || summary.JobID != id {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
 	}
 	offset, limit := queryOffset(r), queryLimit(r)
-	value := map[string]any{"scan": scan, "changes": []model.Change{}, "changes_pagination": paginationJSON(offset, limit, 0), "comparison_source": "none"}
+	value := map[string]any{"scan": summary, "changes": []model.Change{}, "changes_pagination": paginationJSON(offset, limit, 0), "comparison_source": "none"}
 	var state model.JobState
 	var stateErr error
-	needsCurrentBaseline := scan.Status == "success" && scan.BaselineScanID == "" && scan.BaselineConfigHash == ""
+	needsCurrentBaseline := summary.Status == "success" && summary.BaselineScanID == "" && summary.BaselineConfigHash == ""
 	if needsCurrentBaseline {
 		state, stateErr = s.Store.RuntimeState(r.Context(), id)
 	}
-	if scan.Status == "success" {
-		if scan.BaselineScanID != "" || scan.BaselineConfigHash != "" {
-			value["changes"], value["changes_pagination"] = pageSlice(scan.Changes, offset, limit)
+	if summary.Status == "success" {
+		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
+			page, pageErr := s.Store.ListScanChangesPage(r.Context(), scanID, limit, offset)
+			if pageErr != nil {
+				writeError(w, http.StatusInternalServerError, "store", pageErr.Error(), nil)
+				return
+			}
+			items := page.Items
+			if items == nil {
+				items = []model.Change{}
+			}
+			value["changes"], value["changes_pagination"] = items, paginationJSON(offset, limit, page.Total)
 			value["comparison_source"] = "scan_time"
-			value["baseline_scan_id"] = scan.BaselineScanID
+			value["baseline_scan_id"] = summary.BaselineScanID
 		} else if stateErr == nil && state.Baseline != nil {
 			// Legacy scans from before the immutable comparison columns were
 			// introduced retain the previous current-baseline behavior.
-			changes := engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+			// Only this compatibility path needs the full snapshot. Managed scans
+			// always carry their immutable comparison in changes_json.
+			scan, scanErr := s.Store.GetScan(r.Context(), scanID)
+			if scanErr != nil {
+				writeError(w, http.StatusInternalServerError, "store", scanErr.Error(), nil)
+				return
+			}
+			changes := engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != summary.ConfigHash)
 			value["changes"], value["changes_pagination"] = pageSlice(changes, offset, limit)
 			value["comparison_source"] = "current_baseline_legacy"
 		}
@@ -977,14 +1051,22 @@ func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, id, scan
 		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
 		return
 	}
-	scan, err := s.Store.GetScan(r.Context(), scanID)
-	if err != nil || scan.JobID != id {
+	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
+	if err != nil || summary.JobID != id {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
 	}
 	offset, limit := queryOffset(r), queryLimit(r)
-	results, page := pageSlice(scan.Snapshot.Units, offset, limit)
-	writeJSON(w, http.StatusOK, map[string]any{"results": results, "pagination": page})
+	resultPage, err := s.Store.ListScanResultsPage(r.Context(), scanID, limit, offset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		return
+	}
+	results := resultPage.Items
+	if results == nil {
+		results = []model.Unit{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results, "pagination": paginationJSON(offset, limit, resultPage.Total)})
 }
 
 func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scanID string) {
@@ -992,28 +1074,45 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scan
 		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
 		return
 	}
-	scan, err := s.Store.GetScan(r.Context(), scanID)
-	if err != nil || scan.JobID != id {
+	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
+	if err != nil || summary.JobID != id {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
 	}
+	offset, limit := queryOffset(r), queryLimit(r)
 	changes := []model.Change{}
+	var total int
 	comparisonSource := "none"
-	if scan.Status == "success" {
-		if scan.BaselineScanID != "" || scan.BaselineConfigHash != "" {
-			changes = scan.Changes
+	if summary.Status == "success" {
+		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
+			page, pageErr := s.Store.ListScanChangesPage(r.Context(), scanID, limit, offset)
+			if pageErr != nil {
+				writeError(w, http.StatusInternalServerError, "store", pageErr.Error(), nil)
+				return
+			}
+			changes, total = page.Items, page.Total
 			comparisonSource = "scan_time"
-		} else if state, err := s.Store.RuntimeState(r.Context(), id); err == nil && state.Baseline != nil {
-			changes = engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+		} else if state, stateErr := s.Store.RuntimeState(r.Context(), id); stateErr == nil && state.Baseline != nil {
+			scan, scanErr := s.Store.GetScan(r.Context(), scanID)
+			if scanErr != nil {
+				writeError(w, http.StatusInternalServerError, "store", scanErr.Error(), nil)
+				return
+			}
+			changes = engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != summary.ConfigHash)
 			comparisonSource = "current_baseline_legacy"
-		} else if err != nil {
-			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		} else if stateErr != nil {
+			writeError(w, http.StatusInternalServerError, "store", stateErr.Error(), nil)
 			return
 		}
 	}
-	offset, limit := queryOffset(r), queryLimit(r)
-	items, page := pageSlice(changes, offset, limit)
-	writeJSON(w, http.StatusOK, map[string]any{"changes": items, "pagination": page, "comparison_source": comparisonSource, "baseline_scan_id": scan.BaselineScanID})
+	items, page := changes, paginationJSON(offset, limit, total)
+	if comparisonSource != "scan_time" {
+		items, page = pageSlice(changes, offset, limit)
+	}
+	if items == nil {
+		items = []model.Change{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"changes": items, "pagination": page, "comparison_source": comparisonSource, "baseline_scan_id": summary.BaselineScanID})
 }
 func (s *Server) listScans(w http.ResponseWriter, r *http.Request) {
 	limit := queryLimit(r)
@@ -1039,33 +1138,17 @@ func (s *Server) getScan(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request) {
-	jobs, err := s.Store.ListJobs(r.Context(), true)
+	offset, limit := queryOffset(r), queryLimit(r)
+	incidentPage, err := s.Store.ListIncidentsPage(r.Context(), limit, offset)
 	if err != nil {
-		writeError(w, 500, "store", err.Error(), nil)
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 		return
 	}
-	var out []map[string]any
-	for _, job := range jobs {
-		state, stateErr := s.Store.RuntimeState(r.Context(), job.ID)
-		if stateErr != nil {
-			writeError(w, 500, "store", stateErr.Error(), nil)
-			return
-		}
-		for _, incident := range state.Incidents {
-			out = append(out, map[string]any{"job_id": job.ID, "job": job.Job.Name, "incident": incident})
-		}
+	items := make([]map[string]any, 0, len(incidentPage.Items))
+	for _, item := range incidentPage.Items {
+		items = append(items, map[string]any{"job_id": item.JobID, "job": item.Job, "incident": item.Incident})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		left, _ := out[i]["incident"].(model.Incident)
-		right, _ := out[j]["incident"].(model.Incident)
-		if out[i]["job"].(string) != out[j]["job"].(string) {
-			return out[i]["job"].(string) < out[j]["job"].(string)
-		}
-		return left.Change.Key < right.Change.Key
-	})
-	offset, limit := queryOffset(r), queryLimit(r)
-	items, page := pageSlice(out, offset, limit)
-	writeJSON(w, 200, map[string]any{"incidents": items, "pagination": page})
+	writeJSON(w, http.StatusOK, map[string]any{"incidents": items, "pagination": paginationJSON(offset, limit, incidentPage.Total), "truncated": false})
 }
 
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, job string) {
@@ -1121,19 +1204,17 @@ func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, id string)
 		writeError(w, 404, "not_found", "job not found", nil)
 		return
 	}
-	state, err := s.Store.RuntimeState(r.Context(), id)
+	offset, limit := queryOffset(r), queryLimit(r)
+	incidentPage, err := s.Store.ListJobIncidentsPage(r.Context(), id, limit, offset)
 	if err != nil {
-		writeError(w, 500, "store", err.Error(), nil)
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 		return
 	}
-	items := make([]model.Incident, 0, len(state.Incidents))
-	for _, incident := range state.Incidents {
-		items = append(items, incident)
+	items := incidentPage.Items
+	if items == nil {
+		items = []model.Incident{}
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].Change.Key < items[j].Change.Key })
-	offset, limit := queryOffset(r), queryLimit(r)
-	pageItems, page := pageSlice(items, offset, limit)
-	writeJSON(w, 200, map[string]any{"job_id": id, "job": record.Job.Name, "incidents": pageItems, "pagination": page})
+	writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": record.Job.Name, "incidents": items, "pagination": paginationJSON(offset, limit, incidentPage.Total), "truncated": false})
 }
 
 // jobBaseline exposes the current comparison state without requiring clients
@@ -1183,13 +1264,15 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, id string
 		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 		return
 	}
-	events, err := s.Store.ResetRuntimeWithOutbox(r.Context(), id, record.Job.Name, destinations)
+	events, err := s.Store.ResetRuntimeWithOutboxAndAudit(r.Context(), id, record.Job.Name, destinations, store.AuditEntry{Action: "baseline.reset", Detail: id})
 	if err != nil {
+		if s.writeAuditUnavailable(w, err, "baseline.reset") {
+			return
+		}
 		writeError(w, 500, "store", err.Error(), nil)
 		return
 	}
 	s.App.WakeDelivery()
-	_ = s.Store.Audit(r.Context(), "baseline.reset", id)
 	for _, event := range events {
 		s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
 	}
@@ -1218,13 +1301,15 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 		return
 	}
-	events, err := s.Store.ApproveRuntimeWithOutbox(r.Context(), id, record.Job.Name, scan, destinations)
+	events, err := s.Store.ApproveRuntimeWithOutboxAndAudit(r.Context(), id, record.Job.Name, scan, destinations, store.AuditEntry{Action: "baseline.approved", Detail: id})
 	if err != nil {
+		if s.writeAuditUnavailable(w, err, "baseline.approved") {
+			return
+		}
 		writeError(w, 400, "approve_failed", err.Error(), nil)
 		return
 	}
 	s.App.WakeDelivery()
-	_ = s.Store.Audit(r.Context(), "baseline.approved", id)
 	for _, event := range events {
 		s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
 	}
@@ -1270,12 +1355,14 @@ func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "validation_failed", "notification URL is required", map[string]string{"url": "notification URL is required"})
 		return
 	}
-	view, err := s.App.Notifier.CreateManaged(r.Context(), input.Name, *input.URL, enabled)
+	view, err := s.App.Notifier.CreateManagedWithAudit(r.Context(), input.Name, *input.URL, enabled, store.AuditEntry{Action: "notifications.created", Detail: "managed notification created"})
 	if err != nil {
+		if s.writeAuditUnavailable(w, err, "notifications.created") {
+			return
+		}
 		s.writeNotificationError(w, err)
 		return
 	}
-	_ = s.Store.Audit(r.Context(), "notifications.created", "managed notification created: "+view.ID)
 	s.broadcast(map[string]any{"type": "notification.changed", "notification_id": view.ID})
 	writeJSON(w, http.StatusCreated, view)
 }
@@ -1295,11 +1382,13 @@ func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if err := s.App.Notifier.TestDestinationContext(r.Context(), id); err != nil {
-			_ = s.Store.Audit(r.Context(), "notifications.test_failed", "managed notification test failed: "+id)
+			s.auditOptional(r.Context(), "notifications.test_failed", "managed notification test failed: "+id)
 			s.writeNotificationError(w, err)
 			return
 		}
-		_ = s.Store.Audit(r.Context(), "notifications.test", "managed notification tested: "+id)
+		if !s.requireAudit(r.Context(), w, "notifications.test", "managed notification tested: "+id) {
+			return
+		}
 		writeJSON(w, http.StatusOK, map[string]any{"sent": 1})
 		return
 	}
@@ -1343,12 +1432,14 @@ func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationAuthError(w, err)
 		return
 	}
-	view, err := s.App.Notifier.UpdateManaged(r.Context(), id, *input.Revision, input.Name, input.URL, input.Enabled)
+	view, err := s.App.Notifier.UpdateManagedWithAudit(r.Context(), id, *input.Revision, input.Name, input.URL, input.Enabled, store.AuditEntry{Action: "notifications.updated", Detail: "managed notification updated: " + id})
 	if err != nil {
+		if s.writeAuditUnavailable(w, err, "notifications.updated") {
+			return
+		}
 		s.writeNotificationError(w, err)
 		return
 	}
-	_ = s.Store.Audit(r.Context(), "notifications.updated", "managed notification updated: "+id)
 	s.broadcast(map[string]any{"type": "notification.changed", "notification_id": id})
 	writeJSON(w, http.StatusOK, view)
 }
@@ -1371,11 +1462,13 @@ func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationAuthError(w, err)
 		return
 	}
-	if err := s.App.Notifier.DeleteManaged(r.Context(), id, *input.Revision); err != nil {
+	if err := s.App.Notifier.DeleteManagedWithAudit(r.Context(), id, *input.Revision, store.AuditEntry{Action: "notifications.deleted", Detail: "managed notification deleted: " + id}); err != nil {
+		if s.writeAuditUnavailable(w, err, "notifications.deleted") {
+			return
+		}
 		s.writeNotificationError(w, err)
 		return
 	}
-	_ = s.Store.Audit(r.Context(), "notifications.deleted", "managed notification deleted: "+id)
 	s.broadcast(map[string]any{"type": "notification.changed", "notification_id": id})
 	writeJSON(w, http.StatusNoContent, nil)
 }
@@ -1440,11 +1533,13 @@ func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request) {
 	if err := s.App.Notifier.TestContext(r.Context()); err != nil {
 		// Shoutrrr implementations may include destination details in an error;
 		// keep those credentials out of both API responses and logs.
-		_ = s.Store.Audit(r.Context(), "notifications.test_failed", "configured destination test failed")
+		s.auditOptional(r.Context(), "notifications.test_failed", "configured destination test failed")
 		writeError(w, http.StatusBadGateway, "notification_failed", "one or more notification destinations failed", nil)
 		return
 	}
-	_ = s.Store.Audit(r.Context(), "notifications.test", "configured destinations tested")
+	if !s.requireAudit(r.Context(), w, "notifications.test", "configured destinations tested") {
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"sent": s.App.Notifier.ActiveCount()})
 }
 
@@ -1495,7 +1590,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) broadcast(value map[string]any) {
-	payload, _ := json.Marshal(value)
+	payload := boundedSSEPayload(value)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.subscribers == nil {
@@ -1504,9 +1599,12 @@ func (s *Server) broadcast(value map[string]any) {
 	s.nextEventID++
 	message := sseMessage{id: s.nextEventID, payload: payload}
 	s.history = append(s.history, message)
+	s.historyBytes += len(payload)
 	const maxHistory = 256
-	if len(s.history) > maxHistory {
-		s.history = s.history[len(s.history)-maxHistory:]
+	const maxHistoryBytes = 1 << 20
+	for len(s.history) > maxHistory || s.historyBytes > maxHistoryBytes {
+		s.historyBytes -= len(s.history[0].payload)
+		s.history = s.history[1:]
 	}
 	for ch := range s.subscribers {
 		select {
@@ -1520,7 +1618,7 @@ func (s *Server) broadcast(value map[string]any) {
 			case <-ch:
 			default:
 			}
-			refresh, _ := json.Marshal(map[string]any{"type": "refresh_required", "after": message.id - 1})
+			refresh := boundedSSEPayload(map[string]any{"type": "refresh_required", "after": message.id - 1})
 			select {
 			case ch <- sseMessage{id: message.id, payload: refresh}:
 			default:
@@ -1528,6 +1626,23 @@ func (s *Server) broadcast(value map[string]any) {
 			}
 		}
 	}
+}
+
+const maxSSEPayloadBytes = 64 << 10
+
+func boundedSSEPayload(value map[string]any) []byte {
+	payload, err := json.Marshal(value)
+	if err == nil && len(payload) <= maxSSEPayloadBytes {
+		return payload
+	}
+	// Live updates are invalidation hints, not a second results API. A bounded
+	// refresh marker keeps oversized messages from exhausting subscriber
+	// buffers while the browser can fetch the durable, paginated resource.
+	marker, markerErr := json.Marshal(map[string]any{"type": "refresh_required", "reason": "live_update_too_large"})
+	if markerErr != nil {
+		return []byte(`{"type":"refresh_required"}`)
+	}
+	return marker
 }
 
 func (s *Server) replayLocked(lastID uint64) []sseMessage {
@@ -1671,6 +1786,38 @@ func writeValidationError(w http.ResponseWriter, err error) {
 	}
 	writeError(w, http.StatusBadRequest, "validation_failed", message, details)
 }
+
+// auditFailure logs only the action and storage error; callers must not echo
+// credential-bearing details when an audit insert fails. Sensitive handlers
+// use this before writing their success response and fail closed.
+func (s *Server) auditFailure(err error, action string) {
+	s.Log.Error("security audit write failed", "action", action, "error", err)
+}
+
+func (s *Server) auditOptional(ctx context.Context, action, detail string) {
+	if err := s.Store.Audit(ctx, action, detail); err != nil {
+		s.auditFailure(err, action)
+	}
+}
+
+func (s *Server) writeAuditUnavailable(w http.ResponseWriter, err error, action string) bool {
+	if !errors.Is(err, store.ErrAuditUnavailable) {
+		return false
+	}
+	s.auditFailure(err, action)
+	writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "the action was not committed because the security audit could not be recorded", nil)
+	return true
+}
+
+func (s *Server) requireAudit(ctx context.Context, w http.ResponseWriter, action, detail string) bool {
+	if err := s.Store.Audit(ctx, action, detail); err != nil {
+		s.auditFailure(err, action)
+		writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "the action completed but its security audit record could not be written; verify the state before retrying", nil)
+		return false
+	}
+	return true
+}
+
 func writeError(w http.ResponseWriter, status int, code, message string, details any) {
 	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message, "details": details}})
 }

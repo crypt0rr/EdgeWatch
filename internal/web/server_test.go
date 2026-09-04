@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -281,6 +282,20 @@ func TestSSEHistoryAssignsIDsAndSupportsReplay(t *testing.T) {
 	}
 }
 
+func TestSSEPayloadAndHistoryAreByteBounded(t *testing.T) {
+	s := &Server{subscribers: map[chan sseMessage]struct{}{}}
+	large := strings.Repeat("x", maxSSEPayloadBytes+1024)
+	s.broadcast(map[string]any{"type": "scan.completed", "message": large})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.history) != 1 || len(s.history[0].payload) > maxSSEPayloadBytes {
+		t.Fatalf("oversized SSE payload was retained: history=%d bytes=%d", len(s.history), len(s.history[0].payload))
+	}
+	if !strings.Contains(string(s.history[0].payload), "refresh_required") {
+		t.Fatalf("oversized SSE payload was not replaced with refresh marker: %s", s.history[0].payload)
+	}
+}
+
 func TestAPIRequiresSessionCSRFAndRejectsUnvalidatedOptions(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
@@ -356,6 +371,61 @@ func TestAPIRequiresSessionCSRFAndRejectsUnvalidatedOptions(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest || failure["error"].(map[string]any)["code"] != "invalid_json" {
 		t.Fatalf("arbitrary scanner option was accepted: status=%d body=%#v", resp.StatusCode, failure)
+	}
+}
+
+func TestSensitiveJobMutationFailsClosedWhenAuditUnavailable(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	hash, err := auth.PasswordHash("correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAdmin(ctx, store.Admin{Username: "admin", PasswordHash: hash, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := app.New(cfg, s, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	loginRequest.RemoteAddr = "127.0.0.1:1234"
+	raw, _, err := auth.NewManager(s).Login(ctx, loginRequest, "correct horse battery staple", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := s.GetSession(ctx, digest(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`CREATE TRIGGER fail_job_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	h := httptest.NewServer(NewServer(a, s, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
+	defer h.Close()
+	req, err := http.NewRequest(http.MethodPost, h.URL+"/api/v1/jobs", strings.NewReader(`{"name":"audit-blocked","schedule":"0 * * * *","timezone":"UTC","targets":["127.0.0.1"],"tcp":{"ports":"1","mode":"connect"},"timeout":"1m","timing":"balanced","baseline_samples":1,"change_confirmations":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", session.CSRFToken)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("audit failure returned status %d", resp.StatusCode)
+	}
+	if _, err := s.GetJobByName(ctx, "audit-blocked"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("job committed despite audit failure: %v", err)
 	}
 }
 
@@ -504,6 +574,7 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 	}
 	resp = request(http.MethodGet, "/api/v1/jobs/"+created.ID+"/scans/"+changedScan.ID, "", "")
 	var detail struct {
+		Scan             map[string]any `json:"scan"`
 		Changes          []model.Change `json:"changes"`
 		ComparisonSource string         `json:"comparison_source"`
 	}
@@ -514,6 +585,9 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 	resp.Body.Close()
 	if detail.ComparisonSource != "scan_time" || len(detail.Changes) != len(changedScan.Changes) {
 		t.Fatalf("historical scan comparison changed after reset: source=%q changes=%d want=%d", detail.ComparisonSource, len(detail.Changes), len(changedScan.Changes))
+	}
+	if _, present := detail.Scan["snapshot"]; present {
+		t.Fatal("scan detail eagerly returned the full snapshot")
 	}
 }
 

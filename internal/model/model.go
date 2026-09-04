@@ -61,27 +61,32 @@ type Scan struct {
 // snapshots remain available through the scan detail/results endpoints and are
 // intentionally not loaded for paginated list responses.
 type ScanSummary struct {
-	ID          string    `json:"id"`
-	JobID       string    `json:"job_id,omitempty"`
-	Job         string    `json:"job"`
-	JobRevision int64     `json:"job_revision,omitempty"`
-	StartedAt   time.Time `json:"started_at"`
-	FinishedAt  time.Time `json:"finished_at"`
-	Status      string    `json:"status"`
-	Error       string    `json:"error,omitempty"`
-	NmapVersion string    `json:"nmap_version,omitempty"`
-	ConfigHash  string    `json:"config_hash"`
+	ID                 string    `json:"id"`
+	JobID              string    `json:"job_id,omitempty"`
+	Job                string    `json:"job"`
+	JobRevision        int64     `json:"job_revision,omitempty"`
+	StartedAt          time.Time `json:"started_at"`
+	FinishedAt         time.Time `json:"finished_at"`
+	Status             string    `json:"status"`
+	Error              string    `json:"error,omitempty"`
+	NmapVersion        string    `json:"nmap_version,omitempty"`
+	ConfigHash         string    `json:"config_hash"`
+	BaselineScanID     string    `json:"baseline_scan_id,omitempty"`
+	BaselineConfigHash string    `json:"baseline_config_hash,omitempty"`
 }
 
 // ActiveScan describes a scan that has acquired its lease and is currently
 // executing. It intentionally contains metadata only; the result is not
 // persisted until the scanner reaches a terminal state.
 type ActiveScan struct {
-	ID          string    `json:"id"`
-	JobID       string    `json:"job_id,omitempty"`
-	Job         string    `json:"job"`
-	JobRevision int64     `json:"job_revision,omitempty"`
-	StartedAt   time.Time `json:"started_at"`
+	ID               string    `json:"id"`
+	JobID            string    `json:"job_id,omitempty"`
+	Job              string    `json:"job"`
+	JobRevision      int64     `json:"job_revision,omitempty"`
+	StartedAt        time.Time `json:"started_at"`
+	EstimatedProbes  int64     `json:"estimated_probes,omitempty"`
+	NmapInvocations  int64     `json:"nmap_invocations,omitempty"`
+	EstimatedSeconds int64     `json:"estimated_seconds,omitempty"`
 }
 
 type Change struct {
@@ -128,13 +133,72 @@ type JobState struct {
 }
 
 type Event struct {
-	Type      string    `json:"type"`
-	JobID     string    `json:"job_id,omitempty"`
-	Job       string    `json:"job"`
-	ScanID    string    `json:"scan_id,omitempty"`
-	Message   string    `json:"message"`
-	Changes   []Change  `json:"changes,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Type             string    `json:"type"`
+	JobID            string    `json:"job_id,omitempty"`
+	Job              string    `json:"job"`
+	ScanID           string    `json:"scan_id,omitempty"`
+	Message          string    `json:"message"`
+	Changes          []Change  `json:"changes,omitempty"`
+	ChangesCount     int       `json:"changes_count,omitempty"`
+	ChangesTruncated bool      `json:"changes_truncated,omitempty"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+// EventPayloadLimit is the maximum serialized size of a durable event or
+// notification outbox payload. Change details remain available on the scan
+// history endpoint; oversized alert events carry a bounded summary instead.
+const EventPayloadLimit = 64 << 10
+
+// MarshalBoundedEvent serializes an event under the product payload ceiling.
+// If its change list or message is too large, it replaces the detail with an
+// explicit summary so callers never write an unbounded event/outbox row.
+func MarshalBoundedEvent(event Event, max int) (Event, []byte, error) {
+	if max <= 0 {
+		max = EventPayloadLimit
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return event, nil, err
+	}
+	if len(payload) <= max {
+		return event, payload, nil
+	}
+	if len(event.Changes) > 0 {
+		event.ChangesCount = len(event.Changes)
+		event.Changes = nil
+		event.ChangesTruncated = true
+	}
+	if event.Message == "" {
+		event.Message = "Event details exceeded the payload limit"
+	} else {
+		event.Message += " (details truncated)"
+	}
+	payload, err = json.Marshal(event)
+	if err != nil {
+		return event, nil, err
+	}
+	if len(payload) <= max {
+		return event, payload, nil
+	}
+	// A caller could supply an arbitrarily large message even without changes.
+	// Trim it by runes so the fallback remains valid UTF-8 and retain enough
+	// metadata to diagnose the overflow.
+	runes := []rune(event.Message)
+	for len(payload) > max && len(runes) > 0 {
+		runes = runes[:len(runes)-1]
+		event.Message = string(runes)
+		payload, err = json.Marshal(event)
+		if err != nil {
+			return event, nil, err
+		}
+	}
+	if len(payload) <= max {
+		return event, payload, nil
+	}
+	// The fixed metadata fields are comfortably below the default ceiling. If
+	// a caller passes an unusually tiny max, return the marshal error rather
+	// than silently exceeding the requested contract.
+	return event, nil, fmt.Errorf("event payload exceeds %d bytes", max)
 }
 
 func (s *Snapshot) Normalize() {

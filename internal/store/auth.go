@@ -4,9 +4,24 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
+
+// ErrAuditUnavailable indicates that a security-sensitive mutation could not
+// record its required audit row. Callers should fail closed (or report the
+// operation as degraded) rather than claiming a successful audited action.
+var ErrAuditUnavailable = errors.New("security audit unavailable")
+
+// AuditEntry describes a security event that should be committed together
+// with the state mutation that caused it. Keeping this small value type in the
+// store package lets job, baseline, and notification transactions share the
+// same fail-closed audit boundary without exposing database handles to callers.
+type AuditEntry struct {
+	Action string
+	Detail string
+}
 
 type Admin struct {
 	Username     string
@@ -117,7 +132,7 @@ func (s *Store) SaveAdminSecurity(ctx context.Context, a Admin, recoveryCodes []
 		}
 	}
 	if auditAction != "" {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO security_audit(action,detail,created_at) VALUES(?,?,?)`, auditAction, auditDetail, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		if err := insertAuditExec(ctx, tx, auditAction, auditDetail, time.Now().UTC()); err != nil {
 			return err
 		}
 	}
@@ -189,7 +204,7 @@ func (s *Store) CompleteSetup(ctx context.Context, tokenHash string, admin Admin
 	if _, err = tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1`, now.UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO security_audit(action,detail,created_at) VALUES(?,?,?)`, "admin.setup", "administrator created", now.UTC().Format(time.RFC3339Nano)); err != nil {
+	if err = insertAuditExec(ctx, tx, "admin.setup", "administrator created", now.UTC()); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -222,6 +237,25 @@ func (s *Store) CreateSession(ctx context.Context, idHash, csrf string, created,
 	return err
 }
 
+// CreateSessionWithAudit creates a login session and its audit record in one
+// transaction, so a successful login can never be returned without evidence.
+func (s *Store) CreateSessionWithAudit(ctx context.Context, idHash, csrf string, created, expires time.Time, action, detail string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?)`, idHash, created.UTC().Format(time.RFC3339Nano), created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
+		return err
+	}
+	if action != "" {
+		if err := insertAuditExec(ctx, tx, action, detail, created.UTC()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) GetSession(ctx context.Context, idHash string) (Session, error) {
 	var v Session
 	var created, lastSeen, expires string
@@ -246,9 +280,54 @@ func (s *Store) DeleteSession(ctx context.Context, idHash string) error {
 	return err
 }
 
+func (s *Store) DeleteSessionWithAudit(ctx context.Context, idHash, action, detail string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash=?`, idHash); err != nil {
+		return err
+	}
+	if action != "" {
+		if err := insertAuditExec(ctx, tx, action, detail, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) DeleteAllSessions(ctx context.Context) error {
 	_, err := s.DB.ExecContext(ctx, `DELETE FROM sessions`)
 	return err
+}
+
+func (s *Store) DeleteAllSessionsWithAudit(ctx context.Context, action, detail string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions`); err != nil {
+		return err
+	}
+	if action != "" {
+		if err := insertAuditExec(ctx, tx, action, detail, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// DeleteExpiredSessions removes sessions past their absolute expiry. It is
+// safe to run during maintenance because the predicate cannot match a newly
+// touched active session.
+func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (s *Store) SaveRecoveryCodes(ctx context.Context, hashes []string) error {
@@ -278,8 +357,26 @@ func (s *Store) ConsumeRecoveryCode(ctx context.Context, hash string, now time.T
 }
 
 func (s *Store) Audit(ctx context.Context, action, detail string) error {
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO security_audit(action,detail,created_at) VALUES(?,?,?)`, action, detail, time.Now().UTC().Format(time.RFC3339Nano))
-	return err
+	return insertAuditExec(ctx, s.DB, action, detail, time.Now().UTC())
+}
+
+func insertAuditExec(ctx context.Context, execer contextExecer, action, detail string, now time.Time) error {
+	if _, err := execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,created_at) VALUES(?,?,?)`, action, detail, now.UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
+	}
+	return nil
+}
+
+func insertAuditEntries(ctx context.Context, execer contextExecer, entries []AuditEntry, now time.Time) error {
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.Action) == "" {
+			continue
+		}
+		if err := insertAuditExec(ctx, execer, entry.Action, entry.Detail, now); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) RecoveryCodeCount(ctx context.Context) (int, error) {

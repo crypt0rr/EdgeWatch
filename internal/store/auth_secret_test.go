@@ -55,6 +55,14 @@ func TestTOTPSecretIsEncryptedAndReloadable(t *testing.T) {
 	}
 }
 
+func TestDefaultAuthKeyPathRecognizesSQLiteMemoryURIs(t *testing.T) {
+	for _, database := range []string{":memory:", "file::memory:?cache=shared", "file:shared?mode=memory&cache=shared"} {
+		if path := defaultAuthKeyPath(database); path != "" {
+			t.Fatalf("memory database %q unexpectedly selected an auth key path %q", database, path)
+		}
+	}
+}
+
 func TestTOTPSecretKeyLossFailsClosedAndPreservesCiphertext(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

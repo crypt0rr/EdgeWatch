@@ -21,6 +21,7 @@ import {
   restoreJob,
   runJob,
   scanDetail,
+  scanResults,
 } from '../api'
 import { Pagination } from '../components/Pagination'
 
@@ -31,6 +32,8 @@ export function JobDetail() {
   const [selectedScan, setSelectedScan] = useState('')
   const [scanOffset, setScanOffset] = useState(0)
   const [changeOffset, setChangeOffset] = useState(0)
+  const [resultsOffset, setResultsOffset] = useState(0)
+  const [showResults, setShowResults] = useState(false)
   const [actionError, setActionError] = useState('')
   const [actionBusy, setActionBusy] = useState('')
   const job = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id) })
@@ -44,6 +47,11 @@ export function JobDetail() {
     queryKey: ['scan-detail', id, selectedScan, changeOffset],
     queryFn: () => scanDetail(id, selectedScan, changeOffset),
     enabled: !!selectedScan,
+  })
+  const results = useQuery({
+    queryKey: ['scan-results', id, selectedScan, resultsOffset],
+    queryFn: () => scanResults(id, selectedScan, resultsOffset),
+    enabled: !!selectedScan && showResults,
   })
 
   if (job.isLoading) {
@@ -196,6 +204,7 @@ export function JobDetail() {
           <span className="muted">{scopeText(value)}</span>
         </div>
       </div>
+      {value.scan_estimate && <div className="notice" role="status">Estimated per run: {value.scan_estimate.probes.toLocaleString()} probes across {value.scan_estimate.hosts.toLocaleString()} hosts ({value.scan_estimate.nmap_invocations.toLocaleString()} Nmap process{value.scan_estimate.nmap_invocations === 1 ? '' : 'es'}, roughly {formatEstimateDuration(value.scan_estimate.estimated_seconds)}).{value.scan_estimate.unknown_dns ? ` DNS expansion may increase this estimate for ${value.scan_estimate.unknown_dns} name${value.scan_estimate.unknown_dns === 1 ? '' : 's'}.` : ''}</div>}
 
       <div className="detail-columns">
         <div className="panel">
@@ -212,7 +221,7 @@ export function JobDetail() {
                 <button
                   className={selectedScan === scan.id ? 'scan-row selected' : 'scan-row'}
                   key={scan.id}
-                  onClick={() => { setSelectedScan(scan.id); setChangeOffset(0) }}
+                  onClick={() => { setSelectedScan(scan.id); setChangeOffset(0); setResultsOffset(0); setShowResults(false) }}
                 >
                   <span className={scan.status === 'success' ? 'activity-dot success' : 'activity-dot fail'} />
                   <div>
@@ -237,7 +246,10 @@ export function JobDetail() {
                   <h3>Scan diff</h3>
                   <p className="muted">{detail.data.changes_pagination?.total ?? detail.data.changes?.length ?? 0} {detail.data.comparison_source === 'scan_time' ? 'changes recorded at scan time.' : 'changes against the current baseline.'}</p>
                 </div>
-                <button className="icon-button" onClick={() => setSelectedScan('')} aria-label="Close scan detail">×</button>
+                <div className="heading-actions">
+                  {detail.data.scan.status === 'success' && <button className="button ghost" onClick={() => { setShowResults((shown) => !shown); setResultsOffset(0) }}>{showResults ? 'Hide results' : 'View results'}</button>}
+                  <button className="icon-button" onClick={() => setSelectedScan('')} aria-label="Close scan detail">×</button>
+                </div>
               </div>
               {selectedScanCanBeBaseline && (
                 <div className="baseline-approval">
@@ -257,6 +269,11 @@ export function JobDetail() {
                 </div>
               ) : <div className="inline-empty">No changes detected.</div>}
               <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} />
+              {showResults && <div className="scan-results">
+                <div className="panel-heading"><div><h3>Snapshot results</h3><p className="muted">Loaded on demand, one host unit per page.</p></div></div>
+                {results.isLoading ? <div className="skeleton-list" /> : results.error ? <div className="form-error" role="alert">Could not load scan results.</div> : results.data?.results.length ? <div className="result-list">{results.data.results.map((unit) => <div className="result-row" key={`${unit.target}-${unit.protocol}`}><strong>{unit.target}</strong><span className="pill blue">{unit.protocol.toUpperCase()}</span><span className="muted">{unit.ports?.length ?? 0} open or open|filtered ports</span></div>)}</div> : <div className="inline-empty">No host units in this scan.</div>}
+                <Pagination page={results.data?.pagination} onChange={setResultsOffset} />
+              </div>}
             </div>
           )}
         </div>
@@ -299,4 +316,11 @@ export function JobDetail() {
 
 function scopeText(value: { job: { tcp?: { ports: string }; udp?: { ports: string } } }) {
   return [value.job.tcp && value.job.tcp.ports, value.job.udp && value.job.udp.ports].filter(Boolean).join(' · ')
+}
+
+function formatEstimateDuration(seconds: number) {
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.ceil(seconds / 60)
+  if (minutes < 60) return `${minutes}m`
+  return `${Math.ceil(minutes / 60)}h`
 }

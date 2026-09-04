@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -89,5 +90,39 @@ func TestScanProtocolFailsWhenDiscoveryOmitsHost(t *testing.T) {
 	_, err := n.scanProtocol(context.Background(), target, "tcp", config.Protocol{Ports: "22", Mode: "syn"}, "balanced", false)
 	if err == nil || !strings.Contains(err.Error(), "omitted expected address") {
 		t.Fatalf("expected safe discovery failure, got %v", err)
+	}
+}
+
+func TestScanBatchesExpandedCIDRTargets(t *testing.T) {
+	dir := t.TempDir()
+	nmapPath := filepath.Join(dir, "nmap")
+	countPath := filepath.Join(dir, "invocations")
+	var hosts strings.Builder
+	for i := 0; i < 4; i++ {
+		fmt.Fprintf(&hosts, `<host><status state="up"/><address addr="192.0.2.%d" addrtype="ipv4"/></host>`, i)
+	}
+	output := `<?xml version="1.0"?><nmaprun>` + hosts.String() + `<runstats><finished exit="success"/></runstats></nmaprun>`
+	script := "#!/bin/sh\nprintf x >> '" + countPath + "'\nprintf '%s' '" + output + "'\n"
+	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := New(nmapPath)
+	job := config.NormalizeJob(config.Job{
+		Name: "cidr", Targets: []string{"192.0.2.0/30"}, MaxExpandedHosts: 4,
+		TCP: &config.Protocol{Ports: "22", Mode: "syn"}, Timing: "balanced",
+	})
+	snapshot, err := n.Scan(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invocations, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(invocations) != 1 {
+		t.Fatalf("nmap invocations = %d, want one batch: %q", len(invocations), invocations)
+	}
+	if len(snapshot.Units) != 4 {
+		t.Fatalf("snapshot units = %d, want four expanded hosts: %#v", len(snapshot.Units), snapshot.Units)
 	}
 }

@@ -180,16 +180,20 @@ func adminAction(ctx context.Context, action string, s *store.Store, passwordFil
 }
 
 func runDaemon(ctx context.Context, application *app.App, listen string, s *store.Store, logger *slog.Logger) error {
+	runCtx, _ := application.BeginRun(ctx)
 	server := web.NewServer(application, s, logger)
 	errCh := make(chan error, 2)
-	go func() { errCh <- application.Daemon(ctx) }()
-	go func() { errCh <- server.ListenAndServe(ctx, listen) }()
-	select {
-	case err := <-errCh:
-		return err
-	case <-ctx.Done():
-		return nil
+	go func() { errCh <- application.Daemon(runCtx) }()
+	go func() { errCh <- server.ListenAndServe(runCtx, listen) }()
+	first := <-errCh
+	// One component returning (including an HTTP bind or daemon lease error)
+	// must stop the other component before the database is closed by run().
+	application.StopRun()
+	second := <-errCh
+	if first != nil {
+		return first
 	}
+	return second
 }
 func printValue(format string, v any) error {
 	if format == "json" {

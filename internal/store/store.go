@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 3
+const schemaVersion = 4
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -174,6 +174,11 @@ func migrate(db *sql.DB) error {
 );`,
 			"CREATE INDEX IF NOT EXISTS managed_notifications_enabled ON managed_notifications(enabled, name)",
 		},
+		4: {
+			"ALTER TABLE outbox ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE outbox ADD COLUMN claim_until TEXT NOT NULL DEFAULT ''",
+			"CREATE INDEX IF NOT EXISTS outbox_claim ON outbox(sent_at, next_at, claim_until)",
+		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
 		statements, ok := migrations[next]
@@ -253,6 +258,14 @@ func scanTime(raw string) time.Time {
 }
 
 func (s *Store) CreateJob(ctx context.Context, job config.Job) (JobRecord, error) {
+	return s.CreateJobWithEnabled(ctx, job, true)
+}
+
+// CreateJobWithEnabled creates the initial job definition and lifecycle state
+// in one transaction. Keeping a paused job disabled from its first commit
+// prevents a crash window where it could be scheduled before the follow-up
+// lifecycle update succeeds.
+func (s *Store) CreateJobWithEnabled(ctx context.Context, job config.Job, enabled bool) (JobRecord, error) {
 	job = config.NormalizeJob(job)
 	if err := config.ValidateJob(job); err != nil {
 		return JobRecord{}, err
@@ -269,7 +282,7 @@ func (s *Store) CreateJob(ctx context.Context, job config.Job) (JobRecord, error
 		return JobRecord{}, err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?,?,1,0,1,?,?)`, id, job.Name, raw, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?,?, ?,0,1,?,?)`, id, job.Name, raw, boolInt(enabled), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return JobRecord{}, err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO job_revisions(job_id,revision,definition_json,security_hash,created_at) VALUES(?,?,?,?,?)`, id, 1, raw, hash, now.Format(time.RFC3339Nano)); err != nil {
@@ -278,7 +291,7 @@ func (s *Store) CreateJob(ctx context.Context, job config.Job) (JobRecord, error
 	if err = tx.Commit(); err != nil {
 		return JobRecord{}, err
 	}
-	return JobRecord{ID: id, Job: job, Enabled: true, Revision: 1, CreatedAt: now, UpdatedAt: now}, nil
+	return JobRecord{ID: id, Job: job, Enabled: enabled, Revision: 1, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func (s *Store) GetJob(ctx context.Context, id string) (JobRecord, error) {
@@ -1131,11 +1144,29 @@ type Delivery struct {
 	Destination string
 	Event       model.Event
 	Attempts    int
+	ClaimToken  string
 }
 
 func (s *Store) DueDeliveries(ctx context.Context, limit int) ([]Delivery, error) {
+	return s.ClaimDueDeliveries(ctx, limit, uuid.NewString())
+}
+
+var ErrDeliveryClaimLost = errors.New("notification delivery claim was lost")
+
+const deliveryClaimLease = 30 * time.Minute
+
+// ClaimDueDeliveries atomically leases due outbox rows to one drain owner.
+// Expired claims can be recovered by a later process, while active claims are
+// invisible to concurrent drains until the owner records a result.
+func (s *Store) ClaimDueDeliveries(ctx context.Context, limit int, owner string) ([]Delivery, error) {
+	if limit < 1 {
+		return nil, nil
+	}
+	if owner == "" {
+		owner = uuid.NewString()
+	}
 	now := time.Now().UTC()
-	rows, err := s.DB.QueryContext(ctx, `UPDATE outbox SET next_at=? WHERE id IN (SELECT id FROM outbox WHERE sent_at IS NULL AND attempts < 3 AND next_at <= ? ORDER BY id LIMIT ?) RETURNING id,destination,payload_json,attempts`, now.Add(time.Minute).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), limit)
+	rows, err := s.DB.QueryContext(ctx, `UPDATE outbox SET claim_token=?,claim_until=? WHERE id IN (SELECT id FROM outbox WHERE sent_at IS NULL AND attempts < 3 AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?) ORDER BY id LIMIT ?) RETURNING id,destination,payload_json,attempts,claim_token`, owner, now.Add(deliveryClaimLease).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1144,7 +1175,7 @@ func (s *Store) DueDeliveries(ctx context.Context, limit int) ([]Delivery, error
 	for rows.Next() {
 		var d Delivery
 		var b []byte
-		if err := rows.Scan(&d.ID, &d.Destination, &b, &d.Attempts); err != nil {
+		if err := rows.Scan(&d.ID, &d.Destination, &b, &d.Attempts, &d.ClaimToken); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(b, &d.Event); err != nil {
@@ -1154,19 +1185,67 @@ func (s *Store) DueDeliveries(ctx context.Context, limit int) ([]Delivery, error
 	}
 	return out, rows.Err()
 }
+
+// DeliveryResult records the result for the current claim. It retains the
+// original API used by CLI/tests by looking up the row's active claim token.
 func (s *Store) DeliveryResult(ctx context.Context, id int64, sendErr error) error {
-	if sendErr == nil {
-		_, err := s.DB.ExecContext(ctx, `UPDATE outbox SET sent_at=?,last_error='' WHERE id=?`, time.Now().UTC().Format(time.RFC3339Nano), id)
+	var claim string
+	if err := s.DB.QueryRowContext(ctx, `SELECT claim_token FROM outbox WHERE id=?`, id).Scan(&claim); err != nil {
 		return err
 	}
+	return s.DeliveryResultClaim(ctx, id, claim, sendErr)
+}
+
+func (s *Store) DeliveryResultClaim(ctx context.Context, id int64, claim string, sendErr error) error {
+	if claim == "" {
+		return ErrDeliveryClaimLost
+	}
+	if sendErr == nil {
+		result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET sent_at=?,last_error='',claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, time.Now().UTC().Format(time.RFC3339Nano), id, claim)
+		if err != nil {
+			return err
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return ErrDeliveryClaimLost
+		}
+		return nil
+	}
 	var attempts int
-	if err := s.DB.QueryRowContext(ctx, `SELECT attempts FROM outbox WHERE id=?`, id).Scan(&attempts); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT attempts FROM outbox WHERE id=? AND sent_at IS NULL AND claim_token=?`, id, claim).Scan(&attempts); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrDeliveryClaimLost
+		}
 		return err
 	}
 	attempts++
 	delay := time.Duration(1<<min(attempts, 6)) * time.Minute
-	_, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=?,last_error=? WHERE id=?`, attempts, time.Now().UTC().Add(delay).Format(time.RFC3339Nano), truncate(sendErr.Error(), 500), id)
-	return err
+	result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=?,last_error=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, attempts, time.Now().UTC().Add(delay).Format(time.RFC3339Nano), truncate(sendErr.Error(), 500), id, claim)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrDeliveryClaimLost
+	}
+	return nil
+}
+
+// DeferDelivery releases a claim without consuming an attempt. This is used
+// when an encrypted managed destination is temporarily locked or unavailable.
+func (s *Store) DeferDelivery(ctx context.Context, id int64, claim, reason string, delay time.Duration) error {
+	if claim == "" {
+		return ErrDeliveryClaimLost
+	}
+	if delay < time.Minute {
+		delay = time.Minute
+	}
+	result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=?,last_error=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, time.Now().UTC().Add(delay).Format(time.RFC3339Nano), truncate(reason, 500), id, claim)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrDeliveryClaimLost
+	}
+	return nil
 }
 func min(a, b int) int {
 	if a < b {

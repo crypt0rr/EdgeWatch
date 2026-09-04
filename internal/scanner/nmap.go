@@ -40,6 +40,12 @@ type resolvedTarget struct {
 	Hostname  bool
 }
 
+// nmapBatchSize bounds one command's target list while avoiding one process
+// launch per expanded CIDR address. It is deliberately internal so the
+// deployment-level job schema remains focused on scan intent rather than
+// engine-specific tuning.
+const nmapBatchSize = 128
+
 func (n *Nmap) Version(ctx context.Context) string {
 	out, err := exec.CommandContext(ctx, n.Path, "--version").Output()
 	if err != nil {
@@ -59,22 +65,26 @@ func (n *Nmap) Scan(ctx context.Context, job config.Job) (model.Snapshot, error)
 		if rt.Hostname {
 			snap.DNS[rt.Name] = append([]string(nil), rt.Addresses...)
 		}
-		if job.TCP != nil {
+	}
+	if job.TCP != nil {
+		for _, rt := range targets {
 			snap.Scopes = append(snap.Scopes, model.Scope{Target: rt.Name, Protocol: "tcp", Ports: job.TCP.Ports, ServiceDetection: job.TCP.ServiceDetection})
-			units, err := n.scanProtocol(ctx, rt, "tcp", *job.TCP, job.Timing, job.AssumesAlive())
-			if err != nil {
-				return model.Snapshot{}, fmt.Errorf("target %s tcp: %w", rt.Name, err)
-			}
-			snap.Units = append(snap.Units, units...)
 		}
-		if job.UDP != nil {
+		units, err := n.scanProtocolBatch(ctx, targets, "tcp", *job.TCP, job.Timing, job.AssumesAlive())
+		if err != nil {
+			return model.Snapshot{}, fmt.Errorf("tcp scan: %w", err)
+		}
+		snap.Units = append(snap.Units, units...)
+	}
+	if job.UDP != nil {
+		for _, rt := range targets {
 			snap.Scopes = append(snap.Scopes, model.Scope{Target: rt.Name, Protocol: "udp", Ports: job.UDP.Ports, ServiceDetection: job.UDP.ServiceDetection})
-			units, err := n.scanProtocol(ctx, rt, "udp", *job.UDP, job.Timing, job.AssumesAlive())
-			if err != nil {
-				return model.Snapshot{}, fmt.Errorf("target %s udp: %w", rt.Name, err)
-			}
-			snap.Units = append(snap.Units, units...)
 		}
+		units, err := n.scanProtocolBatch(ctx, targets, "udp", *job.UDP, job.Timing, job.AssumesAlive())
+		if err != nil {
+			return model.Snapshot{}, fmt.Errorf("udp scan: %w", err)
+		}
+		snap.Units = append(snap.Units, units...)
 	}
 	snap.Normalize()
 	return snap, nil
@@ -139,54 +149,73 @@ func incrementIP(ip net.IP) {
 }
 
 func (n *Nmap) scanProtocol(ctx context.Context, target resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool) ([]model.Unit, error) {
+	return n.scanProtocolBatch(ctx, []resolvedTarget{target}, protocol, pc, timing, assumeAlive)
+}
+
+func (n *Nmap) scanProtocolBatch(ctx context.Context, targets []resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool) ([]model.Unit, error) {
 	byFamily := map[int][]string{4: {}, 6: {}}
-	for _, address := range target.Addresses {
-		if strings.Contains(address, ":") {
-			byFamily[6] = append(byFamily[6], address)
-		} else {
-			byFamily[4] = append(byFamily[4], address)
+	seen := map[string]bool{}
+	for _, target := range targets {
+		for _, address := range target.Addresses {
+			if seen[address] {
+				continue
+			}
+			seen[address] = true
+			if strings.Contains(address, ":") {
+				byFamily[6] = append(byFamily[6], address)
+			} else {
+				byFamily[4] = append(byFamily[4], address)
+			}
 		}
 	}
 	all := map[string]model.Unit{}
 	for _, family := range []int{4, 6} {
 		addresses := byFamily[family]
-		if len(addresses) == 0 {
+		for start := 0; start < len(addresses); start += nmapBatchSize {
+			end := min(start+nmapBatchSize, len(addresses))
+			batch := addresses[start:end]
+			args := nmapArgs(family, protocol, pc, timing, assumeAlive, batch)
+			cmd := exec.CommandContext(ctx, n.Path, args...)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			stdout, err := cmd.Output()
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("scan timed out or cancelled: %w", ctx.Err())
+			}
+			if err != nil {
+				return nil, fmt.Errorf("nmap failed: %v: %s", err, sanitizeStderr(stderr.String()))
+			}
+			parsed, err := parseXML(stdout, protocol, pc.ServiceDetection)
+			if err != nil {
+				return nil, err
+			}
+			if parsed.Exit != "success" {
+				return nil, fmt.Errorf("nmap run incomplete: %s", parsed.Exit)
+			}
+			for _, address := range batch {
+				unit, ok := parsed.Units[address]
+				if !ok {
+					return nil, fmt.Errorf("nmap output omitted expected address %s", address)
+				}
+				all[address] = unit
+			}
+		}
+	}
+	var units []model.Unit
+	for _, target := range targets {
+		if target.Aggregate {
+			aggregated := make(map[string]model.Unit, len(target.Addresses))
+			for _, address := range target.Addresses {
+				aggregated[address] = all[address]
+			}
+			units = append(units, aggregate(target, aggregated, protocol))
 			continue
 		}
-		args := nmapArgs(family, protocol, pc, timing, assumeAlive, addresses)
-		cmd := exec.CommandContext(ctx, n.Path, args...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		stdout, err := cmd.Output()
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("scan timed out or cancelled: %w", ctx.Err())
+		for _, address := range target.Addresses {
+			unit := all[address]
+			unit.Target = address
+			units = append(units, unit)
 		}
-		if err != nil {
-			return nil, fmt.Errorf("nmap failed: %v: %s", err, sanitizeStderr(stderr.String()))
-		}
-		parsed, err := parseXML(stdout, protocol, pc.ServiceDetection)
-		if err != nil {
-			return nil, err
-		}
-		if parsed.Exit != "success" {
-			return nil, fmt.Errorf("nmap run incomplete: %s", parsed.Exit)
-		}
-		for _, address := range addresses {
-			unit, ok := parsed.Units[address]
-			if !ok {
-				return nil, fmt.Errorf("nmap output omitted expected address %s", address)
-			}
-			all[address] = unit
-		}
-	}
-	if target.Aggregate {
-		return []model.Unit{aggregate(target, all, protocol)}, nil
-	}
-	units := make([]model.Unit, 0, len(target.Addresses))
-	for _, address := range target.Addresses {
-		unit := all[address]
-		unit.Target = address
-		units = append(units, unit)
 	}
 	return units, nil
 }

@@ -206,7 +206,11 @@ func (c Config) Validate() error {
 		if _, err := time.LoadLocation(j.Timezone); err != nil {
 			return fmt.Errorf("job %s: invalid timezone: %w", j.Name, err)
 		}
-		if _, err := parser.Parse(j.Schedule); err != nil {
+		schedule := strings.TrimSpace(j.Schedule)
+		if strings.HasPrefix(schedule, "TZ=") || strings.HasPrefix(schedule, "CRON_TZ=") {
+			return fmt.Errorf("job %s: schedule must contain five cron fields; set timezone in the timezone field", j.Name)
+		}
+		if _, err := parser.Parse(schedule); err != nil {
 			return fmt.Errorf("job %s: invalid schedule: %w", j.Name, err)
 		}
 		if len(j.Targets) == 0 {

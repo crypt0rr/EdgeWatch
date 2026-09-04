@@ -108,6 +108,66 @@ func TestOutboxRetriesAndCompletes(t *testing.T) {
 	}
 }
 
+func TestOutboxClaimsAreExclusiveAndRequireOwner(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if err := s.QueueEvent(ctx, "destination", model.Event{Type: "claim", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.ClaimDueDeliveries(ctx, 10, "owner-one")
+	if err != nil || len(first) != 1 || first[0].ClaimToken != "owner-one" {
+		t.Fatalf("first claim %#v %v", first, err)
+	}
+	second, err := s.ClaimDueDeliveries(ctx, 10, "owner-two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second) != 0 {
+		t.Fatalf("active claim was handed to another owner: %#v", second)
+	}
+	if err := s.DeliveryResultClaim(ctx, first[0].ID, "wrong-owner", nil); !errors.Is(err, ErrDeliveryClaimLost) {
+		t.Fatalf("wrong owner result = %v, want claim lost", err)
+	}
+	if err := s.DeliveryResultClaim(ctx, first[0].ID, first[0].ClaimToken, nil); err != nil {
+		t.Fatal(err)
+	}
+	third, err := s.ClaimDueDeliveries(ctx, 10, "owner-three")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third) != 0 {
+		t.Fatalf("completed delivery remained claimable: %#v", third)
+	}
+}
+
+func TestDeferredDeliveryDoesNotConsumeAttempts(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if err := s.QueueEvent(ctx, "managed:destination:1", model.Event{Type: "defer", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	due, err := s.ClaimDueDeliveries(ctx, 1, "owner")
+	if err != nil || len(due) != 1 {
+		t.Fatalf("claim %#v %v", due, err)
+	}
+	if err := s.DeferDelivery(ctx, due[0].ID, due[0].ClaimToken, "key unavailable", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	if err := s.DB.QueryRowContext(ctx, `SELECT attempts FROM outbox WHERE id=?`, due[0].ID).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 {
+		t.Fatalf("deferred attempts = %d, want 0", attempts)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), due[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if retry, err := s.ClaimDueDeliveries(ctx, 1, "retry-owner"); err != nil || len(retry) != 1 {
+		t.Fatalf("deferred row was not retryable: %#v %v", retry, err)
+	}
+}
+
 func TestPrunePreservesLegacyAndManagedBaselines(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

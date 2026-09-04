@@ -119,8 +119,8 @@ func TestConsoleSetupLoginCreateAndRun(t *testing.T) {
 	if created.ID == "" {
 		t.Fatal("missing job id")
 	}
-	if created.Revision != 2 || created.Enabled {
-		t.Fatalf("created paused job returned stale lifecycle state: %#v", created)
+	if created.Revision != 1 || created.Enabled {
+		t.Fatalf("created paused job was not persisted atomically: %#v", created)
 	}
 	resp = post("/api/v1/jobs/"+created.ID+"/run", "{}", loginResult.CSRF)
 	if resp.StatusCode != http.StatusAccepted {

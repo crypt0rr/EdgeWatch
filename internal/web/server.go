@@ -525,7 +525,11 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeValidationError(w, err)
 		return
 	}
-	record, err := s.Store.CreateJob(r.Context(), job)
+	enabled := true
+	if p.Enabled != nil {
+		enabled = *p.Enabled
+	}
+	record, err := s.Store.CreateJobWithEnabled(r.Context(), job, enabled)
 	if err != nil {
 		if isUnique(err) {
 			writeError(w, 409, "conflict", "job name is already in use", nil)
@@ -533,20 +537,6 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 			writeValidationError(w, err)
 		}
 		return
-	}
-	if p.Enabled != nil && !*p.Enabled {
-		if err := s.Store.SetJobEnabled(r.Context(), record.ID, false); err != nil {
-			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
-			return
-		}
-		// Lifecycle changes advance the immutable revision too, so reload the
-		// record before returning it rather than handing the browser a stale
-		// revision that its first edit would immediately reject.
-		record, err = s.Store.GetJob(r.Context(), record.ID)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
-			return
-		}
 	}
 	s.App.RefreshSchedules()
 	_ = s.Store.Audit(r.Context(), "job.created", record.ID)
@@ -880,25 +870,21 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusConflict, "job_active", "job already has a scan in progress", nil)
 		return
 	}
-	go func() {
-		// Reload immediately before execution so an edit accepted between the
-		// HTTP response and goroutine start runs the current immutable revision
-		// instead of returning an optimistic 202 for a stale snapshot.
-		latest, getErr := s.Store.GetJob(context.Background(), id)
-		if getErr != nil {
-			s.Log.Error("manual scan could not reload job", "job_id", id, "error", getErr)
+	if runErr := s.App.StartManagedRun(id, func(scan model.Scan, events []model.Event, err error) {
+		if err != nil {
+			s.Log.Error("manual scan failed", "job_id", id, "scan_id", scan.ID, "error", err)
+		}
+		if scan.ID != "" {
+			s.broadcast(map[string]any{"type": "scan.completed", "job_id": id, "scan_id": scan.ID, "status": scan.Status, "events": len(events)})
+		}
+	}); runErr != nil {
+		if errors.Is(runErr, app.ErrShuttingDown) {
+			writeError(w, http.StatusServiceUnavailable, "shutting_down", "the application is shutting down", nil)
 			return
 		}
-		if latest.Archived {
-			s.Log.Info("manual scan skipped because job was archived", "job_id", id)
-			return
-		}
-		scan, events, runErr := s.App.RunJobRecord(context.Background(), latest)
-		if runErr != nil {
-			s.Log.Error("manual scan failed", "job", latest.Job.Name, "scan_id", scan.ID, "error", runErr)
-		}
-		s.broadcast(map[string]any{"type": "scan.completed", "job_id": id, "scan_id": scan.ID, "status": scan.Status, "events": len(events)})
-	}()
+		writeError(w, http.StatusInternalServerError, "scan", runErr.Error(), nil)
+		return
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "job_id": id})
 }
 

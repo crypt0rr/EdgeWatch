@@ -126,3 +126,30 @@ func TestScanBatchesExpandedCIDRTargets(t *testing.T) {
 		t.Fatalf("snapshot units = %d, want four expanded hosts: %#v", len(snapshot.Units), snapshot.Units)
 	}
 }
+
+func TestScanWithProgressReportsBoundedWork(t *testing.T) {
+	dir := t.TempDir()
+	nmapPath := filepath.Join(dir, "nmap")
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+sampleXML+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := New(nmapPath)
+	job := config.NormalizeJob(config.Job{
+		Name: "progress", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		TCP: &config.Protocol{Ports: "22-23", Mode: "syn"}, Timing: "balanced",
+	})
+	var updates []Progress
+	if _, err := n.ScanWithProgress(context.Background(), job, func(progress Progress) { updates = append(updates, progress) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) < 4 {
+		t.Fatalf("progress updates = %#v, want resolving, scanning, invocation, complete", updates)
+	}
+	first, last := updates[0], updates[len(updates)-1]
+	if first.Phase != "resolving" || last.Phase != "complete" {
+		t.Fatalf("progress phases = %#v ... %#v", first, last)
+	}
+	if last.TotalProbes != 2 || last.CompletedProbes != 2 || last.TotalInvocations != 1 || last.CompletedInvocations != 1 {
+		t.Fatalf("progress totals = %#v", last)
+	}
+}

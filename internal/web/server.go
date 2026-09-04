@@ -205,6 +205,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.listScans(w, r)
 	case path == "/scans/active" && r.Method == http.MethodGet:
 		s.activeScans(w, r)
+	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/cancel") && r.Method == http.MethodPost:
+		s.cancelScan(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/cancel"))
 	case strings.HasPrefix(path, "/scans/") && r.Method == http.MethodGet:
 		s.getScan(w, r, strings.TrimPrefix(path, "/scans/"))
 	case path == "/incidents" && r.Method == http.MethodGet:
@@ -689,6 +691,26 @@ func (s *Server) activeScans(w http.ResponseWriter, r *http.Request) {
 		scans = []model.ActiveScan{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"scans": scans})
+}
+
+func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, id string) {
+	if strings.TrimSpace(id) == "" {
+		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		return
+	}
+	if err := s.App.CancelScan(id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusConflict, "scan_not_active", "scan is no longer active", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "cancel_failed", err.Error(), nil)
+		return
+	}
+	// Cancellation is an operational action; keep its audit detail opaque and
+	// never include scanner command lines or target payloads.
+	s.auditOptional(r.Context(), "scan.cancel_requested", id)
+	s.broadcast(map[string]any{"type": "scan.cancellation_requested", "scan_id": id})
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "cancelling", "scan_id": id})
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request, id string) {

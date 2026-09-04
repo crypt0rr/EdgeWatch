@@ -48,6 +48,12 @@ type App struct {
 	heartbeatInterval time.Duration
 }
 
+type activeRun struct {
+	mu     sync.RWMutex
+	scan   model.ActiveScan
+	cancel context.CancelFunc
+}
+
 // ErrShuttingDown is returned when a new asynchronous managed scan cannot be
 // accepted because the daemon is stopping.
 var ErrShuttingDown = errors.New("application is shutting down")
@@ -92,6 +98,14 @@ func (a *App) CheckScanWorkBudget(job config.Job) (config.WorkEstimate, error) {
 type Scanner interface {
 	Scan(context.Context, config.Job) (model.Snapshot, error)
 	Version(context.Context) string
+}
+
+// ProgressScanner is optional so deterministic test scanners and future
+// integrations can keep the small Scanner contract. Production Nmap exposes
+// bounded progress and responds to cancellation through the context.
+type ProgressScanner interface {
+	Scanner
+	ScanWithProgress(context.Context, config.Job, scanner.ProgressReporter) (model.Snapshot, error)
 }
 
 func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logger) (*App, error) {
@@ -263,8 +277,13 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		}
 		return model.Scan{}, nil, err
 	}
-	a.running.Store(scan.ID, model.ActiveScan{ID: scan.ID, JobID: jobID, Job: job.Name, JobRevision: revision, StartedAt: started, EstimatedProbes: estimate.Probes, NmapInvocations: estimate.NmapInvocations, EstimatedSeconds: estimate.EstimatedSeconds})
-	defer a.running.Delete(scan.ID)
+	scanCtx, cancel := context.WithTimeout(ctx, job.Timeout.Value())
+	run := &activeRun{scan: model.ActiveScan{ID: scan.ID, JobID: jobID, Job: job.Name, JobRevision: revision, StartedAt: started, EstimatedProbes: estimate.Probes, NmapInvocations: estimate.NmapInvocations, EstimatedSeconds: estimate.EstimatedSeconds, TotalProbes: estimate.Probes, TotalInvocations: estimate.NmapInvocations, Phase: "starting"}, cancel: cancel}
+	a.running.Store(scan.ID, run)
+	defer func() {
+		cancel()
+		a.running.Delete(scan.ID)
+	}()
 	// Publish lifecycle updates to the web console without persisting them as
 	// alert events. This keeps SSE subscribers responsive even when a scan has
 	// no baseline or incident event to emit.
@@ -274,17 +293,29 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		defer releaseCancel()
 		_ = a.Store.ReleaseJobLease(releaseCtx, leaseKey, scan.ID)
 	}()
-	scanCtx, cancel := context.WithTimeout(ctx, job.Timeout.Value())
-	defer cancel()
-	snapshot, scanErr := a.Scanner.Scan(scanCtx, job)
+	var snapshot model.Snapshot
+	var scanErr error
+	if progressScanner, ok := a.Scanner.(ProgressScanner); ok {
+		snapshot, scanErr = progressScanner.ScanWithProgress(scanCtx, job, func(progress scanner.Progress) {
+			a.updateActiveProgress(scan.ID, progress)
+		})
+	} else {
+		snapshot, scanErr = a.Scanner.Scan(scanCtx, job)
+	}
 	scan.FinishedAt = time.Now().UTC()
 	scan.Snapshot = snapshot
 	if scanErr != nil {
-		scan.Status = "failed"
-		scan.Error = scanErr.Error()
+		if errors.Is(scanCtx.Err(), context.Canceled) {
+			scan.Status = "canceled"
+			scan.Error = "scan canceled"
+		} else {
+			scan.Status = "failed"
+			scan.Error = scanErr.Error()
+		}
 	} else {
 		scan.Status = "success"
 	}
+	a.updateActivePhase(scan.ID, "finalizing")
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer persistCancel()
 	completionEvent := model.Event{Type: "scan.completed", JobID: jobID, Job: job.Name, ScanID: scan.ID, Message: "Scan " + scan.Status, CreatedAt: scan.FinishedAt}
@@ -310,7 +341,9 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		if err := a.Store.SaveScan(persistCtx, scan); err != nil {
 			return scan, nil, err
 		}
-		if scanErr != nil {
+		if scan.Status == "canceled" {
+			events, finalizeErr = nil, nil
+		} else if scanErr != nil {
 			events, finalizeErr = a.Engine.Failure(persistCtx, job.Name, scan)
 		} else {
 			events, finalizeErr = a.Engine.Success(persistCtx, job, scan)
@@ -347,8 +380,8 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 func (a *App) ActiveScans() []model.ActiveScan {
 	var scans []model.ActiveScan
 	a.running.Range(func(_, value any) bool {
-		if scan, ok := value.(model.ActiveScan); ok {
-			scans = append(scans, scan)
+		if run, ok := value.(*activeRun); ok {
+			scans = append(scans, run.snapshot())
 		}
 		return true
 	})
@@ -359,6 +392,91 @@ func (a *App) ActiveScans() []model.ActiveScan {
 		return scans[i].StartedAt.Before(scans[j].StartedAt)
 	})
 	return scans
+}
+
+// CancelScan requests cancellation of an active scan. The scanner owns the
+// process context and will persist a canceled terminal record without
+// mutating baseline or incident state.
+func (a *App) CancelScan(id string) error {
+	value, ok := a.running.Load(id)
+	if !ok {
+		return store.ErrNotFound
+	}
+	run, ok := value.(*activeRun)
+	if !ok {
+		return store.ErrNotFound
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if run.cancel == nil {
+		return store.ErrNotFound
+	}
+	run.cancel()
+	run.scan.Phase = "cancelling"
+	return nil
+}
+
+func (a *App) updateActiveProgress(id string, progress scanner.Progress) {
+	value, ok := a.running.Load(id)
+	if !ok {
+		return
+	}
+	run, ok := value.(*activeRun)
+	if !ok {
+		return
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	if progress.TotalProbes > 0 {
+		run.scan.TotalProbes = progress.TotalProbes
+	}
+	if progress.TotalInvocations > 0 {
+		run.scan.TotalInvocations = progress.TotalInvocations
+	}
+	run.scan.CompletedProbes = progress.CompletedProbes
+	run.scan.CompletedInvocations = progress.CompletedInvocations
+	run.scan.ProgressPercent = progressPercent(progress)
+	if progress.Phase != "" {
+		run.scan.Phase = progress.Phase
+	}
+}
+
+func (a *App) updateActivePhase(id, phase string) {
+	value, ok := a.running.Load(id)
+	if !ok {
+		return
+	}
+	run, ok := value.(*activeRun)
+	if !ok {
+		return
+	}
+	run.mu.Lock()
+	run.scan.Phase = phase
+	run.mu.Unlock()
+}
+
+func (r *activeRun) snapshot() model.ActiveScan {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.scan
+}
+
+func progressPercent(progress scanner.Progress) int {
+	total, completed := progress.TotalProbes, progress.CompletedProbes
+	if total <= 0 {
+		total, completed = progress.TotalInvocations, progress.CompletedInvocations
+	}
+	if total <= 0 {
+		return 0
+	}
+	percent := int(completed * 100 / total)
+	if percent < 0 {
+		return 0
+	}
+	if percent > 100 {
+		return 100
+	}
+	return percent
 }
 
 func (a *App) Daemon(ctx context.Context) error {

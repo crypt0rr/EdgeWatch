@@ -61,6 +61,7 @@ export const deleteJob = (id: string, confirm_name: string) => api(`/jobs/${id}?
 export const pauseJob = (id: string, revision: number) => api(`/jobs/${id}/pause`, { method: 'POST', body: JSON.stringify({ revision }) })
 export const resumeJob = (id: string, revision: number) => api(`/jobs/${id}/resume`, { method: 'POST', body: JSON.stringify({ revision }) })
 export const runJob = (id: string) => api<{ status: string }>(`/jobs/${id}/run`, { method: 'POST' })
+export const cancelScan = (id: string) => api<{ status: string; scan_id: string }>(`/scans/${id}/cancel`, { method: 'POST' })
 export const resetBaseline = (id: string) => api(`/jobs/${id}/baseline/reset`, { method: 'POST' })
 export const approveBaseline = (jobId: string, scanId: string) => api(`/jobs/${jobId}/baseline/approve`, { method: 'POST', body: JSON.stringify({ scan_id: scanId }) })
 export const jobScans = (id: string, offset = 0, limit = 20) => api<{ scans: ScanSummary[]; pagination: Pagination }>(`/jobs/${id}/scans?limit=${limit}&offset=${offset}`)

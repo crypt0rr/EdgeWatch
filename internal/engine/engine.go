@@ -30,6 +30,12 @@ func (e *Engine) SuccessForJob(ctx context.Context, jobID string, job config.Job
 	})
 }
 
+func (e *Engine) SuccessForJobWithDestinations(ctx context.Context, jobID string, job config.Job, scan model.Scan, destinations []string) ([]model.Event, error) {
+	return e.Store.UpdateRuntimeForScanWithOutbox(ctx, jobID, scan.ConfigHash, destinations, func(state *model.JobState) ([]model.Event, error) {
+		return processSuccess(state, job, scan)
+	})
+}
+
 func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, error) {
 	state.ConsecutiveFailures = 0
 	state.LastFailureAlert = 0
@@ -203,6 +209,12 @@ func (e *Engine) Failure(ctx context.Context, job string, scan model.Scan) ([]mo
 
 func (e *Engine) FailureForJob(ctx context.Context, jobID, job string, scan model.Scan) ([]model.Event, error) {
 	return e.Store.UpdateRuntimeForScan(ctx, jobID, scan.ConfigHash, func(state *model.JobState) ([]model.Event, error) {
+		return processFailure(state, job, scan)
+	})
+}
+
+func (e *Engine) FailureForJobWithDestinations(ctx context.Context, jobID, job string, scan model.Scan, destinations []string) ([]model.Event, error) {
+	return e.Store.UpdateRuntimeForScanWithOutbox(ctx, jobID, scan.ConfigHash, destinations, func(state *model.JobState) ([]model.Event, error) {
 		return processFailure(state, job, scan)
 	})
 }

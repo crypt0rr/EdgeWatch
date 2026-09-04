@@ -41,6 +41,7 @@ type App struct {
 	scheduleWake chan struct{}
 	eventMu      sync.RWMutex
 	eventHandler func(model.Event)
+	deliveryWake chan struct{}
 }
 
 // ErrShuttingDown is returned when a new asynchronous managed scan cannot be
@@ -78,7 +79,7 @@ func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logge
 	sc := scanner.New(nmapPath)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return &App{Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), entries: map[string]cron.EntryID{}, scheduleWake: make(chan struct{}, 1)}, nil
+	return &App{Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), entries: map[string]cron.EntryID{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1)}, nil
 }
 
 func (a *App) Job(name string) (config.Job, error) {
@@ -246,17 +247,25 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		return scan, nil, err
 	}
 	completionEvent := model.Event{Type: "scan.completed", JobID: jobID, Job: job.Name, ScanID: scan.ID, Message: "Scan " + scan.Status, CreatedAt: scan.FinishedAt}
+	var destinations []string
+	if managed {
+		var destinationErr error
+		destinations, destinationErr = a.Notifier.QueueDestinations(persistCtx)
+		if destinationErr != nil {
+			return scan, nil, destinationErr
+		}
+	}
 	var events []model.Event
 	var err error
 	if scanErr != nil {
 		if managed {
-			events, err = a.Engine.FailureForJob(persistCtx, jobID, job.Name, scan)
+			events, err = a.Engine.FailureForJobWithDestinations(persistCtx, jobID, job.Name, scan, destinations)
 		} else {
 			events, err = a.Engine.Failure(persistCtx, job.Name, scan)
 		}
 	} else {
 		if managed {
-			events, err = a.Engine.SuccessForJob(persistCtx, jobID, job, scan)
+			events, err = a.Engine.SuccessForJobWithDestinations(persistCtx, jobID, job, scan, destinations)
 		} else {
 			events, err = a.Engine.Success(persistCtx, job, scan)
 		}
@@ -272,16 +281,14 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		a.emitEvents([]model.Event{completionEvent})
 		return scan, nil, err
 	}
-	if err = a.Notifier.Queue(persistCtx, events); err != nil {
-		a.emitEvents(events)
-		a.emitEvents([]model.Event{completionEvent})
-		return scan, events, err
-	}
 	a.emitEvents(events)
 	a.emitEvents([]model.Event{completionEvent})
-	if err := a.Notifier.Drain(persistCtx); err != nil {
-		a.Logger.Warn("notification delivery deferred for retry", "job", job.Name)
+	if !managed {
+		if err := a.Notifier.Queue(persistCtx, events); err != nil {
+			return scan, events, err
+		}
 	}
+	a.wakeDelivery()
 	if scanErr != nil {
 		return scan, events, scanErr
 	}
@@ -316,12 +323,12 @@ func (a *App) Daemon(ctx context.Context) error {
 	}
 	c.Start()
 	heartbeat := time.NewTicker(30 * time.Second)
-	deliver := time.NewTicker(30 * time.Second)
 	prune := time.NewTicker(24 * time.Hour)
 	defer heartbeat.Stop()
-	defer deliver.Stop()
 	defer prune.Stop()
-	_ = a.Notifier.Drain(ctx)
+	deliveryDone := a.startDeliveryWorker(ctx)
+	defer func() { <-deliveryDone }()
+	a.wakeDelivery()
 	if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
 		a.Logger.Error("startup history pruning failed", "error", err)
 	} else if stats.Total() > 0 {
@@ -339,10 +346,6 @@ func (a *App) Daemon(ctx context.Context) error {
 		case <-heartbeat.C:
 			if err := a.Store.Heartbeat(ctx, owner); err != nil {
 				return err
-			}
-		case <-deliver.C:
-			if err := a.Notifier.Drain(ctx); err != nil {
-				a.Logger.Warn("notification delivery failed")
 			}
 		case <-prune.C:
 			if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
@@ -470,6 +473,46 @@ func (a *App) reconcileSchedules(ctx context.Context, runOnStart bool) error {
 		}
 	}
 	return nil
+}
+
+// wakeDelivery coalesces notifications for the daemon-owned delivery worker.
+// Keeping delivery outside the scheduler loop means a slow provider cannot
+// stop heartbeats or delay schedule reconciliation.
+func (a *App) wakeDelivery() {
+	if a.deliveryWake == nil {
+		return
+	}
+	select {
+	case a.deliveryWake <- struct{}{}:
+	default:
+	}
+}
+
+func (a *App) startDeliveryWorker(ctx context.Context) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		drain := func() {
+			passCtx, cancel := context.WithTimeout(ctx, 70*time.Second)
+			defer cancel()
+			if err := a.Notifier.Drain(passCtx); err != nil && !errors.Is(err, context.Canceled) {
+				a.Logger.Warn("notification delivery deferred for retry", "error", err)
+			}
+		}
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-a.deliveryWake:
+				drain()
+			case <-ticker.C:
+				drain()
+			}
+		}
+	}()
+	return done
 }
 
 func (a *App) runScheduled(ctx context.Context, job config.Job) {

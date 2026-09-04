@@ -44,6 +44,34 @@ func TestScanStateAndEventPersistence(t *testing.T) {
 	}
 }
 
+func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("job"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinations := []string{"destination-a", "managed:destination-b:2"}
+	events, err := s.UpdateRuntimeWithOutbox(ctx, record.ID, destinations, func(state *model.JobState) ([]model.Event, error) {
+		state.ConsecutiveFailures = 3
+		return []model.Event{{Type: "alert", Job: "job", ScanID: "scan", Message: "changed", CreatedAt: time.Now().UTC()}}, nil
+	})
+	if err != nil || len(events) != 1 {
+		t.Fatalf("runtime transition: %#v %v", events, err)
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != len(destinations) {
+		t.Fatalf("notification intent rows = %d, want %d", count, len(destinations))
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil || state.ConsecutiveFailures != 3 {
+		t.Fatalf("runtime state: %#v %v", state, err)
+	}
+}
+
 func TestLeaseCanBeReleased(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -274,6 +302,40 @@ func TestPruneRetentionClassesAndAuditPolicy(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("current job revision was pruned; rows=%d", count)
+	}
+}
+
+func TestPruneRetainsRevisionsReferencedByScans(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	job, err := s.CreateJob(ctx, testJob("revision-reference"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetJobEnabledWithRevision(ctx, job.ID, false, job.Revision); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339Nano)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE job_revisions SET created_at=? WHERE job_id=? AND revision=1`, old, job.ID); err != nil {
+		t.Fatal(err)
+	}
+	scan := model.Scan{ID: "retained-revision-scan", JobID: job.ID, Job: job.Job.Name, JobRevision: 1, StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}
+	if err := s.SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Revisions != 0 {
+		t.Fatalf("referenced revision was pruned: %#v", stats)
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_revisions WHERE job_id=? AND revision=1`, job.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("revision referenced by retained scan was removed")
 	}
 }
 

@@ -51,6 +51,7 @@ type Notifier struct {
 	Store *store.Store
 
 	mu            sync.RWMutex
+	drainMu       sync.Mutex
 	fileURLs      map[string]string
 	managed       map[string]managedDestination
 	keyPath       string
@@ -424,24 +425,42 @@ func (n *Notifier) Queue(ctx context.Context, events []model.Event) error {
 }
 
 func (n *Notifier) Drain(ctx context.Context) error {
+	n.drainMu.Lock()
+	defer n.drainMu.Unlock()
 	if err := n.Reload(ctx); err != nil {
 		return err
 	}
 	destinations := n.destinationSnapshot()
-	deliveries, err := n.Store.DueDeliveries(ctx, 100)
+	deliveries, err := n.Store.ClaimDueDeliveries(ctx, 100, uuid.NewString())
 	if err != nil {
 		return err
 	}
 	var all []error
 	for _, delivery := range deliveries {
+		// Refresh before each send so an update/delete that happened after the
+		// batch was claimed cannot use the stale URL from the first snapshot.
+		if strings.HasPrefix(delivery.Destination, "managed:") {
+			if reloadErr := n.Reload(ctx); reloadErr != nil {
+				all = append(all, reloadErr)
+				_ = n.Store.DeferDelivery(ctx, delivery.ID, delivery.ClaimToken, "managed notification state unavailable", time.Minute)
+				continue
+			}
+			destinations = n.destinationSnapshot()
+		}
 		raw, ok := destinations[delivery.Destination]
 		var sendErr error
 		if !ok {
+			if strings.HasPrefix(delivery.Destination, "managed:") {
+				if deferErr := n.Store.DeferDelivery(ctx, delivery.ID, delivery.ClaimToken, "managed notification is locked or no longer configured", time.Minute); deferErr != nil && !errors.Is(deferErr, store.ErrDeliveryClaimLost) {
+					all = append(all, deferErr)
+				}
+				continue
+			}
 			sendErr = errors.New("notification destination is no longer configured")
 		} else {
 			sendErr = safeSend(raw, engine.FormatEvent(delivery.Event))
 		}
-		if resultErr := n.Store.DeliveryResult(ctx, delivery.ID, sendErr); resultErr != nil {
+		if resultErr := n.Store.DeliveryResultClaim(ctx, delivery.ID, delivery.ClaimToken, sendErr); resultErr != nil && !errors.Is(resultErr, store.ErrDeliveryClaimLost) {
 			all = append(all, resultErr)
 		}
 		if sendErr != nil {

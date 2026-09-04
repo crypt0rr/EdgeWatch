@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -53,6 +54,100 @@ func TestQueueAndDeliverGenericWebhook(t *testing.T) {
 	due, err := db.DueDeliveries(context.Background(), 10)
 	if err != nil || len(due) != 0 {
 		t.Fatalf("delivery remains due: %#v %v", due, err)
+	}
+}
+
+func TestConcurrentDrainsDoNotDuplicateDelivery(t *testing.T) {
+	var calls atomic.Int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		once.Do(func() { close(entered) })
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := "generic://" + parsed.Host + "/edgewatch?disabletls=yes&template=json"
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	notifier, err := New(db, []string{destination})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := notifier.Queue(context.Background(), []model.Event{{Type: "concurrent", Job: "job", CreatedAt: time.Now().UTC()}}); err != nil {
+		t.Fatal(err)
+	}
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- notifier.Drain(context.Background()) }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first drain did not reach webhook")
+	}
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- notifier.Drain(context.Background()) }()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second drain completed while first delivery was in flight: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("webhook calls = %d, want one", calls.Load())
+	}
+}
+
+func TestLockedManagedDeliveryIsDeferredWithoutAttempts(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	keyPath := filepath.Join(dir, "notification.key")
+	creator, err := New(db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := creator.CreateManaged(ctx, "Locked", "generic://localhost/locked?disabletls=yes&template=json", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueueEvent(ctx, managedKey(created.ID, created.Revision), model.Event{Type: "locked", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	locked, err := NewWithKeyFile(db, nil, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := locked.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	if err := db.DB.QueryRowContext(ctx, `SELECT attempts FROM outbox WHERE destination=?`, managedKey(created.ID, created.Revision)).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 {
+		t.Fatalf("locked delivery attempts = %d, want 0", attempts)
 	}
 }
 

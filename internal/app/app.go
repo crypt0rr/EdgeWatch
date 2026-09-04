@@ -28,6 +28,11 @@ type App struct {
 	Logger       *slog.Logger
 	active       sync.Map
 	wg           sync.WaitGroup
+	runMu        sync.Mutex
+	runCtx       context.Context
+	runCancel    context.CancelFunc
+	runAccepting bool
+	runStarted   bool
 	sem          chan struct{}
 	nmapVersion  string
 	scheduleMu   sync.Mutex
@@ -37,6 +42,10 @@ type App struct {
 	eventMu      sync.RWMutex
 	eventHandler func(model.Event)
 }
+
+// ErrShuttingDown is returned when a new asynchronous managed scan cannot be
+// accepted because the daemon is stopping.
+var ErrShuttingDown = errors.New("application is shutting down")
 
 // Scanner is the small boundary used by the application. Production uses
 // Nmap; tests and future scan engines can provide deterministic implementations
@@ -90,6 +99,89 @@ func (a *App) RunJobRecord(ctx context.Context, record store.JobRecord) (model.S
 		return model.Scan{}, nil, errors.New("archived jobs cannot run")
 	}
 	return a.runJob(ctx, record.Job, record.ID, record.Revision, true)
+}
+
+// BeginRun binds the application's asynchronous work to parent. The returned
+// context is shared by the daemon, scheduler, web-triggered scans, and
+// shutdown path. The boolean reports whether this call created the binding;
+// callers that own a standalone daemon invocation should call StopRun when it
+// returns. A web test may start a fallback context before the daemon starts;
+// the real binding replaces and cancels that fallback.
+func (a *App) BeginRun(parent context.Context) (context.Context, bool) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	a.runMu.Lock()
+	if a.runStarted && a.runAccepting && a.runCtx != nil {
+		ctx := a.runCtx
+		a.runMu.Unlock()
+		return ctx, false
+	}
+	if a.runCancel != nil && !a.runStarted {
+		a.runCancel()
+	}
+	ctx, cancel := context.WithCancel(parent)
+	a.runCtx, a.runCancel, a.runAccepting, a.runStarted = ctx, cancel, true, true
+	a.runMu.Unlock()
+	return ctx, true
+}
+
+// StopRun prevents new asynchronous work, cancels the shared run context, and
+// waits until every tracked scheduled or manual run has returned. It is safe
+// for multiple owners to call while shutdown races with a daemon error.
+func (a *App) StopRun() {
+	a.runMu.Lock()
+	cancel := a.runCancel
+	a.runAccepting = false
+	a.runCancel = nil
+	a.runCtx = nil
+	a.runMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	a.wg.Wait()
+}
+
+// StartManagedRun accepts a web-triggered managed scan and tracks it in the
+// same wait group as scheduled work. The callback runs after the scan has
+// reached a terminal state (or could not be started).
+func (a *App) StartManagedRun(id string, done func(model.Scan, []model.Event, error)) error {
+	a.runMu.Lock()
+	if !a.runAccepting {
+		if a.runStarted {
+			a.runMu.Unlock()
+			return ErrShuttingDown
+		}
+		// Keep direct httptest/embedded-server users functional before a daemon
+		// binds the lifecycle to its signal context. BeginRun replaces this
+		// fallback if the real daemon starts later.
+		a.runCtx, a.runCancel = context.WithCancel(context.Background())
+		a.runAccepting = true
+	}
+	ctx := a.runCtx
+	a.wg.Add(1)
+	a.runMu.Unlock()
+	go func() {
+		defer a.wg.Done()
+		latest, err := a.Store.GetJob(ctx, id)
+		if err != nil {
+			if done != nil {
+				done(model.Scan{}, nil, err)
+			}
+			return
+		}
+		if latest.Archived {
+			if done != nil {
+				done(model.Scan{}, nil, errors.New("archived jobs cannot run"))
+			}
+			return
+		}
+		scan, events, runErr := a.RunJobRecord(ctx, latest)
+		if done != nil {
+			done(scan, events, runErr)
+		}
+	}()
+	return nil
 }
 
 func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision int64, managed bool) (model.Scan, []model.Event, error) {
@@ -194,6 +286,11 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 }
 
 func (a *App) Daemon(ctx context.Context) error {
+	boundCtx, owned := a.BeginRun(ctx)
+	ctx = boundCtx
+	if owned {
+		defer a.StopRun()
+	}
 	if len(a.Config.Jobs) > 0 {
 		a.Logger.Warn("legacy YAML jobs detected; they are inactive in web-managed mode and must be recreated in the console", "jobs", len(a.Config.Jobs))
 	}
@@ -235,7 +332,6 @@ func (a *App) Daemon(ctx context.Context) error {
 			a.scheduleMu.Unlock()
 			stopped := c.Stop()
 			<-stopped.Done()
-			a.wg.Wait()
 			return nil
 		case <-heartbeat.C:
 			if err := a.Store.Heartbeat(ctx, owner); err != nil {
@@ -260,17 +356,13 @@ func (a *App) Daemon(ctx context.Context) error {
 }
 
 func (a *App) startScheduled(ctx context.Context, job config.Job) {
-	a.wg.Add(1)
-	go func() {
-		defer a.wg.Done()
+	a.startTracked(func() {
 		a.runScheduled(ctx, job)
-	}()
+	})
 }
 
 func (a *App) startManagedScheduled(ctx context.Context, id string) {
-	a.wg.Add(1)
-	go func() {
-		defer a.wg.Done()
+	a.startTracked(func() {
 		record, err := a.Store.GetJob(ctx, id)
 		if err != nil || record.Archived || !record.Enabled {
 			return
@@ -285,7 +377,22 @@ func (a *App) startManagedScheduled(ctx context.Context, id string) {
 			return
 		}
 		a.Logger.Info("scan complete", "job", record.Job.Name, "scan_id", scan.ID, "events", len(events))
+	})
+}
+
+func (a *App) startTracked(fn func()) bool {
+	a.runMu.Lock()
+	if !a.runAccepting {
+		a.runMu.Unlock()
+		return false
+	}
+	a.wg.Add(1)
+	a.runMu.Unlock()
+	go func() {
+		defer a.wg.Done()
+		fn()
 	}()
+	return true
 }
 
 // RefreshSchedules wakes the running daemon. Changes made while the daemon is

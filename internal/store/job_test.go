@@ -21,6 +21,32 @@ func testJob(name string) config.Job {
 	})
 }
 
+func TestCreateJobWithEnabledPersistsPausedStateAtomically(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJobWithEnabled(ctx, testJob("paused"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.Revision != 1 || record.Enabled {
+		t.Fatalf("created job state = %#v, want disabled revision 1", record)
+	}
+	stored, err := s.GetJob(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != 1 || stored.Enabled {
+		t.Fatalf("stored job state = %#v, want disabled revision 1", stored)
+	}
+	var revisions int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_revisions WHERE job_id=?`, record.ID).Scan(&revisions); err != nil {
+		t.Fatal(err)
+	}
+	if revisions != 1 {
+		t.Fatalf("revision count = %d, want 1", revisions)
+	}
+}
+
 func TestManagedJobRevisionAndScopeConfirmation(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

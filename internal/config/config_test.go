@@ -90,6 +90,19 @@ web:
 	}
 }
 
+func TestScheduleRejectsEmbeddedTimezonePrefix(t *testing.T) {
+	job := NormalizeJob(Job{
+		Name:     "prefixed",
+		Schedule: "CRON_TZ=UTC 0 * * * *",
+		Timezone: "UTC",
+		Targets:  []string{"192.0.2.1"},
+		TCP:      &Protocol{Ports: "443", Mode: "connect"},
+	})
+	if err := ValidateJob(job); err == nil || !strings.Contains(err.Error(), "timezone field") {
+		t.Fatalf("expected embedded timezone prefix to be rejected, got %v", err)
+	}
+}
+
 func TestSecurityHashIncludesAssumeAlive(t *testing.T) {
 	trueValue, falseValue := true, false
 	base := Job{Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1, AssumeAlive: &trueValue, TCP: &Protocol{Ports: "443", Mode: "syn"}}

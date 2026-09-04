@@ -38,6 +38,81 @@ func (s *blockingScanner) Scan(ctx context.Context, _ config.Job) (model.Snapsho
 	}
 }
 
+type releaseOnlyScanner struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (s *releaseOnlyScanner) Version(context.Context) string { return "release-only" }
+func (s *releaseOnlyScanner) Scan(context.Context, config.Job) (model.Snapshot, error) {
+	close(s.started)
+	<-s.release
+	return model.Snapshot{}, nil
+}
+
+func TestStopRunWaitsForManualManagedRun(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocking := &releaseOnlyScanner{started: make(chan struct{}), release: make(chan struct{})}
+	a.Scanner = blocking
+	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "shutdown", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, owned := a.BeginRun(ctx); !owned {
+		t.Fatal("expected test to own the run context")
+	}
+	completed := make(chan error, 1)
+	if err := a.StartManagedRun(record.ID, func(_ model.Scan, _ []model.Event, runErr error) { completed <- runErr }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocking.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("manual scan did not start")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		a.StopRun()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("shutdown returned before the manual scan finished")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(blocking.release)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not wait for the manual scan")
+	}
+	select {
+	case runErr := <-completed:
+		if runErr != nil {
+			t.Fatalf("manual scan failed: %v", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("manual scan callback did not run")
+	}
+	scans, err := s.ListJobScans(ctx, record.ID, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scans) != 1 || scans[0].Status != "success" {
+		t.Fatalf("manual scan was not persisted before shutdown: %#v", scans)
+	}
+}
+
 func TestManagedScanLeaseBlocksScopeEditUntilScanCompletes(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

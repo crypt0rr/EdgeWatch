@@ -18,10 +18,10 @@ import (
 )
 
 type Store struct {
-	DB           *sql.DB
-	Path         string
-	authKeyPath  string
-	authAutoKey  bool
+	DB          *sql.DB
+	Path        string
+	authKeyPath string
+	authAutoKey bool
 }
 
 var ErrJobBusy = errors.New("job is already running")

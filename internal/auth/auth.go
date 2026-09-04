@@ -186,10 +186,9 @@ func (m *Manager) Login(ctx context.Context, request *http.Request, password, ot
 	session := base64.RawURLEncoding.EncodeToString(sessionRaw)
 	csrf := base64.RawURLEncoding.EncodeToString(csrfRaw)
 	now := m.now()
-	if err := m.Store.CreateSession(ctx, digest(session), csrf, now, now.Add(SessionTTL)); err != nil {
+	if err := m.Store.CreateSessionWithAudit(ctx, digest(session), csrf, now, now.Add(SessionTTL), "admin.login", "successful login"); err != nil {
 		return "", admin, err
 	}
-	_ = m.Store.Audit(ctx, "admin.login", "successful login")
 	m.clear(request.RemoteAddr)
 	return session, admin, nil
 }
@@ -361,10 +360,11 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (store.Sess
 	return session, true
 }
 
-func (m *Manager) Logout(ctx context.Context, r *http.Request) {
+func (m *Manager) Logout(ctx context.Context, r *http.Request) error {
 	if cookie, err := r.Cookie(SessionCookie); err == nil {
-		_ = m.Store.DeleteSession(ctx, digest(cookie.Value))
+		return m.Store.DeleteSessionWithAudit(ctx, digest(cookie.Value), "admin.logout", "session ended")
 	}
+	return nil
 }
 
 func (m *Manager) CheckCSRF(r *http.Request, session store.Session) bool {

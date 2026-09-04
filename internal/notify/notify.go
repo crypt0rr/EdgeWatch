@@ -208,6 +208,16 @@ func (n *Notifier) ensureKey(ctx context.Context) ([]byte, error) {
 }
 
 func (n *Notifier) CreateManaged(ctx context.Context, name, rawURL string, enabled bool) (DestinationView, error) {
+	return n.createManaged(ctx, name, rawURL, enabled, nil)
+}
+
+// CreateManagedWithAudit is the administrator-facing variant. The encrypted
+// URL write and its redacted audit record share one store transaction.
+func (n *Notifier) CreateManagedWithAudit(ctx context.Context, name, rawURL string, enabled bool, audit store.AuditEntry) (DestinationView, error) {
+	return n.createManaged(ctx, name, rawURL, enabled, &audit)
+}
+
+func (n *Notifier) createManaged(ctx context.Context, name, rawURL string, enabled bool, audit *store.AuditEntry) (DestinationView, error) {
 	name = strings.TrimSpace(name)
 	if err := validateName(name); err != nil {
 		return DestinationView{}, err
@@ -225,7 +235,12 @@ func (n *Notifier) CreateManaged(ctx context.Context, name, rawURL string, enabl
 	if err != nil {
 		return DestinationView{}, err
 	}
-	if _, err := n.Store.CreateManagedNotification(ctx, id, name, provider, ciphertext, nonce, enabled); err != nil {
+	if audit == nil {
+		_, err = n.Store.CreateManagedNotification(ctx, id, name, provider, ciphertext, nonce, enabled)
+	} else {
+		_, err = n.Store.CreateManagedNotificationWithAudit(ctx, id, name, provider, ciphertext, nonce, enabled, *audit)
+	}
+	if err != nil {
 		return DestinationView{}, err
 	}
 	if err := n.Reload(ctx); err != nil {
@@ -245,6 +260,16 @@ func validateName(name string) error {
 }
 
 func (n *Notifier) UpdateManaged(ctx context.Context, id string, expectedRevision int64, name string, rawURL *string, enabled *bool) (DestinationView, error) {
+	return n.updateManaged(ctx, id, expectedRevision, name, rawURL, enabled, nil)
+}
+
+// UpdateManagedWithAudit atomically updates destination metadata/ciphertext
+// and records a redacted security event.
+func (n *Notifier) UpdateManagedWithAudit(ctx context.Context, id string, expectedRevision int64, name string, rawURL *string, enabled *bool, audit store.AuditEntry) (DestinationView, error) {
+	return n.updateManaged(ctx, id, expectedRevision, name, rawURL, enabled, &audit)
+}
+
+func (n *Notifier) updateManaged(ctx context.Context, id string, expectedRevision int64, name string, rawURL *string, enabled *bool, audit *store.AuditEntry) (DestinationView, error) {
 	name = strings.TrimSpace(name)
 	if err := validateName(name); err != nil {
 		return DestinationView{}, err
@@ -289,7 +314,12 @@ func (n *Notifier) UpdateManaged(ctx context.Context, id string, expectedRevisio
 	if enabled != nil {
 		nextEnabled = *enabled
 	}
-	updated, err := n.Store.UpdateManagedNotification(ctx, id, expectedRevision, name, provider, ciphertext, nonce, nextEnabled)
+	var updated store.ManagedNotification
+	if audit == nil {
+		updated, err = n.Store.UpdateManagedNotification(ctx, id, expectedRevision, name, provider, ciphertext, nonce, nextEnabled)
+	} else {
+		updated, err = n.Store.UpdateManagedNotificationWithAudit(ctx, id, expectedRevision, name, provider, ciphertext, nonce, nextEnabled, *audit)
+	}
 	if err != nil {
 		return DestinationView{}, err
 	}
@@ -300,7 +330,23 @@ func (n *Notifier) UpdateManaged(ctx context.Context, id string, expectedRevisio
 }
 
 func (n *Notifier) DeleteManaged(ctx context.Context, id string, expectedRevision int64) error {
-	if err := n.Store.DeleteManagedNotification(ctx, id, expectedRevision); err != nil {
+	return n.deleteManaged(ctx, id, expectedRevision, nil)
+}
+
+// DeleteManagedWithAudit removes a destination and records the action in the
+// same transaction.
+func (n *Notifier) DeleteManagedWithAudit(ctx context.Context, id string, expectedRevision int64, audit store.AuditEntry) error {
+	return n.deleteManaged(ctx, id, expectedRevision, &audit)
+}
+
+func (n *Notifier) deleteManaged(ctx context.Context, id string, expectedRevision int64, audit *store.AuditEntry) error {
+	var err error
+	if audit == nil {
+		err = n.Store.DeleteManagedNotification(ctx, id, expectedRevision)
+	} else {
+		err = n.Store.DeleteManagedNotificationWithAudit(ctx, id, expectedRevision, *audit)
+	}
+	if err != nil {
 		return err
 	}
 	return n.Reload(ctx)

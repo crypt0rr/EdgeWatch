@@ -83,6 +83,37 @@ func TestIncompleteFailuresDoNotChangeBaseline(t *testing.T) {
 	}
 }
 
+func TestFinalizeManagedScanRecordsInitialBaselineScanMetadata(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	record, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "managed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
+		TCP: &config.Protocol{Ports: "443", Mode: "connect"}, Timing: "balanced", Timeout: config.Duration(time.Minute),
+		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := Engine{Store: db}
+	current := scan("managed-baseline", snapshot("open"))
+	current.JobID, current.JobRevision, current.Job = record.ID, record.Revision, record.Job.Name
+	current.ConfigHash = record.Job.SecurityHash()
+	if _, err := e.FinalizeManagedScan(ctx, record.ID, record.Job, &current, nil); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := db.GetScan(ctx, current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.BaselineScanID != current.ID || stored.BaselineConfigHash != current.ConfigHash {
+		t.Fatalf("initial baseline metadata = %#v, want scan=%s hash=%s", stored, current.ID, current.ConfigHash)
+	}
+}
+
 func TestFingerprintStabilizesWithoutBlockingPortBaseline(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "db"))

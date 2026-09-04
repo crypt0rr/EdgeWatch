@@ -46,8 +46,10 @@ ssh -L 8080:127.0.0.1:8080 user@docker-host
 `config.yaml` contains deployment settings only. See
 [`config.example.yaml`](config.example.yaml) for the complete schema.
 
-- `database`, `retention`, and `scheduler.max_concurrent_scans` control local
-  storage and scan capacity.
+- `database`, `retention`, `scheduler.max_concurrent_scans`, and
+  `scheduler.max_probe_count` control local storage and scan capacity. A job's
+  estimated probe count is shown in the console and runs over the budget are
+  rejected before scanning unless `allow_high_cost` is explicitly enabled.
 - `web.listen` must be a loopback address; the default is
   `127.0.0.1:8080`.
 - TOTP is optional. Its seed is encrypted with a separate authentication key
@@ -71,7 +73,9 @@ and during its daily pruning pass.
 The web job editor supports individual IP addresses, CIDRs, DNS names, target
 expansion limits, independent TCP and UDP scans, ports `1-65535`, TCP SYN or
 connect mode, service detection, timing, timeouts, cron schedules, timezones,
-and pause/resume controls.
+pause/resume controls, and a preflight Nmap work estimate. Broad scans are
+guarded by the scheduler probe budget; enable the explicit high-cost override
+only when the additional load is understood.
 
 `assume_alive` defaults to `true` and passes `-Pn` to Nmap. Set it to `false`
 when host discovery is required. If discovery reports an expected target as

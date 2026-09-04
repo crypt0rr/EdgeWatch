@@ -21,6 +21,7 @@ const blank: JobForm = {
   timeout: '1h',
   baseline_samples: 2,
   change_confirmations: 1,
+  allow_high_cost: false,
   enabled: true,
 }
 
@@ -35,6 +36,7 @@ const jobFormSchema = z.object({
   timeout: z.string().trim().min(1, 'A scan timeout is required.'),
   baseline_samples: z.number().int('Use a whole number of samples.').min(1, 'Use at least one baseline sample.').max(100, 'Use no more than 100 baseline samples.'),
   change_confirmations: z.number().int('Use a whole number of confirmations.').min(1, 'Use at least one confirmation.').max(100, 'Use no more than 100 confirmations.'),
+  allow_high_cost: z.boolean().optional(),
   enabled: z.boolean().optional(),
 })
 type JobFormFields = z.infer<typeof jobFormSchema>
@@ -179,6 +181,7 @@ export function JobEditor() {
               {(fieldErrors.targets || fieldErrors.target) && <small className="field-error">{fieldErrors.targets || fieldErrors.target}</small>}
             </div>
             <label className="inline-field">Maximum expanded hosts <span className="input-suffix"><input type="number" min={1} max={1000000} {...register('max_expanded_hosts', { valueAsNumber: true })} /><em>hosts</em></span>{(formErrors.max_expanded_hosts?.message || fieldErrors.max_expanded_hosts) && <small className="field-error">{formErrors.max_expanded_hosts?.message || fieldErrors.max_expanded_hosts}</small>}</label>
+            <label className="switch-row"><input type="checkbox" {...register('allow_high_cost')} /><span><strong>Allow high-cost scans</strong><small>Override the deployment probe budget for deliberately broad scopes. The estimated cost is shown after saving.</small></span></label>
             <div className="notice"><Info size={16} /><span>Large CIDRs can take a long time to scan. The expansion limit protects the host from accidental wide scopes.</span></div>
           </div>
 

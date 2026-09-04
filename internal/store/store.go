@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -62,10 +63,29 @@ func Open(path string) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("database path is empty")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return nil, err
+	dsn := path
+	memoryDatabase := isSQLiteMemoryPath(path)
+	artifactPath := path
+	if !memoryDatabase {
+		var err error
+		artifactPath, err = sqliteArtifactPath(path)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(filepath.Dir(artifactPath), 0o750); err != nil {
+			return nil, err
+		}
+		if err := ensurePrivateSQLiteFile(artifactPath); err != nil {
+			return nil, err
+		}
+		// Refuse unsafe pre-existing sidecars before SQLite can open or update
+		// them. SQLite may follow a WAL/SHM symlink during connection setup, so
+		// checking only after the first pragma would leave a small write window.
+		if err := enforcePrivateSQLiteArtifacts(artifactPath); err != nil {
+			return nil, err
+		}
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -75,12 +95,124 @@ func Open(path string) (*Store, error) {
 			db.Close()
 			return nil, err
 		}
+		if !memoryDatabase {
+			if err := enforcePrivateSQLiteArtifacts(artifactPath); err != nil {
+				db.Close()
+				return nil, err
+			}
+		}
 	}
 	if err := migrate(db); err != nil {
 		db.Close()
 		return nil, err
 	}
-	return &Store{DB: db, Path: path, authKeyPath: defaultAuthKeyPath(path), authAutoKey: true}, nil
+	if !memoryDatabase {
+		if err := enforcePrivateSQLiteArtifacts(artifactPath); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	return &Store{DB: db, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true}, nil
+}
+
+// sqliteArtifactPath resolves the on-disk filename represented by a SQLite
+// file: URI. The database driver receives the original URI (so query options
+// such as mode=rwc remain effective), while permission checks must operate on
+// the decoded filename rather than a literal string containing '?mode=…'.
+func sqliteArtifactPath(path string) (string, error) {
+	if !strings.HasPrefix(path, "file:") {
+		return path, nil
+	}
+	withoutScheme := strings.TrimPrefix(path, "file:")
+	if index := strings.IndexByte(withoutScheme, '?'); index >= 0 {
+		withoutScheme = withoutScheme[:index]
+	}
+	if withoutScheme == "" || strings.HasPrefix(withoutScheme, ":memory:") {
+		return "", errors.New("filesystem SQLite URI must include a database path")
+	}
+	// A URI authority is only safe for the local host. SQLite treats a URI
+	// with another authority as a VFS-specific path that EdgeWatch cannot
+	// reliably permission-check.
+	if strings.HasPrefix(withoutScheme, "//") {
+		u, err := url.Parse("file:" + withoutScheme)
+		if err != nil {
+			return "", fmt.Errorf("invalid SQLite database URI: %w", err)
+		}
+		if u.Host != "" && u.Host != "localhost" {
+			return "", errors.New("SQLite database URI must refer to the local host")
+		}
+		withoutScheme = u.Path
+	}
+	decoded, err := url.PathUnescape(withoutScheme)
+	if err != nil {
+		return "", fmt.Errorf("invalid SQLite database URI path: %w", err)
+	}
+	if decoded == "" {
+		return "", errors.New("filesystem SQLite URI must include a database path")
+	}
+	return decoded, nil
+}
+
+func isSQLiteMemoryPath(path string) bool {
+	if path == ":memory:" || strings.HasPrefix(path, "file::memory:") {
+		return true
+	}
+	if !strings.HasPrefix(path, "file:") {
+		return false
+	}
+	queryIndex := strings.IndexByte(path, '?')
+	if queryIndex < 0 {
+		return false
+	}
+	for _, parameter := range strings.Split(path[queryIndex+1:], "&") {
+		key, value, ok := strings.Cut(parameter, "=")
+		if ok && key == "mode" && value == "memory" {
+			return true
+		}
+	}
+	return false
+}
+
+// ensurePrivateSQLiteFile creates the database before the SQLite driver sees
+// it and repairs an existing file to owner-only permissions. This makes the
+// sensitive database deterministic even when the container umask is 022.
+func ensurePrivateSQLiteFile(path string) error {
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("database path must not be a symbolic link: %s", path)
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	closeErr := file.Close()
+	if closeErr != nil {
+		return closeErr
+	}
+	return os.Chmod(path, 0o600)
+}
+
+// enforcePrivateSQLiteArtifacts repairs permissions on SQLite's database and
+// any sidecar files currently present. SQLite creates WAL/SHM lazily, so this
+// is called after connection setup and migrations as well as before opening.
+func enforcePrivateSQLiteArtifacts(path string) error {
+	for _, candidate := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		info, err := os.Lstat(candidate)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("database artifact must not be a symbolic link: %s", candidate)
+		}
+		if err := os.Chmod(candidate, 0o600); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SetAuthKeyPath selects an operator-managed authentication key. An explicit
@@ -290,6 +422,18 @@ func (s *Store) CreateJob(ctx context.Context, job config.Job) (JobRecord, error
 // prevents a crash window where it could be scheduled before the follow-up
 // lifecycle update succeeds.
 func (s *Store) CreateJobWithEnabled(ctx context.Context, job config.Job, enabled bool) (JobRecord, error) {
+	return s.createJobWithAudits(ctx, job, enabled, nil)
+}
+
+// CreateJobWithEnabledAndAudit commits a new job and its security audit row in
+// one transaction. The plain CreateJobWithEnabled API remains available to
+// internal callers that deliberately do not need an audit entry (for example,
+// deterministic fixtures).
+func (s *Store) CreateJobWithEnabledAndAudit(ctx context.Context, job config.Job, enabled bool, audits ...AuditEntry) (JobRecord, error) {
+	return s.createJobWithAudits(ctx, job, enabled, audits)
+}
+
+func (s *Store) createJobWithAudits(ctx context.Context, job config.Job, enabled bool, audits []AuditEntry) (JobRecord, error) {
 	job = config.NormalizeJob(job)
 	if err := config.ValidateJob(job); err != nil {
 		return JobRecord{}, err
@@ -310,6 +454,9 @@ func (s *Store) CreateJobWithEnabled(ctx context.Context, job config.Job, enable
 		return JobRecord{}, err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO job_revisions(job_id,revision,definition_json,security_hash,created_at) VALUES(?,?,?,?,?)`, id, 1, raw, hash, now.Format(time.RFC3339Nano)); err != nil {
+		return JobRecord{}, err
+	}
+	if err = insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return JobRecord{}, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -432,6 +579,13 @@ func (s *Store) UpdateJobWithEvents(ctx context.Context, id string, expectedRevi
 // job transaction is open, so a concurrent credential edit cannot leave an
 // orphaned delivery.
 func (s *Store) UpdateJobWithEventsWithOutbox(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool, destinations []string) (JobRecord, bool, []model.Event, error) {
+	return s.UpdateJobWithEventsWithOutboxAndAudit(ctx, id, expectedRevision, job, enabled, archived, confirmRebaseline, destinations)
+}
+
+// UpdateJobWithEventsWithOutboxAndAudit extends the job revision transaction
+// with one or more audit rows. If an audit insert fails, the revision, runtime
+// reset, event, and outbox intent all roll back together.
+func (s *Store) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool, destinations []string, audits ...AuditEntry) (JobRecord, bool, []model.Event, error) {
 	job = config.NormalizeJob(job)
 	if err := config.ValidateJob(job); err != nil {
 		return JobRecord{}, false, nil, err
@@ -492,16 +646,20 @@ func (s *Store) UpdateJobWithEventsWithOutbox(ctx context.Context, id string, ex
 			return JobRecord{}, false, nil, err
 		}
 		event := model.Event{Type: "baseline-reset", JobID: id, Job: job.Name, Message: "Baseline collection reset", CreatedAt: now}
-		eventRaw, marshalErr := json.Marshal(event)
+		boundedEvent, eventRaw, marshalErr := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
 		if marshalErr != nil {
 			return JobRecord{}, false, nil, marshalErr
 		}
+		event = boundedEvent
 		if _, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,job_id,scan_id,payload_json,created_at) VALUES(?,?,?,?,?,?)`, event.Type, event.Job, event.JobID, event.ScanID, eventRaw, now.Format(time.RFC3339Nano)); err != nil {
 			return JobRecord{}, false, nil, err
 		}
 		events = append(events, event)
 	}
 	if err = queueEventsTx(ctx, tx, events, destinations); err != nil {
+		return JobRecord{}, false, nil, err
+	}
+	if err = insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return JobRecord{}, false, nil, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -518,7 +676,7 @@ func boolInt(v bool) int {
 }
 
 func (s *Store) SetJobArchived(ctx context.Context, id string, archived bool) error {
-	return s.setJobArchived(ctx, id, archived, nil)
+	return s.setJobArchived(ctx, id, archived, nil, nil)
 }
 
 // SetJobArchivedWithRevision applies an archive or restore transition only
@@ -526,10 +684,17 @@ func (s *Store) SetJobArchived(ctx context.Context, id string, archived bool) er
 // actions are state mutations too, so stale browser views must not silently
 // overwrite a newer edit.
 func (s *Store) SetJobArchivedWithRevision(ctx context.Context, id string, archived bool, expectedRevision int64) error {
-	return s.setJobArchived(ctx, id, archived, &expectedRevision)
+	return s.setJobArchived(ctx, id, archived, &expectedRevision, nil)
 }
 
-func (s *Store) setJobArchived(ctx context.Context, id string, archived bool, expectedRevision *int64) error {
+// SetJobArchivedWithRevisionAndAudit applies the lifecycle transition and its
+// audit row atomically. It is used by the web administrator path so a failed
+// audit write cannot leave an unrecorded archive/restore.
+func (s *Store) SetJobArchivedWithRevisionAndAudit(ctx context.Context, id string, archived bool, expectedRevision int64, audit AuditEntry) error {
+	return s.setJobArchived(ctx, id, archived, &expectedRevision, []AuditEntry{audit})
+}
+
+func (s *Store) setJobArchived(ctx context.Context, id string, archived bool, expectedRevision *int64, audits []AuditEntry) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -543,6 +708,9 @@ func (s *Store) setJobArchived(ctx context.Context, id string, archived bool, ex
 		return ErrConflict
 	}
 	if current.Archived == archived {
+		if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
+			return err
+		}
 		return tx.Commit()
 	}
 	now := time.Now().UTC()
@@ -565,20 +733,29 @@ func (s *Store) setJobArchived(ctx context.Context, id string, archived bool, ex
 	if err := appendJobRevisionTx(ctx, tx, id, next, raw, current.Job.SecurityHash(), now); err != nil {
 		return err
 	}
+	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
 func (s *Store) SetJobEnabled(ctx context.Context, id string, enabled bool) error {
-	return s.setJobEnabled(ctx, id, enabled, nil)
+	return s.setJobEnabled(ctx, id, enabled, nil, nil)
 }
 
 // SetJobEnabledWithRevision applies a pause or resume transition only when
 // the caller still holds the current immutable job revision.
 func (s *Store) SetJobEnabledWithRevision(ctx context.Context, id string, enabled bool, expectedRevision int64) error {
-	return s.setJobEnabled(ctx, id, enabled, &expectedRevision)
+	return s.setJobEnabled(ctx, id, enabled, &expectedRevision, nil)
 }
 
-func (s *Store) setJobEnabled(ctx context.Context, id string, enabled bool, expectedRevision *int64) error {
+// SetJobEnabledWithRevisionAndAudit applies a pause/resume transition and its
+// audit row in one transaction.
+func (s *Store) SetJobEnabledWithRevisionAndAudit(ctx context.Context, id string, enabled bool, expectedRevision int64, audit AuditEntry) error {
+	return s.setJobEnabled(ctx, id, enabled, &expectedRevision, []AuditEntry{audit})
+}
+
+func (s *Store) setJobEnabled(ctx context.Context, id string, enabled bool, expectedRevision *int64, audits []AuditEntry) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -595,6 +772,9 @@ func (s *Store) setJobEnabled(ctx context.Context, id string, enabled bool, expe
 		return fmt.Errorf("%w: job %s", ErrNotFound, id)
 	}
 	if current.Enabled == enabled {
+		if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
+			return err
+		}
 		return tx.Commit()
 	}
 	now := time.Now().UTC()
@@ -613,6 +793,9 @@ func (s *Store) setJobEnabled(ctx context.Context, id string, enabled bool, expe
 	if err := appendJobRevisionTx(ctx, tx, id, next, raw, current.Job.SecurityHash(), now); err != nil {
 		return err
 	}
+	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -622,6 +805,17 @@ func appendJobRevisionTx(ctx context.Context, tx *sql.Tx, jobID string, revision
 }
 
 func (s *Store) DeleteJob(ctx context.Context, id string) error {
+	return s.deleteJobWithAudits(ctx, id, nil)
+}
+
+// DeleteJobWithAudit permanently removes an archived job only when the audit
+// row can be committed in the same transaction. The audit row intentionally
+// survives the job deletion as part of the append-only security history.
+func (s *Store) DeleteJobWithAudit(ctx context.Context, id string, audit AuditEntry) error {
+	return s.deleteJobWithAudits(ctx, id, []AuditEntry{audit})
+}
+
+func (s *Store) deleteJobWithAudits(ctx context.Context, id string, audits []AuditEntry) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -661,6 +855,9 @@ func (s *Store) DeleteJob(ctx context.Context, id string) error {
 	}
 	if n, _ := result.RowsAffected(); n == 0 {
 		return fmt.Errorf("%w: job %s", ErrNotFound, id)
+	}
+	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -747,7 +944,7 @@ func (s *Store) ListJobScanSummariesPage(ctx context.Context, jobID string, limi
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,baseline_scan_id,baseline_config_hash FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -757,7 +954,7 @@ func (s *Store) ListJobScanSummariesPage(ctx context.Context, jobID string, limi
 		var jid sql.NullString
 		var revision sql.NullInt64
 		var started, finished string
-		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash); err != nil {
+		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.BaselineScanID, &v.BaselineConfigHash); err != nil {
 			return page, err
 		}
 		if jid.Valid {
@@ -798,6 +995,10 @@ func (s *Store) UpdateRuntimeWithOutbox(ctx context.Context, jobID string, desti
 }
 
 func (s *Store) updateRuntime(ctx context.Context, jobID, securityHash string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	return s.updateRuntimeWithOutboxAndAudits(ctx, jobID, securityHash, destinations, nil, fn)
+}
+
+func (s *Store) updateRuntimeWithOutboxAndAudits(ctx context.Context, jobID, securityHash string, destinations []string, audits []AuditEntry, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -821,6 +1022,9 @@ func (s *Store) updateRuntime(ctx context.Context, jobID, securityHash string, d
 	}
 	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, destinations, fn)
 	if err != nil {
+		return nil, err
+	}
+	if err = insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -848,6 +1052,69 @@ func (s *Store) UpdateRuntimeForScanWithOutbox(ctx context.Context, jobID, secur
 	return s.updateRuntime(ctx, jobID, securityHash, destinations, fn)
 }
 
+// FinalizeManagedScan persists a managed scan and its runtime transition on the
+// same SQLite transaction. The runtime state is read while the transaction's
+// database connection is held, so baseline reset/approval cannot slip between
+// comparison capture and the state transition. If the job's security scope
+// changed while the scanner was running, the scan is retained as immutable
+// history but the runtime state is left untouched.
+func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID, securityHash string, destinations []string, fn func(*model.JobState, *model.Scan) ([]model.Event, error)) ([]model.Event, error) {
+	if scan == nil {
+		return nil, errors.New("scan is required")
+	}
+	if jobID == "" {
+		return nil, errors.New("job ID is required")
+	}
+	if fn == nil {
+		return nil, errors.New("scan finalizer is required")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var raw []byte
+	if err := tx.QueryRowContext(ctx, `SELECT definition_json FROM jobs WHERE id=?`, jobID).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("%w: job %s", ErrNotFound, jobID)
+		}
+		return nil, err
+	}
+	job, err := unmarshalJob(raw)
+	if err != nil {
+		return nil, err
+	}
+	if job.SecurityHash() != securityHash {
+		if err := saveScanExec(ctx, tx, *scan); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, ErrJobRevisionChanged
+	}
+
+	state, err := loadRuntimeTx(ctx, tx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	events, err := fn(&state, scan)
+	if err != nil {
+		return nil, err
+	}
+	if err := saveScanExec(ctx, tx, *scan); err != nil {
+		return nil, err
+	}
+	if _, err := persistRuntimeTxWithOutbox(ctx, tx, jobID, state, events, destinations); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
 func updateRuntimeTxWithOutbox(ctx context.Context, tx *sql.Tx, jobID string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	events, err := updateRuntimeTx(ctx, tx, jobID, fn)
 	if err != nil {
@@ -868,10 +1135,11 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, event := range events {
-		payload, err := json.Marshal(event)
+		bounded, payload, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
 		if err != nil {
 			return err
 		}
+		event = bounded
 		for _, destination := range destinations {
 			if strings.HasPrefix(destination, "managed:") {
 				valid, validationErr := managedDestinationCurrentTx(ctx, tx, destination)
@@ -938,7 +1206,26 @@ func updateRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, fn func(*mod
 	if err != nil {
 		return nil, err
 	}
-	raw, err = json.Marshal(state)
+	return persistRuntimeTx(ctx, tx, jobID, state, events)
+}
+
+func loadRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string) (model.JobState, error) {
+	var raw []byte
+	state := emptyState()
+	err := tx.QueryRowContext(ctx, `SELECT state_json FROM job_runtime WHERE job_id=?`, jobID).Scan(&raw)
+	if err == nil {
+		if err = json.Unmarshal(raw, &state); err != nil {
+			return state, err
+		}
+		ensureMaps(&state)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return state, err
+	}
+	return state, nil
+}
+
+func persistRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, state model.JobState, events []model.Event) ([]model.Event, error) {
+	raw, err := json.Marshal(state)
 	if err != nil {
 		return nil, err
 	}
@@ -949,10 +1236,28 @@ func updateRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, fn func(*mod
 		if events[i].JobID == "" {
 			events[i].JobID = jobID
 		}
-		payload, _ := json.Marshal(events[i])
+		bounded, payload, err := model.MarshalBoundedEvent(events[i], model.EventPayloadLimit)
+		if err != nil {
+			return nil, err
+		}
+		events[i] = bounded
 		if _, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,job_id,scan_id,payload_json,created_at) VALUES(?,?,?,?,?,?)`, events[i].Type, events[i].Job, events[i].JobID, events[i].ScanID, payload, events[i].CreatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
 			return nil, err
 		}
+	}
+	return events, nil
+}
+
+func persistRuntimeTxWithOutbox(ctx context.Context, tx *sql.Tx, jobID string, state model.JobState, events []model.Event, destinations []string) ([]model.Event, error) {
+	events, err := persistRuntimeTx(ctx, tx, jobID, state, events)
+	if err != nil {
+		return nil, err
+	}
+	if len(destinations) == 0 || len(events) == 0 {
+		return events, nil
+	}
+	if err := queueEventsTx(ctx, tx, events, destinations); err != nil {
+		return nil, err
 	}
 	return events, nil
 }
@@ -964,7 +1269,17 @@ func (s *Store) ResetRuntime(ctx context.Context, jobID, name string) ([]model.E
 // ResetRuntimeWithOutbox persists the baseline reset event and its notification
 // intent in the same transaction.
 func (s *Store) ResetRuntimeWithOutbox(ctx context.Context, jobID, name string, destinations []string) ([]model.Event, error) {
-	return s.UpdateRuntimeWithOutbox(ctx, jobID, destinations, func(state *model.JobState) ([]model.Event, error) {
+	return s.resetRuntimeWithAudits(ctx, jobID, name, destinations, nil)
+}
+
+// ResetRuntimeWithOutboxAndAudit clears comparison state, persists any reset
+// notification intent, and records the administrator action atomically.
+func (s *Store) ResetRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name string, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return s.resetRuntimeWithAudits(ctx, jobID, name, destinations, []AuditEntry{audit})
+}
+
+func (s *Store) resetRuntimeWithAudits(ctx context.Context, jobID, name string, destinations []string, audits []AuditEntry) ([]model.Event, error) {
+	return s.updateRuntimeWithOutboxAndAudits(ctx, jobID, "", destinations, audits, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = nil
 		state.BaselineScanID = ""
 		state.BaselineConfigHash = ""
@@ -986,6 +1301,16 @@ func (s *Store) ApproveRuntime(ctx context.Context, jobID, name string, scan mod
 // ApproveRuntimeWithOutbox persists a manual baseline approval and notification
 // intent together, while retaining the current-scope validation.
 func (s *Store) ApproveRuntimeWithOutbox(ctx context.Context, jobID, name string, scan model.Scan, destinations []string) ([]model.Event, error) {
+	return s.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, nil)
+}
+
+// ApproveRuntimeWithOutboxAndAudit applies a manual baseline approval and its
+// notification intent/audit row in one transaction.
+func (s *Store) ApproveRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return s.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, []AuditEntry{audit})
+}
+
+func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audits []AuditEntry) ([]model.Event, error) {
 	if scan.ID == "" {
 		return nil, errors.New("scan ID is required")
 	}
@@ -1024,6 +1349,9 @@ func (s *Store) ApproveRuntimeWithOutbox(ctx context.Context, jobID, name string
 	if err != nil {
 		return nil, err
 	}
+	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -1031,6 +1359,10 @@ func (s *Store) ApproveRuntimeWithOutbox(ctx context.Context, jobID, name string
 }
 
 func (s *Store) SaveScan(ctx context.Context, scan model.Scan) error {
+	return saveScanExec(ctx, s.DB, scan)
+}
+
+func saveScanExec(ctx context.Context, execer contextExecer, scan model.Scan) error {
 	snapshot, err := json.Marshal(scan.Snapshot)
 	if err != nil {
 		return err
@@ -1043,7 +1375,7 @@ func (s *Store) SaveScan(ctx context.Context, scan model.Scan) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.ExecContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+	_, err = execer.ExecContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		scan.ID, nullString(scan.JobID), nullInt64(scan.JobRevision), scan.Job, scan.StartedAt.UTC().Format(time.RFC3339Nano), scan.FinishedAt.UTC().Format(time.RFC3339Nano), scan.Status, scan.Error, scan.NmapVersion, scan.ConfigHash, scan.BaselineScanID, scan.BaselineConfigHash, changesJSON, snapshot)
 	return err
 }
@@ -1078,6 +1410,119 @@ func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {
 		return v, err
 	}
 	return v, nil
+}
+
+// GetScanSummary returns scan metadata without reading either the snapshot or
+// the serialized change list. History/detail views use this method so a broad
+// scan cannot cause a hidden full-result allocation.
+func (s *Store) GetScanSummary(ctx context.Context, id string) (model.ScanSummary, error) {
+	var v model.ScanSummary
+	var started, finished string
+	var jobID sql.NullString
+	var revision sql.NullInt64
+	err := s.DB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,baseline_scan_id,baseline_config_hash FROM scans WHERE id=?`, id).
+		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.BaselineScanID, &v.BaselineConfigHash)
+	if err != nil {
+		return v, err
+	}
+	if jobID.Valid {
+		v.JobID = jobID.String
+	}
+	if revision.Valid {
+		v.JobRevision = revision.Int64
+	}
+	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
+	return v, nil
+}
+
+// GetScanComparison returns scan metadata and the immutable scan-time change
+// list without loading snapshot_json. Legacy rows without a scan-time
+// comparison can be resolved through GetScan when callers need to recreate
+// their historical diff against the then-current baseline behavior.
+func (s *Store) GetScanComparison(ctx context.Context, id string) (model.ScanSummary, []model.Change, error) {
+	var v model.ScanSummary
+	var started, finished string
+	var changesJSON []byte
+	var jobID sql.NullString
+	var revision sql.NullInt64
+	err := s.DB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,baseline_scan_id,baseline_config_hash,changes_json FROM scans WHERE id=?`, id).
+		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.BaselineScanID, &v.BaselineConfigHash, &changesJSON)
+	if err != nil {
+		return v, nil, err
+	}
+	if jobID.Valid {
+		v.JobID = jobID.String
+	}
+	if revision.Valid {
+		v.JobRevision = revision.Int64
+	}
+	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
+	var changes []model.Change
+	if len(changesJSON) > 0 && string(changesJSON) != "null" {
+		if err := json.Unmarshal(changesJSON, &changes); err != nil {
+			return v, nil, err
+		}
+	}
+	return v, changes, nil
+}
+
+// ListScanChangesPage reads only one page of the immutable scan-time diff.
+// Changes are stored as a JSON array for backwards-compatible scan records;
+// SQLite's json_each keeps pagination in the database so the web handler does
+// not deserialize the entire change list merely to return the first page.
+// Legacy rows with a NULL/empty array naturally return an empty page and are
+// handled by the caller's explicit compatibility path.
+func (s *Store) ListScanChangesPage(ctx context.Context, id string, limit, offset int) (Page[model.Change], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[model.Change]
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans, json_each(scans.changes_json) WHERE scans.id=?`, id).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.changes_json) WHERE scans.id=? ORDER BY json_each.key LIMIT ? OFFSET ?`, id, limit, offset)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return page, err
+		}
+		var change model.Change
+		if err := json.Unmarshal(raw, &change); err != nil {
+			return page, err
+		}
+		page.Items = append(page.Items, change)
+	}
+	return page, rows.Err()
+}
+
+// ListScanResultsPage reads one page of snapshot units directly from the
+// persisted JSON document. The explicit results endpoint can therefore show a
+// broad scan incrementally without first materializing every host in Go.
+func (s *Store) ListScanResultsPage(ctx context.Context, id string, limit, offset int) (Page[model.Unit], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[model.Unit]
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=?`, id).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=? ORDER BY json_each.key LIMIT ? OFFSET ?`, id, limit, offset)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return page, err
+		}
+		var unit model.Unit
+		if err := json.Unmarshal(raw, &unit); err != nil {
+			return page, err
+		}
+		page.Items = append(page.Items, unit)
+	}
+	return page, rows.Err()
 }
 
 func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {
@@ -1176,7 +1621,7 @@ func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int
 func (s *Store) ListScanSummariesPage(ctx context.Context, job string, limit, offset int) (Page[model.ScanSummary], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.ScanSummary]
-	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash FROM scans`
+	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,baseline_scan_id,baseline_config_hash FROM scans`
 	countQuery := `SELECT COUNT(*) FROM scans`
 	args := []any{}
 	countArgs := []any{}
@@ -1201,7 +1646,7 @@ func (s *Store) ListScanSummariesPage(ctx context.Context, job string, limit, of
 		var jobID sql.NullString
 		var revision sql.NullInt64
 		var started, finished string
-		if err := rows.Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash); err != nil {
+		if err := rows.Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.BaselineScanID, &v.BaselineConfigHash); err != nil {
 			return page, err
 		}
 		if jobID.Valid {
@@ -1313,6 +1758,66 @@ func (s *Store) State(ctx context.Context, job string) (model.JobState, error) {
 	return state, nil
 }
 
+// JobIncident is the bounded API representation of one active incident. The
+// incident itself remains in the runtime JSON for atomic state transitions,
+// while list methods below use SQLite's json_each to page without decoding the
+// complete incident map into Go memory.
+type JobIncident struct {
+	JobID    string
+	Job      string
+	Incident model.Incident
+}
+
+func (s *Store) ListJobIncidentsPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Incident], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[model.Incident]
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_runtime, json_each(job_runtime.state_json, '$.incidents') WHERE job_runtime.job_id=?`, jobID).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT json_each.value FROM job_runtime, json_each(job_runtime.state_json, '$.incidents') WHERE job_runtime.job_id=? ORDER BY json_each.key LIMIT ? OFFSET ?`, jobID, limit, offset)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return page, err
+		}
+		var incident model.Incident
+		if err := json.Unmarshal(raw, &incident); err != nil {
+			return page, err
+		}
+		page.Items = append(page.Items, incident)
+	}
+	return page, rows.Err()
+}
+
+func (s *Store) ListIncidentsPage(ctx context.Context, limit, offset int) (Page[JobIncident], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[JobIncident]
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_runtime JOIN jobs ON jobs.id=job_runtime.job_id, json_each(job_runtime.state_json, '$.incidents')`).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT jobs.id,jobs.name,json_each.value FROM job_runtime JOIN jobs ON jobs.id=job_runtime.job_id, json_each(job_runtime.state_json, '$.incidents') ORDER BY jobs.name,json_each.key LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item JobIncident
+		var raw []byte
+		if err := rows.Scan(&item.JobID, &item.Job, &raw); err != nil {
+			return page, err
+		}
+		if err := json.Unmarshal(raw, &item.Incident); err != nil {
+			return page, err
+		}
+		page.Items = append(page.Items, item)
+	}
+	return page, rows.Err()
+}
+
 func emptyState() model.JobState { s := model.JobState{}; ensureMaps(&s); return s }
 func ensureMaps(s *model.JobState) {
 	if s.Pending == nil {
@@ -1355,8 +1860,13 @@ func (s *Store) UpdateState(ctx context.Context, job string, fn func(*model.JobS
 	if err != nil {
 		return nil, err
 	}
-	for _, event := range events {
-		payload, _ := json.Marshal(event)
+	for i := range events {
+		bounded, payload, marshalErr := model.MarshalBoundedEvent(events[i], model.EventPayloadLimit)
+		if marshalErr != nil {
+			return nil, marshalErr
+		}
+		events[i] = bounded
+		event := events[i]
 		if _, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at) VALUES(?,?,?,?,?)`, event.Type, event.Job, event.ScanID, payload, event.CreatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
 			return nil, err
 		}
@@ -1368,7 +1878,7 @@ func (s *Store) UpdateState(ctx context.Context, job string, fn func(*model.JobS
 }
 
 func (s *Store) QueueEvent(ctx context.Context, destination string, event model.Event) error {
-	b, err := json.Marshal(event)
+	_, b, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
 	if err != nil {
 		return err
 	}

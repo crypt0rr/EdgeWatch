@@ -26,7 +26,7 @@ var (
 )
 
 func defaultAuthKeyPath(database string) string {
-	if database == "" || database == ":memory:" {
+	if database == "" || isSQLiteMemoryPath(database) {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(database), "auth.key")

@@ -36,6 +36,39 @@ func (e *Engine) SuccessForJobWithDestinations(ctx context.Context, jobID string
 	})
 }
 
+// FinalizeManagedScan captures the scan-time comparison and applies the
+// resulting runtime transition in the store's single transaction. This keeps
+// baseline reset/approval from changing the state between those two steps.
+func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job config.Job, scan *model.Scan, destinations []string) ([]model.Event, error) {
+	if scan == nil {
+		return nil, fmt.Errorf("scan is required")
+	}
+	return e.Store.FinalizeManagedScan(ctx, scan, jobID, scan.ConfigHash, destinations, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
+		if current.Status == "success" {
+			if state.Baseline != nil {
+				current.BaselineScanID = state.BaselineScanID
+				current.BaselineConfigHash = state.BaselineConfigHash
+				current.Changes = Diff(*state.Baseline, current.Snapshot, state.BaselineConfigHash != current.ConfigHash)
+			}
+			events, err := processSuccess(state, job, *current)
+			if err != nil {
+				return nil, err
+			}
+			// A scan can be the sample that completes the initial baseline. In
+			// that case there was no prior baseline to capture above, but the
+			// scan is still the immutable source of the newly established state.
+			// Recording its own ID prevents history from falling back to a later
+			// mutable runtime baseline after an administrator reset.
+			if current.BaselineScanID == "" && state.BaselineScanID == current.ID {
+				current.BaselineScanID = state.BaselineScanID
+				current.BaselineConfigHash = state.BaselineConfigHash
+			}
+			return events, nil
+		}
+		return processFailure(state, job.Name, *current)
+	})
+}
+
 func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, error) {
 	state.ConsecutiveFailures = 0
 	state.LastFailureAlert = 0

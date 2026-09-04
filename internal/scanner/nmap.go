@@ -93,7 +93,8 @@ func (n *Nmap) Scan(ctx context.Context, job config.Job) (model.Snapshot, error)
 func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, error) {
 	var out []resolvedTarget
 	count := 0
-	for _, raw := range job.Targets {
+	for _, input := range job.Targets {
+		raw := config.CanonicalTarget(input)
 		if ip := net.ParseIP(raw); ip != nil {
 			count++
 			if count > job.MaxExpandedHosts {

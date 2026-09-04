@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 4
+const schemaVersion = 5
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -191,6 +191,11 @@ func migrate(db *sql.DB) error {
 			"ALTER TABLE outbox ADD COLUMN claim_token TEXT NOT NULL DEFAULT ''",
 			"ALTER TABLE outbox ADD COLUMN claim_until TEXT NOT NULL DEFAULT ''",
 			"CREATE INDEX IF NOT EXISTS outbox_claim ON outbox(sent_at, next_at, claim_until)",
+		},
+		5: {
+			"CREATE INDEX IF NOT EXISTS events_created_at ON events(created_at)",
+			"CREATE INDEX IF NOT EXISTS job_revisions_created_at ON job_revisions(created_at)",
+			"CREATE INDEX IF NOT EXISTS outbox_sent_at ON outbox(sent_at)",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
@@ -1273,17 +1278,85 @@ func truncate(v string, n int) string {
 	return v
 }
 
-func (s *Store) Prune(ctx context.Context, before time.Time) (int64, error) {
+// PruneStats reports rows removed by one retention pass. Security audit rows
+// are intentionally absent: they are an accountability record and are kept
+// indefinitely unless an operator explicitly removes the database.
+type PruneStats struct {
+	Scans        int64
+	Events       int64
+	SentOutbox   int64
+	FailedOutbox int64
+	Revisions    int64
+}
+
+func (p PruneStats) Total() int64 {
+	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.Revisions
+}
+
+// Prune removes rows outside the configured retention window while preserving
+// every active baseline scan and the current revision of each job. Delivery
+// rows that are still pending (or have retry attempts remaining) are never
+// removed; only sent rows and terminal failures are eligible. The operation is
+// transactional so a crash cannot leave a partially pruned history set.
+func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStats, error) {
+	var stats PruneStats
+	cutoff := before.UTC().Format(time.RFC3339Nano)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return stats, err
+	}
+	defer tx.Rollback()
+
 	// NOT EXISTS avoids SQL's NULL semantics: most state rows do not yet have a
 	// baseline_scan_id, and a NOT IN subquery containing NULL would protect every
 	// old scan from pruning.
-	r, err := s.DB.ExecContext(ctx, `DELETE FROM scans AS scan WHERE scan.finished_at < ?
+	result, err := tx.ExecContext(ctx, `DELETE FROM scans AS scan WHERE scan.finished_at < ?
 		AND NOT EXISTS (SELECT 1 FROM job_states AS legacy WHERE json_extract(legacy.state_json,'$.baseline_scan_id') = scan.id)
-		AND NOT EXISTS (SELECT 1 FROM job_runtime AS managed WHERE json_extract(managed.state_json,'$.baseline_scan_id') = scan.id)`, before.UTC().Format(time.RFC3339Nano))
+		AND NOT EXISTS (SELECT 1 FROM job_runtime AS managed WHERE json_extract(managed.state_json,'$.baseline_scan_id') = scan.id)`, cutoff)
 	if err != nil {
-		return 0, err
+		return stats, err
 	}
-	return r.RowsAffected()
+	stats.Scans, _ = result.RowsAffected()
+
+	result, err = tx.ExecContext(ctx, `DELETE FROM events WHERE created_at < ?`, cutoff)
+	if err != nil {
+		return stats, err
+	}
+	stats.Events, _ = result.RowsAffected()
+
+	result, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE sent_at IS NOT NULL AND sent_at < ?`, cutoff)
+	if err != nil {
+		return stats, err
+	}
+	stats.SentOutbox, _ = result.RowsAffected()
+
+	result, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE sent_at IS NULL AND attempts >= 3 AND next_at < ?`, cutoff)
+	if err != nil {
+		return stats, err
+	}
+	stats.FailedOutbox, _ = result.RowsAffected()
+
+	// Keep the newest revision for every job regardless of age. Older revisions
+	// contain immutable historical definitions and may be discarded after their
+	// retention window because scans retain their own snapshots.
+	result, err = tx.ExecContext(ctx, `DELETE FROM job_revisions
+		WHERE created_at < ?
+		AND revision < COALESCE((SELECT MAX(current.revision) FROM jobs AS current WHERE current.id = job_revisions.job_id), revision)`, cutoff)
+	if err != nil {
+		return stats, err
+	}
+	stats.Revisions, _ = result.RowsAffected()
+
+	if err := tx.Commit(); err != nil {
+		return stats, err
+	}
+	return stats, nil
+}
+
+// Prune is retained for callers that only need the total row count.
+func (s *Store) Prune(ctx context.Context, before time.Time) (int64, error) {
+	stats, err := s.PruneWithStats(ctx, before)
+	return stats.Total(), err
 }
 
 func (s *Store) AcquireLease(ctx context.Context, owner string) error {

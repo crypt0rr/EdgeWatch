@@ -322,10 +322,10 @@ func (a *App) Daemon(ctx context.Context) error {
 	defer deliver.Stop()
 	defer prune.Stop()
 	_ = a.Notifier.Drain(ctx)
-	if n, err := a.Store.Prune(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
+	if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
 		a.Logger.Error("startup history pruning failed", "error", err)
-	} else if n > 0 {
-		a.Logger.Info("startup history pruned", "scans", n)
+	} else if stats.Total() > 0 {
+		a.Logger.Info("startup history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions)
 	}
 	for {
 		select {
@@ -345,10 +345,10 @@ func (a *App) Daemon(ctx context.Context) error {
 				a.Logger.Warn("notification delivery failed")
 			}
 		case <-prune.C:
-			if n, err := a.Store.Prune(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
+			if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
 				a.Logger.Error("history pruning failed", "error", err)
 			} else {
-				a.Logger.Info("history pruned", "scans", n)
+				a.Logger.Info("history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions)
 			}
 		case <-a.scheduleWake:
 			if err := a.reconcileSchedules(ctx, false); err != nil {

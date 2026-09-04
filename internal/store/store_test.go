@@ -206,6 +206,77 @@ func TestPrunePreservesLegacyAndManagedBaselines(t *testing.T) {
 	}
 }
 
+func TestPruneRetentionClassesAndAuditPolicy(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	cutoff := time.Now().UTC().Add(-24 * time.Hour)
+	oldText := old.Format(time.RFC3339Nano)
+
+	job, err := s.CreateJob(ctx, testJob("retention"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetJobEnabledWithRevision(ctx, job.ID, false, job.Revision); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE job_revisions SET created_at=? WHERE job_id=? AND revision=1`, oldText, job.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO events(type,job,payload_json,created_at) VALUES(?,?,?,?)`, "old-event", "retention", []byte(`{}`), oldText); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO security_audit(action,detail,created_at) VALUES(?,?,?)`, "old-audit", "keep", oldText); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.QueueEvent(ctx, "sent", model.Event{Type: "sent", Job: "retention", CreatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET sent_at=? WHERE destination=?`, oldText, "sent"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.QueueEvent(ctx, "failed", model.Event{Type: "failed", Job: "retention", CreatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempts=3,next_at=? WHERE destination=?`, oldText, "failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.QueueEvent(ctx, "pending", model.Event{Type: "pending", Job: "retention", CreatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE destination=?`, oldText, "pending"); err != nil {
+		t.Fatal(err)
+	}
+
+	stats, err := s.PruneWithStats(ctx, cutoff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Events != 1 || stats.SentOutbox != 1 || stats.FailedOutbox != 1 || stats.Revisions != 1 {
+		t.Fatalf("unexpected prune stats: %#v", stats)
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination=?`, "pending").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("pending delivery was pruned")
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE action=?`, "old-audit").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("security audit record was pruned")
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_revisions WHERE job_id=?`, job.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("current job revision was pruned; rows=%d", count)
+	}
+}
+
 func TestHistoryPagesHaveStableMetadataAndOrdering(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

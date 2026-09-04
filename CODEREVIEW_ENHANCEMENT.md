@@ -6,7 +6,7 @@
 
 - **Date:** 2026-09-04
 - **Repository:** `crypt0rr/EdgeWatch`, `/home/crypt0rr/projects/EdgeWatch`
-- **Ref:** `fix/open-review-issues` (remediation branch based on `5aa6dfb`, `v0.5.2`)
+- **Ref:** `main` after PR #65 merge (release candidate based on `v0.5.2`)
 - **Review mode:** Baseline review with remediation status; this is not an exhaustive security audit.
 - **Scope:** Holistic review of the Go daemon, SQLite store and migrations, scanner, authentication, notification delivery, web API, embedded React SPA, deployment manifests, documentation, and CI/release configuration. The prior published items R-012, residual R-007, R-013, and R-014 are present as landed fixes and are not reopened here.
 - **Px convention:** `P0` blocker, `P1` high, `P2` medium, `P3` low
@@ -17,7 +17,7 @@
 
 The remediation branch addresses all thirteen tracked findings from the baseline review: host recovery and credential changes now share safe transaction boundaries; scan history is metadata-first with immutable scan-time comparisons; setup disclosure, authentication limits, scheduling, legacy YAML handling, active-run visibility, SSE replay, notification delivery, and frontend mutation errors are hardened. The Renovate dependency dashboard remains intentionally excluded.
 
-**Verdict:** `REMEDIATED — PENDING PR/RELEASE GATES`
+**Verdict:** `REMEDIATED — READY TO RELEASE`
 
 ## Px summary
 
@@ -239,12 +239,13 @@ The remediation branch addresses all thirteen tracked findings from the baseline
 - **Performed:** `docker compose config --quiet` — Pass.
 - **Performed:** `docker build --build-arg VERSION=0.6.0 -t edgewatch:review .` — Pass (multi-stage production image).
 - **Performed:** Read-through of source, API routes, migrations, deployment manifests, CI/release workflows, README, and SECURITY.md; exact locations above were rechecked.
-- **Planned:** Hosted pull-request checks, merge, and the tag-driven release workflow.
+- **Performed:** Hosted PR checks and post-merge `main` CI (frontend, Go, browser, Compose, and multi-architecture container) — Pass.
+- **Planned:** Tag-driven release workflow — next action is the `v0.6.0` tag.
 - **Not run:** dependency vulnerability scans, live Nmap scans, external Shoutrrr provider calls, or network/reverse-proxy deployment checks.
 
 ## GitHub publication
 
-- **Status:** Published 2026-09-04
+- **Status:** Published and resolved 2026-09-04; PR [#65](https://github.com/crypt0rr/EdgeWatch/pull/65) merged to `main`.
 - **Selected IDs:** R-015, R-016, R-017, R-018, R-019, R-020, R-021, R-022, R-023, R-024, E-004, E-005, E-006
 - **Duplicate check:** Open and closed issues were searched by stable ID and title before creation; no matches existed for the selected items. Existing repository labels were reused (`bug`, `enhancement`); no owners, milestones, projects, or new labels were assigned.
 - **Issue URLs:**
@@ -261,3 +262,7 @@ The remediation branch addresses all thirteen tracked findings from the baseline
   - E-004 — [#62](https://github.com/crypt0rr/EdgeWatch/issues/62)
   - E-005 — [#63](https://github.com/crypt0rr/EdgeWatch/issues/63)
   - E-006 — [#64](https://github.com/crypt0rr/EdgeWatch/issues/64)
+
+All selected issues are now closed by the merged PR. Renovate's Dependency
+Dashboard [#8](https://github.com/crypt0rr/EdgeWatch/issues/8) remains open by
+explicit request and is outside this remediation.

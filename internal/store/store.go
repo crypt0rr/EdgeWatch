@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -418,6 +419,14 @@ func (s *Store) UpdateJob(ctx context.Context, id string, expectedRevision int64
 // returned events are already persisted atomically with the new revision; the
 // web layer can queue notifications and publish them after the commit.
 func (s *Store) UpdateJobWithEvents(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool) (JobRecord, bool, []model.Event, error) {
+	return s.UpdateJobWithEventsWithOutbox(ctx, id, expectedRevision, job, enabled, archived, confirmRebaseline, nil)
+}
+
+// UpdateJobWithEventsWithOutbox also persists notification intent for the
+// security-scope reset event. Destination revisions are validated while the
+// job transaction is open, so a concurrent credential edit cannot leave an
+// orphaned delivery.
+func (s *Store) UpdateJobWithEventsWithOutbox(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool, destinations []string) (JobRecord, bool, []model.Event, error) {
 	job = config.NormalizeJob(job)
 	if err := config.ValidateJob(job); err != nil {
 		return JobRecord{}, false, nil, err
@@ -486,6 +495,9 @@ func (s *Store) UpdateJobWithEvents(ctx context.Context, id string, expectedRevi
 			return JobRecord{}, false, nil, err
 		}
 		events = append(events, event)
+	}
+	if err = queueEventsTx(ctx, tx, events, destinations); err != nil {
+		return JobRecord{}, false, nil, err
 	}
 	if err = tx.Commit(); err != nil {
 		return JobRecord{}, false, nil, err
@@ -799,19 +811,66 @@ func updateRuntimeTxWithOutbox(ctx context.Context, tx *sql.Tx, jobID string, de
 	if len(destinations) == 0 || len(events) == 0 {
 		return events, nil
 	}
+	if err := queueEventsTx(ctx, tx, events, destinations); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destinations []string) error {
+	if len(destinations) == 0 || len(events) == 0 {
+		return nil
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, event := range events {
-		payload, marshalErr := json.Marshal(event)
-		if marshalErr != nil {
-			return nil, marshalErr
+		payload, err := json.Marshal(event)
+		if err != nil {
+			return err
 		}
 		for _, destination := range destinations {
+			if strings.HasPrefix(destination, "managed:") {
+				valid, validationErr := managedDestinationCurrentTx(ctx, tx, destination)
+				if validationErr != nil {
+					return validationErr
+				}
+				// A destination may have been replaced or disabled after the
+				// notifier captured its revision. Preserve the state/event
+				// transition but do not create an orphaned delivery for a
+				// credential that can never send it.
+				if !valid {
+					continue
+				}
+			}
 			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, destination, payload, now); err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
-	return events, nil
+	return nil
+}
+
+// managedDestinationCurrentTx validates an opaque managed destination key at
+// the same transaction boundary that inserts an outbox row. This closes the
+// race where a destination is replaced or deleted between notifier metadata
+// capture and the runtime/event commit.
+func managedDestinationCurrentTx(ctx context.Context, tx *sql.Tx, destination string) (bool, error) {
+	parts := strings.Split(destination, ":")
+	if len(parts) != 3 || parts[0] != "managed" || parts[1] == "" {
+		return false, nil
+	}
+	revision, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil || revision < 1 {
+		return false, nil
+	}
+	var enabled int
+	err = tx.QueryRowContext(ctx, `SELECT enabled FROM managed_notifications WHERE id=? AND revision=?`, parts[1], revision).Scan(&enabled)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return enabled != 0, nil
 }
 
 // updateRuntimeTx applies a runtime state transition and persists its events
@@ -854,7 +913,13 @@ func updateRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, fn func(*mod
 }
 
 func (s *Store) ResetRuntime(ctx context.Context, jobID, name string) ([]model.Event, error) {
-	return s.UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
+	return s.ResetRuntimeWithOutbox(ctx, jobID, name, nil)
+}
+
+// ResetRuntimeWithOutbox persists the baseline reset event and its notification
+// intent in the same transaction.
+func (s *Store) ResetRuntimeWithOutbox(ctx context.Context, jobID, name string, destinations []string) ([]model.Event, error) {
+	return s.UpdateRuntimeWithOutbox(ctx, jobID, destinations, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = nil
 		state.BaselineScanID = ""
 		state.BaselineConfigHash = ""
@@ -870,6 +935,12 @@ func (s *Store) ResetRuntime(ctx context.Context, jobID, name string) ([]model.E
 }
 
 func (s *Store) ApproveRuntime(ctx context.Context, jobID, name string, scan model.Scan) ([]model.Event, error) {
+	return s.ApproveRuntimeWithOutbox(ctx, jobID, name, scan, nil)
+}
+
+// ApproveRuntimeWithOutbox persists a manual baseline approval and notification
+// intent together, while retaining the current-scope validation.
+func (s *Store) ApproveRuntimeWithOutbox(ctx context.Context, jobID, name string, scan model.Scan, destinations []string) ([]model.Event, error) {
 	if scan.ID == "" {
 		return nil, errors.New("scan ID is required")
 	}
@@ -892,7 +963,7 @@ func (s *Store) ApproveRuntime(ctx context.Context, jobID, name string, scan mod
 	if stored.JobID != jobID || stored.ConfigHash != record.Job.SecurityHash() {
 		return nil, errors.New("scan does not belong to the current job scope")
 	}
-	events, err := updateRuntimeTx(ctx, tx, jobID, func(state *model.JobState) ([]model.Event, error) {
+	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, destinations, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = &stored.Snapshot
 		state.BaselineScanID = stored.ID
 		state.BaselineConfigHash = stored.ConfigHash
@@ -1182,8 +1253,24 @@ func (s *Store) QueueEvent(ctx context.Context, destination string, event model.
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, destination, b, time.Now().UTC().Format(time.RFC3339Nano))
-	return err
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if strings.HasPrefix(destination, "managed:") {
+		valid, validationErr := managedDestinationCurrentTx(ctx, tx, destination)
+		if validationErr != nil {
+			return validationErr
+		}
+		if !valid {
+			return tx.Commit()
+		}
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, destination, b, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type Delivery struct {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -52,21 +52,41 @@ export function JobEditor() {
   const [error, setError] = useState('')
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
-  const { register, handleSubmit, reset, watch, setValue, formState: { errors: formErrors } } = useForm<JobFormFields>({
+  const [draftDirty, setDraftDirty] = useState(false)
+  const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
+  const loadedRevision = useRef<{ id?: string; revision: number } | null>(null)
+  const { register, handleSubmit, reset, watch, setValue, formState: { errors: formErrors, isDirty } } = useForm<JobFormFields>({
     defaultValues: blank,
     resolver: zodResolver(jobFormSchema),
   })
   const schedule = watch('schedule')
   const timing = watch('timing')
 
+  const hasDraftChanges = isDirty || draftDirty
+  const applyServerJob = (data: NonNullable<typeof existing.data>) => {
+    reset(data.job)
+    setTargets(data.job.targets)
+    setTCP(data.job.tcp)
+    setUDP(data.job.udp)
+    setScheduleEnabled(data.enabled)
+    loadedRevision.current = { id, revision: data.revision }
+    setRemoteRevision(null)
+    setDraftDirty(false)
+  }
+
   useEffect(() => {
     if (!existing.data) return
-    reset(existing.data.job)
-    setTargets(existing.data.job.targets)
-    setTCP(existing.data.job.tcp)
-    setUDP(existing.data.job.udp)
-    setScheduleEnabled(existing.data.enabled)
-  }, [existing.data, reset])
+    if (!loadedRevision.current || loadedRevision.current.id !== id) {
+      applyServerJob(existing.data)
+      return
+    }
+    if (existing.data.revision === loadedRevision.current.revision) return
+    if (hasDraftChanges) {
+      setRemoteRevision(existing.data.revision)
+      return
+    }
+    applyServerJob(existing.data)
+  }, [existing.data, id, hasDraftChanges, reset])
 
   const save = async (values: JobFormFields, confirm = false) => {
     setFieldErrors({})
@@ -87,12 +107,16 @@ export function JobEditor() {
       setError('Enable TCP, UDP, or both scan types.')
       return
     }
+    if (edit && remoteRevision !== null) {
+      setError('This job changed in another tab. Reload the saved version before continuing.')
+      return
+    }
     const payload = { ...values, enabled: scheduleEnabled, targets: normalizedTargets, tcp, udp }
     setSaving(true)
     setError('')
     try {
       if (edit) {
-        await updateJob(id!, existing.data!.revision, payload, confirm)
+        await updateJob(id!, loadedRevision.current?.revision ?? existing.data!.revision, payload, confirm)
       } else {
         await createJob(payload)
       }
@@ -148,9 +172,9 @@ export function JobEditor() {
               <div className="field-title"><span>Targets</span><span className="field-help">IP · CIDR · DNS</span></div>
               <p className="helper">One target per row. CIDRs are expanded at scan time and DNS names are resolved for every scan.</p>
               <div className="target-list">
-                {targets.map((target, index) => <TargetRow key={index} value={target} index={index} total={targets.length} onChange={(value) => setTargets((items) => items.map((item, i) => i === index ? value : item))} onRemove={() => setTargets((items) => items.filter((_, i) => i !== index))} />)}
+                {targets.map((target, index) => <TargetRow key={index} value={target} index={index} total={targets.length} onChange={(value) => { setDraftDirty(true); setTargets((items) => items.map((item, i) => i === index ? value : item)) }} onRemove={() => { setDraftDirty(true); setTargets((items) => items.filter((_, i) => i !== index)) }} />)}
               </div>
-              <button type="button" className="text-button add-target" onClick={() => setTargets((items) => [...items, ''])}><Plus size={15} /> Add target</button>
+              <button type="button" className="text-button add-target" onClick={() => { setDraftDirty(true); setTargets((items) => [...items, '']) }}><Plus size={15} /> Add target</button>
               {targets.some((target) => cidrWarning(target)) && <div className="notice warning"><TriangleAlert size={16} /><span>{targets.map(cidrWarning).find(Boolean)}</span></div>}
               {(fieldErrors.targets || fieldErrors.target) && <small className="field-error">{fieldErrors.targets || fieldErrors.target}</small>}
             </div>
@@ -160,8 +184,8 @@ export function JobEditor() {
 
           <div className="panel form-panel">
             <div className="panel-heading"><div><h2>Scan types</h2><p className="muted">Enable one or both protocols and set their options independently.</p></div></div>
-            <ProtocolCard label="TCP" enabled={!!tcp} onToggle={(enabled) => setTCP(enabled ? { ports: '1-1024', mode: 'syn', service_detection: false } : undefined)} protocol={tcp} setProtocol={setTCP} />
-            <ProtocolCard label="UDP" enabled={!!udp} onToggle={(enabled) => setUDP(enabled ? { ports: '53', service_detection: true } : undefined)} protocol={udp} setProtocol={setUDP} />
+            <ProtocolCard label="TCP" enabled={!!tcp} onToggle={(enabled) => { setDraftDirty(true); setTCP(enabled ? { ports: '1-1024', mode: 'syn', service_detection: false } : undefined) }} protocol={tcp} setProtocol={(value) => { setDraftDirty(true); setTCP(value) }} />
+            <ProtocolCard label="UDP" enabled={!!udp} onToggle={(enabled) => { setDraftDirty(true); setUDP(enabled ? { ports: '53', service_detection: true } : undefined) }} protocol={udp} setProtocol={(value) => { setDraftDirty(true); setUDP(value) }} />
             {fieldErrors.protocols && <small className="field-error">{fieldErrors.protocols}</small>}
             {fieldErrors.tcp && <small className="field-error">{fieldErrors.tcp}</small>}
             {fieldErrors.udp && <small className="field-error">{fieldErrors.udp}</small>}
@@ -180,14 +204,15 @@ export function JobEditor() {
         <aside className="editor-side">
           <div className="panel form-panel sticky">
             <div className="panel-heading"><div><h2>Schedule</h2><p className="muted">When should this job run?</p></div><ChevronDown size={17} className="muted-icon" /></div>
-            <label>Preset<select value={presetFor(schedule)} onChange={(event) => { if (event.target.value !== 'custom') setValue('schedule', event.target.value) }}><option value="0 */6 * * *">Every 6 hours</option><option value="0 * * * *">Every hour</option><option value="0 3 * * *">Daily at 03:00</option><option value="0 3 * * 0">Weekly on Sunday</option><option value="custom">Custom cron</option></select></label>
+            <label>Preset<select value={presetFor(schedule)} onChange={(event) => { if (event.target.value !== 'custom') { setDraftDirty(true); setValue('schedule', event.target.value, { shouldDirty: true }) } }}><option value="0 */6 * * *">Every 6 hours</option><option value="0 * * * *">Every hour</option><option value="0 3 * * *">Daily at 03:00</option><option value="0 3 * * 0">Weekly on Sunday</option><option value="custom">Custom cron</option></select></label>
             <label>Five-field cron<input {...register('schedule')} placeholder="minute hour day month weekday" />{(formErrors.schedule?.message || fieldErrors.schedule) && <small className="field-error">{formErrors.schedule?.message || fieldErrors.schedule}</small>}<small>Uses the server’s standard cron parser.</small></label>
             <label>Timezone<input {...register('timezone')} placeholder="Europe/Amsterdam" />{(formErrors.timezone?.message || fieldErrors.timezone) && <small className="field-error">{formErrors.timezone?.message || fieldErrors.timezone}</small>}</label>
-            <label className="switch-row"><input type="checkbox" checked={scheduleEnabled} onChange={(event) => setScheduleEnabled(event.target.checked)} /><span><strong>Schedule enabled</strong><small>Pause future scheduled runs without archiving this job.</small></span></label>
+            <label className="switch-row"><input type="checkbox" checked={scheduleEnabled} onChange={(event) => { setDraftDirty(true); setScheduleEnabled(event.target.checked) }} /><span><strong>Schedule enabled</strong><small>Pause future scheduled runs without archiving this job.</small></span></label>
             <label className="switch-row"><input type="checkbox" {...register('run_on_start')} /><span><strong>Run on startup</strong><small>Start a scan when EdgeWatch launches.</small></span></label>
             <label className="switch-row"><input type="checkbox" {...register('assume_alive')} /><span><strong>Assume targets are alive</strong><small>Use Nmap <code>-Pn</code>. Turn off to use host discovery.</small></span></label>
             <label>Timing profile<select {...register('timing')}><option value="conservative">Conservative (T2)</option><option value="balanced">Balanced (T3)</option><option value="fast">Fast (T4)</option></select>{(formErrors.timing?.message || fieldErrors.timing) && <small className="field-error">{formErrors.timing?.message || fieldErrors.timing}</small>}</label>
             <label>Scan timeout<input {...register('timeout')} placeholder="1h" />{(formErrors.timeout?.message || fieldErrors.timeout) && <small className="field-error">{formErrors.timeout?.message || fieldErrors.timeout}</small>}<small>Examples: 30m, 1h, 2d.</small></label>
+            {remoteRevision !== null && <div className="notice warning" role="alert"><TriangleAlert size={16} /><span>This job was saved elsewhere while you were editing. Your draft is preserved. <button type="button" className="link-button" onClick={() => existing.data && applyServerJob(existing.data)}>Reload saved version</button></span></div>}
             {timing === 'fast' && <div className="notice warning"><TriangleAlert size={16} /><span>Fast timing can miss responses on congested or filtered networks.</span></div>}
             {error && <div className="form-error" role="alert">{error}</div>}
             <button disabled={saving} className="button primary wide" type="submit"><Save size={16} />{saving ? 'Saving…' : edit ? 'Save changes' : 'Create job'}</button>

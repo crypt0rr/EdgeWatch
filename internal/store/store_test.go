@@ -51,6 +51,9 @@ func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.CreateManagedNotification(ctx, "destination-b", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
+		t.Fatal(err)
+	}
 	destinations := []string{"destination-a", "managed:destination-b:2"}
 	events, err := s.UpdateRuntimeWithOutbox(ctx, record.ID, destinations, func(state *model.JobState) ([]model.Event, error) {
 		state.ConsecutiveFailures = 3
@@ -63,12 +66,74 @@ func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != len(destinations) {
-		t.Fatalf("notification intent rows = %d, want %d", count, len(destinations))
+	if count != 1 {
+		t.Fatalf("notification intent rows = %d, want one valid row", count)
 	}
 	state, err := s.RuntimeState(ctx, record.ID)
 	if err != nil || state.ConsecutiveFailures != 3 {
 		t.Fatalf("runtime state: %#v %v", state, err)
+	}
+}
+
+func TestStaleManagedDestinationIntentIsSkipped(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	job, err := s.CreateJob(ctx, testJob("stale-destination"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateManagedNotification(ctx, "destination-c", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateManagedNotification(ctx, "destination-c", 1, "Test destination", "generic", []byte{3}, []byte{4}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateRuntimeWithOutbox(ctx, job.ID, []string{"managed:destination-c:1"}, func(state *model.JobState) ([]model.Event, error) {
+		return []model.Event{{Type: "alert", Job: job.Job.Name, CreatedAt: time.Now().UTC()}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination=?`, "managed:destination-c:1").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("stale managed destination was queued: %d", count)
+	}
+}
+
+func TestBaselineActionsPersistNotificationIntent(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	job, err := s.CreateJob(ctx, testJob("baseline-actions"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateManagedNotification(ctx, "baseline-destination", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ResetRuntimeWithOutbox(ctx, job.ID, job.Job.Name, []string{"managed:baseline-destination:1"}); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination=?`, "managed:baseline-destination:1").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("reset notification intent rows = %d, want 1", count)
+	}
+	scan := model.Scan{ID: "baseline-approval-scan", JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}
+	if err := s.SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ApproveRuntimeWithOutbox(ctx, job.ID, job.Job.Name, scan, []string{"managed:baseline-destination:1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination=?`, "managed:baseline-destination:1").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("approval notification intent rows = %d, want 2", count)
 	}
 }
 
@@ -171,6 +236,9 @@ func TestOutboxClaimsAreExclusiveAndRequireOwner(t *testing.T) {
 func TestDeferredDeliveryDoesNotConsumeAttempts(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	if _, err := s.CreateManagedNotification(ctx, "destination", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.QueueEvent(ctx, "managed:destination:1", model.Event{Type: "defer", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}

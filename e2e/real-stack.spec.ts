@@ -203,6 +203,23 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
     expect(incidents.body.incidents.length).toBeGreaterThanOrEqual(2)
     expect(incidents.body.incidents.every((incident: any) => incident.job === 'real-stack-fixture')).toBe(true)
 
+    // Runtime updates and concurrent saves must not replace an in-progress
+    // editor draft. The real SSE connection invalidates the job query here.
+    await page.goto(`${harness.url}/jobs/${jobID}/edit`)
+    await expect(page.getByRole('heading', { name: 'Tune your monitoring job' })).toBeVisible()
+    await page.getByLabel('Job name').fill('draft-name-that-must-survive')
+    const current = await callAPI(page, `/jobs/${jobID}`, 'GET', csrf)
+    const concurrent = await callAPI(page, `/jobs/${jobID}`, 'PUT', csrf, {
+      ...current.body.job,
+      revision: current.body.revision,
+      enabled: current.body.enabled,
+      schedule: '5 0 * * *',
+      confirm_rebaseline: false,
+    })
+    expect(concurrent.status).toBe(200)
+    await expect(page.getByRole('alert')).toContainText('saved elsewhere')
+    await expect(page.getByLabel('Job name')).toHaveValue('draft-name-that-must-survive')
+
     await harness.stop()
     await harness.start()
     const persisted = await callAPI(page, '/jobs', 'GET', csrf)

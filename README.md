@@ -111,6 +111,54 @@ Back up `./data` while EdgeWatch is stopped, together with `config.yaml` and
 any notification URL or encryption-key files. Keep notification secrets out of
 source control.
 
+For an upgrade, stop the current service and make a complete backup before
+starting the new image. SQLite uses WAL mode, so copy the database only while
+EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
+`./data` and any separately mounted encryption-key file together.
+
+The schema migration from the v0.3 database is additive, but it is
+forward-only: an older binary refuses a newer schema. To roll back, stop the
+new service, restore the entire pre-upgrade `./data` directory and deployment
+configuration, then start the previous image. Do not point an older image at
+the upgraded database. The previous named Docker volume, if one exists, is
+not read or migrated automatically.
+
+## Development
+
+Go 1.27.1 or newer and Node.js 24.8.0 are required. The repository checks are:
+
+```console
+go test -race ./...
+go vet ./...
+npm ci
+npm run lint
+npm run build
+npm test
+npm run test:e2e
+docker compose config --quiet
+```
+
+The browser acceptance tests use deterministic API fixtures; integration
+scans should only target controlled listeners. The production image embeds the
+frontend and does not include Node.js.
+
+## Releases
+
+Pull requests and pushes to `main` run the Go, frontend, browser, Compose, and
+multi-architecture container checks. Releases are tag-driven. After the
+validated commit is merged to `main`, create and push a semantic-version tag:
+
+```console
+git tag -a vX.Y.Z -m "EdgeWatch vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+The release workflow publishes Linux AMD64/ARM64 archives and checksums plus
+the corresponding GHCR image with SBOM and provenance attestations. It also
+updates `latest` for stable (non-prerelease) tags. For reproducible deployments,
+pin Compose to the immutable release tag and digest after verifying the
+published artifacts.
+
 ## License
 
 MIT

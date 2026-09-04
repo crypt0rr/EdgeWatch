@@ -33,6 +33,13 @@ jobs:
         run: npm run build
       - name: Frontend unit tests
         run: npm test
+      - name: Set up Go for real-stack browser tests
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Download Go dependencies for real-stack browser tests
+        run: go mod download
       - name: Install Chromium for browser acceptance tests
         run: npx playwright install --with-deps chromium
       - name: Browser acceptance tests

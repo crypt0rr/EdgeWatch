@@ -74,6 +74,65 @@ jobs:
 	}
 }
 
+func TestLoadKeepsInvalidLegacyJobsInactive(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := `database: ` + filepath.Join(dir, "db.sqlite") + `
+retention: 90d
+jobs:
+  - name: old-job
+    schedule: "not a cron schedule"
+    targets: []
+    tcp:
+      ports: "65536"
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("invalid inactive job prevented deployment load: %v", err)
+	}
+	if len(cfg.Jobs) != 1 || cfg.Jobs[0].Name != "old-job" {
+		t.Fatalf("legacy jobs were not retained as metadata: %#v", cfg.Jobs)
+	}
+}
+
+func TestLoadRejectsTrailingYAMLDocument(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := `database: ` + filepath.Join(dir, "db.sqlite") + `
+---
+retention: 90d
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "exactly one YAML document") {
+		t.Fatalf("expected duplicate-document error, got %v", err)
+	}
+}
+
+func TestLoadForAdminSkipsMonitorValidation(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	yaml := `database: ` + filepath.Join(dir, "db.sqlite") + `
+web:
+  listen: 0.0.0.0:8080
+notifications:
+  urls: ["not-a-shoutrrr-url"]
+jobs:
+  - name: old-job
+    schedule: "not a cron schedule"
+`
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadForAdmin(path); err != nil {
+		t.Fatalf("admin loader was coupled to monitor validation: %v", err)
+	}
+}
+
 func TestWebListenerMustBeLoopback(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

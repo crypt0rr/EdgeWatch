@@ -29,6 +29,14 @@ const (
 	PasswordMin   = 12
 	SessionTTL    = 30 * 24 * time.Hour
 	IdleTTL       = 24 * time.Hour
+
+	authFailureWindow    = 5 * time.Minute
+	authFailureThreshold = 5
+	authBlockDuration    = 5 * time.Minute
+	// The limiter is process-local by design, but it must remain bounded when
+	// an attacker rotates source addresses. Keys are evicted oldest-first once
+	// this ceiling is reached; expired entries are swept on every decision.
+	authLimiterMaxEntries = 4096
 )
 
 var ErrRateLimited = errors.New("too many authentication attempts; try again later")
@@ -204,13 +212,11 @@ func (m *Manager) ConfirmPassword(ctx context.Context, request *http.Request, pa
 }
 
 func (m *Manager) allow(remote string) bool {
-	key := remote
-	if host, _, err := netSplitHostPort(remote); err == nil {
-		key = host
-	}
+	key := limiterKey(remote)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
+	m.sweepLimiterLocked(now)
 	if until, ok := m.blocked[key]; ok && now.Before(until) {
 		return false
 	}
@@ -218,15 +224,18 @@ func (m *Manager) allow(remote string) bool {
 }
 
 func (m *Manager) failed(remote string) {
-	key := remote
-	if host, _, err := netSplitHostPort(remote); err == nil {
-		key = host
-	}
+	key := limiterKey(remote)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
+	m.sweepLimiterLocked(now)
+	if _, exists := m.fails[key]; !exists {
+		if _, exists := m.blocked[key]; !exists {
+			m.evictLimiterEntryLocked(now)
+		}
+	}
 	values := m.fails[key]
-	cut := now.Add(-5 * time.Minute)
+	cut := now.Add(-authFailureWindow)
 	var kept []time.Time
 	for _, v := range values {
 		if v.After(cut) {
@@ -234,21 +243,90 @@ func (m *Manager) failed(remote string) {
 		}
 	}
 	kept = append(kept, now)
+	if len(kept) > authFailureThreshold {
+		kept = kept[len(kept)-authFailureThreshold:]
+	}
 	m.fails[key] = kept
-	if len(kept) >= 5 {
-		m.blocked[key] = now.Add(5 * time.Minute)
+	if len(kept) >= authFailureThreshold {
+		m.blocked[key] = now.Add(authBlockDuration)
 	}
 }
 
 func (m *Manager) clear(remote string) {
-	key := remote
-	if host, _, err := netSplitHostPort(remote); err == nil {
-		key = host
-	}
+	key := limiterKey(remote)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.fails, key)
 	delete(m.blocked, key)
+}
+
+func limiterKey(remote string) string {
+	if host, _, err := netSplitHostPort(remote); err == nil {
+		return host
+	}
+	return remote
+}
+
+func (m *Manager) sweepLimiterLocked(now time.Time) {
+	cut := now.Add(-authFailureWindow)
+	for key, values := range m.fails {
+		kept := values[:0]
+		for _, value := range values {
+			if value.After(cut) {
+				kept = append(kept, value)
+			}
+		}
+		if len(kept) == 0 {
+			delete(m.fails, key)
+			continue
+		}
+		if len(kept) > authFailureThreshold {
+			kept = kept[len(kept)-authFailureThreshold:]
+		}
+		m.fails[key] = kept
+	}
+	for key, until := range m.blocked {
+		if !now.Before(until) {
+			delete(m.blocked, key)
+		}
+	}
+}
+
+func (m *Manager) limiterEntryCountLocked() int {
+	count := len(m.fails)
+	for key := range m.blocked {
+		if _, present := m.fails[key]; !present {
+			count++
+		}
+	}
+	return count
+}
+
+func (m *Manager) evictLimiterEntryLocked(now time.Time) {
+	if m.limiterEntryCountLocked() < authLimiterMaxEntries {
+		return
+	}
+	oldestKey := ""
+	oldestAt := now
+	for key, values := range m.fails {
+		if len(values) == 0 {
+			continue
+		}
+		activity := values[len(values)-1]
+		if oldestKey == "" || activity.Before(oldestAt) {
+			oldestKey, oldestAt = key, activity
+		}
+	}
+	for key, until := range m.blocked {
+		activity := until.Add(-authBlockDuration)
+		if oldestKey == "" || activity.Before(oldestAt) {
+			oldestKey, oldestAt = key, activity
+		}
+	}
+	if oldestKey != "" {
+		delete(m.fails, oldestKey)
+		delete(m.blocked, oldestKey)
+	}
 }
 
 // netSplitHostPort avoids treating a malformed RemoteAddr as fatal during

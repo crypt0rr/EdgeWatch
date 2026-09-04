@@ -155,6 +155,132 @@ func TestListenAddressIsLoopbackOnly(t *testing.T) {
 	}
 }
 
+func TestSetupStatusDoesNotExposeOperationalDetails(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	hash, err := auth.PasswordHash("correct horse battery staple")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveAdmin(ctx, store.Admin{Username: "admin", PasswordHash: hash, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		Version:   1,
+		Database:  "test",
+		Retention: config.Duration(24 * time.Hour),
+		Scheduler: config.Scheduler{MaxConcurrent: 3},
+		Web:       config.Web{Listen: "127.0.0.1:8080"},
+		Jobs:      []config.Job{{Name: "legacy-secret"}},
+		Notifications: config.Notifications{URLs: []string{
+			"generic://example.invalid/token",
+		}},
+	}
+	a, err := app.New(cfg, s, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := httptest.NewServer(NewServer(a, s, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
+	defer h.Close()
+
+	resp, err := http.Get(h.URL + "/api/v1/setup/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var public map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&public); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("setup status returned %d", resp.StatusCode)
+	}
+	for _, key := range []string{"notifications", "notification_destinations", "retention", "max_concurrent_scans", "legacy_yaml_jobs"} {
+		if _, ok := public[key]; ok {
+			t.Fatalf("unauthenticated setup status exposed %q: %#v", key, public)
+		}
+	}
+
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	loginRequest.RemoteAddr = "127.0.0.1:1234"
+	sessionToken, _, err := auth.NewManager(s).Login(ctx, loginRequest, "correct horse battery staple", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodGet, h.URL+"/api/v1/status", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: sessionToken})
+	resp, err = (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var private map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&private); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated status returned %d", resp.StatusCode)
+	}
+	for _, key := range []string{"notifications", "retention", "max_concurrent_scans", "legacy_yaml_jobs"} {
+		if _, ok := private[key]; !ok {
+			t.Fatalf("authenticated status omitted %q: %#v", key, private)
+		}
+	}
+}
+
+func TestSSEHistoryAssignsIDsAndSupportsReplay(t *testing.T) {
+	s := &Server{subscribers: map[chan sseMessage]struct{}{}}
+	ch := make(chan sseMessage, 4)
+	s.mu.Lock()
+	s.subscribers[ch] = struct{}{}
+	s.mu.Unlock()
+	s.broadcast(map[string]any{"type": "first"})
+	s.broadcast(map[string]any{"type": "second"})
+	first, second := <-ch, <-ch
+	if first.id == 0 || second.id != first.id+1 {
+		t.Fatalf("SSE IDs were not monotonic: %d, %d", first.id, second.id)
+	}
+	s.mu.Lock()
+	replay := s.replayLocked(first.id)
+	delete(s.subscribers, ch)
+	s.mu.Unlock()
+	if len(replay) != 1 || replay[0].id != second.id || !strings.Contains(string(replay[0].payload), "second") {
+		t.Fatalf("unexpected replay after event %d: %#v", first.id, replay)
+	}
+	for i := 0; i < 300; i++ {
+		s.broadcast(map[string]any{"type": "bulk"})
+	}
+	s.mu.Lock()
+	gap := s.replayLocked(1)
+	s.mu.Unlock()
+	if len(gap) == 0 || !strings.Contains(string(gap[0].payload), "refresh_required") {
+		t.Fatalf("history gap did not request refresh: %#v", gap)
+	}
+	slow := &Server{subscribers: map[chan sseMessage]struct{}{}}
+	slowCh := make(chan sseMessage, 1)
+	slow.subscribers[slowCh] = struct{}{}
+	slow.broadcast(map[string]any{"type": "queued"})
+	slow.broadcast(map[string]any{"type": "new"})
+	select {
+	case marker := <-slowCh:
+		if !strings.Contains(string(marker.payload), "refresh_required") {
+			t.Fatalf("slow subscriber received a silent drop instead of refresh marker: %s", marker.payload)
+		}
+	default:
+		t.Fatal("slow subscriber did not receive an update")
+	}
+}
+
 func TestAPIRequiresSessionCSRFAndRejectsUnvalidatedOptions(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
@@ -347,11 +473,48 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 		}
 		resp.Body.Close()
 		if len(incidents.Incidents) == 1 {
-			return
+			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("incident did not open")
+	resp = request(http.MethodGet, "/api/v1/incidents", "", "")
+	var incidents struct {
+		Incidents []map[string]any `json:"incidents"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&incidents); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(incidents.Incidents) != 1 {
+		t.Fatal("incident did not open")
+	}
+	// Historical scan details must remain reproducible after the current
+	// baseline is reset or replaced.
+	scans, err := s.ListJobScans(ctx, created.ID, 5)
+	if err != nil || len(scans) < 2 {
+		t.Fatalf("scan history: %v (%d rows)", err, len(scans))
+	}
+	changedScan := scans[0]
+	if changedScan.BaselineScanID == "" || len(changedScan.Changes) == 0 {
+		t.Fatalf("changed scan did not persist its scan-time comparison: %#v", changedScan)
+	}
+	if _, err := s.ResetRuntime(ctx, created.ID, "incident-flow"); err != nil {
+		t.Fatal(err)
+	}
+	resp = request(http.MethodGet, "/api/v1/jobs/"+created.ID+"/scans/"+changedScan.ID, "", "")
+	var detail struct {
+		Changes          []model.Change `json:"changes"`
+		ComparisonSource string         `json:"comparison_source"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&detail); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if detail.ComparisonSource != "scan_time" || len(detail.Changes) != len(changedScan.Changes) {
+		t.Fatalf("historical scan comparison changed after reset: source=%q changes=%d want=%d", detail.ComparisonSource, len(detail.Changes), len(changedScan.Changes))
+	}
 }
 
 func TestHistoryEndpointsExposePaginationAndScopedResults(t *testing.T) {
@@ -421,8 +584,8 @@ func TestHistoryEndpointsExposePaginationAndScopedResults(t *testing.T) {
 	}
 	resp = setup(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans?limit=2&offset=1", "", "")
 	var scans struct {
-		Scans      []model.Scan   `json:"scans"`
-		Pagination map[string]any `json:"pagination"`
+		Scans      []model.ScanSummary `json:"scans"`
+		Pagination map[string]any      `json:"pagination"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&scans); err != nil {
 		t.Fatal(err)

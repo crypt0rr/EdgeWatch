@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -27,6 +28,7 @@ type App struct {
 	Notifier          *notify.Notifier
 	Logger            *slog.Logger
 	active            sync.Map
+	running           sync.Map
 	wg                sync.WaitGroup
 	runMu             sync.Mutex
 	runCtx            context.Context
@@ -38,6 +40,7 @@ type App struct {
 	scheduleMu        sync.Mutex
 	cron              *cron.Cron
 	entries           map[string]cron.EntryID
+	scheduleSpecs     map[string]string
 	scheduleWake      chan struct{}
 	eventMu           sync.RWMutex
 	eventHandler      func(model.Event)
@@ -80,7 +83,7 @@ func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logge
 	sc := scanner.New(nmapPath)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return &App{Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), entries: map[string]cron.EntryID{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second}, nil
+	return &App{Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second}, nil
 }
 
 func (a *App) Job(name string) (config.Job, error) {
@@ -222,6 +225,8 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		}
 		return model.Scan{}, nil, err
 	}
+	a.running.Store(scan.ID, model.ActiveScan{ID: scan.ID, JobID: jobID, Job: job.Name, JobRevision: revision, StartedAt: started})
+	defer a.running.Delete(scan.ID)
 	// Publish lifecycle updates to the web console without persisting them as
 	// alert events. This keeps SSE subscribers responsive even when a scan has
 	// no baseline or incident event to emit.
@@ -244,6 +249,20 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	}
 	persistCtx, persistCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer persistCancel()
+	if managed && scanErr == nil {
+		// Capture the comparison context before the engine mutates runtime state.
+		// The scan record then remains reproducible even after a later baseline
+		// reset or scope change.
+		state, stateErr := a.Store.RuntimeState(persistCtx, jobID)
+		if stateErr != nil {
+			return scan, nil, stateErr
+		}
+		if state.Baseline != nil {
+			scan.BaselineScanID = state.BaselineScanID
+			scan.BaselineConfigHash = state.BaselineConfigHash
+			scan.Changes = engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+		}
+	}
 	if err := a.Store.SaveScan(persistCtx, scan); err != nil {
 		return scan, nil, err
 	}
@@ -296,6 +315,26 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	return scan, events, nil
 }
 
+// ActiveScans returns a stable snapshot of scans that are currently executing.
+// A scan only enters this set after its database lease is acquired, so a
+// queued or rejected request is not reported as running.
+func (a *App) ActiveScans() []model.ActiveScan {
+	var scans []model.ActiveScan
+	a.running.Range(func(_, value any) bool {
+		if scan, ok := value.(model.ActiveScan); ok {
+			scans = append(scans, scan)
+		}
+		return true
+	})
+	sort.Slice(scans, func(i, j int) bool {
+		if scans[i].StartedAt.Equal(scans[j].StartedAt) {
+			return scans[i].ID < scans[j].ID
+		}
+		return scans[i].StartedAt.Before(scans[j].StartedAt)
+	})
+	return scans
+}
+
 func (a *App) Daemon(ctx context.Context) error {
 	boundCtx, owned := a.BeginRun(ctx)
 	// Keep daemon-owned work on a child context so an internal error can stop
@@ -326,7 +365,9 @@ func (a *App) Daemon(ctx context.Context) error {
 	a.cron = c
 	a.scheduleMu.Unlock()
 	if err := a.reconcileSchedules(ctx, true); err != nil {
-		return err
+		// Keep healthy jobs running even when one persisted row is malformed;
+		// the reconciliation retry ticker below will install it once repaired.
+		a.Logger.Error("initial job schedule reconciliation failed", "error", err)
 	}
 	c.Start()
 	heartbeatEvery := a.heartbeatInterval
@@ -335,8 +376,10 @@ func (a *App) Daemon(ctx context.Context) error {
 	}
 	heartbeat := time.NewTicker(heartbeatEvery)
 	prune := time.NewTicker(24 * time.Hour)
+	scheduleRetry := time.NewTicker(30 * time.Second)
 	defer heartbeat.Stop()
 	defer prune.Stop()
+	defer scheduleRetry.Stop()
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	deliveryDone := a.startDeliveryWorker(workerCtx)
 	defer func() {
@@ -377,6 +420,10 @@ func (a *App) Daemon(ctx context.Context) error {
 		case <-a.scheduleWake:
 			if err := a.reconcileSchedules(ctx, false); err != nil {
 				a.Logger.Error("job schedule reconciliation failed", "error", err)
+			}
+		case <-scheduleRetry.C:
+			if err := a.reconcileSchedules(ctx, false); err != nil {
+				a.Logger.Error("job schedule reconciliation retry failed", "error", err)
 			}
 		}
 	}
@@ -469,29 +516,90 @@ func (a *App) reconcileSchedules(ctx context.Context, runOnStart bool) error {
 			desired[record.ID] = record
 		}
 	}
-	a.scheduleMu.Lock()
-	defer a.scheduleMu.Unlock()
-	for id, entry := range a.entries {
-		if _, ok := desired[id]; !ok {
-			c.Remove(entry)
-			delete(a.entries, id)
-		}
-	}
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	specs := make(map[string]string, len(desired))
+	invalid := map[string]error{}
 	for id, record := range desired {
-		if old, ok := a.entries[id]; ok {
-			c.Remove(old)
-			delete(a.entries, id)
-		}
 		spec := "CRON_TZ=" + record.Job.Timezone + " " + record.Job.Schedule
+		if _, err := parser.Parse(spec); err != nil {
+			invalid[id] = fmt.Errorf("job %s: %w", record.Job.Name, err)
+			continue
+		}
+		specs[id] = spec
+	}
+	a.scheduleMu.Lock()
+	if a.entries == nil {
+		a.entries = map[string]cron.EntryID{}
+	}
+	if a.scheduleSpecs == nil {
+		a.scheduleSpecs = map[string]string{}
+	}
+	// Add replacements before removing their old entries. All desired specs
+	// were parsed above, so an AddFunc failure can be rolled back without
+	// leaving an otherwise healthy job unscheduled.
+	type pendingEntry struct {
+		id     string
+		entry  cron.EntryID
+		old    cron.EntryID
+		hadOld bool
+	}
+	pending := make([]pendingEntry, 0, len(specs))
+	for id, spec := range specs {
+		old, exists := a.entries[id]
+		if exists && a.scheduleSpecs[id] == spec {
+			continue
+		}
 		jobID := id
 		entry, err := c.AddFunc(spec, func() { a.startManagedScheduled(ctx, jobID) })
 		if err != nil {
-			return fmt.Errorf("job %s: %w", record.Job.Name, err)
+			for _, added := range pending {
+				c.Remove(added.entry)
+			}
+			a.scheduleMu.Unlock()
+			return fmt.Errorf("job %s: %w", desired[id].Job.Name, err)
 		}
-		a.entries[id] = entry
-		if runOnStart && record.Job.RunsOnStart() {
-			a.startManagedScheduled(ctx, id)
+		pending = append(pending, pendingEntry{id: id, entry: entry, old: old, hadOld: exists})
+	}
+	for id, old := range a.entries {
+		if _, isInvalid := invalid[id]; isInvalid {
+			// Preserve a last-known-good entry until the bad persisted row is
+			// repaired. New invalid jobs simply remain unscheduled.
+			continue
 		}
+		if _, exists := specs[id]; !exists {
+			c.Remove(old)
+			delete(a.entries, id)
+			delete(a.scheduleSpecs, id)
+		}
+	}
+	startOnCreate := make([]string, 0, len(pending))
+	for _, next := range pending {
+		if next.hadOld {
+			c.Remove(next.old)
+		}
+		a.entries[next.id] = next.entry
+		a.scheduleSpecs[next.id] = specs[next.id]
+		if runOnStart && !next.hadOld && desired[next.id].Job.RunsOnStart() {
+			startOnCreate = append(startOnCreate, next.id)
+		}
+	}
+	// Preserve the spec cache for entries that were created by an older
+	// process/version and did not need replacement during this pass.
+	for id, spec := range specs {
+		if _, ok := a.scheduleSpecs[id]; !ok {
+			a.scheduleSpecs[id] = spec
+		}
+	}
+	a.scheduleMu.Unlock()
+	for _, id := range startOnCreate {
+		a.startManagedScheduled(ctx, id)
+	}
+	if len(invalid) > 0 {
+		errList := make([]error, 0, len(invalid))
+		for _, err := range invalid {
+			errList = append(errList, err)
+		}
+		return errors.Join(errList...)
 	}
 	return nil
 }

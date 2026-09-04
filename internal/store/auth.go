@@ -70,8 +70,58 @@ func (s *Store) SaveAdmin(ctx context.Context, a Admin) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.DB.ExecContext(ctx, `INSERT INTO admins(id,username,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,totp_secret=excluded.totp_secret,totp_enabled=excluded.totp_enabled,updated_at=excluded.updated_at`, a.Username, a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	return saveAdminExec(ctx, s.DB, a, stored)
+}
+
+type contextExecer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func saveAdminExec(ctx context.Context, execer contextExecer, a Admin, stored string) error {
+	_, err := execer.ExecContext(ctx, `INSERT INTO admins(id,username,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,totp_secret=excluded.totp_secret,totp_enabled=excluded.totp_enabled,updated_at=excluded.updated_at`, a.Username, a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+// SaveAdminSecurity commits an administrator mutation and its dependent
+// authentication state as one transaction. A nil recoveryCodes slice leaves
+// existing recovery codes untouched; a non-nil slice replaces them (including
+// an empty slice, which clears them). This prevents a successful credential
+// update from being reported when session revocation, recovery-code rotation,
+// or the corresponding audit record failed.
+func (s *Store) SaveAdminSecurity(ctx context.Context, a Admin, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, auditAction, auditDetail string) error {
+	stored, err := s.adminTOTPForSave(a)
+	if err != nil {
+		return err
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := saveAdminExec(ctx, tx, a, stored); err != nil {
+		return err
+	}
+	if replaceRecoveryCodes {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes`); err != nil {
+			return err
+		}
+		for _, hash := range recoveryCodes {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO recovery_codes(id_hash) VALUES(?)`, hash); err != nil {
+				return err
+			}
+		}
+	}
+	if revokeSessions {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions`); err != nil {
+			return err
+		}
+	}
+	if auditAction != "" {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO security_audit(action,detail,created_at) VALUES(?,?,?)`, auditAction, auditDetail, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (s *Store) adminTOTPForSave(a Admin) (string, error) {

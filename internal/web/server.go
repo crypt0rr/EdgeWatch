@@ -36,10 +36,18 @@ type Server struct {
 	Log   *slog.Logger
 
 	mu          sync.Mutex
-	subscribers map[chan []byte]struct{}
+	subscribers map[chan sseMessage]struct{}
+	history     []sseMessage
+	nextEventID uint64
+	dropped     uint64
 	pendingTOTP map[string]pendingTOTP
 	testMu      sync.Mutex
 	testLast    map[string]time.Time
+}
+
+type sseMessage struct {
+	id      uint64
+	payload []byte
 }
 
 type pendingTOTP struct {
@@ -51,7 +59,7 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), Log: logger, subscribers: map[chan []byte]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}}
+	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), Log: logger, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}}
 	if token, err := v.Auth.EnsureSetupToken(context.Background()); err != nil {
 		logger.Error("admin setup token generation failed", "error", err)
 	} else if token != "" {
@@ -173,6 +181,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = s.Store.Audit(r.Context(), "admin.sessions_revoked", "all sessions revoked")
 		writeJSON(w, http.StatusNoContent, nil)
+	case path == "/status" && r.Method == http.MethodGet:
+		s.adminStatus(w, r)
 	case path == "/notifications/test" && r.Method == http.MethodPost:
 		s.notificationTest(w, r)
 	case path == "/notifications/destinations" && r.Method == http.MethodGet:
@@ -189,6 +199,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.createJob(w, r)
 	case path == "/scans" && r.Method == http.MethodGet:
 		s.listScans(w, r)
+	case path == "/scans/active" && r.Method == http.MethodGet:
+		s.activeScans(w, r)
 	case strings.HasPrefix(path, "/scans/") && r.Method == http.MethodGet:
 		s.getScan(w, r, strings.TrimPrefix(path, "/scans/"))
 	case path == "/incidents" && r.Method == http.MethodGet:
@@ -218,14 +230,30 @@ func (s *Server) withAuth(w http.ResponseWriter, r *http.Request, fn func(http.R
 func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 	_, err := s.Store.GetAdmin(r.Context())
 	configured := err == nil
+	status := map[string]any{
+		"configured":            configured,
+		"username":              "admin",
+		"password_requirements": auth.PasswordRequirements(),
+	}
+	if !configured {
+		if token, tokenErr := s.Store.GetSetupToken(r.Context()); tokenErr == nil {
+			status["setup_available"] = !token.Used && time.Now().UTC().Before(token.ExpiresAt)
+		}
+	}
+	writeJSON(w, http.StatusOK, status)
+}
+
+// adminStatus contains operational details used by the authenticated console.
+// Keeping this separate from setupStatus prevents pre-auth callers from
+// learning notification state, scheduler capacity, or legacy job names.
+func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 	if reloadErr := s.App.Notifier.Reload(r.Context()); reloadErr != nil {
 		s.Log.Warn("notification state refresh failed", "error", reloadErr)
 	}
 	notificationStatus := s.App.Notifier.Status()
 	status := map[string]any{
-		"configured":                configured,
+		"configured":                true,
 		"username":                  "admin",
-		"password_requirements":     auth.PasswordRequirements(),
 		"notification_destinations": notificationStatus["active"],
 		"notifications":             notificationStatus,
 		"retention":                 s.App.Config.Retention.Value().String(),
@@ -238,11 +266,9 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		status["legacy_yaml_jobs"] = legacy
 	}
-	if !configured {
-		if token, tokenErr := s.Store.GetSetupToken(r.Context()); tokenErr == nil {
-			status["setup_available"] = !token.Used && time.Now().UTC().Before(token.ExpiresAt)
-		}
-	}
+	s.mu.Lock()
+	status["live_updates"] = map[string]any{"history_size": len(s.history), "dropped_events": s.dropped}
+	s.mu.Unlock()
 	writeJSON(w, http.StatusOK, status)
 }
 
@@ -316,12 +342,10 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 		return
 	}
 	admin.PasswordHash, admin.UpdatedAt = hash, time.Now().UTC()
-	if err := s.Store.SaveAdmin(r.Context(), admin); err != nil {
+	if err := s.Store.SaveAdminSecurity(r.Context(), admin, nil, false, true, "admin.password_changed", "password changed"); err != nil {
 		writeError(w, http.StatusInternalServerError, "save_failed", err.Error(), nil)
 		return
 	}
-	_ = s.Store.DeleteAllSessions(r.Context())
-	_ = s.Store.Audit(r.Context(), "admin.password_changed", "password changed")
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -378,15 +402,10 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 		return
 	}
 	admin.TOTPSecret, admin.TOTPEnabled, admin.UpdatedAt = pending.Secret, true, time.Now().UTC()
-	if err := s.Store.SaveAdmin(r.Context(), admin); err != nil {
+	if err := s.Store.SaveAdminSecurity(r.Context(), admin, hashes, true, true, "admin.totp_enabled", "TOTP enabled"); err != nil {
 		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
 		return
 	}
-	if err := s.Store.SaveRecoveryCodes(r.Context(), hashes); err != nil {
-		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
-		return
-	}
-	_ = s.Store.Audit(r.Context(), "admin.totp_enabled", "TOTP enabled")
 	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": plain})
 }
 
@@ -403,13 +422,10 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 		return
 	}
 	admin.TOTPEnabled, admin.TOTPSecret, admin.UpdatedAt = false, "", time.Now().UTC()
-	if err := s.Store.SaveAdmin(r.Context(), admin); err != nil {
+	if err := s.Store.SaveAdminSecurity(r.Context(), admin, []string{}, true, true, "admin.totp_disabled", "TOTP disabled"); err != nil {
 		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
 		return
 	}
-	_ = s.Store.SaveRecoveryCodes(r.Context(), nil)
-	_ = s.Store.DeleteAllSessions(r.Context())
-	_ = s.Store.Audit(r.Context(), "admin.totp_disabled", "TOTP disabled")
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -629,6 +645,14 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		return
 	}
 	writeError(w, 404, "not_found", "job endpoint not found", nil)
+}
+
+func (s *Server) activeScans(w http.ResponseWriter, r *http.Request) {
+	scans := s.App.ActiveScans()
+	if scans == nil {
+		scans = []model.ActiveScan{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scans": scans})
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request, id string) {
@@ -901,13 +925,13 @@ func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	limit := queryLimit(r)
 	offset := queryOffset(r)
-	page, err := s.Store.ListJobScansPage(r.Context(), id, limit, offset)
+	page, err := s.Store.ListJobScanSummariesPage(r.Context(), id, limit, offset)
 	if err != nil {
 		writeError(w, 500, "store", err.Error(), nil)
 		return
 	}
 	if page.Items == nil {
-		page.Items = []model.Scan{}
+		page.Items = []model.ScanSummary{}
 	}
 	writeJSON(w, 200, map[string]any{"scans": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
@@ -924,11 +948,25 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID stri
 		return
 	}
 	offset, limit := queryOffset(r), queryLimit(r)
-	value := map[string]any{"scan": scan, "changes": []model.Change{}, "changes_pagination": paginationJSON(offset, limit, 0)}
-	state, stateErr := s.Store.RuntimeState(r.Context(), id)
-	if scan.Status == "success" && stateErr == nil && state.Baseline != nil {
-		changes := engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
-		value["changes"], value["changes_pagination"] = pageSlice(changes, offset, limit)
+	value := map[string]any{"scan": scan, "changes": []model.Change{}, "changes_pagination": paginationJSON(offset, limit, 0), "comparison_source": "none"}
+	var state model.JobState
+	var stateErr error
+	needsCurrentBaseline := scan.Status == "success" && scan.BaselineScanID == "" && scan.BaselineConfigHash == ""
+	if needsCurrentBaseline {
+		state, stateErr = s.Store.RuntimeState(r.Context(), id)
+	}
+	if scan.Status == "success" {
+		if scan.BaselineScanID != "" || scan.BaselineConfigHash != "" {
+			value["changes"], value["changes_pagination"] = pageSlice(scan.Changes, offset, limit)
+			value["comparison_source"] = "scan_time"
+			value["baseline_scan_id"] = scan.BaselineScanID
+		} else if stateErr == nil && state.Baseline != nil {
+			// Legacy scans from before the immutable comparison columns were
+			// introduced retain the previous current-baseline behavior.
+			changes := engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+			value["changes"], value["changes_pagination"] = pageSlice(changes, offset, limit)
+			value["comparison_source"] = "current_baseline_legacy"
+		}
 	}
 	value["current_security_hash"] = record.Job.SecurityHash()
 	writeJSON(w, http.StatusOK, value)
@@ -959,29 +997,34 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scan
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
 	}
-	state, err := s.Store.RuntimeState(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
-		return
-	}
 	changes := []model.Change{}
-	if scan.Status == "success" && state.Baseline != nil {
-		changes = engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+	comparisonSource := "none"
+	if scan.Status == "success" {
+		if scan.BaselineScanID != "" || scan.BaselineConfigHash != "" {
+			changes = scan.Changes
+			comparisonSource = "scan_time"
+		} else if state, err := s.Store.RuntimeState(r.Context(), id); err == nil && state.Baseline != nil {
+			changes = engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+			comparisonSource = "current_baseline_legacy"
+		} else if err != nil {
+			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+			return
+		}
 	}
 	offset, limit := queryOffset(r), queryLimit(r)
 	items, page := pageSlice(changes, offset, limit)
-	writeJSON(w, http.StatusOK, map[string]any{"changes": items, "pagination": page})
+	writeJSON(w, http.StatusOK, map[string]any{"changes": items, "pagination": page, "comparison_source": comparisonSource, "baseline_scan_id": scan.BaselineScanID})
 }
 func (s *Server) listScans(w http.ResponseWriter, r *http.Request) {
 	limit := queryLimit(r)
 	offset := queryOffset(r)
-	page, err := s.Store.ListScansPage(r.Context(), r.URL.Query().Get("job"), limit, offset)
+	page, err := s.Store.ListScanSummariesPage(r.Context(), r.URL.Query().Get("job"), limit, offset)
 	if err != nil {
 		writeError(w, 500, "store", err.Error(), nil)
 		return
 	}
 	if page.Items == nil {
-		page.Items = []model.Scan{}
+		page.Items = []model.ScanSummary{}
 	}
 	writeJSON(w, 200, map[string]any{"scans": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
@@ -1414,21 +1457,35 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	ch := make(chan []byte, 8)
+	lastID, _ := strconv.ParseUint(strings.TrimSpace(r.Header.Get("Last-Event-ID")), 10, 64)
+	ch := make(chan sseMessage, 64)
 	s.mu.Lock()
+	if s.subscribers == nil {
+		s.subscribers = map[chan sseMessage]struct{}{}
+	}
+	replay := s.replayLocked(lastID)
 	s.subscribers[ch] = struct{}{}
 	s.mu.Unlock()
 	defer func() { s.mu.Lock(); delete(s.subscribers, ch); close(ch); s.mu.Unlock() }()
 	_, _ = w.Write([]byte(": connected\n\n"))
 	flusher.Flush()
+	for _, message := range replay {
+		writeSSEMessage(w, message)
+	}
+	if len(replay) > 0 {
+		flusher.Flush()
+	}
 	heartbeat := time.NewTicker(25 * time.Second)
 	defer heartbeat.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
-		case payload := <-ch:
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", payload)
+		case message, ok := <-ch:
+			if !ok {
+				return
+			}
+			writeSSEMessage(w, message)
 			flusher.Flush()
 		case <-heartbeat.C:
 			_, _ = w.Write([]byte(": heartbeat\n\n"))
@@ -1441,12 +1498,58 @@ func (s *Server) broadcast(value map[string]any) {
 	payload, _ := json.Marshal(value)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.subscribers == nil {
+		s.subscribers = map[chan sseMessage]struct{}{}
+	}
+	s.nextEventID++
+	message := sseMessage{id: s.nextEventID, payload: payload}
+	s.history = append(s.history, message)
+	const maxHistory = 256
+	if len(s.history) > maxHistory {
+		s.history = s.history[len(s.history)-maxHistory:]
+	}
 	for ch := range s.subscribers {
 		select {
-		case ch <- payload:
+		case ch <- message:
 		default:
+			// Never silently lose a live update. Replace one queued item with a
+			// refresh marker; the browser will invalidate all views and the next
+			// reconnect can replay any durable events it missed by ID.
+			s.dropped++
+			select {
+			case <-ch:
+			default:
+			}
+			refresh, _ := json.Marshal(map[string]any{"type": "refresh_required", "after": message.id - 1})
+			select {
+			case ch <- sseMessage{id: message.id, payload: refresh}:
+			default:
+				s.dropped++
+			}
 		}
 	}
+}
+
+func (s *Server) replayLocked(lastID uint64) []sseMessage {
+	if lastID == 0 || len(s.history) == 0 {
+		return nil
+	}
+	oldest := s.history[0].id
+	var replay []sseMessage
+	if lastID+1 < oldest {
+		payload, _ := json.Marshal(map[string]any{"type": "refresh_required", "after": lastID})
+		replay = append(replay, sseMessage{id: oldest - 1, payload: payload})
+	}
+	for _, message := range s.history {
+		if message.id > lastID {
+			replay = append(replay, message)
+		}
+	}
+	return replay
+}
+
+func writeSSEMessage(w io.Writer, message sseMessage) {
+	_, _ = fmt.Fprintf(w, "id: %d\ndata: %s\n\n", message.id, message.payload)
 }
 
 func (s *Server) asset(w http.ResponseWriter, r *http.Request) {

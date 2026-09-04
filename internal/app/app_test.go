@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -197,6 +198,52 @@ func TestManagedScanLeaseBlocksScopeEditUntilScanCompletes(t *testing.T) {
 	}
 }
 
+func TestActiveScansReportsInFlightManagedScan(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocking := &blockingScanner{started: make(chan struct{}), release: make(chan struct{})}
+	a.Scanner = blocking
+	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "active", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, _, runErr := a.RunJobRecord(ctx, record)
+		done <- runErr
+	}()
+	select {
+	case <-blocking.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("scan did not start")
+	}
+	active := a.ActiveScans()
+	if len(active) != 1 || active[0].ID == "" || active[0].JobID != record.ID || active[0].Job != record.Job.Name {
+		t.Fatalf("unexpected active scan snapshot: %#v", active)
+	}
+	close(blocking.release)
+	select {
+	case runErr := <-done:
+		if runErr != nil {
+			t.Fatalf("scan failed: %v", runErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("scan did not complete")
+	}
+	if active := a.ActiveScans(); len(active) != 0 {
+		t.Fatalf("completed scan remained active: %#v", active)
+	}
+}
+
 func TestManagedSchedulerReconcilesCreateUpdateAndArchive(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -222,6 +269,13 @@ func TestManagedSchedulerReconcilesCreateUpdateAndArchive(t *testing.T) {
 	if len(a.entries) != 1 {
 		t.Fatalf("entries after create: %d", len(a.entries))
 	}
+	entryBeforeUpdate := a.entries[record.ID]
+	if err := a.reconcileSchedules(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if a.entries[record.ID] != entryBeforeUpdate {
+		t.Fatalf("unchanged reconciliation replaced cron entry %d with %d", entryBeforeUpdate, a.entries[record.ID])
+	}
 	updated := record.Job
 	updated.Schedule = "15 * * * *"
 	if _, _, err := s.UpdateJob(context.Background(), record.ID, record.Revision, updated, true, false, false); err != nil {
@@ -241,6 +295,59 @@ func TestManagedSchedulerReconcilesCreateUpdateAndArchive(t *testing.T) {
 	}
 	if len(a.entries) != 0 {
 		t.Fatalf("entries after archive: %d", len(a.entries))
+	}
+}
+
+func TestManagedSchedulerRejectsInvalidDesiredSetWithoutUnscheduling(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := cron.New(cron.WithParser(cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)))
+	a.cron = c
+	job := config.NormalizeJob(config.Job{Name: "stable", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"})
+	record, err := s.CreateJobWithEnabled(ctx, job, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.reconcileSchedules(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	entry := a.entries[record.ID]
+	otherJob := job
+	otherJob.Name = "other"
+	otherRecord, err := s.CreateJobWithEnabled(ctx, otherJob, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := a.reconcileSchedules(ctx, false); err != nil {
+		t.Fatal(err)
+	}
+	otherEntry := a.entries[otherRecord.ID]
+	invalid := job
+	invalid.Schedule = "not a cron expression"
+	raw, err := json.Marshal(invalid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE jobs SET definition_json=? WHERE id=?`, raw, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.reconcileSchedules(ctx, false); err == nil {
+		t.Fatal("invalid desired schedule was accepted")
+	}
+	if got := a.entries[record.ID]; got != entry {
+		t.Fatalf("failed reconciliation changed the active entry from %d to %d", entry, got)
+	}
+	if got := a.entries[otherRecord.ID]; got != otherEntry {
+		t.Fatalf("failed reconciliation disturbed a healthy entry from %d to %d", otherEntry, got)
 	}
 }
 

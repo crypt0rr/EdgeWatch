@@ -61,7 +61,11 @@ export function Security() {
       setRecovery(value.recovery_codes)
       setTotp(null)
       setCode('')
-      await client.invalidateQueries({ queryKey: ['session'] })
+      // Enabling TOTP revokes every existing browser session. Keep this page
+      // mounted so the one-time recovery codes remain visible until the
+      // administrator has copied them and signs in again.
+      setCSRF('')
+      setMessage('TOTP enabled. Save the recovery codes below, then sign in again.')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'TOTP setup failed')
     }
@@ -72,8 +76,11 @@ export function Security() {
     if (!password) return
     try {
       await api('/auth/totp', { method: 'DELETE', body: JSON.stringify({ password }) })
-      await client.invalidateQueries({ queryKey: ['session'] })
-      setMessage('TOTP disabled.')
+      // TOTP changes revoke every existing session. Return to sign-in rather
+      // than leaving the page in a state whose cookie is no longer valid.
+      setCSRF('')
+      client.clear()
+      navigate('/login')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not disable TOTP')
     }
@@ -98,6 +105,6 @@ export function Security() {
         {session.data?.totp_enabled ? <div className="settings-form"><div className="status-line"><span className="pill green">Enabled</span><span className="muted">Recovery codes are single-use.</span></div><button className="button secondary" type="button" onClick={disableTotp}>Disable TOTP</button></div> : totp ? <div className="settings-form"><p>Scan this secret in your authenticator app, then enter the six-digit code.</p><code className="secret">{totp.secret}</code><label>Verification code<input inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} placeholder="123456" /></label><button className="button primary" type="button" onClick={enableTotp}>Enable TOTP</button></div> : <div className="settings-form"><p>Enter your current password, then set up an authenticator app.</p><button className="button secondary" type="button" onClick={beginTotp}>Set up authenticator</button></div>}
       </div>
     </div>
-    {recovery.length > 0 && <div className="panel recovery"><h2>Save your recovery codes</h2><p className="muted">These are shown once. Store them somewhere offline before leaving this page.</p><div className="code-grid">{recovery.map((value) => <code key={value}>{value}</code>)}</div><button className="button secondary" type="button" onClick={() => navigator.clipboard?.writeText(recovery.join('\n'))}><Copy size={16} /> Copy codes</button></div>}
+    {recovery.length > 0 && <div className="panel recovery"><h2>Save your recovery codes</h2><p className="muted">These are shown once. Store them somewhere offline before leaving this page.</p><div className="code-grid">{recovery.map((value) => <code key={value}>{value}</code>)}</div><div className="heading-actions"><button className="button secondary" type="button" onClick={() => navigator.clipboard?.writeText(recovery.join('\n'))}><Copy size={16} /> Copy codes</button><button className="button primary" type="button" onClick={() => { client.clear(); navigate('/login') }}>Continue to sign in</button></div></div>}
   </section>
 }

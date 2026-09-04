@@ -31,6 +31,8 @@ const (
 	IdleTTL       = 24 * time.Hour
 )
 
+var ErrRateLimited = errors.New("too many authentication attempts; try again later")
+
 type Manager struct {
 	Store *store.Store
 	Now   func() time.Time
@@ -182,6 +184,23 @@ func (m *Manager) Login(ctx context.Context, request *http.Request, password, ot
 	_ = m.Store.Audit(ctx, "admin.login", "successful login")
 	m.clear(request.RemoteAddr)
 	return session, admin, nil
+}
+
+// ConfirmPassword applies the same per-client failure budget as login to
+// sensitive, already-authenticated operations such as managing notification
+// credentials. It intentionally returns only generic errors so callers cannot
+// distinguish a missing administrator from a wrong password.
+func (m *Manager) ConfirmPassword(ctx context.Context, request *http.Request, password string) error {
+	if !m.allow(request.RemoteAddr) {
+		return ErrRateLimited
+	}
+	admin, err := m.Store.GetAdmin(ctx)
+	if err != nil || !VerifyPassword(admin.PasswordHash, password) {
+		m.failed(request.RemoteAddr)
+		return errors.New("password confirmation failed")
+	}
+	m.clear(request.RemoteAddr)
+	return nil
 }
 
 func (m *Manager) allow(remote string) bool {

@@ -24,6 +24,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/engine"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/webui"
 )
@@ -37,6 +38,8 @@ type Server struct {
 	mu          sync.Mutex
 	subscribers map[chan []byte]struct{}
 	pendingTOTP map[string]pendingTOTP
+	testMu      sync.Mutex
+	testLast    map[string]time.Time
 }
 
 type pendingTOTP struct {
@@ -48,7 +51,7 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), Log: logger, subscribers: map[chan []byte]struct{}{}, pendingTOTP: map[string]pendingTOTP{}}
+	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), Log: logger, subscribers: map[chan []byte]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}}
 	if token, err := v.Auth.EnsureSetupToken(context.Background()); err != nil {
 		logger.Error("admin setup token generation failed", "error", err)
 	} else if token != "" {
@@ -172,6 +175,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNoContent, nil)
 	case path == "/notifications/test" && r.Method == http.MethodPost:
 		s.notificationTest(w, r)
+	case path == "/notifications/destinations" && r.Method == http.MethodGet:
+		s.listNotificationDestinations(w, r)
+	case path == "/notifications/destinations" && r.Method == http.MethodPost:
+		s.createNotificationDestination(w, r)
+	case strings.HasPrefix(path, "/notifications/destinations/"):
+		s.notificationDestinationRoute(w, r, strings.TrimPrefix(path, "/notifications/destinations/"))
 	case path == "/stream" && r.Method == http.MethodGet:
 		s.stream(w, r)
 	case path == "/jobs" && r.Method == http.MethodGet:
@@ -209,11 +218,16 @@ func (s *Server) withAuth(w http.ResponseWriter, r *http.Request, fn func(http.R
 func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 	_, err := s.Store.GetAdmin(r.Context())
 	configured := err == nil
+	if reloadErr := s.App.Notifier.Reload(r.Context()); reloadErr != nil {
+		s.Log.Warn("notification state refresh failed", "error", reloadErr)
+	}
+	notificationStatus := s.App.Notifier.Status()
 	status := map[string]any{
 		"configured":                configured,
 		"username":                  "admin",
 		"password_requirements":     auth.PasswordRequirements(),
-		"notification_destinations": len(s.App.Config.Notifications.URLs),
+		"notification_destinations": notificationStatus["active"],
+		"notifications":             notificationStatus,
 		"retention":                 s.App.Config.Retention.Value().String(),
 		"max_concurrent_scans":      s.App.Config.Scheduler.MaxConcurrent,
 	}
@@ -1172,15 +1186,221 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, id stri
 	writeJSON(w, 200, map[string]any{"events": events})
 }
 
+type notificationPayload struct {
+	Name     string  `json:"name"`
+	URL      *string `json:"url"`
+	Password string  `json:"password"`
+	Enabled  *bool   `json:"enabled"`
+	Revision *int64  `json:"revision"`
+}
+
+func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	if err := s.App.Notifier.Reload(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"destinations": s.App.Notifier.Destinations(), "status": s.App.Notifier.Status()})
+}
+
+func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	var input notificationPayload
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if strings.TrimSpace(input.Password) == "" {
+		writeError(w, http.StatusBadRequest, "password_required", "administrator password confirmation is required", map[string]string{"password": "password confirmation is required"})
+		return
+	}
+	if err := s.Auth.ConfirmPassword(r.Context(), r, input.Password); err != nil {
+		s.writeNotificationAuthError(w, err)
+		return
+	}
+	enabled := true
+	if input.Enabled != nil {
+		enabled = *input.Enabled
+	}
+	if input.URL == nil {
+		writeError(w, http.StatusBadRequest, "validation_failed", "notification URL is required", map[string]string{"url": "notification URL is required"})
+		return
+	}
+	view, err := s.App.Notifier.CreateManaged(r.Context(), input.Name, *input.URL, enabled)
+	if err != nil {
+		s.writeNotificationError(w, err)
+		return
+	}
+	_ = s.Store.Audit(r.Context(), "notifications.created", "managed notification created: "+view.ID)
+	s.broadcast(map[string]any{"type": "notification.changed", "notification_id": view.ID})
+	writeJSON(w, http.StatusCreated, view)
+}
+
+func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Request, rest string) {
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		writeError(w, http.StatusNotFound, "not_found", "notification destination not found", nil)
+		return
+	}
+	id := parts[0]
+	if len(parts) == 2 && parts[1] == "test" && r.Method == http.MethodPost {
+		w.Header().Set("Cache-Control", "no-store")
+		if !s.allowNotificationTest(r) {
+			w.Header().Set("Retry-After", "5")
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "notification tests are temporarily rate limited", nil)
+			return
+		}
+		if err := s.App.Notifier.TestDestinationContext(r.Context(), id); err != nil {
+			_ = s.Store.Audit(r.Context(), "notifications.test_failed", "managed notification test failed: "+id)
+			s.writeNotificationError(w, err)
+			return
+		}
+		_ = s.Store.Audit(r.Context(), "notifications.test", "managed notification tested: "+id)
+		writeJSON(w, http.StatusOK, map[string]any{"sent": 1})
+		return
+	}
+	if len(parts) != 1 {
+		writeError(w, http.StatusNotFound, "not_found", "notification destination endpoint not found", nil)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		w.Header().Set("Cache-Control", "no-store")
+		view, err := s.App.Notifier.Destination(r.Context(), id)
+		if err != nil {
+			s.writeNotificationError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, view)
+	case http.MethodPut:
+		s.updateNotificationDestination(w, r, id)
+	case http.MethodDelete:
+		s.deleteNotificationDestination(w, r, id)
+	default:
+		writeError(w, http.StatusNotFound, "not_found", "notification destination endpoint not found", nil)
+	}
+}
+
+func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Request, id string) {
+	w.Header().Set("Cache-Control", "no-store")
+	var input notificationPayload
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.Revision == nil {
+		writeError(w, http.StatusBadRequest, "revision_required", "notification revision is required", nil)
+		return
+	}
+	if strings.TrimSpace(input.Password) == "" {
+		writeError(w, http.StatusBadRequest, "password_required", "administrator password confirmation is required", map[string]string{"password": "password confirmation is required"})
+		return
+	}
+	if err := s.Auth.ConfirmPassword(r.Context(), r, input.Password); err != nil {
+		s.writeNotificationAuthError(w, err)
+		return
+	}
+	view, err := s.App.Notifier.UpdateManaged(r.Context(), id, *input.Revision, input.Name, input.URL, input.Enabled)
+	if err != nil {
+		s.writeNotificationError(w, err)
+		return
+	}
+	_ = s.Store.Audit(r.Context(), "notifications.updated", "managed notification updated: "+id)
+	s.broadcast(map[string]any{"type": "notification.changed", "notification_id": id})
+	writeJSON(w, http.StatusOK, view)
+}
+
+func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Request, id string) {
+	w.Header().Set("Cache-Control", "no-store")
+	var input notificationPayload
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.Revision == nil {
+		writeError(w, http.StatusBadRequest, "revision_required", "notification revision is required", nil)
+		return
+	}
+	if strings.TrimSpace(input.Password) == "" {
+		writeError(w, http.StatusBadRequest, "password_required", "administrator password confirmation is required", map[string]string{"password": "password confirmation is required"})
+		return
+	}
+	if err := s.Auth.ConfirmPassword(r.Context(), r, input.Password); err != nil {
+		s.writeNotificationAuthError(w, err)
+		return
+	}
+	if err := s.App.Notifier.DeleteManaged(r.Context(), id, *input.Revision); err != nil {
+		s.writeNotificationError(w, err)
+		return
+	}
+	_ = s.Store.Audit(r.Context(), "notifications.deleted", "managed notification deleted: "+id)
+	s.broadcast(map[string]any{"type": "notification.changed", "notification_id": id})
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) writeNotificationAuthError(w http.ResponseWriter, err error) {
+	if errors.Is(err, auth.ErrRateLimited) {
+		w.Header().Set("Retry-After", "300")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many password confirmation attempts; try again later", nil)
+		return
+	}
+	writeError(w, http.StatusUnauthorized, "invalid_password", "password confirmation failed", nil)
+}
+
+func (s *Server) writeNotificationError(w http.ResponseWriter, err error) {
+	lower := strings.ToLower(err.Error())
+	switch {
+	case errors.Is(err, store.ErrConflict):
+		writeError(w, http.StatusConflict, "conflict", "notification was modified; reload before saving", nil)
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "notification destination not found", nil)
+	case errors.Is(err, notify.ErrManagedNotificationLocked), errors.Is(err, notify.ErrKeyUnavailable), errors.Is(err, notify.ErrKeyInvalid), errors.Is(err, notify.ErrKeyPermissions):
+		writeError(w, http.StatusServiceUnavailable, "notification_key_unavailable", "managed notification credentials are unavailable; restore the encryption key before replacing or enabling this destination", nil)
+	case isUnique(err):
+		writeError(w, http.StatusConflict, "conflict", "notification name is already in use", map[string]string{"name": "notification name is already in use"})
+	case strings.Contains(lower, "notification url"), strings.Contains(lower, "notification name"):
+		field := "url"
+		if strings.Contains(lower, "name") {
+			field = "name"
+		}
+		writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]string{field: err.Error()})
+	default:
+		writeError(w, http.StatusInternalServerError, "notification_failed", "notification configuration could not be saved", nil)
+	}
+}
+
+func (s *Server) allowNotificationTest(r *http.Request) bool {
+	key := r.RemoteAddr
+	if cookie, err := r.Cookie(auth.SessionCookie); err == nil && cookie.Value != "" {
+		key = digest(cookie.Value)
+	}
+	now := time.Now().UTC()
+	s.testMu.Lock()
+	defer s.testMu.Unlock()
+	for identity, previous := range s.testLast {
+		if now.Sub(previous) > 10*time.Minute {
+			delete(s.testLast, identity)
+		}
+	}
+	if previous, ok := s.testLast[key]; ok && now.Sub(previous) < 5*time.Second {
+		return false
+	}
+	s.testLast[key] = now
+	return true
+}
+
 func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request) {
-	if err := s.App.Notifier.Test(); err != nil {
+	if !s.allowNotificationTest(r) {
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "notification tests are temporarily rate limited", nil)
+		return
+	}
+	if err := s.App.Notifier.TestContext(r.Context()); err != nil {
 		// Shoutrrr implementations may include destination details in an error;
 		// keep those credentials out of both API responses and logs.
+		_ = s.Store.Audit(r.Context(), "notifications.test_failed", "configured destination test failed")
 		writeError(w, http.StatusBadGateway, "notification_failed", "one or more notification destinations failed", nil)
 		return
 	}
 	_ = s.Store.Audit(r.Context(), "notifications.test", "configured destinations tested")
-	writeJSON(w, 200, map[string]any{"sent": len(s.App.Notifier.URLs)})
+	writeJSON(w, http.StatusOK, map[string]any{"sent": s.App.Notifier.ActiveCount()})
 }
 
 func (s *Server) stream(w http.ResponseWriter, r *http.Request) {

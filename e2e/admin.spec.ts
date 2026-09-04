@@ -55,6 +55,10 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       await json(createdJob, 201)
       return
     }
+    if (path === '/notifications/destinations' && method === 'GET') {
+      await json({ destinations: [{ id: 'dest-1', name: 'Operations', provider: 'generic', source: 'web', enabled: true, locked: false, read_only: false, revision: 1 }], status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' } })
+      return
+    }
     if (path === '/jobs/job-1' && method === 'GET') { await json(createdJob); return }
     if (path === '/jobs/job-1/scans' && method === 'GET') {
       await json({ scans: [scan], pagination: { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null } })
@@ -99,4 +103,8 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).udp).toMatchObject({ ports: '53,123' })
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).assume_alive).toBe(false)
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).schedule).toBe('*/15 * * * *')
+  await page.getByRole('link', { name: 'Notifications' }).click()
+  await expect(page.getByRole('heading', { name: 'Notifications' })).toBeVisible()
+  await expect(page.getByText('Operations')).toBeVisible()
+  await expect(page.locator('.notifications-page')).not.toContainText('generic://')
 })

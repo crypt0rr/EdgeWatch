@@ -58,8 +58,9 @@ type Scheduler struct {
 	MaxConcurrent int `yaml:"max_concurrent_scans"`
 }
 type Notifications struct {
-	URLs     []string `yaml:"urls"`
-	URLsFile string   `yaml:"urls_file"`
+	URLs              []string `yaml:"urls"`
+	URLsFile          string   `yaml:"urls_file"`
+	EncryptionKeyFile string   `yaml:"encryption_key_file"`
 }
 type Job struct {
 	Name             string    `yaml:"name"`

@@ -124,6 +124,8 @@ func TestNotificationEnvironment(t *testing.T) {
 	path := filepath.Join(dir, "config.yaml")
 	yaml := `version: 1
 database: ` + filepath.Join(dir, "db.sqlite") + `
+web:
+  auth_key_file: /run/secrets/edgewatch-auth-key
 notifications:
   encryption_key_file: /run/secrets/edgewatch-notification-key
   urls: ["${EDGEWATCH_TEST_URL}"]
@@ -143,5 +145,8 @@ jobs:
 	}
 	if cfg.Notifications.EncryptionKeyFile != "/run/secrets/edgewatch-notification-key" {
 		t.Fatalf("encryption key file not retained: %q", cfg.Notifications.EncryptionKeyFile)
+	}
+	if cfg.Web.AuthKeyFile != "/run/secrets/edgewatch-auth-key" {
+		t.Fatalf("auth key file not retained: %q", cfg.Web.AuthKeyFile)
 	}
 }

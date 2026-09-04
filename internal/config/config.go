@@ -52,7 +52,8 @@ type Config struct {
 // appliance deliberately only permits loopback listeners; users who need
 // remote access should put a TLS reverse proxy or an SSH tunnel in front of it.
 type Web struct {
-	Listen string `yaml:"listen"`
+	Listen      string `yaml:"listen"`
+	AuthKeyFile string `yaml:"auth_key_file"`
 }
 type Scheduler struct {
 	MaxConcurrent int `yaml:"max_concurrent_scans"`

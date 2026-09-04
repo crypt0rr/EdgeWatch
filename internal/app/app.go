@@ -56,6 +56,9 @@ type Scanner interface {
 }
 
 func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logger) (*App, error) {
+	if cfg.Web.AuthKeyFile != "" {
+		s.SetAuthKeyPath(cfg.Web.AuthKeyFile)
+	}
 	var n *notify.Notifier
 	var err error
 	if cfg.Notifications.EncryptionKeyFile != "" {

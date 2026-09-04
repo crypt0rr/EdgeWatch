@@ -173,30 +173,30 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
     expect(session.status).toBe(200)
     const csrf = session.body.csrf_token as string
 
-    const created = await callAPI(page, '/jobs', 'POST', csrf, {
-      name: 'real-stack-fixture',
-      schedule: '0 0 * * *',
-      timezone: 'UTC',
-      run_on_start: false,
-      assume_alive: true,
-      targets: ['127.0.0.1'],
-      max_expanded_hosts: 1,
-      tcp: { ports: '22-23', mode: 'connect', service_detection: false },
-      timing: 'balanced',
-      timeout: '1m',
-      baseline_samples: 1,
-      change_confirmations: 1,
-      enabled: true,
-    })
-    expect(created.status).toBe(201)
-    const jobID = created.body.id as string
+    await page.getByRole('link', { name: 'Jobs' }).click()
+    await page.getByRole('button', { name: 'New job' }).click()
+    await expect(page.getByRole('heading', { name: 'Create a monitoring job' })).toBeVisible()
+    await page.getByLabel('Job name').fill('real-stack-fixture')
+    await page.getByLabel('Target 1').fill('127.0.0.1')
+    await page.getByLabel('Ports').first().fill('22-23')
+    await page.getByLabel('Baseline samples').fill('1')
+    await page.getByLabel('Five-field cron').fill('0 0 * * *')
+    await page.getByLabel('Timezone').fill('UTC')
+    await page.getByRole('button', { name: 'Create job' }).click()
+    await expect(page).toHaveURL(/\/jobs$/)
+    const jobCard = page.getByRole('link', { name: /real-stack-fixture/ }).first()
+    const href = await jobCard.getAttribute('href')
+    expect(href).toMatch(/^\/jobs\//)
+    const jobID = href!.split('/').pop()!
 
-    expect((await callAPI(page, `/jobs/${jobID}/run`, 'POST', csrf, {})).status).toBe(202)
+    await jobCard.click()
+    await expect(page.getByRole('heading', { name: 'real-stack-fixture' })).toBeVisible()
+    await page.getByRole('button', { name: 'Scan now' }).click()
     await waitForScan(page, jobID, csrf, 1)
     const learned = await callAPI(page, `/jobs/${jobID}`, 'GET', csrf)
     expect(learned.body.baseline.status).toBe('complete')
 
-    expect((await callAPI(page, `/jobs/${jobID}/run`, 'POST', csrf, {})).status).toBe(202)
+    await page.getByRole('button', { name: 'Scan now' }).click()
     await waitForScan(page, jobID, csrf, 2)
     const incidents = await callAPI(page, '/incidents', 'GET', csrf)
     expect(incidents.status).toBe(200)

@@ -5,6 +5,10 @@ retention: 90d
 # host at http://127.0.0.1:8080 or through an SSH tunnel.
 web:
   listen: 127.0.0.1:8080
+  # Optional separate key for encrypting the TOTP seed. The default is
+  # ./data/auth.key; an explicit file must contain 32 raw bytes or 64 hex
+  # characters, be mode 0600, and be mounted into the container.
+  # auth_key_file: /run/secrets/edgewatch-auth-key
 
 scheduler:
   max_concurrent_scans: 1

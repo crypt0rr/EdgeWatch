@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -14,6 +15,10 @@ type Admin struct {
 	TOTPEnabled  bool
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+	// TOTPSecretStored retains the encrypted database value when the key is
+	// unavailable, so unrelated admin updates do not overwrite it.
+	TOTPSecretStored string
+	TOTPSecretError  error
 }
 
 type Session struct {
@@ -32,9 +37,10 @@ type SetupToken struct {
 func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	var a Admin
 	var totp int
+	var stored string
 	var created, updated string
 	err := s.DB.QueryRowContext(ctx, `SELECT username,password_hash,totp_secret,totp_enabled,created_at,updated_at FROM admins WHERE id=1`).
-		Scan(&a.Username, &a.PasswordHash, &a.TOTPSecret, &totp, &created, &updated)
+		Scan(&a.Username, &a.PasswordHash, &stored, &totp, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, ErrNotFound
 	}
@@ -43,12 +49,42 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	}
 	a.TOTPEnabled = totp != 0
 	a.CreatedAt, a.UpdatedAt = scanTime(created), scanTime(updated)
+	a.TOTPSecretStored = stored
+	secret, secretErr := s.openTOTPSecret(stored)
+	if secretErr != nil {
+		a.TOTPSecretError = secretErr
+	} else {
+		a.TOTPSecret = secret
+		if a.TOTPEnabled && secret != "" && !strings.HasPrefix(stored, authCiphertext) {
+			if encrypted, encryptErr := s.sealTOTPSecret(secret); encryptErr == nil {
+				_, _ = s.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=?,updated_at=? WHERE id=1 AND totp_secret=?`, encrypted, time.Now().UTC().Format(time.RFC3339Nano), stored)
+				a.TOTPSecretStored = encrypted
+			}
+		}
+	}
 	return a, nil
 }
 
 func (s *Store) SaveAdmin(ctx context.Context, a Admin) error {
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO admins(id,username,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,totp_secret=excluded.totp_secret,totp_enabled=excluded.totp_enabled,updated_at=excluded.updated_at`, a.Username, a.PasswordHash, a.TOTPSecret, boolInt(a.TOTPEnabled), a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	stored, err := s.adminTOTPForSave(a)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.ExecContext(ctx, `INSERT INTO admins(id,username,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,totp_secret=excluded.totp_secret,totp_enabled=excluded.totp_enabled,updated_at=excluded.updated_at`, a.Username, a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+func (s *Store) adminTOTPForSave(a Admin) (string, error) {
+	if !a.TOTPEnabled || a.TOTPSecret == "" {
+		if a.TOTPEnabled && a.TOTPSecret == "" && a.TOTPSecretStored != "" {
+			return a.TOTPSecretStored, nil
+		}
+		if a.TOTPEnabled {
+			return "", ErrTOTPSecretLocked
+		}
+		return "", nil
+	}
+	return s.sealTOTPSecret(a.TOTPSecret)
 }
 
 func (s *Store) PutSetupToken(ctx context.Context, hash string, expires time.Time) error {
@@ -72,6 +108,10 @@ func (s *Store) GetSetupToken(ctx context.Context) (SetupToken, error) {
 // CompleteSetup consumes the token and creates the one permitted administrator
 // in one transaction, preventing a token race from creating two accounts.
 func (s *Store) CompleteSetup(ctx context.Context, tokenHash string, admin Admin, now time.Time) error {
+	storedSecret, err := s.adminTOTPForSave(admin)
+	if err != nil {
+		return err
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -93,7 +133,7 @@ func (s *Store) CompleteSetup(ctx context.Context, tokenHash string, admin Admin
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO admins(id,username,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?)`, admin.Username, admin.PasswordHash, admin.TOTPSecret, boolInt(admin.TOTPEnabled), admin.CreatedAt.UTC().Format(time.RFC3339Nano), admin.UpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO admins(id,username,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?)`, admin.Username, admin.PasswordHash, storedSecret, boolInt(admin.TOTPEnabled), admin.CreatedAt.UTC().Format(time.RFC3339Nano), admin.UpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1`, now.UTC().Format(time.RFC3339Nano)); err != nil {

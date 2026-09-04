@@ -50,6 +50,11 @@ ssh -L 8080:127.0.0.1:8080 user@docker-host
   storage and scan capacity.
 - `web.listen` must be a loopback address; the default is
   `127.0.0.1:8080`.
+- TOTP is optional. Its seed is encrypted with a separate authentication key
+  generated at `./data/auth.key` when TOTP is first enabled. Set
+  `web.auth_key_file` to a mode-`0600` file containing 32 raw bytes or 64
+  hexadecimal characters when the key must be supplied separately; an
+  explicitly supplied path is never generated automatically.
 - Notification URLs can be supplied with `notifications.urls`,
   `notifications.urls_file`, or an environment value such as
   `${SHOUTRRR_URL}`.
@@ -95,6 +100,12 @@ automatically. Back up the key with `./data/edgewatch.db`; a missing, invalid,
 or unsafe key locks web-managed destinations while scans and deployment-managed
 notifications continue.
 
+The TOTP authentication key is independent of the notification key. Back up
+`./data/auth.key` together with `./data/edgewatch.db` (or the separately mounted
+`web.auth_key_file`); losing it prevents TOTP verification until the key is
+restored. Existing plaintext TOTP seeds from older databases are re-encrypted
+on the first administrator read when the key is available.
+
 ## Operations
 
 Useful commands run inside the container:
@@ -120,8 +131,8 @@ The schema migration from the v0.3 database is additive, but it is
 forward-only: an older binary refuses a newer schema. To roll back, stop the
 new service, restore the entire pre-upgrade `./data` directory and deployment
 configuration, then start the previous image. Do not point an older image at
-the upgraded database. The previous named Docker volume, if one exists, is
-not read or migrated automatically.
+the upgraded database. The current schema is version 4. The previous named
+Docker volume, if one exists, is not read or migrated automatically.
 
 ## Development
 

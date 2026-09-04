@@ -18,8 +18,10 @@ import (
 )
 
 type Store struct {
-	DB   *sql.DB
-	Path string
+	DB          *sql.DB
+	Path        string
+	authKeyPath string
+	authAutoKey bool
 }
 
 var ErrJobBusy = errors.New("job is already running")
@@ -77,7 +79,18 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
-	return &Store{DB: db, Path: path}, nil
+	return &Store{DB: db, Path: path, authKeyPath: defaultAuthKeyPath(path), authAutoKey: true}, nil
+}
+
+// SetAuthKeyPath selects an operator-managed authentication key. An explicit
+// path is never generated automatically; the default key beside the database
+// is generated lazily only when TOTP is first enabled.
+func (s *Store) SetAuthKeyPath(path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	s.authKeyPath = strings.TrimSpace(path)
+	s.authAutoKey = false
 }
 
 func migrate(db *sql.DB) error {

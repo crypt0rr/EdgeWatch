@@ -158,7 +158,7 @@ func (m *Manager) Login(ctx context.Context, request *http.Request, password, ot
 		return "", admin, errors.New("invalid credentials")
 	}
 	if admin.TOTPEnabled {
-		valid := VerifyTOTPAt(admin.TOTPSecret, otp, m.now())
+		valid := admin.TOTPSecretError == nil && VerifyTOTPAt(admin.TOTPSecret, otp, m.now())
 		if !valid && recovery != "" {
 			valid, err = m.Store.ConsumeRecoveryCode(ctx, digest(strings.ToUpper(strings.TrimSpace(recovery))), m.now())
 		}

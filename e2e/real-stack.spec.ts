@@ -208,6 +208,10 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
     const persisted = await callAPI(page, '/jobs', 'GET', csrf)
     expect(persisted.status).toBe(200)
     expect(persisted.body.jobs.map((job: any) => job.job.name)).toContain('real-stack-fixture')
+    // Reload after the process restart so the SPA establishes a fresh session
+    // and EventSource connection instead of retaining a half-closed stream.
+    await page.goto(`${harness.url}/`, { waitUntil: 'domcontentloaded' })
+    await expect(page.getByRole('heading', { name: /Good afternoon, admin/ })).toBeVisible({ timeout: 15_000 })
     await page.getByRole('link', { name: 'Incidents' }).click()
     await expect(page.getByRole('heading', { name: 'Incidents' })).toBeVisible()
     await expect(page.getByRole('row', { name: /real-stack-fixture/ }).first()).toBeVisible()

@@ -89,6 +89,11 @@ jobs:
           cache: npm
       - name: Build embedded frontend assets
         run: npm ci && npm run build
+      # Vite empties the embedded output directory, including the tracked
+      # placeholder that keeps go:embed valid in a clean checkout. Restore it
+      # before GoReleaser performs its dirty-tree check.
+      - name: Restore embedded asset directory marker
+        run: touch internal/webui/dist/.gitkeep
       - name: Build and publish release assets
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:

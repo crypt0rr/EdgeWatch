@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Copy, KeyRound, LogOut, ShieldCheck } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { api, getSession, logoutAllSessions, setCSRF } from '../api'
+import { ActionDialog } from '../components/ActionDialog'
 
 export function Security() {
   const client = useQueryClient()
@@ -15,6 +16,8 @@ export function Security() {
   const [totp, setTotp] = useState<{ secret: string; otpauth: string } | null>(null)
   const [code, setCode] = useState('')
   const [recovery, setRecovery] = useState<string[]>([])
+  const [disablePrompt, setDisablePrompt] = useState(false)
+  const [revokePrompt, setRevokePrompt] = useState(false)
 
   async function change(event: FormEvent) {
     event.preventDefault()
@@ -31,13 +34,13 @@ export function Security() {
   }
 
   async function revokeSessions() {
-    if (!window.confirm('Sign out EdgeWatch on every browser, including this one?')) return
     setMessage('')
     setError('')
     try {
       await logoutAllSessions()
       setCSRF('')
       client.clear()
+      setRevokePrompt(false)
       navigate('/login')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not revoke sessions')
@@ -71,13 +74,13 @@ export function Security() {
     }
   }
 
-  async function disableTotp() {
-    const password = window.prompt('Enter your administrator password to disable TOTP')
-    if (!password) return
+  async function disableTotp(password: string) {
+    setError('')
     try {
       await api('/auth/totp', { method: 'DELETE', body: JSON.stringify({ password }) })
       // TOTP changes revoke every existing session. Return to sign-in rather
       // than leaving the page in a state whose cookie is no longer valid.
+      setDisablePrompt(false)
       setCSRF('')
       client.clear()
       navigate('/login')
@@ -98,13 +101,15 @@ export function Security() {
           <label>New password<input type="password" value={next} onChange={(event) => setNext(event.target.value)} minLength={12} autoComplete="new-password" required /><small>At least 12 characters.</small></label>
           <button className="button primary" type="submit">Update password</button>
         </form>
-        <button className="button secondary" type="button" onClick={revokeSessions}><LogOut size={16} /> Log out all sessions</button>
+        <button className="button secondary" type="button" onClick={() => { setError(''); setRevokePrompt(true) }}><LogOut size={16} /> Log out all sessions</button>
       </div>
       <div className="panel">
         <div className="panel-heading"><div><h2>Authenticator app</h2><p className="muted">{session.data?.totp_enabled ? 'TOTP is protecting administrator sign-in.' : 'Optional extra protection for sign-in.'}</p></div><ShieldCheck className={session.data?.totp_enabled ? 'green-icon' : 'muted-icon'} size={20} /></div>
-        {session.data?.totp_enabled ? <div className="settings-form"><div className="status-line"><span className="pill green">Enabled</span><span className="muted">Recovery codes are single-use.</span></div><button className="button secondary" type="button" onClick={disableTotp}>Disable TOTP</button></div> : totp ? <div className="settings-form"><p>Scan this secret in your authenticator app, then enter the six-digit code.</p><code className="secret">{totp.secret}</code><label>Verification code<input inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} placeholder="123456" /></label><button className="button primary" type="button" onClick={enableTotp}>Enable TOTP</button></div> : <div className="settings-form"><p>Enter your current password, then set up an authenticator app.</p><button className="button secondary" type="button" onClick={beginTotp}>Set up authenticator</button></div>}
+        {session.data?.totp_enabled ? <div className="settings-form"><div className="status-line"><span className="pill green">Enabled</span><span className="muted">Recovery codes are single-use.</span></div><button className="button secondary" type="button" onClick={() => { setError(''); setDisablePrompt(true) }}>Disable TOTP</button></div> : totp ? <div className="settings-form"><p>Scan this secret in your authenticator app, then enter the six-digit code.</p><code className="secret">{totp.secret}</code><label>Verification code<input inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} placeholder="123456" /></label><button className="button primary" type="button" onClick={enableTotp}>Enable TOTP</button></div> : <div className="settings-form"><p>Enter your current password, then set up an authenticator app.</p><button className="button secondary" type="button" onClick={beginTotp}>Set up authenticator</button></div>}
       </div>
     </div>
     {recovery.length > 0 && <div className="panel recovery"><h2>Save your recovery codes</h2><p className="muted">These are shown once. Store them somewhere offline before leaving this page.</p><div className="code-grid">{recovery.map((value) => <code key={value}>{value}</code>)}</div><div className="heading-actions"><button className="button secondary" type="button" onClick={() => navigator.clipboard?.writeText(recovery.join('\n'))}><Copy size={16} /> Copy codes</button><button className="button primary" type="button" onClick={() => { client.clear(); navigate('/login') }}>Continue to sign in</button></div></div>}
+    {disablePrompt && <ActionDialog title="Disable authenticator protection?" description="Enter your administrator password to disable TOTP. Existing browser sessions will be signed out." confirmLabel="Disable TOTP" destructive valueLabel="Administrator password" valueType="password" valueRequired autoComplete="current-password" onConfirm={disableTotp} onCancel={() => setDisablePrompt(false)} error={error} />}
+    {revokePrompt && <ActionDialog title="Log out all sessions?" description="Every EdgeWatch browser session, including this one, will be signed out." confirmLabel="Log out all sessions" destructive onConfirm={() => revokeSessions()} onCancel={() => setRevokePrompt(false)} error={error} />}
   </section>
 }

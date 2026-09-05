@@ -8,6 +8,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { APIError, createJob, getJob, scheduleSuggestion, updateJob } from '../api'
 import type { JobForm, Protocol } from '../types'
 import { cidrWarning, duplicateTarget, targetKind } from '../target'
+import { ActionDialog } from '../components/ActionDialog'
 
 const blank: JobForm = {
   name: '',
@@ -58,6 +59,7 @@ export function JobEditor() {
   const [suggestionInput, setSuggestionInput] = useState({ schedule: blank.schedule, timezone: blank.timezone })
   const [dismissedSuggestion, setDismissedSuggestion] = useState('')
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
+  const [rebaselinePrompt, setRebaselinePrompt] = useState<{ values: JobFormFields; summary: string } | null>(null)
   const loadedRevision = useRef<{ id?: string; revision: number } | null>(null)
   const { register, handleSubmit, reset, watch, setValue, formState: { errors: formErrors, isDirty } } = useForm<JobFormFields>({
     defaultValues: blank,
@@ -157,12 +159,7 @@ export function JobEditor() {
       if (!confirm && (message.includes('rebaseline') || (err instanceof APIError && err.code === 'rebaseline_confirmation_required'))) {
         const changes = err instanceof APIError && Array.isArray(err.details?.changes) ? err.details.changes.filter((change): change is string => typeof change === 'string') : []
         const summary = changes.length ? `\n\nScope changes:\n• ${changes.join('\n• ')}` : ''
-        const proceed = window.confirm(`This changes the scan scope. The current baseline and active incidents will be cleared and a new baseline will be learned.${summary}\n\nContinue?`)
-        if (proceed) {
-          await save(values, true)
-        } else {
-          setError('Scope change cancelled.')
-        }
+        setRebaselinePrompt({ values, summary })
       } else {
         setError(message)
       }
@@ -245,6 +242,7 @@ export function JobEditor() {
           </div>
         </aside>
       </form>
+      {rebaselinePrompt && <ActionDialog title="Confirm scan-scope change" description={`This changes the scan scope. The current baseline and active incidents will be cleared, and a new baseline will be learned.${rebaselinePrompt.summary}`} confirmLabel="Reset baseline and save" destructive onConfirm={async () => { await save(rebaselinePrompt.values, true) }} onCancel={() => { setRebaselinePrompt(null); setError('Scope change cancelled.') }} error={error} />}
     </section>
   )
 }

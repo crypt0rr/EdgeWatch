@@ -8,6 +8,12 @@ import net from 'node:net'
 
 const password = 'correct horse battery staple'
 
+async function navigateFromShell(page: import('@playwright/test').Page, label: string) {
+  const trigger = page.getByRole('button', { name: 'Open navigation' })
+  if (await trigger.isVisible()) await trigger.click()
+  await page.getByRole('link', { name: label, exact: true }).click()
+}
+
 type Harness = {
   url: string
   setupToken: () => string
@@ -111,11 +117,26 @@ notifications:
 
   const stop = async () => {
     if (!child || child.exitCode !== null || !child.pid) return
+    const processGroupID = child.pid
     try { process.kill(-child.pid, 'SIGTERM') } catch { /* already stopped */ }
     await Promise.race([once(child, 'exit'), delay(10_000)])
     if (child.exitCode === null) {
       try { process.kill(-child.pid, 'SIGKILL') } catch { /* already stopped */ }
     }
+    const deadline = Date.now() + 5_000
+    while (Date.now() < deadline) {
+      try {
+        process.kill(-processGroupID, 0)
+        await delay(50)
+      } catch {
+        break
+      }
+    }
+    // Allow the daemon's deferred SQLite lease release to complete before a
+    // restart in the same fixture. The process-group check above normally
+    // makes this unnecessary, but the Go runner can briefly outlive its
+    // child after receiving SIGTERM.
+    await delay(100)
     child = undefined
   }
 
@@ -173,7 +194,7 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
     expect(session.status).toBe(200)
     const csrf = session.body.csrf_token as string
 
-    await page.getByRole('link', { name: 'Jobs' }).click()
+    await navigateFromShell(page, 'Jobs')
     await page.getByRole('button', { name: 'New job' }).click()
     await expect(page.getByRole('heading', { name: 'Create a monitoring job' })).toBeVisible()
     await page.getByLabel('Job name').fill('real-stack-fixture')
@@ -229,9 +250,9 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
     // and EventSource connection instead of retaining a half-closed stream.
     await page.goto(`${harness.url}/`, { waitUntil: 'domcontentloaded' })
     await expect(page.getByRole('heading', { name: /Good afternoon, admin/ })).toBeVisible({ timeout: 15_000 })
-    await page.getByRole('link', { name: 'Incidents' }).click()
+    await navigateFromShell(page, 'Incidents')
     await expect(page.getByRole('heading', { name: 'Incidents' })).toBeVisible()
-    await expect(page.getByRole('row', { name: /real-stack-fixture/ }).first()).toBeVisible()
+    await expect(page.getByRole('row', { name: /real-stack-fixture/ }).or(page.getByRole('article', { name: /real-stack-fixture/ })).first()).toBeVisible()
   } finally {
     await harness.stop()
   }

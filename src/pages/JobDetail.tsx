@@ -25,6 +25,9 @@ import {
   scanHosts,
 } from '../api'
 import { Pagination } from '../components/Pagination'
+import { ActionDialog } from '../components/ActionDialog'
+
+type JobDialog = 'reset' | 'approve' | 'archive' | 'delete'
 
 export function JobDetail() {
   const { id = '' } = useParams()
@@ -37,6 +40,7 @@ export function JobDetail() {
   const [showResults, setShowResults] = useState(false)
   const [actionError, setActionError] = useState('')
   const [actionBusy, setActionBusy] = useState('')
+  const [dialog, setDialog] = useState<JobDialog | null>(null)
   const job = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id) })
   const scans = useQuery({
     queryKey: ['job-scans', id, scanOffset],
@@ -80,12 +84,12 @@ export function JobDetail() {
     }
   }
   async function reset() {
-    if (!window.confirm('Reset this baseline? New scans will be learned before changes are reported.')) return
     setActionError('')
     setActionBusy('reset')
     try {
       await resetBaseline(id)
       await client.invalidateQueries({ queryKey: ['job', id] })
+      setDialog(null)
     } catch (err) {
       reportActionError(err, 'Could not reset the baseline.')
     } finally {
@@ -93,13 +97,14 @@ export function JobDetail() {
     }
   }
   async function approve() {
-    if (!detail.data || !window.confirm('Use this successful scan as the baseline for the current scope?')) return
+    if (!detail.data) return
     setActionError('')
     setActionBusy('approve')
     try {
       await approveBaseline(id, detail.data.scan.id)
       await client.invalidateQueries({ queryKey: ['job', id] })
       setSelectedScan('')
+      setDialog(null)
     } catch (err) {
       reportActionError(err, 'Could not approve this baseline.')
     } finally {
@@ -107,11 +112,11 @@ export function JobDetail() {
     }
   }
   async function archive() {
-    if (!window.confirm('Archive this job? History will be kept.')) return
     setActionError('')
     setActionBusy('archive')
     try {
       await archiveJob(id, value.revision)
+      setDialog(null)
       navigate('/jobs')
     } catch (err) {
       reportActionError(err, 'Could not archive this job.')
@@ -131,13 +136,12 @@ export function JobDetail() {
       setActionBusy('')
     }
   }
-  async function permanentlyDelete() {
-    const confirmation = window.prompt(`Type ${value.job.name} to permanently delete this archived job and all retained history.`)
-    if (confirmation !== value.job.name) return
+  async function permanentlyDelete(confirmation: string) {
     setActionError('')
     setActionBusy('delete')
     try {
       await deleteJob(id, confirmation)
+      setDialog(null)
       navigate('/jobs')
     } catch (err) {
       reportActionError(err, 'Could not permanently delete this job.')
@@ -171,7 +175,7 @@ export function JobDetail() {
           <button className="button secondary" onClick={() => navigate(`/jobs/${id}/edit`)} disabled={!!actionBusy}>
             <Edit3 size={16} /> Edit
           </button>
-          {value.archived ? <><button className="button secondary" onClick={restore} disabled={!!actionBusy}>{actionBusy === 'restore' ? 'Restoring…' : 'Restore'}</button><button className="button danger" onClick={permanentlyDelete} disabled={!!actionBusy}>{actionBusy === 'delete' ? 'Deleting…' : 'Delete permanently'}</button></> : <button className="icon-button danger" aria-label="Archive job" onClick={archive} disabled={!!actionBusy}><Archive size={17} /></button>}
+          {value.archived ? <><button className="button secondary" onClick={restore} disabled={!!actionBusy}>{actionBusy === 'restore' ? 'Restoring…' : 'Restore'}</button><button className="button danger" onClick={() => { setActionError(''); setDialog('delete') }} disabled={!!actionBusy}>{actionBusy === 'delete' ? 'Deleting…' : 'Delete permanently'}</button></> : <button className="icon-button danger" aria-label="Archive job" onClick={() => { setActionError(''); setDialog('archive') }} disabled={!!actionBusy}><Archive size={17} /></button>}
         </div>
       </div>
       {actionError && <div className="form-error banner" role="alert">{actionError}</div>}
@@ -255,7 +259,7 @@ export function JobDetail() {
               {selectedScanCanBeBaseline && (
                 <div className="baseline-approval">
                   <span className="muted">This successful scan matches the current security scope.</span>
-                  <button className="button secondary" onClick={approve} disabled={!!actionBusy}>{actionBusy === 'approve' ? 'Approving…' : 'Use as baseline'}</button>
+                  <button className="button secondary" onClick={() => { setActionError(''); setDialog('approve') }} disabled={!!actionBusy}>{actionBusy === 'approve' ? 'Approving…' : 'Use as baseline'}</button>
                 </div>
               )}
               {detail.data.changes?.length ? (
@@ -308,10 +312,14 @@ export function JobDetail() {
               </>
             )}
           </div>
-          <button className="button secondary" onClick={reset} disabled={!!actionBusy}><RotateCcw size={16} /> {actionBusy === 'reset' ? 'Resetting…' : 'Reset baseline'}</button>
+          <button className="button secondary" onClick={() => { setActionError(''); setDialog('reset') }} disabled={!!actionBusy}><RotateCcw size={16} /> {actionBusy === 'reset' ? 'Resetting…' : 'Reset baseline'}</button>
           {value.baseline.status === 'complete' && <Link className="button secondary explore-button" to={`/jobs/${id}/baseline`}><Server size={16} /> Explore baseline <span className="button-count">{value.baseline.host_count ?? 'hosts'}</span></Link>}
         </div>
       </div>
+      {dialog === 'reset' && <ActionDialog title="Reset this baseline?" description="New scans will be learned before changes are reported. Existing history is preserved." confirmLabel="Reset baseline" destructive onConfirm={() => reset()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
+      {dialog === 'approve' && <ActionDialog title="Use this scan as the baseline?" description="This successful scan matches the current security scope. Future scans will compare against its results." confirmLabel="Use as baseline" onConfirm={() => approve()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
+      {dialog === 'archive' && <ActionDialog title="Archive this job?" description="The job will stop running, but its history and incidents will be kept." confirmLabel="Archive job" destructive onConfirm={() => archive()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
+      {dialog === 'delete' && <ActionDialog title="Delete this archived job permanently?" description="All retained history for this job will be removed. Type the job name exactly to continue." confirmLabel="Delete permanently" destructive valueLabel={`Type “${value.job.name}” to confirm`} valueType="text" valueRequired expectedValue={value.job.name} placeholder={value.job.name} autoComplete="off" onConfirm={permanentlyDelete} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
     </section>
   )
 }

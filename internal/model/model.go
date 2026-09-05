@@ -191,21 +191,30 @@ type ValueCount struct {
 
 type Incident struct {
 	Change        Change    `json:"change"`
+	ScanID        string    `json:"scan_id,omitempty"`
 	OpenedAt      time.Time `json:"opened_at"`
 	LastSeenAt    time.Time `json:"last_seen_at"`
 	RecoveryCount int       `json:"recovery_count"`
 }
 
 type JobState struct {
-	Baseline              *Snapshot             `json:"baseline,omitempty"`
-	BaselineScanID        string                `json:"baseline_scan_id,omitempty"`
-	BaselineConfigHash    string                `json:"baseline_config_hash,omitempty"`
-	Candidate             *Snapshot             `json:"candidate,omitempty"`
-	CandidateHash         string                `json:"candidate_hash,omitempty"`
-	CandidateCount        int                   `json:"candidate_count"`
-	CandidateAttempts     int                   `json:"candidate_attempts"`
-	Pending               map[string]Pending    `json:"pending,omitempty"`
-	Incidents             map[string]Incident   `json:"incidents,omitempty"`
+	Baseline           *Snapshot           `json:"baseline,omitempty"`
+	BaselineScanID     string              `json:"baseline_scan_id,omitempty"`
+	BaselineConfigHash string              `json:"baseline_config_hash,omitempty"`
+	Candidate          *Snapshot           `json:"candidate,omitempty"`
+	CandidateHash      string              `json:"candidate_hash,omitempty"`
+	CandidateCount     int                 `json:"candidate_count"`
+	CandidateAttempts  int                 `json:"candidate_attempts"`
+	Pending            map[string]Pending  `json:"pending,omitempty"`
+	Incidents          map[string]Incident `json:"incidents,omitempty"`
+	// Suppressed contains incident keys whose next successful scan should be
+	// ignored. Values are remaining successful scans; the UI currently uses one
+	// scan, while keeping the counter makes the state forward-compatible.
+	Suppressed map[string]int `json:"suppressed,omitempty"`
+	// SuppressedChanges keeps the last confirmed change while its incident is
+	// hidden. It lets the engine re-open the same incident immediately when the
+	// one-scan suppression expires, without requiring confirmations again.
+	SuppressedChanges     map[string]Change     `json:"suppressed_changes,omitempty"`
 	FingerprintCandidates map[string]ValueCount `json:"fingerprint_candidates,omitempty"`
 	ConsecutiveFailures   int                   `json:"consecutive_failures"`
 	LastFailureAlert      int                   `json:"last_failure_alert"`

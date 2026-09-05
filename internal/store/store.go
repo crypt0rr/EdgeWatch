@@ -389,10 +389,13 @@ func nullInt64(v int64) any {
 }
 
 var (
-	ErrNotFound           = errors.New("not found")
-	ErrConflict           = errors.New("resource was modified by another request")
-	ErrRebaselineRequired = errors.New("security-relevant job changes require rebaseline confirmation")
-	ErrJobScanActive      = errors.New("job has an active scan")
+	ErrNotFound                  = errors.New("not found")
+	ErrConflict                  = errors.New("resource was modified by another request")
+	ErrRebaselineRequired        = errors.New("security-relevant job changes require rebaseline confirmation")
+	ErrJobScanActive             = errors.New("job has an active scan")
+	ErrIncidentNotFound          = errors.New("incident not found")
+	ErrBaselineNotReady          = errors.New("baseline is not ready")
+	ErrUnsupportedIncidentChange = errors.New("unsupported incident change")
 	// ErrJobRevisionChanged is returned when a scan was queued with an older
 	// immutable job revision. The caller must reload the job before starting it.
 	ErrJobRevisionChanged = errors.New("job revision changed before scan started")
@@ -1300,6 +1303,8 @@ func (s *Store) resetRuntimeWithAudits(ctx context.Context, jobID, name string, 
 		state.CandidateAttempts = 0
 		state.Pending = map[string]model.Pending{}
 		state.Incidents = map[string]model.Incident{}
+		state.Suppressed = map[string]int{}
+		state.SuppressedChanges = map[string]model.Change{}
 		state.FingerprintCandidates = map[string]model.ValueCount{}
 		return []model.Event{{Type: "baseline-reset", Job: name, Message: "Baseline collection reset", CreatedAt: time.Now().UTC()}}, nil
 	})
@@ -1354,6 +1359,8 @@ func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string
 		state.CandidateAttempts = 0
 		state.Pending = map[string]model.Pending{}
 		state.Incidents = map[string]model.Incident{}
+		state.Suppressed = map[string]int{}
+		state.SuppressedChanges = map[string]model.Change{}
 		state.FingerprintCandidates = map[string]model.ValueCount{}
 		return []model.Event{{Type: "baseline-approved", Job: name, ScanID: stored.ID, Message: "Baseline manually approved", CreatedAt: time.Now().UTC()}}, nil
 	})
@@ -1885,6 +1892,12 @@ func ensureMaps(s *model.JobState) {
 	if s.Incidents == nil {
 		s.Incidents = map[string]model.Incident{}
 	}
+	if s.Suppressed == nil {
+		s.Suppressed = map[string]int{}
+	}
+	if s.SuppressedChanges == nil {
+		s.SuppressedChanges = map[string]model.Change{}
+	}
 	if s.FingerprintCandidates == nil {
 		s.FingerprintCandidates = map[string]model.ValueCount{}
 	}
@@ -2280,6 +2293,8 @@ func (s *Store) Approve(ctx context.Context, job string, scan model.Scan) ([]mod
 		state.CandidateAttempts = 0
 		state.Pending = map[string]model.Pending{}
 		state.Incidents = map[string]model.Incident{}
+		state.Suppressed = map[string]int{}
+		state.SuppressedChanges = map[string]model.Change{}
 		state.FingerprintCandidates = map[string]model.ValueCount{}
 		return []model.Event{{Type: "baseline-approved", Job: job, ScanID: scan.ID, Message: "Baseline manually approved", CreatedAt: time.Now().UTC()}}, nil
 	})
@@ -2295,6 +2310,8 @@ func (s *Store) ResetBaseline(ctx context.Context, job string) ([]model.Event, e
 		state.CandidateAttempts = 0
 		state.Pending = map[string]model.Pending{}
 		state.Incidents = map[string]model.Incident{}
+		state.Suppressed = map[string]int{}
+		state.SuppressedChanges = map[string]model.Change{}
 		state.FingerprintCandidates = map[string]model.ValueCount{}
 		return []model.Event{{Type: "baseline-reset", Job: job, Message: "Baseline collection reset", CreatedAt: time.Now().UTC()}}, nil
 	})

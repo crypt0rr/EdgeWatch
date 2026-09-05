@@ -25,6 +25,13 @@ func (schedulerFake) Scan(context.Context, config.Job) (model.Snapshot, error) {
 	return model.Snapshot{}, nil
 }
 
+type failingScanner struct{ err error }
+
+func (s failingScanner) Version(context.Context) string { return "failing" }
+func (s failingScanner) Scan(context.Context, config.Job) (model.Snapshot, error) {
+	return model.Snapshot{}, s.err
+}
+
 type blockingScanner struct {
 	started chan struct{}
 	release chan struct{}
@@ -348,6 +355,99 @@ func TestHighCostManagedScanReportsProgressAndCanBeCanceled(t *testing.T) {
 	}
 	if active := a.ActiveScans(); len(active) != 0 {
 		t.Fatalf("canceled scan remained active: %#v", active)
+	}
+}
+
+func TestManagedTerminalOutcomesQueueNotifications(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{
+		Version:   1,
+		Database:  "test",
+		Retention: config.Duration(24 * time.Hour),
+		Scheduler: config.Scheduler{MaxConcurrent: 1},
+		Web:       config.Web{Listen: "127.0.0.1:8080"},
+		Notifications: config.Notifications{URLs: []string{
+			"generic://localhost/edgewatch?disabletls=yes&template=json",
+		}},
+	}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := config.NormalizeJob(config.Job{
+		Name: "terminal-outcomes", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"},
+		TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timing: "balanced", Timeout: config.Duration(time.Minute),
+		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
+	})
+	record, err := s.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	a.Scanner = failingScanner{err: errors.New("network unavailable")}
+	failed, events, runErr := a.RunJobRecord(ctx, record)
+	if runErr == nil || failed.Status != "failed" || len(events) != 1 || events[0].Type != "scan-failure" {
+		t.Fatalf("failed run = scan=%#v events=%#v err=%v", failed, events, runErr)
+	}
+
+	blocking := &blockingScanner{started: make(chan struct{}), release: make(chan struct{})}
+	a.Scanner = blocking
+	canceledDone := make(chan struct{})
+	var canceled model.Scan
+	var canceledEvents []model.Event
+	var canceledErr error
+	go func() {
+		canceled, canceledEvents, canceledErr = a.RunJobRecord(ctx, record)
+		close(canceledDone)
+	}()
+	select {
+	case <-blocking.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancellable scan did not start")
+	}
+	active := a.ActiveScans()
+	if len(active) != 1 {
+		t.Fatalf("active scans = %#v", active)
+	}
+	if err := a.CancelScan(active[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-canceledDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled scan did not finish")
+	}
+	if !errors.Is(canceledErr, context.Canceled) || canceled.Status != "canceled" || len(canceledEvents) != 1 || canceledEvents[0].Type != "scan-canceled" {
+		t.Fatalf("canceled run = scan=%#v events=%#v err=%v", canceled, canceledEvents, canceledErr)
+	}
+
+	rows, err := s.DB.QueryContext(ctx, `SELECT payload_json FROM outbox ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var types []string
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var event model.Event
+		if err := json.Unmarshal(raw, &event); err != nil {
+			t.Fatal(err)
+		}
+		types = append(types, event.Type)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(types) != 2 || types[0] != "scan-failure" || types[1] != "scan-canceled" {
+		t.Fatalf("terminal outcome notifications = %v", types)
 	}
 }
 

@@ -44,12 +44,6 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 		return nil, fmt.Errorf("scan is required")
 	}
 	return e.Store.FinalizeManagedScan(ctx, scan, jobID, scan.ConfigHash, destinations, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
-		if current.Status == "canceled" {
-			// Operator cancellation is an intentional terminal outcome, not a
-			// scanner health failure. Keep the immutable history row but leave
-			// baseline, candidate, and incident state unchanged.
-			return nil, nil
-		}
 		if current.Status == "success" {
 			if state.Baseline != nil {
 				current.BaselineScanID = state.BaselineScanID
@@ -71,6 +65,9 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 			}
 			return events, nil
 		}
+		// Failed, timed-out, and canceled scans never enter comparison state,
+		// but every terminal non-success outcome is retained as an event so the
+		// configured notification destinations can alert the operator.
 		return processFailure(state, job.Name, *current)
 	})
 }
@@ -259,12 +256,34 @@ func (e *Engine) FailureForJobWithDestinations(ctx context.Context, jobID, job s
 }
 
 func processFailure(state *model.JobState, job string, scan model.Scan) ([]model.Event, error) {
-	state.ConsecutiveFailures++
-	if state.ConsecutiveFailures == 3 || state.ConsecutiveFailures-state.LastFailureAlert >= 10 {
-		state.LastFailureAlert = state.ConsecutiveFailures
-		return []model.Event{{Type: "scan-failure", Job: job, ScanID: scan.ID, Message: fmt.Sprintf("%d consecutive scan failures; latest: %s", state.ConsecutiveFailures, scan.Error), CreatedAt: scan.FinishedAt}}, nil
+	if scan.Status == "canceled" {
+		return []model.Event{{Type: "scan-canceled", Job: job, ScanID: scan.ID, Message: scanOutcomeMessage(scan), CreatedAt: scan.FinishedAt}}, nil
 	}
-	return nil, nil
+	state.ConsecutiveFailures++
+	// A terminal failure is actionable even when it is the first failure. Keep
+	// the counters for dashboard health and future alert policies, but do not
+	// suppress the notification that explains the failed run.
+	state.LastFailureAlert = state.ConsecutiveFailures
+	return []model.Event{{Type: "scan-failure", Job: job, ScanID: scan.ID, Message: scanOutcomeMessage(scan), CreatedAt: scan.FinishedAt}}, nil
+}
+
+func scanOutcomeMessage(scan model.Scan) string {
+	label := strings.TrimSpace(scan.Status)
+	switch label {
+	case "":
+		label = "failed"
+	case "canceled":
+		label = "canceled"
+	case "timed_out", "timeout", "timed-out":
+		label = "timed out"
+	default:
+		label = strings.ReplaceAll(label, "_", " ")
+	}
+	message := "Scan " + label
+	if reason := strings.TrimSpace(scan.Error); reason != "" {
+		message += ": " + reason
+	}
+	return message
 }
 
 type item struct {
@@ -379,6 +398,45 @@ func applyChanges(state *model.JobState, job, scanID string, current []model.Cha
 	for _, c := range current {
 		currentMap[c.Key] = c
 	}
+	// Suppression is counted in successful scans, rather than wall-clock time.
+	// Keep the confirmed change one extra state transition so an unchanged
+	// incident can be re-opened immediately when its one-scan suppression ends.
+	suppressedThisScan := map[string]bool{}
+	expiredSuppression := map[string]model.Change{}
+	for key, remaining := range state.Suppressed {
+		if remaining <= 0 {
+			if change, ok := state.SuppressedChanges[key]; ok {
+				expiredSuppression[key] = change
+			}
+			delete(state.Suppressed, key)
+			delete(state.SuppressedChanges, key)
+			continue
+		}
+		suppressedThisScan[key] = true
+		state.Suppressed[key] = remaining - 1
+	}
+	allCurrent := make(map[string]model.Change, len(currentMap))
+	for key, change := range currentMap {
+		allCurrent[key] = change
+	}
+	for key := range suppressedThisScan {
+		// The action removes the active incident immediately. Repeat that
+		// cleanup here so a state written by an older server cannot leak a
+		// suppressed row or pending confirmation into the next scan.
+		delete(currentMap, key)
+		delete(state.Pending, key)
+		delete(state.Incidents, key)
+	}
+	for key, change := range expiredSuppression {
+		if current, ok := allCurrent[key]; ok && current.New == change.New {
+			// Re-open below without making the administrator confirm the same
+			// already-confirmed change again. A changed value is processed by the
+			// normal confirmation path instead.
+			delete(currentMap, key)
+			delete(state.Pending, key)
+			delete(state.Incidents, key)
+		}
+	}
 	var opened, recovered []model.Change
 	for key, c := range currentMap {
 		if incident, ok := state.Incidents[key]; ok && incident.Change.New == c.New {
@@ -395,12 +453,20 @@ func applyChanges(state *model.JobState, job, scanID string, current []model.Cha
 			p = model.Pending{Change: c, Count: 1}
 		}
 		if p.Count >= required {
-			state.Incidents[key] = model.Incident{Change: c, OpenedAt: now, LastSeenAt: now}
+			state.Incidents[key] = model.Incident{Change: c, ScanID: scanID, OpenedAt: now, LastSeenAt: now}
 			delete(state.Pending, key)
 			opened = append(opened, c)
 		} else {
 			state.Pending[key] = p
 		}
+	}
+	for key, change := range expiredSuppression {
+		currentChange, ok := allCurrent[key]
+		if !ok || currentChange.New != change.New {
+			continue
+		}
+		state.Incidents[key] = model.Incident{Change: currentChange, ScanID: scanID, OpenedAt: now, LastSeenAt: now}
+		opened = append(opened, currentChange)
 	}
 	for key := range state.Pending {
 		if _, ok := currentMap[key]; !ok {
@@ -408,7 +474,7 @@ func applyChanges(state *model.JobState, job, scanID string, current []model.Cha
 		}
 	}
 	for key, incident := range state.Incidents {
-		if _, ok := currentMap[key]; ok {
+		if _, ok := allCurrent[key]; ok {
 			continue
 		}
 		incident.RecoveryCount++
@@ -421,6 +487,8 @@ func applyChanges(state *model.JobState, job, scanID string, current []model.Cha
 			state.Incidents[key] = incident
 		}
 	}
+	sort.Slice(opened, func(i, j int) bool { return opened[i].Key < opened[j].Key })
+	sort.Slice(recovered, func(i, j int) bool { return recovered[i].Key < recovered[j].Key })
 	var events []model.Event
 	if len(opened) > 0 {
 		events = append(events, model.Event{Type: "changes-detected", Job: job, ScanID: scanID, Message: fmt.Sprintf("%d baseline change(s) confirmed", len(opened)), Changes: opened, CreatedAt: now})
@@ -484,6 +552,12 @@ func unitMap(s model.Snapshot) map[string]model.Unit {
 
 func FormatEvent(e model.Event) string {
 	var b strings.Builder
+	switch {
+	case e.Type == "changes-recovered":
+		b.WriteString("🟢 ")
+	case e.Type == "changes-detected" && hasCriticalChange(e.Changes):
+		b.WriteString("🔴 ")
+	}
 	b.WriteString("EdgeWatch: ")
 	b.WriteString(e.Message)
 	b.WriteString("\nJob: ")
@@ -499,6 +573,15 @@ func FormatEvent(e model.Event) string {
 		b.WriteString(model.ChangeSummary(c))
 	}
 	return b.String()
+}
+
+func hasCriticalChange(changes []model.Change) bool {
+	for _, change := range changes {
+		if strings.EqualFold(strings.TrimSpace(change.Severity), "critical") {
+			return true
+		}
+	}
+	return false
 }
 
 func ScopeDescription(s model.Scope) string {

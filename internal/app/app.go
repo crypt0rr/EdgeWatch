@@ -21,6 +21,10 @@ import (
 )
 
 type App struct {
+	// Version is the build version shown by the web console and CLI. It is
+	// populated by the command package when the process starts and defaults to
+	// "dev" for library and test users.
+	Version           string
 	Config            *config.Config
 	Store             *store.Store
 	Scanner           Scanner
@@ -131,7 +135,7 @@ func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logge
 	sc := scanner.New(nmapPath)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return &App{Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second}, nil
+	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second}, nil
 }
 
 func (a *App) Job(name string) (config.Job, error) {
@@ -341,9 +345,7 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		if err := a.Store.SaveScan(persistCtx, scan); err != nil {
 			return scan, nil, err
 		}
-		if scan.Status == "canceled" {
-			events, finalizeErr = nil, nil
-		} else if scanErr != nil {
+		if scan.Status != "success" {
 			events, finalizeErr = a.Engine.Failure(persistCtx, job.Name, scan)
 		} else {
 			events, finalizeErr = a.Engine.Success(persistCtx, job, scan)

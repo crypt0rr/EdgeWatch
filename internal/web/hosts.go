@@ -1,13 +1,16 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -18,11 +21,24 @@ type hostSummary struct {
 	Address           string                `json:"address"`
 	AddressFamily     string                `json:"address_family,omitempty"`
 	SourceTargets     []string              `json:"source_targets,omitempty"`
+	DNSNames          []string              `json:"dns_names,omitempty"`
 	Protocols         []hostProtocolSummary `json:"protocols,omitempty"`
 	OpenPorts         int                   `json:"open_ports"`
 	OpenFilteredPorts int                   `json:"open_filtered_ports"`
 	HasOpenPorts      bool                  `json:"has_open_ports"`
 	Legacy            bool                  `json:"legacy,omitempty"`
+}
+
+// allHostSummary is the latest successful scan result for one effective IP.
+// The scan and job references make the existing historical host-detail route
+// the canonical drill-down without duplicating detailed observations here.
+type allHostSummary struct {
+	hostSummary
+	JobID       string    `json:"job_id,omitempty"`
+	Job         string    `json:"job"`
+	ScanID      string    `json:"scan_id"`
+	ScannedAt   time.Time `json:"scanned_at"`
+	DataQuality string    `json:"data_quality"`
 }
 
 type hostProtocolSummary struct {
@@ -271,7 +287,7 @@ func normalizeHostSlice(hosts []model.HostObservation) {
 }
 
 func summaryForHost(host model.HostObservation, legacy bool) hostSummary {
-	result := hostSummary{Address: host.Address, AddressFamily: host.AddressFamily, SourceTargets: append([]string(nil), host.SourceTargets...), Legacy: legacy}
+	result := hostSummary{Address: host.Address, AddressFamily: host.AddressFamily, SourceTargets: append([]string(nil), host.SourceTargets...), DNSNames: append([]string(nil), host.DNSNames...), Legacy: legacy}
 	for _, protocol := range host.Protocols {
 		summary := hostProtocolSummary{Protocol: protocol.Protocol, ScanType: protocol.ScanType, ScannedPorts: protocol.ScannedPorts, ScannedPortCount: protocol.ScannedPortCount, ServiceDetection: protocol.ServiceDetection}
 		for _, port := range protocol.Ports {
@@ -290,20 +306,128 @@ func summaryForHost(host model.HostObservation, legacy bool) hostSummary {
 	return result
 }
 
+func (s *Server) latestScannedHosts(ctx context.Context) ([]allHostSummary, error) {
+	latest := make(map[string]allHostSummary)
+	const pageSize = 1000
+	for offset := 0; ; offset += pageSize {
+		page, err := s.Store.ListScansPage(ctx, "", pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		for _, scan := range page.Items {
+			// A failed or cancelled scan is not a historical result. Successful
+			// scans are returned newest first by ListScansPage, so the first
+			// observation for an address is its latest result.
+			if scan.Status != "success" {
+				continue
+			}
+			hostPage, err := observationsForSnapshot(scan.Snapshot)
+			if err != nil {
+				return nil, err
+			}
+			for _, host := range hostPage.Items {
+				address := canonicalHostAddress(host.Address)
+				if address == "" || net.ParseIP(address) == nil {
+					continue
+				}
+				if _, exists := latest[address]; exists {
+					continue
+				}
+				latest[address] = allHostSummary{
+					hostSummary: summaryForHost(host, hostPage.DataQuality == "legacy"),
+					JobID:       scan.JobID,
+					Job:         scan.Job,
+					ScanID:      scan.ID,
+					ScannedAt:   scan.FinishedAt,
+					DataQuality: hostPage.DataQuality,
+				}
+			}
+		}
+		if len(page.Items) == 0 || offset+len(page.Items) >= page.Total {
+			break
+		}
+	}
+	result := make([]allHostSummary, 0, len(latest))
+	for _, host := range latest {
+		result = append(result, host)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].Address < result[j].Address
+	})
+	return result, nil
+}
+
+func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
+	limit, offset, err := parseHostPagination(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_pagination", err.Error(), nil)
+		return
+	}
+	hasOpen, err := parseHasOpen(r.URL.Query().Get("has_open_ports"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error(), nil)
+		return
+	}
+	protocol, err := parseHostProtocol(r.URL.Query().Get("protocol"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error(), nil)
+		return
+	}
+	hosts, err := s.latestScannedHosts(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		return
+	}
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	filtered := make([]allHostSummary, 0, len(hosts))
+	for _, item := range hosts {
+		host := model.HostObservation{Address: item.Address, SourceTargets: item.SourceTargets, DNSNames: item.DNSNames}
+		if !hostMatches(host, item.hostSummary, "", protocol, hasOpen) {
+			continue
+		}
+		matches := hostMatches(host, item.hostSummary, query, "", nil)
+		if !matches && query != "" && strings.Contains(strings.ToLower(item.Job), strings.ToLower(query)) {
+			matches = true
+		}
+		if !matches {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	total := len(filtered)
+	if offset >= total {
+		filtered = nil
+	} else {
+		end := offset + limit
+		if end > total {
+			end = total
+		}
+		filtered = filtered[offset:end]
+	}
+	if filtered == nil {
+		filtered = []allHostSummary{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"hosts": filtered, "pagination": paginationJSON(offset, limit, total)})
+}
+
 func hostMatches(host model.HostObservation, summary hostSummary, query, protocol string, hasOpen *bool) bool {
 	if protocol != "" {
 		found := false
-		for _, item := range host.Protocols {
+		protocolHasOpen := false
+		for _, item := range summary.Protocols {
 			if strings.EqualFold(item.Protocol, protocol) {
 				found = true
+				protocolHasOpen = item.OpenPorts > 0 || item.OpenFilteredPorts > 0
 				break
 			}
 		}
 		if !found {
 			return false
 		}
-	}
-	if hasOpen != nil && summary.HasOpenPorts != *hasOpen {
+		if hasOpen != nil && protocolHasOpen != *hasOpen {
+			return false
+		}
+	} else if hasOpen != nil && summary.HasOpenPorts != *hasOpen {
 		return false
 	}
 	if query == "" {

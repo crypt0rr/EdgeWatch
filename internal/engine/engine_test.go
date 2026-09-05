@@ -2,7 +2,9 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -54,10 +56,81 @@ func TestBaselineChangeAndRecoveryConfirmations(t *testing.T) {
 	}
 }
 
+func TestSuppressedIncidentReopensAfterOneSuccessfulScan(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := Engine{Store: db}
+	job := config.Job{Name: "suppressed", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 2}}
+	if _, err := e.Success(ctx, job, scan("baseline", snapshot(""))); err != nil {
+		t.Fatal(err)
+	}
+	if events, err := e.Success(ctx, job, scan("candidate-1", snapshot("open"))); err != nil || len(events) != 0 {
+		t.Fatalf("first changed scan: %#v, %v", events, err)
+	}
+	if events, err := e.Success(ctx, job, scan("incident", snapshot("open"))); err != nil || len(events) != 1 || events[0].Type != "changes-detected" {
+		t.Fatalf("incident scan: %#v, %v", events, err)
+	}
+	key := "port|192.0.2.1|tcp|443"
+	if _, err := db.UpdateState(ctx, job.Name, func(state *model.JobState) ([]model.Event, error) {
+		incident, ok := state.Incidents[key]
+		if !ok {
+			return nil, fmt.Errorf("incident %s not found", key)
+		}
+		state.Suppressed[key] = 1
+		state.SuppressedChanges[key] = incident.Change
+		delete(state.Incidents, key)
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if events, err := e.Success(ctx, job, scan("suppressed-scan", snapshot("open"))); err != nil || len(events) != 0 {
+		t.Fatalf("suppressed scan: %#v, %v", events, err)
+	}
+	state, err := db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Incidents) != 0 || state.Suppressed[key] != 0 {
+		t.Fatalf("suppression window after scan = %#v", state)
+	}
+	events, err := e.Success(ctx, job, scan("reopened", snapshot("open")))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" {
+		t.Fatalf("reopened scan: %#v, %v", events, err)
+	}
+	state, err = db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Incidents) != 1 || state.Suppressed[key] != 0 {
+		t.Fatalf("reopened state = %#v", state)
+	}
+}
+
 func TestUDPUncertaintyIsWarning(t *testing.T) {
 	changes := Diff(snapshot(""), model.Snapshot{Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}}, Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 53, State: "open|filtered"}}}}}, false)
 	if len(changes) != 1 || changes[0].Severity != "warning" {
 		t.Fatalf("changes %#v", changes)
+	}
+}
+
+func TestFormatEventUsesOutcomeIndicators(t *testing.T) {
+	recovered := FormatEvent(model.Event{Type: "changes-recovered", Message: "one change recovered", Job: "test"})
+	if !strings.HasPrefix(recovered, "🟢 EdgeWatch: ") {
+		t.Fatalf("recovery notification = %q", recovered)
+	}
+
+	critical := FormatEvent(model.Event{Type: "changes-detected", Message: "one change", Job: "test", Changes: []model.Change{{Severity: "critical"}}})
+	if !strings.HasPrefix(critical, "🔴 EdgeWatch: ") {
+		t.Fatalf("critical notification = %q", critical)
+	}
+
+	warning := FormatEvent(model.Event{Type: "changes-detected", Message: "one change", Job: "test", Changes: []model.Change{{Severity: "warning"}}})
+	if strings.HasPrefix(warning, "🔴 ") || strings.HasPrefix(warning, "🟢 ") {
+		t.Fatalf("warning notification has an outcome indicator = %q", warning)
 	}
 }
 
@@ -80,6 +153,58 @@ func TestIncompleteFailuresDoNotChangeBaseline(t *testing.T) {
 	}
 	if len(state.Incidents) != 0 {
 		t.Fatal("failure created incident")
+	}
+}
+
+func TestEveryUnsuccessfulScanEmitsAnOutcomeEvent(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := Engine{Store: db}
+	job := config.Job{Name: "outcomes", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+
+	failed := scan("failed", snapshot(""))
+	failed.Status = "failed"
+	failed.Error = "nmap failed: permission denied"
+	events, err := e.Failure(ctx, job.Name, failed)
+	if err != nil || len(events) != 1 || events[0].Type != "scan-failure" {
+		t.Fatalf("failed scan event = %#v, err=%v", events, err)
+	}
+	if events[0].Message != "Scan failed: nmap failed: permission denied" {
+		t.Fatalf("failed scan message = %q", events[0].Message)
+	}
+
+	canceled := scan("canceled", snapshot(""))
+	canceled.Status = "canceled"
+	canceled.Error = "scan canceled"
+	events, err = e.Failure(ctx, job.Name, canceled)
+	if err != nil || len(events) != 1 || events[0].Type != "scan-canceled" {
+		t.Fatalf("canceled scan event = %#v, err=%v", events, err)
+	}
+	if events[0].Message != "Scan canceled: scan canceled" {
+		t.Fatalf("canceled scan message = %q", events[0].Message)
+	}
+
+	timedOut := scan("timed-out", snapshot(""))
+	timedOut.Status = "timed_out"
+	timedOut.Error = "scan exceeded its timeout"
+	events, err = e.Failure(ctx, job.Name, timedOut)
+	if err != nil || len(events) != 1 || events[0].Type != "scan-failure" {
+		t.Fatalf("timed-out scan event = %#v, err=%v", events, err)
+	}
+	if events[0].Message != "Scan timed out: scan exceeded its timeout" {
+		t.Fatalf("timed-out scan message = %q", events[0].Message)
+	}
+
+	state, err := db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.ConsecutiveFailures != 2 {
+		t.Fatalf("unexpected failure count after canceled and timed-out scans: %d", state.ConsecutiveFailures)
 	}
 }
 

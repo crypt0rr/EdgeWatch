@@ -209,3 +209,39 @@ func TestScanWithProgressReportsBoundedWork(t *testing.T) {
 		t.Fatalf("progress totals = %#v", last)
 	}
 }
+
+func TestScanWithProgressReportsLiveProcessHeartbeatAndNmapOutput(t *testing.T) {
+	dir := t.TempDir()
+	nmapPath := filepath.Join(dir, "nmap")
+	script := "#!/bin/sh\necho 'About 42.0% done; ETC: 00:01' >&2\nsleep 2\nprintf '%s' '" + sampleXML + "'\n"
+	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := New(nmapPath)
+	job := config.NormalizeJob(config.Job{
+		Name: "live-progress", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		TCP: &config.Protocol{Ports: "22-23", Mode: "syn"}, Timing: "balanced",
+	})
+	var updates []Progress
+	if _, err := n.ScanWithProgress(context.Background(), job, func(progress Progress) { updates = append(updates, progress) }); err != nil {
+		t.Fatal(err)
+	}
+	foundLive, foundOutput, foundFraction, foundComplete := false, false, false, false
+	for _, update := range updates {
+		if update.ProcessAlive && update.Protocol == "tcp" {
+			foundLive = true
+		}
+		if strings.Contains(update.LastOutput, "About 42.0%") {
+			foundOutput = true
+		}
+		if update.ProcessAlive && update.ProcessProgressPercent > 0 {
+			foundFraction = true
+		}
+		if update.Phase == "complete" && !update.ProcessAlive {
+			foundComplete = true
+		}
+	}
+	if !foundLive || !foundOutput || !foundFraction || !foundComplete {
+		t.Fatalf("live progress updates missing: live=%v output=%v fraction=%v complete=%v updates=%#v", foundLive, foundOutput, foundFraction, foundComplete, updates)
+	}
+}

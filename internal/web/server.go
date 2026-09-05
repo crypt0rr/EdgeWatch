@@ -66,7 +66,11 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	if a != nil && a.Version != "" {
 		buildVersion = a.Version
 	}
-	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdap.New(s, a.Config.RDAPEnabled()), Log: logger, Version: buildVersion, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}}
+	rdapClient := rdap.New(s, a.Config.RDAPEnabled())
+	rdapClient.OnCacheWriteError = func(err error) {
+		logger.Warn("rdap cache write failed", "error", err)
+	}
+	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}}
 	if token, err := v.Auth.EnsureSetupToken(context.Background()); err != nil {
 		logger.Error("admin setup token generation failed", "error", err)
 	} else if token != "" {

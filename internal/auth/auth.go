@@ -88,7 +88,29 @@ func (m *Manager) EnsureSetupToken(ctx context.Context) (string, error) {
 		return "", err
 	}
 	plain := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw)
-	if err := m.Store.PutSetupToken(ctx, digest(plain), m.now().Add(15*time.Minute)); err != nil {
+	now := m.now()
+	if err := m.Store.PutSetupTokenAt(ctx, digest(plain), now.Add(15*time.Minute), now); err != nil {
+		return "", err
+	}
+	return plain, nil
+}
+
+// ReissueSetupToken creates a fresh setup token for a clean installation. The
+// store performs the administrator-exists check, persists the issue time for a
+// cross-process rate limit, and records an opaque audit event.
+func (m *Manager) ReissueSetupToken(ctx context.Context) (string, error) {
+	if _, err := m.Store.GetAdmin(ctx); err == nil {
+		return "", errors.New("administrator is already configured")
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return "", err
+	}
+	raw, err := randomBytes(32)
+	if err != nil {
+		return "", err
+	}
+	plain := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw)
+	now := m.now()
+	if err := m.Store.ReissueSetupToken(ctx, digest(plain), now.Add(15*time.Minute), now); err != nil {
 		return "", err
 	}
 	return plain, nil

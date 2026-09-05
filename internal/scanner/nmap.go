@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -31,16 +32,27 @@ type Nmap struct {
 // Counts are based on resolved addresses and ports, and are deliberately
 // estimates of Nmap probes rather than an SLA for network response time.
 type Progress struct {
+	StartedAt            time.Time
 	CompletedProbes      int64
 	TotalProbes          int64
 	CompletedInvocations int64
 	TotalInvocations     int64
 	Phase                string
+	// The remaining fields describe liveness inside one Nmap process. They are
+	// intentionally advisory: Nmap may not emit a percentage for every scan,
+	// but the heartbeat and last output still prove that the process is alive.
+	Protocol               string
+	CurrentInvocation      int64
+	TotalBatches           int64
+	ProcessProgressPercent int
+	ElapsedSeconds         int64
+	LastOutput             string
+	ProcessAlive           bool
 }
 
-// ProgressReporter receives scan progress after resolution and each completed
-// Nmap invocation. Implementations must not retain or call it after Scan
-// returns.
+// ProgressReporter receives scan progress after resolution, while an Nmap
+// process is alive, and after each completed invocation. Implementations must
+// not retain or call it after Scan returns.
 type ProgressReporter func(Progress)
 
 func New(path string) *Nmap {
@@ -81,14 +93,24 @@ func (n *Nmap) Scan(ctx context.Context, job config.Job) (model.Snapshot, error)
 // console. The legacy Scan method delegates here so test and plugin scanners
 // do not need to implement progress reporting.
 func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report ProgressReporter) (model.Snapshot, error) {
-	reportProgress(report, Progress{Phase: "resolving"})
+	started := time.Now().UTC()
+	emit := func(progress Progress) {
+		if progress.ElapsedSeconds <= 0 {
+			progress.ElapsedSeconds = int64(time.Since(started).Seconds())
+		}
+		if progress.ElapsedSeconds < 0 {
+			progress.ElapsedSeconds = 0
+		}
+		reportProgress(report, progress)
+	}
+	emit(Progress{Phase: "resolving", StartedAt: started})
 	targets, err := n.resolve(ctx, job)
 	if err != nil {
 		return model.Snapshot{}, err
 	}
 	totalProbes, totalInvocations := progressTotals(targets, job)
-	progress := Progress{TotalProbes: totalProbes, TotalInvocations: totalInvocations, Phase: "scanning"}
-	reportProgress(report, progress)
+	progress := Progress{TotalProbes: totalProbes, TotalInvocations: totalInvocations, Phase: "scanning", StartedAt: started}
+	emit(progress)
 	snap := model.Snapshot{DNS: map[string][]string{}}
 	for _, rt := range targets {
 		if rt.Hostname {
@@ -99,10 +121,24 @@ func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report Prog
 		for _, rt := range targets {
 			snap.Scopes = append(snap.Scopes, model.Scope{Target: rt.Name, Protocol: "tcp", Ports: job.TCP.Ports, ServiceDetection: job.TCP.ServiceDetection})
 		}
+		baseInvocations, baseProbes := progress.CompletedInvocations, progress.CompletedProbes
 		result, err := n.scanProtocolBatchDetailedProgress(ctx, targets, "tcp", *job.TCP, job.Timing, job.AssumesAlive(), func(invocations, probes int64) {
 			progress.CompletedInvocations += invocations
 			progress.CompletedProbes += probes
-			reportProgress(report, progress)
+			emit(progress)
+		}, func(update invocationProgress) {
+			live := progress
+			live.Protocol = update.Protocol
+			live.CurrentInvocation = baseInvocations + update.Invocation
+			live.TotalBatches = totalInvocations
+			live.ProcessProgressPercent = int(update.Fraction * 100)
+			live.ProcessAlive = update.Alive
+			live.LastOutput = update.Output
+			live.CompletedProbes = baseProbes + int64(float64(update.BatchProbes)*update.Fraction)
+			if update.Alive {
+				live.Phase = update.Protocol + " scanning"
+			}
+			emit(live)
 		})
 		if err != nil {
 			return model.Snapshot{}, fmt.Errorf("tcp scan: %w", err)
@@ -114,10 +150,24 @@ func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report Prog
 		for _, rt := range targets {
 			snap.Scopes = append(snap.Scopes, model.Scope{Target: rt.Name, Protocol: "udp", Ports: job.UDP.Ports, ServiceDetection: job.UDP.ServiceDetection})
 		}
+		baseInvocations, baseProbes := progress.CompletedInvocations, progress.CompletedProbes
 		result, err := n.scanProtocolBatchDetailedProgress(ctx, targets, "udp", *job.UDP, job.Timing, job.AssumesAlive(), func(invocations, probes int64) {
 			progress.CompletedInvocations += invocations
 			progress.CompletedProbes += probes
-			reportProgress(report, progress)
+			emit(progress)
+		}, func(update invocationProgress) {
+			live := progress
+			live.Protocol = update.Protocol
+			live.CurrentInvocation = baseInvocations + update.Invocation
+			live.TotalBatches = totalInvocations
+			live.ProcessProgressPercent = int(update.Fraction * 100)
+			live.ProcessAlive = update.Alive
+			live.LastOutput = update.Output
+			live.CompletedProbes = baseProbes + int64(float64(update.BatchProbes)*update.Fraction)
+			if update.Alive {
+				live.Phase = update.Protocol + " scanning"
+			}
+			emit(live)
 		})
 		if err != nil {
 			return model.Snapshot{}, fmt.Errorf("udp scan: %w", err)
@@ -129,7 +179,10 @@ func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report Prog
 	progress.CompletedInvocations = progress.TotalInvocations
 	progress.CompletedProbes = progress.TotalProbes
 	progress.Phase = "complete"
-	reportProgress(report, progress)
+	progress.ProcessAlive = false
+	progress.CurrentInvocation = progress.TotalInvocations
+	progress.ElapsedSeconds = int64(time.Since(started).Seconds())
+	emit(progress)
 	return snap, nil
 }
 
@@ -252,7 +305,7 @@ func (n *Nmap) scanProtocolBatch(ctx context.Context, targets []resolvedTarget, 
 }
 
 func (n *Nmap) scanProtocolBatchProgress(ctx context.Context, targets []resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool, report func(int64, int64)) ([]model.Unit, error) {
-	result, err := n.scanProtocolBatchDetailedProgress(ctx, targets, protocol, pc, timing, assumeAlive, report)
+	result, err := n.scanProtocolBatchDetailedProgress(ctx, targets, protocol, pc, timing, assumeAlive, report, nil)
 	return result.Units, err
 }
 
@@ -261,11 +314,24 @@ type protocolScanResult struct {
 	Hosts map[string]model.HostObservation
 }
 
+type invocationProgress struct {
+	Protocol    string
+	Invocation  int64
+	BatchProbes int64
+	Fraction    float64
+	Output      string
+	Alive       bool
+}
+
 // scanProtocolBatchDetailedProgress retains the compact units used by the
 // comparison engine and, alongside them, detailed per-effective-address
 // observations for the host explorer. The two representations intentionally
 // have separate lifecycles: descriptive host evidence never affects hashes.
-func (n *Nmap) scanProtocolBatchDetailedProgress(ctx context.Context, targets []resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool, report func(int64, int64)) (protocolScanResult, error) {
+func (n *Nmap) scanProtocolBatchDetailedProgress(ctx context.Context, targets []resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool, report func(int64, int64), statusReports ...func(invocationProgress)) (protocolScanResult, error) {
+	var status func(invocationProgress)
+	if len(statusReports) > 0 {
+		status = statusReports[0]
+	}
 	byFamily := map[int][]string{4: {}, 6: {}}
 	seen := map[string]bool{}
 	for _, target := range targets {
@@ -290,14 +356,49 @@ func (n *Nmap) scanProtocolBatchDetailedProgress(ctx context.Context, targets []
 			batch := addresses[start:end]
 			args := nmapArgs(family, protocol, pc, timing, assumeAlive, batch)
 			cmd := exec.CommandContext(ctx, n.Path, args...)
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
-			stdout, err := cmd.Output()
+			batchProbes := int64(len(batch))
+			ports, _ := config.ParsePorts(pc.Ports)
+			factor := int64(1)
+			if pc.ServiceDetection {
+				factor = 2
+			}
+			batchProbes *= int64(len(ports)) * factor
+			localInvocation := int64(start/nmapBatchSize) + 1
+			if family == 6 && len(byFamily[4]) > 0 {
+				localInvocation += int64((len(byFamily[4]) + nmapBatchSize - 1) / nmapBatchSize)
+			}
+			if status != nil {
+				status(invocationProgress{Protocol: protocol, Invocation: localInvocation, BatchProbes: batchProbes, Alive: true})
+			}
+			var lastOutput string
+			lastFraction := 0.0
+			stdout, stderr, err := runNmapInvocation(ctx, cmd, func(line string, fraction float64) {
+				lastOutput = line
+				if fraction > lastFraction {
+					lastFraction = fraction
+				}
+				if status != nil {
+					status(invocationProgress{Protocol: protocol, Invocation: localInvocation, BatchProbes: batchProbes, Fraction: lastFraction, Output: line, Alive: true})
+				}
+			}, func() {
+				if status != nil {
+					status(invocationProgress{Protocol: protocol, Invocation: localInvocation, BatchProbes: batchProbes, Fraction: lastFraction, Output: lastOutput, Alive: true})
+				}
+			})
 			if ctx.Err() != nil {
+				if status != nil {
+					status(invocationProgress{Protocol: protocol, Invocation: localInvocation, BatchProbes: batchProbes, Output: lastOutput, Fraction: lastFraction, Alive: false})
+				}
 				return protocolScanResult{}, fmt.Errorf("scan timed out or cancelled: %w", ctx.Err())
 			}
 			if err != nil {
-				return protocolScanResult{}, fmt.Errorf("nmap failed: %v: %s", err, sanitizeStderr(stderr.String()))
+				if status != nil {
+					status(invocationProgress{Protocol: protocol, Invocation: localInvocation, BatchProbes: batchProbes, Output: lastOutput, Fraction: lastFraction, Alive: false})
+				}
+				return protocolScanResult{}, fmt.Errorf("nmap failed: %v: %s", err, sanitizeStderr(stderr))
+			}
+			if status != nil {
+				status(invocationProgress{Protocol: protocol, Invocation: localInvocation, BatchProbes: batchProbes, Fraction: 1, Output: lastOutput, Alive: false})
 			}
 			parsed, err := parseXMLWithConfig(stdout, protocol, pc)
 			if err != nil {
@@ -317,11 +418,6 @@ func (n *Nmap) scanProtocolBatchDetailedProgress(ctx context.Context, targets []
 				}
 			}
 			if report != nil {
-				ports, _ := config.ParsePorts(pc.Ports)
-				factor := int64(1)
-				if pc.ServiceDetection {
-					factor = 2
-				}
 				report(1, int64(len(batch))*int64(len(ports))*factor)
 			}
 		}
@@ -366,7 +462,10 @@ func (n *Nmap) scanProtocolBatchDetailedProgress(ctx context.Context, targets []
 }
 
 func nmapArgs(family int, protocol string, pc config.Protocol, timing string, assumeAlive bool, addresses []string) []string {
-	args := []string{"-n", "-oX", "-", "-p", pc.Ports, timingArg(timing), "--reason"}
+	// Nmap keeps XML on stdout and emits periodic timing lines on its status
+	// channel. This flag is an internal, fixed observability setting rather than
+	// a user-provided argument.
+	args := []string{"-n", "-oX", "-", "-p", pc.Ports, timingArg(timing), "--reason", "--stats-every", "1s"}
 	if assumeAlive {
 		args = append(args, "-Pn")
 	}
@@ -401,6 +500,159 @@ func sanitizeStderr(v string) string {
 		v = v[:500] + "…"
 	}
 	return v
+}
+
+// runNmapInvocation keeps XML on stdout while consuming Nmap's human status
+// channel concurrently. A ticker is intentionally part of this helper: some
+// Nmap versions only print --stats-every output for interactive terminals, but
+// the process heartbeat still gives the console truthful liveness information.
+func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string, float64), onHeartbeat func()) ([]byte, string, error) {
+	var stdout bytes.Buffer
+	var callbackMu sync.Mutex
+	emitOutput := func(line string, fraction float64) {
+		if onOutput == nil {
+			return
+		}
+		line = trimProgressOutput(line)
+		if line == "" {
+			return
+		}
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
+		onOutput(line, fraction)
+	}
+	emitHeartbeat := func() {
+		if onHeartbeat == nil {
+			return
+		}
+		callbackMu.Lock()
+		defer callbackMu.Unlock()
+		onHeartbeat()
+	}
+	stderr := &progressOutputWriter{emit: func(line string) {
+		fraction, _ := parseNmapProgress(line)
+		emitOutput(line, fraction)
+	}}
+	cmd.Stdout = &stdout
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return nil, "", err
+	}
+
+	heartbeatStop := make(chan struct{})
+	heartbeatDone := make(chan struct{})
+	go func() {
+		defer close(heartbeatDone)
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				emitHeartbeat()
+			case <-ctx.Done():
+				return
+			case <-heartbeatStop:
+				return
+			}
+		}
+	}()
+
+	waitErr := cmd.Wait()
+	close(heartbeatStop)
+	stderr.Flush()
+	// The heartbeat goroutine may have observed the stop signal just before the
+	// command exited. Waiting for its completion prevents callbacks after the
+	// invocation's terminal update.
+	<-heartbeatDone
+	return stdout.Bytes(), stderr.String(), waitErrWithContext(ctx, waitErr)
+}
+
+// progressOutputWriter lets os/exec own the pipe-copy lifecycle while still
+// exposing complete stderr lines to the progress callback. Using Stdout and
+// Stderr writers instead of StdoutPipe/StderrPipe avoids a race where Wait
+// closes a pipe at the same moment a reader goroutine observes its EOF.
+type progressOutputWriter struct {
+	mu      sync.Mutex
+	all     strings.Builder
+	pending strings.Builder
+	emit    func(string)
+}
+
+func (w *progressOutputWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	w.all.Write(data)
+	w.pending.Write(data)
+	value := w.pending.String()
+	lines := strings.Split(value, "\n")
+	w.pending.Reset()
+	if len(lines) > 0 && lines[len(lines)-1] != "" {
+		w.pending.WriteString(lines[len(lines)-1])
+		lines = lines[:len(lines)-1]
+	} else if len(lines) > 0 {
+		lines = lines[:len(lines)-1]
+	}
+	w.mu.Unlock()
+	for _, line := range lines {
+		if w.emit != nil {
+			w.emit(line)
+		}
+	}
+	return len(data), nil
+}
+
+func (w *progressOutputWriter) Flush() {
+	w.mu.Lock()
+	line := w.pending.String()
+	w.pending.Reset()
+	w.mu.Unlock()
+	if strings.TrimSpace(line) != "" && w.emit != nil {
+		w.emit(line)
+	}
+}
+
+func (w *progressOutputWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.all.String()
+}
+
+func waitErrWithContext(ctx context.Context, waitErr error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return waitErr
+}
+
+func trimProgressOutput(line string) string {
+	line = strings.TrimSpace(line)
+	if len(line) > 240 {
+		line = line[:240] + "…"
+	}
+	return line
+}
+
+func parseNmapProgress(line string) (float64, bool) {
+	lower := strings.ToLower(line)
+	start := strings.Index(lower, "about ")
+	if start < 0 {
+		return 0, false
+	}
+	start += len("about ")
+	end := strings.IndexByte(line[start:], '%')
+	if end < 0 {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(strings.TrimSpace(line[start:start+end]), 64)
+	if err != nil {
+		return 0, false
+	}
+	if value < 0 {
+		value = 0
+	}
+	if value > 100 {
+		value = 100
+	}
+	return value / 100, true
 }
 
 type nmapRun struct {

@@ -41,6 +41,17 @@ loopback-only; use an SSH tunnel for a remote Docker host:
 ssh -L 8080:127.0.0.1:8080 user@docker-host
 ```
 
+If the initial token was lost before the administrator was created, a host
+operator can issue one replacement token. This command is deliberately
+explicit and rate-limited, and prints the token only to the invoking terminal:
+
+```console
+docker compose exec edgewatch edgewatch admin setup-token --config /etc/edgewatch/config.yaml --force
+```
+
+It is refused after setup has completed. The existing token is invalidated when
+the replacement is issued.
+
 ## Configuration
 
 `config.yaml` contains deployment settings only. See

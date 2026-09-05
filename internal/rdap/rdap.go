@@ -29,6 +29,8 @@ const (
 	lookupTimeout        = 8 * time.Second
 	cacheFreshFor        = 24 * time.Hour
 	cacheStaleFor        = 7 * 24 * time.Hour
+	bootstrapFreshFor    = 24 * time.Hour
+	cacheWriteTimeout    = time.Second
 )
 
 // Event is a normalized RDAP registration event. Only the event action and
@@ -64,12 +66,26 @@ type Result struct {
 type bootstrapService struct {
 	Network *net.IPNet
 	URL     string
+	Origin  string
 }
 
 type lookupCall struct {
 	done   chan struct{}
 	result Result
 	err    error
+}
+
+type bootstrapCall struct {
+	done        chan struct{}
+	services    []bootstrapService
+	authorities map[string]struct{}
+	err         error
+}
+
+// AddressResolver is deliberately small so tests can provide deterministic
+// DNS answers. Production uses net.DefaultResolver.
+type AddressResolver interface {
+	LookupIPAddr(context.Context, string) ([]net.IPAddr, error)
 }
 
 // Client performs safe registry lookups and caches their normalized result.
@@ -82,12 +98,20 @@ type Client struct {
 	BootstrapIPv4URL  string
 	BootstrapIPv6URL  string
 	Now               func() time.Time
+	Resolver          AddressResolver
+	BootstrapTTL      time.Duration
 	AllowPrivateHosts bool // test-only escape hatch for local HTTPS fixtures
+	// OnCacheWriteError is optional observability for best-effort cache writes.
+	// The callback receives only the operation error, never registry payloads.
+	OnCacheWriteError func(error)
 
-	mu       sync.Mutex
-	services map[int][]bootstrapService
-	inflight map[string]*lookupCall
-	sem      chan struct{}
+	mu                sync.Mutex
+	services          map[int][]bootstrapService
+	authorities       map[int]map[string]struct{}
+	bootstrapFetched  map[int]time.Time
+	bootstrapInflight map[int]*bootstrapCall
+	inflight          map[string]*lookupCall
+	sem               chan struct{}
 }
 
 func New(s *store.Store, enabled bool) *Client {
@@ -97,15 +121,20 @@ func New(s *store.Store, enabled bool) *Client {
 	}
 	transport.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12} // #nosec G402 -- registry endpoints require modern TLS.
 	return &Client{
-		Store:            s,
-		Enabled:          enabled,
-		HTTPClient:       &http.Client{Transport: transport, Timeout: lookupTimeout},
-		BootstrapIPv4URL: defaultIPv4Bootstrap,
-		BootstrapIPv6URL: defaultIPv6Bootstrap,
-		Now:              time.Now,
-		services:         map[int][]bootstrapService{},
-		inflight:         map[string]*lookupCall{},
-		sem:              make(chan struct{}, 4),
+		Store:             s,
+		Enabled:           enabled,
+		HTTPClient:        &http.Client{Transport: transport, Timeout: lookupTimeout},
+		BootstrapIPv4URL:  defaultIPv4Bootstrap,
+		BootstrapIPv6URL:  defaultIPv6Bootstrap,
+		Now:               time.Now,
+		Resolver:          net.DefaultResolver,
+		BootstrapTTL:      bootstrapFreshFor,
+		services:          map[int][]bootstrapService{},
+		authorities:       map[int]map[string]struct{}{},
+		bootstrapFetched:  map[int]time.Time{},
+		bootstrapInflight: map[int]*bootstrapCall{},
+		inflight:          map[string]*lookupCall{},
+		sem:               make(chan struct{}, 4),
 	}
 }
 
@@ -158,11 +187,13 @@ func (c *Client) Lookup(ctx context.Context, rawAddress string) (Result, error) 
 }
 
 func (c *Client) lookup(ctx context.Context, ip net.IP) (Result, error) {
+	lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
+	defer cancel()
 	now := c.now()
 	var cached store.RDAPCacheEntry
 	var cacheErr error
 	if c.Store != nil {
-		cached, cacheErr = c.Store.GetRDAPCache(ctx, ip.String())
+		cached, cacheErr = c.Store.GetRDAPCache(lookupCtx, ip.String())
 		if cacheErr == nil && now.Before(cached.ExpiresAt) {
 			result, err := decodeCached(cached.Payload)
 			if err == nil {
@@ -176,11 +207,9 @@ func (c *Client) lookup(ctx context.Context, ip net.IP) (Result, error) {
 	select {
 	case c.sem <- struct{}{}:
 		defer func() { <-c.sem }()
-	case <-ctx.Done():
-		return Result{Status: "unavailable", Address: ip.String(), Message: ctx.Err().Error()}, ctx.Err()
+	case <-lookupCtx.Done():
+		return Result{Status: "unavailable", Address: ip.String(), Message: lookupCtx.Err().Error()}, lookupCtx.Err()
 	}
-	lookupCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
-	defer cancel()
 	service, err := c.serviceFor(lookupCtx, ip)
 	if err == nil {
 		result, fetchErr := c.fetch(lookupCtx, ip, service)
@@ -190,7 +219,16 @@ func (c *Client) lookup(ctx context.Context, ip net.IP) (Result, error) {
 			if c.Store != nil {
 				payload, marshalErr := json.Marshal(cachePayload(result))
 				if marshalErr == nil {
-					_ = c.Store.PutRDAPCache(context.Background(), store.RDAPCacheEntry{Address: ip.String(), Payload: payload, FetchedAt: now, ExpiresAt: now.Add(cacheFreshFor), StaleUntil: now.Add(cacheFreshFor + cacheStaleFor)})
+					writeCtx, writeCancel := context.WithTimeout(lookupCtx, cacheWriteTimeout)
+					writeErr := c.Store.PutRDAPCache(writeCtx, store.RDAPCacheEntry{Address: ip.String(), Payload: payload, FetchedAt: now, ExpiresAt: now.Add(cacheFreshFor), StaleUntil: now.Add(cacheFreshFor + cacheStaleFor)})
+					writeCancel()
+					if writeErr != nil && c.OnCacheWriteError != nil {
+						// Cache persistence is best effort. Do not let an operator
+						// callback turn a bounded lookup into an unbounded request.
+						callback := c.OnCacheWriteError
+						cacheErr := fmt.Errorf("RDAP cache write: %w", writeErr)
+						go callback(cacheErr)
+					}
 				}
 			}
 			return result, nil
@@ -234,6 +272,13 @@ func unavailableMessage(err error) string {
 }
 
 func isPrivate(ip net.IP) bool {
+	// Normalize IPv4-mapped IPv6 values before applying the special-use checks.
+	// Resolver implementations are allowed to return either representation,
+	// and treating ::ffff:127.0.0.1 differently from 127.0.0.1 would make the
+	// endpoint allowlist bypassable.
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
 	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
 }
 
@@ -242,10 +287,16 @@ func (c *Client) serviceFor(ctx context.Context, ip net.IP) (bootstrapService, e
 	if ip.To4() != nil {
 		family = 4
 	}
+	now := c.now()
+	ttl := c.BootstrapTTL
+	if ttl <= 0 {
+		ttl = bootstrapFreshFor
+	}
 	c.mu.Lock()
 	services := append([]bootstrapService(nil), c.services[family]...)
+	fetchedAt := c.bootstrapFetched[family]
 	c.mu.Unlock()
-	if len(services) == 0 {
+	if len(services) == 0 || fetchedAt.IsZero() || now.Sub(fetchedAt) >= ttl {
 		bootstrapURL := c.BootstrapIPv6URL
 		if family == 4 {
 			bootstrapURL = c.BootstrapIPv4URL
@@ -272,12 +323,62 @@ func (c *Client) serviceFor(ctx context.Context, ip net.IP) (bootstrapService, e
 }
 
 func (c *Client) loadBootstrap(ctx context.Context, family int, endpoint string) ([]bootstrapService, error) {
+	c.mu.Lock()
+	if c.bootstrapInflight == nil {
+		c.bootstrapInflight = map[int]*bootstrapCall{}
+	}
+	if call := c.bootstrapInflight[family]; call != nil {
+		c.mu.Unlock()
+		select {
+		case <-call.done:
+			return call.services, call.err
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	call := &bootstrapCall{done: make(chan struct{})}
+	previous := append([]bootstrapService(nil), c.services[family]...)
+	previousAuthorities := cloneAuthorities(c.authorities[family])
+	c.bootstrapInflight[family] = call
+	c.mu.Unlock()
+
+	services, err := c.loadBootstrapOnce(ctx, family, endpoint)
+	c.mu.Lock()
+	if err == nil {
+		call.services = append([]bootstrapService(nil), services...)
+		call.authorities = cloneAuthorities(c.authorities[family])
+	} else if len(previous) > 0 {
+		// Keep the last-known-good delegation usable during a transient IANA
+		// outage. Mark the attempt time so concurrent host pages do not turn an
+		// outage into a bootstrap request storm.
+		call.services = previous
+		call.authorities = previousAuthorities
+		c.bootstrapFetched[family] = c.now()
+		call.err = nil
+	} else {
+		call.err = err
+	}
+	delete(c.bootstrapInflight, family)
+	close(call.done)
+	c.mu.Unlock()
+	return call.services, call.err
+}
+
+func (c *Client) loadBootstrapOnce(ctx context.Context, family int, endpoint string) ([]bootstrapService, error) {
 	if !strings.HasPrefix(strings.ToLower(endpoint), "https://") {
 		return nil, errors.New("RDAP bootstrap endpoint must use HTTPS")
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, lookupTimeout)
 	defer cancel()
-	body, err := c.getLimited(requestCtx, endpoint)
+	parsedEndpoint, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("parse RDAP bootstrap endpoint: %w", err)
+	}
+	origin, err := canonicalAuthority(parsedEndpoint)
+	if err != nil {
+		return nil, fmt.Errorf("parse RDAP bootstrap endpoint: %w", err)
+	}
+	body, err := c.getLimited(requestCtx, endpoint, map[string]struct{}{origin: {}})
 	if err != nil {
 		return nil, fmt.Errorf("load RDAP bootstrap: %w", err)
 	}
@@ -288,6 +389,7 @@ func (c *Client) loadBootstrap(ctx context.Context, family int, endpoint string)
 		return nil, fmt.Errorf("parse RDAP bootstrap: %w", err)
 	}
 	services := make([]bootstrapService, 0)
+	authorities := make(map[string]struct{})
 	for _, service := range document.Services {
 		if len(service) != 2 {
 			continue
@@ -298,11 +400,19 @@ func (c *Client) loadBootstrap(ctx context.Context, family int, endpoint string)
 			continue
 		}
 		base := ""
+		baseOrigin := ""
 		for _, candidate := range urls {
-			if strings.HasPrefix(strings.ToLower(candidate), "https://") {
-				base = candidate
-				break
+			candidateURL, parseErr := url.Parse(candidate)
+			if parseErr != nil {
+				continue
 			}
+			candidateOrigin, originErr := canonicalAuthority(candidateURL)
+			if originErr != nil {
+				continue
+			}
+			base = candidate
+			baseOrigin = candidateOrigin
+			break
 		}
 		if base == "" {
 			continue
@@ -312,7 +422,8 @@ func (c *Client) loadBootstrap(ctx context.Context, family int, endpoint string)
 			if parseErr != nil || (family == 4) != (network.IP.To4() != nil) {
 				continue
 			}
-			services = append(services, bootstrapService{Network: network, URL: strings.TrimRight(base, "/") + "/"})
+			services = append(services, bootstrapService{Network: network, URL: strings.TrimRight(base, "/") + "/", Origin: baseOrigin})
+			authorities[baseOrigin] = struct{}{}
 		}
 	}
 	if len(services) == 0 {
@@ -327,9 +438,28 @@ func (c *Client) loadBootstrap(ctx context.Context, family int, endpoint string)
 	if c.services == nil {
 		c.services = map[int][]bootstrapService{}
 	}
+	if c.authorities == nil {
+		c.authorities = map[int]map[string]struct{}{}
+	}
+	if c.bootstrapFetched == nil {
+		c.bootstrapFetched = map[int]time.Time{}
+	}
 	c.services[family] = services
+	c.authorities[family] = authorities
+	c.bootstrapFetched[family] = c.now()
 	c.mu.Unlock()
 	return services, nil
+}
+
+func cloneAuthorities(values map[string]struct{}) map[string]struct{} {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(map[string]struct{}, len(values))
+	for value := range values {
+		cloned[value] = struct{}{}
+	}
+	return cloned
 }
 
 func (c *Client) fetch(ctx context.Context, ip net.IP, service bootstrapService) (Result, error) {
@@ -337,37 +467,71 @@ func (c *Client) fetch(ctx context.Context, ip net.IP, service bootstrapService)
 	if err != nil || base.Scheme != "https" || base.Host == "" {
 		return Result{}, errors.New("invalid authoritative RDAP HTTPS endpoint")
 	}
+	origin := service.Origin
+	if origin == "" {
+		origin, err = canonicalAuthority(base)
+		if err != nil {
+			return Result{}, fmt.Errorf("invalid authoritative RDAP HTTPS endpoint: %w", err)
+		}
+	}
 	endpoint := *base
 	endpoint.Path = path.Join(base.Path, "ip", ip.String())
 	endpoint.RawPath = ""
-	body, err := c.getLimited(ctx, endpoint.String())
+	allowed := map[string]struct{}{origin: {}}
+	body, err := c.getLimited(ctx, endpoint.String(), allowed)
 	if err != nil {
 		return Result{}, fmt.Errorf("query authoritative RDAP: %w", err)
 	}
-	return parseResponse(body, endpoint.String())
+	return parseResponse(body, endpoint.String(), allowed)
 }
 
-func (c *Client) getLimited(ctx context.Context, endpoint string) ([]byte, error) {
+func (c *Client) getLimited(ctx context.Context, endpoint string, allowlists ...map[string]struct{}) ([]byte, error) {
+	var allowed map[string]struct{}
+	if len(allowlists) > 0 {
+		allowed = allowlists[0]
+	}
 	parsed, err := url.Parse(endpoint)
-	if err != nil || parsed.Scheme != "https" || parsed.Host == "" {
+	if err != nil {
 		return nil, errors.New("RDAP requests require an HTTPS endpoint")
 	}
-	if !c.AllowPrivateHosts && isPrivateHost(parsed.Hostname()) {
-		return nil, errors.New("RDAP endpoint is not an allowed public host")
+	origin, addresses, err := c.validateEndpoint(ctx, parsed, allowed)
+	if err != nil {
+		return nil, err
+	}
+	if origin == "" {
+		return nil, errors.New("RDAP requests require an HTTPS endpoint")
 	}
 	client := c.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: lookupTimeout}
 	}
 	baseClient := *client
+	pinned := map[string][]net.IPAddr{}
+	if len(addresses) > 0 {
+		pinned[origin] = append([]net.IPAddr(nil), addresses...)
+	}
+	transport, err := c.safeTransport(baseClient.Transport, pinned)
+	if err != nil {
+		return nil, err
+	}
+	baseClient.Transport = transport
 	redirects := 0
 	baseClient.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		redirects++
 		if redirects > 3 {
 			return errors.New("too many redirects")
 		}
-		if req.URL.Scheme != "https" || (!c.AllowPrivateHosts && isPrivateHost(req.URL.Hostname())) {
-			return errors.New("redirect target is not an allowed HTTPS endpoint")
+		redirectOrigin, redirectAddresses, err := c.validateEndpoint(req.Context(), req.URL, allowed)
+		if err != nil {
+			return fmt.Errorf("redirect target is not an allowed HTTPS endpoint: %w", err)
+		}
+		// Keep the first validated answer for an authority. Re-resolving a
+		// redirect on every dial would allow DNS rebinding between validation and
+		// the TLS connection.
+		if len(redirectAddresses) > 0 {
+			if _, exists := pinned[redirectOrigin]; !exists {
+				pinned[redirectOrigin] = append([]net.IPAddr(nil), redirectAddresses...)
+			}
 		}
 		return nil
 	}
@@ -395,12 +559,136 @@ func (c *Client) getLimited(ctx context.Context, endpoint string) ([]byte, error
 	return body, nil
 }
 
-func isPrivateHost(host string) bool {
-	if ip := net.ParseIP(host); ip != nil {
-		return isPrivate(ip)
+func (c *Client) validateEndpoint(ctx context.Context, parsed *url.URL, allowed map[string]struct{}) (string, []net.IPAddr, error) {
+	if parsed == nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil || parsed.Fragment != "" {
+		return "", nil, errors.New("RDAP requests require an HTTPS endpoint without credentials or fragments")
 	}
-	host = strings.ToLower(strings.TrimSuffix(host, "."))
-	return host == "localhost" || strings.HasSuffix(host, ".localhost") || host == "metadata.google.internal"
+	origin, err := canonicalAuthority(parsed)
+	if err != nil {
+		return "", nil, err
+	}
+	if len(allowed) > 0 {
+		if _, ok := allowed[origin]; !ok {
+			return "", nil, fmt.Errorf("RDAP endpoint %s is not selected by the registry", origin)
+		}
+	}
+	if c.AllowPrivateHosts {
+		return origin, nil, nil
+	}
+	addresses, err := c.lookupIPAddr(ctx, parsed.Hostname())
+	if err != nil {
+		return "", nil, fmt.Errorf("resolve RDAP endpoint %s: %w", parsed.Hostname(), err)
+	}
+	if len(addresses) == 0 {
+		return "", nil, fmt.Errorf("resolve RDAP endpoint %s: no addresses", parsed.Hostname())
+	}
+	for _, address := range addresses {
+		if isPrivate(address.IP) {
+			return "", nil, fmt.Errorf("RDAP endpoint %s resolves to a private or special-use address", parsed.Hostname())
+		}
+	}
+	return origin, addresses, nil
+}
+
+func canonicalAuthority(parsed *url.URL) (string, error) {
+	if parsed == nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil {
+		return "", errors.New("RDAP authority must be HTTPS without credentials")
+	}
+	host := strings.ToLower(strings.TrimSuffix(parsed.Hostname(), "."))
+	if host == "" || strings.Contains(host, "%") {
+		return "", errors.New("RDAP authority has an invalid hostname")
+	}
+	port := parsed.Port()
+	if port == "" || port == "443" {
+		if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+			host = "[" + ip.String() + "]"
+		}
+		return "https://" + host, nil
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
+	}
+	return "https://" + net.JoinHostPort(host, port), nil
+}
+
+func (c *Client) lookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error) {
+	if ip := net.ParseIP(host); ip != nil {
+		return []net.IPAddr{{IP: ip}}, nil
+	}
+	resolver := c.Resolver
+	if resolver == nil {
+		resolver = net.DefaultResolver
+	}
+	return resolver.LookupIPAddr(ctx, host)
+}
+
+func (c *Client) safeTransport(raw http.RoundTripper, pinSets ...map[string][]net.IPAddr) (http.RoundTripper, error) {
+	var pinned map[string][]net.IPAddr
+	if len(pinSets) > 0 {
+		pinned = pinSets[0]
+	}
+	transport := raw
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	base, ok := transport.(*http.Transport)
+	if !ok {
+		return nil, errors.New("RDAP HTTP client must use a net/http transport")
+	}
+	cloned := base.Clone()
+	// Proxies receive the original hostname and can bypass the endpoint
+	// validation/pinned dialer. RDAP deliberately uses direct HTTPS only.
+	cloned.Proxy = nil
+	// A custom DialTLSContext would bypass the guarded DialContext below (and
+	// could resolve or connect to an unvalidated address), so force net/http to
+	// perform TLS after our pinned TCP dial.
+	cloned.DialTLSContext = nil
+	baseDial := cloned.DialContext
+	if baseDial == nil {
+		dialer := &net.Dialer{}
+		baseDial = dialer.DialContext
+	}
+	cloned.DialContext = c.safeDialContext(baseDial, pinned)
+	return cloned, nil
+}
+
+func (c *Client) safeDialContext(base func(context.Context, string, string) (net.Conn, error), pinSets ...map[string][]net.IPAddr) func(context.Context, string, string) (net.Conn, error) {
+	var pinned map[string][]net.IPAddr
+	if len(pinSets) > 0 {
+		pinned = pinSets[0]
+	}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, err
+		}
+		cleanHost := strings.Trim(host, "[]")
+		var addresses []net.IPAddr
+		if origin, originErr := canonicalAuthority(&url.URL{Scheme: "https", Host: address}); originErr == nil {
+			addresses = append(addresses, pinned[origin]...)
+		}
+		if len(addresses) == 0 {
+			addresses, err = c.lookupIPAddr(ctx, cleanHost)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if len(addresses) == 0 {
+			return nil, errors.New("RDAP endpoint has no dialable addresses")
+		}
+		var lastErr error
+		for _, candidate := range addresses {
+			if !c.AllowPrivateHosts && isPrivate(candidate.IP) {
+				return nil, errors.New("RDAP endpoint resolved to a private or special-use address")
+			}
+			conn, dialErr := base(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
+			if dialErr == nil {
+				return conn, nil
+			}
+			lastErr = dialErr
+		}
+		return nil, lastErr
+	}
 }
 
 type rawResponse struct {
@@ -434,7 +722,11 @@ type rawResponse struct {
 	} `json:"links"`
 }
 
-func parseResponse(body []byte, source string) (Result, error) {
+func parseResponse(body []byte, source string, allowlists ...map[string]struct{}) (Result, error) {
+	var allowed map[string]struct{}
+	if len(allowlists) > 0 {
+		allowed = allowlists[0]
+	}
 	var raw rawResponse
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return Result{}, fmt.Errorf("parse RDAP response: %w", err)
@@ -477,10 +769,7 @@ func parseResponse(body []byte, source string) (Result, error) {
 	}
 	for _, entity := range raw.Entities {
 		if len(entity.Roles) > 0 {
-			name := extractVCardName(entity.VCardArray)
-			if name == "" {
-				name = strings.TrimSpace(entity.Handle)
-			}
+			name := extractVCardOrganization(entity.VCardArray)
 			if name != "" {
 				result.Organizations = append(result.Organizations, name)
 			}
@@ -492,14 +781,24 @@ func parseResponse(body []byte, source string) (Result, error) {
 	})
 	for _, link := range raw.Links {
 		if link.Rel == "self" && strings.HasPrefix(strings.ToLower(link.Href), "https://") {
-			result.SourceURL = link.Href
-			break
+			if parsedLink, parseErr := url.Parse(link.Href); parseErr == nil {
+				if origin, originErr := canonicalAuthority(parsedLink); originErr == nil {
+					if len(allowed) == 0 {
+						result.SourceURL = link.Href
+						break
+					}
+					if _, selected := allowed[origin]; selected {
+						result.SourceURL = link.Href
+						break
+					}
+				}
+			}
 		}
 	}
 	return result, nil
 }
 
-func extractVCardName(raw json.RawMessage) string {
+func extractVCardOrganization(raw json.RawMessage) string {
 	var value []json.RawMessage
 	if json.Unmarshal(raw, &value) != nil || len(value) != 2 {
 		return ""
@@ -514,9 +813,13 @@ func extractVCardName(raw json.RawMessage) string {
 			continue
 		}
 		var name string
-		if json.Unmarshal(field[0], &name) == nil && name == "fn" {
+		if json.Unmarshal(field[0], &name) == nil && name == "org" {
 			if json.Unmarshal(field[3], &name) == nil {
 				return strings.TrimSpace(name)
+			}
+			var values []string
+			if json.Unmarshal(field[3], &values) == nil {
+				return strings.TrimSpace(strings.Join(values, ", "))
 			}
 		}
 	}

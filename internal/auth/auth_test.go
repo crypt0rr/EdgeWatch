@@ -49,6 +49,38 @@ func TestSetupTokenIsSingleUse(t *testing.T) {
 	}
 }
 
+func TestReissueSetupTokenReplacesPreviousTokenAndIsRateLimited(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	m := NewManager(s)
+	m.Now = func() time.Time { return now }
+	first, err := m.EnsureSetupToken(context.Background())
+	if err != nil || first == "" {
+		t.Fatalf("initial token %q: %v", first, err)
+	}
+	if _, err := m.ReissueSetupToken(context.Background()); !errors.Is(err, store.ErrSetupTokenRateLimited) {
+		t.Fatalf("immediate reissue error = %v", err)
+	}
+	now = now.Add(time.Minute + time.Second)
+	second, err := m.ReissueSetupToken(context.Background())
+	if err != nil || second == "" || second == first {
+		t.Fatalf("replacement token %q: %v", second, err)
+	}
+	if err := m.Setup(context.Background(), first, "correct horse battery staple"); err == nil {
+		t.Fatal("replaced token was accepted")
+	}
+	if err := m.Setup(context.Background(), second, "correct horse battery staple"); err != nil {
+		t.Fatalf("replacement token setup failed: %v", err)
+	}
+	if _, err := m.ReissueSetupToken(context.Background()); err == nil || !strings.Contains(err.Error(), "already configured") {
+		t.Fatalf("post-setup reissue error = %v", err)
+	}
+}
+
 func TestSessionAuthenticationAndCSRF(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {

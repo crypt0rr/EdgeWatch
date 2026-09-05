@@ -16,6 +16,14 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
     started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:00:01Z',
     status: 'success', config_hash: 'hash', snapshot: { units: [], scopes: [] },
   }
+  const detailedHost = {
+    address: '192.0.2.1', address_family: 'IPv4', source_targets: ['router.example.com'], dns_names: ['router.example.com'], status: 'up', status_reason: 'arp-response', reason_ttl: 64, latency_ms: 0.42,
+    hostnames: [{ name: 'router.example.com', type: 'user' }], link_addresses: [{ address: 'AA:BB:CC:DD:EE:FF', type: 'mac', vendor: 'Example Vendor' }],
+    protocols: [
+      { protocol: 'tcp', scan_type: 'tcp syn', scanned_ports: '22-443', scanned_port_count: 422, service_detection: true, ports: [{ port: 443, state: 'open', reason: 'syn-ack', reason_ttl: 64, service: { name: 'https', product: 'Example HTTPD', version: '1.2.3', method: 'probed', confidence: 98, cpes: ['cpe:/a:example:httpd:1.2.3'] } }], state_summaries: [{ state: 'open', count: 1 }, { state: 'closed', count: 421, reasons: [{ reason: 'reset', count: 421 }] }] },
+      { protocol: 'udp', scan_type: 'udp', scanned_ports: '53', scanned_port_count: 1, service_detection: false, ports: [{ port: 53, state: 'open|filtered', reason: 'udp-response', reason_ttl: 64 }], state_summaries: [{ state: 'open|filtered', count: 1 }] },
+    ],
+  }
 
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request()
@@ -60,6 +68,18 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       await json({ job_id: 'job-1', job: 'edge-router', scan, data_quality: 'detailed', host: { address: '192.0.2.1', address_family: 'IPv4', source_targets: ['router.example.com'], status: 'up', protocols: [{ protocol: 'tcp', scanned_ports: '22', scanned_port_count: 1, service_detection: false, ports: [{ port: 22, state: 'open', reason: 'syn-ack' }], state_summaries: [{ state: 'open', count: 1 }] }] } })
       return
     }
+    if (path === '/jobs/job-1/baseline/hosts' && method === 'GET') {
+      await json({ job_id: 'job-1', job: 'edge-router', source_scan: scan, data_quality: 'detailed', hosts: [{ address: '192.0.2.1', address_family: 'IPv4', source_targets: ['router.example.com'], dns_names: ['router.example.com'], protocols: [{ protocol: 'tcp', scanned_ports: '22-443', scanned_port_count: 422, service_detection: true, open_ports: 1, open_filtered_ports: 0 }, { protocol: 'udp', scanned_ports: '53', scanned_port_count: 1, service_detection: false, open_ports: 0, open_filtered_ports: 1 }], open_ports: 1, open_filtered_ports: 1, has_open_ports: true }], pagination: { limit: 50, offset: 0, total: 1, has_more: false, next_offset: null } })
+      return
+    }
+    if (path === '/jobs/job-1/baseline/hosts/192.0.2.1/rdap' && method === 'GET') {
+      await json({ rdap: { status: 'success', address: '192.0.2.1', network_name: 'Example Net', handle: 'EX-1', prefix: '192.0.2.0/24', country: 'NL', allocation_type: 'ALLOCATED PA', registry: 'example', organizations: ['Example Org'], source_url: 'https://rdap.example/ips/192.0.2.1' } })
+      return
+    }
+    if (path === '/jobs/job-1/baseline/hosts/192.0.2.1' && method === 'GET') {
+      await json({ job_id: 'job-1', job: 'edge-router', source_scan: scan, data_quality: 'detailed', host: detailedHost, expected: detailedHost })
+      return
+    }
     if (path === '/setup' && method === 'POST') {
       configured = true
       await json({ configured: true }, 201)
@@ -91,7 +111,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       createdJob = {
         id: 'job-1', revision: 1, enabled: true, archived: false, security_hash: 'hash',
         created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
-        job: payload, baseline: { status: 'collecting', samples: 0, attempts: 0 },
+        job: payload, baseline: { status: 'complete', samples: 1, attempts: 1, host_count: 1, scan_id: 'scan-1' },
       }
       await json(createdJob, 201)
       return
@@ -158,6 +178,21 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).udp).toMatchObject({ ports: '53,123' })
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).assume_alive).toBe(false)
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).schedule).toBe('*/15 * * * *')
+  await page.getByRole('link', { name: /edge-router/ }).click()
+  await expect(page.getByRole('heading', { name: 'edge-router' })).toBeVisible()
+  await expect(page.getByRole('link', { name: /Explore baseline/ })).toContainText('1')
+  await page.getByRole('link', { name: /Explore baseline/ }).click()
+  await expect(page.getByRole('heading', { name: 'Explore baseline' })).toBeVisible()
+  await expect(page.getByText('192.0.2.1')).toBeVisible()
+  await page.getByRole('link', { name: /192\.0\.2\.1/ }).click()
+  await expect(page.getByRole('heading', { name: '192.0.2.1' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'TCP' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'UDP' })).toBeVisible()
+  await expect(page.getByText('Example HTTPD')).toBeVisible()
+  await expect(page.getByText('open|filtered').first()).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Network registration (RDAP/WHOIS)' })).toBeVisible()
+  await expect(page.getByText('Example Org')).toBeVisible()
+  await expect(page.locator('.host-detail-page')).not.toContainText('Individual Contact')
   await page.getByRole('link', { name: 'Notifications' }).click()
   await expect(page.getByRole('heading', { name: 'Notifications' })).toBeVisible()
   await expect(page.getByText('Operations')).toBeVisible()
@@ -170,4 +205,54 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await passwordDialog.getByRole('button', { name: 'Cancel' }).click()
   await page.getByRole('button', { name: 'Sign out' }).click()
   await expect(page.getByRole('heading', { name: 'Sign in to EdgeWatch' })).toBeVisible()
+})
+
+test('host explorer renders every RDAP state without exposing contact data', async ({ page }) => {
+  const rdapStates: Record<string, Record<string, unknown>> = {
+    '192.0.2.10': { status: 'success', address: '192.0.2.10', network_name: 'Example Net', organizations: ['Example Org'] },
+    '192.0.2.11': { status: 'cached', address: '192.0.2.11', network_name: 'Cached Net' },
+    '192.0.2.12': { status: 'stale', address: '192.0.2.12', network_name: 'Stale Net', message: 'Registry unavailable; showing cached data' },
+    '2001:db8::10': { status: 'disabled', address: '2001:db8::10' },
+    '203.0.113.10': { status: 'unavailable', address: '203.0.113.10', message: 'No registry data is available.' },
+  }
+  const addresses = Object.keys(rdapStates)
+  const host = (address: string) => ({
+    address, address_family: address.includes(':') ? 'IPv6' : 'IPv4', source_targets: ['fleet.example.com'], dns_names: ['fleet.example.com'], status: 'up',
+    protocols: [{ protocol: 'tcp', scan_type: 'tcp syn', scanned_ports: '443', scanned_port_count: 1, service_detection: true, ports: [{ port: 443, state: 'open', reason: 'syn-ack', service: { name: 'https', product: 'Example HTTPD', version: '1.0', method: 'probed' } }], state_summaries: [{ state: 'open', count: 1 }], }],
+  })
+  await page.route('**/api/v1/**', async (route) => {
+    const request = route.request()
+    const rawPath = new URL(request.url()).pathname.replace('/api/v1', '')
+    const path = decodeURIComponent(rawPath)
+    const method = request.method()
+    const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+    if (path === '/stream') { await route.abort(); return }
+    if (path === '/setup/status' && method === 'GET') { await json({ configured: true, setup_available: false, version: 'v0.7.0', password_requirements: { minimum_length: 12 } }); return }
+    if (path === '/auth/session' && method === 'GET') { await json({ username: 'admin', csrf_token: 'test-csrf', totp_enabled: false }); return }
+    if (path === '/incidents' && method === 'GET') { await json({ incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }); return }
+    if (path === '/jobs/job-1/baseline/hosts' && method === 'GET') {
+      await json({ job_id: 'job-1', job: 'fleet', data_quality: 'detailed', hosts: addresses.map(address => ({ address, address_family: address.includes(':') ? 'IPv6' : 'IPv4', source_targets: ['fleet.example.com'], dns_names: ['fleet.example.com'], protocols: [{ protocol: 'tcp', scanned_ports: '443', scanned_port_count: 1, service_detection: true, open_ports: 1, open_filtered_ports: 0 }], open_ports: 1, open_filtered_ports: 0, has_open_ports: true })), pagination: { limit: 50, offset: 0, total: addresses.length, has_more: false, next_offset: null } })
+      return
+    }
+    if (path.startsWith('/jobs/job-1/baseline/hosts/') && method === 'GET') {
+      const suffix = path.slice('/jobs/job-1/baseline/hosts/'.length)
+      if (suffix.endsWith('/rdap')) { await json({ rdap: rdapStates[suffix.slice(0, -'/rdap'.length)] ?? { status: 'unavailable', address: suffix } }); return }
+      if (rdapStates[suffix]) { await json({ job_id: 'job-1', job: 'fleet', data_quality: 'detailed', host: host(suffix), expected: host(suffix) }); return }
+    }
+    await json({ error: { code: 'not_found', message: `${method} ${path}` } }, 404)
+  })
+
+  for (const [address, state] of Object.entries(rdapStates)) {
+    await page.goto('/jobs/job-1/baseline')
+    await expect(page.getByRole('heading', { name: 'Explore baseline' })).toBeVisible()
+    await page.getByRole('link', { name: new RegExp(address.replaceAll('.', '\\.').replaceAll(':', '\\:')) }).click()
+    await expect(page.getByRole('heading', { name: address })).toBeVisible()
+    if (state.status === 'success') await expect(page.getByText('Example Org')).toBeVisible()
+    if (state.status === 'cached') await expect(page.getByText('Cached registry data', { exact: true })).toBeVisible()
+    if (state.status === 'stale') await expect(page.getByText('Cached registry data (stale)', { exact: true })).toBeVisible()
+    if (state.status === 'disabled') await expect(page.getByText('RDAP lookups are disabled by deployment configuration.')).toBeVisible()
+    if (state.status === 'unavailable') await expect(page.getByText('No registry data is available.')).toBeVisible()
+    await expect(page.locator('.host-detail-page')).not.toContainText('Postal')
+    await expect(page.locator('.host-detail-page')).not.toContainText('Individual Contact')
+  }
 })

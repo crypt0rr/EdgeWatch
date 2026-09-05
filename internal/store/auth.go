@@ -46,6 +46,7 @@ type Session struct {
 
 type SetupToken struct {
 	ExpiresAt time.Time
+	IssuedAt  time.Time
 	Used      bool
 }
 
@@ -153,21 +154,64 @@ func (s *Store) adminTOTPForSave(a Admin) (string, error) {
 }
 
 func (s *Store) PutSetupToken(ctx context.Context, hash string, expires time.Time) error {
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO setup_tokens(id,token_hash,expires_at,used_at) VALUES(1,?,?,NULL) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at,used_at=NULL`, hash, expires.UTC().Format(time.RFC3339Nano))
+	return s.PutSetupTokenAt(ctx, hash, expires, time.Now().UTC())
+}
+
+// PutSetupTokenAt stores a fresh setup token and records when it was issued.
+// The timestamp is persisted so host recovery commands can enforce a rate
+// limit across short-lived CLI processes.
+func (s *Store) PutSetupTokenAt(ctx context.Context, hash string, expires, issuedAt time.Time) error {
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO setup_tokens(id,token_hash,expires_at,used_at,issued_at) VALUES(1,?,?,NULL,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at,used_at=NULL,issued_at=excluded.issued_at`, hash, expires.UTC().Format(time.RFC3339Nano), issuedAt.UTC().Format(time.RFC3339Nano))
 	return err
 }
 
 func (s *Store) GetSetupToken(ctx context.Context) (SetupToken, error) {
 	var expires string
+	var issued string
 	var used sql.NullString
-	err := s.DB.QueryRowContext(ctx, `SELECT expires_at,used_at FROM setup_tokens WHERE id=1`).Scan(&expires, &used)
+	err := s.DB.QueryRowContext(ctx, `SELECT expires_at,used_at,issued_at FROM setup_tokens WHERE id=1`).Scan(&expires, &used, &issued)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SetupToken{}, ErrNotFound
 	}
 	if err != nil {
 		return SetupToken{}, err
 	}
-	return SetupToken{ExpiresAt: scanTime(expires), Used: used.Valid}, nil
+	return SetupToken{ExpiresAt: scanTime(expires), IssuedAt: scanTime(issued), Used: used.Valid}, nil
+}
+
+var ErrSetupTokenRateLimited = errors.New("setup token was issued too recently; try again later")
+
+// ReissueSetupToken atomically replaces the one-time setup token, but only
+// while no administrator exists. It is intended for a host-authorized CLI
+// recovery path; the token itself is returned only to that caller and never
+// enters an API response or audit detail.
+func (s *Store) ReissueSetupToken(ctx context.Context, hash string, expires, now time.Time) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var username string
+	if err = tx.QueryRowContext(ctx, `SELECT username FROM admins WHERE id=1`).Scan(&username); err == nil {
+		return errors.New("administrator is already configured")
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	var issued string
+	if err = tx.QueryRowContext(ctx, `SELECT issued_at FROM setup_tokens WHERE id=1`).Scan(&issued); err == nil {
+		if previous := scanTime(issued); !previous.IsZero() && now.UTC().Sub(previous) < time.Minute {
+			return ErrSetupTokenRateLimited
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO setup_tokens(id,token_hash,expires_at,used_at,issued_at) VALUES(1,?,?,NULL,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at,used_at=NULL,issued_at=excluded.issued_at`, hash, expires.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	if err = insertAuditExec(ctx, tx, "admin.setup_token_reissued", "setup token reissued from host CLI", now.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CompleteSetup consumes the token and creates the one permitted administrator

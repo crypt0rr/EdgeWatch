@@ -1018,3 +1018,22 @@ func TestHistoryPagesHaveStableMetadataAndOrdering(t *testing.T) {
 		t.Fatalf("unexpected event page: total=%d items=%#v", events.Total, events.Items)
 	}
 }
+
+func TestRDAPCacheNormalizesAddresses(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC)
+	if err := s.PutRDAPCache(ctx, RDAPCacheEntry{
+		Address: "2001:0db8:0:0:0:0:0:1", Payload: []byte(`{"network_name":"example"}`),
+		FetchedAt: now, ExpiresAt: now.Add(24 * time.Hour), StaleUntil: now.Add(8 * 24 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := s.GetRDAPCache(ctx, "2001:db8::1")
+	if err != nil || entry.Address != "2001:db8::1" || string(entry.Payload) != `{"network_name":"example"}` {
+		t.Fatalf("normalized cache entry = %#v, err=%v", entry, err)
+	}
+	if err := s.PutRDAPCache(ctx, RDAPCacheEntry{Address: "not-an-ip", Payload: []byte(`{}`), FetchedAt: now, ExpiresAt: now, StaleUntil: now}); err == nil {
+		t.Fatal("invalid RDAP address was accepted")
+	}
+}

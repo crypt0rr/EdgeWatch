@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -57,7 +58,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 6
+const schemaVersion = 7
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -334,6 +335,16 @@ func migrate(db *sql.DB) error {
 			"ALTER TABLE scans ADD COLUMN baseline_scan_id TEXT NOT NULL DEFAULT ''",
 			"ALTER TABLE scans ADD COLUMN baseline_config_hash TEXT NOT NULL DEFAULT ''",
 			"ALTER TABLE scans ADD COLUMN changes_json BLOB NOT NULL DEFAULT '[]'",
+		},
+		7: {
+			`CREATE TABLE IF NOT EXISTS rdap_cache (
+ address TEXT PRIMARY KEY,
+ payload_json BLOB NOT NULL,
+ fetched_at TEXT NOT NULL,
+ expires_at TEXT NOT NULL,
+ stale_until TEXT NOT NULL
+);`,
+			"CREATE INDEX IF NOT EXISTS rdap_cache_expiry ON rdap_cache(expires_at, stale_until)",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
@@ -1523,6 +1534,54 @@ func (s *Store) ListScanResultsPage(ctx context.Context, id string, limit, offse
 		page.Items = append(page.Items, unit)
 	}
 	return page, rows.Err()
+}
+
+// RDAPCacheEntry is the normalized, deliberately non-sensitive representation
+// kept for on-demand registry enrichment. Raw RDAP documents and contact
+// details never enter this table.
+type RDAPCacheEntry struct {
+	Address    string
+	Payload    []byte
+	FetchedAt  time.Time
+	ExpiresAt  time.Time
+	StaleUntil time.Time
+}
+
+func normalizeRDAPAddress(raw string) (string, error) {
+	ip := net.ParseIP(strings.TrimSpace(raw))
+	if ip == nil {
+		return "", errors.New("RDAP cache address must be a valid IP")
+	}
+	return ip.String(), nil
+}
+
+func (s *Store) GetRDAPCache(ctx context.Context, address string) (RDAPCacheEntry, error) {
+	normalized, err := normalizeRDAPAddress(address)
+	if err != nil {
+		return RDAPCacheEntry{}, fmt.Errorf("%w: %s", ErrNotFound, strings.TrimSpace(address))
+	}
+	var entry RDAPCacheEntry
+	var fetched, expires, stale string
+	var payload []byte
+	err = s.DB.QueryRowContext(ctx, `SELECT address,payload_json,fetched_at,expires_at,stale_until FROM rdap_cache WHERE address=?`, normalized).Scan(&entry.Address, &payload, &fetched, &expires, &stale)
+	if errors.Is(err, sql.ErrNoRows) {
+		return RDAPCacheEntry{}, fmt.Errorf("%w: RDAP cache %s", ErrNotFound, address)
+	}
+	if err != nil {
+		return RDAPCacheEntry{}, err
+	}
+	entry.Payload = append([]byte(nil), payload...)
+	entry.FetchedAt, entry.ExpiresAt, entry.StaleUntil = scanTime(fetched), scanTime(expires), scanTime(stale)
+	return entry, nil
+}
+
+func (s *Store) PutRDAPCache(ctx context.Context, entry RDAPCacheEntry) error {
+	address, err := normalizeRDAPAddress(entry.Address)
+	if err != nil || len(entry.Payload) == 0 {
+		return errors.New("RDAP cache entry is incomplete")
+	}
+	_, err = s.DB.ExecContext(ctx, `INSERT INTO rdap_cache(address,payload_json,fetched_at,expires_at,stale_until) VALUES(?,?,?,?,?) ON CONFLICT(address) DO UPDATE SET payload_json=excluded.payload_json,fetched_at=excluded.fetched_at,expires_at=excluded.expires_at,stale_until=excluded.stale_until`, address, entry.Payload, entry.FetchedAt.UTC().Format(time.RFC3339Nano), entry.ExpiresAt.UTC().Format(time.RFC3339Nano), entry.StaleUntil.UTC().Format(time.RFC3339Nano))
+	return err
 }
 
 func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {

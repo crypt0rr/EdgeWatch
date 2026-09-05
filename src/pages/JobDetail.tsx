@@ -9,6 +9,7 @@ import {
   Play,
   RotateCcw,
   ShieldAlert,
+  Server,
   TimerReset,
 } from 'lucide-react'
 import {
@@ -21,7 +22,7 @@ import {
   restoreJob,
   runJob,
   scanDetail,
-  scanResults,
+  scanHosts,
 } from '../api'
 import { Pagination } from '../components/Pagination'
 
@@ -50,7 +51,7 @@ export function JobDetail() {
   })
   const results = useQuery({
     queryKey: ['scan-results', id, selectedScan, resultsOffset],
-    queryFn: () => scanResults(id, selectedScan, resultsOffset),
+    queryFn: () => scanHosts(id, selectedScan, { offset: resultsOffset }),
     enabled: !!selectedScan && showResults,
   })
 
@@ -269,9 +270,9 @@ export function JobDetail() {
                 </div>
               ) : <div className="inline-empty">No changes detected.</div>}
               <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} />
-              {showResults && <div className="scan-results">
-                <div className="panel-heading"><div><h3>Snapshot results</h3><p className="muted">Loaded on demand, one host unit per page.</p></div></div>
-                {results.isLoading ? <div className="skeleton-list" /> : results.error ? <div className="form-error" role="alert">Could not load scan results.</div> : results.data?.results.length ? <div className="result-list">{results.data.results.map((unit) => <div className="result-row" key={`${unit.target}-${unit.protocol}`}><strong>{unit.target}</strong><span className="pill blue">{unit.protocol.toUpperCase()}</span><span className="muted">{unit.ports?.length ?? 0} open or open|filtered ports</span></div>)}</div> : <div className="inline-empty">No host units in this scan.</div>}
+                {showResults && <div className="scan-results">
+                <div className="panel-heading"><div><h3>Snapshot results</h3><p className="muted">Loaded on demand; open an effective host for technical evidence.</p></div></div>
+                {results.isLoading ? <div className="skeleton-list" /> : results.error ? <div className="form-error" role="alert">Could not load scan results.</div> : results.data?.hosts.length ? <div className="result-list">{results.data.hosts.map((host) => <Link className="result-row" to={`/jobs/${id}/scans/${selectedScan}/hosts/${encodeURIComponent(host.address)}`} key={host.address}><strong>{host.address}</strong><span className="pill blue">{host.protocols?.map(protocol => protocol.protocol.toUpperCase()).join(' + ') || 'HOST'}</span><span className="muted">{host.open_ports + host.open_filtered_ports} positive ports · View host details</span></Link>)}</div> : <div className="inline-empty">No effective hosts in this scan.</div>}
                 <Pagination page={results.data?.pagination} onChange={setResultsOffset} />
               </div>}
             </div>
@@ -308,6 +309,7 @@ export function JobDetail() {
             )}
           </div>
           <button className="button secondary" onClick={reset} disabled={!!actionBusy}><RotateCcw size={16} /> {actionBusy === 'reset' ? 'Resetting…' : 'Reset baseline'}</button>
+          {value.baseline.status === 'complete' && <Link className="button secondary explore-button" to={`/jobs/${id}/baseline`}><Server size={16} /> Explore baseline <span className="button-count">{value.baseline.host_count ?? 'hosts'}</span></Link>}
         </div>
       </div>
     </section>

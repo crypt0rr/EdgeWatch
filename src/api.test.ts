@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { APIError, api, createNotificationDestination, listScans, setCSRF, updateNotificationDestination } from './api'
+import { APIError, api, baselineHost, baselineHosts, createNotificationDestination, listScans, setCSRF, updateNotificationDestination } from './api'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -49,5 +49,16 @@ describe('notification API contract', () => {
     const updateBody = JSON.parse(String(fetchMock.mock.calls[1][1]?.body)) as Record<string, unknown>
     expect(updateBody).toMatchObject({ revision: 1, name: 'Ops', password: 'correct horse battery staple', enabled: false })
     expect(updateBody.url).toBeUndefined()
+  })
+})
+
+describe('host explorer API contract', () => {
+  it('encodes IPv6 addresses and applies host filters before requesting', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify({ hosts: [], data_quality: 'detailed', pagination: { limit: 50, offset: 0, total: 0, has_more: false, next_offset: null } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    await baselineHosts('job-1', { q: 'router', protocol: 'tcp', has_open_ports: true })
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/jobs/job-1/baseline/hosts?limit=50&offset=0&q=router&protocol=tcp&has_open_ports=true')
+    await baselineHost('job-1', '2001:db8::1')
+    expect(String(fetchMock.mock.calls[1][0])).toBe('/api/v1/jobs/job-1/baseline/hosts/2001%3Adb8%3A%3A1')
   })
 })

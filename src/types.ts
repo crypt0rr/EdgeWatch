@@ -6,8 +6,8 @@ export type JobForm = {
   timeout: string; baseline_samples: number; change_confirmations: number; enabled?: boolean; allow_high_cost?: boolean
 }
 export type WorkEstimate = { hosts: number; tcp_ports: number; udp_ports: number; probes: number; nmap_invocations: number; estimated_seconds: number; unknown_dns: number }
-export type Job = { id: string; revision: number; enabled: boolean; archived: boolean; security_hash: string; created_at: string; updated_at: string; job: JobForm; baseline: { status: string; samples?: number; attempts?: number; scan_id?: string; incidents?: number; pending?: number }; scan_estimate?: WorkEstimate }
-export type Scan = { id: string; job_id?: string; job: string; job_revision?: number; started_at: string; finished_at: string; status: string; error?: string; nmap_version?: string; config_hash: string; baseline_scan_id?: string; baseline_config_hash?: string; snapshot?: { units: Unit[]; scopes: Scope[]; dns?: Record<string, string[]> } }
+export type Job = { id: string; revision: number; enabled: boolean; archived: boolean; security_hash: string; created_at: string; updated_at: string; job: JobForm; baseline: { status: string; samples?: number; attempts?: number; scan_id?: string; incidents?: number; pending?: number; host_count?: number }; scan_estimate?: WorkEstimate }
+export type Scan = { id: string; job_id?: string; job: string; job_revision?: number; started_at: string; finished_at: string; status: string; error?: string; nmap_version?: string; config_hash: string; baseline_scan_id?: string; baseline_config_hash?: string; snapshot?: { units: Unit[]; scopes: Scope[]; dns?: Record<string, string[]>; hosts?: HostObservation[] } }
 export type ScanSummary = { id: string; job_id?: string; job: string; job_revision?: number; started_at: string; finished_at: string; status: string; error?: string; nmap_version?: string; config_hash: string; baseline_scan_id?: string; baseline_config_hash?: string }
 export type ActiveScan = {
   id: string; job_id?: string; job: string; job_revision?: number; started_at: string
@@ -19,3 +19,45 @@ export type Unit = { target: string; protocol: string; addresses?: string[]; por
 export type Scope = { target: string; protocol: string; ports: string; service_detection: boolean }
 export type Incident = { job_id: string; job: string; incident: { change: { key?: string; kind: string; target: string; protocol?: string; port?: number; old?: string; new?: string; severity: string }; opened_at: string; last_seen_at: string } }
 export type Change = { key?: string; kind: string; target: string; protocol?: string; port?: number; old?: string; new?: string; severity: string }
+
+export type StateReason = { reason: string; count: number }
+export type StateSummary = { state: string; count: number; reasons?: StateReason[] }
+export type ServiceObservation = {
+  name?: string; product?: string; version?: string; extra_info?: string; method?: string
+  confidence?: number; tunnel?: string; os_type?: string; device_type?: string; cpes?: string[]
+}
+export type PortObservation = { port: number; state: string; reason?: string; reason_ttl?: number; service?: ServiceObservation }
+export type ProtocolObservation = {
+  protocol: string; scan_type?: string; scanned_ports: string; scanned_port_count: number
+  service_detection: boolean; ports?: PortObservation[]; state_summaries?: StateSummary[]
+}
+export type HostObservation = {
+  address: string; source_targets?: string[]; dns_names?: string[]; address_family?: string; status?: string
+  status_reason?: string; reason_ttl?: number; latency_ms?: number
+  link_addresses?: { address: string; type?: string; vendor?: string }[]
+  hostnames?: { name: string; type?: string }[]; protocols?: ProtocolObservation[]
+}
+export type HostProtocolSummary = {
+  protocol: string; scan_type?: string; scanned_ports: string; scanned_port_count: number
+  service_detection: boolean; open_ports: number; open_filtered_ports: number
+}
+export type HostSummary = {
+  address: string; address_family?: string; source_targets?: string[]; protocols?: HostProtocolSummary[]
+  open_ports: number; open_filtered_ports: number; has_open_ports: boolean; legacy?: boolean
+}
+export type BaselineHostsResponse = {
+  job_id: string; job: string; source_scan?: ScanSummary | null; data_quality: string
+  hosts: HostSummary[]; pagination: Pagination
+}
+export type HostDetailResponse = {
+  job_id: string; job: string; data_quality: string; host: HostObservation
+  expected?: HostObservation | null; source_scan?: ScanSummary | null; scan?: ScanSummary | null
+}
+export type RdapResult = {
+  status: 'success' | 'cached' | 'stale' | 'private' | 'disabled' | 'unavailable' | string
+  address: string; registry?: string; network_name?: string; handle?: string
+  start_address?: string; end_address?: string; prefix?: string; country?: string
+  allocation_type?: string; statuses?: string[]; organizations?: string[]
+  events?: { action: string; date?: string }[]; source_url?: string
+  fetched_at?: string; expires_at?: string; stale?: boolean; message?: string
+}

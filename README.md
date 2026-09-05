@@ -52,6 +52,13 @@ ssh -L 8080:127.0.0.1:8080 user@docker-host
   rejected before scanning unless `allow_high_cost` is explicitly enabled.
 - `web.listen` must be a loopback address; the default is
   `127.0.0.1:8080`.
+- `enrichment.rdap.enabled` controls on-demand network-registration lookups
+  from the host explorer. It defaults to `true`; set it to `false` for an
+  isolated or privacy-sensitive deployment. Public host pages query the
+  authoritative RIR over HTTPS and cache only normalized network metadata for
+  24 hours (stale data can be shown for up to seven days). Private and
+  special-use addresses are never queried, and raw RDAP responses/contact
+  details are not retained.
 - TOTP is optional. Its seed is encrypted with a separate authentication key
   generated at `./data/auth.key` when TOTP is first enabled. Set
   `web.auth_key_file` to a mode-`0600` file containing 32 raw bytes or 64
@@ -83,6 +90,12 @@ baseline or opening/recovering incidents.
 when host discovery is required. If discovery reports an expected target as
 down or omits it, the scan fails safely instead of treating the target as
 closed.
+
+When a baseline is ready, use **Explore baseline** on the job page to inspect
+every effective address produced by the configured targets. Host detail pages
+show the exact TCP/UDP scope, positive ports, service fingerprints, Nmap
+reasons, and summarized closed/filtered outcomes. Scan history has the same
+per-address view; older snapshots remain readable with a legacy-detail notice.
 
 ## Baselines and incidents
 
@@ -141,7 +154,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 6), but it is
+version 7), but it is
 forward-only: an older binary refuses a newer schema. To roll back, stop the
 new service, restore the entire pre-upgrade `./data` directory and deployment
 configuration, then start the previous image. Do not point an older image at

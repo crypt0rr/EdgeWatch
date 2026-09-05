@@ -122,6 +122,10 @@ func TestFormatEventUsesOutcomeIndicators(t *testing.T) {
 	if !strings.HasPrefix(recovered, "🟢 EdgeWatch: ") {
 		t.Fatalf("recovery notification = %q", recovered)
 	}
+	cycleRecovered := FormatEvent(model.Event{Type: "scan-recovered", Message: "scan cycle recovered", Job: "test"})
+	if !strings.HasPrefix(cycleRecovered, "🟢 EdgeWatch: ") {
+		t.Fatalf("resumable recovery notification = %q", cycleRecovered)
+	}
 
 	critical := FormatEvent(model.Event{Type: "changes-detected", Message: "one change", Job: "test", Changes: []model.Change{{Severity: "critical"}}})
 	if !strings.HasPrefix(critical, "🔴 EdgeWatch: ") {

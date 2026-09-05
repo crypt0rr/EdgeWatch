@@ -20,6 +20,7 @@ const blank: JobForm = {
   max_expanded_hosts: 256,
   timing: 'balanced',
   timeout: '1h',
+  resume_window: '8d',
   baseline_samples: 2,
   change_confirmations: 1,
   allow_high_cost: false,
@@ -35,6 +36,7 @@ const jobFormSchema = z.object({
   max_expanded_hosts: z.number().int('Use a whole number of hosts.').min(1, 'Use at least one host.').max(1_000_000, 'The expansion limit is too high.'),
   timing: z.string().refine((value) => ['conservative', 'balanced', 'fast'].includes(value), 'Choose a valid timing profile.'),
   timeout: z.string().trim().min(1, 'A scan timeout is required.'),
+  resume_window: z.string().trim().min(1, 'A resume window is required.'),
   baseline_samples: z.number().int('Use a whole number of samples.').min(1, 'Use at least one baseline sample.').max(100, 'Use no more than 100 baseline samples.'),
   change_confirmations: z.number().int('Use a whole number of confirmations.').min(1, 'Use at least one confirmation.').max(100, 'Use no more than 100 confirmations.'),
   allow_high_cost: z.boolean().optional(),
@@ -234,6 +236,7 @@ export function JobEditor() {
             <label className="switch-row"><input type="checkbox" {...register('assume_alive')} /><span><strong>Assume targets are alive</strong><small>Use Nmap <code>-Pn</code>. Turn off to use host discovery.</small></span></label>
             <label>Timing profile<select {...register('timing')}><option value="conservative">Conservative (T2)</option><option value="balanced">Balanced (T3)</option><option value="fast">Fast (T4)</option></select>{(formErrors.timing?.message || fieldErrors.timing) && <small className="field-error">{formErrors.timing?.message || fieldErrors.timing}</small>}</label>
             <label>Scan timeout<input {...register('timeout')} placeholder="1h" />{(formErrors.timeout?.message || fieldErrors.timeout) && <small className="field-error">{formErrors.timeout?.message || fieldErrors.timeout}</small>}<small>Examples: 30m, 1h, 2d.</small></label>
+            <label>Resume window<input {...register('resume_window')} placeholder="8d" />{(formErrors.resume_window?.message || fieldErrors.resume_window) && <small className="field-error">{formErrors.resume_window?.message || fieldErrors.resume_window}</small>}<small>How long paused broad-scan progress is kept (1h–30d).</small></label>
             {remoteRevision !== null && <div className="notice warning" role="alert"><TriangleAlert size={16} /><span>This job was saved elsewhere while you were editing. Your draft is preserved. <button type="button" className="link-button" onClick={() => existing.data && applyServerJob(existing.data)}>Reload saved version</button></span></div>}
             {timing === 'fast' && <div className="notice warning"><TriangleAlert size={16} /><span>Fast timing can miss responses on congested or filtered networks.</span></div>}
             {error && <div className="form-error" role="alert">{error}</div>}

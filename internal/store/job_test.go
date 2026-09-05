@@ -363,7 +363,7 @@ func TestExistingSchemaMigratesWithWebTables(t *testing.T) {
 	if version != schemaVersion {
 		t.Fatalf("schema version %d", version)
 	}
-	for _, table := range []string{"jobs", "job_revisions", "job_runtime", "admins", "sessions", "recovery_codes", "security_audit", "setup_tokens", "managed_notifications", "rdap_cache", "scan_hosts"} {
+	for _, table := range []string{"jobs", "job_revisions", "job_runtime", "admins", "sessions", "recovery_codes", "security_audit", "setup_tokens", "managed_notifications", "rdap_cache", "scan_hosts", "scan_cycles", "scan_cycle_units"} {
 		var name string
 		if err := s.DB.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name); err != nil {
 			t.Fatalf("missing %s: %v", table, err)

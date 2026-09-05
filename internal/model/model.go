@@ -121,6 +121,17 @@ type Scan struct {
 	Error       string    `json:"error,omitempty"`
 	NmapVersion string    `json:"nmap_version,omitempty"`
 	ConfigHash  string    `json:"config_hash"`
+	// Cycle fields describe a resumable broad-scan attempt. They are additive
+	// metadata and never participate in snapshot comparison or hashing.
+	CycleID         string `json:"cycle_id,omitempty"`
+	CycleAttempt    int    `json:"cycle_attempt,omitempty"`
+	CycleStatus     string `json:"cycle_status,omitempty"`
+	Resumable       bool   `json:"resumable,omitempty"`
+	CompletedProbes int64  `json:"completed_probes,omitempty"`
+	TotalProbes     int64  `json:"total_probes,omitempty"`
+	CompletedUnits  int    `json:"completed_units,omitempty"`
+	TotalUnits      int    `json:"total_units,omitempty"`
+	NoProgressTries int    `json:"no_progress_attempts,omitempty"`
 	// BaselineScanID and BaselineConfigHash identify the comparison used when
 	// this scan was processed. Changes is the immutable scan-time diff; list
 	// endpoints intentionally use ScanSummary instead of loading it.
@@ -144,6 +155,15 @@ type ScanSummary struct {
 	Error              string    `json:"error,omitempty"`
 	NmapVersion        string    `json:"nmap_version,omitempty"`
 	ConfigHash         string    `json:"config_hash"`
+	CycleID            string    `json:"cycle_id,omitempty"`
+	CycleAttempt       int       `json:"cycle_attempt,omitempty"`
+	CycleStatus        string    `json:"cycle_status,omitempty"`
+	Resumable          bool      `json:"resumable,omitempty"`
+	CompletedProbes    int64     `json:"completed_probes,omitempty"`
+	TotalProbes        int64     `json:"total_probes,omitempty"`
+	CompletedUnits     int       `json:"completed_units,omitempty"`
+	TotalUnits         int       `json:"total_units,omitempty"`
+	NoProgressTries    int       `json:"no_progress_attempts,omitempty"`
 	BaselineScanID     string    `json:"baseline_scan_id,omitempty"`
 	BaselineConfigHash string    `json:"baseline_config_hash,omitempty"`
 }
@@ -152,27 +172,38 @@ type ScanSummary struct {
 // executing. It intentionally contains metadata only; the result is not
 // persisted until the scanner reaches a terminal state.
 type ActiveScan struct {
-	ID                     string    `json:"id"`
-	JobID                  string    `json:"job_id,omitempty"`
-	Job                    string    `json:"job"`
-	JobRevision            int64     `json:"job_revision,omitempty"`
-	StartedAt              time.Time `json:"started_at"`
-	EstimatedProbes        int64     `json:"estimated_probes,omitempty"`
-	NmapInvocations        int64     `json:"nmap_invocations,omitempty"`
-	EstimatedSeconds       int64     `json:"estimated_seconds,omitempty"`
-	CompletedProbes        int64     `json:"completed_probes,omitempty"`
-	TotalProbes            int64     `json:"total_probes,omitempty"`
-	CompletedInvocations   int64     `json:"completed_invocations,omitempty"`
-	TotalInvocations       int64     `json:"total_invocations,omitempty"`
-	ProgressPercent        int       `json:"progress_percent"`
-	Phase                  string    `json:"phase,omitempty"`
-	Protocol               string    `json:"protocol,omitempty"`
-	CurrentInvocation      int64     `json:"current_invocation,omitempty"`
-	TotalBatches           int64     `json:"total_batches,omitempty"`
-	ProcessProgressPercent int       `json:"process_progress_percent,omitempty"`
-	ElapsedSeconds         int64     `json:"elapsed_seconds,omitempty"`
-	LastOutput             string    `json:"last_output,omitempty"`
-	ProcessAlive           bool      `json:"process_alive"`
+	ID                      string    `json:"id"`
+	JobID                   string    `json:"job_id,omitempty"`
+	Job                     string    `json:"job"`
+	JobRevision             int64     `json:"job_revision,omitempty"`
+	StartedAt               time.Time `json:"started_at"`
+	EstimatedProbes         int64     `json:"estimated_probes,omitempty"`
+	NmapInvocations         int64     `json:"nmap_invocations,omitempty"`
+	EstimatedSeconds        int64     `json:"estimated_seconds,omitempty"`
+	CompletedProbes         int64     `json:"completed_probes,omitempty"`
+	TotalProbes             int64     `json:"total_probes,omitempty"`
+	CompletedInvocations    int64     `json:"completed_invocations,omitempty"`
+	TotalInvocations        int64     `json:"total_invocations,omitempty"`
+	ProgressPercent         int       `json:"progress_percent"`
+	Phase                   string    `json:"phase,omitempty"`
+	Protocol                string    `json:"protocol,omitempty"`
+	CurrentInvocation       int64     `json:"current_invocation,omitempty"`
+	TotalBatches            int64     `json:"total_batches,omitempty"`
+	ProcessProgressPercent  int       `json:"process_progress_percent,omitempty"`
+	ElapsedSeconds          int64     `json:"elapsed_seconds,omitempty"`
+	LastOutput              string    `json:"last_output,omitempty"`
+	ProcessAlive            bool      `json:"process_alive"`
+	CycleID                 string    `json:"cycle_id,omitempty"`
+	CycleAttempt            int       `json:"cycle_attempt,omitempty"`
+	CycleStatus             string    `json:"cycle_status,omitempty"`
+	CycleCompletedProbes    int64     `json:"cycle_completed_probes,omitempty"`
+	CycleTotalProbes        int64     `json:"cycle_total_probes,omitempty"`
+	CycleCompletedUnits     int       `json:"cycle_completed_units,omitempty"`
+	CycleTotalUnits         int       `json:"cycle_total_units,omitempty"`
+	CycleNoProgressAttempts int       `json:"cycle_no_progress_attempts,omitempty"`
+	CurrentUnit             int64     `json:"current_unit,omitempty"`
+	CurrentUnitPorts        string    `json:"current_unit_ports,omitempty"`
+	CurrentUnitAddresses    int       `json:"current_unit_addresses,omitempty"`
 }
 
 type Change struct {

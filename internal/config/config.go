@@ -89,6 +89,7 @@ type Job struct {
 	UDP              *Protocol `yaml:"udp"`
 	Timing           string    `yaml:"timing"`
 	Timeout          Duration  `yaml:"timeout"`
+	ResumeWindow     Duration  `yaml:"resume_window"`
 	Baseline         Baseline  `yaml:"baseline"`
 	Change           Change    `yaml:"change"`
 	AllowHighCost    bool      `yaml:"allow_high_cost,omitempty"`
@@ -230,6 +231,9 @@ func applyDefaults(c *Config) {
 		if j.Timeout == 0 {
 			j.Timeout = Duration(time.Hour)
 		}
+		if j.ResumeWindow == 0 {
+			j.ResumeWindow = Duration(8 * 24 * time.Hour)
+		}
 		if j.AssumeAlive == nil {
 			assumeAlive := true
 			j.AssumeAlive = &assumeAlive
@@ -289,6 +293,9 @@ func (c Config) Validate() error {
 		}
 		if j.Timeout.Value() < time.Second {
 			return fmt.Errorf("job %s: timeout must be at least 1s", j.Name)
+		}
+		if j.ResumeWindow.Value() < time.Hour || j.ResumeWindow.Value() > 30*24*time.Hour {
+			return fmt.Errorf("job %s: resume_window must be between 1h and 30d", j.Name)
 		}
 		if j.Timing != "conservative" && j.Timing != "balanced" && j.Timing != "fast" {
 			return fmt.Errorf("job %s: timing must be conservative, balanced, or fast", j.Name)
@@ -637,6 +644,16 @@ func (j Job) RunsOnStart() bool { return j.RunOnStart == nil || *j.RunOnStart }
 
 func (j Job) AssumesAlive() bool { return j.AssumeAlive == nil || *j.AssumeAlive }
 
+// ResumeWindowValue is the maximum age of a resumable scan cycle. It is
+// separate from Timeout: Timeout bounds one attempt, while ResumeWindow
+// bounds the complete coverage window assembled from multiple attempts.
+func (j Job) ResumeWindowValue() time.Duration {
+	if j.ResumeWindow == 0 {
+		return 8 * 24 * time.Hour
+	}
+	return j.ResumeWindow.Value()
+}
+
 func (j Job) SecurityHash() string {
 	type securityJob struct {
 		Targets     []string
@@ -646,6 +663,29 @@ func (j Job) SecurityHash() string {
 	}
 	v := securityJob{append([]string(nil), j.Targets...), j.MaxExpandedHosts, j.AssumesAlive(), j.TCP, j.UDP}
 	sort.Strings(v.Targets)
+	b, _ := yaml.Marshal(v)
+	h := sha256.Sum256(b)
+	return hex.EncodeToString(h[:])
+}
+
+// ExecutionHash identifies the settings that affect how a pinned scan plan is
+// executed without changing the monitored security scope. It is kept separate
+// from SecurityHash so schedule, timeout, and resume-window edits can safely
+// leave an in-progress cycle intact while still recording the execution
+// settings that created a persisted plan.
+func (j Job) ExecutionHash() string {
+	// Callers often construct a Job value directly (for example, a scheduler
+	// fixture or a recovery command) instead of passing it through NormalizeJob.
+	// Hash the effective execution settings so omitted defaults and explicit
+	// defaults cannot create a false cycle mismatch.
+	j = NormalizeJob(j)
+	type executionJob struct {
+		SecurityHash string
+		Timing       string
+		Timeout      Duration
+		ResumeWindow Duration
+	}
+	v := executionJob{SecurityHash: j.SecurityHash(), Timing: j.Timing, Timeout: j.Timeout, ResumeWindow: j.ResumeWindow}
 	b, _ := yaml.Marshal(v)
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])

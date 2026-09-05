@@ -114,10 +114,18 @@ function Shell({ username, version, onLogout }: { username: string; version: str
         switch (event.type) {
           case 'scan.started':
           case 'scan.completed':
+          case 'scan-paused':
+          case 'scan-recovered':
+          case 'scan-failure':
+          case 'scan-canceled':
             void client.invalidateQueries({ queryKey: ['active-scans'] })
             void client.invalidateQueries({ queryKey: ['scans'] })
             void client.invalidateQueries({ queryKey: ['hosts'] })
-            if (event.job_id) void client.invalidateQueries({ queryKey: ['job-scans', event.job_id] })
+            if (event.job_id) {
+              void client.invalidateQueries({ queryKey: ['job-scans', event.job_id] })
+              void client.invalidateQueries({ queryKey: ['scan-cycle', event.job_id] })
+              void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+            }
             break
           case 'changes-detected':
           case 'incident-opened':

@@ -48,6 +48,13 @@ type Progress struct {
 	ElapsedSeconds         int64
 	LastOutput             string
 	ProcessAlive           bool
+	// Work-unit fields are populated by resumable scans. They let the
+	// dashboard distinguish persisted cycle progress from the current Nmap
+	// process without exposing engine-specific command arguments.
+	CurrentUnit   int
+	TotalUnits    int
+	UnitPorts     string
+	UnitAddresses int
 }
 
 // ProgressReporter receives scan progress after resolution, while an Nmap
@@ -241,6 +248,9 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 	var out []resolvedTarget
 	count := 0
 	for _, input := range job.Targets {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		raw := config.CanonicalTarget(input)
 		if ip := net.ParseIP(raw); ip != nil {
 			count++
@@ -252,6 +262,9 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 		}
 		if ip, network, err := net.ParseCIDR(raw); err == nil {
 			for current := ip.Mask(network.Mask); network.Contains(current); incrementIP(current) {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 				count++
 				if count > job.MaxExpandedHosts {
 					return nil, fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts)

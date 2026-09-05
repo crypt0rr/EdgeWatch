@@ -1,5 +1,15 @@
 import { expect, test } from '@playwright/test'
 
+async function openMobileNavigation(page: import('@playwright/test').Page) {
+  const trigger = page.getByRole('button', { name: 'Open navigation' })
+  if (await trigger.isVisible()) await trigger.click()
+}
+
+async function navigateFromShell(page: import('@playwright/test').Page, label: string) {
+  await openMobileNavigation(page)
+  await page.getByRole('link', { name: label, exact: true }).click()
+}
+
 test('setup, login, and build a TCP/UDP job in the console', async ({ page }) => {
   let configured = false
   let loggedIn = false
@@ -145,17 +155,20 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await page.getByRole('button', { name: 'Sign in' }).click()
   await expect(page.getByRole('heading', { name: 'Good afternoon, admin' })).toBeVisible()
   await expect(page.getByText('EdgeWatch v0.7.0')).toBeVisible()
+  await openMobileNavigation(page)
   await expect(page.getByRole('link', { name: 'Incidents' })).toHaveClass(/nav-link-alert/)
   await expect(page.locator('#active-incident-count')).toHaveText('1')
-  await page.getByRole('link', { name: 'Incidents' }).click()
+  const closeNavigation = page.getByRole('button', { name: 'Close navigation' }).first()
+  if (await closeNavigation.isVisible()) await closeNavigation.click()
+  await navigateFromShell(page, 'Incidents')
   await expect(page.getByRole('button', { name: 'Accept change' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Suppress 1 scan' })).toBeVisible()
-  await page.getByRole('link', { name: 'Hosts' }).click()
+  await navigateFromShell(page, 'Hosts')
   await expect(page.getByRole('heading', { name: 'Hosts', exact: true })).toBeVisible()
   await expect(page.getByText('192.0.2.1')).toBeVisible()
   await page.getByRole('link', { name: /192\.0\.2\.1/ }).click()
   await expect(page.getByRole('heading', { name: '192.0.2.1' })).toBeVisible()
-  await page.getByRole('link', { name: 'Jobs' }).click()
+  await navigateFromShell(page, 'Jobs')
   await page.getByRole('button', { name: 'New job' }).click()
   await expect(page.getByRole('heading', { name: 'Create a monitoring job' })).toBeVisible()
   await expect(page.getByText('Stagger scheduled scans')).toBeVisible()
@@ -181,6 +194,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await page.getByRole('link', { name: /edge-router/ }).click()
   await expect(page.getByRole('heading', { name: 'edge-router' })).toBeVisible()
   await expect(page.getByRole('link', { name: /Explore baseline/ })).toContainText('1')
+  await page.getByRole('link', { name: /Explore baseline/ }).scrollIntoViewIfNeeded()
   await page.getByRole('link', { name: /Explore baseline/ }).click()
   await expect(page.getByRole('heading', { name: 'Explore baseline' })).toBeVisible()
   await expect(page.getByText('192.0.2.1')).toBeVisible()
@@ -188,12 +202,12 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await expect(page.getByRole('heading', { name: '192.0.2.1' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'TCP' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'UDP' })).toBeVisible()
-  await expect(page.getByText('Example HTTPD')).toBeVisible()
-  await expect(page.getByText('open|filtered').first()).toBeVisible()
+  await expect(page.locator('strong:visible', { hasText: 'Example HTTPD' })).toBeVisible()
+  await expect(page.locator('.state-summary-item:visible', { hasText: 'open|filtered' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Network registration (RDAP/WHOIS)' })).toBeVisible()
   await expect(page.getByText('Example Org')).toBeVisible()
   await expect(page.locator('.host-detail-page')).not.toContainText('Individual Contact')
-  await page.getByRole('link', { name: 'Notifications' }).click()
+  await navigateFromShell(page, 'Notifications')
   await expect(page.getByRole('heading', { name: 'Notifications' })).toBeVisible()
   await expect(page.getByText('Operations')).toBeVisible()
   await expect(page.locator('.notifications-page')).not.toContainText('generic://')
@@ -203,6 +217,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await expect(passwordDialog).toBeVisible()
   await expect(passwordDialog.locator('input[type="password"]')).toBeVisible()
   await passwordDialog.getByRole('button', { name: 'Cancel' }).click()
+  await openMobileNavigation(page)
   await page.getByRole('button', { name: 'Sign out' }).click()
   await expect(page.getByRole('heading', { name: 'Sign in to EdgeWatch' })).toBeVisible()
 })

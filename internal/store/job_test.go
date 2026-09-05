@@ -363,7 +363,7 @@ func TestExistingSchemaMigratesWithWebTables(t *testing.T) {
 	if version != schemaVersion {
 		t.Fatalf("schema version %d", version)
 	}
-	for _, table := range []string{"jobs", "job_revisions", "job_runtime", "admins", "sessions", "recovery_codes", "security_audit", "setup_tokens", "managed_notifications", "rdap_cache"} {
+	for _, table := range []string{"jobs", "job_revisions", "job_runtime", "admins", "sessions", "recovery_codes", "security_audit", "setup_tokens", "managed_notifications", "rdap_cache", "scan_hosts"} {
 		var name string
 		if err := s.DB.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name); err != nil {
 			t.Fatalf("missing %s: %v", table, err)
@@ -400,5 +400,31 @@ func TestV1DatabaseAddsManagedColumns(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("expected managed event column, got %d", count)
+	}
+}
+
+func TestV9DatabaseAddsSetupTokenIssueTimestamp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v9.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE setup_tokens (id INTEGER PRIMARY KEY CHECK(id=1), token_hash TEXT NOT NULL, expires_at TEXT NOT NULL, used_at TEXT); PRAGMA user_version = 8;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var count int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('setup_tokens') WHERE name='issued_at'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("issued_at column count = %d", count)
 	}
 }

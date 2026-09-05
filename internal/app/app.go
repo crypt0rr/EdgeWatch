@@ -312,6 +312,9 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		if errors.Is(scanCtx.Err(), context.Canceled) {
 			scan.Status = "canceled"
 			scan.Error = "scan canceled"
+		} else if errors.Is(scanCtx.Err(), context.DeadlineExceeded) || errors.Is(scanErr, context.DeadlineExceeded) {
+			scan.Status = "timed_out"
+			scan.Error = "scan timed out"
 		} else {
 			scan.Status = "failed"
 			scan.Error = scanErr.Error()
@@ -438,6 +441,25 @@ func (a *App) updateActiveProgress(id string, progress scanner.Progress) {
 	run.scan.CompletedProbes = progress.CompletedProbes
 	run.scan.CompletedInvocations = progress.CompletedInvocations
 	run.scan.ProgressPercent = progressPercent(progress)
+	if progress.Protocol != "" {
+		run.scan.Protocol = progress.Protocol
+	}
+	if progress.CurrentInvocation > 0 {
+		run.scan.CurrentInvocation = progress.CurrentInvocation
+	}
+	if progress.TotalBatches > 0 {
+		run.scan.TotalBatches = progress.TotalBatches
+	}
+	if progress.ProcessAlive || progress.ProcessProgressPercent > 0 {
+		run.scan.ProcessProgressPercent = progress.ProcessProgressPercent
+	}
+	if progress.ElapsedSeconds > run.scan.ElapsedSeconds {
+		run.scan.ElapsedSeconds = progress.ElapsedSeconds
+	}
+	if progress.LastOutput != "" {
+		run.scan.LastOutput = progress.LastOutput
+	}
+	run.scan.ProcessAlive = progress.ProcessAlive
 	if progress.Phase != "" {
 		run.scan.Phase = progress.Phase
 	}
@@ -454,13 +476,21 @@ func (a *App) updateActivePhase(id, phase string) {
 	}
 	run.mu.Lock()
 	run.scan.Phase = phase
+	run.scan.ProcessAlive = false
 	run.mu.Unlock()
 }
 
 func (r *activeRun) snapshot() model.ActiveScan {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.scan
+	snapshot := r.scan
+	if !snapshot.StartedAt.IsZero() {
+		elapsed := int64(time.Since(snapshot.StartedAt).Seconds())
+		if elapsed > snapshot.ElapsedSeconds {
+			snapshot.ElapsedSeconds = elapsed
+		}
+	}
+	return snapshot
 }
 
 func progressPercent(progress scanner.Progress) int {

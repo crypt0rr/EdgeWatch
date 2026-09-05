@@ -152,20 +152,27 @@ type ScanSummary struct {
 // executing. It intentionally contains metadata only; the result is not
 // persisted until the scanner reaches a terminal state.
 type ActiveScan struct {
-	ID                   string    `json:"id"`
-	JobID                string    `json:"job_id,omitempty"`
-	Job                  string    `json:"job"`
-	JobRevision          int64     `json:"job_revision,omitempty"`
-	StartedAt            time.Time `json:"started_at"`
-	EstimatedProbes      int64     `json:"estimated_probes,omitempty"`
-	NmapInvocations      int64     `json:"nmap_invocations,omitempty"`
-	EstimatedSeconds     int64     `json:"estimated_seconds,omitempty"`
-	CompletedProbes      int64     `json:"completed_probes,omitempty"`
-	TotalProbes          int64     `json:"total_probes,omitempty"`
-	CompletedInvocations int64     `json:"completed_invocations,omitempty"`
-	TotalInvocations     int64     `json:"total_invocations,omitempty"`
-	ProgressPercent      int       `json:"progress_percent"`
-	Phase                string    `json:"phase,omitempty"`
+	ID                     string    `json:"id"`
+	JobID                  string    `json:"job_id,omitempty"`
+	Job                    string    `json:"job"`
+	JobRevision            int64     `json:"job_revision,omitempty"`
+	StartedAt              time.Time `json:"started_at"`
+	EstimatedProbes        int64     `json:"estimated_probes,omitempty"`
+	NmapInvocations        int64     `json:"nmap_invocations,omitempty"`
+	EstimatedSeconds       int64     `json:"estimated_seconds,omitempty"`
+	CompletedProbes        int64     `json:"completed_probes,omitempty"`
+	TotalProbes            int64     `json:"total_probes,omitempty"`
+	CompletedInvocations   int64     `json:"completed_invocations,omitempty"`
+	TotalInvocations       int64     `json:"total_invocations,omitempty"`
+	ProgressPercent        int       `json:"progress_percent"`
+	Phase                  string    `json:"phase,omitempty"`
+	Protocol               string    `json:"protocol,omitempty"`
+	CurrentInvocation      int64     `json:"current_invocation,omitempty"`
+	TotalBatches           int64     `json:"total_batches,omitempty"`
+	ProcessProgressPercent int       `json:"process_progress_percent,omitempty"`
+	ElapsedSeconds         int64     `json:"elapsed_seconds,omitempty"`
+	LastOutput             string    `json:"last_output,omitempty"`
+	ProcessAlive           bool      `json:"process_alive"`
 }
 
 type Change struct {

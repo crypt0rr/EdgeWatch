@@ -13,7 +13,9 @@ export type ActiveScan = {
   id: string; job_id?: string; job: string; job_revision?: number; started_at: string
   estimated_probes?: number; nmap_invocations?: number; estimated_seconds?: number
   completed_probes?: number; total_probes?: number; completed_invocations?: number
-  total_invocations?: number; progress_percent: number; phase?: string
+  total_invocations?: number; progress_percent: number; phase?: string; protocol?: string
+  current_invocation?: number; total_batches?: number; process_progress_percent?: number
+  elapsed_seconds?: number; last_output?: string; process_alive?: boolean
 }
 export type Unit = { target: string; protocol: string; addresses?: string[]; ports?: { port: number; state: string; service?: string }[] }
 export type Scope = { target: string; protocol: string; ports: string; service_detection: boolean }

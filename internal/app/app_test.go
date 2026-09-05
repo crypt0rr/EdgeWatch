@@ -32,6 +32,14 @@ func (s failingScanner) Scan(context.Context, config.Job) (model.Snapshot, error
 	return model.Snapshot{}, s.err
 }
 
+type deadlineScanner struct{}
+
+func (deadlineScanner) Version(context.Context) string { return "deadline" }
+func (deadlineScanner) Scan(ctx context.Context, _ config.Job) (model.Snapshot, error) {
+	<-ctx.Done()
+	return model.Snapshot{}, ctx.Err()
+}
+
 type blockingScanner struct {
 	started chan struct{}
 	release chan struct{}
@@ -448,6 +456,44 @@ func TestManagedTerminalOutcomesQueueNotifications(t *testing.T) {
 	}
 	if len(types) != 2 || types[0] != "scan-failure" || types[1] != "scan-canceled" {
 		t.Fatalf("terminal outcome notifications = %v", types)
+	}
+}
+
+func TestManagedTimeoutIsPersistedAsDistinctTerminalStatus(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Scanner = deadlineScanner{}
+	job := config.NormalizeJob(config.Job{
+		Name: "timeout", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"},
+		TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timing: "balanced", Timeout: config.Duration(time.Second),
+		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
+	})
+	record, err := s.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan, events, runErr := a.RunJobRecord(ctx, record)
+	if !errors.Is(runErr, context.DeadlineExceeded) || scan.Status != "timed_out" || scan.Error != "scan timed out" {
+		t.Fatalf("timeout run = scan=%#v events=%#v err=%v", scan, events, runErr)
+	}
+	if len(events) != 1 || events[0].Type != "scan-failure" || !strings.Contains(events[0].Message, "Scan timed out") {
+		t.Fatalf("timeout event = %#v", events)
+	}
+	stored, err := s.ListJobScans(ctx, record.ID, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 1 || stored[0].Status != "timed_out" {
+		t.Fatalf("stored timeout = %#v", stored)
 	}
 }
 

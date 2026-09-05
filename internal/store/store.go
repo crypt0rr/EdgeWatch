@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 7
+const schemaVersion = 9
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -345,6 +345,35 @@ func migrate(db *sql.DB) error {
  stale_until TEXT NOT NULL
 );`,
 			"CREATE INDEX IF NOT EXISTS rdap_cache_expiry ON rdap_cache(expires_at, stale_until)",
+		},
+		8: {
+			`CREATE TABLE IF NOT EXISTS scan_hosts (
+ scan_id TEXT NOT NULL,
+ address TEXT NOT NULL,
+ job TEXT NOT NULL DEFAULT '',
+ address_family TEXT NOT NULL DEFAULT '',
+ source_targets_json BLOB NOT NULL DEFAULT '[]',
+ dns_names_json BLOB NOT NULL DEFAULT '[]',
+ host_json BLOB NOT NULL,
+ data_quality TEXT NOT NULL DEFAULT 'detailed',
+ open_ports INTEGER NOT NULL DEFAULT 0,
+ open_filtered_ports INTEGER NOT NULL DEFAULT 0,
+ tcp_present INTEGER NOT NULL DEFAULT 0,
+ udp_present INTEGER NOT NULL DEFAULT 0,
+ tcp_open_ports INTEGER NOT NULL DEFAULT 0,
+ tcp_open_filtered_ports INTEGER NOT NULL DEFAULT 0,
+ udp_open_ports INTEGER NOT NULL DEFAULT 0,
+ udp_open_filtered_ports INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(scan_id, address),
+ FOREIGN KEY(scan_id) REFERENCES scans(id) ON DELETE CASCADE
+);`,
+			"CREATE INDEX IF NOT EXISTS scan_hosts_address ON scan_hosts(address)",
+			"CREATE INDEX IF NOT EXISTS scan_hosts_scan_address ON scan_hosts(scan_id, address)",
+			"CREATE INDEX IF NOT EXISTS scan_hosts_job_address ON scan_hosts(job, address)",
+			"CREATE INDEX IF NOT EXISTS scan_hosts_open ON scan_hosts(open_ports, open_filtered_ports)",
+		},
+		9: {
+			"ALTER TABLE setup_tokens ADD COLUMN issued_at TEXT NOT NULL DEFAULT ''",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
@@ -893,6 +922,94 @@ type Page[T any] struct {
 	Total int
 }
 
+// ScanHost is an indexed effective-address observation. The complete host
+// evidence remains in Host, while the scan_hosts table stores summary columns
+// used to filter and paginate without decoding unrelated scan snapshots.
+type ScanHost struct {
+	ScanID      string
+	DataQuality string
+	Host        model.HostObservation
+}
+
+// LatestScanHost is an indexed host observation enriched with the scan/job
+// metadata needed by the global Hosts view.
+type LatestScanHost struct {
+	ScanHost
+	JobID     string
+	Job       string
+	ScannedAt time.Time
+}
+
+type hostFilter struct {
+	where []string
+	args  []any
+}
+
+func buildHostFilter(query, protocol string, hasOpen *bool) hostFilter {
+	filter := hostFilter{}
+	if query = strings.TrimSpace(strings.ToLower(query)); query != "" {
+		like := "%" + query + "%"
+		filter.where = append(filter.where, "(LOWER(address) LIKE ? OR LOWER(job) LIKE ? OR LOWER(source_targets_json) LIKE ? OR LOWER(dns_names_json) LIKE ? OR LOWER(host_json) LIKE ?)")
+		filter.args = append(filter.args, like, like, like, like, like)
+	}
+	if protocol == "tcp" {
+		filter.where = append(filter.where, "tcp_present=1")
+		if hasOpen != nil {
+			if *hasOpen {
+				filter.where = append(filter.where, "(tcp_open_ports > 0 OR tcp_open_filtered_ports > 0)")
+			} else {
+				filter.where = append(filter.where, "tcp_open_ports = 0 AND tcp_open_filtered_ports = 0")
+			}
+		}
+	} else if protocol == "udp" {
+		filter.where = append(filter.where, "udp_present=1")
+		if hasOpen != nil {
+			if *hasOpen {
+				filter.where = append(filter.where, "(udp_open_ports > 0 OR udp_open_filtered_ports > 0)")
+			} else {
+				filter.where = append(filter.where, "udp_open_ports = 0 AND udp_open_filtered_ports = 0")
+			}
+		}
+	} else if hasOpen != nil {
+		if *hasOpen {
+			filter.where = append(filter.where, "(open_ports > 0 OR open_filtered_ports > 0)")
+		} else {
+			filter.where = append(filter.where, "open_ports = 0 AND open_filtered_ports = 0")
+		}
+	}
+	return filter
+}
+
+func scanHostStats(host model.HostObservation) (open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered int) {
+	for _, protocol := range host.Protocols {
+		switch protocol.Protocol {
+		case "tcp":
+			tcpPresent = 1
+		case "udp":
+			udpPresent = 1
+		}
+		for _, port := range protocol.Ports {
+			switch port.State {
+			case "open":
+				open++
+				if protocol.Protocol == "tcp" {
+					tcpOpen++
+				} else if protocol.Protocol == "udp" {
+					udpOpen++
+				}
+			case "open|filtered":
+				openFiltered++
+				if protocol.Protocol == "tcp" {
+					tcpOpenFiltered++
+				} else if protocol.Protocol == "udp" {
+					udpOpenFiltered++
+				}
+			}
+		}
+	}
+	return
+}
+
 func normalizePage(limit, offset int) (int, int) {
 	if limit <= 0 || limit > 1000 {
 		limit = 50
@@ -998,6 +1115,21 @@ func (s *Store) RuntimeState(ctx context.Context, jobID string) (model.JobState,
 	}
 	ensureMaps(&state)
 	return state, nil
+}
+
+// RuntimeBaselineMeta reads only the baseline identifiers from runtime JSON.
+// Host pages use this fast path before deciding whether they need the full
+// legacy state snapshot.
+func (s *Store) RuntimeBaselineMeta(ctx context.Context, jobID string) (scanID, configHash string, err error) {
+	var scan, hash sql.NullString
+	err = s.DB.QueryRowContext(ctx, `SELECT json_extract(state_json,'$.baseline_scan_id'), json_extract(state_json,'$.baseline_config_hash') FROM job_runtime WHERE job_id=?`, jobID).Scan(&scan, &hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", nil
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return scan.String, hash.String, nil
 }
 
 func (s *Store) UpdateRuntime(ctx context.Context, jobID string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
@@ -1395,7 +1527,191 @@ func saveScanExec(ctx context.Context, execer contextExecer, scan model.Scan) er
 	}
 	_, err = execer.ExecContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		scan.ID, nullString(scan.JobID), nullInt64(scan.JobRevision), scan.Job, scan.StartedAt.UTC().Format(time.RFC3339Nano), scan.FinishedAt.UTC().Format(time.RFC3339Nano), scan.Status, scan.Error, scan.NmapVersion, scan.ConfigHash, scan.BaselineScanID, scan.BaselineConfigHash, changesJSON, snapshot)
-	return err
+	if err != nil {
+		return err
+	}
+	return saveScanHostsExec(ctx, execer, scan)
+}
+
+func saveScanHostsExec(ctx context.Context, execer contextExecer, scan model.Scan) error {
+	if len(scan.Snapshot.Hosts) == 0 {
+		return nil
+	}
+	// Normalize a copy so the indexed payload has stable ordering without
+	// mutating the immutable snapshot that the caller may still hold.
+	hosts := append([]model.HostObservation(nil), scan.Snapshot.Hosts...)
+	hostSnapshot := model.Snapshot{Hosts: hosts}
+	hostSnapshot.Normalize()
+	for _, host := range hostSnapshot.Hosts {
+		address := strings.TrimSpace(host.Address)
+		if net.ParseIP(address) == nil {
+			continue
+		}
+		hostJSON, err := json.Marshal(host)
+		if err != nil {
+			return err
+		}
+		sourceTargets, err := json.Marshal(host.SourceTargets)
+		if err != nil {
+			return err
+		}
+		dnsNames, err := json.Marshal(host.DNSNames)
+		if err != nil {
+			return err
+		}
+		open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered := scanHostStats(host)
+		if _, err := execer.ExecContext(ctx, `INSERT INTO scan_hosts(scan_id,address,job,address_family,source_targets_json,dns_names_json,host_json,data_quality,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			scan.ID, address, scan.Job, host.AddressFamily, sourceTargets, dnsNames, hostJSON, "detailed", open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func normalizeStoredHostAddress(raw string) (string, error) {
+	ip := net.ParseIP(strings.TrimSpace(raw))
+	if ip == nil {
+		return "", fmt.Errorf("host address is not a valid IP: %s", raw)
+	}
+	return ip.String(), nil
+}
+
+func decodeScanHost(address, dataQuality string, raw []byte) (ScanHost, error) {
+	normalized, err := normalizeStoredHostAddress(address)
+	if err != nil {
+		return ScanHost{}, err
+	}
+	var host model.HostObservation
+	if err := json.Unmarshal(raw, &host); err != nil {
+		return ScanHost{}, err
+	}
+	host.Address = normalized
+	return ScanHost{DataQuality: dataQuality, Host: host}, nil
+}
+
+// ListScanHostsPage reads indexed effective hosts for one scan. The SQL
+// predicates run before LIMIT/OFFSET, so a page request never needs to load
+// unrelated host payloads into Go.
+func (s *Store) ListScanHostsPage(ctx context.Context, scanID, query, protocol string, hasOpen *bool, limit, offset int) (Page[ScanHost], error) {
+	limit, offset = normalizePage(limit, offset)
+	filter := buildHostFilter(query, protocol, hasOpen)
+	where := append([]string{"scan_id=?"}, filter.where...)
+	args := append([]any{scanID}, filter.args...)
+	var page Page[ScanHost]
+	countQuery := `SELECT COUNT(*) FROM scan_hosts WHERE ` + strings.Join(where, " AND ")
+	if err := s.DB.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	querySQL := `SELECT address,data_quality,host_json FROM scan_hosts WHERE ` + strings.Join(where, " AND ") + ` ORDER BY address LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := s.DB.QueryContext(ctx, querySQL, args...)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var address, dataQuality string
+		var raw []byte
+		if err := rows.Scan(&address, &dataQuality, &raw); err != nil {
+			return page, err
+		}
+		item, err := decodeScanHost(address, dataQuality, raw)
+		if err != nil {
+			return page, err
+		}
+		item.ScanID = scanID
+		page.Items = append(page.Items, item)
+	}
+	return page, rows.Err()
+}
+
+// ScanHostIndexExists reports whether a scan has the incremental host index.
+// It is separate from a filtered page's Total: a valid indexed scan can have
+// zero matches for a particular query and must not fall back to decoding its
+// complete snapshot.
+func (s *Store) ScanHostIndexExists(ctx context.Context, scanID string) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_hosts WHERE scan_id=?)`, scanID).Scan(&exists)
+	return exists, err
+}
+
+// SuccessfulScanHostIndexExists is the global equivalent used by the Hosts
+// view to distinguish an indexed database (including a zero-match filter)
+// from a wholly legacy database.
+func (s *Store) SuccessfulScanHostIndexExists(ctx context.Context) (bool, error) {
+	var exists bool
+	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_hosts h JOIN scans s ON s.id=h.scan_id WHERE s.status='success')`).Scan(&exists)
+	return exists, err
+}
+
+// GetScanHost returns one indexed effective host, or ErrNotFound when the scan
+// predates the host index or the address was not part of that scan.
+func (s *Store) GetScanHost(ctx context.Context, scanID, address string) (ScanHost, error) {
+	normalized, err := normalizeStoredHostAddress(address)
+	if err != nil {
+		return ScanHost{}, fmt.Errorf("%w: host %s", ErrNotFound, address)
+	}
+	var dataQuality string
+	var raw []byte
+	err = s.DB.QueryRowContext(ctx, `SELECT data_quality,host_json FROM scan_hosts WHERE scan_id=? AND address=?`, scanID, normalized).Scan(&dataQuality, &raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ScanHost{}, fmt.Errorf("%w: host %s", ErrNotFound, normalized)
+	}
+	if err != nil {
+		return ScanHost{}, err
+	}
+	item, err := decodeScanHost(normalized, dataQuality, raw)
+	if err != nil {
+		return ScanHost{}, err
+	}
+	item.ScanID = scanID
+	return item, nil
+}
+
+// ListLatestScanHostsPage returns the newest successful indexed observation
+// for each effective address across all jobs. Window ranking is performed by
+// SQLite before host JSON is decoded.
+func (s *Store) ListLatestScanHostsPage(ctx context.Context, query, protocol string, hasOpen *bool, limit, offset int) (Page[LatestScanHost], error) {
+	limit, offset = normalizePage(limit, offset)
+	filter := buildHostFilter(query, protocol, hasOpen)
+	base := `WITH ranked AS (
+	 SELECT h.scan_id,h.address,h.data_quality,h.host_json,h.source_targets_json,h.dns_names_json,
+        h.open_ports,h.open_filtered_ports,h.tcp_present,h.udp_present,
+        h.tcp_open_ports,h.tcp_open_filtered_ports,h.udp_open_ports,h.udp_open_filtered_ports,
+        s.job_id,s.job,s.finished_at,
+        ROW_NUMBER() OVER (PARTITION BY h.address ORDER BY s.finished_at DESC,s.id DESC) AS rn
+ FROM scan_hosts h JOIN scans s ON s.id=h.scan_id
+ WHERE s.status='success'
+) `
+	where := append([]string{"rn=1"}, filter.where...)
+	args := append([]any(nil), filter.args...)
+	var page Page[LatestScanHost]
+	countQuery := base + `SELECT COUNT(*) FROM ranked WHERE ` + strings.Join(where, " AND ")
+	if err := s.DB.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	querySQL := base + `SELECT scan_id,address,data_quality,host_json,job_id,job,finished_at FROM ranked WHERE ` + strings.Join(where, " AND ") + ` ORDER BY address LIMIT ? OFFSET ?`
+	args = append(args, limit, offset)
+	rows, err := s.DB.QueryContext(ctx, querySQL, args...)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var scanID, address, dataQuality, job, finished string
+		var jobID sql.NullString
+		var raw []byte
+		if err := rows.Scan(&scanID, &address, &dataQuality, &raw, &jobID, &job, &finished); err != nil {
+			return page, err
+		}
+		item, err := decodeScanHost(address, dataQuality, raw)
+		if err != nil {
+			return page, err
+		}
+		parsed, _ := time.Parse(time.RFC3339Nano, finished)
+		page.Items = append(page.Items, LatestScanHost{ScanHost: ScanHost{ScanID: scanID, DataQuality: dataQuality, Host: item.Host}, JobID: jobID.String, Job: job, ScannedAt: parsed})
+	}
+	return page, rows.Err()
 }
 
 func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {

@@ -115,6 +115,54 @@ func TestOpenSupportsSQLiteMemoryURI(t *testing.T) {
 	}
 }
 
+func TestScanHostIndexSupportsFilteringPaginationAndLatestRows(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	job := model.Scan{
+		ID: "indexed-scan", JobID: "job-1", Job: "edge", StartedAt: time.Unix(100, 0).UTC(), FinishedAt: time.Unix(100, 0).UTC(), Status: "success",
+		Snapshot: model.Snapshot{Hosts: []model.HostObservation{
+			{Address: "198.51.100.20", AddressFamily: "IPv4", SourceTargets: []string{"edge.example"}, DNSNames: []string{"edge.example"}, Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22,443", ScannedPortCount: 2, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}},
+			{Address: "2001:db8::20", AddressFamily: "IPv6", SourceTargets: []string{"2001:db8::20"}, Protocols: []model.ProtocolObservation{{Protocol: "udp", ScannedPorts: "53", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 53, State: "open|filtered"}}}}},
+		}},
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('job-1','edge','{}',1,0,1,?,?)`, time.Unix(1, 0).UTC().Format(time.RFC3339Nano), time.Unix(1, 0).UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveScan(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	tcp := "tcp"
+	open := true
+	page, err := s.ListScanHostsPage(ctx, job.ID, "edge.example", tcp, &open, 1, 0)
+	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].Host.Address != "198.51.100.20" {
+		t.Fatalf("indexed TCP page = %#v, %v", page, err)
+	}
+	if _, err := s.GetScanHost(ctx, job.ID, "2001:0db8::20"); err != nil {
+		t.Fatalf("normalized IPv6 lookup failed: %v", err)
+	}
+	udp := "udp"
+	page, err = s.ListScanHostsPage(ctx, job.ID, "", udp, &open, 50, 0)
+	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].Host.Address != "2001:db8::20" {
+		t.Fatalf("indexed UDP page = %#v, %v", page, err)
+	}
+	latest, err := s.ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
+	if err != nil || latest.Total != 2 || len(latest.Items) != 2 {
+		t.Fatalf("latest indexed page = %#v, %v", latest, err)
+	}
+	if _, _, err := s.RuntimeBaselineMeta(ctx, "job-1"); err != nil {
+		t.Fatal(err)
+	}
+	indexed, err := s.ScanHostIndexExists(ctx, job.ID)
+	if err != nil || !indexed {
+		t.Fatalf("scan host index marker = %v, %v", indexed, err)
+	}
+	missing := "does-not-match"
+	empty, err := s.ListScanHostsPage(ctx, job.ID, missing, "", nil, 50, 0)
+	if err != nil || empty.Total != 0 || len(empty.Items) != 0 {
+		t.Fatalf("empty indexed filter = %#v, %v", empty, err)
+	}
+}
+
 func TestOpenRejectsSQLiteSidecarSymlink(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "symlink.db")

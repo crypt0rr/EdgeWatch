@@ -56,6 +56,7 @@ func run(args []string) error {
 	limit := fs.Int("limit", 50, "history limit")
 	nmapPath := fs.String("nmap", "nmap", "Nmap executable")
 	passwordFile := fs.String("password-file", "", "file containing a new administrator password")
+	force := fs.Bool("force", false, "confirm replacement of the current setup token")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -85,7 +86,7 @@ func run(args []string) error {
 	}
 	defer s.Close()
 	if cmd == "admin" {
-		return adminAction(context.Background(), action, s, *passwordFile)
+		return adminAction(context.Background(), action, s, *passwordFile, *force)
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	application, err := app.New(cfg, s, *nmapPath, logger)
@@ -139,11 +140,23 @@ func run(args []string) error {
 
 func usage() error {
 	fmt.Fprintln(os.Stderr, `Usage: edgewatch <command> [options]
-	Commands: daemon, config validate, scan, status, history, baseline approve|reset, notify test, admin reset-password|disable-totp, health, version`)
+	Commands: daemon, config validate, scan, status, history, baseline approve|reset, notify test, admin setup-token|reset-password|disable-totp, health, version`)
 	return errors.New("invalid or missing command")
 }
 
-func adminAction(ctx context.Context, action string, s *store.Store, passwordFile string) error {
+func adminAction(ctx context.Context, action string, s *store.Store, passwordFile string, confirmations ...bool) error {
+	force := len(confirmations) > 0 && confirmations[0]
+	if action == "setup-token" || action == "reissue-setup-token" {
+		if !force {
+			return errors.New("reissuing the setup token replaces the current token; pass --force to confirm")
+		}
+		token, err := auth.NewManager(s).ReissueSetupToken(ctx)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(os.Stdout, "EdgeWatch setup token (valid for 15 minutes):", token)
+		return nil
+	}
 	admin, err := s.GetAdmin(ctx)
 	if err != nil {
 		return errors.New("administrator is not configured")

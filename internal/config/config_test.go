@@ -50,6 +50,9 @@ jobs:
 	if cfg.Web.Listen != "127.0.0.1:8080" {
 		t.Fatalf("web listener default %q", cfg.Web.Listen)
 	}
+	if !cfg.RDAPEnabled() || cfg.Enrichment.RDAP.Enabled == nil {
+		t.Fatal("RDAP omission did not default to enabled")
+	}
 	if cfg.Retention.Value() != 90*24*time.Hour {
 		t.Fatalf("retention %s", cfg.Retention.Value())
 	}
@@ -68,6 +71,13 @@ jobs:
 	}
 	if cfg.Jobs[0].AssumesAlive() {
 		t.Fatal("explicit assume_alive=false was not applied")
+	}
+	if err := os.WriteFile(path, []byte(strings.Replace(yaml, "retention: 90d", "retention: 90d\nenrichment:\n  rdap:\n    enabled: false", 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil || cfg.RDAPEnabled() {
+		t.Fatalf("explicit RDAP disable was not applied: %v", err)
 	}
 	if err := os.WriteFile(path, []byte(strings.Replace(yaml, "tcp:", "unknown: true\n    tcp:", 1)), 0o600); err != nil {
 		t.Fatal(err)

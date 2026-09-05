@@ -1,4 +1,4 @@
-import type { ActiveScan, Change, Incident, Job, JobForm, Pagination, Scan, ScanSummary, Unit } from './types'
+import type { ActiveScan, BaselineHostsResponse, Change, HostDetailResponse, Incident, Job, JobForm, Pagination, RdapResult, Scan, ScanSummary, Unit } from './types'
 
 export type NotificationDestination = {
   id: string
@@ -43,7 +43,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!response.ok) throw new APIError(body?.error?.message || 'Request failed', body?.error?.code, body?.error?.details)
   return body as T
 }
-export type AdminStatus = { configured: boolean; username: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; max_probe_count?: number; live_updates?: { history_size: number; dropped_events: number } }
+export type AdminStatus = { configured: boolean; username: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; max_probe_count?: number; rdap_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number } }
 export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; password_requirements: { minimum_length: number } }>('/setup/status')
 export const adminStatus = () => api<AdminStatus>('/status')
 export const getSession = () => api<{ username: string; csrf_token: string; totp_enabled: boolean }>('/auth/session')
@@ -66,6 +66,22 @@ export const resetBaseline = (id: string) => api(`/jobs/${id}/baseline/reset`, {
 export const approveBaseline = (jobId: string, scanId: string) => api(`/jobs/${jobId}/baseline/approve`, { method: 'POST', body: JSON.stringify({ scan_id: scanId }) })
 export const jobScans = (id: string, offset = 0, limit = 20) => api<{ scans: ScanSummary[]; pagination: Pagination }>(`/jobs/${id}/scans?limit=${limit}&offset=${offset}`)
 export const jobBaseline = (id: string, offset = 0, limit = 50) => api<{ job_id: string; job: string; revision: number; security_hash: string; baseline: Job['baseline']; snapshot: { units: Unit[]; scopes: { target: string; protocol: string; ports: string; service_detection: boolean }[]; dns?: Record<string, string[]> } | null; pagination: Pagination }>(`/jobs/${id}/baseline?limit=${limit}&offset=${offset}`)
+export type HostFilters = { q?: string; protocol?: string; has_open_ports?: boolean; limit?: number; offset?: number }
+function hostQuery(filters: HostFilters = {}) {
+  const params = new URLSearchParams()
+  params.set('limit', String(filters.limit ?? 50))
+  params.set('offset', String(filters.offset ?? 0))
+  if (filters.q) params.set('q', filters.q)
+  if (filters.protocol) params.set('protocol', filters.protocol)
+  if (filters.has_open_ports !== undefined) params.set('has_open_ports', String(filters.has_open_ports))
+  return params.toString()
+}
+export const baselineHosts = (id: string, filters: HostFilters = {}) => api<BaselineHostsResponse>(`/jobs/${id}/baseline/hosts?${hostQuery(filters)}`)
+export const baselineHost = (id: string, address: string) => api<HostDetailResponse>(`/jobs/${id}/baseline/hosts/${encodeURIComponent(address)}`)
+export const baselineHostRDAP = (id: string, address: string) => api<{ rdap: RdapResult }>(`/jobs/${id}/baseline/hosts/${encodeURIComponent(address)}/rdap`)
+export const scanHosts = (jobId: string, scanId: string, filters: HostFilters = {}) => api<{ job_id: string; job: string; scan: ScanSummary; data_quality: string; hosts: import('./types').HostSummary[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${encodeURIComponent(scanId)}/hosts?${hostQuery(filters)}`)
+export const scanHost = (jobId: string, scanId: string, address: string) => api<HostDetailResponse>(`/jobs/${jobId}/scans/${encodeURIComponent(scanId)}/hosts/${encodeURIComponent(address)}`)
+export const scanHostRDAP = (jobId: string, scanId: string, address: string) => api<{ rdap: RdapResult }>(`/jobs/${jobId}/scans/${encodeURIComponent(scanId)}/hosts/${encodeURIComponent(address)}/rdap`)
 export const scanDetail = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ scan: Scan; changes: Change[]; changes_pagination: Pagination; current_security_hash: string; comparison_source?: string; baseline_scan_id?: string }>(`/jobs/${jobId}/scans/${scanId}?limit=${limit}&offset=${offset}`)
 export const scanResults = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ results: Unit[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/results?limit=${limit}&offset=${offset}`)
 export const scanChanges = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ changes: Change[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/changes?limit=${limit}&offset=${offset}`)

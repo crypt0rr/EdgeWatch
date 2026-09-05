@@ -24,6 +24,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/engine"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/notify"
+	"github.com/crypt0rr/edgewatch/internal/rdap"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/webui"
 )
@@ -32,6 +33,7 @@ type Server struct {
 	App   *app.App
 	Store *store.Store
 	Auth  *auth.Manager
+	RDAP  *rdap.Client
 	Log   *slog.Logger
 
 	mu           sync.Mutex
@@ -59,7 +61,7 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), Log: logger, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}}
+	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdap.New(s, a.Config.RDAPEnabled()), Log: logger, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}}
 	if token, err := v.Auth.EnsureSetupToken(context.Background()); err != nil {
 		logger.Error("admin setup token generation failed", "error", err)
 	} else if token != "" {
@@ -207,6 +209,18 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.activeScans(w, r)
 	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/cancel") && r.Method == http.MethodPost:
 		s.cancelScan(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/cancel"))
+	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/hosts") && r.Method == http.MethodGet:
+		s.scanHostsRoute(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/hosts"))
+	case strings.HasPrefix(path, "/scans/") && strings.Contains(strings.TrimPrefix(path, "/scans/"), "/hosts/") && r.Method == http.MethodGet:
+		if strings.HasSuffix(path, "/rdap") {
+			value := strings.TrimPrefix(path, "/scans/")
+			parts := strings.SplitN(value, "/hosts/", 2)
+			s.scanHostRDAPRoute(w, r, parts[0], strings.TrimSuffix(parts[1], "/rdap"))
+			break
+		}
+		value := strings.TrimPrefix(path, "/scans/")
+		parts := strings.SplitN(value, "/hosts/", 2)
+		s.scanHostRoute(w, r, parts[0], parts[1])
 	case strings.HasPrefix(path, "/scans/") && r.Method == http.MethodGet:
 		s.getScan(w, r, strings.TrimPrefix(path, "/scans/"))
 	case path == "/incidents" && r.Method == http.MethodGet:
@@ -265,6 +279,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		"retention":                 s.App.Config.Retention.Value().String(),
 		"max_concurrent_scans":      s.App.Config.Scheduler.MaxConcurrent,
 		"max_probe_count":           s.App.Config.Scheduler.MaxProbeCount,
+		"rdap_enabled":              s.App.Config.RDAPEnabled(),
 	}
 	if len(s.App.Config.Jobs) > 0 {
 		legacy := make([]string, 0, len(s.App.Config.Jobs))
@@ -545,7 +560,11 @@ func baselineJSON(state model.JobState, currentHash string) map[string]any {
 	if currentHash != "" && state.BaselineConfigHash != "" && state.BaselineConfigHash != currentHash {
 		status = "updating"
 	}
-	return map[string]any{"status": status, "scan_id": state.BaselineScanID, "config_hash": state.BaselineConfigHash, "samples": state.CandidateCount, "attempts": state.CandidateAttempts, "incidents": len(state.Incidents), "pending": len(state.Pending)}
+	hostCount := 0
+	if page, err := observationsForSnapshot(*state.Baseline); err == nil {
+		hostCount = len(page.Items)
+	}
+	return map[string]any{"status": status, "scan_id": state.BaselineScanID, "config_hash": state.BaselineConfigHash, "samples": state.CandidateCount, "attempts": state.CandidateAttempts, "incidents": len(state.Incidents), "pending": len(state.Pending), "host_count": hostCount}
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
@@ -656,6 +675,30 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 	}
 	if len(parts) == 4 && parts[1] == "scans" && parts[3] == "results" && r.Method == http.MethodGet {
 		s.jobScanResults(w, r, id, parts[2])
+		return
+	}
+	if len(parts) == 4 && parts[1] == "scans" && parts[3] == "hosts" && r.Method == http.MethodGet {
+		s.jobScanHosts(w, r, id, parts[2])
+		return
+	}
+	if len(parts) == 5 && parts[1] == "scans" && parts[3] == "hosts" && r.Method == http.MethodGet {
+		s.jobScanHost(w, r, id, parts[2], parts[4])
+		return
+	}
+	if len(parts) == 6 && parts[1] == "scans" && parts[3] == "hosts" && parts[5] == "rdap" && r.Method == http.MethodGet {
+		s.jobScanHostRDAP(w, r, id, parts[2], parts[4])
+		return
+	}
+	if len(parts) == 3 && parts[1] == "baseline" && parts[2] == "hosts" && r.Method == http.MethodGet {
+		s.jobBaselineHosts(w, r, id)
+		return
+	}
+	if len(parts) == 4 && parts[1] == "baseline" && parts[2] == "hosts" && r.Method == http.MethodGet {
+		s.jobBaselineHost(w, r, id, parts[3])
+		return
+	}
+	if len(parts) == 5 && parts[1] == "baseline" && parts[2] == "hosts" && parts[4] == "rdap" && r.Method == http.MethodGet {
+		s.jobBaselineHostRDAP(w, r, id, parts[3])
 		return
 	}
 	if len(parts) == 4 && parts[1] == "scans" && parts[3] == "changes" && r.Method == http.MethodGet {

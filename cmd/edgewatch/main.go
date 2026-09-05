@@ -215,7 +215,7 @@ func normalizedConfig(cfg *config.Config) map[string]any {
 	for _, j := range cfg.Jobs {
 		jobs = append(jobs, map[string]any{"name": j.Name, "schedule": j.Schedule, "timezone": j.Timezone, "targets": j.Targets, "security_hash": j.SecurityHash()})
 	}
-	return map[string]any{"valid": true, "version": cfg.Version, "database": cfg.Database, "web_listen": cfg.Web.Listen, "max_probe_count": cfg.Scheduler.MaxProbeCount, "jobs": jobs, "legacy_jobs_inactive": len(jobs) > 0, "notification_destinations": len(cfg.Notifications.URLs)}
+	return map[string]any{"valid": true, "version": cfg.Version, "database": cfg.Database, "web_listen": cfg.Web.Listen, "max_probe_count": cfg.Scheduler.MaxProbeCount, "rdap_enabled": cfg.RDAPEnabled(), "jobs": jobs, "legacy_jobs_inactive": len(jobs) > 0, "notification_destinations": len(cfg.Notifications.URLs)}
 }
 
 func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, output string) error {

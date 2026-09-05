@@ -1,7 +1,7 @@
 database: /var/lib/edgewatch/edgewatch.db
 retention: 90d
 
-# The administration UI is loopback-only in v0.3. Access it on the Docker
+# The administration UI is loopback-only in v0.7. Access it on the Docker
 # host at http://127.0.0.1:8080 or through an SSH tunnel.
 web:
   listen: 127.0.0.1:8080
@@ -14,6 +14,12 @@ scheduler:
   max_concurrent_scans: 1
   # Approximate probes permitted per run unless a job opts into high-cost work.
   max_probe_count: 5000000
+
+# Opening a public host in the console performs an on-demand RDAP lookup.
+# Set enabled: false for isolated or privacy-sensitive deployments.
+enrichment:
+  rdap:
+    enabled: true
 
 notifications:
   # Prefer a Docker secret-style file with one Shoutrrr URL per line.

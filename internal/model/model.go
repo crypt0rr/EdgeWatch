@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +25,77 @@ type Unit struct {
 	Ports     []PortState `json:"ports,omitempty"`
 }
 
+// HostObservation is the technical, per-effective-address evidence captured
+// from one or more protocol scans. Units remain the compact logical view used
+// by the baseline/change engine; observations deliberately do not participate
+// in that comparison.
+type HostObservation struct {
+	Address       string                `json:"address"`
+	SourceTargets []string              `json:"source_targets,omitempty"`
+	DNSNames      []string              `json:"dns_names,omitempty"`
+	AddressFamily string                `json:"address_family,omitempty"`
+	Status        string                `json:"status,omitempty"`
+	StatusReason  string                `json:"status_reason,omitempty"`
+	ReasonTTL     int                   `json:"reason_ttl,omitempty"`
+	LatencyMS     float64               `json:"latency_ms,omitempty"`
+	LinkAddresses []LinkAddress         `json:"link_addresses,omitempty"`
+	Hostnames     []Hostname            `json:"hostnames,omitempty"`
+	Protocols     []ProtocolObservation `json:"protocols,omitempty"`
+}
+
+type LinkAddress struct {
+	Address string `json:"address"`
+	Type    string `json:"type,omitempty"`
+	Vendor  string `json:"vendor,omitempty"`
+}
+
+type Hostname struct {
+	Name string `json:"name"`
+	Type string `json:"type,omitempty"`
+}
+
+type ProtocolObservation struct {
+	Protocol         string            `json:"protocol"`
+	ScanType         string            `json:"scan_type,omitempty"`
+	ScannedPorts     string            `json:"scanned_ports"`
+	ScannedPortCount int               `json:"scanned_port_count"`
+	ServiceDetection bool              `json:"service_detection"`
+	Ports            []PortObservation `json:"ports,omitempty"`
+	StateSummaries   []StateSummary    `json:"state_summaries,omitempty"`
+}
+
+type PortObservation struct {
+	Port      int                 `json:"port"`
+	State     string              `json:"state"`
+	Reason    string              `json:"reason,omitempty"`
+	ReasonTTL int                 `json:"reason_ttl,omitempty"`
+	Service   *ServiceObservation `json:"service,omitempty"`
+}
+
+type ServiceObservation struct {
+	Name       string   `json:"name,omitempty"`
+	Product    string   `json:"product,omitempty"`
+	Version    string   `json:"version,omitempty"`
+	ExtraInfo  string   `json:"extra_info,omitempty"`
+	Method     string   `json:"method,omitempty"`
+	Confidence int      `json:"confidence,omitempty"`
+	Tunnel     string   `json:"tunnel,omitempty"`
+	OSType     string   `json:"os_type,omitempty"`
+	DeviceType string   `json:"device_type,omitempty"`
+	CPEs       []string `json:"cpes,omitempty"`
+}
+
+type StateSummary struct {
+	State   string        `json:"state"`
+	Count   int           `json:"count"`
+	Reasons []StateReason `json:"reasons,omitempty"`
+}
+
+type StateReason struct {
+	Reason string `json:"reason"`
+	Count  int    `json:"count"`
+}
+
 type Scope struct {
 	Target           string `json:"target"`
 	Protocol         string `json:"protocol"`
@@ -35,6 +107,7 @@ type Snapshot struct {
 	Units  []Unit              `json:"units"`
 	Scopes []Scope             `json:"scopes"`
 	DNS    map[string][]string `json:"dns,omitempty"`
+	Hosts  []HostObservation   `json:"hosts,omitempty"`
 }
 
 type Scan struct {
@@ -224,6 +297,45 @@ func (s *Snapshot) Normalize() {
 	for key := range s.DNS {
 		sort.Strings(s.DNS[key])
 	}
+	for i := range s.Hosts {
+		host := &s.Hosts[i]
+		if ip := net.ParseIP(strings.TrimSpace(host.Address)); ip != nil {
+			host.Address = ip.String()
+		} else {
+			host.Address = strings.TrimSpace(host.Address)
+		}
+		sort.Strings(host.SourceTargets)
+		sort.Strings(host.DNSNames)
+		sort.Slice(host.LinkAddresses, func(a, b int) bool {
+			if host.LinkAddresses[a].Type == host.LinkAddresses[b].Type {
+				return host.LinkAddresses[a].Address < host.LinkAddresses[b].Address
+			}
+			return host.LinkAddresses[a].Type < host.LinkAddresses[b].Type
+		})
+		sort.Slice(host.Hostnames, func(a, b int) bool {
+			if host.Hostnames[a].Name == host.Hostnames[b].Name {
+				return host.Hostnames[a].Type < host.Hostnames[b].Type
+			}
+			return host.Hostnames[a].Name < host.Hostnames[b].Name
+		})
+		for j := range host.Protocols {
+			protocol := &host.Protocols[j]
+			sort.Slice(protocol.Ports, func(a, b int) bool { return protocol.Ports[a].Port < protocol.Ports[b].Port })
+			for k := range protocol.Ports {
+				if protocol.Ports[k].Service != nil {
+					sort.Strings(protocol.Ports[k].Service.CPEs)
+				}
+			}
+			for k := range protocol.StateSummaries {
+				sort.Slice(protocol.StateSummaries[k].Reasons, func(a, b int) bool {
+					return protocol.StateSummaries[k].Reasons[a].Reason < protocol.StateSummaries[k].Reasons[b].Reason
+				})
+			}
+			sort.Slice(protocol.StateSummaries, func(a, b int) bool { return protocol.StateSummaries[a].State < protocol.StateSummaries[b].State })
+		}
+		sort.Slice(host.Protocols, func(a, b int) bool { return host.Protocols[a].Protocol < host.Protocols[b].Protocol })
+	}
+	sort.Slice(s.Hosts, func(i, j int) bool { return s.Hosts[i].Address < s.Hosts[j].Address })
 }
 
 func (s Snapshot) Hash() string {
@@ -236,6 +348,11 @@ func (s Snapshot) Hash() string {
 			stable.Units[i].Ports[j].Evidence = nil
 		}
 	}
+	// Host observations are descriptive evidence (latency, discovery reason,
+	// service metadata, and state summaries), not baseline identity. Keep them
+	// out of convergence and security hashes so richer output never creates a
+	// false change or forces a rebaseline.
+	stable.Hosts = nil
 	stable.Normalize()
 	b, _ = json.Marshal(stable)
 	h := sha256.Sum256(b)

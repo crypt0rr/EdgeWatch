@@ -45,8 +45,20 @@ type Config struct {
 	Retention     Duration      `yaml:"retention"`
 	Scheduler     Scheduler     `yaml:"scheduler"`
 	Web           Web           `yaml:"web"`
+	Enrichment    Enrichment    `yaml:"enrichment"`
 	Notifications Notifications `yaml:"notifications"`
 	Jobs          []Job         `yaml:"jobs"`
+}
+
+// Enrichment controls optional, on-demand metadata lookups. RDAP is enabled
+// by default for backwards-compatible appliance installs; a pointer lets an
+// operator explicitly disable outbound registry requests with enabled:false.
+type Enrichment struct {
+	RDAP RDAP `yaml:"rdap"`
+}
+
+type RDAP struct {
+	Enabled *bool `yaml:"enabled"`
 }
 
 // Web contains the local administrative HTTP listener settings. The v0.3
@@ -196,6 +208,10 @@ func applyDefaults(c *Config) {
 	if c.Web.Listen == "" {
 		c.Web.Listen = "127.0.0.1:8080"
 	}
+	if c.Enrichment.RDAP.Enabled == nil {
+		enabled := true
+		c.Enrichment.RDAP.Enabled = &enabled
+	}
 	for i := range c.Jobs {
 		j := &c.Jobs[i]
 		if j.RunOnStart == nil {
@@ -228,6 +244,11 @@ func applyDefaults(c *Config) {
 			j.TCP.Mode = "syn"
 		}
 	}
+}
+
+// RDAPEnabled resolves the omission-defaulted deployment setting.
+func (c Config) RDAPEnabled() bool {
+	return c.Enrichment.RDAP.Enabled == nil || *c.Enrichment.RDAP.Enabled
 }
 
 func (c Config) Validate() error {

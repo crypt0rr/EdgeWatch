@@ -5,7 +5,7 @@ import { z } from 'zod'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, ChevronDown, Info, Plus, Save, Trash2, TriangleAlert } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { APIError, createJob, getJob, updateJob } from '../api'
+import { APIError, createJob, getJob, scheduleSuggestion, updateJob } from '../api'
 import type { JobForm, Protocol } from '../types'
 import { cidrWarning, duplicateTarget, targetKind } from '../target'
 
@@ -55,6 +55,8 @@ export function JobEditor() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
   const [draftDirty, setDraftDirty] = useState(false)
+  const [suggestionInput, setSuggestionInput] = useState({ schedule: blank.schedule, timezone: blank.timezone })
+  const [dismissedSuggestion, setDismissedSuggestion] = useState('')
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const loadedRevision = useRef<{ id?: string; revision: number } | null>(null)
   const { register, handleSubmit, reset, watch, setValue, formState: { errors: formErrors, isDirty } } = useForm<JobFormFields>({
@@ -62,7 +64,26 @@ export function JobEditor() {
     resolver: zodResolver(jobFormSchema),
   })
   const schedule = watch('schedule')
+  const timezone = watch('timezone')
   const timing = watch('timing')
+
+  useEffect(() => {
+    if (edit) return
+    const timer = window.setTimeout(() => setSuggestionInput({ schedule: schedule.trim(), timezone: timezone.trim() }), 350)
+    return () => window.clearTimeout(timer)
+  }, [edit, schedule, timezone])
+
+  const suggestionReady = !edit && suggestionInput.schedule.split(/\s+/).length === 5 && !!suggestionInput.timezone
+  const suggestionQuery = useQuery({
+    queryKey: ['schedule-suggestion', suggestionInput.schedule, suggestionInput.timezone],
+    queryFn: () => scheduleSuggestion(suggestionInput.schedule, suggestionInput.timezone),
+    enabled: suggestionReady,
+    staleTime: 15_000,
+    retry: false,
+  })
+  const currentSuggestion = suggestionInput.schedule === schedule.trim() && suggestionInput.timezone === timezone.trim() ? suggestionQuery.data : undefined
+  const suggestionKey = currentSuggestion?.nearest ? `${currentSuggestion.nearest.id}:${suggestionInput.schedule}:${suggestionInput.timezone}` : ''
+  const showSuggestion = !!currentSuggestion?.suggested && suggestionKey !== dismissedSuggestion
 
   const hasDraftChanges = isDirty || draftDirty
   const applyServerJob = (data: NonNullable<typeof existing.data>) => {
@@ -210,6 +231,7 @@ export function JobEditor() {
             <label>Preset<select value={presetFor(schedule)} onChange={(event) => { if (event.target.value !== 'custom') { setDraftDirty(true); setValue('schedule', event.target.value, { shouldDirty: true }) } }}><option value="0 */6 * * *">Every 6 hours</option><option value="0 * * * *">Every hour</option><option value="0 3 * * *">Daily at 03:00</option><option value="0 3 * * 0">Weekly on Sunday</option><option value="custom">Custom cron</option></select></label>
             <label>Five-field cron<input {...register('schedule')} placeholder="minute hour day month weekday" />{(formErrors.schedule?.message || fieldErrors.schedule) && <small className="field-error">{formErrors.schedule?.message || fieldErrors.schedule}</small>}<small>Uses the server’s standard cron parser.</small></label>
             <label>Timezone<input {...register('timezone')} placeholder="Europe/Amsterdam" />{(formErrors.timezone?.message || fieldErrors.timezone) && <small className="field-error">{formErrors.timezone?.message || fieldErrors.timezone}</small>}</label>
+            {showSuggestion && currentSuggestion?.nearest && <div className="notice schedule-suggestion" role="status"><Info size={16} /><div className="schedule-suggestion-copy"><strong>Stagger scheduled scans</strong><span>{currentSuggestion.nearest.name} is next at {formatSuggestionTime(currentSuggestion.nearest.next_run)} ({currentSuggestion.nearest.timezone}; {formatGap(currentSuggestion.gap_minutes)}). Starting 30 minutes {currentSuggestion.offset_minutes && currentSuggestion.offset_minutes < 0 ? 'earlier' : 'later'} keeps scheduled work apart.</span><small>You can keep this schedule when overlapping runs are intentional.</small></div>{currentSuggestion.suggested_schedule && <button type="button" className="button secondary" onClick={() => { setDraftDirty(true); setDismissedSuggestion(suggestionKey); setValue('schedule', currentSuggestion.suggested_schedule!, { shouldDirty: true, shouldValidate: true }) }}>Use {currentSuggestion.offset_minutes && currentSuggestion.offset_minutes < 0 ? 'earlier' : 'later'} time</button>}</div>}
             <label className="switch-row"><input type="checkbox" checked={scheduleEnabled} onChange={(event) => { setDraftDirty(true); setScheduleEnabled(event.target.checked) }} /><span><strong>Schedule enabled</strong><small>Pause future scheduled runs without archiving this job.</small></span></label>
             <label className="switch-row"><input type="checkbox" {...register('run_on_start')} /><span><strong>Run on startup</strong><small>Start a scan when EdgeWatch launches.</small></span></label>
             <label className="switch-row"><input type="checkbox" {...register('assume_alive')} /><span><strong>Assume targets are alive</strong><small>Use Nmap <code>-Pn</code>. Turn off to use host discovery.</small></span></label>
@@ -237,4 +259,15 @@ function ProtocolCard({ label, enabled, onToggle, protocol, setProtocol }: { lab
 
 function presetFor(schedule: string) {
   return ['0 */6 * * *', '0 * * * *', '0 3 * * *', '0 3 * * 0'].includes(schedule) ? schedule : 'custom'
+}
+
+function formatSuggestionTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'the next scheduled run'
+  return date.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+}
+
+function formatGap(minutes: number) {
+  if (minutes <= 0) return 'at the same time'
+  return `${minutes} minute${minutes === 1 ? '' : 's'} apart`
 }

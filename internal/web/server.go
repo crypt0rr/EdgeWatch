@@ -30,11 +30,12 @@ import (
 )
 
 type Server struct {
-	App   *app.App
-	Store *store.Store
-	Auth  *auth.Manager
-	RDAP  *rdap.Client
-	Log   *slog.Logger
+	App     *app.App
+	Store   *store.Store
+	Auth    *auth.Manager
+	RDAP    *rdap.Client
+	Log     *slog.Logger
+	Version string
 
 	mu           sync.Mutex
 	subscribers  map[chan sseMessage]struct{}
@@ -61,7 +62,11 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdap.New(s, a.Config.RDAPEnabled()), Log: logger, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}}
+	buildVersion := "dev"
+	if a != nil && a.Version != "" {
+		buildVersion = a.Version
+	}
+	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdap.New(s, a.Config.RDAPEnabled()), Log: logger, Version: buildVersion, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}}
 	if token, err := v.Auth.EnsureSetupToken(context.Background()); err != nil {
 		logger.Error("admin setup token generation failed", "error", err)
 	} else if token != "" {
@@ -203,8 +208,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.listJobs(w, r)
 	case path == "/jobs" && r.Method == http.MethodPost:
 		s.createJob(w, r)
+	case path == "/jobs/schedule-suggestion" && r.Method == http.MethodGet:
+		s.scheduleSuggestion(w, r)
 	case path == "/scans" && r.Method == http.MethodGet:
 		s.listScans(w, r)
+	case path == "/hosts" && r.Method == http.MethodGet:
+		s.listHosts(w, r)
 	case path == "/scans/active" && r.Method == http.MethodGet:
 		s.activeScans(w, r)
 	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/cancel") && r.Method == http.MethodPost:
@@ -253,6 +262,7 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]any{
 		"configured":            configured,
 		"username":              "admin",
+		"version":               s.Version,
 		"password_requirements": auth.PasswordRequirements(),
 	}
 	if !configured {
@@ -274,6 +284,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]any{
 		"configured":                true,
 		"username":                  "admin",
+		"version":                   s.Version,
 		"notification_destinations": notificationStatus["active"],
 		"notifications":             notificationStatus,
 		"retention":                 s.App.Config.Retention.Value().String(),
@@ -707,6 +718,14 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 	}
 	if len(parts) == 2 && parts[1] == "incidents" && r.Method == http.MethodGet {
 		s.jobIncidents(w, r, id)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "incidents" && parts[2] == "accept" && r.Method == http.MethodPost {
+		s.acceptIncident(w, r, id)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "incidents" && parts[2] == "suppress" && r.Method == http.MethodPost {
+		s.suppressIncident(w, r, id)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "events" && r.Method == http.MethodGet {
@@ -1280,6 +1299,90 @@ func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, id string)
 		items = []model.Incident{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": record.Job.Name, "incidents": items, "pagination": paginationJSON(offset, limit, incidentPage.Total), "truncated": false})
+}
+
+type incidentActionRequest struct {
+	Key string `json:"key"`
+}
+
+func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, id string) {
+	var input incidentActionRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	key := strings.TrimSpace(input.Key)
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "key_required", "incident key is required", map[string]string{"key": "incident key is required"})
+		return
+	}
+	record, err := s.Store.GetJob(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		return
+	}
+	events, err := s.Store.AcceptIncidentWithAudit(r.Context(), id, record.Job.Name, key, store.AuditEntry{Action: "incident.accepted", Detail: id + ":" + key})
+	if err != nil {
+		s.writeIncidentActionError(w, err, "incident.accepted")
+		return
+	}
+	s.broadcastIncidentEvents(id, events)
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, id string) {
+	var input incidentActionRequest
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	key := strings.TrimSpace(input.Key)
+	if key == "" {
+		writeError(w, http.StatusBadRequest, "key_required", "incident key is required", map[string]string{"key": "incident key is required"})
+		return
+	}
+	record, err := s.Store.GetJob(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		return
+	}
+	events, err := s.Store.SuppressIncidentWithAudit(r.Context(), id, record.Job.Name, key, store.AuditEntry{Action: "incident.suppressed", Detail: id + ":" + key})
+	if err != nil {
+		s.writeIncidentActionError(w, err, "incident.suppressed")
+		return
+	}
+	s.broadcastIncidentEvents(id, events)
+	writeJSON(w, http.StatusNoContent, nil)
+}
+
+func (s *Server) writeIncidentActionError(w http.ResponseWriter, err error, action string) {
+	if s.writeAuditUnavailable(w, err, action) {
+		return
+	}
+	switch {
+	case errors.Is(err, store.ErrIncidentNotFound):
+		writeError(w, http.StatusNotFound, "incident_not_found", "incident is no longer active", nil)
+	case errors.Is(err, store.ErrJobScanActive):
+		writeError(w, http.StatusConflict, "job_active", "incident actions cannot change the baseline during an active scan", nil)
+	case errors.Is(err, store.ErrBaselineNotReady):
+		writeError(w, http.StatusConflict, "baseline_not_ready", "the job does not have an active baseline", nil)
+	case errors.Is(err, store.ErrUnsupportedIncidentChange):
+		writeError(w, http.StatusBadRequest, "incident_change_invalid", "this incident cannot be applied to the baseline", nil)
+	default:
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+	}
+}
+
+func (s *Server) broadcastIncidentEvents(jobID string, events []model.Event) {
+	for _, event := range events {
+		s.broadcast(map[string]any{"type": event.Type, "job_id": jobID, "job": event.Job, "scan_id": event.ScanID, "message": event.Message, "changes": event.Changes})
+	}
 }
 
 // jobBaseline exposes the current comparison state without requiring clients

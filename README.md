@@ -84,7 +84,15 @@ pause/resume controls, and a preflight Nmap work estimate. Broad scans are
 guarded by the scheduler probe budget; enable the explicit high-cost override
 only when the additional load is understood. Active scans expose completed
 probe/process counts in the dashboard and can be canceled without changing a
-baseline or opening/recovering incidents.
+baseline or opening/recovering incidents. Every terminal non-success outcome
+(including operator cancellation, scanner errors, and timeouts) is recorded and
+sent to configured notification destinations; the message includes the scan
+and failure reason.
+
+When creating a job, the editor compares its next scheduled run with active
+jobs and offers a non-blocking 30-minute offset when another run is too close.
+The suggestion is optional: keep the chosen schedule when concurrent runs are
+intentional.
 
 `assume_alive` defaults to `true` and passes `-Pn` to Nmap. Set it to `false`
 when host discovery is required. If discovery reports an expected target as
@@ -96,6 +104,9 @@ every effective address produced by the configured targets. Host detail pages
 show the exact TCP/UDP scope, positive ports, service fingerprints, Nmap
 reasons, and summarized closed/filtered outcomes. Scan history has the same
 per-address view; older snapshots remain readable with a legacy-detail notice.
+The **Hosts** page aggregates the latest successful historical result for each
+effective IP across all jobs and links directly to that scan's detailed host
+view.
 
 ## Baselines and incidents
 
@@ -103,6 +114,12 @@ Set the number of baseline samples and change confirmations per job. Only
 successful scans can advance a baseline; failed, timed-out, partial, or
 malformed scans never change comparison state. Confirmed port, service, or DNS
 changes appear as incidents and can trigger notifications.
+
+From the Incidents page, the administrator can **Accept change** to fold a
+confirmed observation into the current baseline (scan history remains
+unchanged), or **Suppress 1 scan** to hide it for the next successful scan.
+Suppression is scan-based rather than time-based: if the same change is still
+present after that scan, it is reported again and notifications resume.
 
 Review and approve a successful current-scope scan, or reset the baseline,
 from the job detail page. Security-relevant job edits require explicit
@@ -179,23 +196,6 @@ docker compose config --quiet
 The browser acceptance tests use deterministic API fixtures; integration
 scans should only target controlled listeners. The production image embeds the
 frontend and does not include Node.js.
-
-## Releases
-
-Pull requests and pushes to `main` run the Go, frontend, browser, Compose, and
-multi-architecture container checks. Releases are tag-driven. After the
-validated commit is merged to `main`, create and push a semantic-version tag:
-
-```console
-git tag -a vX.Y.Z -m "EdgeWatch vX.Y.Z"
-git push origin vX.Y.Z
-```
-
-The release workflow publishes Linux AMD64/ARM64 archives and checksums plus
-the corresponding GHCR image with SBOM and provenance attestations. It also
-updates `latest` for stable (non-prerelease) tags. For reproducible deployments,
-pin Compose to the immutable release tag and digest after verifying the
-published artifacts.
 
 ## License
 

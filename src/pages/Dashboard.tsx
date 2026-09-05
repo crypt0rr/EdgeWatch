@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { Activity, AlertTriangle, Bell, CheckCircle2, Clock3, Play, Radar } from 'lucide-react'
 import { activeScans, adminStatus, cancelScan, listIncidents, listJobs, listScans, notificationTest, runJob } from '../api'
 import { useNavigate } from 'react-router-dom'
+import { formatRetention } from '../format'
 
 export function Dashboard() {
   const navigate = useNavigate()
@@ -21,7 +22,7 @@ export function Dashboard() {
   const ready = jobs.data?.jobs.filter(j => j.baseline.status === 'complete').length ?? 0
   const activeJobs = jobs.data?.jobs.filter(j => j.enabled && !j.archived).length ?? 0
   const notificationCount = setup.data?.notification_destinations ?? 0
-  const policy = setup.data?.retention ? `Retention ${setup.data.retention} · ${setup.data.max_concurrent_scans ?? 1} scan${setup.data.max_concurrent_scans === 1 ? '' : 's'} at a time.` : ''
+  const policy = setup.data?.retention ? `Retention ${formatRetention(setup.data.retention)} · ${setup.data.max_concurrent_scans ?? 1} scan${setup.data.max_concurrent_scans === 1 ? '' : 's'} at a time.` : ''
   async function runConfiguredJob(id: string) {
     setRunError('')
     setRunningJob(id)

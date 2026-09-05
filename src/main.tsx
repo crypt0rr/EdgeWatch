@@ -2,8 +2,8 @@ import { StrictMode, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Activity, Bell, Boxes, ClipboardList, Gauge, LogOut, Menu, ShieldCheck, Wifi } from 'lucide-react'
-import { getSession, listIncidents, listJobs, setCSRF, setupStatus, logout as apiLogout } from './api'
+import { Activity, Bell, Boxes, ClipboardList, Gauge, LogOut, Menu, Server, ShieldCheck, Wifi } from 'lucide-react'
+import { acceptIncident, getSession, listIncidents, listJobs, setCSRF, setupStatus, suppressIncident, logout as apiLogout } from './api'
 import { Dashboard } from './pages/Dashboard'
 import { JobEditor } from './pages/JobEditor'
 import { JobDetail } from './pages/JobDetail'
@@ -12,17 +12,21 @@ import { Security } from './pages/Security'
 import { Notifications } from './pages/Notifications'
 import { BaselineHosts } from './pages/BaselineHosts'
 import { HostDetail } from './pages/HostDetail'
+import { Hosts } from './pages/Hosts'
 import { Pagination } from './components/Pagination'
+import type { Incident } from './types'
 import './tailwind.css'
 import './styles.css'
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 5000, refetchOnWindowFocus: true } } })
 
-function Shell({ username, onLogout }: { username: string; onLogout: () => void }) {
+function Shell({ username, version, onLogout }: { username: string; version: string; onLogout: () => void }) {
   const [open, setOpen] = useState(false)
   const [liveState, setLiveState] = useState<'connecting' | 'live' | 'reconnecting'>('connecting')
   const location = useLocation()
   const client = useQueryClient()
+  const incidentSummary = useQuery({ queryKey: ['incidents', 'navigation'], queryFn: () => listIncidents(0, 1), refetchInterval: 15000 })
+  const incidentCount = incidentSummary.data?.pagination.total ?? 0
   useEffect(() => {
     const stream = new EventSource('/api/v1/stream')
     stream.onopen = () => setLiveState('live')
@@ -35,13 +39,20 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
           case 'scan.completed':
             void client.invalidateQueries({ queryKey: ['active-scans'] })
             void client.invalidateQueries({ queryKey: ['scans'] })
+            void client.invalidateQueries({ queryKey: ['hosts'] })
             if (event.job_id) void client.invalidateQueries({ queryKey: ['job-scans', event.job_id] })
             break
           case 'changes-detected':
           case 'incident-opened':
           case 'incident-closed':
+          case 'incident-accepted':
+          case 'incident-suppressed':
             void client.invalidateQueries({ queryKey: ['incidents'] })
             if (event.job_id) void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+            if (event.type === 'incident-accepted') {
+              void client.invalidateQueries({ queryKey: ['baseline-hosts', event.job_id] })
+              void client.invalidateQueries({ queryKey: ['host-detail'] })
+            }
             break
           case 'job.created':
           case 'job.updated':
@@ -70,6 +81,7 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
   const links = [
     { to: '/', label: 'Overview', icon: Gauge },
     { to: '/jobs', label: 'Jobs', icon: Boxes },
+    { to: '/hosts', label: 'Hosts', icon: Server },
     { to: '/incidents', label: 'Incidents', icon: Activity },
     { to: '/notifications', label: 'Notifications', icon: Bell },
     { to: '/security', label: 'Security', icon: ShieldCheck },
@@ -77,11 +89,11 @@ function Shell({ username, onLogout }: { username: string; onLogout: () => void 
   return <div className="app-shell">
     <aside className={open ? 'sidebar open' : 'sidebar'}>
       <div className="brand"><span className="brand-mark"><Wifi size={19} /></span><span>EdgeWatch</span></div>
-      <nav>{links.map(({ to, label, icon: Icon }) => <Link key={to} to={to} onClick={() => setOpen(false)} className={location.pathname === to || (to === '/jobs' && location.pathname.startsWith('/jobs')) ? 'nav-link active' : 'nav-link'}><Icon size={18} />{label}</Link>)}</nav>
-      <div className="sidebar-bottom"><div className="user-chip"><span className="avatar">A</span><span><strong>{username}</strong><small>Administrator</small></span></div><button className="nav-link quiet" onClick={onLogout}><LogOut size={17} />Sign out</button></div>
+      <nav>{links.map(({ to, label, icon: Icon }) => { const active = location.pathname === to || (to === '/jobs' && location.pathname.startsWith('/jobs')) || (to === '/hosts' && location.pathname.startsWith('/scans/')); const incidents = to === '/incidents'; const attention = incidents && incidentCount > 0; return <Link key={to} to={to} onClick={() => setOpen(false)} aria-label={incidents ? 'Incidents' : undefined} aria-describedby={attention ? 'active-incident-count' : undefined} className={`nav-link${active ? ' active' : ''}${attention ? ' nav-link-alert' : ''}`}><Icon size={18} /><span className="nav-link-label">{label}</span>{attention && <span id="active-incident-count" className="nav-count" aria-live="polite" aria-label={`${incidentCount} active incident${incidentCount === 1 ? '' : 's'}`}>{incidentCount > 99 ? '99+' : incidentCount}</span>}</Link> })}</nav>
+      <div className="sidebar-bottom"><div className="user-chip"><span className="avatar">A</span><span><small className="app-version">EdgeWatch {version}</small><strong>{username}</strong><small>Administrator</small></span></div><button className="nav-link quiet" onClick={onLogout}><LogOut size={17} />Sign out</button></div>
     </aside>
     {open && <button aria-label="Close navigation" className="backdrop" onClick={() => setOpen(false)} />}
-    <main className="main"><header className="topbar"><button aria-label="Open navigation" className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><div className="breadcrumb">{location.pathname === '/' ? 'Overview' : location.pathname.split('/').filter(Boolean).map(v => v[0].toUpperCase() + v.slice(1)).join(' / ')}</div><div className="topbar-actions"><span className="status-dot"><i /> {liveState === 'live' ? 'Live updates' : liveState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}</span><Bell size={18} /></div></header><div className="content"><Routes><Route path="/" element={<Dashboard />} /><Route path="/jobs" element={<Jobs />} /><Route path="/jobs/new" element={<JobEditor />} /><Route path="/jobs/:id" element={<JobDetail />} /><Route path="/jobs/:id/edit" element={<JobEditor />} /><Route path="/jobs/:id/baseline" element={<BaselineHosts />} /><Route path="/jobs/:id/baseline/hosts/:address" element={<HostDetail />} /><Route path="/jobs/:id/scans/:scanId/hosts/:address" element={<HostDetail />} /><Route path="/incidents" element={<Incidents />} /><Route path="/notifications" element={<Notifications />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></div></main>
+    <main className="main"><header className="topbar"><button aria-label="Open navigation" className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><div className="breadcrumb">{location.pathname === '/' ? 'Overview' : location.pathname.split('/').filter(Boolean).map(v => v[0].toUpperCase() + v.slice(1)).join(' / ')}</div><div className="topbar-actions"><span className="status-dot"><i /> {liveState === 'live' ? 'Live updates' : liveState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}</span><Bell size={18} /></div></header><div className="content"><Routes><Route path="/" element={<Dashboard />} /><Route path="/jobs" element={<Jobs />} /><Route path="/jobs/new" element={<JobEditor />} /><Route path="/jobs/:id" element={<JobDetail />} /><Route path="/jobs/:id/edit" element={<JobEditor />} /><Route path="/jobs/:id/baseline" element={<BaselineHosts />} /><Route path="/jobs/:id/baseline/hosts/:address" element={<HostDetail />} /><Route path="/jobs/:id/scans/:scanId/hosts/:address" element={<HostDetail />} /><Route path="/hosts" element={<Hosts />} /><Route path="/scans/:scanId/hosts/:address" element={<HostDetail />} /><Route path="/incidents" element={<Incidents />} /><Route path="/notifications" element={<Notifications />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></div></main>
   </div>
 }
 
@@ -95,17 +107,48 @@ function protocolSummary(job: { job: { tcp?: { ports: string }; udp?: { ports: s
 
 function Incidents() {
   const [offset, setOffset] = useState(0)
+  const [busy, setBusy] = useState('')
+  const [actionError, setActionError] = useState('')
+  const client = useQueryClient()
   const incidents = useQuery({ queryKey: ['incidents', offset], queryFn: () => listIncidents(offset) })
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Change tracking</p><h1>Incidents</h1><p className="muted">Confirmed changes detected against active baselines.</p></div></div>{incidents.isLoading ? <Loading /> : incidents.data?.incidents.length ? <><div className="table-card"><table><thead><tr><th>Job</th><th>Target</th><th>Change</th><th>Severity</th><th>Last seen</th></tr></thead><tbody>{incidents.data.incidents.map((row, i) => <tr key={`${row.job_id}-${row.incident.change.key ?? i}`}><td><strong>{row.job}</strong></td><td>{row.incident.change.target}</td><td>{row.incident.change.kind}{row.incident.change.port ? ` / ${row.incident.change.protocol}:${row.incident.change.port}` : ''}</td><td><span className={`pill ${row.incident.change.severity === 'critical' ? 'red' : 'amber'}`}>{row.incident.change.severity}</span></td><td>{new Date(row.incident.last_seen_at).toLocaleString()}</td></tr>)}</tbody></table></div><Pagination page={incidents.data.pagination} onChange={setOffset} /></> : <Empty icon={<ClipboardList />} title="No active incidents" body="EdgeWatch will show confirmed port, service, or DNS changes here." />}</section>
+  async function act(row: Incident, action: 'accept' | 'suppress') {
+    const key = row.incident.change.key
+    if (!key) {
+      setActionError('This legacy incident has no actionable key. Run a newer scan before changing it.')
+      return
+    }
+    const message = action === 'accept'
+      ? `Accept this change into the baseline for “${row.job}”? Future scans will treat it as expected.`
+      : 'Suppress this incident for the next successful scan? If it is still present after that scan, it will be reported again.'
+    if (!window.confirm(message)) return
+    const actionID = `${action}:${row.job_id}:${key}`
+    setBusy(actionID)
+    setActionError('')
+    try {
+      if (action === 'accept') await acceptIncident(row.job_id, key)
+      else await suppressIncident(row.job_id, key)
+      await client.invalidateQueries({ queryKey: ['incidents'] })
+      await client.invalidateQueries({ queryKey: ['job', row.job_id] })
+      if (action === 'accept') {
+        await client.invalidateQueries({ queryKey: ['baseline-hosts', row.job_id] })
+        await client.invalidateQueries({ queryKey: ['host-detail'] })
+      }
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'The incident action could not be completed.')
+    } finally {
+      setBusy('')
+    }
+  }
+  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Change tracking</p><h1>Incidents</h1><p className="muted">Confirmed changes detected against active baselines.</p></div></div>{actionError && <div className="form-error banner" role="alert">{actionError}</div>}{incidents.isLoading ? <Loading /> : incidents.data?.incidents.length ? <><div className="table-card"><table><thead><tr><th>Job</th><th>Target</th><th>Change</th><th>Severity</th><th>Last seen</th><th>Actions</th></tr></thead><tbody>{incidents.data.incidents.map((row, i) => { const key = row.incident.change.key; const acceptID = `accept:${row.job_id}:${key ?? i}`; const suppressID = `suppress:${row.job_id}:${key ?? i}`; return <tr key={`${row.job_id}-${key ?? i}`}><td><strong>{row.job}</strong></td><td>{row.incident.change.target}</td><td>{row.incident.change.kind}{row.incident.change.port ? ` / ${row.incident.change.protocol}:${row.incident.change.port}` : ''}</td><td><span className={`pill ${row.incident.change.severity === 'critical' ? 'red' : 'amber'}`}>{row.incident.change.severity}</span></td><td>{new Date(row.incident.last_seen_at).toLocaleString()}</td><td><div className="incident-actions"><button className="button secondary" type="button" onClick={() => void act(row, 'accept')} disabled={!key || !!busy}>{busy === acceptID ? 'Accepting…' : 'Accept change'}</button><button className="button ghost" type="button" onClick={() => void act(row, 'suppress')} disabled={!key || !!busy}>{busy === suppressID ? 'Suppressing…' : 'Suppress 1 scan'}</button></div></td></tr> })}</tbody></table></div><Pagination page={incidents.data.pagination} onChange={setOffset} /></> : <Empty icon={<ClipboardList />} title="No active incidents" body="EdgeWatch will show confirmed port, service, or DNS changes here." />}</section>
 }
 
-function ProtectedApp() { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate]); if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; return <Shell username={session.data?.username ?? 'admin'} onLogout={async () => { await apiLogout(); setCSRF(''); queryClient.clear(); navigate('/login') }} /> }
+function ProtectedApp({ version, onLogout }: { version: string; onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate]); if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; return <Shell username={session.data?.username ?? 'admin'} version={version} onLogout={onLogout} /> }
 
 function AuthRoutes({ configured }: { configured: boolean }) { const location = useLocation(); return <Routes><Route path="/setup" element={<Setup />} /><Route path="/login" element={<Login />} /><Route path="*" element={configured ? <Navigate to="/login" replace state={{ from: { pathname: location.pathname, search: location.search } }} /> : <Navigate to="/setup" replace />} /></Routes> }
 
-function App() { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus, retry: false }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const authenticated = !!session.data && !session.error; return <BrowserRouter>{status.isLoading || session.isLoading ? <Loading /> : status.error ? <ErrorCard message="Unable to contact EdgeWatch. Retry when the service is available." /> : status.data?.configured && authenticated ? <ProtectedApp /> : <AuthGate statusConfigured={!!status.data?.configured} authenticated={authenticated} />}</BrowserRouter> }
+function App() { const [signedOut, setSignedOut] = useState(false); const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus, retry: false }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); useEffect(() => { if (session.data) setSignedOut(false) }, [session.data]); const authenticated = !signedOut && !!session.data && !session.error; async function handleLogout() { try { await apiLogout() } catch { /* The server clears the cookie before reporting audit errors. */ } finally { setCSRF(''); queryClient.clear(); queryClient.setQueryData(['session'], null); setSignedOut(true) } } return <BrowserRouter>{status.isLoading || session.isLoading ? <Loading /> : status.error ? <ErrorCard message="Unable to contact EdgeWatch. Retry when the service is available." /> : status.data?.configured && authenticated ? <ProtectedApp version={status.data.version ?? 'dev'} onLogout={handleLogout} /> : <AuthGate statusConfigured={!!status.data?.configured} />}</BrowserRouter> }
 
-function AuthGate({ statusConfigured, authenticated }: { statusConfigured: boolean; authenticated: boolean }) { if (authenticated) return <ProtectedApp />; return <AuthRoutes configured={statusConfigured} /> }
+function AuthGate({ statusConfigured }: { statusConfigured: boolean }) { return <AuthRoutes configured={statusConfigured} /> }
 
 function Loading() { return <div className="loading"><span className="spinner" />Loading EdgeWatch…</div> }
 function ErrorCard({ message }: { message: string }) { return <div className="error-card">{message}</div> }

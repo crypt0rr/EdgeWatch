@@ -17,7 +17,7 @@ export type ActiveScan = {
 }
 export type Unit = { target: string; protocol: string; addresses?: string[]; ports?: { port: number; state: string; service?: string }[] }
 export type Scope = { target: string; protocol: string; ports: string; service_detection: boolean }
-export type Incident = { job_id: string; job: string; incident: { change: { key?: string; kind: string; target: string; protocol?: string; port?: number; old?: string; new?: string; severity: string }; opened_at: string; last_seen_at: string } }
+export type Incident = { job_id: string; job: string; incident: { change: { key?: string; kind: string; target: string; protocol?: string; port?: number; old?: string; new?: string; severity: string }; scan_id?: string; opened_at: string; last_seen_at: string; recovery_count?: number } }
 export type Change = { key?: string; kind: string; target: string; protocol?: string; port?: number; old?: string; new?: string; severity: string }
 
 export type StateReason = { reason: string; count: number }
@@ -42,9 +42,13 @@ export type HostProtocolSummary = {
   service_detection: boolean; open_ports: number; open_filtered_ports: number
 }
 export type HostSummary = {
-  address: string; address_family?: string; source_targets?: string[]; protocols?: HostProtocolSummary[]
+  address: string; address_family?: string; source_targets?: string[]; dns_names?: string[]; protocols?: HostProtocolSummary[]
   open_ports: number; open_filtered_ports: number; has_open_ports: boolean; legacy?: boolean
 }
+export type GlobalHostSummary = HostSummary & {
+  job_id?: string; job: string; scan_id: string; scanned_at: string; data_quality: string
+}
+export type GlobalHostsResponse = { hosts: GlobalHostSummary[]; pagination: Pagination }
 export type BaselineHostsResponse = {
   job_id: string; job: string; source_scan?: ScanSummary | null; data_quality: string
   hosts: HostSummary[]; pagination: Pagination

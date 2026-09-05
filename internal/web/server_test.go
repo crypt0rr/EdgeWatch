@@ -186,6 +186,7 @@ func TestSetupStatusDoesNotExposeOperationalDetails(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	a.Version = "v0.7.0"
 	h := httptest.NewServer(NewServer(a, s, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
 	defer h.Close()
 
@@ -201,6 +202,9 @@ func TestSetupStatusDoesNotExposeOperationalDetails(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("setup status returned %d", resp.StatusCode)
+	}
+	if public["version"] != "v0.7.0" {
+		t.Fatalf("setup status version = %#v", public["version"])
 	}
 	for _, key := range []string{"notifications", "notification_destinations", "retention", "max_concurrent_scans", "legacy_yaml_jobs"} {
 		if _, ok := public[key]; ok {
@@ -231,6 +235,9 @@ func TestSetupStatusDoesNotExposeOperationalDetails(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("authenticated status returned %d", resp.StatusCode)
+	}
+	if private["version"] != "v0.7.0" {
+		t.Fatalf("authenticated status version = %#v", private["version"])
 	}
 	for _, key := range []string{"notifications", "retention", "max_concurrent_scans", "legacy_yaml_jobs"} {
 		if _, ok := private[key]; !ok {
@@ -568,6 +575,35 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 	changedScan := scans[0]
 	if changedScan.BaselineScanID == "" || len(changedScan.Changes) == 0 {
 		t.Fatalf("changed scan did not persist its scan-time comparison: %#v", changedScan)
+	}
+	incidentKey := changedScan.Changes[0].Key
+	resp = request(http.MethodPost, "/api/v1/jobs/"+created.ID+"/incidents/suppress", `{"key":"`+incidentKey+`"}`, loginResult.CSRF)
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("suppress status %d: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+	state, err := s.RuntimeState(ctx, created.ID)
+	if err != nil || len(state.Incidents) != 0 || state.Suppressed[incidentKey] != 1 {
+		t.Fatalf("suppression state: %#v (err=%v)", state, err)
+	}
+	if _, err := s.UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents[incidentKey] = model.Incident{Change: changedScan.Changes[0], OpenedAt: time.Now().UTC(), LastSeenAt: time.Now().UTC()}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp = request(http.MethodPost, "/api/v1/jobs/"+created.ID+"/incidents/accept", `{"key":"`+incidentKey+`"}`, loginResult.CSRF)
+	if resp.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("accept status %d: %s", resp.StatusCode, body)
+	}
+	resp.Body.Close()
+	state, err = s.RuntimeState(ctx, created.ID)
+	if err != nil || len(state.Incidents) != 0 || state.Baseline == nil || len(state.Baseline.Units[0].Ports) != 0 {
+		t.Fatalf("acceptance state: %#v (err=%v)", state, err)
 	}
 	if _, err := s.ResetRuntime(ctx, created.ID, "incident-flow"); err != nil {
 		t.Fatal(err)

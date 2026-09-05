@@ -1,4 +1,4 @@
-import { FormEvent, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Bell, Check, KeyRound, LockKeyhole, Pencil, Plug, RefreshCw, Send, ShieldCheck, Trash2 } from 'lucide-react'
 import {
@@ -18,6 +18,13 @@ type EditState = {
   enabled: boolean
 }
 
+type PasswordPromptState = {
+  title: string
+  description: string
+  confirmLabel: string
+  resolve: (password: string | null) => void
+}
+
 export function Notifications() {
   const client = useQueryClient()
   const destinations = useQuery({ queryKey: ['notifications'], queryFn: listNotificationDestinations, refetchInterval: 30_000 })
@@ -26,6 +33,8 @@ export function Notifications() {
   const [enabled, setEnabled] = useState(true)
   const [password, setPassword] = useState('')
   const [edit, setEdit] = useState<EditState | null>(null)
+  const [passwordPrompt, setPasswordPrompt] = useState<PasswordPromptState | null>(null)
+  const [promptPassword, setPromptPassword] = useState('')
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
@@ -74,6 +83,20 @@ export function Notifications() {
     setEdit({ id: destination.id, name: destination.name, url: '', enabled: destination.enabled })
   }
 
+  function askPassword(title: string, description: string, confirmLabel: string) {
+    return new Promise<string | null>(resolve => {
+      setPromptPassword('')
+      setPasswordPrompt({ title, description, confirmLabel, resolve })
+    })
+  }
+
+  function resolvePassword(password: string | null) {
+    const pending = passwordPrompt
+    setPasswordPrompt(null)
+    setPromptPassword('')
+    pending?.resolve(password)
+  }
+
   async function saveEdit(event: FormEvent) {
     event.preventDefault()
     if (!edit) return
@@ -83,7 +106,7 @@ export function Notifications() {
       setError('This destination changed. Refresh the page and try again.')
       return
     }
-    const confirmation = window.prompt('Enter the administrator password to save this destination.')
+    const confirmation = await askPassword('Confirm destination changes', 'Enter the administrator password to save this destination.', 'Save changes')
     if (confirmation === null) return
     setBusy(edit.id)
     try {
@@ -103,7 +126,8 @@ export function Notifications() {
   async function toggle(destination: NotificationDestination) {
     if (destination.locked || destination.revision === undefined) return
     resetFeedback()
-    const confirmation = window.prompt(`Enter the administrator password to ${destination.enabled ? 'pause' : 'enable'} this destination.`)
+    const action = destination.enabled ? 'pause' : 'enable'
+    const confirmation = await askPassword(`Confirm ${action}`, `Enter the administrator password to ${action} this destination.`, destination.enabled ? 'Pause destination' : 'Enable destination')
     if (confirmation === null) return
     setBusy(destination.id)
     try {
@@ -121,7 +145,7 @@ export function Notifications() {
     if (destination.revision === undefined) return
     resetFeedback()
     if (!window.confirm(`Remove “${destination.name}”? Its delivery history is retained, but this destination will no longer receive notifications.`)) return
-    const confirmation = window.prompt('Enter the administrator password to remove this destination.')
+    const confirmation = await askPassword('Confirm removal', 'Enter the administrator password to remove this destination.', 'Remove destination')
     if (confirmation === null) return
     setBusy(destination.id)
     try {
@@ -170,7 +194,33 @@ export function Notifications() {
       {destinations.isLoading ? <div className="loading"><span className="spinner" />Loading destinations…</div> : destinations.error ? <div className="error-card">{destinations.error.message}</div> : destinations.data?.destinations.length ? <div className="notification-list">{destinations.data.destinations.map(destination => <DestinationRow key={destination.id} destination={destination} editing={edit?.id === destination.id ? edit : null} busy={busy} onEdit={beginEdit} onCancel={() => setEdit(null)} onSave={saveEdit} onChange={setEdit} onToggle={toggle} onDelete={remove} onTest={test} />)}</div> : <div className="inline-empty">No notification destinations are configured.</div>}
     </div>
     <p className="helper notification-footnote"><LockKeyhole size={13} /> URLs containing credentials are encrypted with the local notification key. Back up <code>notification.key</code> with <code>edgewatch.db</code>; losing it locks web-managed destinations until the key is restored (or a destination is deleted and recreated).</p>
+    {passwordPrompt && <PasswordDialog prompt={passwordPrompt} password={promptPassword} onPasswordChange={setPromptPassword} onSubmit={resolvePassword} onCancel={() => resolvePassword(null)} />}
   </section>
+}
+
+function PasswordDialog({ prompt, password, onPasswordChange, onSubmit, onCancel }: { prompt: PasswordPromptState; password: string; onPasswordChange: (value: string) => void; onSubmit: (value: string) => void; onCancel: () => void }) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    inputRef.current?.focus()
+  }, [])
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') onCancel()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => document.removeEventListener('keydown', onKeyDown)
+  }, [onCancel])
+  return <div className="modal-backdrop" role="presentation" onMouseDown={onCancel}>
+    <section className="password-dialog" role="dialog" aria-modal="true" aria-labelledby="notification-password-title" aria-describedby="notification-password-description" onMouseDown={event => event.stopPropagation()}>
+      <div className="password-dialog-icon"><LockKeyhole size={19} /></div>
+      <h2 id="notification-password-title">{prompt.title}</h2>
+      <p id="notification-password-description">{prompt.description}</p>
+      <form onSubmit={event => { event.preventDefault(); if (password) onSubmit(password) }}>
+        <label>Administrator password<input ref={inputRef} type="password" value={password} onChange={event => onPasswordChange(event.target.value)} autoComplete="current-password" required /></label>
+        <div className="password-dialog-actions"><button className="button ghost" type="button" onClick={onCancel}>Cancel</button><button className="button primary" type="submit" disabled={!password}>{prompt.confirmLabel}</button></div>
+      </form>
+    </section>
+  </div>
 }
 
 function DestinationRow({ destination, editing, busy, onEdit, onCancel, onSave, onChange, onToggle, onDelete, onTest }: { destination: NotificationDestination; editing: EditState | null; busy: string; onEdit: (destination: NotificationDestination) => void; onCancel: () => void; onSave: (event: FormEvent) => void; onChange: (next: EditState | null) => void; onToggle: (destination: NotificationDestination) => void; onDelete: (destination: NotificationDestination) => void; onTest: (destination: NotificationDestination) => void }) {

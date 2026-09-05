@@ -82,9 +82,11 @@ the replacement is issued.
   not used for scheduling.
 
 Retention applies to completed scans, events, sent notification deliveries,
-terminally failed deliveries, and superseded job revisions. Active baselines,
-the current revision of every job, pending/retryable deliveries, and the
-security audit log are retained; audit records are intentionally indefinite.
+terminally failed deliveries, superseded job revisions, and terminal
+resumable-cycle metadata that no retained scan still references. Active
+baselines, the current revision of every job, pending/retryable deliveries,
+active scan cycles, and the security audit log are retained; audit records are
+intentionally indefinite.
 The daemon logs the row counts removed from each retention class at startup
 and during its daily pruning pass.
 
@@ -99,6 +101,20 @@ baseline or opening/recovering incidents. Every terminal non-success outcome
 (including operator cancellation, scanner errors, and timeouts) is recorded and
 sent to configured notification destinations; the message includes the scan
 and failure reason.
+
+For broad jobs (more than 4,096 configured ports or 65,536 estimated probes),
+EdgeWatch automatically breaks the scan into deterministic Nmap work units.
+Each successful unit is checkpointed in SQLite. If the per-attempt timeout is
+reached, the current unit is split (addresses first, then ports) and the cycle
+is paused for the next scheduled or manual trigger; partial cycles never affect
+the baseline. Paused progress is retained for eight days by default. Configure
+the per-job `resume_window` between `1h` and `30d`, or use **Discard saved
+progress** on the job page to force a fresh full-range cycle. Three consecutive
+attempts without any completed work mark a cycle stalled and generate a failure
+notification. If the resume window expires, EdgeWatch records one terminal
+failure notification before the next trigger starts from a fresh plan. A
+completed cycle emits a recovery notification when it follows earlier timeout
+pauses.
 
 When creating a job, the editor compares its next scheduled run with active
 jobs and offers a non-blocking 30-minute offset when another run is too close.
@@ -182,7 +198,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 7), but it is
+version 10), but it is
 forward-only: an older binary refuses a newer schema. To roll back, stop the
 new service, restore the entire pre-upgrade `./data` directory and deployment
 configuration, then start the previous image. Do not point an older image at

@@ -190,6 +190,29 @@ func TestSecurityHashIncludesAssumeAlive(t *testing.T) {
 	}
 }
 
+func TestResumeWindowDefaultsAndExecutionHash(t *testing.T) {
+	job := NormalizeJob(Job{Name: "resume", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &Protocol{Ports: "1", Mode: "syn"}})
+	if job.ResumeWindowValue() != 8*24*time.Hour {
+		t.Fatalf("resume window default = %s", job.ResumeWindowValue())
+	}
+	changed := job
+	changed.Timing = "fast"
+	if job.ExecutionHash() == changed.ExecutionHash() {
+		t.Fatal("timing change did not alter execution hash")
+	}
+	if job.SecurityHash() != changed.SecurityHash() {
+		t.Fatal("timing change unexpectedly altered security hash")
+	}
+	changed.Timeout = Duration(2 * time.Hour)
+	if job.ExecutionHash() == changed.ExecutionHash() {
+		t.Fatal("timeout change did not alter execution hash")
+	}
+	changed.ResumeWindow = Duration(31 * 24 * time.Hour)
+	if err := ValidateJob(changed); err == nil || !strings.Contains(err.Error(), "resume_window") {
+		t.Fatalf("invalid resume window accepted: %v", err)
+	}
+}
+
 func TestCanonicalTargetsRejectEquivalentForms(t *testing.T) {
 	for _, targets := range [][]string{
 		{"192.168.1.1/24", "192.168.1.0/24"},

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,6 +39,36 @@ func (deadlineScanner) Version(context.Context) string { return "deadline" }
 func (deadlineScanner) Scan(ctx context.Context, _ config.Job) (model.Snapshot, error) {
 	<-ctx.Done()
 	return model.Snapshot{}, ctx.Err()
+}
+
+type resumableTestScanner struct {
+	mu    sync.Mutex
+	calls map[int]int
+}
+
+func (s *resumableTestScanner) Version(context.Context) string { return "resumable-test" }
+func (s *resumableTestScanner) Scan(context.Context, config.Job) (model.Snapshot, error) {
+	return model.Snapshot{}, errors.New("ordinary scan path should not be used")
+}
+func (s *resumableTestScanner) Plan(context.Context, config.Job) (scanner.WorkPlan, error) {
+	return scanner.WorkPlan{CreatedAt: time.Now().UTC(), Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-2"}}, Units: []scanner.WorkUnit{
+		{Sequence: 0, Protocol: "tcp", Family: 4, Targets: []scanner.ResolvedTarget{{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}}}, Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1},
+		{Sequence: 1, Protocol: "tcp", Family: 4, Targets: []scanner.ResolvedTarget{{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}}}, Addresses: []string{"192.0.2.1"}, Ports: "2", PortCount: 1, Probes: 1},
+	}, TotalUnits: 2, TotalProbes: 2, Job: config.Job{}}, nil
+}
+func (s *resumableTestScanner) ScanWorkUnit(ctx context.Context, _ config.Job, unit scanner.WorkUnit, _ scanner.ProgressReporter) (model.Snapshot, error) {
+	s.mu.Lock()
+	if s.calls == nil {
+		s.calls = map[int]int{}
+	}
+	s.calls[unit.Sequence]++
+	call := s.calls[unit.Sequence]
+	s.mu.Unlock()
+	if unit.Sequence == 1 && call == 1 {
+		<-ctx.Done()
+		return model.Snapshot{}, ctx.Err()
+	}
+	return model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: unit.Protocol, Addresses: unit.Addresses, Ports: []model.PortState{{Port: unit.PortCount, State: "open"}}}}}, nil
 }
 
 type blockingScanner struct {
@@ -108,6 +139,165 @@ func TestScanWorkBudgetIsCheckedBeforeLease(t *testing.T) {
 	}
 	if _, err := s.ListJobScans(ctx, record.ID, 10); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestResumableScanCheckpointsTimeoutAndRecovers(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Scanner = &resumableTestScanner{}
+	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "broad", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "syn"}, Timeout: config.Duration(time.Second), ResumeWindow: config.Duration(time.Hour)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, events, firstErr := a.RunJobRecord(ctx, record)
+	if firstErr == nil || first.Status != "timed_out" || !first.Resumable || first.CycleStatus != "paused" {
+		t.Fatalf("first resumable attempt = %#v, events=%#v, err=%v", first, events, firstErr)
+	}
+	cycle, err := s.GetActiveScanCycle(ctx, record.ID)
+	if err != nil || cycle.Status != "paused" || cycle.CompletedUnits != 1 {
+		t.Fatalf("paused cycle = %#v, %v", cycle, err)
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Baseline != nil || len(state.Incidents) != 0 {
+		t.Fatalf("partial cycle changed comparison state: %#v", state)
+	}
+	second, events, secondErr := a.RunJobRecord(ctx, record)
+	if secondErr != nil || second.Status != "success" || second.CycleStatus != "completed" || second.CompletedUnits != 2 {
+		t.Fatalf("recovered attempt = %#v, events=%#v, err=%v", second, events, secondErr)
+	}
+	state, err = s.RuntimeState(ctx, record.ID)
+	if err != nil || state.Baseline == nil {
+		t.Fatalf("completed cycle did not establish baseline: %#v, %v", state, err)
+	}
+	var paused, recovered bool
+	for _, event := range events {
+		if event.Type == "scan-recovered" {
+			recovered = true
+		}
+		if event.Type == "scan-paused" {
+			paused = true
+		}
+	}
+	if !recovered || paused {
+		t.Fatalf("second attempt events = %#v", events)
+	}
+}
+
+func TestExpiredResumableCycleProducesFailureBeforeFreshCycle(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := &resumableTestScanner{}
+	a.Scanner = probe
+	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "expired", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "syn"}, Timeout: config.Duration(time.Second), ResumeWindow: config.Duration(time.Hour)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := probe.Plan(ctx, record.Job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cycle, err := s.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), ExecutionHash: record.Job.ExecutionHash(), Plan: plan, ExpiresAt: time.Now().UTC().Add(-time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The expired cycle is reported as a failed attempt. It is not silently
+	// replaced in the same trigger, so the next schedule/manual run starts the
+	// fresh cycle explicitly.
+	scan, events, runErr := a.runJobRecord(ctx, record, false)
+	if runErr == nil || scan.Status != "timed_out" || scan.CycleID != cycle.ID || scan.CycleStatus != "expired" {
+		t.Fatalf("expired cycle = %#v events=%#v err=%v", scan, events, runErr)
+	}
+	if len(events) != 1 || events[0].Type != "scan-failure" {
+		t.Fatalf("expired cycle events = %#v", events)
+	}
+	if _, err := s.GetActiveScanCycle(ctx, record.ID); !errors.Is(err, store.ErrNoScanCycle) {
+		t.Fatalf("expired cycle remained active: %v", err)
+	}
+	// A later trigger creates a new cycle after the expiry failure has been
+	// persisted. The fake scanner completes it deterministically.
+	probe.mu.Lock()
+	probe.calls = map[int]int{1: 1}
+	probe.mu.Unlock()
+	second, _, secondErr := a.RunJobRecord(ctx, record)
+	if secondErr != nil || second.Status != "success" || second.CycleID == cycle.ID {
+		t.Fatalf("fresh cycle = %#v err=%v", second, secondErr)
+	}
+}
+
+func TestCompletedCycleWithoutScanIsRecovered(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	probe := &resumableTestScanner{}
+	a.Scanner = probe
+	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "promote", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "syn"}, Timeout: config.Duration(time.Second), ResumeWindow: config.Duration(time.Hour)}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := probe.Plan(ctx, record.Job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cycle, err := s.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), ExecutionHash: record.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, unit := range plan.Units {
+		claimed, claimErr := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence)
+		if claimErr != nil {
+			t.Fatal(claimErr)
+		}
+		if err := s.CompleteScanCycleUnit(ctx, cycle.ID, claimed.Sequence, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: claimed.Unit.PortCount, State: "open"}}}}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.CompleteScanCycle(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	scan, events, runErr := a.RunJobRecord(ctx, record)
+	if runErr != nil || scan.Status != "success" || scan.CycleID != cycle.ID || scan.CycleStatus != "completed" {
+		t.Fatalf("recovered cycle = %#v events=%#v err=%v", scan, events, runErr)
+	}
+	rows, err := s.ListJobScans(ctx, record.ID, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Status != "success" || rows[0].CycleID != cycle.ID {
+		t.Fatalf("recovered scan history = %#v", rows)
 	}
 }
 

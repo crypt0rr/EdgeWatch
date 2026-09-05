@@ -21,13 +21,15 @@ import {
   resetBaseline,
   restoreJob,
   runJob,
+  scanCycle,
+  discardScanCycle,
   scanDetail,
   scanHosts,
 } from '../api'
 import { Pagination } from '../components/Pagination'
 import { ActionDialog } from '../components/ActionDialog'
 
-type JobDialog = 'reset' | 'approve' | 'archive' | 'delete'
+type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 
 export function JobDetail() {
   const { id = '' } = useParams()
@@ -48,6 +50,7 @@ export function JobDetail() {
     enabled: !!id,
     refetchInterval: 10000,
   })
+  const cycle = useQuery({ queryKey: ['scan-cycle', id], queryFn: () => scanCycle(id), enabled: !!id, refetchInterval: 5000 })
   const detail = useQuery({
     queryKey: ['scan-detail', id, selectedScan, changeOffset],
     queryFn: () => scanDetail(id, selectedScan, changeOffset),
@@ -148,12 +151,31 @@ export function JobDetail() {
       setActionBusy('')
     }
   }
+  async function discardCycle() {
+    const current = cycle.data?.cycle ?? value.scan_cycle
+    if (!current) return
+    setActionError('')
+    setActionBusy('discard-cycle')
+    try {
+      await discardScanCycle(id, current.id)
+      await Promise.all([cycle.refetch(), job.refetch()])
+      setDialog(null)
+    } catch (err) {
+      reportActionError(err, 'Could not discard the paused scan cycle.')
+    } finally {
+      setActionBusy('')
+    }
+  }
 
   const selectedScanCanBeBaseline = Boolean(
     detail.data
       && detail.data.scan.status === 'success'
       && detail.data.scan.config_hash === detail.data.current_security_hash,
   )
+  // A successful poll that returns {cycle: null} is authoritative. Falling
+  // back to the job payload in that case would keep a discarded/expired cycle
+  // banner visible until the next full job refetch.
+  const activeCycle = cycle.data ? cycle.data.cycle : value.scan_cycle
 
   return (
     <section className="page">
@@ -210,6 +232,7 @@ export function JobDetail() {
         </div>
       </div>
       {value.scan_estimate && <div className="notice" role="status">Estimated per run: {value.scan_estimate.probes.toLocaleString()} probes across {value.scan_estimate.hosts.toLocaleString()} hosts ({value.scan_estimate.nmap_invocations.toLocaleString()} Nmap process{value.scan_estimate.nmap_invocations === 1 ? '' : 'es'}, roughly {formatEstimateDuration(value.scan_estimate.estimated_seconds)}).{value.scan_estimate.unknown_dns ? ` DNS expansion may increase this estimate for ${value.scan_estimate.unknown_dns} name${value.scan_estimate.unknown_dns === 1 ? '' : 's'}.` : ''}</div>}
+      {activeCycle && <div className={activeCycle.status === 'stalled' ? 'form-error banner' : 'notice'} role="status"><strong>{activeCycle.status === 'paused' ? 'Broad scan paused safely.' : activeCycle.status === 'stalled' ? 'Broad scan stalled.' : 'Broad scan cycle active.'}</strong> {activeCycle.completed_units} of {activeCycle.total_units} work units and {activeCycle.completed_probes.toLocaleString()} of {activeCycle.total_probes.toLocaleString()} probes complete. {activeCycle.last_error && <span>{activeCycle.last_error}</span>} {(activeCycle.status === 'paused' || activeCycle.status === 'stalled') && <button className="button ghost" onClick={() => { setActionError(''); setDialog('discard-cycle') }} disabled={!!actionBusy}>Discard saved progress</button>}</div>}
 
       <div className="detail-columns">
         <div className="panel">
@@ -320,6 +343,7 @@ export function JobDetail() {
       {dialog === 'approve' && <ActionDialog title="Use this scan as the baseline?" description="This successful scan matches the current security scope. Future scans will compare against its results." confirmLabel="Use as baseline" onConfirm={() => approve()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
       {dialog === 'archive' && <ActionDialog title="Archive this job?" description="The job will stop running, but its history and incidents will be kept." confirmLabel="Archive job" destructive onConfirm={() => archive()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
       {dialog === 'delete' && <ActionDialog title="Delete this archived job permanently?" description="All retained history for this job will be removed. Type the job name exactly to continue." confirmLabel="Delete permanently" destructive valueLabel={`Type “${value.job.name}” to confirm`} valueType="text" valueRequired expectedValue={value.job.name} placeholder={value.job.name} autoComplete="off" onConfirm={permanentlyDelete} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
+      {dialog === 'discard-cycle' && <ActionDialog title="Discard saved broad-scan progress?" description="The next trigger will start a fresh full-range scan. Existing attempt history remains available." confirmLabel="Discard progress" destructive onConfirm={() => discardCycle()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
     </section>
   )
 }

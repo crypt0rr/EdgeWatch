@@ -67,6 +67,11 @@ var ErrShuttingDown = errors.New("application is shutting down")
 // explicitly opted into high-cost work.
 var ErrScanWorkBudget = errors.New("estimated scan work exceeds the configured probe budget")
 
+// ErrScanCycleStalled tells scheduled callers that an operator must intervene
+// before another attempt is started. Manual runs are allowed to retry the
+// checkpointed cycle explicitly.
+var ErrScanCycleStalled = errors.New("scan cycle is stalled; manual retry required")
+
 type ScanWorkBudgetError struct {
 	Estimate config.WorkEstimate
 	Budget   int64
@@ -148,17 +153,25 @@ func (a *App) Job(name string) (config.Job, error) {
 }
 
 func (a *App) RunJob(ctx context.Context, job config.Job) (model.Scan, []model.Event, error) {
-	return a.runJob(ctx, job, "", 0, false)
+	return a.runJob(ctx, job, "", 0, false, false)
 }
 
 // RunJobRecord executes a web-managed job revision. The record is passed by
 // value so a concurrent edit cannot change the configuration of an in-flight
 // scan.
 func (a *App) RunJobRecord(ctx context.Context, record store.JobRecord) (model.Scan, []model.Event, error) {
+	return a.runJobRecord(ctx, record, true)
+}
+
+// runJobRecord executes a web-managed job with an explicit trigger mode. A
+// manual trigger may retry a stalled resumable cycle; scheduled triggers stop
+// at the stalled state until an operator either runs it manually or discards
+// the saved progress.
+func (a *App) runJobRecord(ctx context.Context, record store.JobRecord, manual bool) (model.Scan, []model.Event, error) {
 	if record.Archived {
 		return model.Scan{}, nil, errors.New("archived jobs cannot run")
 	}
-	return a.runJob(ctx, record.Job, record.ID, record.Revision, true)
+	return a.runJob(ctx, record.Job, record.ID, record.Revision, true, manual)
 }
 
 // BeginRun binds the application's asynchronous work to parent. The returned
@@ -244,7 +257,7 @@ func (a *App) StartManagedRun(id string, done func(model.Scan, []model.Event, er
 	return nil
 }
 
-func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision int64, managed bool) (model.Scan, []model.Event, error) {
+func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision int64, managed, manual bool) (model.Scan, []model.Event, error) {
 	key := job.Name
 	if managed {
 		key = jobID
@@ -262,6 +275,11 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	estimate, err := a.CheckScanWorkBudget(job)
 	if err != nil {
 		return model.Scan{}, nil, err
+	}
+	if managed && !manual {
+		if cycle, cycleErr := a.Store.GetActiveScanCycle(ctx, jobID); cycleErr == nil && cycle.Status == "stalled" {
+			return model.Scan{}, nil, ErrScanCycleStalled
+		}
 	}
 	started := time.Now().UTC()
 	scan := model.Scan{ID: scanner.NewID(started), JobID: jobID, JobRevision: revision, Job: job.Name, StartedAt: started, ConfigHash: job.SecurityHash(), NmapVersion: a.nmapVersion}
@@ -299,27 +317,45 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	}()
 	var snapshot model.Snapshot
 	var scanErr error
-	if progressScanner, ok := a.Scanner.(ProgressScanner); ok {
-		snapshot, scanErr = progressScanner.ScanWithProgress(scanCtx, job, func(progress scanner.Progress) {
-			a.updateActiveProgress(scan.ID, progress)
-		})
-	} else {
-		snapshot, scanErr = a.Scanner.Scan(scanCtx, job)
+	resumableRun := false
+	if managed {
+		if resumableScanner, ok := a.Scanner.(scanner.ResumableScanner); ok {
+			var handled bool
+			handled, snapshot, scanErr = a.runResumableAttempt(ctx, scanCtx, job, jobID, &scan, run, resumableScanner, manual)
+			resumableRun = handled
+			if errors.Is(scanErr, ErrScanCycleStalled) {
+				// A scheduled trigger that races with a newly stalled cycle must
+				// not create a synthetic failed scan or notification. The cycle's
+				// original stall attempt already recorded the actionable alert.
+				return model.Scan{}, nil, scanErr
+			}
+		}
+	}
+	if !resumableRun {
+		if progressScanner, ok := a.Scanner.(ProgressScanner); ok {
+			snapshot, scanErr = progressScanner.ScanWithProgress(scanCtx, job, func(progress scanner.Progress) {
+				a.updateActiveProgress(scan.ID, progress)
+			})
+		} else {
+			snapshot, scanErr = a.Scanner.Scan(scanCtx, job)
+		}
 	}
 	scan.FinishedAt = time.Now().UTC()
 	scan.Snapshot = snapshot
 	if scanErr != nil {
-		if errors.Is(scanCtx.Err(), context.Canceled) {
-			scan.Status = "canceled"
-			scan.Error = "scan canceled"
-		} else if errors.Is(scanCtx.Err(), context.DeadlineExceeded) || errors.Is(scanErr, context.DeadlineExceeded) {
-			scan.Status = "timed_out"
-			scan.Error = "scan timed out"
-		} else {
-			scan.Status = "failed"
-			scan.Error = scanErr.Error()
+		if !resumableRun {
+			if errors.Is(scanCtx.Err(), context.Canceled) {
+				scan.Status = "canceled"
+				scan.Error = "scan canceled"
+			} else if errors.Is(scanCtx.Err(), context.DeadlineExceeded) || errors.Is(scanErr, context.DeadlineExceeded) {
+				scan.Status = "timed_out"
+				scan.Error = "scan timed out"
+			} else {
+				scan.Status = "failed"
+				scan.Error = scanErr.Error()
+			}
 		}
-	} else {
+	} else if !resumableRun {
 		scan.Status = "success"
 	}
 	a.updateActivePhase(scan.ID, "finalizing")
@@ -582,7 +618,12 @@ func (a *App) Daemon(ctx context.Context) error {
 	if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
 		a.Logger.Error("startup history pruning failed", "error", err)
 	} else if stats.Total() > 0 {
-		a.Logger.Info("startup history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions)
+		a.Logger.Info("startup history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions, "cycles", stats.Cycles)
+	}
+	if expired, err := a.Store.ExpireScanCycles(ctx, time.Now().UTC()); err != nil {
+		a.Logger.Error("startup scan-cycle expiry failed", "error", err)
+	} else if expired > 0 {
+		a.Logger.Info("expired scan cycles", "cycles", expired)
 	}
 	for {
 		select {
@@ -601,7 +642,12 @@ func (a *App) Daemon(ctx context.Context) error {
 			if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
 				a.Logger.Error("history pruning failed", "error", err)
 			} else {
-				a.Logger.Info("history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions)
+				a.Logger.Info("history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions, "cycles", stats.Cycles)
+			}
+			if expired, err := a.Store.ExpireScanCycles(ctx, time.Now().UTC()); err != nil {
+				a.Logger.Error("scan-cycle expiry failed", "error", err)
+			} else if expired > 0 {
+				a.Logger.Info("expired scan cycles", "cycles", expired)
 			}
 		case <-a.scheduleWake:
 			if err := a.reconcileSchedules(ctx, false); err != nil {
@@ -627,9 +673,13 @@ func (a *App) startManagedScheduled(ctx context.Context, id string) {
 		if err != nil || record.Archived || !record.Enabled {
 			return
 		}
-		scan, events, runErr := a.RunJobRecord(ctx, record)
+		scan, events, runErr := a.runJobRecord(ctx, record, false)
 		if errors.Is(runErr, scanner.ErrBusy) {
 			a.Logger.Warn("scheduled run skipped because job is active", "job", record.Job.Name)
+			return
+		}
+		if errors.Is(runErr, ErrScanCycleStalled) {
+			a.Logger.Warn("scheduled run skipped because resumable cycle is stalled; manual retry required", "job", record.Job.Name)
 			return
 		}
 		if runErr != nil {

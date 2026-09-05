@@ -63,6 +63,9 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 				current.BaselineScanID = state.BaselineScanID
 				current.BaselineConfigHash = state.BaselineConfigHash
 			}
+			if current.Resumable && current.CycleAttempt > 1 {
+				return append(events, model.Event{Type: "scan-recovered", Job: scan.Job, ScanID: scan.ID, Message: "Resumable scan cycle completed after earlier paused attempts", CreatedAt: scan.FinishedAt}), nil
+			}
 			return events, nil
 		}
 		// Failed, timed-out, and canceled scans never enter comparison state,
@@ -256,6 +259,12 @@ func (e *Engine) FailureForJobWithDestinations(ctx context.Context, jobID, job s
 }
 
 func processFailure(state *model.JobState, job string, scan model.Scan) ([]model.Event, error) {
+	if scan.Resumable && scan.CycleStatus == "paused" {
+		if scan.Status == "canceled" {
+			return []model.Event{{Type: "scan-canceled", Job: job, ScanID: scan.ID, Message: scanOutcomeMessage(scan), CreatedAt: scan.FinishedAt}}, nil
+		}
+		return []model.Event{{Type: "scan-paused", Job: job, ScanID: scan.ID, Message: scanOutcomeMessage(scan), CreatedAt: scan.FinishedAt}}, nil
+	}
 	if scan.Status == "canceled" {
 		return []model.Event{{Type: "scan-canceled", Job: job, ScanID: scan.ID, Message: scanOutcomeMessage(scan), CreatedAt: scan.FinishedAt}}, nil
 	}
@@ -553,7 +562,7 @@ func unitMap(s model.Snapshot) map[string]model.Unit {
 func FormatEvent(e model.Event) string {
 	var b strings.Builder
 	switch {
-	case e.Type == "changes-recovered":
+	case e.Type == "changes-recovered" || e.Type == "scan-recovered":
 		b.WriteString("🟢 ")
 	case e.Type == "changes-detected" && hasCriticalChange(e.Changes):
 		b.WriteString("🔴 ")

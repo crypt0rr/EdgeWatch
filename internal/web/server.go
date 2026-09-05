@@ -510,6 +510,7 @@ type jobPayload struct {
 	UDP                 *protocolPayload `json:"udp"`
 	Timing              string           `json:"timing"`
 	Timeout             string           `json:"timeout"`
+	ResumeWindow        string           `json:"resume_window,omitempty"`
 	BaselineSamples     int              `json:"baseline_samples"`
 	ChangeConfirmations int              `json:"change_confirmations"`
 	Enabled             *bool            `json:"enabled,omitempty"`
@@ -531,6 +532,13 @@ func (p jobPayload) config() (config.Job, error) {
 			return job, fmt.Errorf("timeout: %w", err)
 		}
 		job.Timeout = config.Duration(d)
+	}
+	if p.ResumeWindow != "" {
+		d, err := parseDuration(p.ResumeWindow)
+		if err != nil {
+			return job, fmt.Errorf("resume_window: %w", err)
+		}
+		job.ResumeWindow = config.Duration(d)
 	}
 	if p.TCP != nil {
 		job.TCP = &config.Protocol{Ports: p.TCP.Ports, Mode: p.TCP.Mode, ServiceDetection: p.TCP.ServiceDetection}
@@ -556,8 +564,27 @@ func jobJSON(record store.JobRecord, state model.JobState) map[string]any {
 	return map[string]any{"id": record.ID, "revision": record.Revision, "enabled": record.Enabled, "archived": record.Archived, "created_at": record.CreatedAt, "updated_at": record.UpdatedAt, "security_hash": record.Job.SecurityHash(), "job": p, "baseline": baselineJSON(state, record.Job.SecurityHash()), "scan_estimate": estimate}
 }
 
+func (s *Server) jobJSONWithCycle(ctx context.Context, record store.JobRecord, state model.JobState) map[string]any {
+	value := jobJSON(record, state)
+	cycle, err := s.Store.GetActiveScanCycle(ctx, record.ID)
+	if errors.Is(err, store.ErrNoScanCycle) {
+		value["scan_cycle"] = nil
+		return value
+	}
+	if err != nil {
+		value["scan_cycle_error"] = err.Error()
+		return value
+	}
+	value["scan_cycle"] = cycleJSON(cycle)
+	return value
+}
+
+func cycleJSON(cycle store.ScanCycleRecord) map[string]any {
+	return map[string]any{"id": cycle.ID, "job_id": cycle.JobID, "job_revision": cycle.JobRevision, "status": cycle.Status, "attempt_count": cycle.AttemptCount, "no_progress_attempts": cycle.NoProgressAttempts, "total_units": cycle.TotalUnits, "completed_units": cycle.CompletedUnits, "total_probes": cycle.TotalProbes, "completed_probes": cycle.CompletedProbes, "started_at": cycle.StartedAt, "updated_at": cycle.UpdatedAt, "expires_at": cycle.ExpiresAt, "finished_at": cycle.FinishedAt, "last_error": cycle.LastError}
+}
+
 func fromConfig(j config.Job) jobPayload {
-	p := jobPayload{Name: j.Name, Schedule: j.Schedule, Timezone: j.Timezone, RunOnStart: j.RunOnStart, AssumeAlive: j.AssumeAlive, Targets: j.Targets, MaxExpandedHosts: j.MaxExpandedHosts, Timing: j.Timing, Timeout: j.Timeout.Value().String(), BaselineSamples: j.Baseline.Samples, ChangeConfirmations: j.Change.Confirmations, AllowHighCost: j.AllowHighCost}
+	p := jobPayload{Name: j.Name, Schedule: j.Schedule, Timezone: j.Timezone, RunOnStart: j.RunOnStart, AssumeAlive: j.AssumeAlive, Targets: j.Targets, MaxExpandedHosts: j.MaxExpandedHosts, Timing: j.Timing, Timeout: j.Timeout.Value().String(), ResumeWindow: j.ResumeWindowValue().String(), BaselineSamples: j.Baseline.Samples, ChangeConfirmations: j.Change.Confirmations, AllowHighCost: j.AllowHighCost}
 	if j.TCP != nil {
 		p.TCP = &protocolPayload{Ports: j.TCP.Ports, Mode: j.TCP.Mode, ServiceDetection: j.TCP.ServiceDetection}
 	}
@@ -596,7 +623,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 500, "store", stateErr.Error(), nil)
 			return
 		}
-		out = append(out, jobJSON(j, state))
+		out = append(out, s.jobJSONWithCycle(r.Context(), j, state))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": out})
 }
@@ -630,7 +657,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	s.App.RefreshSchedules()
 	state, _ := s.Store.RuntimeState(r.Context(), record.ID)
 	s.broadcast(map[string]any{"type": "job.created", "job_id": record.ID})
-	writeJSON(w, http.StatusCreated, jobJSON(record, state))
+	writeJSON(w, http.StatusCreated, s.jobJSONWithCycle(r.Context(), record, state))
 }
 
 func isUnique(err error) bool {
@@ -678,6 +705,14 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 	}
 	if len(parts) == 2 && parts[1] == "run" && r.Method == http.MethodPost {
 		s.runJob(w, r, id)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "scan-cycle" && r.Method == http.MethodGet {
+		s.scanCycle(w, r, id)
+		return
+	}
+	if len(parts) == 3 && parts[1] == "scan-cycle" && r.Method == http.MethodDelete {
+		s.discardScanCycle(w, r, id, parts[2])
 		return
 	}
 	if len(parts) == 2 && parts[1] == "scans" && r.Method == http.MethodGet {
@@ -790,7 +825,7 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, 500, "store", err.Error(), nil)
 		return
 	}
-	writeJSON(w, 200, jobJSON(record, state))
+	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), record, state))
 }
 
 func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
@@ -867,7 +902,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 	s.App.RefreshSchedules()
 	state, _ := s.Store.RuntimeState(r.Context(), id)
 	s.broadcast(map[string]any{"type": "job.updated", "job_id": id})
-	writeJSON(w, 200, jobJSON(record, state))
+	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), record, state))
 }
 
 func securityScopeChanges(old, next config.Job) []string {
@@ -1061,7 +1096,76 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusInternalServerError, "scan", runErr.Error(), nil)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "job_id": id})
+	mode := "standard"
+	if broadScan(record.Job) {
+		mode = "resumable"
+	}
+	cycleID := ""
+	if cycle, cycleErr := s.Store.GetActiveScanCycle(r.Context(), id); cycleErr == nil {
+		cycleID = cycle.ID
+		mode = "resumable"
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "job_id": id, "mode": mode, "cycle_id": cycleID})
+}
+
+func broadScan(job config.Job) bool {
+	estimate, err := config.EstimateJobWork(job)
+	if err != nil {
+		return false
+	}
+	return estimate.TCPPorts > 4096 || estimate.UDPPorts > 4096 || estimate.Probes > 65_536
+}
+
+func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, id string) {
+	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		return
+	}
+	cycle, err := s.Store.GetActiveScanCycle(r.Context(), id)
+	if errors.Is(err, store.ErrNoScanCycle) {
+		writeJSON(w, http.StatusOK, map[string]any{"cycle": nil})
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		return
+	}
+	// The plan contains the immutable job and target expansion needed to
+	// explain progress, but it is intentionally returned without raw scanner
+	// arguments or completed snapshot fragments.
+	units, unitsErr := s.Store.ListScanCycleUnitSummaries(r.Context(), cycle.ID)
+	if unitsErr != nil {
+		writeError(w, http.StatusInternalServerError, "store", unitsErr.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"cycle": map[string]any{
+		"id": cycle.ID, "job_id": cycle.JobID, "job_revision": cycle.JobRevision,
+		"status": cycle.Status, "attempt_count": cycle.AttemptCount,
+		"no_progress_attempts": cycle.NoProgressAttempts, "total_units": cycle.TotalUnits,
+		"completed_units": cycle.CompletedUnits, "total_probes": cycle.TotalProbes,
+		"completed_probes": cycle.CompletedProbes, "started_at": cycle.StartedAt,
+		"updated_at": cycle.UpdatedAt, "expires_at": cycle.ExpiresAt,
+		"finished_at": cycle.FinishedAt, "last_error": cycle.LastError, "units": units,
+	}})
+}
+
+func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, id, cycleID string) {
+	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		return
+	}
+	cycle, err := s.Store.GetScanCycle(r.Context(), cycleID)
+	if err != nil || cycle.JobID != id {
+		writeError(w, http.StatusNotFound, "not_found", "scan cycle not found", nil)
+		return
+	}
+	if err := s.Store.DiscardScanCycle(r.Context(), cycleID); err != nil {
+		writeError(w, http.StatusConflict, "cycle_discard_failed", err.Error(), nil)
+		return
+	}
+	s.auditOptional(r.Context(), "scan.cycle_discarded", cycleID)
+	s.broadcast(map[string]any{"type": "scan.cycle_discarded", "job_id": id, "cycle_id": cycleID})
+	writeJSON(w, http.StatusNoContent, nil)
 }
 
 func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, id string) {
@@ -1947,7 +2051,7 @@ func writeValidationError(w http.ResponseWriter, err error) {
 	// Keep validation responses useful to form clients without exposing an
 	// implementation-specific error type. The API returns a stable field name
 	// when the validator can identify one, while preserving the full message.
-	fields := []string{"schedule", "timezone", "target", "tcp", "udp", "ports", "timeout", "timing", "baseline", "confirmations", "max_expanded_hosts", "name"}
+	fields := []string{"schedule", "timezone", "target", "tcp", "udp", "ports", "timeout", "resume_window", "timing", "baseline", "confirmations", "max_expanded_hosts", "name"}
 	for _, field := range fields {
 		if strings.Contains(lower, field) {
 			details[field] = message

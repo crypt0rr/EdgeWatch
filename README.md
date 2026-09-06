@@ -163,6 +163,14 @@ in `./data/edgewatch.db`. Adding, replacing, enabling, pausing, or removing a
 destination requires administrator password confirmation and uses optimistic
 revisions. URLs are never returned by the API or written to audit records.
 
+Each web-managed job can select one or more named destinations in its editor.
+Selections use stable destination IDs, so rotating a managed destination's
+credentials does not require reconfiguring jobs. Deployment-managed URLs are
+available as read-only destinations. Jobs created before per-job routing was
+introduced retain the legacy behavior of sending to every enabled destination
+until they are saved in the editor; an explicitly empty selection keeps a job
+silent.
+
 To supply the key separately, set `notifications.encryption_key_file` to a
 `0600` file containing 32 raw bytes or 64 hexadecimal characters and mount it
 into the container. An explicitly supplied key path is never generated

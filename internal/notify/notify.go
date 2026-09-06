@@ -15,6 +15,7 @@ import (
 
 	"github.com/containrrr/shoutrrr"
 	"github.com/containrrr/shoutrrr/pkg/types"
+	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/engine"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
@@ -22,6 +23,7 @@ import (
 )
 
 var ErrManagedNotificationLocked = errors.New("managed notification is locked")
+var ErrInvalidDestinationSelection = errors.New("invalid notification destination selection")
 
 const notificationWorkers = 4
 
@@ -479,16 +481,108 @@ func (n *Notifier) destinationKeys() map[string]struct{} {
 // QueueDestinations reloads metadata and returns enabled destination keys for
 // an atomic event transition. Keys are opaque hashes or managed revisions.
 func (n *Notifier) QueueDestinations(ctx context.Context) ([]string, error) {
+	return n.QueueDestinationsForSelection(ctx, nil)
+}
+
+// QueueDestinationsForJob resolves the destinations selected by a managed
+// job. A nil selection is the backwards-compatible legacy mode and sends to
+// every enabled global destination. An explicit empty selection intentionally
+// disables delivery for that job. Stable selectors are destination IDs (the
+// file: hash returned for deployment URLs or the UUID returned for a managed
+// destination); managed revision keys are resolved at queue time so a
+// credential update does not require editing every job.
+func (n *Notifier) QueueDestinationsForJob(ctx context.Context, job config.Job) ([]string, error) {
+	return n.QueueDestinationsForSelection(ctx, job.NotificationDestinations)
+}
+
+func (n *Notifier) QueueDestinationsForSelection(ctx context.Context, selection []string) ([]string, error) {
 	if err := n.Reload(ctx); err != nil {
 		return nil, err
 	}
-	keys := n.destinationKeys()
+	var keys map[string]struct{}
+	if selection == nil {
+		keys = n.destinationKeys()
+	} else {
+		keys = n.selectedDestinationKeys(selection)
+	}
 	out := make([]string, 0, len(keys))
 	for key := range keys {
 		out = append(out, key)
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// ValidateDestinationSelection checks stable IDs at the API boundary without
+// ever handling or returning destination URLs. It accepts paused or locked
+// managed destinations so an administrator can keep a job selection ready
+// while restoring a key or re-enabling delivery. The scan queue will simply
+// defer locked destinations and skip IDs removed after this validation.
+func (n *Notifier) ValidateDestinationSelection(ctx context.Context, selection []string) error {
+	if selection == nil {
+		return nil
+	}
+	if err := n.Reload(ctx); err != nil {
+		return err
+	}
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	seen := make(map[string]struct{}, len(selection))
+	for _, selector := range selection {
+		selector = strings.TrimSpace(selector)
+		if selector == "" {
+			return fmt.Errorf("%w: notification destination ID cannot be empty", ErrInvalidDestinationSelection)
+		}
+		if _, exists := seen[selector]; exists {
+			continue
+		}
+		seen[selector] = struct{}{}
+		if !n.destinationSelectorExistsLocked(selector) {
+			return fmt.Errorf("%w: notification destination %q was not found", ErrInvalidDestinationSelection, selector)
+		}
+	}
+	return nil
+}
+
+func (n *Notifier) selectedDestinationKeys(selection []string) map[string]struct{} {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	keys := make(map[string]struct{}, len(selection))
+	for _, selector := range selection {
+		selector = strings.TrimSpace(selector)
+		if key, ok := n.destinationKeyLocked(selector); ok {
+			keys[key] = struct{}{}
+		}
+	}
+	return keys
+}
+
+func (n *Notifier) destinationSelectorExistsLocked(selector string) bool {
+	if strings.HasPrefix(selector, "file:") {
+		id := strings.TrimPrefix(selector, "file:")
+		if id == "" {
+			return false
+		}
+		_, ok := n.fileURLs[id]
+		return ok
+	}
+	_, ok := n.managed[selector]
+	return ok
+}
+
+func (n *Notifier) destinationKeyLocked(selector string) (string, bool) {
+	if strings.HasPrefix(selector, "file:") {
+		id := strings.TrimPrefix(selector, "file:")
+		if _, ok := n.fileURLs[id]; ok && id != "" {
+			return id, true
+		}
+		return "", false
+	}
+	entry, ok := n.managed[selector]
+	if !ok || !entry.record.Enabled {
+		return "", false
+	}
+	return managedKey(entry.record.ID, entry.record.Revision), true
 }
 
 func (n *Notifier) Queue(ctx context.Context, events []model.Event) error {

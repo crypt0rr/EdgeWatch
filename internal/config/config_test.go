@@ -235,6 +235,31 @@ func TestNormalizeJobCanonicalizesTargets(t *testing.T) {
 	}
 }
 
+func TestNormalizeJobCanonicalizesNotificationDestinations(t *testing.T) {
+	job := NormalizeJob(Job{NotificationDestinations: []string{" managed:b ", "file:a", "managed:b", ""}})
+	want := []string{"file:a", "managed:b"}
+	if !reflect.DeepEqual(job.NotificationDestinations, want) {
+		t.Fatalf("notification destinations = %#v, want %#v", job.NotificationDestinations, want)
+	}
+	empty := NormalizeJob(Job{NotificationDestinations: []string{}})
+	if empty.NotificationDestinations == nil {
+		t.Fatal("explicit empty notification selection became nil")
+	}
+	legacy := NormalizeJob(Job{})
+	if legacy.NotificationDestinations != nil {
+		t.Fatalf("omitted notification selection = %#v, want nil", legacy.NotificationDestinations)
+	}
+}
+
+func TestNotificationDestinationsDoNotChangeSecurityHash(t *testing.T) {
+	base := NormalizeJob(Job{Targets: []string{"192.0.2.1"}, TCP: &Protocol{Ports: "443", Mode: "syn"}})
+	changed := base
+	changed.NotificationDestinations = []string{"managed:alerts"}
+	if base.SecurityHash() != changed.SecurityHash() {
+		t.Fatal("notification routing unexpectedly changed the security hash")
+	}
+}
+
 func TestEstimateJobWorkIncludesProtocolsAndServiceCost(t *testing.T) {
 	job := NormalizeJob(Job{
 		Targets: []string{"192.0.2.0/30", "router.example"},

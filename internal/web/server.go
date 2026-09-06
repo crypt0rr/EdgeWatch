@@ -499,25 +499,26 @@ type protocolPayload struct {
 	ServiceDetection bool   `json:"service_detection"`
 }
 type jobPayload struct {
-	Name                string           `json:"name"`
-	Schedule            string           `json:"schedule"`
-	Timezone            string           `json:"timezone"`
-	RunOnStart          *bool            `json:"run_on_start"`
-	AssumeAlive         *bool            `json:"assume_alive"`
-	Targets             []string         `json:"targets"`
-	MaxExpandedHosts    int              `json:"max_expanded_hosts"`
-	TCP                 *protocolPayload `json:"tcp"`
-	UDP                 *protocolPayload `json:"udp"`
-	Timing              string           `json:"timing"`
-	Timeout             string           `json:"timeout"`
-	ResumeWindow        string           `json:"resume_window,omitempty"`
-	BaselineSamples     int              `json:"baseline_samples"`
-	ChangeConfirmations int              `json:"change_confirmations"`
-	Enabled             *bool            `json:"enabled,omitempty"`
-	Archived            bool             `json:"archived,omitempty"`
-	Revision            int64            `json:"revision,omitempty"`
-	ConfirmRebaseline   bool             `json:"confirm_rebaseline,omitempty"`
-	AllowHighCost       bool             `json:"allow_high_cost,omitempty"`
+	Name                     string           `json:"name"`
+	Schedule                 string           `json:"schedule"`
+	Timezone                 string           `json:"timezone"`
+	RunOnStart               *bool            `json:"run_on_start"`
+	AssumeAlive              *bool            `json:"assume_alive"`
+	Targets                  []string         `json:"targets"`
+	MaxExpandedHosts         int              `json:"max_expanded_hosts"`
+	TCP                      *protocolPayload `json:"tcp"`
+	UDP                      *protocolPayload `json:"udp"`
+	Timing                   string           `json:"timing"`
+	Timeout                  string           `json:"timeout"`
+	ResumeWindow             string           `json:"resume_window,omitempty"`
+	BaselineSamples          int              `json:"baseline_samples"`
+	ChangeConfirmations      int              `json:"change_confirmations"`
+	Enabled                  *bool            `json:"enabled,omitempty"`
+	Archived                 bool             `json:"archived,omitempty"`
+	Revision                 int64            `json:"revision,omitempty"`
+	ConfirmRebaseline        bool             `json:"confirm_rebaseline,omitempty"`
+	AllowHighCost            bool             `json:"allow_high_cost,omitempty"`
+	NotificationDestinations *[]string        `json:"notification_destinations,omitempty"`
 }
 
 type lifecyclePayload struct {
@@ -526,6 +527,9 @@ type lifecyclePayload struct {
 
 func (p jobPayload) config() (config.Job, error) {
 	job := config.Job{Name: strings.TrimSpace(p.Name), Schedule: strings.TrimSpace(p.Schedule), Timezone: strings.TrimSpace(p.Timezone), RunOnStart: p.RunOnStart, AssumeAlive: p.AssumeAlive, Targets: p.Targets, MaxExpandedHosts: p.MaxExpandedHosts, Timing: p.Timing, AllowHighCost: p.AllowHighCost}
+	if p.NotificationDestinations != nil {
+		job.NotificationDestinations = cloneStrings(*p.NotificationDestinations)
+	}
 	if p.Timeout != "" {
 		d, err := parseDuration(p.Timeout)
 		if err != nil {
@@ -585,6 +589,11 @@ func cycleJSON(cycle store.ScanCycleRecord) map[string]any {
 
 func fromConfig(j config.Job) jobPayload {
 	p := jobPayload{Name: j.Name, Schedule: j.Schedule, Timezone: j.Timezone, RunOnStart: j.RunOnStart, AssumeAlive: j.AssumeAlive, Targets: j.Targets, MaxExpandedHosts: j.MaxExpandedHosts, Timing: j.Timing, Timeout: j.Timeout.Value().String(), ResumeWindow: j.ResumeWindowValue().String(), BaselineSamples: j.Baseline.Samples, ChangeConfirmations: j.Change.Confirmations, AllowHighCost: j.AllowHighCost}
+	if j.NotificationDestinations != nil {
+		selection := make([]string, len(j.NotificationDestinations))
+		copy(selection, j.NotificationDestinations)
+		p.NotificationDestinations = &selection
+	}
 	if j.TCP != nil {
 		p.TCP = &protocolPayload{Ports: j.TCP.Ports, Mode: j.TCP.Mode, ServiceDetection: j.TCP.ServiceDetection}
 	}
@@ -638,6 +647,9 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		writeValidationError(w, err)
 		return
 	}
+	if !s.validateNotificationSelection(w, r, job) {
+		return
+	}
 	enabled := true
 	if p.Enabled != nil {
 		enabled = *p.Enabled
@@ -662,6 +674,30 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 
 func isUnique(err error) bool {
 	return strings.Contains(strings.ToLower(err.Error()), "unique constraint")
+}
+
+func cloneStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	cloned := make([]string, len(values))
+	copy(cloned, values)
+	return cloned
+}
+
+func (s *Server) validateNotificationSelection(w http.ResponseWriter, r *http.Request, job config.Job) bool {
+	if job.NotificationDestinations == nil {
+		return true
+	}
+	if err := s.App.Notifier.ValidateDestinationSelection(r.Context(), job.NotificationDestinations); err != nil {
+		if errors.Is(err, notify.ErrInvalidDestinationSelection) {
+			writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]string{"notification_destinations": err.Error()})
+		} else {
+			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
+		}
+		return false
+	}
+	return true
 }
 
 func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.Session, rest string) {
@@ -838,10 +874,18 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 		writeValidationError(w, err)
 		return
 	}
+	if !s.validateNotificationSelection(w, r, job) {
+		return
+	}
 	current, err := s.Store.GetJob(r.Context(), id)
 	if err != nil {
 		writeError(w, 404, "not_found", "job not found", nil)
 		return
+	}
+	// Routing is additive to the job API. Older clients that do not send the
+	// field must not accidentally reset a job's saved notification selection.
+	if p.NotificationDestinations == nil {
+		job.NotificationDestinations = cloneStrings(current.Job.NotificationDestinations)
 	}
 	active, activeErr := s.Store.JobActive(r.Context(), id)
 	if activeErr != nil {
@@ -859,7 +903,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	var destinations []string
 	if scopeChanged && p.ConfirmRebaseline {
-		destinations, err = s.App.Notifier.QueueDestinations(r.Context())
+		destinations, err = s.App.Notifier.QueueDestinationsForJob(r.Context(), job)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 			return
@@ -1535,7 +1579,7 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, id string
 		writeError(w, 404, "not_found", "job not found", nil)
 		return
 	}
-	destinations, err := s.App.Notifier.QueueDestinations(r.Context())
+	destinations, err := s.App.Notifier.QueueDestinationsForJob(r.Context(), record.Job)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 		return
@@ -1572,7 +1616,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, 400, "invalid_scan", "scan does not belong to this job or current scope", nil)
 		return
 	}
-	destinations, err := s.App.Notifier.QueueDestinations(r.Context())
+	destinations, err := s.App.Notifier.QueueDestinationsForJob(r.Context(), record.Job)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 		return

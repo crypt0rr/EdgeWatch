@@ -365,7 +365,7 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	var destinations []string
 	if managed {
 		var destinationErr error
-		destinations, destinationErr = a.Notifier.QueueDestinations(persistCtx)
+		destinations, destinationErr = a.Notifier.QueueDestinationsForJob(persistCtx, job)
 		if destinationErr != nil {
 			// Preserve the completed scan even when notification configuration
 			// cannot be read. Runtime state is deliberately left unchanged,

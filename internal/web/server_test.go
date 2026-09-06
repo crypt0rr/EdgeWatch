@@ -48,6 +48,25 @@ func (s *sequenceScanner) Scan(context.Context, config.Job) (model.Snapshot, err
 	}
 	return s.snapshots[index], nil
 }
+
+func TestJobPayloadPreservesExplicitEmptyNotificationSelection(t *testing.T) {
+	selection := []string{}
+	job, err := (jobPayload{NotificationDestinations: &selection}).config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.NotificationDestinations == nil {
+		t.Fatal("explicit empty notification selection became nil")
+	}
+	legacy, err := (jobPayload{}).config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy.NotificationDestinations != nil {
+		t.Fatalf("omitted notification selection = %#v, want nil", legacy.NotificationDestinations)
+	}
+}
+
 func TestConsoleSetupLoginCreateAndRun(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
@@ -952,6 +971,53 @@ func TestNotificationAPIIsWriteOnlyAndUsesOptimisticConcurrency(t *testing.T) {
 		body, _ := io.ReadAll(response.Body)
 		response.Body.Close()
 		t.Fatalf("disable status %d: %s", response.StatusCode, body)
+	}
+	response.Body.Close()
+	response = request(http.MethodPost, "/api/v1/jobs", `{"name":"selected-alerts","schedule":"0 * * * *","timezone":"UTC","targets":["127.0.0.1"],"tcp":{"ports":"1","mode":"connect"},"timeout":"1m","timing":"balanced","baseline_samples":1,"change_confirmations":1,"max_expanded_hosts":256,"notification_destinations":["`+created.ID+`"]}`, login.CSRF)
+	if response.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("job create status %d: %s", response.StatusCode, body)
+	}
+	var createdJob struct {
+		ID       string `json:"id"`
+		Revision int64  `json:"revision"`
+		Job      struct {
+			NotificationDestinations []string `json:"notification_destinations"`
+		} `json:"job"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&createdJob); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if len(createdJob.Job.NotificationDestinations) != 1 || createdJob.Job.NotificationDestinations[0] != created.ID {
+		t.Fatalf("job notification selection = %#v", createdJob.Job.NotificationDestinations)
+	}
+	response = request(http.MethodPut, "/api/v1/jobs/"+createdJob.ID, fmt.Sprintf(`{"name":"selected-alerts","schedule":"0 * * * *","timezone":"UTC","targets":["127.0.0.1"],"tcp":{"ports":"1","mode":"connect"},"timeout":"1m","timing":"balanced","baseline_samples":1,"change_confirmations":1,"max_expanded_hosts":256,"revision":%d}`, createdJob.Revision), login.CSRF)
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("legacy job update status %d: %s", response.StatusCode, body)
+	}
+	var updatedJob struct {
+		Job struct {
+			NotificationDestinations []string `json:"notification_destinations"`
+		} `json:"job"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&updatedJob); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if len(updatedJob.Job.NotificationDestinations) != 1 || updatedJob.Job.NotificationDestinations[0] != created.ID {
+		t.Fatalf("omitted routing field did not preserve selection: %#v", updatedJob.Job.NotificationDestinations)
+	}
+	response = request(http.MethodPost, "/api/v1/jobs", `{"name":"unknown-alert","schedule":"0 * * * *","timezone":"UTC","targets":["127.0.0.1"],"tcp":{"ports":"1","mode":"connect"},"timeout":"1m","timing":"balanced","baseline_samples":1,"change_confirmations":1,"max_expanded_hosts":256,"notification_destinations":["managed:missing"]}`, login.CSRF)
+	if response.StatusCode != http.StatusBadRequest {
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("unknown destination job status %d: %s", response.StatusCode, body)
 	}
 	response.Body.Close()
 	rows, err := s.DB.Query(`SELECT detail FROM security_audit WHERE action LIKE 'notifications.%'`)

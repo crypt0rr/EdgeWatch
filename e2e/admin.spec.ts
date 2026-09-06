@@ -182,6 +182,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await page.getByRole('checkbox', { name: 'UDP scan' }).check()
   await page.getByRole('textbox', { name: /Ports Ranges/ }).nth(1).fill('53,123')
   await page.getByRole('checkbox', { name: 'Assume targets are alive' }).uncheck()
+  await expect(page.getByRole('checkbox', { name: 'Operations' })).toBeChecked()
   await page.getByLabel('Five-field cron').fill('*/15 * * * *')
   await page.getByRole('button', { name: 'Create job' }).click()
 
@@ -191,6 +192,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).udp).toMatchObject({ ports: '53,123' })
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).assume_alive).toBe(false)
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).schedule).toBe('*/15 * * * *')
+  expect(createdJob?.job && (createdJob.job as Record<string, unknown>).notification_destinations).toEqual(['dest-1'])
   await page.getByRole('link', { name: /edge-router/ }).click()
   await expect(page.getByRole('heading', { name: 'edge-router' })).toBeVisible()
   await expect(page.getByRole('link', { name: /Explore baseline/ })).toContainText('1')

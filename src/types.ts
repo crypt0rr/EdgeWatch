@@ -4,7 +4,7 @@ export type JobForm = {
   name: string; schedule: string; timezone: string; run_on_start?: boolean; assume_alive?: boolean
   targets: string[]; max_expanded_hosts: number; tcp?: Protocol; udp?: Protocol; timing: string
   timeout: string; baseline_samples: number; change_confirmations: number; enabled?: boolean; allow_high_cost?: boolean
-  resume_window?: string
+  resume_window?: string; notification_destinations?: string[]
 }
 export type WorkEstimate = { hosts: number; tcp_ports: number; udp_ports: number; probes: number; nmap_invocations: number; estimated_seconds: number; unknown_dns: number }
 export type Job = { id: string; revision: number; enabled: boolean; archived: boolean; security_hash: string; created_at: string; updated_at: string; job: JobForm; baseline: { status: string; samples?: number; attempts?: number; scan_id?: string; incidents?: number; pending?: number; host_count?: number }; scan_estimate?: WorkEstimate; scan_cycle?: ScanCycle | null }

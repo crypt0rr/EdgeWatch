@@ -649,6 +649,61 @@ func TestManagedTerminalOutcomesQueueNotifications(t *testing.T) {
 	}
 }
 
+func TestManagedRunQueuesOnlyJobSelectedNotifications(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{
+		Version:   1,
+		Database:  "test",
+		Retention: config.Duration(24 * time.Hour),
+		Scheduler: config.Scheduler{MaxConcurrent: 1},
+		Web:       config.Web{Listen: "127.0.0.1:8080"},
+		Notifications: config.Notifications{URLs: []string{
+			"generic://localhost/deployment?disabletls=yes&template=json",
+		}},
+	}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed, err := a.Notifier.CreateManaged(ctx, "Operations", "generic://localhost/managed?disabletls=yes&template=json", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := config.NormalizeJob(config.Job{
+		Name: "selected-notifications", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"},
+		TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timing: "balanced", Timeout: config.Duration(time.Minute),
+		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
+		NotificationDestinations: []string{managed.ID},
+	})
+	record, err := s.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Scanner = failingScanner{err: errors.New("selected notification test")}
+	if _, _, runErr := a.RunJobRecord(ctx, record); runErr == nil {
+		t.Fatal("failed scan unexpectedly succeeded")
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("outbox rows = %d, want only the selected destination", count)
+	}
+	var destination string
+	if err := s.DB.QueryRowContext(ctx, `SELECT destination FROM outbox`).Scan(&destination); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(destination, "managed:"+managed.ID+":") {
+		t.Fatalf("queued destination = %q, want managed revision", destination)
+	}
+}
+
 func TestManagedTimeoutIsPersistedAsDistinctTerminalStatus(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

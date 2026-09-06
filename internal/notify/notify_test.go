@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
@@ -54,6 +55,86 @@ func TestQueueAndDeliverGenericWebhook(t *testing.T) {
 	due, err := db.DueDeliveries(context.Background(), 10)
 	if err != nil || len(due) != 0 {
 		t.Fatalf("delivery remains due: %#v %v", due, err)
+	}
+}
+
+func TestQueueDestinationsForJobUsesStableSelection(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	deployment := "generic://localhost/deployment?disabletls=yes&template=json"
+	notifier, err := New(db, []string{deployment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed, err := notifier.CreateManaged(ctx, "Operations", "generic://localhost/managed?disabletls=yes&template=json", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := notifier.QueueDestinationsForJob(ctx, config.Job{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("legacy selection returned %d destinations, want 2", len(all))
+	}
+	selected, err := notifier.QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{managed.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 1 || selected[0] != managedKey(managed.ID, managed.Revision) {
+		t.Fatalf("managed selection = %#v, want current managed revision", selected)
+	}
+	selected, err = notifier.QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{"file:" + hashURL(deployment)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 1 || selected[0] != hashURL(deployment) {
+		t.Fatalf("deployment selection = %#v, want hashed file key", selected)
+	}
+	none, err := notifier.QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(none) != 0 {
+		t.Fatalf("explicit empty selection returned %#v", none)
+	}
+	if err := notifier.ValidateDestinationSelection(ctx, []string{managed.ID, "file:" + hashURL(deployment)}); err != nil {
+		t.Fatalf("valid selection rejected: %v", err)
+	}
+	if err := notifier.ValidateDestinationSelection(ctx, []string{"managed:missing"}); err == nil {
+		t.Fatal("unknown destination selection accepted")
+	}
+}
+
+func TestQueueDestinationsForJobTracksManagedRevision(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	notifier, err := New(db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := notifier.CreateManaged(ctx, "Operations", "generic://localhost/first?disabletls=yes&template=json", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedURL := "generic://localhost/second?disabletls=yes&template=json"
+	if _, err := notifier.UpdateManaged(ctx, created.ID, created.Revision, created.Name, &updatedURL, nil); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := notifier.QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{created.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || keys[0] != managedKey(created.ID, created.Revision+1) {
+		t.Fatalf("revision-aware selection = %#v", keys)
 	}
 }
 

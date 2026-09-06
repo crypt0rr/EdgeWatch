@@ -332,7 +332,7 @@ func baseline(ctx context.Context, action string, s *store.Store, a *app.App, jo
 		var events []model.Event
 		var err error
 		var destinations []string
-		destinations, err = a.Notifier.QueueDestinations(ctx)
+		destinations, err = a.Notifier.QueueDestinationsForJob(ctx, record.Job)
 		if err != nil {
 			return err
 		}

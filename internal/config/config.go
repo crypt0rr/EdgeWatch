@@ -93,6 +93,11 @@ type Job struct {
 	Baseline         Baseline  `yaml:"baseline"`
 	Change           Change    `yaml:"change"`
 	AllowHighCost    bool      `yaml:"allow_high_cost,omitempty"`
+	// NotificationDestinations contains stable destination identifiers selected
+	// for this job. A nil value preserves the legacy behavior of delivering to
+	// every globally enabled destination; an explicit empty list disables
+	// notifications for the job. Destination secrets never live in the job.
+	NotificationDestinations []string `yaml:"notification_destinations,omitempty" json:"notification_destinations,omitempty"`
 }
 type Protocol struct {
 	Ports            string `yaml:"ports"`
@@ -385,6 +390,28 @@ func NormalizeJob(j Job) Job {
 	j.Timezone = strings.TrimSpace(j.Timezone)
 	for i := range j.Targets {
 		j.Targets[i] = CanonicalTarget(j.Targets[i])
+	}
+	if j.NotificationDestinations != nil {
+		seen := make(map[string]struct{}, len(j.NotificationDestinations))
+		selected := make([]string, 0, len(j.NotificationDestinations))
+		for _, destination := range j.NotificationDestinations {
+			destination = strings.TrimSpace(destination)
+			if destination == "" {
+				continue
+			}
+			if _, exists := seen[destination]; exists {
+				continue
+			}
+			seen[destination] = struct{}{}
+			selected = append(selected, destination)
+		}
+		sort.Strings(selected)
+		// Keep an explicitly supplied empty list non-nil so callers can
+		// distinguish "deliver nowhere" from the legacy nil default.
+		if selected == nil {
+			selected = []string{}
+		}
+		j.NotificationDestinations = selected
 	}
 	return j
 }

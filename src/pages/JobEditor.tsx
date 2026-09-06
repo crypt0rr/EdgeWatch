@@ -3,9 +3,9 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, ChevronDown, Info, Plus, Save, Trash2, TriangleAlert } from 'lucide-react'
+import { ArrowLeft, Bell, ChevronDown, Info, Plus, Save, Trash2, TriangleAlert } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { APIError, createJob, getJob, scheduleSuggestion, updateJob } from '../api'
+import { APIError, createJob, getJob, listNotificationDestinations, scheduleSuggestion, updateJob } from '../api'
 import type { JobForm, Protocol } from '../types'
 import { cidrWarning, duplicateTarget, targetKind } from '../target'
 import { ActionDialog } from '../components/ActionDialog'
@@ -50,9 +50,12 @@ export function JobEditor() {
   const navigate = useNavigate()
   const client = useQueryClient()
   const existing = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id!), enabled: edit })
+  const notificationDestinations = useQuery({ queryKey: ['notifications'], queryFn: listNotificationDestinations, staleTime: 30_000 })
   const [targets, setTargets] = useState<string[]>(blank.targets)
   const [tcp, setTCP] = useState<Protocol | undefined>({ ports: '1-1024', mode: 'syn', service_detection: false })
   const [udp, setUDP] = useState<Protocol | undefined>()
+  const [selectedNotificationIDs, setSelectedNotificationIDs] = useState<string[]>([])
+  const [notificationSelectionTouched, setNotificationSelectionTouched] = useState(false)
   const [scheduleEnabled, setScheduleEnabled] = useState(true)
   const [error, setError] = useState('')
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
@@ -115,6 +118,20 @@ export function JobEditor() {
     applyServerJob(existing.data)
   }, [existing.data, id, hasDraftChanges, reset])
 
+  // Jobs created before per-job routing was introduced have an omitted
+  // selection, which intentionally means "all active destinations". Once the
+  // destination list is available, make that compatibility behavior explicit
+  // in the editor while preserving an intentional empty selection.
+  useEffect(() => {
+    if (!notificationDestinations.data || notificationSelectionTouched) return
+    const configured = existing.data?.job.notification_destinations
+    if (configured !== undefined) {
+      setSelectedNotificationIDs([...configured])
+      return
+    }
+    setSelectedNotificationIDs(notificationDestinations.data.destinations.filter(isActiveDestination).map(destination => destination.id))
+  }, [existing.data, notificationDestinations.data, notificationSelectionTouched])
+
   const save = async (values: JobFormFields, confirm = false) => {
     setFieldErrors({})
     const normalizedTargets = targets.map((value) => value.trim()).filter(Boolean)
@@ -138,7 +155,7 @@ export function JobEditor() {
       setError('This job changed in another tab. Reload the saved version before continuing.')
       return
     }
-    const payload = { ...values, enabled: scheduleEnabled, targets: normalizedTargets, tcp, udp }
+    const payload = { ...values, enabled: scheduleEnabled, targets: normalizedTargets, tcp, udp, notification_destinations: notificationDestinations.data ? selectedNotificationIDs : undefined }
     setSaving(true)
     setError('')
     try {
@@ -222,6 +239,18 @@ export function JobEditor() {
               <label>Change confirmations<input type="number" min={1} max={100} {...register('change_confirmations', { valueAsNumber: true })} />{(formErrors.change_confirmations?.message || fieldErrors.confirmations) && <small className="field-error">{formErrors.change_confirmations?.message || fieldErrors.confirmations}</small>}<small>Matching scans before an incident opens.</small></label>
             </div>
           </div>
+
+          <div className="panel form-panel job-notification-panel">
+            <div className="panel-heading"><div><h2>Notifications for this job</h2><p className="muted">Choose one or more configured destinations for this job’s alerts.</p></div><Bell className="muted-icon" size={19} /></div>
+            {notificationDestinations.isLoading ? <div className="loading"><span className="spinner" />Loading destinations…</div> : notificationDestinations.error ? <div className="form-error" role="alert">Notification destinations could not be loaded. The existing routing will be preserved.</div> : notificationDestinations.data?.destinations.length ? <div className="job-notification-list">
+              {notificationDestinations.data.destinations.map(destination => <label className="switch-row job-notification-option" key={destination.id}>
+                <input type="checkbox" checked={selectedNotificationIDs.includes(destination.id)} onChange={event => { setNotificationSelectionTouched(true); setDraftDirty(true); setSelectedNotificationIDs(current => event.target.checked ? [...current, destination.id] : current.filter(idValue => idValue !== destination.id)) }} />
+                <span><strong>{destination.name}</strong><small>{destination.provider || 'unknown provider'} · {destination.source === 'deployment' ? 'deployment-managed' : 'web-managed'}{destination.locked ? ' · credentials locked' : !destination.enabled ? ' · paused' : ''}</small></span>
+                <span className={destination.locked ? 'pill amber' : destination.enabled ? 'pill green' : 'pill gray'}>{destination.locked ? 'Locked' : destination.enabled ? 'Enabled' : 'Paused'}</span>
+              </label>)}
+            </div> : <div className="inline-empty">No notification destinations are configured. Add one from the Notifications page.</div>}
+            <p className="helper">Uncheck every destination to keep this job silent. A job from an older release with no saved selection continues using all globally enabled destinations until you save it here.</p>
+          </div>
         </div>
 
         <aside className="editor-side">
@@ -271,4 +300,8 @@ function formatSuggestionTime(value: string) {
 function formatGap(minutes: number) {
   if (minutes <= 0) return 'at the same time'
   return `${minutes} minute${minutes === 1 ? '' : 's'} apart`
+}
+
+function isActiveDestination(destination: { enabled: boolean; locked: boolean }) {
+  return destination.enabled && !destination.locked
 }

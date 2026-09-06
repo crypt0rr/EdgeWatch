@@ -401,6 +401,7 @@ func (c *Client) loadBootstrapOnce(ctx context.Context, family int, endpoint str
 		}
 		base := ""
 		baseOrigin := ""
+		candidateOrigins := make(map[string]struct{})
 		for _, candidate := range urls {
 			candidateURL, parseErr := url.Parse(candidate)
 			if parseErr != nil {
@@ -410,9 +411,14 @@ func (c *Client) loadBootstrapOnce(ctx context.Context, family int, endpoint str
 			if originErr != nil {
 				continue
 			}
-			base = candidate
-			baseOrigin = candidateOrigin
-			break
+			// The first valid HTTPS URL remains the directly selected service,
+			// while every valid URL is an IANA-authorized authority that may be
+			// used for a legitimate RIR referral redirect.
+			candidateOrigins[candidateOrigin] = struct{}{}
+			if base == "" {
+				base = candidate
+				baseOrigin = candidateOrigin
+			}
 		}
 		if base == "" {
 			continue
@@ -423,7 +429,9 @@ func (c *Client) loadBootstrapOnce(ctx context.Context, family int, endpoint str
 				continue
 			}
 			services = append(services, bootstrapService{Network: network, URL: strings.TrimRight(base, "/") + "/", Origin: baseOrigin})
-			authorities[baseOrigin] = struct{}{}
+			for candidateOrigin := range candidateOrigins {
+				authorities[candidateOrigin] = struct{}{}
+			}
 		}
 	}
 	if len(services) == 0 {
@@ -462,6 +470,25 @@ func cloneAuthorities(values map[string]struct{}) map[string]struct{} {
 	return cloned
 }
 
+func (c *Client) allowedAuthorities(ip net.IP, selected string) map[string]struct{} {
+	family := 6
+	if ip.To4() != nil {
+		family = 4
+	}
+	c.mu.Lock()
+	allowed := cloneAuthorities(c.authorities[family])
+	c.mu.Unlock()
+	if allowed == nil {
+		allowed = make(map[string]struct{})
+	}
+	// Keep the selected service explicitly allowed for clients/tests that
+	// provide a service without loading a bootstrap document first.
+	if selected != "" {
+		allowed[selected] = struct{}{}
+	}
+	return allowed
+}
+
 func (c *Client) fetch(ctx context.Context, ip net.IP, service bootstrapService) (Result, error) {
 	base, err := url.Parse(service.URL)
 	if err != nil || base.Scheme != "https" || base.Host == "" {
@@ -477,7 +504,7 @@ func (c *Client) fetch(ctx context.Context, ip net.IP, service bootstrapService)
 	endpoint := *base
 	endpoint.Path = path.Join(base.Path, "ip", ip.String())
 	endpoint.RawPath = ""
-	allowed := map[string]struct{}{origin: {}}
+	allowed := c.allowedAuthorities(ip, origin)
 	body, err := c.getLimited(ctx, endpoint.String(), allowed)
 	if err != nil {
 		return Result{}, fmt.Errorf("query authoritative RDAP: %w", err)

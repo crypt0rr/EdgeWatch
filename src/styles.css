@@ -494,3 +494,75 @@
     backdrop-filter: none;
   }
 }
+
+/* Keep large custom port expressions readable without letting them widen
+   cards, rows, or protocol headings. Exact scopes remain available in the
+   expandable details element on job and host detail pages. */
+.job-card,
+.job-card > p,
+.protocol-heading > div,
+.scope-details-list,
+.scope-details,
+.host-row > * {
+  min-width: 0;
+}
+
+.job-card > p {
+  overflow-wrap: anywhere;
+}
+
+.host-row {
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1.2fr) minmax(0, 1.3fr) auto;
+}
+
+.host-source,
+.host-coverage {
+  min-width: 0;
+}
+
+.scope-details-list {
+  display: grid;
+  gap: 5px;
+  margin-top: 7px;
+}
+
+.scope-details summary {
+  color: #83b9ef;
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.scope-expression {
+  display: block;
+  max-height: 8rem;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid #203b59;
+  border-radius: 6px;
+  background: #091827;
+  color: #b7dcff;
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.protocol-heading .scope-details-list {
+  max-width: 100%;
+}
+
+@media (max-width: 620px) {
+  .host-row {
+    display: block;
+  }
+
+  .host-source,
+  .host-coverage,
+  .host-open-count {
+    margin-top: 9px;
+  }
+}

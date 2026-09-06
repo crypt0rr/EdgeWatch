@@ -15,6 +15,7 @@ import { HostDetail } from './pages/HostDetail'
 import { Hosts } from './pages/Hosts'
 import { Pagination } from './components/Pagination'
 import { ActionDialog } from './components/ActionDialog'
+import { compactPortExpression } from './components/PortScopeDetails'
 import type { Incident } from './types'
 import './tailwind.css'
 import './styles.css'
@@ -189,7 +190,12 @@ function Jobs() {
   return <section className="page"><div className="page-heading"><div><p className="eyebrow">Configuration</p><h1>Jobs</h1><p className="muted">Each job owns its targets, protocols, schedule, and baseline.</p></div><button className="button primary" onClick={() => navigate('/jobs/new')}>＋ New job</button></div>{jobs.isLoading ? <Loading /> : jobs.error ? <ErrorCard message={jobs.error.message} /> : <div className="job-grid">{jobs.data?.jobs.map(job => <Link className={job.archived ? 'job-card archived' : 'job-card'} to={`/jobs/${job.id}`} key={job.id}><div className="job-card-top"><span className={job.enabled && !job.archived ? 'pill green' : 'pill gray'}>{job.archived ? 'Archived' : job.enabled ? 'Scheduled' : 'Paused'}</span><span className="revision">r{job.revision}</span></div><h3>{job.job.name}</h3><p className="muted">{job.job.targets.length} target{job.job.targets.length === 1 ? '' : 's'} · {protocolSummary(job)}</p><div className="job-card-bottom"><span className={job.baseline.status === 'complete' ? 'baseline complete' : 'baseline'}>{job.baseline.status === 'complete' ? '● Baseline ready' : `◌ Collecting ${job.baseline.samples ?? 0}/${job.job.baseline_samples}`}</span><span>{job.job.schedule}</span></div></Link>)}{!jobs.data?.jobs.length && <Empty title="No jobs yet" body="Create your first TCP or UDP monitoring job." action={<button className="button primary" onClick={() => navigate('/jobs/new')}>Create a job</button>} />}</div>}</section>
 }
 
-function protocolSummary(job: { job: { tcp?: { ports: string }; udp?: { ports: string } } }) { return [job.job.tcp && `TCP ${job.job.tcp.ports}`, job.job.udp && `UDP ${job.job.udp.ports}`].filter(Boolean).join(' · ') }
+function protocolSummary(job: { job: { tcp?: { ports: string }; udp?: { ports: string } } }) {
+  return [
+    job.job.tcp && `TCP · ${compactPortExpression(job.job.tcp.ports)}`,
+    job.job.udp && `UDP · ${compactPortExpression(job.job.udp.ports)}`,
+  ].filter(Boolean).join(' · ')
+}
 
 function Incidents() {
   const [offset, setOffset] = useState(0)

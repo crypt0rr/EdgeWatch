@@ -144,6 +144,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   })
 
   await page.goto('/')
+  await expect(page.locator('link[rel="icon"]')).toHaveAttribute('href', '/favicon.svg')
   await expect(page.getByRole('heading', { name: 'Create your administrator' })).toBeVisible()
   await page.getByLabel('Setup token').fill('setup-token')
   await page.locator('input[autocomplete="new-password"]').first().fill('correct horse battery staple')

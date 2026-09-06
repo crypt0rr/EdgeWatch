@@ -116,12 +116,20 @@ notifications:
   }
 
   const stop = async () => {
-    if (!child || child.exitCode !== null || !child.pid) return
+    if (!child || !child.pid) return
     const processGroupID = child.pid
-    try { process.kill(-child.pid, 'SIGTERM') } catch { /* already stopped */ }
-    await Promise.race([once(child, 'exit'), delay(10_000)])
-    if (child.exitCode === null) {
-      try { process.kill(-child.pid, 'SIGKILL') } catch { /* already stopped */ }
+    const processHandle = child
+    // `go run` can exit before the compiled daemon child has finished
+    // shutting down. Always signal the detached process group, even when the
+    // runner already has an exit code, so a restart cannot race its lease.
+    try { process.kill(-processGroupID, 'SIGTERM') } catch { /* already stopped */ }
+    if (processHandle.exitCode === null) {
+      await Promise.race([once(processHandle, 'exit'), delay(10_000)])
+    } else {
+      await delay(100)
+    }
+    if (processHandle.exitCode === null) {
+      try { process.kill(-processGroupID, 'SIGKILL') } catch { /* already stopped */ }
     }
     const deadline = Date.now() + 5_000
     while (Date.now() < deadline) {

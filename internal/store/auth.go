@@ -24,7 +24,11 @@ type AuditEntry struct {
 }
 
 type Admin struct {
-	Username     string
+	// Username is the stable administrator identity used for authentication.
+	Username string
+	// DisplayName is the label shown in the web console. It is deliberately
+	// separate from Username so changing the label never changes sign-in.
+	DisplayName  string
 	PasswordHash string
 	TOTPSecret   string
 	TOTPEnabled  bool
@@ -55,14 +59,15 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	var totp int
 	var stored string
 	var created, updated string
-	err := s.DB.QueryRowContext(ctx, `SELECT username,password_hash,totp_secret,totp_enabled,created_at,updated_at FROM admins WHERE id=1`).
-		Scan(&a.Username, &a.PasswordHash, &stored, &totp, &created, &updated)
+	err := s.DB.QueryRowContext(ctx, `SELECT username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at FROM admins WHERE id=1`).
+		Scan(&a.Username, &a.DisplayName, &a.PasswordHash, &stored, &totp, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return a, ErrNotFound
 	}
 	if err != nil {
 		return a, err
 	}
+	a.DisplayName = adminDisplayName(a)
 	a.TOTPEnabled = totp != 0
 	a.CreatedAt, a.UpdatedAt = scanTime(created), scanTime(updated)
 	a.TOTPSecretStored = stored
@@ -94,8 +99,18 @@ type contextExecer interface {
 }
 
 func saveAdminExec(ctx context.Context, execer contextExecer, a Admin, stored string) error {
-	_, err := execer.ExecContext(ctx, `INSERT INTO admins(id,username,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,password_hash=excluded.password_hash,totp_secret=excluded.totp_secret,totp_enabled=excluded.totp_enabled,updated_at=excluded.updated_at`, a.Username, a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	_, err := execer.ExecContext(ctx, `INSERT INTO admins(id,username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,password_hash=excluded.password_hash,totp_secret=excluded.totp_secret,totp_enabled=excluded.totp_enabled,updated_at=excluded.updated_at`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano))
 	return err
+}
+
+func adminDisplayName(a Admin) string {
+	if name := strings.TrimSpace(a.DisplayName); name != "" {
+		return name
+	}
+	if username := strings.TrimSpace(a.Username); username != "" {
+		return username
+	}
+	return "admin"
 }
 
 // SaveAdminSecurity commits an administrator mutation and its dependent
@@ -242,7 +257,7 @@ func (s *Store) CompleteSetup(ctx context.Context, tokenHash string, admin Admin
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO admins(id,username,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?)`, admin.Username, admin.PasswordHash, storedSecret, boolInt(admin.TOTPEnabled), admin.CreatedAt.UTC().Format(time.RFC3339Nano), admin.UpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO admins(id,username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?,?)`, admin.Username, adminDisplayName(admin), admin.PasswordHash, storedSecret, boolInt(admin.TOTPEnabled), admin.CreatedAt.UTC().Format(time.RFC3339Nano), admin.UpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1`, now.UTC().Format(time.RFC3339Nano)); err != nil {

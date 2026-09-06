@@ -43,14 +43,15 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!response.ok) throw new APIError(body?.error?.message || 'Request failed', body?.error?.code, body?.error?.details)
   return body as T
 }
-export type AdminStatus = { configured: boolean; username: string; version: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; max_probe_count?: number; rdap_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number } }
+export type AdminStatus = { configured: boolean; username: string; display_name?: string; version: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; max_probe_count?: number; rdap_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number } }
 export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; version: string; password_requirements: { minimum_length: number } }>('/setup/status')
 export const adminStatus = () => api<AdminStatus>('/status')
-export const getSession = () => api<{ username: string; csrf_token: string; totp_enabled: boolean }>('/auth/session')
-export const login = (password: string, otp?: string, recovery_code?: string) => api<{ username: string; csrf_token: string; totp_required: boolean }>('/auth/login', { method: 'POST', body: JSON.stringify({ password, otp, recovery_code }) })
+export const getSession = () => api<{ username: string; display_name?: string; csrf_token: string; totp_enabled: boolean }>('/auth/session')
+export const login = (password: string, otp?: string, recovery_code?: string) => api<{ username: string; display_name?: string; csrf_token: string; totp_required: boolean }>('/auth/login', { method: 'POST', body: JSON.stringify({ password, otp, recovery_code }) })
 export const setup = (token: string, password: string) => api('/setup', { method: 'POST', body: JSON.stringify({ token, password }) })
 export const logout = () => api('/auth/logout', { method: 'POST' })
 export const logoutAllSessions = () => api('/auth/sessions', { method: 'DELETE' })
+export const updateDisplayName = (displayName: string) => api<{ display_name: string }>('/auth/display-name', { method: 'PUT', body: JSON.stringify({ display_name: displayName }) })
 export const listJobs = (archived = false) => api<{ jobs: Job[] }>(`/jobs?include_archived=${archived}`)
 export type ScheduleSuggestion = {
   suggested: boolean

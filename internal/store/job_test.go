@@ -369,6 +369,39 @@ func TestExistingSchemaMigratesWithWebTables(t *testing.T) {
 			t.Fatalf("missing %s: %v", table, err)
 		}
 	}
+	var columns int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('admins') WHERE name='display_name'`).Scan(&columns); err != nil {
+		t.Fatal(err)
+	}
+	if columns != 1 {
+		t.Fatalf("administrator display_name column count = %d", columns)
+	}
+	var defaultValue string
+	if err := s.DB.QueryRow(`SELECT dflt_value FROM pragma_table_info('admins') WHERE name='display_name'`).Scan(&defaultValue); err != nil {
+		t.Fatal(err)
+	}
+	if defaultValue != "'admin'" {
+		t.Fatalf("administrator display_name default = %q", defaultValue)
+	}
+	now := time.Now().UTC()
+	if err := s.SaveAdmin(context.Background(), Admin{Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := s.GetAdmin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.DisplayName != "admin" {
+		t.Fatalf("default administrator display name = %q", admin.DisplayName)
+	}
+	admin.DisplayName = "Ada Lovelace"
+	if err := s.SaveAdmin(context.Background(), admin); err != nil {
+		t.Fatal(err)
+	}
+	admin, err = s.GetAdmin(context.Background())
+	if err != nil || admin.DisplayName != "Ada Lovelace" {
+		t.Fatalf("saved administrator display name = %q, err=%v", admin.DisplayName, err)
+	}
 }
 
 func TestV1DatabaseAddsManagedColumns(t *testing.T) {
@@ -426,5 +459,46 @@ func TestV9DatabaseAddsSetupTokenIssueTimestamp(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("issued_at column count = %d", count)
+	}
+}
+
+func TestV10DatabaseAddsAdministratorDisplayName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v10.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE admins (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ username TEXT NOT NULL DEFAULT 'admin',
+ password_hash TEXT NOT NULL,
+ totp_secret TEXT NOT NULL DEFAULT '',
+ totp_enabled INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+); PRAGMA user_version = 10;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var count int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('admins') WHERE name='display_name'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("display_name column count = %d", count)
+	}
+	var defaultValue string
+	if err := s.DB.QueryRow(`SELECT dflt_value FROM pragma_table_info('admins') WHERE name='display_name'`).Scan(&defaultValue); err != nil {
+		t.Fatal(err)
+	}
+	if defaultValue != "'admin'" {
+		t.Fatalf("display_name default = %q", defaultValue)
 	}
 }

@@ -97,7 +97,11 @@ type Job struct {
 	// for this job. A nil value preserves the legacy behavior of delivering to
 	// every globally enabled destination; an explicit empty list disables
 	// notifications for the job. Destination secrets never live in the job.
-	NotificationDestinations []string `yaml:"notification_destinations,omitempty" json:"notification_destinations,omitempty"`
+	// Keep the JSON field when the slice is explicitly empty. The nil versus
+	// empty distinction is the difference between legacy global routing and a
+	// deliberately silent job, so persistence must not let encoding/json's
+	// omitempty collapse the two states.
+	NotificationDestinations []string `yaml:"notification_destinations,omitempty" json:"notification_destinations"`
 }
 type Protocol struct {
 	Ports            string `yaml:"ports"`

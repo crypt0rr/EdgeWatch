@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/crypt0rr/edgewatch/internal/app"
 	"github.com/crypt0rr/edgewatch/internal/auth"
@@ -177,6 +179,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "/auth/logout" && r.Method == http.MethodPost:
 		s.logout(w, r)
+	case path == "/auth/display-name" && r.Method == http.MethodPut:
+		s.changeDisplayName(w, r)
 	case path == "/auth/password" && r.Method == http.MethodPut:
 		s.changePassword(w, r, session)
 	case path == "/auth/totp/setup" && r.Method == http.MethodPost:
@@ -281,13 +285,19 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 // Keeping this separate from setupStatus prevents pre-auth callers from
 // learning notification state, scheduler capacity, or legacy job names.
 func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
+	admin, err := s.Store.GetAdmin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "admin_missing", "administrator account could not be loaded", nil)
+		return
+	}
 	if reloadErr := s.App.Notifier.Reload(r.Context()); reloadErr != nil {
 		s.Log.Warn("notification state refresh failed", "error", reloadErr)
 	}
 	notificationStatus := s.App.Notifier.Status()
 	status := map[string]any{
 		"configured":                true,
-		"username":                  "admin",
+		"username":                  admin.Username,
+		"display_name":              admin.DisplayName,
 		"version":                   s.Version,
 		"notification_destinations": notificationStatus["active"],
 		"notifications":             notificationStatus,
@@ -351,7 +361,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	auth.SetSessionCookie(w, raw)
 	session, _ := s.Store.GetSession(r.Context(), digest(raw))
-	writeJSON(w, http.StatusOK, map[string]any{"username": admin.Username, "csrf_token": session.CSRFToken, "totp_required": admin.TOTPEnabled})
+	writeJSON(w, http.StatusOK, map[string]any{"username": admin.Username, "display_name": admin.DisplayName, "csrf_token": session.CSRFToken, "totp_required": admin.TOTPEnabled})
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
@@ -375,7 +385,57 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request, session store.S
 		writeError(w, http.StatusInternalServerError, "admin_missing", err.Error(), nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"username": admin.Username, "csrf_token": session.CSRFToken, "totp_enabled": admin.TOTPEnabled, "password_requirements": auth.PasswordRequirements()})
+	writeJSON(w, http.StatusOK, map[string]any{"username": admin.Username, "display_name": admin.DisplayName, "csrf_token": session.CSRFToken, "totp_enabled": admin.TOTPEnabled, "password_requirements": auth.PasswordRequirements()})
+}
+
+const maxDisplayNameRunes = 80
+
+func validateDisplayName(value string) (string, error) {
+	if !utf8.ValidString(value) {
+		return "", errors.New("display name must be valid UTF-8")
+	}
+	name := strings.TrimSpace(value)
+	if name == "" {
+		return "", errors.New("display name cannot be empty")
+	}
+	if utf8.RuneCountInString(name) > maxDisplayNameRunes {
+		return "", fmt.Errorf("display name must be at most %d characters", maxDisplayNameRunes)
+	}
+	for _, character := range name {
+		if unicode.IsControl(character) {
+			return "", errors.New("display name must not contain control characters")
+		}
+	}
+	return name, nil
+}
+
+func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		DisplayName string `json:"display_name"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	displayName, err := validateDisplayName(input.DisplayName)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_display_name", err.Error(), map[string]string{"display_name": err.Error()})
+		return
+	}
+	admin, err := s.Store.GetAdmin(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "admin_missing", "administrator account could not be loaded", nil)
+		return
+	}
+	admin.DisplayName = displayName
+	admin.UpdatedAt = time.Now().UTC()
+	if err := s.Store.SaveAdminSecurity(r.Context(), admin, nil, false, false, "admin.display_name_changed", "administrator display name changed"); err != nil {
+		if s.writeAuditUnavailable(w, err, "admin.display_name_changed") {
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "save_failed", "administrator display name could not be saved", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"display_name": displayName})
 }
 
 func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session store.Session) {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -248,6 +249,30 @@ func TestNormalizeJobCanonicalizesNotificationDestinations(t *testing.T) {
 	legacy := NormalizeJob(Job{})
 	if legacy.NotificationDestinations != nil {
 		t.Fatalf("omitted notification selection = %#v, want nil", legacy.NotificationDestinations)
+	}
+}
+
+func TestNotificationDestinationsJSONPreservesSilentSelection(t *testing.T) {
+	legacy, err := json.Marshal(Job{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	explicit, err := json.Marshal(Job{NotificationDestinations: []string{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(legacy), `"notification_destinations":null`) {
+		t.Fatalf("legacy notification selection was not represented as null: %s", legacy)
+	}
+	if !strings.Contains(string(explicit), `"notification_destinations":[]`) {
+		t.Fatalf("explicit empty notification selection was omitted: %s", explicit)
+	}
+	var roundTrip Job
+	if err := json.Unmarshal(explicit, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip.NotificationDestinations == nil || len(roundTrip.NotificationDestinations) != 0 {
+		t.Fatalf("explicit empty selection did not survive JSON round trip: %#v", roundTrip.NotificationDestinations)
 	}
 }
 

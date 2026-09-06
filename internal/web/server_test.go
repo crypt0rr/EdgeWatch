@@ -11,6 +11,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -162,6 +163,134 @@ func TestConsoleSetupLoginCreateAndRun(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatal("scan did not finish")
+}
+
+func TestDisplayNameAPIUpdatesSessionAndAudit(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := app.New(cfg, s, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := auth.NewManager(s).EnsureSetupToken(ctx)
+	if err != nil || token == "" {
+		t.Fatalf("setup token %q: %v", token, err)
+	}
+	h := httptest.NewServer(NewServer(a, s, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
+	defer h.Close()
+	jar, _ := cookiejar.New(nil)
+	client := &http.Client{Jar: jar}
+	request := func(method, path, body, csrf string) *http.Response {
+		req, requestErr := http.NewRequest(method, h.URL+path, strings.NewReader(body))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		if csrf != "" {
+			req.Header.Set("X-CSRF-Token", csrf)
+		}
+		resp, requestErr := client.Do(req)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		return resp
+	}
+	resp := request(http.MethodPost, "/api/v1/setup", `{"token":"`+token+`","password":"correct horse battery staple"}`, "")
+	if resp.StatusCode != http.StatusCreated {
+		resp.Body.Close()
+		t.Fatalf("setup status %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = request(http.MethodPost, "/api/v1/auth/login", `{"password":"correct horse battery staple"}`, "")
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("login status %d", resp.StatusCode)
+	}
+	var loginResult struct {
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+		CSRF        string `json:"csrf_token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&loginResult); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if loginResult.Username != "admin" || loginResult.DisplayName != "admin" || loginResult.CSRF == "" {
+		t.Fatalf("login identity = %#v", loginResult)
+	}
+	resp = request(http.MethodPut, "/api/v1/auth/display-name", `{"display_name":"  Grace Hopper  "}`, loginResult.CSRF)
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("display name update status %d: %s", resp.StatusCode, body)
+	}
+	var updated struct {
+		DisplayName string `json:"display_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if updated.DisplayName != "Grace Hopper" {
+		t.Fatalf("updated display name = %q", updated.DisplayName)
+	}
+	resp = request(http.MethodGet, "/api/v1/auth/session", "", "")
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("session status %d", resp.StatusCode)
+	}
+	var sessionResult struct {
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&sessionResult); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if sessionResult.Username != "admin" || sessionResult.DisplayName != "Grace Hopper" {
+		t.Fatalf("session identity = %#v", sessionResult)
+	}
+	admin, err := s.GetAdmin(ctx)
+	if err != nil || admin.DisplayName != "Grace Hopper" {
+		t.Fatalf("stored display name = %q, err=%v", admin.DisplayName, err)
+	}
+	var audits int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE action=?`, "admin.display_name_changed").Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 1 {
+		t.Fatalf("display name audit rows = %d", audits)
+	}
+	for _, value := range []string{" ", strings.Repeat("a", maxDisplayNameRunes+1), "valid\nname"} {
+		resp = request(http.MethodPut, "/api/v1/auth/display-name", `{"display_name":`+strconv.Quote(value)+`}`, loginResult.CSRF)
+		var failure map[string]any
+		if err := json.NewDecoder(resp.Body).Decode(&failure); err != nil {
+			resp.Body.Close()
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("invalid display name %q returned %d: %#v", value, resp.StatusCode, failure)
+		}
+		errPayload, ok := failure["error"].(map[string]any)
+		if !ok || errPayload["code"] != "invalid_display_name" {
+			t.Fatalf("invalid display name %q response = %#v", value, failure)
+		}
+	}
+	admin, err = s.GetAdmin(ctx)
+	if err != nil || admin.DisplayName != "Grace Hopper" {
+		t.Fatalf("invalid update changed display name = %q, err=%v", admin.DisplayName, err)
+	}
 }
 
 func TestListenAddressIsLoopbackOnly(t *testing.T) {
@@ -1001,7 +1130,8 @@ func TestNotificationAPIIsWriteOnlyAndUsesOptimisticConcurrency(t *testing.T) {
 		t.Fatalf("legacy job update status %d: %s", response.StatusCode, body)
 	}
 	var updatedJob struct {
-		Job struct {
+		Revision int64 `json:"revision"`
+		Job      struct {
 			NotificationDestinations []string `json:"notification_destinations"`
 		} `json:"job"`
 	}
@@ -1012,6 +1142,25 @@ func TestNotificationAPIIsWriteOnlyAndUsesOptimisticConcurrency(t *testing.T) {
 	response.Body.Close()
 	if len(updatedJob.Job.NotificationDestinations) != 1 || updatedJob.Job.NotificationDestinations[0] != created.ID {
 		t.Fatalf("omitted routing field did not preserve selection: %#v", updatedJob.Job.NotificationDestinations)
+	}
+	response = request(http.MethodPut, "/api/v1/jobs/"+createdJob.ID, fmt.Sprintf(`{"name":"selected-alerts","schedule":"0 * * * *","timezone":"UTC","targets":["127.0.0.1"],"tcp":{"ports":"1","mode":"connect"},"timeout":"1m","timing":"balanced","baseline_samples":1,"change_confirmations":1,"max_expanded_hosts":256,"revision":%d,"notification_destinations":[]}`, updatedJob.Revision), login.CSRF)
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		response.Body.Close()
+		t.Fatalf("silent routing update status %d: %s", response.StatusCode, body)
+	}
+	var silentJob struct {
+		Job struct {
+			NotificationDestinations []string `json:"notification_destinations"`
+		} `json:"job"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&silentJob); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if silentJob.Job.NotificationDestinations == nil || len(silentJob.Job.NotificationDestinations) != 0 {
+		t.Fatalf("explicit empty routing selection was not retained: %#v", silentJob.Job.NotificationDestinations)
 	}
 	response = request(http.MethodPost, "/api/v1/jobs", `{"name":"unknown-alert","schedule":"0 * * * *","timezone":"UTC","targets":["127.0.0.1"],"tcp":{"ports":"1","mode":"connect"},"timeout":"1m","timing":"balanced","baseline_samples":1,"change_confirmations":1,"max_expanded_hosts":256,"notification_destinations":["managed:missing"]}`, login.CSRF)
 	if response.StatusCode != http.StatusBadRequest {

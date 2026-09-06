@@ -1,8 +1,8 @@
-import { FormEvent, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Copy, KeyRound, LogOut, ShieldCheck } from 'lucide-react'
+import { Check, Copy, KeyRound, LogOut, ShieldCheck, UserRound } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { api, getSession, logoutAllSessions, setCSRF } from '../api'
+import { api, getSession, logoutAllSessions, setCSRF, updateDisplayName } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
 
 export function Security() {
@@ -18,6 +18,35 @@ export function Security() {
   const [recovery, setRecovery] = useState<string[]>([])
   const [disablePrompt, setDisablePrompt] = useState(false)
   const [revokePrompt, setRevokePrompt] = useState(false)
+  const [displayName, setDisplayName] = useState('')
+  const [displayNameBusy, setDisplayNameBusy] = useState(false)
+  const displayNameInitialized = useRef(false)
+
+  useEffect(() => {
+    if (displayNameInitialized.current || !session.data) return
+    setDisplayName(session.data.display_name ?? session.data.username ?? 'admin')
+    displayNameInitialized.current = true
+  }, [session.data])
+
+  async function saveDisplayName(event: FormEvent) {
+    event.preventDefault()
+    setMessage('')
+    setError('')
+    setDisplayNameBusy(true)
+    try {
+      const value = await updateDisplayName(displayName)
+      setDisplayName(value.display_name)
+      setMessage('Administrator display name updated.')
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['session'] }),
+        client.invalidateQueries({ queryKey: ['admin-status'] }),
+      ])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Display name update failed')
+    } finally {
+      setDisplayNameBusy(false)
+    }
+  }
 
   async function change(event: FormEvent) {
     event.preventDefault()
@@ -94,6 +123,13 @@ export function Security() {
     {message && <div className="success-banner"><Check size={17} />{message}</div>}
     {error && <div className="form-error banner" role="alert">{error}</div>}
     <div className="settings-grid">
+      <div className="panel">
+        <div className="panel-heading"><div><h2>Administrator profile</h2><p className="muted">Choose the name shown throughout the console.</p></div><UserRound className="muted-icon" size={19} /></div>
+        <form className="settings-form" onSubmit={saveDisplayName}>
+          <label>Display name<input type="text" value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={80} autoComplete="nickname" required /><small>Shown in the sidebar and dashboard. Your administrator sign-in remains unchanged.</small></label>
+          <button className="button primary" type="submit" disabled={displayNameBusy || !displayName.trim()}>{displayNameBusy ? 'Saving…' : 'Save display name'}</button>
+        </form>
+      </div>
       <div className="panel">
         <div className="panel-heading"><div><h2>Password</h2><p className="muted">Argon2id-protected administrator credentials.</p></div><KeyRound className="muted-icon" size={19} /></div>
         <form className="settings-form" onSubmit={change}>

@@ -14,6 +14,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   let configured = false
   let loggedIn = false
   let csrf = ''
+  let displayName = 'admin'
   let createdJob: Record<string, unknown> | null = null
   const existingJob = {
     id: 'job-existing', revision: 1, enabled: true, archived: false, security_hash: 'existing-hash',
@@ -51,11 +52,11 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
     }
     if (path === '/auth/session' && method === 'GET') {
       if (!loggedIn) { await json({ error: { code: 'unauthorized', message: 'authentication required' } }, 401); return }
-      await json({ username: 'admin', csrf_token: csrf, totp_enabled: false })
+      await json({ username: 'admin', display_name: displayName, csrf_token: csrf, totp_enabled: false })
       return
     }
     if (path === '/status' && method === 'GET') {
-      await json({ configured: true, username: 'admin', notification_destinations: 0, notifications: { deployment: 0, managed: 0, active: 0, locked: 0, key_state: 'not_required' }, retention: '90d', max_concurrent_scans: 1 })
+      await json({ configured: true, username: 'admin', display_name: displayName, notification_destinations: 0, notifications: { deployment: 0, managed: 0, active: 0, locked: 0, key_state: 'not_required' }, retention: '90d', max_concurrent_scans: 1 })
       return
     }
     if (path === '/scans/active' && method === 'GET') {
@@ -98,7 +99,13 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
     if (path === '/auth/login' && method === 'POST') {
       loggedIn = true
       csrf = 'test-csrf'
-      await json({ username: 'admin', csrf_token: csrf, totp_required: false })
+      await json({ username: 'admin', display_name: displayName, csrf_token: csrf, totp_required: false })
+      return
+    }
+    if (path === '/auth/display-name' && method === 'PUT') {
+      const payload = JSON.parse(request.postData() ?? '{}') as { display_name?: string }
+      displayName = payload.display_name ?? displayName
+      await json({ display_name: displayName })
       return
     }
     if (path === '/auth/logout' && method === 'POST') {
@@ -156,6 +163,13 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await page.getByRole('button', { name: 'Sign in' }).click()
   await expect(page.getByRole('heading', { name: 'Good afternoon, admin' })).toBeVisible()
   await expect(page.getByText('EdgeWatch v0.7.0')).toBeVisible()
+  await navigateFromShell(page, 'Security')
+  await expect(page.getByLabel('Display name')).toHaveValue('admin')
+  await page.getByLabel('Display name').fill('Edge operator')
+  await page.getByRole('button', { name: 'Save display name' }).click()
+  await expect(page.locator('.user-chip strong')).toHaveText('Edge operator')
+  await navigateFromShell(page, 'Overview')
+  await expect(page.getByRole('heading', { name: 'Good afternoon, Edge operator' })).toBeVisible()
   await openMobileNavigation(page)
   await expect(page.getByRole('link', { name: 'Incidents' })).toHaveClass(/nav-link-alert/)
   await expect(page.locator('#active-incident-count')).toHaveText('1')

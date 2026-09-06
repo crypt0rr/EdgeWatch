@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 10
+const schemaVersion = 11
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -436,6 +436,22 @@ func migrate(db *sql.DB) error {
  FOREIGN KEY(cycle_id) REFERENCES scan_cycles(id) ON DELETE CASCADE
 );`,
 			"CREATE INDEX IF NOT EXISTS scan_cycle_units_pending ON scan_cycle_units(cycle_id,status,sequence)",
+		},
+		11: {
+			// Keep the stable username as the administrator identity while allowing
+			// the console label to be changed without affecting authentication.
+			// The table guard also keeps partially-created recovery databases
+			// upgradeable when they have a schema marker but no admin row yet.
+			`CREATE TABLE IF NOT EXISTS admins (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ username TEXT NOT NULL DEFAULT 'admin',
+ password_hash TEXT NOT NULL,
+ totp_secret TEXT NOT NULL DEFAULT '',
+ totp_enabled INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);`,
+			"ALTER TABLE admins ADD COLUMN display_name TEXT NOT NULL DEFAULT 'admin'",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {

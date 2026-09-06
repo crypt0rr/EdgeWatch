@@ -111,3 +111,26 @@ func TestAllHostsReturnsLatestSuccessfulResultPerAddress(t *testing.T) {
 		t.Fatalf("unexpected global host response: %#v", response.Hosts)
 	}
 }
+
+func TestSummaryForHostCollapsesChunkedProtocolObservations(t *testing.T) {
+	host := model.HostObservation{
+		Address: "198.51.100.10",
+		Protocols: []model.ProtocolObservation{
+			{Protocol: "tcp", ScannedPorts: "1-4096", ScannedPortCount: 4096, Ports: []model.PortObservation{{Port: 22, State: "open"}}},
+			{Protocol: "tcp", ScannedPorts: "4097-8192", ScannedPortCount: 4096, Ports: []model.PortObservation{{Port: 443, State: "open|filtered"}}},
+			{Protocol: "udp", ScannedPorts: "53", ScannedPortCount: 1},
+		},
+	}
+	summary := summaryForHost(host, false)
+	if len(summary.Protocols) != 2 {
+		t.Fatalf("protocol summaries = %#v, want one TCP and one UDP record", summary.Protocols)
+	}
+	if summary.OpenPorts != 1 || summary.OpenFilteredPorts != 1 {
+		t.Fatalf("positive port counts = %d open, %d open|filtered", summary.OpenPorts, summary.OpenFilteredPorts)
+	}
+	for _, protocol := range summary.Protocols {
+		if protocol.Protocol == "tcp" && protocol.OpenPorts != 1 {
+			t.Fatalf("TCP summary = %#v", protocol)
+		}
+	}
+}

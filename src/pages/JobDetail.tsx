@@ -28,6 +28,7 @@ import {
 } from '../api'
 import { Pagination } from '../components/Pagination'
 import { ActionDialog } from '../components/ActionDialog'
+import { PortScopeDetails } from '../components/PortScopeDetails'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 
@@ -228,7 +229,10 @@ export function JobDetail() {
         <div className="summary-card">
           <span className="summary-label">Scope</span>
           <strong>{[value.job.tcp && 'TCP', value.job.udp && 'UDP'].filter(Boolean).join(' + ')}</strong>
-          <span className="muted">{scopeText(value)}</span>
+          <PortScopeDetails items={[
+            value.job.tcp && { protocol: 'TCP', ports: value.job.tcp.ports },
+            value.job.udp && { protocol: 'UDP', ports: value.job.udp.ports },
+          ].filter((item): item is { protocol: string; ports: string } => Boolean(item))} />
         </div>
       </div>
       {value.scan_estimate && <div className="notice" role="status">Estimated per run: {value.scan_estimate.probes.toLocaleString()} probes across {value.scan_estimate.hosts.toLocaleString()} hosts ({value.scan_estimate.nmap_invocations.toLocaleString()} Nmap process{value.scan_estimate.nmap_invocations === 1 ? '' : 'es'}, roughly {formatEstimateDuration(value.scan_estimate.estimated_seconds)}).{value.scan_estimate.unknown_dns ? ` DNS expansion may increase this estimate for ${value.scan_estimate.unknown_dns} name${value.scan_estimate.unknown_dns === 1 ? '' : 's'}.` : ''}</div>}
@@ -346,10 +350,6 @@ export function JobDetail() {
       {dialog === 'discard-cycle' && <ActionDialog title="Discard saved broad-scan progress?" description="The next trigger will start a fresh full-range scan. Existing attempt history remains available." confirmLabel="Discard progress" destructive onConfirm={() => discardCycle()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
     </section>
   )
-}
-
-function scopeText(value: { job: { tcp?: { ports: string }; udp?: { ports: string } } }) {
-  return [value.job.tcp && value.job.tcp.ports, value.job.udp && value.job.udp.ports].filter(Boolean).join(' · ')
 }
 
 function formatEstimateDuration(seconds: number) {

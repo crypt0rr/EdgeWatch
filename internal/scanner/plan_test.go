@@ -62,3 +62,34 @@ func TestMergeWorkSnapshotsDeduplicatesChunkAddresses(t *testing.T) {
 		t.Fatalf("merged snapshot was not normalized: %#v", result)
 	}
 }
+
+func TestMergeWorkSnapshotsDeduplicatesChunkedHostProtocols(t *testing.T) {
+	plan := WorkPlan{
+		Scopes: []model.Scope{{Target: "host", Protocol: "tcp", Ports: "1-8192"}},
+		DNS:    map[string][]string{},
+	}
+	fragments := []model.Snapshot{
+		{Hosts: []model.HostObservation{{
+			Address: "198.51.100.1",
+			Protocols: []model.ProtocolObservation{{
+				Protocol: "tcp", ScannedPorts: "1-4096", ScannedPortCount: 4096,
+				Ports: []model.PortObservation{{Port: 22, State: "open"}},
+			}},
+		}}},
+		{Hosts: []model.HostObservation{{
+			Address: "198.51.100.1",
+			Protocols: []model.ProtocolObservation{{
+				Protocol: "tcp", ScannedPorts: "4097-8192", ScannedPortCount: 4096,
+				Ports: []model.PortObservation{{Port: 443, State: "open|filtered"}},
+			}},
+		}}},
+	}
+	result := MergeWorkSnapshots(plan, fragments)
+	if len(result.Hosts) != 1 || len(result.Hosts[0].Protocols) != 1 {
+		t.Fatalf("merged host protocols = %#v", result.Hosts)
+	}
+	protocol := result.Hosts[0].Protocols[0]
+	if protocol.ScannedPorts != "1-8192" || protocol.ScannedPortCount != 8192 || len(protocol.Ports) != 2 {
+		t.Fatalf("merged protocol scope/evidence = %#v", protocol)
+	}
+}

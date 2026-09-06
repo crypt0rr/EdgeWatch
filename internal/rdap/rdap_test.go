@@ -2,6 +2,7 @@ package rdap
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"net"
@@ -84,6 +85,45 @@ func TestLookupUsesLongestBootstrapPrefixAndCachesNormalizedData(t *testing.T) {
 		t.Fatal("raw entities were retained")
 	}
 	_ = time.Now() // keep this test explicit about wall-clock cache semantics
+}
+
+func TestLookupAllowsIANAListedRIRReferral(t *testing.T) {
+	var authorityRequests atomic.Int32
+	rir := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorityRequests.Add(1)
+		if r.URL.Path != "/rdap/ip/198.51.100.10" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte(`{"name":"Referred Net","handle":"REF-1","links":[{"rel":"self","href":"` + "PLACEHOLDER" + `"}]}`))
+	}))
+	defer rir.Close()
+	var selected *httptest.Server
+	selected = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ipv4.json":
+			_, _ = w.Write([]byte(`{"services":[[["198.51.100.0/24"],["` + selected.URL + `/rdap/"]],[["203.0.113.0/24"],["` + rir.URL + `/rdap/"]]]}`))
+		case "/rdap/ip/198.51.100.10":
+			http.Redirect(w, r, rir.URL+"/rdap/ip/198.51.100.10", http.StatusSeeOther)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer selected.Close()
+
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- test servers use self-signed certificates.
+	client := New(nil, true)
+	client.HTTPClient = &http.Client{Transport: transport, Timeout: lookupTimeout}
+	client.AllowPrivateHosts = true
+	client.BootstrapIPv4URL = selected.URL + "/ipv4.json"
+	result, err := client.Lookup(context.Background(), "198.51.100.10")
+	if err != nil || result.Status != "success" || result.NetworkName != "Referred Net" {
+		t.Fatalf("referral lookup = %#v, %v", result, err)
+	}
+	if authorityRequests.Load() != 1 {
+		t.Fatalf("authoritative referral requests = %d, want one", authorityRequests.Load())
+	}
 }
 
 type staticResolver map[string][]net.IPAddr

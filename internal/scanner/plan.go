@@ -285,6 +285,11 @@ func MergeWorkSnapshots(plan WorkPlan, fragments []model.Snapshot) model.Snapsho
 		}
 	}
 	for hostIndex := range result.Hosts {
+		// A broad scan is assembled from independently completed port chunks.
+		// Each chunk can contribute a protocol observation for the same address;
+		// collapse those observations before restoring the configured scope so
+		// consumers see one TCP and one UDP record per effective host.
+		dedupeHostObservation(&result.Hosts[hostIndex])
 		for protocolIndex := range result.Hosts[hostIndex].Protocols {
 			protocol := &result.Hosts[hostIndex].Protocols[protocolIndex]
 			if scope, ok := scopeByProtocol[protocol.Protocol]; ok {

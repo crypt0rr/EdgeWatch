@@ -108,6 +108,7 @@ func observationsForSnapshot(snapshot model.Snapshot) (hostPage, error) {
 	if len(snapshot.Hosts) > 0 {
 		result := append([]model.HostObservation(nil), snapshot.Hosts...)
 		normalizeHostSlice(result)
+		restoreHostScopes(result, snapshot.Scopes)
 		return hostPage{Items: result, DataQuality: "detailed"}, nil
 	}
 	return hostPage{Items: deriveLegacyHosts(snapshot), DataQuality: "legacy"}, nil
@@ -259,37 +260,149 @@ func dedupeHost(host *model.HostObservation) {
 	}
 	host.SourceTargets = stringsUnique(host.SourceTargets)
 	host.DNSNames = stringsUnique(host.DNSNames)
+	links := map[string]model.LinkAddress{}
+	for _, link := range host.LinkAddresses {
+		links[link.Type+"\x00"+link.Address] = link
+	}
+	host.LinkAddresses = host.LinkAddresses[:0]
+	for _, link := range links {
+		host.LinkAddresses = append(host.LinkAddresses, link)
+	}
+	names := map[string]model.Hostname{}
+	for _, name := range host.Hostnames {
+		names[name.Type+"\x00"+name.Name] = name
+	}
+	host.Hostnames = host.Hostnames[:0]
+	for _, name := range names {
+		host.Hostnames = append(host.Hostnames, name)
+	}
+	// Broad scans are assembled from port chunks, so a single effective host
+	// may contain many TCP (or UDP) protocol observations. Merge those records
+	// before presenting or indexing them; otherwise the UI renders one coverage
+	// chip per chunk and counts the same protocol repeatedly.
+	protocols := map[string]int{}
+	merged := make([]model.ProtocolObservation, 0, len(host.Protocols))
+	for _, incoming := range host.Protocols {
+		index, exists := protocols[incoming.Protocol]
+		if !exists {
+			protocols[incoming.Protocol] = len(merged)
+			merged = append(merged, incoming)
+			continue
+		}
+		mergeProtocolObservation(&merged[index], incoming)
+	}
+	host.Protocols = merged
 	for i := range host.Protocols {
-		ports := map[int]model.PortObservation{}
-		for _, port := range host.Protocols[i].Ports {
-			previous, exists := ports[port.Port]
-			if !exists {
-				ports[port.Port] = port
-				continue
-			}
-			// Legacy snapshots can contain one logical port per address. Keep
-			// the strongest positive state and retain whichever evidence fields
-			// are available instead of letting map iteration choose arbitrarily.
-			if previous.State != "open" && port.State == "open" {
-				previous.State = port.State
-			}
-			if previous.Reason == "" {
-				previous.Reason, previous.ReasonTTL = port.Reason, port.ReasonTTL
-			}
-			if previous.Service == nil {
-				previous.Service = port.Service
-			}
-			ports[port.Port] = previous
-		}
-		host.Protocols[i].Ports = host.Protocols[i].Ports[:0]
-		for _, port := range ports {
-			host.Protocols[i].Ports = append(host.Protocols[i].Ports, port)
-		}
+		dedupeProtocolPorts(&host.Protocols[i])
 	}
 	// The model normalizer gives all nested arrays deterministic order.
 	holder := model.Snapshot{Hosts: []model.HostObservation{*host}}
 	holder.Normalize()
 	*host = holder.Hosts[0]
+}
+
+func mergeProtocolObservation(destination *model.ProtocolObservation, incoming model.ProtocolObservation) {
+	destination.Ports = append(destination.Ports, incoming.Ports...)
+	if destination.ScanType == "" {
+		destination.ScanType = incoming.ScanType
+	}
+	if destination.ScannedPorts == "" {
+		destination.ScannedPorts = incoming.ScannedPorts
+	}
+	if incoming.ScannedPortCount > destination.ScannedPortCount {
+		destination.ScannedPortCount = incoming.ScannedPortCount
+	}
+	destination.ServiceDetection = destination.ServiceDetection || incoming.ServiceDetection
+	for _, summary := range incoming.StateSummaries {
+		found := false
+		for index := range destination.StateSummaries {
+			if destination.StateSummaries[index].State != summary.State {
+				continue
+			}
+			destination.StateSummaries[index].Count += summary.Count
+			for _, reason := range summary.Reasons {
+				reasonFound := false
+				for reasonIndex := range destination.StateSummaries[index].Reasons {
+					if destination.StateSummaries[index].Reasons[reasonIndex].Reason != reason.Reason {
+						continue
+					}
+					destination.StateSummaries[index].Reasons[reasonIndex].Count += reason.Count
+					reasonFound = true
+					break
+				}
+				if !reasonFound {
+					destination.StateSummaries[index].Reasons = append(destination.StateSummaries[index].Reasons, reason)
+				}
+			}
+			found = true
+			break
+		}
+		if !found {
+			destination.StateSummaries = append(destination.StateSummaries, summary)
+		}
+	}
+}
+
+func dedupeProtocolPorts(protocol *model.ProtocolObservation) {
+	ports := map[int]int{}
+	merged := make([]model.PortObservation, 0, len(protocol.Ports))
+	for _, incoming := range protocol.Ports {
+		index, exists := ports[incoming.Port]
+		if !exists {
+			ports[incoming.Port] = len(merged)
+			merged = append(merged, incoming)
+			continue
+		}
+		destination := &merged[index]
+		// Keep the strongest positive state and whichever evidence fields are
+		// available instead of relying on map iteration order.
+		if destination.State != "open" && incoming.State == "open" {
+			destination.State = incoming.State
+		}
+		if destination.Reason == "" {
+			destination.Reason, destination.ReasonTTL = incoming.Reason, incoming.ReasonTTL
+		}
+		mergeServiceObservation(destination, incoming)
+	}
+	protocol.Ports = merged
+}
+
+func mergeServiceObservation(destination *model.PortObservation, incoming model.PortObservation) {
+	if destination.Service == nil {
+		destination.Service = incoming.Service
+		return
+	}
+	if incoming.Service == nil {
+		return
+	}
+	if destination.Service.Name == "" {
+		destination.Service.Name = incoming.Service.Name
+	}
+	if destination.Service.Product == "" {
+		destination.Service.Product = incoming.Service.Product
+	}
+	if destination.Service.Version == "" {
+		destination.Service.Version = incoming.Service.Version
+	}
+	if destination.Service.ExtraInfo == "" {
+		destination.Service.ExtraInfo = incoming.Service.ExtraInfo
+	}
+	if destination.Service.Method == "" {
+		destination.Service.Method = incoming.Service.Method
+	}
+	if destination.Service.Confidence == 0 {
+		destination.Service.Confidence = incoming.Service.Confidence
+	}
+	if destination.Service.Tunnel == "" {
+		destination.Service.Tunnel = incoming.Service.Tunnel
+	}
+	if destination.Service.OSType == "" {
+		destination.Service.OSType = incoming.Service.OSType
+	}
+	if destination.Service.DeviceType == "" {
+		destination.Service.DeviceType = incoming.Service.DeviceType
+	}
+	destination.Service.CPEs = append(destination.Service.CPEs, incoming.Service.CPEs...)
 }
 
 func normalizeHostSlice(hosts []model.HostObservation) {
@@ -302,7 +415,47 @@ func normalizeHostSlice(hosts []model.HostObservation) {
 	copy(hosts, snapshot.Hosts)
 }
 
+func restoreHostScopes(hosts []model.HostObservation, scopes []model.Scope) {
+	byProtocol := map[string]model.Scope{}
+	for _, scope := range scopes {
+		protocol := strings.ToLower(strings.TrimSpace(scope.Protocol))
+		if protocol == "" {
+			continue
+		}
+		if _, exists := byProtocol[protocol]; !exists {
+			byProtocol[protocol] = scope
+		}
+	}
+	for hostIndex := range hosts {
+		for protocolIndex := range hosts[hostIndex].Protocols {
+			protocol := &hosts[hostIndex].Protocols[protocolIndex]
+			scope, exists := byProtocol[strings.ToLower(strings.TrimSpace(protocol.Protocol))]
+			if !exists {
+				continue
+			}
+			protocol.ScannedPorts = scope.Ports
+			protocol.ServiceDetection = scope.ServiceDetection
+			protocol.ScannedPortCount = portCount(scope.Ports)
+		}
+	}
+}
+
+func scopesForJob(job config.Job) []model.Scope {
+	scopes := make([]model.Scope, 0, 2)
+	if job.TCP != nil {
+		scopes = append(scopes, model.Scope{Protocol: "tcp", Ports: job.TCP.Ports, ServiceDetection: job.TCP.ServiceDetection})
+	}
+	if job.UDP != nil {
+		scopes = append(scopes, model.Scope{Protocol: "udp", Ports: job.UDP.Ports, ServiceDetection: job.UDP.ServiceDetection})
+	}
+	return scopes
+}
+
 func summaryForHost(host model.HostObservation, legacy bool) hostSummary {
+	// Indexed hosts may have been written by an older broad-scan merge that
+	// retained one protocol record per port chunk. Normalize the copy before
+	// calculating counts so legacy rows cannot render duplicate TCP/UDP chips.
+	dedupeHost(&host)
 	result := hostSummary{Address: host.Address, AddressFamily: host.AddressFamily, SourceTargets: append([]string(nil), host.SourceTargets...), DNSNames: append([]string(nil), host.DNSNames...), Legacy: legacy}
 	for _, protocol := range host.Protocols {
 		summary := hostProtocolSummary{Protocol: protocol.Protocol, ScanType: protocol.ScanType, ScannedPorts: protocol.ScannedPorts, ScannedPortCount: protocol.ScannedPortCount, ServiceDetection: protocol.ServiceDetection}
@@ -634,6 +787,10 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, raw
 	}
 	if baselineScanID, _, metaErr := s.Store.RuntimeBaselineMeta(r.Context(), id); metaErr == nil && baselineScanID != "" {
 		if indexed, indexErr := s.Store.GetScanHost(r.Context(), baselineScanID, address); indexErr == nil {
+			dedupeHost(&indexed.Host)
+			hosts := []model.HostObservation{indexed.Host}
+			restoreHostScopes(hosts, scopesForJob(record.Job))
+			indexed.Host = hosts[0]
 			var source any
 			if summary, summaryErr := s.Store.GetScanSummary(r.Context(), baselineScanID); summaryErr == nil {
 				source = summary
@@ -820,10 +977,24 @@ func (s *Server) renderScanHost(w http.ResponseWriter, r *http.Request, id, jobN
 		return
 	}
 	if indexed, indexErr := s.Store.GetScanHost(r.Context(), scanID, address); indexErr == nil {
+		dedupeHost(&indexed.Host)
+		if id != "" {
+			if record, recordErr := s.Store.GetJob(r.Context(), id); recordErr == nil {
+				hosts := []model.HostObservation{indexed.Host}
+				restoreHostScopes(hosts, scopesForJob(record.Job))
+				indexed.Host = hosts[0]
+			}
+		}
 		var expected any
 		if id != "" {
 			if baselineID, _, metaErr := s.Store.RuntimeBaselineMeta(r.Context(), id); metaErr == nil && baselineID != "" {
 				if baselineHost, baselineErr := s.Store.GetScanHost(r.Context(), baselineID, address); baselineErr == nil {
+					dedupeHost(&baselineHost.Host)
+					if record, recordErr := s.Store.GetJob(r.Context(), id); recordErr == nil {
+						hosts := []model.HostObservation{baselineHost.Host}
+						restoreHostScopes(hosts, scopesForJob(record.Job))
+						baselineHost.Host = hosts[0]
+					}
 					expected = baselineHost.Host
 				}
 			}

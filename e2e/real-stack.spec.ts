@@ -3,8 +3,11 @@ import { chmod, mkdtemp, writeFile } from 'node:fs/promises'
 import { once } from 'node:events'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { execFile, spawn, type ChildProcess } from 'node:child_process'
 import net from 'node:net'
+import { promisify } from 'node:util'
+
+const build = promisify(execFile)
 
 const password = 'correct horse battery staple'
 
@@ -43,6 +46,7 @@ async function createHarness(): Promise<Harness> {
   const port = await availablePort()
   const counter = join(directory, 'nmap-count')
   const nmap = join(directory, 'fake-nmap.sh')
+  const binary = join(directory, 'edgewatch')
   await writeFile(nmap, `#!/bin/sh
 if [ "\${1:-}" = "--version" ]; then
   printf '%s\\n' 'Nmap 7.99 (https://nmap.org)'
@@ -79,6 +83,7 @@ web:
 notifications:
   urls: []
 `)
+  await build('go', ['build', '-o', binary, './cmd/edgewatch'], { cwd: process.cwd() })
 
   let child: ChildProcess | undefined
   let output = ''
@@ -87,7 +92,7 @@ notifications:
   const url = `http://127.0.0.1:${port}`
 
   const start = async () => {
-    child = spawn('go', ['run', './cmd/edgewatch', 'daemon', '--config', config, '--nmap', nmap], {
+    child = spawn(binary, ['daemon', '--config', config, '--nmap', nmap], {
       cwd: process.cwd(),
       detached: true,
       stdio: ['ignore', 'pipe', 'pipe'],

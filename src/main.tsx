@@ -2,8 +2,8 @@ import { StrictMode, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Activity, Bell, Boxes, ClipboardList, Gauge, Globe2, LogOut, Menu, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
-import { acceptIncident, getSession, listIncidents, listJobs, setCSRF, setupStatus, suppressIncident, logout as apiLogout } from './api'
+import { Activity, ArrowUp, Bell, Boxes, ClipboardList, Gauge, Globe2, LogOut, Menu, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
+import { acceptIncident, adminStatus, getSession, listIncidents, listJobs, setCSRF, setupStatus, suppressIncident, logout as apiLogout } from './api'
 import { Dashboard } from './pages/Dashboard'
 import { JobEditor } from './pages/JobEditor'
 import { JobDetail } from './pages/JobDetail'
@@ -52,6 +52,9 @@ function Shell({ displayName, version, role, publicDashboardEnabled, onLogout }:
   const wasOpenRef = useRef(false)
   const location = useLocation()
   const client = useQueryClient()
+  const updateStatus = useQuery({ queryKey: ['admin-status'], queryFn: adminStatus, refetchInterval: 60_000 })
+  const update = updateStatus.data?.updates
+  const updateAvailable = !!update && (update.available === true || update.status === 'update_available')
   const incidentSummary = useQuery({ queryKey: ['incidents', 'navigation'], queryFn: () => listIncidents(0, 1), refetchInterval: 15000, enabled: role !== 'viewer' })
   const incidentCount = incidentSummary.data?.pagination.total ?? 0
   useEffect(() => {
@@ -156,6 +159,11 @@ function Shell({ displayName, version, role, publicDashboardEnabled, onLogout }:
             void client.invalidateQueries({ queryKey: ['notifications'] })
             void client.invalidateQueries({ queryKey: ['admin-status'] })
             break
+          case 'application.update_status':
+          case 'application-updated':
+          case 'application-update-available':
+            void client.invalidateQueries({ queryKey: ['admin-status'] })
+            break
           case 'refresh_required':
           default:
             // Unknown events and a replay gap deliberately trigger a full
@@ -182,7 +190,7 @@ function Shell({ displayName, version, role, publicDashboardEnabled, onLogout }:
     <aside id="primary-navigation" ref={drawerRef} role={isMobile && open ? 'dialog' : undefined} aria-label="Primary navigation" aria-modal={isMobile && open ? true : undefined} aria-hidden={isMobile ? !open : undefined} inert={isMobile ? !open : undefined} className={open ? 'sidebar open' : 'sidebar'}>
       <div className="brand"><span className="brand-mark"><Wifi size={19} /></span><span>EdgeWatch</span><button type="button" className="drawer-close" aria-label="Close navigation" onClick={() => setOpen(false)}><X size={19} /></button></div>
       <nav>{links.map(({ to, label, icon: Icon }) => { const active = location.pathname === to || (to === '/jobs' && location.pathname.startsWith('/jobs')) || (to === '/hosts' && location.pathname.startsWith('/scans/')); const incidents = to === '/incidents'; const attention = incidents && incidentCount > 0; return <Link key={to} to={to} onClick={() => setOpen(false)} aria-label={incidents ? 'Incidents' : undefined} aria-describedby={attention ? 'active-incident-count' : undefined} className={`nav-link${active ? ' active' : ''}${attention ? ' nav-link-alert' : ''}`}><Icon size={18} /><span className="nav-link-label">{label}</span>{attention && <span id="active-incident-count" className="nav-count" aria-live="polite" aria-label={`${incidentCount} active incident${incidentCount === 1 ? '' : 's'}`}>{incidentCount > 99 ? '99+' : incidentCount}</span>}</Link> })}</nav>
-      <div className="sidebar-bottom"><div className="user-chip"><span className="avatar">{displayName.trim().charAt(0).toUpperCase() || 'A'}</span><span><small className="app-version">EdgeWatch {version}</small><strong>{displayName}</strong><small>{role === 'administrator' ? 'Administrator' : role === 'operator' ? 'Operator' : 'Viewer · read only'}</small></span></div><button className="nav-link quiet" onClick={onLogout}><LogOut size={17} />Sign out</button></div>
+      <div className="sidebar-bottom"><div className="user-chip"><span className="avatar">{displayName.trim().charAt(0).toUpperCase() || 'A'}</span><span><small className="app-version">EdgeWatch {version}{updateAvailable && update.release_url && <a className="version-update" href={update.release_url} target="_blank" rel="noopener noreferrer" aria-label={`Update available: ${version} to ${update.latest_version ?? 'new release'}`} title={`Update available: ${version} to ${update.latest_version ?? 'new release'}`}><ArrowUp size={13} aria-hidden="true" /></a>}</small><strong>{displayName}</strong><small>{role === 'administrator' ? 'Administrator' : role === 'operator' ? 'Operator' : 'Viewer · read only'}</small></span></div><button className="nav-link quiet" onClick={onLogout}><LogOut size={17} />Sign out</button></div>
     </aside>
     {open && isMobile && <button type="button" aria-label="Close navigation" tabIndex={-1} className="backdrop" onClick={() => setOpen(false)} />}
     <main className="main" inert={isMobile && open ? true : undefined} aria-hidden={isMobile && open ? true : undefined}><header className="topbar"><button ref={menuButtonRef} type="button" aria-label={open ? 'Close navigation' : 'Open navigation'} aria-controls="primary-navigation" aria-expanded={isMobile ? open : false} className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><nav className="breadcrumb" title={breadcrumb} aria-label={`Breadcrumb: ${breadcrumb}`}>{breadcrumb}</nav><div className="topbar-actions"><span className="status-dot"><i /> {liveState === 'live' ? 'Live updates' : liveState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}</span><Bell size={18} /></div></header><div className="content"><Routes><Route path="/" element={role === 'viewer' && publicDashboardEnabled ? <Navigate to="/highlights" replace /> : <Dashboard />} /><Route path="/highlights" element={<PublicDashboard />} /><Route path="/jobs" element={<Jobs />} /><Route path="/jobs/new" element={<JobEditor />} /><Route path="/jobs/:id" element={<JobDetail />} /><Route path="/jobs/:id/edit" element={<JobEditor />} /><Route path="/jobs/:id/baseline" element={<BaselineHosts />} /><Route path="/jobs/:id/baseline/hosts/:address" element={<HostDetail />} /><Route path="/jobs/:id/scans/:scanId/hosts/:address" element={<HostDetail />} /><Route path="/hosts" element={<Hosts />} /><Route path="/scans/:scanId/hosts/:address" element={<HostDetail />} /><Route path="/incidents" element={<Incidents />} /><Route path="/notifications" element={<Notifications />} /><Route path="/users" element={<Users />} /><Route path="/public-dashboard" element={<PublicDashboardAdmin />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></div></main>

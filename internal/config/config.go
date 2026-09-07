@@ -46,8 +46,15 @@ type Config struct {
 	Scheduler     Scheduler     `yaml:"scheduler"`
 	Web           Web           `yaml:"web"`
 	Enrichment    Enrichment    `yaml:"enrichment"`
+	Updates       Updates       `yaml:"updates"`
 	Notifications Notifications `yaml:"notifications"`
 	Jobs          []Job         `yaml:"jobs"`
+}
+
+// Updates controls the optional outbound GitHub release check. The pointer
+// preserves an omission-defaulted setting in the same way as RDAP.Enabled.
+type Updates struct {
+	Enabled *bool `yaml:"enabled"`
 }
 
 // Enrichment controls optional, on-demand metadata lookups. RDAP is enabled
@@ -222,6 +229,10 @@ func applyDefaults(c *Config) {
 		enabled := true
 		c.Enrichment.RDAP.Enabled = &enabled
 	}
+	if c.Updates.Enabled == nil {
+		enabled := true
+		c.Updates.Enabled = &enabled
+	}
 	for i := range c.Jobs {
 		j := &c.Jobs[i]
 		if j.RunOnStart == nil {
@@ -262,6 +273,11 @@ func applyDefaults(c *Config) {
 // RDAPEnabled resolves the omission-defaulted deployment setting.
 func (c Config) RDAPEnabled() bool {
 	return c.Enrichment.RDAP.Enabled == nil || *c.Enrichment.RDAP.Enabled
+}
+
+// UpdatesEnabled resolves the omission-defaulted deployment setting.
+func (c Config) UpdatesEnabled() bool {
+	return c.Updates.Enabled == nil || *c.Updates.Enabled
 }
 
 func (c Config) Validate() error {

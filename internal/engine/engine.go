@@ -561,6 +561,38 @@ func unitMap(s model.Snapshot) map[string]model.Unit {
 
 func FormatEvent(e model.Event) string {
 	var b strings.Builder
+	if e.Type == "application-update-available" {
+		b.WriteString("⬆️ EdgeWatch update available")
+		if e.CurrentVersion != "" {
+			b.WriteString("\nCurrent version: ")
+			b.WriteString(e.CurrentVersion)
+		}
+		if e.LatestVersion != "" {
+			b.WriteString("\nNew version: ")
+			b.WriteString(e.LatestVersion)
+		}
+		if e.ReleaseURL != "" {
+			b.WriteString("\nRelease: ")
+			b.WriteString(e.ReleaseURL)
+		}
+		return b.String()
+	}
+	if e.Type == "application-updated" {
+		b.WriteString("🟢 EdgeWatch updated")
+		if e.PreviousVersion != "" {
+			b.WriteString("\nPrevious version: ")
+			b.WriteString(e.PreviousVersion)
+		}
+		if e.CurrentVersion != "" {
+			b.WriteString("\nCurrent version: ")
+			b.WriteString(e.CurrentVersion)
+		}
+		if e.ReleaseURL != "" {
+			b.WriteString("\nRelease: ")
+			b.WriteString(e.ReleaseURL)
+		}
+		return b.String()
+	}
 	switch {
 	case e.Type == "changes-recovered" || e.Type == "scan-recovered":
 		b.WriteString("🟢 ")
@@ -569,8 +601,10 @@ func FormatEvent(e model.Event) string {
 	}
 	b.WriteString("EdgeWatch: ")
 	b.WriteString(e.Message)
-	b.WriteString("\nJob: ")
-	b.WriteString(e.Job)
+	if e.Job != "" {
+		b.WriteString("\nJob: ")
+		b.WriteString(e.Job)
+	}
 	if e.ScanID != "" {
 		b.WriteString("\nScan: ")
 		b.WriteString(e.ScanID)

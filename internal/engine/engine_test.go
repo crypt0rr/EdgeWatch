@@ -138,6 +138,17 @@ func TestFormatEventUsesOutcomeIndicators(t *testing.T) {
 	}
 }
 
+func TestFormatEventUsesApplicationUpdateMessages(t *testing.T) {
+	available := FormatEvent(model.Event{Type: "application-update-available", CurrentVersion: "v1.1.0", LatestVersion: "v1.2.0", ReleaseURL: "https://github.com/crypt0rr/EdgeWatch/releases/tag/v1.2.0"})
+	if !strings.Contains(available, "⬆️ EdgeWatch update available") || !strings.Contains(available, "Current version: v1.1.0") || !strings.Contains(available, "New version: v1.2.0") || strings.Contains(available, "Job:") {
+		t.Fatalf("available update notification = %q", available)
+	}
+	updated := FormatEvent(model.Event{Type: "application-updated", PreviousVersion: "v1.1.0", CurrentVersion: "v1.2.0", ReleaseURL: "https://github.com/crypt0rr/EdgeWatch/releases/tag/v1.2.0"})
+	if !strings.Contains(updated, "🟢 EdgeWatch updated") || !strings.Contains(updated, "Previous version: v1.1.0") || strings.Contains(updated, "Job:") {
+		t.Fatalf("updated notification = %q", updated)
+	}
+}
+
 func TestIncompleteFailuresDoNotChangeBaseline(t *testing.T) {
 	ctx := context.Background()
 	db, _ := store.Open(filepath.Join(t.TempDir(), "db"))

@@ -264,6 +264,10 @@ type Event struct {
 	Job              string    `json:"job"`
 	ScanID           string    `json:"scan_id,omitempty"`
 	Message          string    `json:"message"`
+	PreviousVersion  string    `json:"previous_version,omitempty"`
+	CurrentVersion   string    `json:"current_version,omitempty"`
+	LatestVersion    string    `json:"latest_version,omitempty"`
+	ReleaseURL       string    `json:"release_url,omitempty"`
 	Changes          []Change  `json:"changes,omitempty"`
 	ChangesCount     int       `json:"changes_count,omitempty"`
 	ChangesTruncated bool      `json:"changes_truncated,omitempty"`

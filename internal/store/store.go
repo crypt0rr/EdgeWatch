@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 12
+const schemaVersion = 13
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -526,6 +526,24 @@ func migrate(db *sql.DB) error {
 			"UPDATE sessions SET user_id='00000000-0000-0000-0000-000000000001' WHERE user_id=''",
 			"UPDATE recovery_codes SET user_id='00000000-0000-0000-0000-000000000001' WHERE user_id=''",
 			"INSERT OR IGNORE INTO public_dashboard(id,enabled,title,introduction,updated_at) VALUES(1,0,'EdgeWatch public status','',datetime('now'))",
+		},
+		13: {
+			`CREATE TABLE IF NOT EXISTS application_update_state (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ installed_version TEXT NOT NULL DEFAULT '',
+ latest_version TEXT NOT NULL DEFAULT '',
+ release_url TEXT NOT NULL DEFAULT '',
+ release_name TEXT NOT NULL DEFAULT '',
+ published_at TEXT NOT NULL DEFAULT '',
+ etag TEXT NOT NULL DEFAULT '',
+ last_checked_at TEXT NOT NULL DEFAULT '',
+ last_successful_check_at TEXT NOT NULL DEFAULT '',
+ check_status TEXT NOT NULL DEFAULT 'unknown',
+ last_error TEXT NOT NULL DEFAULT '',
+ announced_available_version TEXT NOT NULL DEFAULT '',
+ announced_upgrade_version TEXT NOT NULL DEFAULT ''
+);`,
+			`INSERT OR IGNORE INTO application_update_state(id,check_status) VALUES(1,'unknown')`,
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {

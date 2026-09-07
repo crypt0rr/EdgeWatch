@@ -122,3 +122,26 @@ func TestUpdateUserKeepsLastEnabledAdministrator(t *testing.T) {
 		t.Fatalf("last administrator changed despite rejection: %#v", loaded)
 	}
 }
+
+func TestSaveUserSecurityKeepsRoleValidationAndLastAdministratorInvariant(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	admin, err := s.CreateUser(ctx, User{Username: "admin", DisplayName: "Administrator", Role: RoleAdministrator, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin.Role = RoleOperator
+	admin.UpdatedAt = now.Add(time.Minute)
+	if err := s.SaveUserSecurity(ctx, admin, nil, false, false, AuditEntry{}); !errors.Is(err, ErrLastAdministrator) {
+		t.Fatalf("last administrator security update error = %v", err)
+	}
+	loaded, err := s.GetUser(ctx, admin.ID)
+	if err != nil || loaded.Role != RoleAdministrator || !loaded.Enabled {
+		t.Fatalf("administrator changed despite security guard: %#v, %v", loaded, err)
+	}
+	loaded.Role = "invalid"
+	if err := s.SaveUserSecurity(ctx, loaded, nil, false, false, AuditEntry{}); err == nil {
+		t.Fatal("invalid role was accepted by SaveUserSecurity")
+	}
+}

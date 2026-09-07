@@ -79,6 +79,9 @@ func loadAuthKey(path string) ([]byte, error) {
 }
 
 func hexDecode(raw []byte) ([]byte, error) {
+	if len(raw)%2 != 0 {
+		return nil, ErrAuthKeyInvalid
+	}
 	out := make([]byte, len(raw)/2)
 	for i := range out {
 		hi, ok := hexNibble(raw[i*2])

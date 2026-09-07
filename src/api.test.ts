@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { APIError, acceptIncident, api, baselineHost, baselineHosts, createNotificationDestination, historicalScanHost, listHosts, listScans, scheduleSuggestion, setCSRF, suppressIncident, updateNotificationDestination } from './api'
+import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, revokeUserSessions, scheduleSuggestion, setCSRF, setup, suppressIncident, updateNotificationDestination, updateUser } from './api'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -94,5 +94,65 @@ describe('incident action API contract', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ key: 'port|192.0.2.1|tcp|443' })
     expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
     expect(String(fetchMock.mock.calls[1][0])).toBe('/api/v1/jobs/job%2F1/incidents/suppress')
+  })
+})
+
+describe('authentication and public API contracts', () => {
+  it('handles empty responses, malformed errors, and CSRF only on mutations', async () => {
+    const noContent = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(null, { status: 204 }))
+    vi.stubGlobal('fetch', noContent)
+    setCSRF('csrf-token')
+    await expect(api<void>('/auth/logout', { method: 'POST' })).resolves.toBeUndefined()
+    expect(new Headers(noContent.mock.calls[0][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
+
+    const malformed = vi.fn(async (_input: RequestInfo | URL) => new Response('not-json', { status: 500 }))
+    vi.stubGlobal('fetch', malformed)
+    await expect(api('/status')).rejects.toMatchObject({ name: 'APIError', message: 'Request failed' })
+
+    const get = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify({ ok: true }), { status: 200 }))
+    vi.stubGlobal('fetch', get)
+    await api('/status')
+    expect(new Headers(get.mock.calls[0][1]?.headers).get('X-CSRF-Token')).toBeNull()
+  })
+
+  it('sends the authentication, user, and activation contracts with encoded IDs', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ user: { id: 'u-1' }, activation_token: 'token', activation_path: '/activate' }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    setCSRF('csrf-token')
+    await login('administrator password', undefined, undefined, 'admin')
+    await setup('setup-token', 'administrator password')
+    await activate('activation-token', 'operator password')
+    await listUsers()
+    await createUser('operator', 'Operator', 'operator')
+    await updateUser('user/1', { enabled: false })
+    await issueUserActivation('user/1')
+    await revokeUserSessions('user/1')
+    const urls = fetchMock.mock.calls.map(call => String(call[0]))
+    expect(urls).toEqual([
+      '/api/v1/auth/login',
+      '/api/v1/setup',
+      '/api/v1/auth/activate',
+      '/api/v1/users',
+      '/api/v1/users',
+      '/api/v1/users/user%2F1',
+      '/api/v1/users/user%2F1/activation',
+      '/api/v1/users/user%2F1/sessions',
+    ])
+    expect(new Headers(fetchMock.mock.calls[7][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
+  })
+
+  it('keeps public requests credential-free and exposes structured errors', async () => {
+    const errorFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.credentials).toBe('omit')
+      return new Response(JSON.stringify({ error: { code: 'public_disabled', message: 'disabled' } }), { status: 404 })
+    })
+    vi.stubGlobal('fetch', errorFetch)
+    await expect(getPublicDashboard()).rejects.toMatchObject({ code: 'public_disabled', message: 'disabled' })
+    const successFetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.credentials).toBe('omit')
+      return new Response(JSON.stringify({ title: 'Status', hosts: [] }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', successFetch)
+    await expect(getPublicDashboard()).resolves.toMatchObject({ title: 'Status', hosts: [] })
   })
 })

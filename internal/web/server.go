@@ -29,6 +29,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/rdap"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/updatecheck"
 	"github.com/crypt0rr/edgewatch/internal/webui"
 )
 
@@ -89,7 +90,20 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	}
 	if a != nil {
 		a.SetEventHandler(func(event model.Event) {
-			v.broadcast(map[string]any{"type": event.Type, "job_id": event.JobID, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
+			payload := map[string]any{"type": event.Type, "job_id": event.JobID, "job": event.Job, "scan_id": event.ScanID, "message": event.Message}
+			if event.PreviousVersion != "" {
+				payload["previous_version"] = event.PreviousVersion
+			}
+			if event.CurrentVersion != "" {
+				payload["current_version"] = event.CurrentVersion
+			}
+			if event.LatestVersion != "" {
+				payload["latest_version"] = event.LatestVersion
+			}
+			if event.ReleaseURL != "" {
+				payload["release_url"] = event.ReleaseURL
+			}
+			v.broadcast(payload)
 		})
 	}
 	return v
@@ -453,7 +467,75 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	s.mu.Lock()
 	status["live_updates"] = map[string]any{"history_size": len(s.history), "dropped_events": s.dropped}
 	s.mu.Unlock()
+	status["updates"] = s.applicationUpdateStatus(r.Context())
 	writeJSON(w, http.StatusOK, status)
+}
+
+func (s *Server) applicationUpdateStatus(ctx context.Context) map[string]any {
+	enabled := true
+	if s.App != nil && s.App.Config != nil {
+		enabled = s.App.Config.UpdatesEnabled()
+	}
+	current := "dev"
+	if s.Version != "" {
+		current = s.Version
+	}
+	result := map[string]any{"enabled": enabled, "current_version": current, "status": "development_build", "stale": false, "available": false}
+	if !enabled {
+		result["status"] = "disabled"
+		return result
+	}
+	currentVersion := updatecheck.NormalizeVersion(current)
+	if currentVersion == "" || s.Store == nil {
+		return result
+	}
+	state, err := s.Store.GetApplicationUpdateState(ctx)
+	if err != nil {
+		result["status"] = "check_failed"
+		return result
+	}
+	if state.LatestVersion != "" {
+		result["latest_version"] = state.LatestVersion
+	}
+	if state.ReleaseURL != "" {
+		result["release_url"] = state.ReleaseURL
+	}
+	if state.ReleaseName != "" {
+		result["release_name"] = state.ReleaseName
+	}
+	if state.PublishedAt != "" {
+		result["published_at"] = state.PublishedAt
+	}
+	if !state.LastCheckedAt.IsZero() {
+		result["last_checked_at"] = state.LastCheckedAt
+	}
+	if !state.LastSuccessfulCheckAt.IsZero() {
+		result["last_successful_check_at"] = state.LastSuccessfulCheckAt
+	}
+	available := updatecheck.CompareVersions(state.LatestVersion, currentVersion) > 0
+	result["available"] = available
+	if available && result["release_url"] == nil {
+		if releaseURL := updatecheck.ReleasePageURL(state.LatestVersion); releaseURL != "" {
+			result["release_url"] = releaseURL
+		}
+	}
+	switch {
+	case state.CheckStatus == "failed":
+		result["status"] = "check_failed"
+		result["stale"] = available || !state.LastSuccessfulCheckAt.IsZero()
+		if state.LastError != "" {
+			result["error"] = state.LastError
+		}
+	case available:
+		result["status"] = "update_available"
+	case state.LatestVersion != "" && updatecheck.CompareVersions(currentVersion, state.LatestVersion) > 0:
+		result["status"] = "ahead"
+	case state.CheckStatus == "ok":
+		result["status"] = "up_to_date"
+	default:
+		result["status"] = "check_failed"
+	}
+	return result
 }
 
 func (s *Server) setup(w http.ResponseWriter, r *http.Request) {

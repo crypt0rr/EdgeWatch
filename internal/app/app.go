@@ -17,6 +17,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/updatecheck"
 	"github.com/robfig/cron/v3"
 )
 
@@ -50,6 +51,8 @@ type App struct {
 	eventHandler      func(model.Event)
 	deliveryWake      chan struct{}
 	heartbeatInterval time.Duration
+	ReleaseChecker    ReleaseChecker
+	UpdateInterval    time.Duration
 }
 
 type activeRun struct {
@@ -109,6 +112,13 @@ type Scanner interface {
 	Version(context.Context) string
 }
 
+// ReleaseChecker is the small boundary used by the daemon. Keeping the
+// network client behind this interface makes cadence and failure behavior
+// deterministic in application tests.
+type ReleaseChecker interface {
+	Check(context.Context, string) (updatecheck.Result, error)
+}
+
 // ProgressScanner is optional so deterministic test scanners and future
 // integrations can keep the small Scanner contract. Production Nmap exposes
 // bounded progress and responds to cancellation through the context.
@@ -159,7 +169,7 @@ func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logge
 	sc := scanner.New(nmapPath)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second}, nil
+	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second}, nil
 }
 
 func (a *App) Job(name string) (config.Job, error) {
@@ -628,9 +638,15 @@ func (a *App) Daemon(ctx context.Context) error {
 	heartbeat := time.NewTicker(heartbeatEvery)
 	prune := time.NewTicker(24 * time.Hour)
 	scheduleRetry := time.NewTicker(30 * time.Second)
+	updateInterval := a.UpdateInterval
+	if updateInterval <= 0 {
+		updateInterval = updatecheck.CheckInterval
+	}
+	updates := time.NewTicker(updateInterval)
 	defer heartbeat.Stop()
 	defer prune.Stop()
 	defer scheduleRetry.Stop()
+	defer updates.Stop()
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	deliveryDone := a.startDeliveryWorker(workerCtx)
 	defer func() {
@@ -664,6 +680,10 @@ func (a *App) Daemon(ctx context.Context) error {
 	} else if expired > 0 {
 		a.Logger.Info("expired scan cycles", "cycles", expired)
 	}
+	// Run the update check once at startup, then on the fixed three-hour
+	// cadence. Version tracking remains active even when outbound checks are
+	// disabled so a later deployment can still report a real upgrade.
+	a.runUpdateCheck(ctx)
 	for {
 		select {
 		case <-ctx.Done():
@@ -696,8 +716,121 @@ func (a *App) Daemon(ctx context.Context) error {
 			if err := a.reconcileSchedules(ctx, false); err != nil {
 				a.Logger.Error("job schedule reconciliation retry failed", "error", err)
 			}
+		case <-updates.C:
+			a.runUpdateCheck(ctx)
 		}
 	}
+}
+
+func (a *App) updateDestinations(ctx context.Context) []string {
+	if a.Notifier == nil {
+		return nil
+	}
+	destinations, err := a.Notifier.QueueDestinations(ctx)
+	if err != nil {
+		logger := a.Logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("application update notification destinations unavailable", "error", err)
+		return nil
+	}
+	return destinations
+}
+
+func (a *App) emitUpdateStatus() {
+	a.emitEvents([]model.Event{{Type: "application.update_status", Message: "Application update status changed", CreatedAt: time.Now().UTC()}})
+}
+
+// runUpdateCheck records the current build and performs one bounded release
+// lookup. All notification-producing state transitions are committed by the
+// store before their corresponding events are emitted to SSE subscribers.
+func (a *App) runUpdateCheck(ctx context.Context) {
+	if a.Store == nil {
+		return
+	}
+	logger := a.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	current := updatecheck.NormalizeVersion(a.Version)
+	if current != "" {
+		state, err := a.Store.GetApplicationUpdateState(ctx)
+		if err != nil {
+			logger.Warn("application version state unavailable", "error", err)
+		} else {
+			versionComparison := updatecheck.CompareVersions(current, state.InstalledVersion)
+			notifyUpgrade := state.InstalledVersion != "" && versionComparison > 0
+			if state.InstalledVersion != "" && versionComparison < 0 {
+				logger.Warn("application version rollback detected", "previous_version", state.InstalledVersion, "current_version", current)
+			}
+			releaseURL := ""
+			if state.LatestVersion == current {
+				releaseURL = state.ReleaseURL
+			}
+			if releaseURL == "" {
+				releaseURL = updatecheck.ReleasePageURL(current)
+			}
+			var destinations []string
+			if notifyUpgrade {
+				destinations = a.updateDestinations(ctx)
+			}
+			events, recordErr := a.Store.RecordInstalledVersion(ctx, current, releaseURL, notifyUpgrade, destinations)
+			if recordErr != nil {
+				logger.Warn("application version state update failed", "error", recordErr)
+			} else if len(events) > 0 {
+				a.emitEvents(events)
+				a.wakeDelivery()
+			}
+		}
+	}
+	if a.Config == nil || !a.Config.UpdatesEnabled() || current == "" {
+		return
+	}
+	checker := a.ReleaseChecker
+	if checker == nil {
+		return
+	}
+	state, err := a.Store.GetApplicationUpdateState(ctx)
+	if err != nil {
+		logger.Warn("application release state unavailable", "error", err)
+		return
+	}
+	result, checkErr := checker.Check(ctx, state.ETag)
+	if checkErr != nil {
+		if err := a.Store.RecordReleaseCheckFailure(ctx, checkErr.Error()); err != nil {
+			logger.Warn("application release failure state could not be saved", "error", err)
+		}
+		logger.Warn("application release check failed", "error", checkErr)
+		a.emitUpdateStatus()
+		return
+	}
+	if result.NotModified {
+		if err := a.Store.RecordReleaseNotModified(ctx, result.ETag); err != nil {
+			logger.Warn("application release check timestamp could not be saved", "error", err)
+		}
+		a.emitUpdateStatus()
+		return
+	}
+	newer := updatecheck.CompareVersions(result.Release.Version, current) > 0
+	release := result.Release
+	if release.URL == "" {
+		release.URL = updatecheck.ReleasePageURL(release.Version)
+	}
+	var destinations []string
+	if newer {
+		destinations = a.updateDestinations(ctx)
+	}
+	events, recordErr := a.Store.RecordReleaseCheck(ctx, current, release.Version, release.URL, release.Name, release.PublishedAt, result.ETag, newer, destinations)
+	if recordErr != nil {
+		logger.Warn("application release state update failed", "error", recordErr)
+		return
+	}
+	if len(events) > 0 {
+		a.emitEvents(events)
+		a.wakeDelivery()
+	}
+	a.emitUpdateStatus()
 }
 
 func (a *App) startScheduled(ctx context.Context, job config.Job) {

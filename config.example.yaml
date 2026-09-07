@@ -15,6 +15,12 @@ scheduler:
   # Approximate probes permitted per run unless a job opts into high-cost work.
   max_probe_count: 5000000
 
+# Check the latest stable GitHub release at startup and every three hours.
+# Set enabled: false for offline or privacy-sensitive deployments. A check
+# reveals the host's public IP and EdgeWatch user agent to GitHub.
+updates:
+  enabled: true
+
 # Opening a public host in the console performs an on-demand RDAP lookup.
 # Set enabled: false for isolated or privacy-sensitive deployments.
 enrichment:

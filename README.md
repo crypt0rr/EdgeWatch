@@ -71,6 +71,14 @@ the replacement is issued.
   public page only shows data already present in that cache. Private and
   special-use addresses are never queried, and raw RDAP responses/contact
   details are not retained.
+- `updates.enabled` controls the outbound GitHub release check. It defaults to
+  `true`; EdgeWatch checks the latest stable release at startup and every three
+  hours, notifying each globally enabled destination once per release when an
+  update is available. After a newer image starts, it also sends a one-time
+  previous/current version notification. Set it to `false` for offline or
+  privacy-sensitive deployments. Checks reveal the host's public IP and the
+  EdgeWatch user agent to GitHub. EdgeWatch reports releases only; Docker image
+  updates and restarts remain operator-controlled.
 - TOTP is optional. Its seed is encrypted with a separate authentication key
   generated at `./data/auth.key` when TOTP is first enabled. Set
   `web.auth_key_file` to a mode-`0600` file containing 32 raw bytes or 64
@@ -231,7 +239,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 12), but it is
+version 13), but it is
 forward-only: an older binary refuses a newer schema. To roll back, stop the
 new service, restore the entire pre-upgrade `./data` directory and deployment
 configuration, then start the previous image. Do not point an older image at

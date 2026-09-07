@@ -25,8 +25,13 @@ If the key is lost or replaced, web-managed destinations become unavailable;
 they cannot be recovered from the database alone. Restore the original key and
 database together, or delete and recreate the affected destinations after
 confirming that the old credentials are revoked. A database upgraded to schema
-12 must not be opened by an older EdgeWatch binary; downgrade by restoring the
+13 must not be opened by an older EdgeWatch binary; downgrade by restoring the
 complete pre-upgrade `./data` backup before starting the old version.
+
+By default, EdgeWatch checks the latest stable release on GitHub at startup and
+every three hours. This outbound request reveals the Docker host's public IP
+and the EdgeWatch user agent to GitHub; set `updates.enabled: false` for
+isolated or privacy-sensitive deployments.
 
 Retention pruning deliberately keeps the security audit log indefinitely.
 Only completed scans, historical events, sent or terminally failed outbox

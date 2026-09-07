@@ -20,6 +20,20 @@ export type NotificationStatus = {
   locked: number
   key_state: string
 }
+export type ApplicationUpdateStatus = {
+  enabled: boolean
+  status: 'up_to_date' | 'update_available' | 'ahead' | 'check_failed' | 'disabled' | 'development_build' | string
+  available?: boolean
+  current_version: string
+  latest_version?: string
+  release_url?: string
+  release_name?: string
+  published_at?: string
+  last_checked_at?: string
+  last_successful_check_at?: string
+  stale?: boolean
+  error?: string
+}
 
 let csrf = ''
 export function setCSRF(value: string) { csrf = value }
@@ -45,7 +59,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 export type Role = 'administrator' | 'operator' | 'viewer'
 export type SessionUser = { user_id: string; username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_enabled: boolean; password_requirements: { minimum_length: number } }
-export type AdminStatus = { configured: boolean; username: string; display_name?: string; role?: Role; permissions?: string[]; version: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; max_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number } }
+export type AdminStatus = { configured: boolean; username: string; display_name?: string; role?: Role; permissions?: string[]; version: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; max_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number }; updates?: ApplicationUpdateStatus }
 export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; public_dashboard_enabled?: boolean; version: string; password_requirements: { minimum_length: number } }>('/setup/status')
 export const adminStatus = () => api<AdminStatus>('/status')
 export const getSession = () => api<SessionUser>('/auth/session')

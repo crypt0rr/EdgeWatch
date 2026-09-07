@@ -203,3 +203,61 @@ func TestValidationHelpersAndEstimateOverflow(t *testing.T) {
 		t.Fatalf("invalid UDP estimate error = %v", err)
 	}
 }
+
+func TestLoadForAdminRejectsMalformedVersionAndDatabase(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	write := func(contents string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("version: 2\ndatabase: " + filepath.Join(dir, "db") + "\n")
+	if _, err := LoadForAdmin(path); err == nil || !strings.Contains(err.Error(), "unsupported config version") {
+		t.Fatalf("unsupported admin version error = %v", err)
+	}
+	write("version: 1\n")
+	if cfg, err := LoadForAdmin(path); err != nil || cfg.Database != "/var/lib/edgewatch/edgewatch.db" {
+		t.Fatalf("admin defaults = %#v, error = %v", cfg, err)
+	}
+	write("database: " + filepath.Join(dir, "db") + "\n: [")
+	if _, err := LoadForAdmin(path); err == nil {
+		t.Fatal("malformed YAML was accepted by the admin loader")
+	}
+	write("database: " + filepath.Join(dir, "db") + "\n---\nother: value\n")
+	if _, err := LoadForAdmin(path); err == nil || !strings.Contains(err.Error(), "exactly one YAML document") {
+		t.Fatalf("trailing YAML document error = %v", err)
+	}
+	if _, err := LoadForAdmin(filepath.Join(dir, "missing.yaml")); err == nil {
+		t.Fatal("missing admin configuration was accepted")
+	}
+	write("database: " + filepath.Join(dir, "db") + "\n---\n[")
+	if _, err := LoadForAdmin(path); err == nil || !strings.Contains(err.Error(), "read trailing YAML document") {
+		t.Fatalf("malformed trailing YAML error = %v", err)
+	}
+}
+
+func TestConfigArithmeticAndExplicitResumeWindowEdges(t *testing.T) {
+	if saturatingMul(0, 10) != 0 || saturatingMul(-1, 10) != 0 || maxInt64(1, 2) != 2 || maxInt64(2, 1) != 2 || minInt64(1, 2) != 1 || minInt64(2, 1) != 1 {
+		t.Fatal("arithmetic helper boundaries returned unexpected values")
+	}
+	job := Job{ResumeWindow: Duration(2 * time.Hour)}
+	if got := job.ResumeWindowValue(); got != 2*time.Hour {
+		t.Fatalf("explicit resume window = %s", got)
+	}
+	if got := (Job{}).ResumeWindowValue(); got != 8*24*time.Hour {
+		t.Fatalf("zero resume window default = %s", got)
+	}
+	for _, target := range []string{"bad/name", "bad\\name", "bad\tname", "bad\nname", "éxample.test"} {
+		if err := validateTarget(target); err == nil {
+			t.Errorf("invalid target %q was accepted", target)
+		}
+	}
+	if _, err := ParsePorts("1-x"); err == nil || !strings.Contains(err.Error(), "invalid port") {
+		t.Fatal("malformed range endpoint was accepted")
+	}
+	if err := (Config{Version: 1, Database: "db", Retention: Duration(24 * time.Hour), Scheduler: Scheduler{MaxConcurrent: 1, MaxProbeCount: 1}, Web: Web{Listen: "127.0.0.1:8080"}, Jobs: []Job{validCoverageJob()}}).Validate(); err != nil {
+		t.Fatalf("valid configuration rejected: %v", err)
+	}
+}

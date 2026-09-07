@@ -5,7 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -26,6 +28,9 @@ func TestServerErrorMappingHelpers(t *testing.T) {
 		{"conflict", store.ErrConflict, http.StatusConflict, "conflict"},
 		{"not found", store.ErrNotFound, http.StatusNotFound, "not_found"},
 		{"key locked", notify.ErrManagedNotificationLocked, http.StatusServiceUnavailable, "notification_key_unavailable"},
+		{"key unavailable", notify.ErrKeyUnavailable, http.StatusServiceUnavailable, "notification_key_unavailable"},
+		{"key invalid", notify.ErrKeyInvalid, http.StatusServiceUnavailable, "notification_key_unavailable"},
+		{"key permissions", notify.ErrKeyPermissions, http.StatusServiceUnavailable, "notification_key_unavailable"},
 		{"unique", errors.New("UNIQUE constraint failed"), http.StatusConflict, "conflict"},
 		{"URL validation", errors.New("notification URL is invalid"), http.StatusBadRequest, "validation_failed"},
 		{"name validation", errors.New("notification name is empty"), http.StatusBadRequest, "validation_failed"},
@@ -76,6 +81,70 @@ func TestServerErrorMappingHelpers(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	if !server.writeAuditUnavailable(recorder, store.ErrAuditUnavailable, "action") || recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("audit unavailable response = %d %v", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
+	server, _, admin := newUsersTestServer(t)
+	for _, test := range []struct {
+		name, method, rest string
+	}{
+		{name: "empty id", method: http.MethodGet, rest: ""},
+		{name: "nested endpoint", method: http.MethodGet, rest: "id/other"},
+		{name: "unsupported method", method: http.MethodPatch, rest: "id"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			server.notificationDestinationRoute(recorder, httptest.NewRequest(test.method, "/api/v1/notifications/destinations/"+test.rest, nil), admin, test.rest)
+			if recorder.Code != http.StatusNotFound {
+				t.Fatalf("route status = %d, body = %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+
+	missing := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/missing/test", nil)
+	missing.RemoteAddr = "127.0.0.1:4001"
+	recorder := httptest.NewRecorder()
+	server.notificationDestinationRoute(recorder, missing, admin, "missing/test")
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("missing destination test status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+	limited := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/missing/test", nil)
+	limited.RemoteAddr = missing.RemoteAddr
+	recorder = httptest.NewRecorder()
+	server.notificationDestinationRoute(recorder, limited, admin, "missing/test")
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("rate-limited destination test status = %d, body = %s", recorder.Code, recorder.Body.String())
+	}
+
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	parsed, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination, err := server.App.Notifier.CreateManaged(context.Background(), "Route test", "generic://"+parsed.Host+"/edgewatch?disabletls=yes&template=json", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	testRequest := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/"+destination.ID+"/test", nil)
+	testRequest.RemoteAddr = "127.0.0.1:4002"
+	recorder = httptest.NewRecorder()
+	server.notificationDestinationRoute(recorder, testRequest, admin, destination.ID+"/test")
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"sent":1`) || calls.Load() != 1 {
+		t.Fatalf("successful destination test = %d %s (calls=%d)", recorder.Code, recorder.Body.String(), calls.Load())
+	}
+
+	server.testLast["expired"] = time.Now().UTC().Add(-11 * time.Minute)
+	identity := httptest.NewRequest(http.MethodPost, "/", nil)
+	identity.RemoteAddr = "127.0.0.1:4003"
+	identity.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "session-cookie"})
+	if !server.allowNotificationTest(identity) {
+		t.Fatal("expired notification test identity was unexpectedly limited")
 	}
 }
 

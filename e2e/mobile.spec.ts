@@ -17,7 +17,7 @@ test('mobile navigation is modal and incident cards fit the viewport', async ({ 
       return
     }
     if (path === '/auth/session') {
-      await json({ username: 'admin', csrf_token: 'mobile-csrf', totp_enabled: false })
+      await json({ username: 'admin', role: 'administrator', permissions: [], csrf_token: 'mobile-csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } })
       return
     }
     if (path === '/incidents') {

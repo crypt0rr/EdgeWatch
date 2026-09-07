@@ -110,6 +110,66 @@ func TestQueueDestinationsForJobUsesStableSelection(t *testing.T) {
 	}
 }
 
+func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	deployment := "generic://localhost/deployment?disabletls=yes&template=json"
+	legacyJob := config.NormalizeJob(config.Job{
+		Name:     "legacy-job",
+		Schedule: "0 * * * *",
+		Timezone: "UTC",
+		Targets:  []string{"127.0.0.1"},
+		TCP:      &config.Protocol{Ports: "1", Mode: "connect"},
+		Timeout:  config.Duration(time.Minute),
+		Timing:   "balanced",
+	})
+	createdJob, err := db.CreateJob(ctx, legacyJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if createdJob.Job.NotificationDestinations != nil {
+		t.Fatalf("fixture unexpectedly has a saved selection: %#v", createdJob.Job.NotificationDestinations)
+	}
+
+	notifier, err := New(db, []string{deployment})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := notifier.CreateManaged(ctx, "Operations", "generic://localhost/managed?disabletls=yes&template=json", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stored, err := db.GetJob(ctx, createdJob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != createdJob.Revision+1 {
+		t.Fatalf("legacy job revision = %d, want %d", stored.Revision, createdJob.Revision+1)
+	}
+	if stored.Job.NotificationDestinations == nil || len(stored.Job.NotificationDestinations) != 1 {
+		t.Fatalf("legacy job selection = %#v, want the pre-existing deployment destination", stored.Job.NotificationDestinations)
+	}
+	if stored.Job.NotificationDestinations[0] != "file:"+hashURL(deployment) {
+		t.Fatalf("legacy job selection = %#v, want file destination", stored.Job.NotificationDestinations)
+	}
+	if stored.Job.NotificationDestinations[0] == created.ID {
+		t.Fatalf("new managed destination was added to legacy job selection: %#v", stored.Job.NotificationDestinations)
+	}
+	keys, err := notifier.QueueDestinationsForJob(ctx, stored.Job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(keys) != 1 || keys[0] != hashURL(deployment) {
+		t.Fatalf("legacy job queued destinations = %#v, want only the pre-existing deployment destination", keys)
+	}
+}
+
 func TestQueueDestinationsForJobTracksManagedRevision(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

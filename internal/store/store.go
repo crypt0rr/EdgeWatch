@@ -58,7 +58,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 11
+const schemaVersion = 12
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -453,6 +453,80 @@ func migrate(db *sql.DB) error {
 );`,
 			"ALTER TABLE admins ADD COLUMN display_name TEXT NOT NULL DEFAULT 'admin'",
 		},
+		12: {
+			// Multi-user authentication keeps the legacy admins table readable for
+			// compatibility while making users the authoritative identity store.
+			// The fixed UUID gives the original administrator a stable identity and
+			// lets existing sessions and recovery codes be migrated without asking
+			// the operator to sign in again.
+			`CREATE TABLE IF NOT EXISTS users (
+ id TEXT PRIMARY KEY,
+ username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+ display_name TEXT NOT NULL,
+ role TEXT NOT NULL CHECK(role IN ('administrator','operator','viewer')),
+ password_hash TEXT NOT NULL,
+ totp_secret TEXT NOT NULL DEFAULT '',
+ totp_enabled INTEGER NOT NULL DEFAULT 0,
+ enabled INTEGER NOT NULL DEFAULT 1,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ last_login_at TEXT NOT NULL DEFAULT ''
+);`,
+			// A few supported recovery fixtures carry a schema marker without the
+			// complete authentication tables. Create their legacy shape before the
+			// additive user_id columns below so upgrades remain restart-safe.
+			`CREATE TABLE IF NOT EXISTS sessions (
+ id_hash TEXT PRIMARY KEY,
+ created_at TEXT NOT NULL,
+ last_seen_at TEXT NOT NULL,
+ expires_at TEXT NOT NULL,
+ csrf_token TEXT NOT NULL
+);`,
+			`CREATE TABLE IF NOT EXISTS recovery_codes (
+ id_hash TEXT PRIMARY KEY,
+ used_at TEXT
+);`,
+			`CREATE TABLE IF NOT EXISTS security_audit (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ action TEXT NOT NULL,
+ detail TEXT NOT NULL DEFAULT '',
+ created_at TEXT NOT NULL
+);`,
+			"ALTER TABLE security_audit ADD COLUMN actor_user_id TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE security_audit ADD COLUMN actor_username TEXT NOT NULL DEFAULT ''",
+			`ALTER TABLE sessions ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`,
+			`ALTER TABLE recovery_codes ADD COLUMN user_id TEXT NOT NULL DEFAULT ''`,
+			`CREATE TABLE IF NOT EXISTS user_invites (
+ id_hash TEXT PRIMARY KEY,
+ user_id TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ expires_at TEXT NOT NULL,
+ used_at TEXT,
+ FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);`,
+			"CREATE INDEX IF NOT EXISTS user_invites_expiry ON user_invites(expires_at, used_at)",
+			`CREATE TABLE IF NOT EXISTS public_dashboard (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ enabled INTEGER NOT NULL DEFAULT 0,
+ title TEXT NOT NULL DEFAULT 'EdgeWatch public status',
+ introduction TEXT NOT NULL DEFAULT '',
+ updated_at TEXT NOT NULL
+);`,
+			`CREATE TABLE IF NOT EXISTS public_dashboard_hosts (
+ dashboard_id INTEGER NOT NULL DEFAULT 1,
+ job_id TEXT NOT NULL,
+ address TEXT NOT NULL,
+ created_at TEXT NOT NULL,
+ PRIMARY KEY(dashboard_id,job_id,address),
+ FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);`,
+			"CREATE INDEX IF NOT EXISTS public_dashboard_hosts_address ON public_dashboard_hosts(address)",
+			`INSERT OR IGNORE INTO users(id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at)
+ SELECT '00000000-0000-0000-0000-000000000001',username,COALESCE(display_name,username),'administrator',password_hash,totp_secret,totp_enabled,1,created_at,updated_at,'' FROM admins WHERE id=1`,
+			"UPDATE sessions SET user_id='00000000-0000-0000-0000-000000000001' WHERE user_id=''",
+			"UPDATE recovery_codes SET user_id='00000000-0000-0000-0000-000000000001' WHERE user_id=''",
+			"INSERT OR IGNORE INTO public_dashboard(id,enabled,title,introduction,updated_at) VALUES(1,0,'EdgeWatch public status','',datetime('now'))",
+		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
 		statements, ok := migrations[next]
@@ -500,6 +574,7 @@ var (
 	ErrConflict                  = errors.New("resource was modified by another request")
 	ErrRebaselineRequired        = errors.New("security-relevant job changes require rebaseline confirmation")
 	ErrJobScanActive             = errors.New("job has an active scan")
+	ErrLastAdministrator         = errors.New("at least one enabled administrator is required")
 	ErrIncidentNotFound          = errors.New("incident not found")
 	ErrBaselineNotReady          = errors.New("baseline is not ready")
 	ErrUnsupportedIncidentChange = errors.New("unsupported incident change")
@@ -530,8 +605,25 @@ func unmarshalJob(raw []byte) (config.Job, error) {
 }
 
 func scanTime(raw string) time.Time {
-	v, _ := time.Parse(time.RFC3339Nano, raw)
-	return v
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Time{}
+	}
+	// Application writes use RFC3339Nano. SQLite defaults and older databases
+	// may contain UTC timestamps without an offset, so accept those formats as
+	// well while keeping all parsed values explicitly in UTC.
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02T15:04:05",
+	} {
+		if value, err := time.ParseInLocation(layout, raw, time.UTC); err == nil {
+			return value
+		}
+	}
+	return time.Time{}
 }
 
 func (s *Store) CreateJob(ctx context.Context, job config.Job) (JobRecord, error) {
@@ -1806,7 +1898,7 @@ func (s *Store) ListLatestScanHostsPage(ctx context.Context, query, protocol str
 		if err != nil {
 			return page, err
 		}
-		parsed, _ := time.Parse(time.RFC3339Nano, finished)
+		parsed := scanTime(finished)
 		page.Items = append(page.Items, LatestScanHost{ScanHost: ScanHost{ScanID: scanID, DataQuality: dataQuality, Host: item.Host}, JobID: jobID.String, Job: job, ScannedAt: parsed})
 	}
 	return page, rows.Err()

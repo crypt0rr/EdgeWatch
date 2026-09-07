@@ -1,5 +1,6 @@
-// Package auth implements the deliberately small, single-administrator
-// authentication surface used by the local EdgeWatch console.
+// Package auth implements the local EdgeWatch authentication surface. The
+// first-run account remains the stable administrator for compatibility, while
+// subsequent users authenticate through the same opaque-session machinery.
 package auth
 
 import (
@@ -67,16 +68,30 @@ func randomBytes(n int) ([]byte, error) {
 	return b, err
 }
 
+// NewOpaqueToken returns a URL-safe one-time token and its SHA-256 digest.
+// Callers persist only the digest; the clear token is returned once to the
+// administrator or activation flow.
+func NewOpaqueToken() (string, string, error) {
+	raw, err := randomBytes(32)
+	if err != nil {
+		return "", "", err
+	}
+	plain := base64.RawURLEncoding.EncodeToString(raw)
+	return plain, digest(plain), nil
+}
+
 func digest(v string) string {
 	h := sha256.Sum256([]byte(v))
 	return hex.EncodeToString(h[:])
 }
 
 func (m *Manager) EnsureSetupToken(ctx context.Context) (string, error) {
-	if _, err := m.Store.GetAdmin(ctx); err == nil {
-		return "", nil
-	} else if !errors.Is(err, store.ErrNotFound) {
+	configured, err := m.Store.HasAdministrator(ctx)
+	if err != nil {
 		return "", err
+	}
+	if configured {
+		return "", nil
 	}
 	if token, err := m.Store.GetSetupToken(ctx); err == nil && !token.Used && m.now().Before(token.ExpiresAt) {
 		// The clear token is intentionally only emitted when generated. It is
@@ -99,10 +114,12 @@ func (m *Manager) EnsureSetupToken(ctx context.Context) (string, error) {
 // store performs the administrator-exists check, persists the issue time for a
 // cross-process rate limit, and records an opaque audit event.
 func (m *Manager) ReissueSetupToken(ctx context.Context) (string, error) {
-	if _, err := m.Store.GetAdmin(ctx); err == nil {
-		return "", errors.New("administrator is already configured")
-	} else if !errors.Is(err, store.ErrNotFound) {
+	configured, err := m.Store.HasAdministrator(ctx)
+	if err != nil {
 		return "", err
+	}
+	if configured {
+		return "", errors.New("administrator is already configured")
 	}
 	raw, err := randomBytes(32)
 	if err != nil {
@@ -164,55 +181,118 @@ func (m *Manager) Setup(ctx context.Context, token, password string) error {
 // login. The non-HTTP Setup method remains available to trusted callers and
 // tests, while the web endpoint should use this wrapper.
 func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token, password string) error {
-	if !m.allow(request.RemoteAddr) {
-		return errors.New("too many setup attempts; try again later")
+	remote := requestRemote(request)
+	if !m.allow(remote) {
+		return ErrRateLimited
 	}
 	if err := m.Setup(ctx, token, password); err != nil {
-		m.failed(request.RemoteAddr)
+		m.failed(remote)
 		return err
 	}
-	m.clear(request.RemoteAddr)
+	m.clear(remote)
+	return nil
+}
+
+// ActivateRequest protects one-time user activation/password-reset links with
+// the same per-source failure budget as setup and login. The token digest and
+// Argon2id hash are handled inside the store transaction; a failed attempt
+// never consumes the invite.
+func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, token, password string) error {
+	remote := requestRemote(request)
+	if !m.allow(remote) {
+		return ErrRateLimited
+	}
+	hash, err := PasswordHash(password)
+	if err != nil {
+		m.failed(remote)
+		return err
+	}
+	now := m.now()
+	if _, err := m.Store.ActivateUser(ctx, digest(token), hash, now, store.AuditEntry{Action: "user.activated", Detail: "user account activated"}); err != nil {
+		m.failed(remote)
+		return err
+	}
+	m.clear(remote)
 	return nil
 }
 
 func (m *Manager) Login(ctx context.Context, request *http.Request, password, otp, recovery string) (string, store.Admin, error) {
-	if !m.allow(request.RemoteAddr) {
-		return "", store.Admin{}, errors.New("too many login attempts; try again later")
-	}
-	admin, err := m.Store.GetAdmin(ctx)
+	raw, user, err := m.LoginAs(ctx, request, "admin", password, otp, recovery)
 	if err != nil {
-		return "", admin, errors.New("administrator is not configured")
+		return "", store.Admin{}, err
 	}
-	if !VerifyPassword(admin.PasswordHash, password) {
-		m.failed(request.RemoteAddr)
-		return "", admin, errors.New("invalid credentials")
+	return raw, store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt}, nil
+}
+
+// LoginAs authenticates any enabled EdgeWatch user. The legacy Login method
+// above intentionally remains as a compatibility wrapper for CLI and tests
+// that always sign in as the original administrator.
+func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, password, otp, recovery string) (string, store.User, error) {
+	remote := requestRemote(request)
+	if !m.allow(remote) {
+		return "", store.User{}, ErrRateLimited
 	}
-	if admin.TOTPEnabled {
-		valid := admin.TOTPSecretError == nil && VerifyTOTPAt(admin.TOTPSecret, otp, m.now())
+	user, err := m.Store.GetUserByUsername(ctx, username)
+	if errors.Is(err, store.ErrNotFound) && strings.EqualFold(strings.TrimSpace(username), "admin") {
+		// Databases created by older test fixtures may not have the migrated
+		// users row yet. Preserve the original administrator behavior while the
+		// normal Open path always creates it through migration 12.
+		admin, adminErr := m.Store.GetAdmin(ctx)
+		if adminErr != nil {
+			return "", store.User{}, errors.New("administrator is not configured")
+		}
+		user = store.User{ID: store.LegacyAdminUserID, Username: admin.Username, DisplayName: admin.DisplayName, Role: store.RoleAdministrator, PasswordHash: admin.PasswordHash, TOTPSecret: admin.TOTPSecret, TOTPSecretStored: admin.TOTPSecretStored, TOTPSecretError: admin.TOTPSecretError, TOTPEnabled: admin.TOTPEnabled, Enabled: true, CreatedAt: admin.CreatedAt, UpdatedAt: admin.UpdatedAt}
+		err = nil
+	}
+	if err != nil {
+		// Unknown usernames still consume the failure budget. Otherwise an
+		// attacker could bypass the login limiter by rotating arbitrary account
+		// names while probing the endpoint for a real administrator or invitee.
+		m.failed(remote)
+		return "", store.User{}, errors.New("invalid credentials")
+	}
+	if !user.Enabled {
+		m.failed(remote)
+		// Keep disabled accounts indistinguishable from unknown usernames. This
+		// prevents the login endpoint from becoming an account-enumeration oracle
+		// while the administration UI can still show the disabled state.
+		return "", user, errors.New("invalid credentials")
+	}
+	if !VerifyPassword(user.PasswordHash, password) {
+		m.failed(remote)
+		return "", user, errors.New("invalid credentials")
+	}
+	if user.TOTPEnabled {
+		valid := user.TOTPSecretError == nil && VerifyTOTPAt(user.TOTPSecret, otp, m.now())
 		if !valid && recovery != "" {
-			valid, err = m.Store.ConsumeRecoveryCode(ctx, digest(strings.ToUpper(strings.TrimSpace(recovery))), m.now())
+			valid, err = m.Store.ConsumeRecoveryCodeForUser(ctx, user.ID, digest(strings.ToUpper(strings.TrimSpace(recovery))), m.now())
 		}
 		if !valid {
-			m.failed(request.RemoteAddr)
-			return "", admin, errors.New("one-time code is required")
+			m.failed(remote)
+			return "", user, errors.New("one-time code is required")
 		}
 	}
 	sessionRaw, err := randomBytes(32)
 	if err != nil {
-		return "", admin, err
+		return "", user, err
 	}
 	csrfRaw, err := randomBytes(32)
 	if err != nil {
-		return "", admin, err
+		return "", user, err
 	}
 	session := base64.RawURLEncoding.EncodeToString(sessionRaw)
 	csrf := base64.RawURLEncoding.EncodeToString(csrfRaw)
 	now := m.now()
-	if err := m.Store.CreateSessionWithAudit(ctx, digest(session), csrf, now, now.Add(SessionTTL), "admin.login", "successful login"); err != nil {
-		return "", admin, err
+	action := "user.login"
+	if user.Role == store.RoleAdministrator {
+		action = "admin.login"
 	}
-	m.clear(request.RemoteAddr)
-	return session, admin, nil
+	if err := m.Store.CreateSessionForUserWithAuditEntry(ctx, user.ID, digest(session), csrf, now, now.Add(SessionTTL), store.AuditEntry{Action: action, Detail: "successful login", ActorUserID: user.ID, ActorUsername: user.Username}); err != nil {
+		return "", user, err
+	}
+	_ = m.Store.SetUserLastLogin(ctx, user.ID, now)
+	m.clear(remote)
+	return session, user, nil
 }
 
 // ConfirmPassword applies the same per-client failure budget as login to
@@ -220,16 +300,33 @@ func (m *Manager) Login(ctx context.Context, request *http.Request, password, ot
 // credentials. It intentionally returns only generic errors so callers cannot
 // distinguish a missing administrator from a wrong password.
 func (m *Manager) ConfirmPassword(ctx context.Context, request *http.Request, password string) error {
-	if !m.allow(request.RemoteAddr) {
+	return m.ConfirmPasswordForUser(ctx, request, store.LegacyAdminUserID, password)
+}
+
+// ConfirmPasswordForUser applies the password confirmation budget to the
+// authenticated account that is about to perform a sensitive operation. The
+// legacy ConfirmPassword wrapper remains for callers that predate RBAC, but
+// web-managed administrators must be able to confirm with their own password
+// rather than the original admin account's credential.
+func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Request, userID, password string) error {
+	remote := requestRemote(request)
+	if !m.allow(remote) {
 		return ErrRateLimited
 	}
-	admin, err := m.Store.GetAdmin(ctx)
-	if err != nil || !VerifyPassword(admin.PasswordHash, password) {
-		m.failed(request.RemoteAddr)
+	user, err := m.Store.GetUser(ctx, userID)
+	if err != nil || !user.Enabled || !VerifyPassword(user.PasswordHash, password) {
+		m.failed(remote)
 		return errors.New("password confirmation failed")
 	}
-	m.clear(request.RemoteAddr)
+	m.clear(remote)
 	return nil
+}
+
+func requestRemote(request *http.Request) string {
+	if request == nil {
+		return "unknown"
+	}
+	return request.RemoteAddr
 }
 
 func (m *Manager) allow(remote string) bool {
@@ -370,6 +467,13 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (store.Sess
 	if err != nil {
 		return store.Session{}, false
 	}
+	if session.UserID == "" {
+		session.UserID = store.LegacyAdminUserID
+	}
+	user, err := m.Store.GetUser(ctx, session.UserID)
+	if err != nil || !user.Enabled {
+		return store.Session{}, false
+	}
 	now := m.now()
 	if !now.Before(session.ExpiresAt) || now.Sub(session.LastSeenAt) > IdleTTL {
 		_ = m.Store.DeleteSession(ctx, session.IDHash)
@@ -379,6 +483,7 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (store.Sess
 	// idle timestamp is refreshed on activity, but an active browser cannot
 	// extend a session beyond its 30-day expiry.
 	_ = m.Store.TouchSession(ctx, session.IDHash, now, session.ExpiresAt)
+	session.Username, session.DisplayName, session.Role = user.Username, user.DisplayName, user.Role
 	return session, true
 }
 
@@ -387,6 +492,21 @@ func (m *Manager) Logout(ctx context.Context, r *http.Request) error {
 		return m.Store.DeleteSessionWithAudit(ctx, digest(cookie.Value), "admin.logout", "session ended")
 	}
 	return nil
+}
+
+// LogoutSession is the role-aware variant used by the web API. It keeps the
+// legacy Logout method above for CLI/tests while attributing new sign-outs to
+// the actual account and avoiding a second session lookup.
+func (m *Manager) LogoutSession(ctx context.Context, r *http.Request, session store.Session) error {
+	cookie, err := r.Cookie(SessionCookie)
+	if err != nil || cookie.Value == "" {
+		return nil
+	}
+	action := "user.logout"
+	if session.Role == store.RoleAdministrator {
+		action = "admin.logout"
+	}
+	return m.Store.DeleteSessionWithAuditEntry(ctx, digest(cookie.Value), store.AuditEntry{Action: action, Detail: "session ended", ActorUserID: session.UserID, ActorUsername: session.Username})
 }
 
 func (m *Manager) CheckCSRF(r *http.Request, session store.Session) bool {

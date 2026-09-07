@@ -277,7 +277,7 @@ func mustURL(t *testing.T, raw string) *url.URL {
 
 func TestLookupSuppressesPrivateAndDisabledAddresses(t *testing.T) {
 	client := New(nil, true)
-	for _, address := range []string{"192.168.1.1", "127.0.0.1", "::1", "fe80::1", "ff02::1"} {
+	for _, address := range []string{"192.168.1.1", "100.64.0.1", "100.127.255.254", "127.0.0.1", "::1", "fe80::1", "ff02::1"} {
 		result, err := client.Lookup(context.Background(), address)
 		if err != nil || result.Status != "private" {
 			t.Fatalf("private %s = %#v, %v", address, result, err)

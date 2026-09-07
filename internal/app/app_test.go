@@ -71,6 +71,60 @@ func (s *resumableTestScanner) ScanWorkUnit(ctx context.Context, _ config.Job, u
 	return model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: unit.Protocol, Addresses: unit.Addresses, Ports: []model.PortState{{Port: unit.PortCount, State: "open"}}}}}, nil
 }
 
+func TestNewFreezesLegacyNotificationSelections(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	legacy := config.NormalizeJob(config.Job{
+		Name:     "legacy-routing",
+		Schedule: "0 * * * *",
+		Timezone: "UTC",
+		Targets:  []string{"127.0.0.1"},
+		TCP:      &config.Protocol{Ports: "1", Mode: "connect"},
+		Timeout:  config.Duration(time.Minute),
+		Timing:   "balanced",
+	})
+	legacyRecord, err := s.CreateJob(ctx, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	silent := legacy
+	silent.Name = "silent-routing"
+	silent.NotificationDestinations = []string{}
+	silentRecord, err := s.CreateJob(ctx, silent)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		Version: 1, Database: s.Path, Retention: config.Duration(24 * time.Hour),
+		Scheduler:     config.Scheduler{MaxConcurrent: 1},
+		Web:           config.Web{Listen: "127.0.0.1:8080"},
+		Notifications: config.Notifications{URLs: []string{"generic://localhost/deployment?disabletls=yes&template=json"}},
+	}
+	if _, err := New(cfg, s, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+		t.Fatal(err)
+	}
+
+	storedLegacy, err := s.GetJob(ctx, legacyRecord.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedLegacy.Revision != legacyRecord.Revision+1 || storedLegacy.Job.NotificationDestinations == nil || len(storedLegacy.Job.NotificationDestinations) != 1 || !strings.HasPrefix(storedLegacy.Job.NotificationDestinations[0], "file:") {
+		t.Fatalf("legacy job after startup freeze = %#v, want one deployment selector at revision 2", storedLegacy)
+	}
+	storedSilent, err := s.GetJob(ctx, silentRecord.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedSilent.Revision != silentRecord.Revision || storedSilent.Job.NotificationDestinations == nil || len(storedSilent.Job.NotificationDestinations) != 0 {
+		t.Fatalf("explicit silent job changed during startup freeze = %#v", storedSilent)
+	}
+}
+
 type blockingScanner struct {
 	started chan struct{}
 	release chan struct{}

@@ -2,17 +2,20 @@ import { StrictMode, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Activity, Bell, Boxes, ClipboardList, Gauge, LogOut, Menu, Server, ShieldCheck, Wifi, X } from 'lucide-react'
+import { Activity, Bell, Boxes, ClipboardList, Gauge, Globe2, LogOut, Menu, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
 import { acceptIncident, getSession, listIncidents, listJobs, setCSRF, setupStatus, suppressIncident, logout as apiLogout } from './api'
 import { Dashboard } from './pages/Dashboard'
 import { JobEditor } from './pages/JobEditor'
 import { JobDetail } from './pages/JobDetail'
-import { Login, Setup } from './pages/Auth'
+import { Activate, Login, Setup } from './pages/Auth'
 import { Security } from './pages/Security'
 import { Notifications } from './pages/Notifications'
 import { BaselineHosts } from './pages/BaselineHosts'
 import { HostDetail } from './pages/HostDetail'
 import { Hosts } from './pages/Hosts'
+import { Users } from './pages/Users'
+import { PublicDashboard, PublicDashboardAdmin } from './pages/PublicDashboard'
+import type { Role } from './api'
 import { Pagination } from './components/Pagination'
 import { ActionDialog } from './components/ActionDialog'
 import { compactPortExpression } from './components/PortScopeDetails'
@@ -40,7 +43,7 @@ function useIsMobile() {
   return mobile
 }
 
-function Shell({ displayName, version, onLogout }: { displayName: string; version: string; onLogout: () => void }) {
+function Shell({ displayName, version, role, publicDashboardEnabled, onLogout }: { displayName: string; version: string; role: Role; publicDashboardEnabled: boolean; onLogout: () => void }) {
   const [open, setOpen] = useState(false)
   const [liveState, setLiveState] = useState<'connecting' | 'live' | 'reconnecting'>('connecting')
   const isMobile = useIsMobile()
@@ -49,7 +52,7 @@ function Shell({ displayName, version, onLogout }: { displayName: string; versio
   const wasOpenRef = useRef(false)
   const location = useLocation()
   const client = useQueryClient()
-  const incidentSummary = useQuery({ queryKey: ['incidents', 'navigation'], queryFn: () => listIncidents(0, 1), refetchInterval: 15000 })
+  const incidentSummary = useQuery({ queryKey: ['incidents', 'navigation'], queryFn: () => listIncidents(0, 1), refetchInterval: 15000, enabled: role !== 'viewer' })
   const incidentCount = incidentSummary.data?.pagination.total ?? 0
   useEffect(() => {
     if (!isMobile && open) setOpen(false)
@@ -106,6 +109,7 @@ function Shell({ displayName, version, onLogout }: { displayName: string; versio
     return () => document.removeEventListener('keydown', onKeyDown)
   }, [isMobile, open])
   useEffect(() => {
+    if (role === 'viewer') return
     const stream = new EventSource('/api/v1/stream')
     stream.onopen = () => setLiveState('live')
     stream.onerror = () => setLiveState('reconnecting')
@@ -163,13 +167,14 @@ function Shell({ displayName, version, onLogout }: { displayName: string; versio
       }
     }
     return () => stream.close()
-  }, [client])
+  }, [client, role])
   const links = [
     { to: '/', label: 'Overview', icon: Gauge },
+    ...(role === 'viewer' && publicDashboardEnabled ? [{ to: '/highlights', label: 'Highlights', icon: Globe2 }] : []),
     { to: '/jobs', label: 'Jobs', icon: Boxes },
-    { to: '/hosts', label: 'Hosts', icon: Server },
-    { to: '/incidents', label: 'Incidents', icon: Activity },
-    { to: '/notifications', label: 'Notifications', icon: Bell },
+    ...(role !== 'viewer' ? [{ to: '/hosts', label: 'Hosts', icon: Server }] : []),
+    ...(role !== 'viewer' ? [{ to: '/incidents', label: 'Incidents', icon: Activity }] : []),
+    ...(role === 'administrator' ? [{ to: '/notifications', label: 'Notifications', icon: Bell }, { to: '/users', label: 'Users', icon: UserRound }, { to: '/public-dashboard', label: 'Public status', icon: Globe2 }] : []),
     { to: '/security', label: 'Security', icon: ShieldCheck },
   ]
   const breadcrumb = location.pathname === '/' ? 'Overview' : location.pathname.split('/').filter(Boolean).map(v => v[0].toUpperCase() + v.slice(1)).join(' / ')
@@ -177,17 +182,19 @@ function Shell({ displayName, version, onLogout }: { displayName: string; versio
     <aside id="primary-navigation" ref={drawerRef} role={isMobile && open ? 'dialog' : undefined} aria-label="Primary navigation" aria-modal={isMobile && open ? true : undefined} aria-hidden={isMobile ? !open : undefined} inert={isMobile ? !open : undefined} className={open ? 'sidebar open' : 'sidebar'}>
       <div className="brand"><span className="brand-mark"><Wifi size={19} /></span><span>EdgeWatch</span><button type="button" className="drawer-close" aria-label="Close navigation" onClick={() => setOpen(false)}><X size={19} /></button></div>
       <nav>{links.map(({ to, label, icon: Icon }) => { const active = location.pathname === to || (to === '/jobs' && location.pathname.startsWith('/jobs')) || (to === '/hosts' && location.pathname.startsWith('/scans/')); const incidents = to === '/incidents'; const attention = incidents && incidentCount > 0; return <Link key={to} to={to} onClick={() => setOpen(false)} aria-label={incidents ? 'Incidents' : undefined} aria-describedby={attention ? 'active-incident-count' : undefined} className={`nav-link${active ? ' active' : ''}${attention ? ' nav-link-alert' : ''}`}><Icon size={18} /><span className="nav-link-label">{label}</span>{attention && <span id="active-incident-count" className="nav-count" aria-live="polite" aria-label={`${incidentCount} active incident${incidentCount === 1 ? '' : 's'}`}>{incidentCount > 99 ? '99+' : incidentCount}</span>}</Link> })}</nav>
-      <div className="sidebar-bottom"><div className="user-chip"><span className="avatar">{displayName.trim().charAt(0).toUpperCase() || 'A'}</span><span><small className="app-version">EdgeWatch {version}</small><strong>{displayName}</strong><small>Administrator</small></span></div><button className="nav-link quiet" onClick={onLogout}><LogOut size={17} />Sign out</button></div>
+      <div className="sidebar-bottom"><div className="user-chip"><span className="avatar">{displayName.trim().charAt(0).toUpperCase() || 'A'}</span><span><small className="app-version">EdgeWatch {version}</small><strong>{displayName}</strong><small>{role === 'administrator' ? 'Administrator' : role === 'operator' ? 'Operator' : 'Viewer · read only'}</small></span></div><button className="nav-link quiet" onClick={onLogout}><LogOut size={17} />Sign out</button></div>
     </aside>
     {open && isMobile && <button type="button" aria-label="Close navigation" tabIndex={-1} className="backdrop" onClick={() => setOpen(false)} />}
-    <main className="main" inert={isMobile && open ? true : undefined} aria-hidden={isMobile && open ? true : undefined}><header className="topbar"><button ref={menuButtonRef} type="button" aria-label={open ? 'Close navigation' : 'Open navigation'} aria-controls="primary-navigation" aria-expanded={isMobile ? open : false} className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><nav className="breadcrumb" title={breadcrumb} aria-label={`Breadcrumb: ${breadcrumb}`}>{breadcrumb}</nav><div className="topbar-actions"><span className="status-dot"><i /> {liveState === 'live' ? 'Live updates' : liveState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}</span><Bell size={18} /></div></header><div className="content"><Routes><Route path="/" element={<Dashboard />} /><Route path="/jobs" element={<Jobs />} /><Route path="/jobs/new" element={<JobEditor />} /><Route path="/jobs/:id" element={<JobDetail />} /><Route path="/jobs/:id/edit" element={<JobEditor />} /><Route path="/jobs/:id/baseline" element={<BaselineHosts />} /><Route path="/jobs/:id/baseline/hosts/:address" element={<HostDetail />} /><Route path="/jobs/:id/scans/:scanId/hosts/:address" element={<HostDetail />} /><Route path="/hosts" element={<Hosts />} /><Route path="/scans/:scanId/hosts/:address" element={<HostDetail />} /><Route path="/incidents" element={<Incidents />} /><Route path="/notifications" element={<Notifications />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></div></main>
+    <main className="main" inert={isMobile && open ? true : undefined} aria-hidden={isMobile && open ? true : undefined}><header className="topbar"><button ref={menuButtonRef} type="button" aria-label={open ? 'Close navigation' : 'Open navigation'} aria-controls="primary-navigation" aria-expanded={isMobile ? open : false} className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><nav className="breadcrumb" title={breadcrumb} aria-label={`Breadcrumb: ${breadcrumb}`}>{breadcrumb}</nav><div className="topbar-actions"><span className="status-dot"><i /> {liveState === 'live' ? 'Live updates' : liveState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}</span><Bell size={18} /></div></header><div className="content"><Routes><Route path="/" element={role === 'viewer' && publicDashboardEnabled ? <Navigate to="/highlights" replace /> : <Dashboard />} /><Route path="/highlights" element={<PublicDashboard />} /><Route path="/jobs" element={<Jobs />} /><Route path="/jobs/new" element={<JobEditor />} /><Route path="/jobs/:id" element={<JobDetail />} /><Route path="/jobs/:id/edit" element={<JobEditor />} /><Route path="/jobs/:id/baseline" element={<BaselineHosts />} /><Route path="/jobs/:id/baseline/hosts/:address" element={<HostDetail />} /><Route path="/jobs/:id/scans/:scanId/hosts/:address" element={<HostDetail />} /><Route path="/hosts" element={<Hosts />} /><Route path="/scans/:scanId/hosts/:address" element={<HostDetail />} /><Route path="/incidents" element={<Incidents />} /><Route path="/notifications" element={<Notifications />} /><Route path="/users" element={<Users />} /><Route path="/public-dashboard" element={<PublicDashboardAdmin />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to="/" replace />} /></Routes></div></main>
   </div>
 }
 
 function Jobs() {
   const navigate = useNavigate()
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: () => listJobs(true) })
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Configuration</p><h1>Jobs</h1><p className="muted">Each job owns its targets, protocols, schedule, and baseline.</p></div><button className="button primary" onClick={() => navigate('/jobs/new')}>＋ New job</button></div>{jobs.isLoading ? <Loading /> : jobs.error ? <ErrorCard message={jobs.error.message} /> : <div className="job-grid">{jobs.data?.jobs.map(job => <Link className={job.archived ? 'job-card archived' : 'job-card'} to={`/jobs/${job.id}`} key={job.id}><div className="job-card-top"><span className={job.enabled && !job.archived ? 'pill green' : 'pill gray'}>{job.archived ? 'Archived' : job.enabled ? 'Scheduled' : 'Paused'}</span><span className="revision">r{job.revision}</span></div><h3>{job.job.name}</h3><p className="muted">{job.job.targets.length} target{job.job.targets.length === 1 ? '' : 's'} · {protocolSummary(job)}</p><div className="job-card-bottom"><span className={job.baseline.status === 'complete' ? 'baseline complete' : 'baseline'}>{job.baseline.status === 'complete' ? '● Baseline ready' : `◌ Collecting ${job.baseline.samples ?? 0}/${job.job.baseline_samples}`}</span><span>{job.job.schedule}</span></div></Link>)}{!jobs.data?.jobs.length && <Empty title="No jobs yet" body="Create your first TCP or UDP monitoring job." action={<button className="button primary" onClick={() => navigate('/jobs/new')}>Create a job</button>} />}</div>}</section>
+  const session = useQuery({ queryKey: ['session'], queryFn: getSession })
+  const canWrite = session.data?.role !== 'viewer'
+  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Configuration</p><h1>Jobs</h1><p className="muted">Each job owns its targets, protocols, schedule, and baseline.</p></div>{canWrite && <button className="button primary" onClick={() => navigate('/jobs/new')}>＋ New job</button>}</div>{jobs.isLoading ? <Loading /> : jobs.error ? <ErrorCard message={jobs.error.message} /> : <div className="job-grid">{jobs.data?.jobs.map(job => <Link className={job.archived ? 'job-card archived' : 'job-card'} to={`/jobs/${job.id}`} key={job.id}><div className="job-card-top"><span className={job.enabled && !job.archived ? 'pill green' : 'pill gray'}>{job.archived ? 'Archived' : job.enabled ? 'Scheduled' : 'Paused'}</span><span className="revision">r{job.revision}</span></div><h3>{job.job.name}</h3><p className="muted">{job.job.targets.length} target{job.job.targets.length === 1 ? '' : 's'} · {protocolSummary(job)}</p><div className="job-card-bottom"><span className={job.baseline.status === 'complete' ? 'baseline complete' : 'baseline'}>{job.baseline.status === 'complete' ? '● Baseline ready' : `◌ Collecting ${job.baseline.samples ?? 0}/${job.job.baseline_samples}`}</span><span>{job.job.schedule}</span></div></Link>)}{!jobs.data?.jobs.length && canWrite && <Empty title="No jobs yet" body="Create your first TCP or UDP monitoring job." action={<button className="button primary" onClick={() => navigate('/jobs/new')}>Create a job</button>} />}{!jobs.data?.jobs.length && !canWrite && <Empty title="No jobs configured" body="An operator can create a monitoring job for this EdgeWatch instance." />}</div>}</section>
 }
 
 function protocolSummary(job: { job: { tcp?: { ports: string }; udp?: { ports: string } } }) {
@@ -255,11 +262,32 @@ function IncidentActions({ row, busy, acceptID, suppressID, onAction }: { row: I
   return <div className="incident-actions"><button className="button secondary" type="button" onClick={() => onAction(row, 'accept')} disabled={!key || !!busy}>{busy === acceptID ? 'Accepting…' : 'Accept change'}</button><button className="button ghost" type="button" onClick={() => onAction(row, 'suppress')} disabled={!key || !!busy}>{busy === suppressID ? 'Suppressing…' : 'Suppress 1 scan'}</button></div>
 }
 
-function ProtectedApp({ version, onLogout }: { version: string; onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate]); if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; return <Shell displayName={session.data?.display_name ?? session.data?.username ?? 'admin'} version={version} onLogout={onLogout} /> }
+function ProtectedApp({ version, onLogout }: { version: string; onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate]); if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; return <Shell displayName={session.data?.display_name ?? session.data?.username ?? 'admin'} role={session.data?.role ?? 'administrator'} publicDashboardEnabled={!!status.data.public_dashboard_enabled} version={version} onLogout={onLogout} /> }
 
-function AuthRoutes({ configured }: { configured: boolean }) { const location = useLocation(); return <Routes><Route path="/setup" element={<Setup />} /><Route path="/login" element={<Login />} /><Route path="*" element={configured ? <Navigate to="/login" replace state={{ from: { pathname: location.pathname, search: location.search } }} /> : <Navigate to="/setup" replace />} /></Routes> }
+function AuthRoutes({ configured }: { configured: boolean }) { const location = useLocation(); return <Routes><Route path="/setup" element={<Setup />} /><Route path="/activate" element={<Activate />} /><Route path="/login" element={<Login />} /><Route path="*" element={configured ? <Navigate to="/login" replace state={{ from: { pathname: location.pathname, search: location.search } }} /> : <Navigate to="/setup" replace />} /></Routes> }
 
-function App() { const [signedOut, setSignedOut] = useState(false); const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus, retry: false }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); useEffect(() => { if (session.data) setSignedOut(false) }, [session.data]); const authenticated = !signedOut && !!session.data && !session.error; async function handleLogout() { try { await apiLogout() } catch { /* The server clears the cookie before reporting audit errors. */ } finally { setCSRF(''); queryClient.clear(); queryClient.setQueryData(['session'], null); setSignedOut(true) } } return <BrowserRouter>{status.isLoading || session.isLoading ? <Loading /> : status.error ? <ErrorCard message="Unable to contact EdgeWatch. Retry when the service is available." /> : status.data?.configured && authenticated ? <ProtectedApp version={status.data.version ?? 'dev'} onLogout={handleLogout} /> : <AuthGate statusConfigured={!!status.data?.configured} />}</BrowserRouter> }
+function App() { return <BrowserRouter><AppContent /></BrowserRouter> }
+
+function AppContent() {
+  const location = useLocation()
+  const isPublic = location.pathname === '/public' || location.pathname === '/public/'
+  const [signedOut, setSignedOut] = useState(false)
+  // The public highlights page is deliberately independent of setup/session
+  // state. This avoids an unnecessary authenticated request and keeps the
+  // unauthenticated route usable while the administrator is signed out.
+  const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus, retry: false, enabled: !isPublic })
+  const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false, enabled: !isPublic })
+  useEffect(() => { if (session.data) setSignedOut(false) }, [session.data])
+  const authenticated = !signedOut && !!session.data && !session.error
+  async function handleLogout() {
+    try { await apiLogout() } catch { /* The server clears the cookie before reporting audit errors. */ }
+    finally { setCSRF(''); queryClient.clear(); queryClient.setQueryData(['session'], null); setSignedOut(true) }
+  }
+  if (isPublic) return <PublicDashboard />
+  if (status.isLoading || session.isLoading) return <Loading />
+  if (status.error) return <ErrorCard message="Unable to contact EdgeWatch. Retry when the service is available." />
+  return status.data?.configured && authenticated ? <ProtectedApp version={status.data.version ?? 'dev'} onLogout={handleLogout} /> : <AuthGate statusConfigured={!!status.data?.configured} />
+}
 
 function AuthGate({ statusConfigured }: { statusConfigured: boolean }) { return <AuthRoutes configured={statusConfigured} /> }
 

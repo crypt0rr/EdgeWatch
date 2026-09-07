@@ -228,6 +228,13 @@ func (n *Notifier) createManaged(ctx context.Context, name, rawURL string, enabl
 	if err != nil {
 		return DestinationView{}, err
 	}
+	// Snapshot the destinations that exist before this endpoint is inserted.
+	// Legacy jobs with no saved routing selection are frozen to this snapshot
+	// transactionally, so the newly created endpoint remains opt-in.
+	if err := n.Reload(ctx); err != nil {
+		return DestinationView{}, err
+	}
+	legacySelection := n.LegacySelection()
 	key, err := n.ensureKey(ctx)
 	if err != nil {
 		return DestinationView{}, err
@@ -238,9 +245,9 @@ func (n *Notifier) createManaged(ctx context.Context, name, rawURL string, enabl
 		return DestinationView{}, err
 	}
 	if audit == nil {
-		_, err = n.Store.CreateManagedNotification(ctx, id, name, provider, ciphertext, nonce, enabled)
+		_, err = n.Store.CreateManagedNotificationWithLegacySelection(ctx, id, name, provider, ciphertext, nonce, enabled, legacySelection)
 	} else {
-		_, err = n.Store.CreateManagedNotificationWithAudit(ctx, id, name, provider, ciphertext, nonce, enabled, *audit)
+		_, err = n.Store.CreateManagedNotificationWithLegacySelectionAndAudit(ctx, id, name, provider, ciphertext, nonce, enabled, legacySelection, *audit)
 	}
 	if err != nil {
 		return DestinationView{}, err
@@ -405,6 +412,26 @@ func (n *Notifier) Destinations() []DestinationView {
 		return strings.ToLower(views[i].Name) < strings.ToLower(views[j].Name)
 	})
 	return views
+}
+
+// LegacySelection returns the stable selectors for destinations that currently
+// participate in global delivery. It is used when a new endpoint is created
+// to freeze jobs that still rely on the legacy nil-selection behavior. The
+// returned slice is always non-nil, including when no destinations exist.
+func (n *Notifier) LegacySelection() []string {
+	n.mu.RLock()
+	selection := make([]string, 0, len(n.fileURLs)+len(n.managed))
+	for id := range n.fileURLs {
+		selection = append(selection, "file:"+id)
+	}
+	for id, entry := range n.managed {
+		if entry.record.Enabled {
+			selection = append(selection, id)
+		}
+	}
+	n.mu.RUnlock()
+	sort.Strings(selection)
+	return selection
 }
 
 func (n *Notifier) ActiveCount() int {

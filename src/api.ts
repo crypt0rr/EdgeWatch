@@ -43,12 +43,15 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!response.ok) throw new APIError(body?.error?.message || 'Request failed', body?.error?.code, body?.error?.details)
   return body as T
 }
-export type AdminStatus = { configured: boolean; username: string; display_name?: string; version: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; max_probe_count?: number; rdap_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number } }
-export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; version: string; password_requirements: { minimum_length: number } }>('/setup/status')
+export type Role = 'administrator' | 'operator' | 'viewer'
+export type SessionUser = { user_id: string; username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_enabled: boolean; password_requirements: { minimum_length: number } }
+export type AdminStatus = { configured: boolean; username: string; display_name?: string; role?: Role; permissions?: string[]; version: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; max_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number } }
+export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; public_dashboard_enabled?: boolean; version: string; password_requirements: { minimum_length: number } }>('/setup/status')
 export const adminStatus = () => api<AdminStatus>('/status')
-export const getSession = () => api<{ username: string; display_name?: string; csrf_token: string; totp_enabled: boolean }>('/auth/session')
-export const login = (password: string, otp?: string, recovery_code?: string) => api<{ username: string; display_name?: string; csrf_token: string; totp_required: boolean }>('/auth/login', { method: 'POST', body: JSON.stringify({ password, otp, recovery_code }) })
+export const getSession = () => api<SessionUser>('/auth/session')
+export const login = (password: string, otp?: string, recovery_code?: string, username = 'admin') => api<{ username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_required: boolean }>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password, otp, recovery_code }) })
 export const setup = (token: string, password: string) => api('/setup', { method: 'POST', body: JSON.stringify({ token, password }) })
+export const activate = (token: string, password: string) => api('/auth/activate', { method: 'POST', body: JSON.stringify({ token, password }) })
 export const logout = () => api('/auth/logout', { method: 'POST' })
 export const logoutAllSessions = () => api('/auth/sessions', { method: 'DELETE' })
 export const updateDisplayName = (displayName: string) => api<{ display_name: string }>('/auth/display-name', { method: 'PUT', body: JSON.stringify({ display_name: displayName }) })
@@ -113,3 +116,24 @@ export const createNotificationDestination = (name: string, url: string, passwor
 export const updateNotificationDestination = (id: string, revision: number, name: string, password: string, options: { url?: string; enabled?: boolean } = {}) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ name, revision, password, ...options }) })
 export const deleteNotificationDestination = (id: string, revision: number, password: string) => api<void>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ revision, password }) })
 export const testNotificationDestination = (id: string) => api<{ sent: number }>(`/notifications/destinations/${encodeURIComponent(id)}/test`, { method: 'POST' })
+
+export type UserSummary = { id: string; username: string; display_name: string; role: Role; enabled: boolean; pending?: boolean; totp_enabled: boolean; created_at: string; updated_at: string; last_login_at?: string }
+export const listUsers = () => api<{ users: UserSummary[] }>('/users')
+export const createUser = (username: string, display_name: string, role: Role) => api<{ user: UserSummary; activation_token: string; activation_path: string }>('/users', { method: 'POST', body: JSON.stringify({ username, display_name, role }) })
+export const updateUser = (id: string, value: { display_name?: string; role?: Role; enabled?: boolean }) => api<UserSummary>(`/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(value) })
+export const issueUserActivation = (id: string) => api<{ activation_token: string; activation_path: string; expires_at: string }>(`/users/${encodeURIComponent(id)}/activation`, { method: 'POST' })
+export const revokeUserSessions = (id: string) => api<void>(`/users/${encodeURIComponent(id)}/sessions`, { method: 'DELETE' })
+
+export type PublicDashboardHost = { job_id: string; address: string; created_at: string }
+export type PublicDashboardConfig = { enabled: boolean; title: string; introduction: string; updated_at: string; hosts: PublicDashboardHost[] }
+export type PublicPort = { protocol: string; port: number; service?: string; product?: string; version?: string }
+export type PublicHost = { job: string; address: string; address_family?: string; public: boolean; private: boolean; available: boolean; stale?: boolean; last_successful_scan?: string; open_ports?: PublicPort[]; open_filtered_ports?: PublicPort[]; rdap?: { status: string; network_name?: string; country?: string; registry?: string; organizations?: string[]; prefix?: string; source_url?: string; fetched_at?: string; stale?: boolean; message?: string } }
+export type PublicDashboard = { title: string; introduction?: string; updated_at: string; hosts: PublicHost[] }
+export const getPublicDashboardConfig = () => api<PublicDashboardConfig>('/public-dashboard')
+export const savePublicDashboardConfig = (value: { enabled: boolean; title: string; introduction: string; hosts: PublicDashboardHost[] }) => api<PublicDashboardConfig>('/public-dashboard', { method: 'PUT', body: JSON.stringify(value) })
+export async function getPublicDashboard(): Promise<PublicDashboard> {
+  const response = await fetch('/api/public/v1/dashboard', { credentials: 'omit' })
+  const body = await response.json().catch(() => ({}))
+  if (!response.ok) throw new APIError(body?.error?.message || 'Public status is not available', body?.error?.code)
+  return body as PublicDashboard
+}

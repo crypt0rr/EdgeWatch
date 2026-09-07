@@ -118,6 +118,9 @@ type ProgressScanner interface {
 }
 
 func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logger) (*App, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if cfg.Web.AuthKeyFile != "" {
 		s.SetAuthKeyPath(cfg.Web.AuthKeyFile)
 	}
@@ -134,8 +137,24 @@ func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logge
 	if err != nil {
 		return nil, err
 	}
-	if logger == nil {
-		logger = slog.Default()
+	// Jobs created before per-job routing was introduced have a nil selection
+	// and historically followed every globally enabled destination. Materialize
+	// that snapshot at startup so a destination added later cannot silently
+	// become enabled for those jobs. Explicit selections, including an empty
+	// silent selection, are left untouched.
+	materialized, err := s.MaterializeLegacyNotificationSelections(context.Background(), n.LegacySelection())
+	if err != nil {
+		return nil, fmt.Errorf("freeze legacy notification selections: %w", err)
+	}
+	if materialized > 0 {
+		logger.Info("froze legacy notification selections", "jobs", materialized)
+	}
+	if len(cfg.Jobs) > 0 {
+		legacyNames := make([]string, 0, len(cfg.Jobs))
+		for _, job := range cfg.Jobs {
+			legacyNames = append(legacyNames, job.Name)
+		}
+		logger.Warn("legacy YAML jobs are inactive; recreate them in the web console", "jobs", legacyNames)
 	}
 	sc := scanner.New(nmapPath)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -306,6 +325,22 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		cancel()
 		a.running.Delete(scan.ID)
 	}()
+	// Legacy nil selections are frozen at scan start as well as when they are
+	// persisted. This closes the race where a new endpoint is added while an
+	// older scan is running: that scan must not deliver its completion events to
+	// an endpoint that did not exist when the scan began. Stable selectors are
+	// resolved again at finalization so managed credential rotations still use
+	// the current revision.
+	var legacyNotificationSelection []string
+	legacySelectionCaptured := false
+	if managed && job.NotificationDestinations == nil {
+		if reloadErr := a.Notifier.Reload(ctx); reloadErr != nil {
+			a.Logger.Warn("legacy notification selection snapshot failed", "job", job.Name, "error", reloadErr)
+		} else {
+			legacyNotificationSelection = a.Notifier.LegacySelection()
+			legacySelectionCaptured = true
+		}
+	}
 	// Publish lifecycle updates to the web console without persisting them as
 	// alert events. This keeps SSE subscribers responsive even when a scan has
 	// no baseline or incident event to emit.
@@ -365,7 +400,11 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	var destinations []string
 	if managed {
 		var destinationErr error
-		destinations, destinationErr = a.Notifier.QueueDestinationsForJob(persistCtx, job)
+		if legacySelectionCaptured {
+			destinations, destinationErr = a.Notifier.QueueDestinationsForSelection(persistCtx, legacyNotificationSelection)
+		} else {
+			destinations, destinationErr = a.Notifier.QueueDestinationsForJob(persistCtx, job)
+		}
 		if destinationErr != nil {
 			// Preserve the completed scan even when notification configuration
 			// cannot be read. Runtime state is deliberately left unchanged,

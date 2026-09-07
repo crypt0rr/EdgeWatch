@@ -52,7 +52,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
     }
     if (path === '/auth/session' && method === 'GET') {
       if (!loggedIn) { await json({ error: { code: 'unauthorized', message: 'authentication required' } }, 401); return }
-      await json({ username: 'admin', display_name: displayName, csrf_token: csrf, totp_enabled: false })
+      await json({ username: 'admin', display_name: displayName, role: 'administrator', permissions: [], csrf_token: csrf, totp_enabled: false, password_requirements: { minimum_length: 12 } })
       return
     }
     if (path === '/status' && method === 'GET') {
@@ -99,7 +99,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
     if (path === '/auth/login' && method === 'POST') {
       loggedIn = true
       csrf = 'test-csrf'
-      await json({ username: 'admin', display_name: displayName, csrf_token: csrf, totp_required: false })
+      await json({ username: 'admin', display_name: displayName, role: 'administrator', permissions: [], csrf_token: csrf, totp_required: false })
       return
     }
     if (path === '/auth/display-name' && method === 'PUT') {
@@ -260,7 +260,7 @@ test('host explorer renders every RDAP state without exposing contact data', asy
     const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/stream') { await route.abort(); return }
     if (path === '/setup/status' && method === 'GET') { await json({ configured: true, setup_available: false, version: 'v0.7.0', password_requirements: { minimum_length: 12 } }); return }
-    if (path === '/auth/session' && method === 'GET') { await json({ username: 'admin', csrf_token: 'test-csrf', totp_enabled: false }); return }
+    if (path === '/auth/session' && method === 'GET') { await json({ username: 'admin', role: 'administrator', permissions: [], csrf_token: 'test-csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } }); return }
     if (path === '/incidents' && method === 'GET') { await json({ incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }); return }
     if (path === '/jobs/job-1/baseline/hosts' && method === 'GET') {
       await json({ job_id: 'job-1', job: 'fleet', data_quality: 'detailed', hosts: addresses.map(address => ({ address, address_family: address.includes(':') ? 'IPv6' : 'IPv4', source_targets: ['fleet.example.com'], dns_names: ['fleet.example.com'], protocols: [{ protocol: 'tcp', scanned_ports: '443', scanned_port_count: 1, service_detection: true, open_ports: 1, open_filtered_ports: 0 }], open_ports: 1, open_filtered_ports: 0, has_open_ports: true })), pagination: { limit: 50, offset: 0, total: addresses.length, has_more: false, next_offset: null } })

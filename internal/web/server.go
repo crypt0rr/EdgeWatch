@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -48,6 +49,8 @@ type Server struct {
 	pendingTOTP  map[string]pendingTOTP
 	testMu       sync.Mutex
 	testLast     map[string]time.Time
+	publicMu     sync.Mutex
+	publicHits   map[string][]time.Time
 }
 
 type sseMessage struct {
@@ -68,24 +71,33 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	if a != nil && a.Version != "" {
 		buildVersion = a.Version
 	}
-	rdapClient := rdap.New(s, a.Config.RDAPEnabled())
+	rdapEnabled := true
+	if a != nil && a.Config != nil {
+		rdapEnabled = a.Config.RDAPEnabled()
+	}
+	rdapClient := rdap.New(s, rdapEnabled)
 	rdapClient.OnCacheWriteError = func(err error) {
 		logger.Warn("rdap cache write failed", "error", err)
 	}
-	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}}
-	if token, err := v.Auth.EnsureSetupToken(context.Background()); err != nil {
-		logger.Error("admin setup token generation failed", "error", err)
-	} else if token != "" {
-		logger.Warn("EdgeWatch admin setup required; setup token is valid for 15 minutes", "setup_token", token)
+	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
+	if s != nil {
+		if token, err := v.Auth.EnsureSetupToken(context.Background()); err != nil {
+			logger.Error("admin setup token generation failed", "error", err)
+		} else if token != "" {
+			logger.Warn("EdgeWatch admin setup required; setup token is valid for 15 minutes", "setup_token", token)
+		}
 	}
-	a.SetEventHandler(func(event model.Event) {
-		v.broadcast(map[string]any{"type": event.Type, "job_id": event.JobID, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
-	})
+	if a != nil {
+		a.SetEventHandler(func(event model.Event) {
+			v.broadcast(map[string]any{"type": event.Type, "job_id": event.JobID, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
+		})
+	}
 	return v
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/public/v1/", s.publicAPI)
 	mux.HandleFunc("/api/v1/", s.api)
 	mux.HandleFunc("/assets/", s.asset)
 	mux.HandleFunc("/", s.spa)
@@ -161,6 +173,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.login(w, r)
 		return
 	}
+	if path == "/auth/activate" && r.Method == http.MethodPost {
+		s.activateUser(w, r)
+		return
+	}
 	if path == "/auth/session" && r.Method == http.MethodGet {
 		s.withAuth(w, r, s.session)
 		return
@@ -175,12 +191,16 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "csrf", "missing or invalid CSRF token", nil)
 		return
 	}
+	if permission := requiredPermission(path, r.Method); permission != "" && !auth.HasPermission(session, permission) {
+		writeError(w, http.StatusForbidden, "forbidden", "your account is not allowed to perform this action", map[string]string{"permission": permission})
+		return
+	}
 
 	switch {
 	case path == "/auth/logout" && r.Method == http.MethodPost:
-		s.logout(w, r)
+		s.logout(w, r, session)
 	case path == "/auth/display-name" && r.Method == http.MethodPut:
-		s.changeDisplayName(w, r)
+		s.changeDisplayName(w, r, session)
 	case path == "/auth/password" && r.Method == http.MethodPut:
 		s.changePassword(w, r, session)
 	case path == "/auth/totp/setup" && r.Method == http.MethodPost:
@@ -190,9 +210,13 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/auth/totp" && r.Method == http.MethodDelete:
 		s.totpDisable(w, r, session)
 	case path == "/auth/sessions" && r.Method == http.MethodDelete:
-		if err := s.Auth.Store.DeleteAllSessionsWithAudit(r.Context(), "admin.sessions_revoked", "all sessions revoked"); err != nil {
+		action := "user.sessions_revoked"
+		if session.Role == store.RoleAdministrator {
+			action = "admin.sessions_revoked"
+		}
+		if err := s.Auth.Store.DeleteUserSessionsWithAudit(r.Context(), session.UserID, actorAudit(session, action, "all sessions revoked")); err != nil {
 			if errors.Is(err, store.ErrAuditUnavailable) {
-				s.auditFailure(err, "admin.sessions_revoked")
+				s.auditFailure(err, action)
 				writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "sessions were not revoked because the security audit could not be recorded", nil)
 				return
 			}
@@ -201,21 +225,27 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusNoContent, nil)
 	case path == "/status" && r.Method == http.MethodGet:
-		s.adminStatus(w, r)
+		s.adminStatus(w, r, session)
+	case path == "/users" || strings.HasPrefix(path, "/users/"):
+		s.usersRoute(w, r, session, strings.TrimPrefix(path, "/users"))
+	case path == "/public-dashboard" && (r.Method == http.MethodGet || r.Method == http.MethodPut):
+		s.publicDashboardRoute(w, r, session)
 	case path == "/notifications/test" && r.Method == http.MethodPost:
-		s.notificationTest(w, r)
+		s.notificationTest(w, r, session)
 	case path == "/notifications/destinations" && r.Method == http.MethodGet:
 		s.listNotificationDestinations(w, r)
+	case path == "/notifications/options" && r.Method == http.MethodGet:
+		s.listNotificationDestinations(w, r)
 	case path == "/notifications/destinations" && r.Method == http.MethodPost:
-		s.createNotificationDestination(w, r)
+		s.createNotificationDestination(w, r, session)
 	case strings.HasPrefix(path, "/notifications/destinations/"):
-		s.notificationDestinationRoute(w, r, strings.TrimPrefix(path, "/notifications/destinations/"))
+		s.notificationDestinationRoute(w, r, session, strings.TrimPrefix(path, "/notifications/destinations/"))
 	case path == "/stream" && r.Method == http.MethodGet:
 		s.stream(w, r)
 	case path == "/jobs" && r.Method == http.MethodGet:
 		s.listJobs(w, r)
 	case path == "/jobs" && r.Method == http.MethodPost:
-		s.createJob(w, r)
+		s.createJob(w, r, session)
 	case path == "/jobs/schedule-suggestion" && r.Method == http.MethodGet:
 		s.scheduleSuggestion(w, r)
 	case path == "/scans" && r.Method == http.MethodGet:
@@ -225,7 +255,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/scans/active" && r.Method == http.MethodGet:
 		s.activeScans(w, r)
 	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/cancel") && r.Method == http.MethodPost:
-		s.cancelScan(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/cancel"))
+		s.cancelScan(w, r, session, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/cancel"))
 	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/hosts") && r.Method == http.MethodGet:
 		s.scanHostsRoute(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/hosts"))
 	case strings.HasPrefix(path, "/scans/") && strings.Contains(strings.TrimPrefix(path, "/scans/"), "/hosts/") && r.Method == http.MethodGet:
@@ -251,6 +281,101 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// requiredPermission centralizes the route authorization boundary. The
+// frontend may hide controls for a role, but every API request is checked here
+// so a viewer cannot turn a read-only screen into a write primitive by calling
+// an endpoint directly.
+func requiredPermission(path, method string) string {
+	if strings.HasPrefix(path, "/auth/") {
+		return ""
+	}
+	if path == "/status" {
+		return auth.PermissionOverviewRead
+	}
+	if path == "/stream" {
+		return auth.PermissionStreamRead
+	}
+	if path == "/notifications/test" || (strings.HasPrefix(path, "/notifications/destinations/") && method != http.MethodGet) {
+		return auth.PermissionNotificationsManage
+	}
+	if strings.HasPrefix(path, "/notifications/destinations/") && method == http.MethodGet {
+		return auth.PermissionNotificationOptions
+	}
+	if path == "/notifications/destinations" {
+		if method == http.MethodGet {
+			return auth.PermissionNotificationOptions
+		}
+		return auth.PermissionNotificationsManage
+	}
+	if path == "/notifications/options" {
+		return auth.PermissionNotificationOptions
+	}
+	if path == "/users" || strings.HasPrefix(path, "/users/") {
+		return auth.PermissionUsersManage
+	}
+	if path == "/public-dashboard" || strings.HasPrefix(path, "/public-dashboard/") {
+		return auth.PermissionPublicManage
+	}
+	if path == "/scans/active" {
+		if method == http.MethodGet {
+			return auth.PermissionScansRead
+		}
+		return auth.PermissionJobsRun
+	}
+	if path == "/scans" || strings.HasPrefix(path, "/scans/") {
+		if method == http.MethodGet {
+			return auth.PermissionScansRead
+		}
+		return auth.PermissionJobsRun
+	}
+	if path == "/hosts" || strings.HasPrefix(path, "/hosts/") {
+		return auth.PermissionHostsRead
+	}
+	if path == "/incidents" {
+		if method == http.MethodGet {
+			return auth.PermissionIncidentsRead
+		}
+		return auth.PermissionIncidentsManage
+	}
+	if path == "/events" || strings.HasPrefix(path, "/events/") {
+		return auth.PermissionScansRead
+	}
+	if path == "/jobs" {
+		if method == http.MethodGet {
+			return auth.PermissionJobsRead
+		}
+		return auth.PermissionJobsWrite
+	}
+	if strings.HasPrefix(path, "/jobs/") {
+		if method == http.MethodGet {
+			if strings.Contains(path, "/baseline") {
+				return auth.PermissionBaselinesRead
+			}
+			if strings.Contains(path, "/scans") || strings.Contains(path, "/scan-cycle") || strings.Contains(path, "/events") {
+				return auth.PermissionScansRead
+			}
+			if strings.Contains(path, "/incidents") {
+				return auth.PermissionIncidentsRead
+			}
+			if strings.Contains(path, "/hosts") {
+				return auth.PermissionHostsRead
+			}
+			return auth.PermissionJobsRead
+		}
+		if strings.Contains(path, "/baseline/approve") || strings.Contains(path, "/baseline/reset") {
+			return auth.PermissionBaselinesManage
+		}
+		if strings.Contains(path, "/incidents/accept") || strings.Contains(path, "/incidents/suppress") {
+			return auth.PermissionIncidentsManage
+		}
+		if strings.HasSuffix(path, "/run") || strings.Contains(path, "/scan-cycle") {
+			return auth.PermissionJobsRun
+		}
+		return auth.PermissionJobsWrite
+	}
+	return ""
+}
+
 func isMutation(method string) bool {
 	return method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions
 }
@@ -265,13 +390,19 @@ func (s *Server) withAuth(w http.ResponseWriter, r *http.Request, fn func(http.R
 }
 
 func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
-	_, err := s.Store.GetAdmin(r.Context())
-	configured := err == nil
+	configured, err := s.Store.HasAdministrator(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", "setup status could not be loaded", nil)
+		return
+	}
 	status := map[string]any{
 		"configured":            configured,
 		"username":              "admin",
 		"version":               s.Version,
 		"password_requirements": auth.PasswordRequirements(),
+	}
+	if dashboard, dashboardErr := s.Store.GetPublicDashboard(r.Context()); dashboardErr == nil {
+		status["public_dashboard_enabled"] = dashboard.Enabled
 	}
 	if !configured {
 		if token, tokenErr := s.Store.GetSetupToken(r.Context()); tokenErr == nil {
@@ -284,10 +415,10 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 // adminStatus contains operational details used by the authenticated console.
 // Keeping this separate from setupStatus prevents pre-auth callers from
 // learning notification state, scheduler capacity, or legacy job names.
-func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
-	admin, err := s.Store.GetAdmin(r.Context())
+func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session store.Session) {
+	user, err := s.Store.GetUser(r.Context(), session.UserID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "admin_missing", "administrator account could not be loaded", nil)
+		writeError(w, http.StatusInternalServerError, "user_missing", "account could not be loaded", nil)
 		return
 	}
 	if reloadErr := s.App.Notifier.Reload(r.Context()); reloadErr != nil {
@@ -296,8 +427,10 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 	notificationStatus := s.App.Notifier.Status()
 	status := map[string]any{
 		"configured":                true,
-		"username":                  admin.Username,
-		"display_name":              admin.DisplayName,
+		"username":                  user.Username,
+		"display_name":              user.DisplayName,
+		"role":                      user.Role,
+		"permissions":               auth.PermissionsForRole(user.Role),
 		"version":                   s.Version,
 		"notification_destinations": notificationStatus["active"],
 		"notifications":             notificationStatus,
@@ -306,7 +439,11 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request) {
 		"max_probe_count":           s.App.Config.Scheduler.MaxProbeCount,
 		"rdap_enabled":              s.App.Config.RDAPEnabled(),
 	}
-	if len(s.App.Config.Jobs) > 0 {
+	if user.Role == store.RoleViewer {
+		delete(status, "notification_destinations")
+		delete(status, "notifications")
+	}
+	if user.Role != store.RoleViewer && len(s.App.Config.Jobs) > 0 {
 		legacy := make([]string, 0, len(s.App.Config.Jobs))
 		for _, job := range s.App.Config.Jobs {
 			legacy = append(legacy, job.Name)
@@ -328,6 +465,11 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.Auth.SetupRequest(r.Context(), r, input.Token, input.Password); err != nil {
+		if errors.Is(err, auth.ErrRateLimited) {
+			w.Header().Set("Retry-After", "300")
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many setup attempts; try again later", nil)
+			return
+		}
 		if errors.Is(err, store.ErrAuditUnavailable) {
 			s.auditFailure(err, "admin.setup")
 			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "setup could not be completed because the security audit is unavailable", nil)
@@ -342,6 +484,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	var input struct {
+		Username string `json:"username"`
 		Password string `json:"password"`
 		OTP      string `json:"otp"`
 		Recovery string `json:"recovery_code"`
@@ -349,10 +492,23 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	raw, admin, err := s.Auth.Login(r.Context(), r, input.Password, input.OTP, input.Recovery)
+	username := strings.TrimSpace(input.Username)
+	if username == "" {
+		username = "admin"
+	}
+	raw, user, err := s.Auth.LoginAs(r.Context(), r, username, input.Password, input.OTP, input.Recovery)
 	if err != nil {
+		if errors.Is(err, auth.ErrRateLimited) {
+			w.Header().Set("Retry-After", "300")
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts; try again later", nil)
+			return
+		}
 		if errors.Is(err, store.ErrAuditUnavailable) {
-			s.auditFailure(err, "admin.login")
+			action := "user.login"
+			if user.Role == store.RoleAdministrator {
+				action = "admin.login"
+			}
+			s.auditFailure(err, action)
 			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "login could not be completed because the security audit is unavailable", nil)
 			return
 		}
@@ -361,15 +517,19 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	}
 	auth.SetSessionCookie(w, raw)
 	session, _ := s.Store.GetSession(r.Context(), digest(raw))
-	writeJSON(w, http.StatusOK, map[string]any{"username": admin.Username, "display_name": admin.DisplayName, "csrf_token": session.CSRFToken, "totp_required": admin.TOTPEnabled})
+	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "display_name": user.DisplayName, "role": user.Role, "permissions": auth.PermissionsForRole(user.Role), "csrf_token": session.CSRFToken, "totp_required": user.TOTPEnabled})
 }
 
-func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
-	err := s.Auth.Logout(r.Context(), r)
+func (s *Server) logout(w http.ResponseWriter, r *http.Request, session store.Session) {
+	err := s.Auth.LogoutSession(r.Context(), r, session)
 	auth.ClearSessionCookie(w)
 	if err != nil {
 		if errors.Is(err, store.ErrAuditUnavailable) {
-			s.auditFailure(err, "admin.logout")
+			action := "user.logout"
+			if session.Role == store.RoleAdministrator {
+				action = "admin.logout"
+			}
+			s.auditFailure(err, action)
 			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "logout could not be recorded by the security audit", nil)
 			return
 		}
@@ -380,12 +540,12 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) session(w http.ResponseWriter, r *http.Request, session store.Session) {
-	admin, err := s.Store.GetAdmin(r.Context())
+	user, err := s.Store.GetUser(r.Context(), session.UserID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "admin_missing", err.Error(), nil)
+		writeError(w, http.StatusInternalServerError, "user_missing", err.Error(), nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"username": admin.Username, "display_name": admin.DisplayName, "csrf_token": session.CSRFToken, "totp_enabled": admin.TOTPEnabled, "password_requirements": auth.PasswordRequirements()})
+	writeJSON(w, http.StatusOK, map[string]any{"user_id": user.ID, "username": user.Username, "display_name": user.DisplayName, "role": user.Role, "permissions": auth.PermissionsForRole(user.Role), "csrf_token": session.CSRFToken, "totp_enabled": user.TOTPEnabled, "password_requirements": auth.PasswordRequirements()})
 }
 
 const maxDisplayNameRunes = 80
@@ -409,7 +569,7 @@ func validateDisplayName(value string) (string, error) {
 	return name, nil
 }
 
-func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request) {
+func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, session store.Session) {
 	var input struct {
 		DisplayName string `json:"display_name"`
 	}
@@ -421,18 +581,27 @@ func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_display_name", err.Error(), map[string]string{"display_name": err.Error()})
 		return
 	}
-	admin, err := s.Store.GetAdmin(r.Context())
+	user, err := s.Store.GetUser(r.Context(), session.UserID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "admin_missing", "administrator account could not be loaded", nil)
+		writeError(w, http.StatusInternalServerError, "user_missing", "account could not be loaded", nil)
 		return
 	}
-	admin.DisplayName = displayName
-	admin.UpdatedAt = time.Now().UTC()
-	if err := s.Store.SaveAdminSecurity(r.Context(), admin, nil, false, false, "admin.display_name_changed", "administrator display name changed"); err != nil {
-		if s.writeAuditUnavailable(w, err, "admin.display_name_changed") {
+	user.DisplayName = displayName
+	user.UpdatedAt = time.Now().UTC()
+	var saveErr error
+	auditAction := "user.display_name_changed"
+	if user.ID == store.LegacyAdminUserID {
+		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt}
+		auditAction = "admin.display_name_changed"
+		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, nil, false, false, store.AuditEntry{Action: auditAction, Detail: "administrator display name changed", ActorUserID: session.UserID, ActorUsername: session.Username})
+	} else {
+		saveErr = s.Store.UpdateUser(r.Context(), user, false, store.AuditEntry{Action: auditAction, Detail: "display name changed", ActorUserID: session.UserID, ActorUsername: session.Username})
+	}
+	if err := saveErr; err != nil {
+		if s.writeAuditUnavailable(w, err, auditAction) {
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "save_failed", "administrator display name could not be saved", nil)
+		writeError(w, http.StatusInternalServerError, "save_failed", "display name could not be saved", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"display_name": displayName})
@@ -446,8 +615,8 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	admin, err := s.Store.GetAdmin(r.Context())
-	if err != nil || !auth.VerifyPassword(admin.PasswordHash, input.Current) {
+	user, err := s.Store.GetUser(r.Context(), session.UserID)
+	if err != nil || !auth.VerifyPassword(user.PasswordHash, input.Current) {
 		writeError(w, http.StatusBadRequest, "invalid_password", "current password is incorrect", nil)
 		return
 	}
@@ -456,9 +625,18 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 		writeError(w, http.StatusBadRequest, "invalid_password", err.Error(), nil)
 		return
 	}
-	admin.PasswordHash, admin.UpdatedAt = hash, time.Now().UTC()
-	if err := s.Store.SaveAdminSecurity(r.Context(), admin, nil, false, true, "admin.password_changed", "password changed"); err != nil {
-		if s.writeAuditUnavailable(w, err, "admin.password_changed") {
+	user.PasswordHash, user.UpdatedAt = hash, time.Now().UTC()
+	auditAction := "user.password_changed"
+	var saveErr error
+	if user.ID == store.LegacyAdminUserID {
+		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt}
+		auditAction = "admin.password_changed"
+		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, nil, false, true, store.AuditEntry{Action: auditAction, Detail: "password changed", ActorUserID: session.UserID, ActorUsername: session.Username})
+	} else {
+		saveErr = s.Store.UpdateUser(r.Context(), user, true, store.AuditEntry{Action: auditAction, Detail: "password changed", ActorUserID: session.UserID, ActorUsername: session.Username})
+	}
+	if err := saveErr; err != nil {
+		if s.writeAuditUnavailable(w, err, auditAction) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "save_failed", err.Error(), nil)
@@ -474,8 +652,8 @@ func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	admin, err := s.Store.GetAdmin(r.Context())
-	if err != nil || !auth.VerifyPassword(admin.PasswordHash, input.Password) {
+	user, err := s.Store.GetUser(r.Context(), session.UserID)
+	if err != nil || !auth.VerifyPassword(user.PasswordHash, input.Password) {
 		writeError(w, http.StatusBadRequest, "invalid_password", "password is incorrect", nil)
 		return
 	}
@@ -489,7 +667,7 @@ func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store
 	s.mu.Lock()
 	s.pendingTOTP[key] = pendingTOTP{Secret: secret, Expires: time.Now().UTC().Add(10 * time.Minute)}
 	s.mu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"secret": secret, "otpauth": "otpauth://totp/EdgeWatch:admin?secret=" + secret + "&issuer=EdgeWatch"})
+	writeJSON(w, http.StatusOK, map[string]any{"secret": secret, "otpauth": "otpauth://totp/EdgeWatch:" + url.QueryEscape(user.Username) + "?secret=" + secret + "&issuer=EdgeWatch"})
 }
 
 func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session store.Session) {
@@ -514,14 +692,23 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
 		return
 	}
-	admin, err := s.Store.GetAdmin(r.Context())
+	user, err := s.Store.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
 		return
 	}
-	admin.TOTPSecret, admin.TOTPEnabled, admin.UpdatedAt = pending.Secret, true, time.Now().UTC()
-	if err := s.Store.SaveAdminSecurity(r.Context(), admin, hashes, true, true, "admin.totp_enabled", "TOTP enabled"); err != nil {
-		if s.writeAuditUnavailable(w, err, "admin.totp_enabled") {
+	user.TOTPSecret, user.TOTPEnabled, user.UpdatedAt = pending.Secret, true, time.Now().UTC()
+	auditAction := "user.totp_enabled"
+	var saveErr error
+	if user.ID == store.LegacyAdminUserID {
+		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt}
+		auditAction = "admin.totp_enabled"
+		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username})
+	} else {
+		saveErr = s.Store.SaveUserSecurity(r.Context(), user, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username})
+	}
+	if err := saveErr; err != nil {
+		if s.writeAuditUnavailable(w, err, auditAction) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
@@ -537,14 +724,23 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	admin, err := s.Store.GetAdmin(r.Context())
-	if err != nil || !auth.VerifyPassword(admin.PasswordHash, input.Password) {
+	user, err := s.Store.GetUser(r.Context(), session.UserID)
+	if err != nil || !auth.VerifyPassword(user.PasswordHash, input.Password) {
 		writeError(w, http.StatusBadRequest, "invalid_password", "password is incorrect", nil)
 		return
 	}
-	admin.TOTPEnabled, admin.TOTPSecret, admin.UpdatedAt = false, "", time.Now().UTC()
-	if err := s.Store.SaveAdminSecurity(r.Context(), admin, []string{}, true, true, "admin.totp_disabled", "TOTP disabled"); err != nil {
-		if s.writeAuditUnavailable(w, err, "admin.totp_disabled") {
+	user.TOTPEnabled, user.TOTPSecret, user.UpdatedAt = false, "", time.Now().UTC()
+	auditAction := "user.totp_disabled"
+	var saveErr error
+	if user.ID == store.LegacyAdminUserID {
+		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt}
+		auditAction = "admin.totp_disabled"
+		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, []string{}, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP disabled", ActorUserID: session.UserID, ActorUsername: session.Username})
+	} else {
+		saveErr = s.Store.SaveUserSecurity(r.Context(), user, []string{}, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP disabled", ActorUserID: session.UserID, ActorUsername: session.Username})
+	}
+	if err := saveErr; err != nil {
+		if s.writeAuditUnavailable(w, err, auditAction) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
@@ -697,7 +893,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": out})
 }
 
-func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
+func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store.Session) {
 	var p jobPayload
 	if !decodeJSON(w, r, &p) {
 		return
@@ -714,7 +910,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	if p.Enabled != nil {
 		enabled = *p.Enabled
 	}
-	record, err := s.Store.CreateJobWithEnabledAndAudit(r.Context(), job, enabled, store.AuditEntry{Action: "job.created", Detail: job.Name})
+	record, err := s.Store.CreateJobWithEnabledAndAudit(r.Context(), job, enabled, actorAudit(session, "job.created", job.Name))
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "job.created") {
 			return
@@ -772,35 +968,35 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		return
 	}
 	if len(parts) == 1 && r.Method == http.MethodPut {
-		s.updateJob(w, r, id)
+		s.updateJob(w, r, session, id)
 		return
 	}
 	if len(parts) == 1 && r.Method == http.MethodDelete {
 		if r.URL.Query().Get("permanent") == "true" {
-			s.permanentDelete(w, r, id)
+			s.permanentDelete(w, r, session, id)
 		} else {
-			s.archiveJob(w, r, id, true)
+			s.archiveJob(w, r, session, id, true)
 		}
 		return
 	}
 	if len(parts) == 2 && parts[1] == "archive" && r.Method == http.MethodPost {
-		s.archiveJob(w, r, id, true)
+		s.archiveJob(w, r, session, id, true)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "restore" && r.Method == http.MethodPost {
-		s.archiveJob(w, r, id, false)
+		s.archiveJob(w, r, session, id, false)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "pause" && r.Method == http.MethodPost {
-		s.enableJob(w, r, id, false)
+		s.enableJob(w, r, session, id, false)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "resume" && r.Method == http.MethodPost {
-		s.enableJob(w, r, id, true)
+		s.enableJob(w, r, session, id, true)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "run" && r.Method == http.MethodPost {
-		s.runJob(w, r, id)
+		s.runJob(w, r, session, id)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "scan-cycle" && r.Method == http.MethodGet {
@@ -808,7 +1004,7 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		return
 	}
 	if len(parts) == 3 && parts[1] == "scan-cycle" && r.Method == http.MethodDelete {
-		s.discardScanCycle(w, r, id, parts[2])
+		s.discardScanCycle(w, r, session, id, parts[2])
 		return
 	}
 	if len(parts) == 2 && parts[1] == "scans" && r.Method == http.MethodGet {
@@ -856,11 +1052,11 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		return
 	}
 	if len(parts) == 3 && parts[1] == "incidents" && parts[2] == "accept" && r.Method == http.MethodPost {
-		s.acceptIncident(w, r, id)
+		s.acceptIncident(w, r, session, id)
 		return
 	}
 	if len(parts) == 3 && parts[1] == "incidents" && parts[2] == "suppress" && r.Method == http.MethodPost {
-		s.suppressIncident(w, r, id)
+		s.suppressIncident(w, r, session, id)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "events" && r.Method == http.MethodGet {
@@ -872,11 +1068,11 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		return
 	}
 	if len(parts) == 3 && parts[1] == "baseline" && parts[2] == "reset" && r.Method == http.MethodPost {
-		s.resetBaseline(w, r, id)
+		s.resetBaseline(w, r, session, id)
 		return
 	}
 	if len(parts) == 3 && parts[1] == "baseline" && parts[2] == "approve" && r.Method == http.MethodPost {
-		s.approveBaseline(w, r, id)
+		s.approveBaseline(w, r, session, id)
 		return
 	}
 	writeError(w, 404, "not_found", "job endpoint not found", nil)
@@ -890,7 +1086,7 @@ func (s *Server) activeScans(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"scans": scans})
 }
 
-func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	if strings.TrimSpace(id) == "" {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
@@ -905,7 +1101,7 @@ func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	// Cancellation is an operational action; keep its audit detail opaque and
 	// never include scanner command lines or target payloads.
-	s.auditOptional(r.Context(), "scan.cancel_requested", id)
+	s.auditOptionalEntry(r.Context(), actorAudit(session, "scan.cancel_requested", id))
 	s.broadcast(map[string]any{"type": "scan.cancellation_requested", "scan_id": id})
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "cancelling", "scan_id": id})
 }
@@ -924,9 +1120,13 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), record, state))
 }
 
-func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	var p jobPayload
 	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if p.Revision < 1 {
+		writeError(w, http.StatusBadRequest, "revision_required", "job revision is required", map[string]string{"revision": "job revision is required"})
 		return
 	}
 	job, err := p.config()
@@ -969,9 +1169,9 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 	}
-	audits := []store.AuditEntry{{Action: "job.updated", Detail: id}}
+	audits := []store.AuditEntry{actorAudit(session, "job.updated", id)}
 	if scopeChanged {
-		audits = append([]store.AuditEntry{{Action: "job.rebaseline_requested", Detail: id}}, audits...)
+		audits = append([]store.AuditEntry{actorAudit(session, "job.rebaseline_requested", id)}, audits...)
 	}
 	record, changed, events, err := s.Store.UpdateJobWithEventsWithOutboxAndAudit(r.Context(), id, p.Revision, job, enabled, current.Archived, p.ConfirmRebaseline, destinations, audits...)
 	if errors.Is(err, store.ErrConflict) {
@@ -1068,7 +1268,7 @@ func protocolSummary(p *config.Protocol) string {
 	return p.Ports
 }
 
-func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, id string, archive bool) {
+func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, session store.Session, id string, archive bool) {
 	var payload lifecyclePayload
 	if !decodeJSON(w, r, &payload) {
 		return
@@ -1078,7 +1278,7 @@ func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, id string, a
 		return
 	}
 	action := map[bool]string{true: "job.archived", false: "job.restored"}[archive]
-	if err := s.Store.SetJobArchivedWithRevisionAndAudit(r.Context(), id, archive, *payload.Revision, store.AuditEntry{Action: action, Detail: id}); err != nil {
+	if err := s.Store.SetJobArchivedWithRevisionAndAudit(r.Context(), id, archive, *payload.Revision, actorAudit(session, action, id)); err != nil {
 		if s.writeAuditUnavailable(w, err, action) {
 			return
 		}
@@ -1096,7 +1296,11 @@ func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, id string, a
 	writeJSON(w, 204, nil)
 }
 
-func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
+	if session.Role != store.RoleAdministrator {
+		writeError(w, http.StatusForbidden, "forbidden", "only an administrator can permanently delete a job", nil)
+		return
+	}
 	var input struct {
 		ConfirmName string `json:"confirm_name"`
 	}
@@ -1116,7 +1320,7 @@ func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusConflict, "archive_required", "archive the job before permanently deleting it", nil)
 		return
 	}
-	if err := s.Store.DeleteJobWithAudit(r.Context(), id, store.AuditEntry{Action: "job.deleted", Detail: id}); err != nil {
+	if err := s.Store.DeleteJobWithAudit(r.Context(), id, actorAudit(session, "job.deleted", id)); err != nil {
 		if s.writeAuditUnavailable(w, err, "job.deleted") {
 			return
 		}
@@ -1132,7 +1336,7 @@ func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, id stri
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
-func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, id string, enabled bool) {
+func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, session store.Session, id string, enabled bool) {
 	var payload lifecyclePayload
 	if !decodeJSON(w, r, &payload) {
 		return
@@ -1142,7 +1346,7 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, id string, en
 		return
 	}
 	action := map[bool]string{true: "job.resumed", false: "job.paused"}[enabled]
-	if err := s.Store.SetJobEnabledWithRevisionAndAudit(r.Context(), id, enabled, *payload.Revision, store.AuditEntry{Action: action, Detail: id}); err != nil {
+	if err := s.Store.SetJobEnabledWithRevisionAndAudit(r.Context(), id, enabled, *payload.Revision, actorAudit(session, action, id)); err != nil {
 		if s.writeAuditUnavailable(w, err, action) {
 			return
 		}
@@ -1159,7 +1363,7 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, id string, en
 	writeJSON(w, 204, nil)
 }
 
-func (s *Server) runJob(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	record, err := s.Store.GetJob(r.Context(), id)
 	if err != nil {
 		writeError(w, 404, "not_found", "job not found", nil)
@@ -1209,6 +1413,7 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, id string) {
 		cycleID = cycle.ID
 		mode = "resumable"
 	}
+	s.auditOptionalEntry(r.Context(), actorAudit(session, "scan.run_requested", id))
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "job_id": id, "mode": mode, "cycle_id": cycleID})
 }
 
@@ -1253,7 +1458,7 @@ func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, id string) {
 	}})
 }
 
-func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, id, cycleID string) {
+func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, session store.Session, id, cycleID string) {
 	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
 		return
@@ -1267,7 +1472,7 @@ func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, id, cy
 		writeError(w, http.StatusConflict, "cycle_discard_failed", err.Error(), nil)
 		return
 	}
-	s.auditOptional(r.Context(), "scan.cycle_discarded", cycleID)
+	s.auditOptionalEntry(r.Context(), actorAudit(session, "scan.cycle_discarded", cycleID))
 	s.broadcast(map[string]any{"type": "scan.cycle_discarded", "job_id": id, "cycle_id": cycleID})
 	writeJSON(w, http.StatusNoContent, nil)
 }
@@ -1517,7 +1722,7 @@ type incidentActionRequest struct {
 	Key string `json:"key"`
 }
 
-func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	var input incidentActionRequest
 	if !decodeJSON(w, r, &input) {
 		return
@@ -1536,7 +1741,7 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, id strin
 		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 		return
 	}
-	events, err := s.Store.AcceptIncidentWithAudit(r.Context(), id, record.Job.Name, key, store.AuditEntry{Action: "incident.accepted", Detail: id + ":" + key})
+	events, err := s.Store.AcceptIncidentWithAudit(r.Context(), id, record.Job.Name, key, actorAudit(session, "incident.accepted", id+":"+key))
 	if err != nil {
 		s.writeIncidentActionError(w, err, "incident.accepted")
 		return
@@ -1545,7 +1750,7 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, id strin
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
-func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	var input incidentActionRequest
 	if !decodeJSON(w, r, &input) {
 		return
@@ -1564,7 +1769,7 @@ func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, id str
 		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 		return
 	}
-	events, err := s.Store.SuppressIncidentWithAudit(r.Context(), id, record.Job.Name, key, store.AuditEntry{Action: "incident.suppressed", Detail: id + ":" + key})
+	events, err := s.Store.SuppressIncidentWithAudit(r.Context(), id, record.Job.Name, key, actorAudit(session, "incident.suppressed", id+":"+key))
 	if err != nil {
 		s.writeIncidentActionError(w, err, "incident.suppressed")
 		return
@@ -1633,7 +1838,7 @@ func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, id string) 
 	writeJSON(w, http.StatusOK, value)
 }
 
-func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	record, err := s.Store.GetJob(r.Context(), id)
 	if err != nil {
 		writeError(w, 404, "not_found", "job not found", nil)
@@ -1644,7 +1849,7 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, id string
 		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 		return
 	}
-	events, err := s.Store.ResetRuntimeWithOutboxAndAudit(r.Context(), id, record.Job.Name, destinations, store.AuditEntry{Action: "baseline.reset", Detail: id})
+	events, err := s.Store.ResetRuntimeWithOutboxAndAudit(r.Context(), id, record.Job.Name, destinations, actorAudit(session, "baseline.reset", id))
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "baseline.reset") {
 			return
@@ -1659,7 +1864,7 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, id string
 	writeJSON(w, 200, map[string]any{"events": events})
 }
 
-func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	var input struct {
 		ScanID string `json:"scan_id"`
 	}
@@ -1681,7 +1886,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 		return
 	}
-	events, err := s.Store.ApproveRuntimeWithOutboxAndAudit(r.Context(), id, record.Job.Name, scan, destinations, store.AuditEntry{Action: "baseline.approved", Detail: id})
+	events, err := s.Store.ApproveRuntimeWithOutboxAndAudit(r.Context(), id, record.Job.Name, scan, destinations, actorAudit(session, "baseline.approved", id))
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "baseline.approved") {
 			return
@@ -1713,17 +1918,17 @@ func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Req
 	writeJSON(w, http.StatusOK, map[string]any{"destinations": s.App.Notifier.Destinations(), "status": s.App.Notifier.Status()})
 }
 
-func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Request) {
+func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session) {
 	w.Header().Set("Cache-Control", "no-store")
 	var input notificationPayload
 	if !decodeJSON(w, r, &input) {
 		return
 	}
 	if strings.TrimSpace(input.Password) == "" {
-		writeError(w, http.StatusBadRequest, "password_required", "administrator password confirmation is required", map[string]string{"password": "password confirmation is required"})
+		writeError(w, http.StatusBadRequest, "password_required", "account password confirmation is required", map[string]string{"password": "password confirmation is required"})
 		return
 	}
-	if err := s.Auth.ConfirmPassword(r.Context(), r, input.Password); err != nil {
+	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, input.Password); err != nil {
 		s.writeNotificationAuthError(w, err)
 		return
 	}
@@ -1735,7 +1940,7 @@ func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "validation_failed", "notification URL is required", map[string]string{"url": "notification URL is required"})
 		return
 	}
-	view, err := s.App.Notifier.CreateManagedWithAudit(r.Context(), input.Name, *input.URL, enabled, store.AuditEntry{Action: "notifications.created", Detail: "managed notification created"})
+	view, err := s.App.Notifier.CreateManagedWithAudit(r.Context(), input.Name, *input.URL, enabled, store.AuditEntry{Action: "notifications.created", Detail: "managed notification created", ActorUserID: session.UserID, ActorUsername: session.Username})
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "notifications.created") {
 			return
@@ -1747,7 +1952,7 @@ func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusCreated, view)
 }
 
-func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Request, rest string) {
+func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Request, session store.Session, rest string) {
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		writeError(w, http.StatusNotFound, "not_found", "notification destination not found", nil)
@@ -1762,11 +1967,11 @@ func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if err := s.App.Notifier.TestDestinationContext(r.Context(), id); err != nil {
-			s.auditOptional(r.Context(), "notifications.test_failed", "managed notification test failed: "+id)
+			s.auditOptionalEntry(r.Context(), store.AuditEntry{Action: "notifications.test_failed", Detail: "managed notification test failed: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
 			s.writeNotificationError(w, err)
 			return
 		}
-		if !s.requireAudit(r.Context(), w, "notifications.test", "managed notification tested: "+id) {
+		if !s.requireAuditEntry(r.Context(), w, store.AuditEntry{Action: "notifications.test", Detail: "managed notification tested: " + id, ActorUserID: session.UserID, ActorUsername: session.Username}) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"sent": 1})
@@ -1786,15 +1991,15 @@ func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Req
 		}
 		writeJSON(w, http.StatusOK, view)
 	case http.MethodPut:
-		s.updateNotificationDestination(w, r, id)
+		s.updateNotificationDestination(w, r, session, id)
 	case http.MethodDelete:
-		s.deleteNotificationDestination(w, r, id)
+		s.deleteNotificationDestination(w, r, session, id)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "notification destination endpoint not found", nil)
 	}
 }
 
-func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	w.Header().Set("Cache-Control", "no-store")
 	var input notificationPayload
 	if !decodeJSON(w, r, &input) {
@@ -1805,14 +2010,14 @@ func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if strings.TrimSpace(input.Password) == "" {
-		writeError(w, http.StatusBadRequest, "password_required", "administrator password confirmation is required", map[string]string{"password": "password confirmation is required"})
+		writeError(w, http.StatusBadRequest, "password_required", "account password confirmation is required", map[string]string{"password": "password confirmation is required"})
 		return
 	}
-	if err := s.Auth.ConfirmPassword(r.Context(), r, input.Password); err != nil {
+	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, input.Password); err != nil {
 		s.writeNotificationAuthError(w, err)
 		return
 	}
-	view, err := s.App.Notifier.UpdateManagedWithAudit(r.Context(), id, *input.Revision, input.Name, input.URL, input.Enabled, store.AuditEntry{Action: "notifications.updated", Detail: "managed notification updated: " + id})
+	view, err := s.App.Notifier.UpdateManagedWithAudit(r.Context(), id, *input.Revision, input.Name, input.URL, input.Enabled, store.AuditEntry{Action: "notifications.updated", Detail: "managed notification updated: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "notifications.updated") {
 			return
@@ -1824,7 +2029,7 @@ func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, view)
 }
 
-func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	w.Header().Set("Cache-Control", "no-store")
 	var input notificationPayload
 	if !decodeJSON(w, r, &input) {
@@ -1835,14 +2040,14 @@ func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if strings.TrimSpace(input.Password) == "" {
-		writeError(w, http.StatusBadRequest, "password_required", "administrator password confirmation is required", map[string]string{"password": "password confirmation is required"})
+		writeError(w, http.StatusBadRequest, "password_required", "account password confirmation is required", map[string]string{"password": "password confirmation is required"})
 		return
 	}
-	if err := s.Auth.ConfirmPassword(r.Context(), r, input.Password); err != nil {
+	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, input.Password); err != nil {
 		s.writeNotificationAuthError(w, err)
 		return
 	}
-	if err := s.App.Notifier.DeleteManagedWithAudit(r.Context(), id, *input.Revision, store.AuditEntry{Action: "notifications.deleted", Detail: "managed notification deleted: " + id}); err != nil {
+	if err := s.App.Notifier.DeleteManagedWithAudit(r.Context(), id, *input.Revision, store.AuditEntry{Action: "notifications.deleted", Detail: "managed notification deleted: " + id, ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
 		if s.writeAuditUnavailable(w, err, "notifications.deleted") {
 			return
 		}
@@ -1904,7 +2109,7 @@ func (s *Server) allowNotificationTest(r *http.Request) bool {
 	return true
 }
 
-func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request) {
+func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request, session store.Session) {
 	if !s.allowNotificationTest(r) {
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "notification tests are temporarily rate limited", nil)
@@ -1913,11 +2118,11 @@ func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request) {
 	if err := s.App.Notifier.TestContext(r.Context()); err != nil {
 		// Shoutrrr implementations may include destination details in an error;
 		// keep those credentials out of both API responses and logs.
-		s.auditOptional(r.Context(), "notifications.test_failed", "configured destination test failed")
+		s.auditOptionalEntry(r.Context(), store.AuditEntry{Action: "notifications.test_failed", Detail: "configured destination test failed", ActorUserID: session.UserID, ActorUsername: session.Username})
 		writeError(w, http.StatusBadGateway, "notification_failed", "one or more notification destinations failed", nil)
 		return
 	}
-	if !s.requireAudit(r.Context(), w, "notifications.test", "configured destinations tested") {
+	if !s.requireAuditEntry(r.Context(), w, store.AuditEntry{Action: "notifications.test", Detail: "configured destinations tested", ActorUserID: session.UserID, ActorUsername: session.Username}) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sent": s.App.Notifier.ActiveCount()})
@@ -2175,8 +2380,16 @@ func (s *Server) auditFailure(err error, action string) {
 }
 
 func (s *Server) auditOptional(ctx context.Context, action, detail string) {
-	if err := s.Store.Audit(ctx, action, detail); err != nil {
-		s.auditFailure(err, action)
+	s.auditOptionalEntry(ctx, store.AuditEntry{Action: action, Detail: detail})
+}
+
+func actorAudit(session store.Session, action, detail string) store.AuditEntry {
+	return store.AuditEntry{Action: action, Detail: detail, ActorUserID: session.UserID, ActorUsername: session.Username}
+}
+
+func (s *Server) auditOptionalEntry(ctx context.Context, entry store.AuditEntry) {
+	if err := s.Store.AuditEntry(ctx, entry); err != nil {
+		s.auditFailure(err, entry.Action)
 	}
 }
 
@@ -2190,8 +2403,12 @@ func (s *Server) writeAuditUnavailable(w http.ResponseWriter, err error, action 
 }
 
 func (s *Server) requireAudit(ctx context.Context, w http.ResponseWriter, action, detail string) bool {
-	if err := s.Store.Audit(ctx, action, detail); err != nil {
-		s.auditFailure(err, action)
+	return s.requireAuditEntry(ctx, w, store.AuditEntry{Action: action, Detail: detail})
+}
+
+func (s *Server) requireAuditEntry(ctx context.Context, w http.ResponseWriter, entry store.AuditEntry) bool {
+	if err := s.Store.AuditEntry(ctx, entry); err != nil {
+		s.auditFailure(err, entry.Action)
 		writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "the action completed but its security audit record could not be written; verify the state before retrying", nil)
 		return false
 	}

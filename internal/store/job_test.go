@@ -363,7 +363,7 @@ func TestExistingSchemaMigratesWithWebTables(t *testing.T) {
 	if version != schemaVersion {
 		t.Fatalf("schema version %d", version)
 	}
-	for _, table := range []string{"jobs", "job_revisions", "job_runtime", "admins", "sessions", "recovery_codes", "security_audit", "setup_tokens", "managed_notifications", "rdap_cache", "scan_hosts", "scan_cycles", "scan_cycle_units"} {
+	for _, table := range []string{"jobs", "job_revisions", "job_runtime", "admins", "users", "user_invites", "sessions", "recovery_codes", "security_audit", "setup_tokens", "managed_notifications", "rdap_cache", "scan_hosts", "scan_cycles", "scan_cycle_units", "public_dashboard", "public_dashboard_hosts"} {
 		var name string
 		if err := s.DB.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name); err != nil {
 			t.Fatalf("missing %s: %v", table, err)
@@ -500,5 +500,63 @@ func TestV10DatabaseAddsAdministratorDisplayName(t *testing.T) {
 	}
 	if defaultValue != "'admin'" {
 		t.Fatalf("display_name default = %q", defaultValue)
+	}
+}
+
+func TestV11DatabaseMigratesAdministratorIdentityAndLegacySessions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "v11.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = db.Exec(`
+CREATE TABLE admins (
+ id INTEGER PRIMARY KEY CHECK(id=1), username TEXT NOT NULL DEFAULT 'admin',
+ password_hash TEXT NOT NULL, totp_secret TEXT NOT NULL DEFAULT '',
+ totp_enabled INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL, display_name TEXT NOT NULL DEFAULT 'admin'
+);
+INSERT INTO admins(id,username,password_hash,totp_secret,totp_enabled,created_at,updated_at,display_name) VALUES(1,'legacy-admin','hash','',0,?,?, 'Legacy Admin');
+CREATE TABLE sessions (id_hash TEXT PRIMARY KEY, created_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, expires_at TEXT NOT NULL, csrf_token TEXT NOT NULL);
+INSERT INTO sessions(id_hash,created_at,last_seen_at,expires_at,csrf_token) VALUES('session-hash',?,?,?,'csrf');
+CREATE TABLE recovery_codes (id_hash TEXT PRIMARY KEY, used_at TEXT);
+INSERT INTO recovery_codes(id_hash,used_at) VALUES('recovery-hash',NULL);
+CREATE TABLE security_audit (id INTEGER PRIMARY KEY AUTOINCREMENT, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+PRAGMA user_version = 11;`, now, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	user, err := s.GetUserByUsername(context.Background(), "legacy-admin")
+	if err != nil || user.ID != LegacyAdminUserID || user.DisplayName != "Legacy Admin" || user.Role != RoleAdministrator {
+		t.Fatalf("migrated administrator = %#v, err=%v", user, err)
+	}
+	var userID string
+	if err := s.DB.QueryRow(`SELECT user_id FROM sessions WHERE id_hash='session-hash'`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if userID != LegacyAdminUserID {
+		t.Fatalf("migrated session user_id = %q", userID)
+	}
+	if err := s.DB.QueryRow(`SELECT user_id FROM recovery_codes WHERE id_hash='recovery-hash'`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if userID != LegacyAdminUserID {
+		t.Fatalf("migrated recovery user_id = %q", userID)
+	}
+	var updated string
+	if err := s.DB.QueryRow(`SELECT updated_at FROM public_dashboard WHERE id=1`).Scan(&updated); err != nil {
+		t.Fatal(err)
+	}
+	if scanTime(updated).IsZero() {
+		t.Fatalf("public dashboard timestamp was not parsed: %q", updated)
 	}
 }

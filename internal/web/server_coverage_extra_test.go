@@ -1,0 +1,239 @@
+package web
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/auth"
+	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/notify"
+	"github.com/crypt0rr/edgewatch/internal/store"
+)
+
+func TestServerErrorMappingHelpers(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	for _, test := range []struct {
+		name string
+		err  error
+		code int
+		want string
+	}{
+		{"conflict", store.ErrConflict, http.StatusConflict, "conflict"},
+		{"not found", store.ErrNotFound, http.StatusNotFound, "not_found"},
+		{"key locked", notify.ErrManagedNotificationLocked, http.StatusServiceUnavailable, "notification_key_unavailable"},
+		{"unique", errors.New("UNIQUE constraint failed"), http.StatusConflict, "conflict"},
+		{"URL validation", errors.New("notification URL is invalid"), http.StatusBadRequest, "validation_failed"},
+		{"name validation", errors.New("notification name is empty"), http.StatusBadRequest, "validation_failed"},
+		{"other", errors.New("delivery failed"), http.StatusInternalServerError, "notification_failed"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			server.writeNotificationError(recorder, test.err)
+			if recorder.Code != test.code || !strings.Contains(recorder.Body.String(), `"code":"`+test.want+`"`) {
+				t.Fatalf("notification error = %d %s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+	for _, test := range []struct {
+		err  error
+		code int
+		want string
+	}{
+		{auth.ErrRateLimited, http.StatusTooManyRequests, "rate_limited"},
+		{errors.New("wrong password"), http.StatusUnauthorized, "invalid_password"},
+	} {
+		recorder := httptest.NewRecorder()
+		server.writeNotificationAuthError(recorder, test.err)
+		if recorder.Code != test.code || !strings.Contains(recorder.Body.String(), `"code":"`+test.want+`"`) {
+			t.Fatalf("notification auth error = %d %s", recorder.Code, recorder.Body.String())
+		}
+	}
+	for _, test := range []struct {
+		err  error
+		code int
+		want string
+	}{
+		{store.ErrIncidentNotFound, http.StatusNotFound, "incident_not_found"},
+		{store.ErrJobScanActive, http.StatusConflict, "job_active"},
+		{store.ErrBaselineNotReady, http.StatusConflict, "baseline_not_ready"},
+		{store.ErrUnsupportedIncidentChange, http.StatusBadRequest, "incident_change_invalid"},
+		{errors.New("unexpected"), http.StatusInternalServerError, "store"},
+	} {
+		recorder := httptest.NewRecorder()
+		server.writeIncidentActionError(recorder, test.err, "incident.test")
+		if recorder.Code != test.code || !strings.Contains(recorder.Body.String(), `"code":"`+test.want+`"`) {
+			t.Fatalf("incident error = %d %s", recorder.Code, recorder.Body.String())
+		}
+	}
+	if server.writeAuditUnavailable(httptest.NewRecorder(), errors.New("not audit"), "action") {
+		t.Fatal("non-audit error was treated as audit unavailable")
+	}
+	recorder := httptest.NewRecorder()
+	if !server.writeAuditUnavailable(recorder, store.ErrAuditUnavailable, "action") || recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("audit unavailable response = %d %v", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestServerSetupStatusAndRouteGuards(t *testing.T) {
+	server, db, admin := newUsersTestServer(t)
+	ctx := context.Background()
+	status := httptest.NewRecorder()
+	server.setupStatus(status, httptest.NewRequest(http.MethodGet, "/api/v1/setup/status", nil))
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"configured":true`) || !strings.Contains(status.Body.String(), server.Version) {
+		t.Fatalf("setup status = %d %s", status.Code, status.Body.String())
+	}
+	for _, rest := range []string{"", "/unknown", "job/unknown"} {
+		recorder := httptest.NewRecorder()
+		server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+rest, nil), admin, rest)
+		if recorder.Code != http.StatusNotFound {
+			t.Errorf("job route %q status = %d", rest, recorder.Code)
+		}
+	}
+	missing := httptest.NewRecorder()
+	server.getJob(missing, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing", nil), "missing")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing get job status = %d", missing.Code)
+	}
+	baseline := httptest.NewRecorder()
+	server.jobBaseline(baseline, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing/baseline", nil), "missing")
+	if baseline.Code != http.StatusNotFound {
+		t.Fatalf("missing baseline status = %d", baseline.Code)
+	}
+	active := httptest.NewRecorder()
+	server.activeScans(active, httptest.NewRequest(http.MethodGet, "/api/v1/scans/active", nil))
+	if active.Code != http.StatusOK || !strings.Contains(active.Body.String(), `"scans":[]`) {
+		t.Fatalf("empty active scans = %d %s", active.Code, active.Body.String())
+	}
+	if _, err := db.GetUser(ctx, admin.UserID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServerAuthenticationAndAuditFailureResponses(t *testing.T) {
+	server, db, admin := newUsersTestServer(t)
+	badSetup := httptest.NewRecorder()
+	setupRequest := httptest.NewRequest(http.MethodPost, "/api/v1/setup", strings.NewReader(`{"token":"bad","password":"short"}`))
+	setupRequest.Header.Set("Content-Type", "application/json")
+	server.setup(badSetup, setupRequest)
+	if badSetup.Code != http.StatusBadRequest {
+		t.Fatalf("invalid setup status = %d", badSetup.Code)
+	}
+	badLogin := httptest.NewRecorder()
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"admin","password":"wrong"}`))
+	loginRequest.Header.Set("Content-Type", "application/json")
+	server.login(badLogin, loginRequest)
+	if badLogin.Code != http.StatusUnauthorized {
+		t.Fatalf("invalid login status = %d", badLogin.Code)
+	}
+	if _, err := db.DB.ExecContext(context.Background(), `CREATE TRIGGER fail_web_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	if server.requireAuditEntry(context.Background(), recorder, store.AuditEntry{Action: "test"}) || recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("required audit failure = %d %s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := db.DB.ExecContext(context.Background(), `DROP TRIGGER fail_web_audit`); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := db.CreateSessionForUserWithAudit(context.Background(), admin.UserID, "logout-failure", "csrf", now, now.Add(time.Hour), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(context.Background(), `CREATE TRIGGER fail_web_logout BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	logout := httptest.NewRecorder()
+	logoutRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	logoutRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "logout-failure"})
+	server.logout(logout, logoutRequest, admin)
+	if logout.Code != http.StatusServiceUnavailable {
+		t.Fatalf("audit logout status = %d %s", logout.Code, logout.Body.String())
+	}
+	if _, err := db.DB.ExecContext(context.Background(), `DROP TRIGGER fail_web_logout`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
+	server, db, admin := newUsersTestServer(t)
+	ctx := context.Background()
+	missing := httptest.NewRecorder()
+	server.runJob(missing, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/missing/run", nil), admin, "missing")
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing run status = %d", missing.Code)
+	}
+	job := config.NormalizeJob(config.Job{Name: "run-guards", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetJobArchived(ctx, record.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	archived := httptest.NewRecorder()
+	server.runJob(archived, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/run", nil), admin, record.ID)
+	if archived.Code != http.StatusConflict {
+		t.Fatalf("archived run status = %d", archived.Code)
+	}
+	if err := db.SetJobArchived(ctx, record.ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AcquireJobLease(ctx, record.ID, "active-owner", time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	active := httptest.NewRecorder()
+	server.runJob(active, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/run", nil), admin, record.ID)
+	if active.Code != http.StatusConflict {
+		t.Fatalf("active run status = %d", active.Code)
+	}
+	_ = db.ReleaseJobLease(ctx, record.ID, "active-owner")
+}
+
+func TestServerPaginationAndSSEBoundaryHelpers(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/?limit=bad&offset=-1", nil)
+	if queryLimit(request) != 50 || queryOffset(request) != 0 {
+		t.Fatal("invalid query values did not default")
+	}
+	request = httptest.NewRequest(http.MethodGet, "/?limit=2001&offset=99999999", nil)
+	if queryLimit(request) != 1000 || queryOffset(request) != 10000000 {
+		t.Fatal("query values were not capped")
+	}
+	if paginationJSON(0, 10, 5)["has_more"] != false || paginationJSON(0, 10, 15)["next_offset"] != 10 {
+		t.Fatal("pagination metadata is incorrect")
+	}
+	if got, _ := pageSlice([]string{"a", "b"}, -1, 0); len(got) != 2 {
+		t.Fatal("default page slice failed")
+	}
+	server, _, _ := newUsersTestServer(t)
+	server.broadcast(map[string]any{"type": "first"})
+	server.broadcast(map[string]any{"type": "second"})
+	server.mu.Lock()
+	if got := server.replayLocked(1); len(got) != 1 || got[0].id != 2 {
+		server.mu.Unlock()
+		t.Fatalf("normal replay = %#v", got)
+	}
+	if got := server.replayLocked(99); len(got) != 0 {
+		server.mu.Unlock()
+		t.Fatalf("future replay = %#v", got)
+	}
+	server.history = []sseMessage{{id: 10, payload: []byte(`{"type":"old"}`)}}
+	if got := server.replayLocked(1); len(got) != 2 || !strings.Contains(string(got[0].payload), "refresh_required") {
+		server.mu.Unlock()
+		t.Fatalf("gap replay = %#v", got)
+	}
+	server.mu.Unlock()
+	if len(boundedSSEPayload(map[string]any{"value": strings.Repeat("x", maxSSEPayloadBytes)})) > maxSSEPayloadBytes {
+		t.Fatal("oversized SSE payload was not bounded")
+	}
+	if len(boundedSSEPayload(map[string]any{"value": "ok"})) == 0 {
+		t.Fatal("normal SSE payload was empty")
+	}
+	if !isMutation(http.MethodDelete) && isMutation(http.MethodGet) {
+		t.Fatal("mutation classifier failed")
+	}
+}

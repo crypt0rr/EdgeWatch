@@ -54,6 +54,21 @@ func TestMarshalBoundedEventKeepsPayloadWithinLimit(t *testing.T) {
 	}
 }
 
+func TestMarshalBoundedEventDefaultLimitAndMessageTruncation(t *testing.T) {
+	changes := make([]Change, 100)
+	event := Event{Type: "change", Job: "job", Changes: changes}
+	bounded, payload, err := MarshalBoundedEvent(event, 512)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(payload) > 512 || !bounded.ChangesTruncated || bounded.ChangesCount != len(changes) || bounded.Message == "" {
+		t.Fatalf("default bounded event = %d bytes %#v", len(payload), bounded)
+	}
+	if _, payload, err := MarshalBoundedEvent(Event{Type: "small", Job: "job"}, 0); err != nil || len(payload) > EventPayloadLimit {
+		t.Fatalf("default event limit failed: %d bytes, %v", len(payload), err)
+	}
+}
+
 func TestSnapshotNormalizeSortsAndCanonicalizesEvidence(t *testing.T) {
 	snapshot := Snapshot{
 		Units: []Unit{
@@ -91,6 +106,24 @@ func TestSnapshotNormalizeSortsAndCanonicalizesEvidence(t *testing.T) {
 	}
 	if host.Protocols[0].Ports[0].Port != 22 || host.Protocols[0].Ports[1].Service.CPEs[0] != "c1" || host.Protocols[0].StateSummaries[1].Reasons[0].Reason != "a" {
 		t.Fatalf("host evidence was not normalized: %#v", host.Protocols[0])
+	}
+}
+
+func TestSnapshotNormalizeSortsEqualLinkAndHostnameKeysAndNonIPAddresses(t *testing.T) {
+	snapshot := Snapshot{Hosts: []HostObservation{
+		{Address: "  logical.example ", LinkAddresses: []LinkAddress{{Type: "mac", Address: "z"}, {Type: "mac", Address: "a"}, {Type: "ip", Address: "z"}}, Hostnames: []Hostname{{Name: "same", Type: "z"}, {Name: "same", Type: "a"}, {Name: "other", Type: "z"}}, Protocols: []ProtocolObservation{{Protocol: "udp"}, {Protocol: "tcp"}}},
+		{Address: "192.0.2.1"},
+	}}
+	snapshot.Normalize()
+	if snapshot.Hosts[0].Address != "192.0.2.1" || snapshot.Hosts[1].Address != "logical.example" {
+		t.Fatalf("hosts were not sorted/canonicalized: %#v", snapshot.Hosts)
+	}
+	host := snapshot.Hosts[1]
+	if host.LinkAddresses[0].Type != "ip" || host.LinkAddresses[1].Address != "a" || host.LinkAddresses[2].Address != "z" {
+		t.Fatalf("link addresses were not deterministically ordered: %#v", host.LinkAddresses)
+	}
+	if host.Hostnames[0].Name != "other" || host.Hostnames[1].Type != "a" || host.Hostnames[2].Type != "z" {
+		t.Fatalf("hostnames were not deterministically ordered: %#v", host.Hostnames)
 	}
 }
 

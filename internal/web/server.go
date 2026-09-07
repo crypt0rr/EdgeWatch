@@ -662,7 +662,11 @@ func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store
 		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
 		return
 	}
-	cookie, _ := r.Cookie(auth.SessionCookie)
+	cookie, cookieErr := r.Cookie(auth.SessionCookie)
+	if cookieErr != nil || cookie.Value == "" {
+		writeError(w, http.StatusBadRequest, "totp_failed", "an authenticated session cookie is required for TOTP setup", nil)
+		return
+	}
 	key := digest(cookie.Value)
 	s.mu.Lock()
 	s.pendingTOTP[key] = pendingTOTP{Secret: secret, Expires: time.Now().UTC().Add(10 * time.Minute)}
@@ -677,7 +681,11 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	cookie, _ := r.Cookie(auth.SessionCookie)
+	cookie, cookieErr := r.Cookie(auth.SessionCookie)
+	if cookieErr != nil || cookie.Value == "" {
+		writeError(w, http.StatusBadRequest, "totp_failed", "an authenticated session cookie is required for TOTP setup", nil)
+		return
+	}
 	key := digest(cookie.Value)
 	s.mu.Lock()
 	pending, ok := s.pendingTOTP[key]

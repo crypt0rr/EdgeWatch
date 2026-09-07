@@ -289,3 +289,12 @@ func TestLookupSuppressesPrivateAndDisabledAddresses(t *testing.T) {
 		t.Fatalf("disabled lookup = %#v, %v", result, err)
 	}
 }
+
+func TestUnavailableMessage(t *testing.T) {
+	if got := unavailableMessage(nil); got != "registry data is unavailable" {
+		t.Fatalf("nil unavailable message = %q", got)
+	}
+	if got := unavailableMessage(errors.New("timeout")); got != "registry lookup unavailable: timeout" {
+		t.Fatalf("error unavailable message = %q", got)
+	}
+}

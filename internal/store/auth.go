@@ -124,7 +124,15 @@ func (s *Store) SaveAdmin(ctx context.Context, a Admin) error {
 	if err != nil {
 		return err
 	}
-	return saveAdminExec(ctx, s.DB, a, stored)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := saveAdminExec(ctx, tx, a, stored); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 type contextExecer interface {
@@ -327,8 +335,12 @@ func (s *Store) CompleteSetup(ctx context.Context, tokenHash string, admin Admin
 	if _, err = tx.ExecContext(ctx, `INSERT INTO users(id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, LegacyAdminUserID, admin.Username, adminDisplayName(admin), RoleAdministrator, admin.PasswordHash, storedSecret, boolInt(admin.TOTPEnabled), 1, admin.CreatedAt.UTC().Format(time.RFC3339Nano), admin.UpdatedAt.UTC().Format(time.RFC3339Nano), ""); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1`, now.UTC().Format(time.RFC3339Nano)); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1 AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
 		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return errors.New("setup token expired or already used")
 	}
 	if err = insertAuditExec(ctx, tx, "admin.setup", "administrator created", now.UTC()); err != nil {
 		return err
@@ -352,8 +364,12 @@ func (s *Store) ConsumeSetupToken(ctx context.Context, hash string, now time.Tim
 	if used.Valid || !now.Before(scanTime(expires)) {
 		return errors.New("setup token expired or already used")
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1`, now.UTC().Format(time.RFC3339Nano)); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1 AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
 		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return errors.New("setup token expired or already used")
 	}
 	return tx.Commit()
 }

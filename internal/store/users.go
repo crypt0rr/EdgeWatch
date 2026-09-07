@@ -332,6 +332,15 @@ func (s *Store) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []st
 	if _, err := uuid.Parse(u.ID); err != nil {
 		return err
 	}
+	if err := ValidateUserRole(u.Role); err != nil {
+		return err
+	}
+	if strings.TrimSpace(u.DisplayName) == "" {
+		u.DisplayName = u.Username
+	}
+	if u.UpdatedAt.IsZero() {
+		u.UpdatedAt = time.Now().UTC()
+	}
 	stored, err := s.userTOTPForSave(u)
 	if err != nil {
 		return err
@@ -341,6 +350,26 @@ func (s *Store) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []st
 		return err
 	}
 	defer tx.Rollback()
+	var currentRole string
+	var currentEnabled int
+	if err := tx.QueryRowContext(ctx, `SELECT role,enabled FROM users WHERE id=?`, u.ID).Scan(&currentRole, &currentEnabled); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	// TOTP and host-recovery writes must enforce the same last-administrator
+	// invariant as profile updates. Keeping this check in the transaction
+	// closes the race where two security mutations demote or disable the final
+	// enabled administrator concurrently.
+	if currentRole == RoleAdministrator && currentEnabled != 0 && (u.Role != RoleAdministrator || !u.Enabled) {
+		var otherAdministrators int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=? AND enabled=1 AND id<>?`, RoleAdministrator, u.ID).Scan(&otherAdministrators); err != nil {
+			return err
+		}
+		if otherAdministrators == 0 {
+			return ErrLastAdministrator
+		}
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE users SET display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=? WHERE id=?`, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID)
 	if err != nil {
 		return err
@@ -529,8 +558,12 @@ func (s *Store) ConsumeUserInvite(ctx context.Context, idHash string, now time.T
 	if used.Valid || !now.Before(scanTime(expires)) {
 		return User{}, errors.New("activation token expired or already used")
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE id_hash=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), idHash); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE id_hash=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), idHash)
+	if err != nil {
 		return User{}, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return User{}, errors.New("activation token expired or already used")
 	}
 	var u User
 	var totp, enabled int

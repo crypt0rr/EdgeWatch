@@ -30,7 +30,15 @@ func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 	dashboard, err := s.Store.GetPublicDashboard(r.Context())
-	if errors.Is(err, store.ErrNotFound) || !dashboard.Enabled {
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "public_dashboard", "public status could not be loaded", nil)
+		return
+	}
+	if !dashboard.Enabled {
 		writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
 		return
 	}
@@ -130,7 +138,11 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 		writeError(w, http.StatusBadRequest, "save_failed", err.Error(), nil)
 		return
 	}
-	result, _ := s.Store.GetPublicDashboard(r.Context())
+	result, err := s.Store.GetPublicDashboard(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", "public dashboard could not be loaded after saving", nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -139,8 +151,11 @@ func (s *Server) latestPublishedHost(ctx context.Context, jobID, address string)
 		return store.ScanHost{}, store.ErrNotFound
 	}
 	job, err := s.Store.GetJob(ctx, jobID)
-	if err != nil || job.Archived {
+	if errors.Is(err, store.ErrNotFound) || job.Archived {
 		return store.ScanHost{}, store.ErrNotFound
+	}
+	if err != nil {
+		return store.ScanHost{}, err
 	}
 	host, _, err := s.Store.GetLatestSuccessfulJobHost(ctx, jobID, address)
 	if err == nil {

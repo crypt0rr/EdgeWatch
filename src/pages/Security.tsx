@@ -36,7 +36,7 @@ export function Security() {
     try {
       const value = await updateDisplayName(displayName)
       setDisplayName(value.display_name)
-      setMessage('Administrator display name updated.')
+      setMessage('Display name updated.')
       await Promise.all([
         client.invalidateQueries({ queryKey: ['session'] }),
         client.invalidateQueries({ queryKey: ['admin-status'] }),
@@ -118,20 +118,21 @@ export function Security() {
     }
   }
 
+  const accountLabel = session.data?.role === 'administrator' ? 'Administrator' : session.data?.role === 'operator' ? 'Operator' : 'Viewer'
   return <section className="page narrow">
-    <div className="page-heading"><div><p className="eyebrow">Administrator</p><h1>Security</h1><p className="muted">Protect the local console and keep recovery under your control.</p></div></div>
+    <div className="page-heading"><div><p className="eyebrow">{accountLabel} account</p><h1>Security</h1><p className="muted">Protect the local console and keep recovery under your control.</p></div></div>
     {message && <div className="success-banner"><Check size={17} />{message}</div>}
     {error && <div className="form-error banner" role="alert">{error}</div>}
     <div className="settings-grid">
       <div className="panel">
-        <div className="panel-heading"><div><h2>Administrator profile</h2><p className="muted">Choose the name shown throughout the console.</p></div><UserRound className="muted-icon" size={19} /></div>
+        <div className="panel-heading"><div><h2>Profile</h2><p className="muted">Choose the name shown throughout the console.</p></div><UserRound className="muted-icon" size={19} /></div>
         <form className="settings-form" onSubmit={saveDisplayName}>
-          <label>Display name<input type="text" value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={80} autoComplete="nickname" required /><small>Shown in the sidebar and dashboard. Your administrator sign-in remains unchanged.</small></label>
+          <label>Display name<input type="text" value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={80} autoComplete="nickname" required /><small>Shown in the sidebar and dashboard. Your sign-in remains unchanged.</small></label>
           <button className="button primary" type="submit" disabled={displayNameBusy || !displayName.trim()}>{displayNameBusy ? 'Saving…' : 'Save display name'}</button>
         </form>
       </div>
       <div className="panel">
-        <div className="panel-heading"><div><h2>Password</h2><p className="muted">Argon2id-protected administrator credentials.</p></div><KeyRound className="muted-icon" size={19} /></div>
+        <div className="panel-heading"><div><h2>Password</h2><p className="muted">Your password is protected with Argon2id.</p></div><KeyRound className="muted-icon" size={19} /></div>
         <form className="settings-form" onSubmit={change}>
           <label>Current password<input type="password" value={current} onChange={(event) => setCurrent(event.target.value)} autoComplete="current-password" required /></label>
           <label>New password<input type="password" value={next} onChange={(event) => setNext(event.target.value)} minLength={12} autoComplete="new-password" required /><small>At least 12 characters.</small></label>
@@ -140,12 +141,12 @@ export function Security() {
         <button className="button secondary" type="button" onClick={() => { setError(''); setRevokePrompt(true) }}><LogOut size={16} /> Log out all sessions</button>
       </div>
       <div className="panel">
-        <div className="panel-heading"><div><h2>Authenticator app</h2><p className="muted">{session.data?.totp_enabled ? 'TOTP is protecting administrator sign-in.' : 'Optional extra protection for sign-in.'}</p></div><ShieldCheck className={session.data?.totp_enabled ? 'green-icon' : 'muted-icon'} size={20} /></div>
+        <div className="panel-heading"><div><h2>Authenticator app</h2><p className="muted">{session.data?.totp_enabled ? 'TOTP is protecting your sign-in.' : 'Optional extra protection for sign-in.'}</p></div><ShieldCheck className={session.data?.totp_enabled ? 'green-icon' : 'muted-icon'} size={20} /></div>
         {session.data?.totp_enabled ? <div className="settings-form"><div className="status-line"><span className="pill green">Enabled</span><span className="muted">Recovery codes are single-use.</span></div><button className="button secondary" type="button" onClick={() => { setError(''); setDisablePrompt(true) }}>Disable TOTP</button></div> : totp ? <div className="settings-form"><p>Scan this secret in your authenticator app, then enter the six-digit code.</p><code className="secret">{totp.secret}</code><label>Verification code<input inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} placeholder="123456" /></label><button className="button primary" type="button" onClick={enableTotp}>Enable TOTP</button></div> : <div className="settings-form"><p>Enter your current password, then set up an authenticator app.</p><button className="button secondary" type="button" onClick={beginTotp}>Set up authenticator</button></div>}
       </div>
     </div>
     {recovery.length > 0 && <div className="panel recovery"><h2>Save your recovery codes</h2><p className="muted">These are shown once. Store them somewhere offline before leaving this page.</p><div className="code-grid">{recovery.map((value) => <code key={value}>{value}</code>)}</div><div className="heading-actions"><button className="button secondary" type="button" onClick={() => navigator.clipboard?.writeText(recovery.join('\n'))}><Copy size={16} /> Copy codes</button><button className="button primary" type="button" onClick={() => { client.clear(); navigate('/login') }}>Continue to sign in</button></div></div>}
-    {disablePrompt && <ActionDialog title="Disable authenticator protection?" description="Enter your administrator password to disable TOTP. Existing browser sessions will be signed out." confirmLabel="Disable TOTP" destructive valueLabel="Administrator password" valueType="password" valueRequired autoComplete="current-password" onConfirm={disableTotp} onCancel={() => setDisablePrompt(false)} error={error} />}
+    {disablePrompt && <ActionDialog title="Disable authenticator protection?" description="Enter your account password to disable TOTP. Existing browser sessions will be signed out." confirmLabel="Disable TOTP" destructive valueLabel="Account password" valueType="password" valueRequired autoComplete="current-password" onConfirm={disableTotp} onCancel={() => setDisablePrompt(false)} error={error} />}
     {revokePrompt && <ActionDialog title="Log out all sessions?" description="Every EdgeWatch browser session, including this one, will be signed out." confirmLabel="Log out all sessions" destructive onConfirm={() => revokeSessions()} onCancel={() => setRevokePrompt(false)} error={error} />}
   </section>
 }

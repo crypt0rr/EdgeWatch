@@ -279,6 +279,12 @@ func isPrivate(ip net.IP) bool {
 	if v4 := ip.To4(); v4 != nil {
 		ip = v4
 	}
+	// RFC 6598 shared address space is not globally registered and must not be
+	// sent to an external RDAP service. net.IP.IsPrivate intentionally does
+	// not include 100.64.0.0/10 because it is neither RFC1918 nor RFC4193.
+	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+		return true
+	}
 	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
 }
 

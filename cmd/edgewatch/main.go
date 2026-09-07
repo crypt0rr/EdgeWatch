@@ -56,6 +56,7 @@ func run(args []string) error {
 	limit := fs.Int("limit", 50, "history limit")
 	nmapPath := fs.String("nmap", "nmap", "Nmap executable")
 	passwordFile := fs.String("password-file", "", "file containing a new administrator password")
+	username := fs.String("username", "admin", "username for administrator recovery actions")
 	force := fs.Bool("force", false, "confirm replacement of the current setup token")
 	if err := fs.Parse(rest); err != nil {
 		return err
@@ -86,7 +87,7 @@ func run(args []string) error {
 	}
 	defer s.Close()
 	if cmd == "admin" {
-		return adminAction(context.Background(), action, s, *passwordFile, *force)
+		return adminActionForUser(context.Background(), action, s, *passwordFile, *username, *force)
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	application, err := app.New(cfg, s, *nmapPath, logger)
@@ -140,11 +141,16 @@ func run(args []string) error {
 
 func usage() error {
 	fmt.Fprintln(os.Stderr, `Usage: edgewatch <command> [options]
-	Commands: daemon, config validate, scan, status, history, baseline approve|reset, notify test, admin setup-token|reset-password|disable-totp, health, version`)
+	Commands: daemon, config validate, scan, status, history, baseline approve|reset, notify test, admin setup-token|reset-password|disable-totp, health, version
+	Admin recovery actions accept --username (default admin) and require host access.`)
 	return errors.New("invalid or missing command")
 }
 
 func adminAction(ctx context.Context, action string, s *store.Store, passwordFile string, confirmations ...bool) error {
+	return adminActionForUser(ctx, action, s, passwordFile, "admin", confirmations...)
+}
+
+func adminActionForUser(ctx context.Context, action string, s *store.Store, passwordFile, username string, confirmations ...bool) error {
 	force := len(confirmations) > 0 && confirmations[0]
 	if action == "setup-token" || action == "reissue-setup-token" {
 		if !force {
@@ -157,9 +163,13 @@ func adminAction(ctx context.Context, action string, s *store.Store, passwordFil
 		fmt.Fprintln(os.Stdout, "EdgeWatch setup token (valid for 15 minutes):", token)
 		return nil
 	}
-	admin, err := s.GetAdmin(ctx)
+	username = strings.TrimSpace(username)
+	if username == "" {
+		username = "admin"
+	}
+	user, err := s.GetUserByUsername(ctx, username)
 	if err != nil {
-		return errors.New("administrator is not configured")
+		return fmt.Errorf("user %q is not configured", username)
 	}
 	switch action {
 	case "reset-password":
@@ -176,11 +186,27 @@ func adminAction(ctx context.Context, action string, s *store.Store, passwordFil
 		if err != nil {
 			return err
 		}
-		admin.PasswordHash, admin.UpdatedAt = hash, time.Now().UTC()
-		return s.SaveAdminSecurity(ctx, admin, nil, false, true, "admin.password_reset", "password reset from host CLI")
+		user.PasswordHash, user.UpdatedAt = hash, time.Now().UTC()
+		if user.ID == store.LegacyAdminUserID {
+			admin, adminErr := s.GetAdmin(ctx)
+			if adminErr != nil {
+				return adminErr
+			}
+			admin.PasswordHash, admin.UpdatedAt = hash, user.UpdatedAt
+			return s.SaveAdminSecurityWithAudit(ctx, admin, nil, false, true, store.AuditEntry{Action: "admin.password_reset", Detail: "password reset from host CLI", ActorUsername: "host-cli"})
+		}
+		return s.SaveUserSecurity(ctx, user, nil, false, true, store.AuditEntry{Action: "user.password_reset", Detail: "password reset from host CLI", ActorUsername: "host-cli"})
 	case "disable-totp":
-		admin.TOTPEnabled, admin.TOTPSecret, admin.UpdatedAt = false, "", time.Now().UTC()
-		return s.SaveAdminSecurity(ctx, admin, []string{}, true, true, "admin.totp_disabled", "TOTP disabled from host CLI")
+		user.TOTPEnabled, user.TOTPSecret, user.UpdatedAt = false, "", time.Now().UTC()
+		if user.ID == store.LegacyAdminUserID {
+			admin, adminErr := s.GetAdmin(ctx)
+			if adminErr != nil {
+				return adminErr
+			}
+			admin.TOTPEnabled, admin.TOTPSecret, admin.UpdatedAt = false, "", user.UpdatedAt
+			return s.SaveAdminSecurityWithAudit(ctx, admin, []string{}, true, true, store.AuditEntry{Action: "admin.totp_disabled", Detail: "TOTP disabled from host CLI", ActorUsername: "host-cli"})
+		}
+		return s.SaveUserSecurity(ctx, user, []string{}, true, true, store.AuditEntry{Action: "user.totp_disabled", Detail: "TOTP disabled from host CLI", ActorUsername: "host-cli"})
 	default:
 		return errors.New("expected: admin reset-password|disable-totp")
 	}

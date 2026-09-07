@@ -1,0 +1,74 @@
+package auth
+
+import "github.com/crypt0rr/edgewatch/internal/store"
+
+const (
+	PermissionOverviewRead        = "overview.read"
+	PermissionJobsRead            = "jobs.read"
+	PermissionJobsWrite           = "jobs.write"
+	PermissionJobsRun             = "jobs.run"
+	PermissionHostsRead           = "hosts.read"
+	PermissionScansRead           = "scans.read"
+	PermissionBaselinesRead       = "baselines.read"
+	PermissionBaselinesManage     = "baselines.manage"
+	PermissionIncidentsRead       = "incidents.read"
+	PermissionIncidentsManage     = "incidents.manage"
+	PermissionNotificationOptions = "notification_options.read"
+	PermissionNotificationsRead   = "notifications.read"
+	PermissionNotificationsManage = "notifications.manage"
+	PermissionUsersManage         = "users.manage"
+	PermissionAuditRead           = "audit.read"
+	PermissionPublicManage        = "public_dashboard.manage"
+	PermissionStreamRead          = "stream.read"
+)
+
+var rolePermissions = map[string]map[string]bool{
+	store.RoleAdministrator: {
+		PermissionOverviewRead: true, PermissionJobsRead: true, PermissionJobsWrite: true,
+		PermissionJobsRun: true, PermissionHostsRead: true, PermissionScansRead: true,
+		PermissionBaselinesRead: true, PermissionBaselinesManage: true,
+		PermissionIncidentsRead: true, PermissionIncidentsManage: true,
+		PermissionNotificationOptions: true, PermissionNotificationsRead: true,
+		PermissionNotificationsManage: true, PermissionUsersManage: true,
+		PermissionAuditRead: true, PermissionPublicManage: true, PermissionStreamRead: true,
+	},
+	store.RoleOperator: {
+		PermissionOverviewRead: true, PermissionJobsRead: true, PermissionJobsWrite: true,
+		PermissionJobsRun: true, PermissionHostsRead: true, PermissionScansRead: true,
+		PermissionBaselinesRead: true, PermissionBaselinesManage: true,
+		PermissionIncidentsRead: true, PermissionIncidentsManage: true,
+		PermissionNotificationOptions: true, PermissionStreamRead: true,
+	},
+	store.RoleViewer: {
+		// Viewers get the deliberately narrow read-only console: overview,
+		// configured jobs, and their current baseline. They do not get the
+		// global host/scan inventory or incident stream; the unauthenticated
+		// highlights page is the separate guest-facing projection.
+		PermissionOverviewRead: true, PermissionJobsRead: true, PermissionBaselinesRead: true,
+	},
+}
+
+func PermissionsForRole(role string) []string {
+	values := rolePermissions[role]
+	result := make([]string, 0, len(values))
+	for permission := range values {
+		result = append(result, permission)
+	}
+	// The list is an API response and should be deterministic. Avoid importing
+	// a second sorting helper into callers.
+	for i := 1; i < len(result); i++ {
+		for j := i; j > 0 && result[j] < result[j-1]; j-- {
+			result[j], result[j-1] = result[j-1], result[j]
+		}
+	}
+	return result
+}
+
+func HasPermission(session store.Session, permission string) bool {
+	if session.Role == "" {
+		// Sessions created by pre-RBAC binaries are only ever valid for the
+		// original administrator and are upgraded by Authenticate when possible.
+		return permission == PermissionOverviewRead || permission == PermissionJobsRead || permission == PermissionJobsWrite || permission == PermissionJobsRun || permission == PermissionHostsRead || permission == PermissionScansRead || permission == PermissionBaselinesRead || permission == PermissionBaselinesManage || permission == PermissionIncidentsRead || permission == PermissionIncidentsManage || permission == PermissionNotificationOptions || permission == PermissionNotificationsRead || permission == PermissionNotificationsManage || permission == PermissionUsersManage || permission == PermissionAuditRead || permission == PermissionPublicManage || permission == PermissionStreamRead
+	}
+	return rolePermissions[session.Role][permission]
+}

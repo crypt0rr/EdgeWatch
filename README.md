@@ -65,9 +65,10 @@ the replacement is issued.
   `127.0.0.1:8080`.
 - `enrichment.rdap.enabled` controls on-demand network-registration lookups
   from the host explorer. It defaults to `true`; set it to `false` for an
-  isolated or privacy-sensitive deployment. Public host pages query the
+  isolated or privacy-sensitive deployment. Host detail pages query the
   authoritative RIR over HTTPS and cache only normalized network metadata for
-  24 hours (stale data can be shown for up to seven days). Private and
+  24 hours (stale data can be shown for up to seven days). The unauthenticated
+  public page only shows data already present in that cache. Private and
   special-use addresses are never queried, and raw RDAP responses/contact
   details are not retained.
 - TOTP is optional. Its seed is encrypted with a separate authentication key
@@ -80,6 +81,30 @@ the replacement is issued.
   `${SHOUTRRR_URL}`.
 - Create all monitoring jobs in the web console. The YAML `jobs` section is
   not used for scheduling.
+
+## Users and public status
+
+The first-run account is an `administrator`. Administrators can invite more
+accounts from **Users**; the recipient receives a single-use activation token
+and chooses an Argon2id password in the browser. Roles are deliberately small:
+
+- **Administrator** can manage users, notification destinations, public-status
+  publication, jobs, baselines, and incidents.
+- **Operator** can configure and run jobs, review baselines and incidents, and
+  select existing notification destinations for a job. Operators cannot read
+  or change destination URLs or manage users.
+- **Viewer** is read-only for the operational console and can inspect jobs and
+  baseline information. When public status is enabled, signing in as a viewer
+  opens the administrator-selected **Highlights** page first; the jobs and
+  baseline views remain available from the navigation. Every account can change
+  its own display name, password, and optional authenticator protection.
+
+To publish a limited unauthenticated highlights page, an administrator enables
+**Public status** and explicitly selects effective hosts. The page is available
+at `/public` and contains only the selected job names, latest successful scan
+time, positive ports, and cached normalized network-registration data. It does
+not provide a host selector or proxy arbitrary RDAP requests. Keep the page
+disabled for isolated or privacy-sensitive deployments.
 
 Retention applies to completed scans, events, sent notification deliveries,
 terminally failed deliveries, superseded job revisions, and terminal
@@ -167,9 +192,9 @@ Each web-managed job can select one or more named destinations in its editor.
 Selections use stable destination IDs, so rotating a managed destination's
 credentials does not require reconfiguring jobs. Deployment-managed URLs are
 available as read-only destinations. Jobs created before per-job routing was
-introduced retain the legacy behavior of sending to every enabled destination
-until they are saved in the editor; an explicitly empty selection keeps a job
-silent.
+introduced are frozen to the destinations that exist when EdgeWatch starts (or
+when the next destination is added), so a newly added endpoint is never silently
+enabled for an existing job. An explicitly empty selection keeps a job silent.
 
 To supply the key separately, set `notifications.encryption_key_file` to a
 `0600` file containing 32 raw bytes or 64 hexadecimal characters and mount it
@@ -206,7 +231,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 10), but it is
+version 12), but it is
 forward-only: an older binary refuses a newer schema. To roll back, stop the
 new service, restore the entire pre-upgrade `./data` directory and deployment
 configuration, then start the previous image. Do not point an older image at

@@ -249,7 +249,7 @@ export function JobEditor() {
                 <span className={destination.locked ? 'pill amber' : destination.enabled ? 'pill green' : 'pill gray'}>{destination.locked ? 'Locked' : destination.enabled ? 'Enabled' : 'Paused'}</span>
               </label>)}
             </div> : <div className="inline-empty">No notification destinations are configured. Add one from the Notifications page.</div>}
-            <p className="helper">Uncheck every destination to keep this job silent. A job from an older release with no saved selection continues using all globally enabled destinations until you save it here.</p>
+            <p className="helper">Uncheck every destination to keep this job silent. A job from an older release with no saved selection is frozen to the destinations present at startup or before a new endpoint is added.</p>
           </div>
         </div>
 

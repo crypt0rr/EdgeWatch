@@ -19,8 +19,10 @@ var ErrAuditUnavailable = errors.New("security audit unavailable")
 // store package lets job, baseline, and notification transactions share the
 // same fail-closed audit boundary without exposing database handles to callers.
 type AuditEntry struct {
-	Action string
-	Detail string
+	Action        string
+	Detail        string
+	ActorUserID   string
+	ActorUsername string
 }
 
 type Admin struct {
@@ -41,11 +43,15 @@ type Admin struct {
 }
 
 type Session struct {
-	IDHash     string
-	CreatedAt  time.Time
-	LastSeenAt time.Time
-	ExpiresAt  time.Time
-	CSRFToken  string
+	IDHash      string
+	UserID      string
+	Username    string
+	DisplayName string
+	Role        string
+	CreatedAt   time.Time
+	LastSeenAt  time.Time
+	ExpiresAt   time.Time
+	CSRFToken   string
 }
 
 type SetupToken struct {
@@ -86,6 +92,33 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	return a, nil
 }
 
+// HasAdministrator reports whether an administrator identity has ever been
+// configured. The users table is authoritative for multi-user installations;
+// the legacy admins row is retained as a compatibility fallback for databases
+// opened by an older binary or a partially completed migration.
+func (s *Store) HasAdministrator(ctx context.Context) (bool, error) {
+	var present int
+	err := s.DB.QueryRowContext(ctx, `SELECT 1 FROM users WHERE role=? LIMIT 1`, RoleAdministrator).Scan(&present)
+	if err == nil {
+		return true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		// A pre-migration fixture may not have the users table yet. Fall through
+		// to the legacy row so host recovery and compatibility callers still work.
+		if !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+			return false, err
+		}
+	}
+	_, legacyErr := s.GetAdmin(ctx)
+	if legacyErr == nil {
+		return true, nil
+	}
+	if errors.Is(legacyErr, ErrNotFound) {
+		return false, nil
+	}
+	return false, legacyErr
+}
+
 func (s *Store) SaveAdmin(ctx context.Context, a Admin) error {
 	stored, err := s.adminTOTPForSave(a)
 	if err != nil {
@@ -100,6 +133,15 @@ type contextExecer interface {
 
 func saveAdminExec(ctx context.Context, execer contextExecer, a Admin, stored string) error {
 	_, err := execer.ExecContext(ctx, `INSERT INTO admins(id,username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,password_hash=excluded.password_hash,totp_secret=excluded.totp_secret,totp_enabled=excluded.totp_enabled,updated_at=excluded.updated_at`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	// Keep the compatibility administrator row and the authoritative users row
+	// synchronized while older callers continue using SaveAdmin.
+	if _, err = execer.ExecContext(ctx, `INSERT OR IGNORE INTO users(id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, LegacyAdminUserID, a.Username, adminDisplayName(a), RoleAdministrator, a.PasswordHash, stored, boolInt(a.TOTPEnabled), 1, a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano), ""); err != nil {
+		return err
+	}
+	_, err = execer.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,password_hash=?,totp_secret=?,totp_enabled=?,updated_at=? WHERE id=?`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.UpdatedAt.UTC().Format(time.RFC3339Nano), LegacyAdminUserID)
 	return err
 }
 
@@ -120,6 +162,12 @@ func adminDisplayName(a Admin) string {
 // update from being reported when session revocation, recovery-code rotation,
 // or the corresponding audit record failed.
 func (s *Store) SaveAdminSecurity(ctx context.Context, a Admin, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, auditAction, auditDetail string) error {
+	return s.SaveAdminSecurityWithAudit(ctx, a, recoveryCodes, replaceRecoveryCodes, revokeSessions, AuditEntry{Action: auditAction, Detail: auditDetail})
+}
+
+// SaveAdminSecurityWithAudit is the actor-aware form used by the web console.
+// The legacy string-argument wrapper above remains for CLI and older callers.
+func (s *Store) SaveAdminSecurityWithAudit(ctx context.Context, a Admin, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry) error {
 	stored, err := s.adminTOTPForSave(a)
 	if err != nil {
 		return err
@@ -133,22 +181,26 @@ func (s *Store) SaveAdminSecurity(ctx context.Context, a Admin, recoveryCodes []
 		return err
 	}
 	if replaceRecoveryCodes {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes`); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id=?`, LegacyAdminUserID); err != nil {
 			return err
 		}
 		for _, hash := range recoveryCodes {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO recovery_codes(id_hash) VALUES(?)`, hash); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO recovery_codes(id_hash,user_id) VALUES(?,?)`, hash, LegacyAdminUserID); err != nil {
 				return err
 			}
 		}
 	}
 	if revokeSessions {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions`); err != nil {
+		// Password/TOTP changes for the compatibility administrator must not
+		// sign out unrelated operator/viewer accounts now that sessions are
+		// user-scoped. Older databases have their sessions attributed to the
+		// stable legacy administrator ID by migration 12.
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=? OR user_id=''`, LegacyAdminUserID); err != nil {
 			return err
 		}
 	}
-	if auditAction != "" {
-		if err := insertAuditExec(ctx, tx, auditAction, auditDetail, time.Now().UTC()); err != nil {
+	if audit.Action != "" {
+		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
 			return err
 		}
 	}
@@ -212,6 +264,12 @@ func (s *Store) ReissueSetupToken(ctx context.Context, hash string, expires, now
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	var userCount int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=?`, RoleAdministrator).Scan(&userCount); err == nil && userCount > 0 {
+		return errors.New("administrator is already configured")
+	} else if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+		return err
+	}
 	var issued string
 	if err = tx.QueryRowContext(ctx, `SELECT issued_at FROM setup_tokens WHERE id=1`).Scan(&issued); err == nil {
 		if previous := scanTime(issued); !previous.IsZero() && now.UTC().Sub(previous) < time.Minute {
@@ -257,7 +315,16 @@ func (s *Store) CompleteSetup(ctx context.Context, tokenHash string, admin Admin
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
+	var userCount int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=?`, RoleAdministrator).Scan(&userCount); err == nil && userCount > 0 {
+		return errors.New("administrator is already configured")
+	} else if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO admins(id,username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?,?)`, admin.Username, adminDisplayName(admin), admin.PasswordHash, storedSecret, boolInt(admin.TOTPEnabled), admin.CreatedAt.UTC().Format(time.RFC3339Nano), admin.UpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `INSERT INTO users(id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, LegacyAdminUserID, admin.Username, adminDisplayName(admin), RoleAdministrator, admin.PasswordHash, storedSecret, boolInt(admin.TOTPEnabled), 1, admin.CreatedAt.UTC().Format(time.RFC3339Nano), admin.UpdatedAt.UTC().Format(time.RFC3339Nano), ""); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1`, now.UTC().Format(time.RFC3339Nano)); err != nil {
@@ -292,23 +359,36 @@ func (s *Store) ConsumeSetupToken(ctx context.Context, hash string, now time.Tim
 }
 
 func (s *Store) CreateSession(ctx context.Context, idHash, csrf string, created, expires time.Time) error {
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO sessions(id_hash,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?)`, idHash, created.UTC().Format(time.RFC3339Nano), created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano), csrf)
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, LegacyAdminUserID, created.UTC().Format(time.RFC3339Nano), created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano), csrf)
 	return err
 }
 
 // CreateSessionWithAudit creates a login session and its audit record in one
 // transaction, so a successful login can never be returned without evidence.
 func (s *Store) CreateSessionWithAudit(ctx context.Context, idHash, csrf string, created, expires time.Time, action, detail string) error {
+	return s.CreateSessionForUserWithAudit(ctx, LegacyAdminUserID, idHash, csrf, created, expires, action, detail)
+}
+
+// CreateSessionForUserWithAudit creates a session tied to a concrete user and
+// records the login audit atomically.
+func (s *Store) CreateSessionForUserWithAudit(ctx context.Context, userID, idHash, csrf string, created, expires time.Time, action, detail string) error {
+	return s.CreateSessionForUserWithAuditEntry(ctx, userID, idHash, csrf, created, expires, AuditEntry{Action: action, Detail: detail, ActorUserID: userID})
+}
+
+// CreateSessionForUserWithAuditEntry is the actor-aware login primitive. The
+// session and its authentication audit record are committed together so a
+// successful login cannot be returned without evidence.
+func (s *Store) CreateSessionForUserWithAuditEntry(ctx context.Context, userID, idHash, csrf string, created, expires time.Time, audit AuditEntry) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?)`, idHash, created.UTC().Format(time.RFC3339Nano), created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, created.UTC().Format(time.RFC3339Nano), created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
 		return err
 	}
-	if action != "" {
-		if err := insertAuditExec(ctx, tx, action, detail, created.UTC()); err != nil {
+	if audit.Action != "" {
+		if err := insertAuditEntryExec(ctx, tx, audit, created.UTC()); err != nil {
 			return err
 		}
 	}
@@ -318,7 +398,7 @@ func (s *Store) CreateSessionWithAudit(ctx context.Context, idHash, csrf string,
 func (s *Store) GetSession(ctx context.Context, idHash string) (Session, error) {
 	var v Session
 	var created, lastSeen, expires string
-	err := s.DB.QueryRowContext(ctx, `SELECT id_hash,created_at,last_seen_at,expires_at,csrf_token FROM sessions WHERE id_hash=?`, idHash).Scan(&v.IDHash, &created, &lastSeen, &expires, &v.CSRFToken)
+	err := s.DB.QueryRowContext(ctx, `SELECT id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token FROM sessions WHERE id_hash=?`, idHash).Scan(&v.IDHash, &v.UserID, &created, &lastSeen, &expires, &v.CSRFToken)
 	if errors.Is(err, sql.ErrNoRows) {
 		return v, ErrNotFound
 	}
@@ -340,6 +420,13 @@ func (s *Store) DeleteSession(ctx context.Context, idHash string) error {
 }
 
 func (s *Store) DeleteSessionWithAudit(ctx context.Context, idHash, action, detail string) error {
+	return s.DeleteSessionWithAuditEntry(ctx, idHash, AuditEntry{Action: action, Detail: detail})
+}
+
+// DeleteSessionWithAuditEntry removes one session and records the actor that
+// ended it. The actor fields are additive, so older callers can keep using
+// DeleteSessionWithAudit without losing compatibility.
+func (s *Store) DeleteSessionWithAuditEntry(ctx context.Context, idHash string, audit AuditEntry) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -348,8 +435,8 @@ func (s *Store) DeleteSessionWithAudit(ctx context.Context, idHash, action, deta
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash=?`, idHash); err != nil {
 		return err
 	}
-	if action != "" {
-		if err := insertAuditExec(ctx, tx, action, detail, time.Now().UTC()); err != nil {
+	if audit.Action != "" {
+		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
 			return err
 		}
 	}
@@ -390,16 +477,20 @@ func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) (int64
 }
 
 func (s *Store) SaveRecoveryCodes(ctx context.Context, hashes []string) error {
+	return s.SaveRecoveryCodesForUser(ctx, LegacyAdminUserID, hashes)
+}
+
+func (s *Store) SaveRecoveryCodesForUser(ctx context.Context, userID string, hashes []string) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.ExecContext(ctx, `DELETE FROM recovery_codes`); err != nil {
+	if _, err = tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id=?`, userID); err != nil {
 		return err
 	}
 	for _, hash := range hashes {
-		if _, err = tx.ExecContext(ctx, `INSERT INTO recovery_codes(id_hash) VALUES(?)`, hash); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO recovery_codes(id_hash,user_id) VALUES(?,?)`, hash, userID); err != nil {
 			return err
 		}
 	}
@@ -407,7 +498,11 @@ func (s *Store) SaveRecoveryCodes(ctx context.Context, hashes []string) error {
 }
 
 func (s *Store) ConsumeRecoveryCode(ctx context.Context, hash string, now time.Time) (bool, error) {
-	r, err := s.DB.ExecContext(ctx, `UPDATE recovery_codes SET used_at=? WHERE id_hash=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), hash)
+	return s.ConsumeRecoveryCodeForUser(ctx, LegacyAdminUserID, hash, now)
+}
+
+func (s *Store) ConsumeRecoveryCodeForUser(ctx context.Context, userID, hash string, now time.Time) (bool, error) {
+	r, err := s.DB.ExecContext(ctx, `UPDATE recovery_codes SET used_at=? WHERE id_hash=? AND user_id=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), hash, userID)
 	if err != nil {
 		return false, err
 	}
@@ -419,8 +514,23 @@ func (s *Store) Audit(ctx context.Context, action, detail string) error {
 	return insertAuditExec(ctx, s.DB, action, detail, time.Now().UTC())
 }
 
+// AuditEntry records a security event with optional actor attribution. It is
+// kept as a small convenience wrapper for mutations that cannot share a
+// transaction with their state change (for example, a failed notification
+// delivery or a host-initiated recovery action).
+func (s *Store) AuditEntry(ctx context.Context, entry AuditEntry) error {
+	return insertAuditEntryExec(ctx, s.DB, entry, time.Now().UTC())
+}
+
 func insertAuditExec(ctx context.Context, execer contextExecer, action, detail string, now time.Time) error {
-	if _, err := execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,created_at) VALUES(?,?,?)`, action, detail, now.UTC().Format(time.RFC3339Nano)); err != nil {
+	return insertAuditEntryExec(ctx, execer, AuditEntry{Action: action, Detail: detail}, now)
+}
+
+func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry AuditEntry, now time.Time) error {
+	if strings.TrimSpace(entry.Action) == "" {
+		return nil
+	}
+	if _, err := execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,created_at) VALUES(?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, now.UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
 	}
 	return nil
@@ -431,7 +541,7 @@ func insertAuditEntries(ctx context.Context, execer contextExecer, entries []Aud
 		if strings.TrimSpace(entry.Action) == "" {
 			continue
 		}
-		if err := insertAuditExec(ctx, execer, entry.Action, entry.Detail, now); err != nil {
+		if err := insertAuditEntryExec(ctx, execer, entry, now); err != nil {
 			return err
 		}
 	}

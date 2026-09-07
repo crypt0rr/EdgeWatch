@@ -1007,6 +1007,18 @@ func TestNotificationAPIIsWriteOnlyAndUsesOptimisticConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	legacyJob, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name:     "legacy-notification-job",
+		Schedule: "0 * * * *",
+		Timezone: "UTC",
+		Targets:  []string{"127.0.0.1"},
+		TCP:      &config.Protocol{Ports: "1", Mode: "connect"},
+		Timeout:  config.Duration(time.Minute),
+		Timing:   "balanced",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := httptest.NewServer(NewServer(a, s, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
 	defer h.Close()
 	jar, _ := cookiejar.New(nil)
@@ -1059,6 +1071,13 @@ func TestNotificationAPIIsWriteOnlyAndUsesOptimisticConcurrency(t *testing.T) {
 	}
 	if created.ID == "" || created.Revision != 1 || created.Source != "web" {
 		t.Fatalf("unexpected created destination: %#v", created)
+	}
+	storedLegacy, err := s.GetJob(ctx, legacyJob.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedLegacy.Job.NotificationDestinations == nil || len(storedLegacy.Job.NotificationDestinations) != 1 || storedLegacy.Job.NotificationDestinations[0] == created.ID {
+		t.Fatalf("new destination was opted into existing legacy job: %#v", storedLegacy.Job.NotificationDestinations)
 	}
 	var ciphertext []byte
 	if err := s.DB.QueryRow(`SELECT ciphertext FROM managed_notifications WHERE id=?`, created.ID).Scan(&ciphertext); err != nil {

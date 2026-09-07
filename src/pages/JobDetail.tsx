@@ -23,6 +23,7 @@ import {
   runJob,
   scanCycle,
   discardScanCycle,
+  getSession,
   scanDetail,
   scanHosts,
 } from '../api'
@@ -45,22 +46,25 @@ export function JobDetail() {
   const [actionBusy, setActionBusy] = useState('')
   const [dialog, setDialog] = useState<JobDialog | null>(null)
   const job = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id) })
+  const session = useQuery({ queryKey: ['session'], queryFn: getSession })
+  const canOperate = session.data?.role !== 'viewer'
+  const canReadScans = session.data?.role !== 'viewer'
   const scans = useQuery({
     queryKey: ['job-scans', id, scanOffset],
     queryFn: () => jobScans(id, scanOffset),
-    enabled: !!id,
+    enabled: !!id && canReadScans,
     refetchInterval: 10000,
   })
-  const cycle = useQuery({ queryKey: ['scan-cycle', id], queryFn: () => scanCycle(id), enabled: !!id, refetchInterval: 5000 })
+  const cycle = useQuery({ queryKey: ['scan-cycle', id], queryFn: () => scanCycle(id), enabled: !!id && canOperate, refetchInterval: 5000 })
   const detail = useQuery({
     queryKey: ['scan-detail', id, selectedScan, changeOffset],
     queryFn: () => scanDetail(id, selectedScan, changeOffset),
-    enabled: !!selectedScan,
+    enabled: !!selectedScan && canReadScans,
   })
   const results = useQuery({
     queryKey: ['scan-results', id, selectedScan, resultsOffset],
     queryFn: () => scanHosts(id, selectedScan, { offset: resultsOffset }),
-    enabled: !!selectedScan && showResults,
+    enabled: !!selectedScan && showResults && canReadScans,
   })
 
   if (job.isLoading) {
@@ -176,7 +180,7 @@ export function JobDetail() {
   // A successful poll that returns {cycle: null} is authoritative. Falling
   // back to the job payload in that case would keep a discarded/expired cycle
   // banner visible until the next full job refetch.
-  const activeCycle = cycle.data ? cycle.data.cycle : value.scan_cycle
+  const activeCycle = canOperate ? (cycle.data ? cycle.data.cycle : value.scan_cycle) : null
 
   return (
     <section className="page">
@@ -191,7 +195,7 @@ export function JobDetail() {
           </div>
           <p className="muted">Revision {value.revision} · Updated {new Date(value.updated_at).toLocaleString()}</p>
         </div>
-        <div className="heading-actions">
+        {canOperate && <div className="heading-actions">
           <button className="button secondary" onClick={run} disabled={value.archived || !!actionBusy}>
             <Play size={16} /> {actionBusy === 'run' ? 'Starting…' : 'Scan now'}
           </button>
@@ -199,7 +203,7 @@ export function JobDetail() {
             <Edit3 size={16} /> Edit
           </button>
           {value.archived ? <><button className="button secondary" onClick={restore} disabled={!!actionBusy}>{actionBusy === 'restore' ? 'Restoring…' : 'Restore'}</button><button className="button danger" onClick={() => { setActionError(''); setDialog('delete') }} disabled={!!actionBusy}>{actionBusy === 'delete' ? 'Deleting…' : 'Delete permanently'}</button></> : <button className="icon-button danger" aria-label="Archive job" onClick={() => { setActionError(''); setDialog('archive') }} disabled={!!actionBusy}><Archive size={17} /></button>}
-        </div>
+        </div>}
       </div>
       {actionError && <div className="form-error banner" role="alert">{actionError}</div>}
 
@@ -236,10 +240,10 @@ export function JobDetail() {
         </div>
       </div>
       {value.scan_estimate && <div className="notice" role="status">Estimated per run: {value.scan_estimate.probes.toLocaleString()} probes across {value.scan_estimate.hosts.toLocaleString()} hosts ({value.scan_estimate.nmap_invocations.toLocaleString()} Nmap process{value.scan_estimate.nmap_invocations === 1 ? '' : 'es'}, roughly {formatEstimateDuration(value.scan_estimate.estimated_seconds)}).{value.scan_estimate.unknown_dns ? ` DNS expansion may increase this estimate for ${value.scan_estimate.unknown_dns} name${value.scan_estimate.unknown_dns === 1 ? '' : 's'}.` : ''}</div>}
-      {activeCycle && <div className={activeCycle.status === 'stalled' ? 'form-error banner' : 'notice'} role="status"><strong>{activeCycle.status === 'paused' ? 'Broad scan paused safely.' : activeCycle.status === 'stalled' ? 'Broad scan stalled.' : 'Broad scan cycle active.'}</strong> {activeCycle.completed_units} of {activeCycle.total_units} work units and {activeCycle.completed_probes.toLocaleString()} of {activeCycle.total_probes.toLocaleString()} probes complete. {activeCycle.last_error && <span>{activeCycle.last_error}</span>} {(activeCycle.status === 'paused' || activeCycle.status === 'stalled') && <button className="button ghost" onClick={() => { setActionError(''); setDialog('discard-cycle') }} disabled={!!actionBusy}>Discard saved progress</button>}</div>}
+      {activeCycle && <div className={activeCycle.status === 'stalled' ? 'form-error banner' : 'notice'} role="status"><strong>{activeCycle.status === 'paused' ? 'Broad scan paused safely.' : activeCycle.status === 'stalled' ? 'Broad scan stalled.' : 'Broad scan cycle active.'}</strong> {activeCycle.completed_units} of {activeCycle.total_units} work units and {activeCycle.completed_probes.toLocaleString()} of {activeCycle.total_probes.toLocaleString()} probes complete. {activeCycle.last_error && <span>{activeCycle.last_error}</span>} {canOperate && (activeCycle.status === 'paused' || activeCycle.status === 'stalled') && <button className="button ghost" onClick={() => { setActionError(''); setDialog('discard-cycle') }} disabled={!!actionBusy}>Discard saved progress</button>}</div>}
 
       <div className="detail-columns">
-        <div className="panel">
+        {canReadScans && <div className="panel">
           <div className="panel-heading">
             <div>
               <h2>Recent scans</h2>
@@ -286,7 +290,7 @@ export function JobDetail() {
               {selectedScanCanBeBaseline && (
                 <div className="baseline-approval">
                   <span className="muted">This successful scan matches the current security scope.</span>
-                  <button className="button secondary" onClick={() => { setActionError(''); setDialog('approve') }} disabled={!!actionBusy}>{actionBusy === 'approve' ? 'Approving…' : 'Use as baseline'}</button>
+                  {canOperate && <button className="button secondary" onClick={() => { setActionError(''); setDialog('approve') }} disabled={!!actionBusy}>{actionBusy === 'approve' ? 'Approving…' : 'Use as baseline'}</button>}
                 </div>
               )}
               {detail.data.changes?.length ? (
@@ -308,7 +312,7 @@ export function JobDetail() {
               </div>}
             </div>
           )}
-        </div>
+        </div>}
 
         <div className="panel">
           <div className="panel-heading">
@@ -339,7 +343,7 @@ export function JobDetail() {
               </>
             )}
           </div>
-          <button className="button secondary" onClick={() => { setActionError(''); setDialog('reset') }} disabled={!!actionBusy}><RotateCcw size={16} /> {actionBusy === 'reset' ? 'Resetting…' : 'Reset baseline'}</button>
+          {canOperate && <button className="button secondary" onClick={() => { setActionError(''); setDialog('reset') }} disabled={!!actionBusy}><RotateCcw size={16} /> {actionBusy === 'reset' ? 'Resetting…' : 'Reset baseline'}</button>}
           {value.baseline.status === 'complete' && <Link className="button secondary explore-button" to={`/jobs/${id}/baseline`}><Server size={16} /> Explore baseline <span className="button-count">{value.baseline.host_count ?? 'hosts'}</span></Link>}
         </div>
       </div>

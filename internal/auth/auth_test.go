@@ -143,6 +143,50 @@ func TestConfirmPasswordUsesGenericErrorsAndRateLimit(t *testing.T) {
 	}
 }
 
+func TestSetupAndLoginRateLimitsReturnTypedError(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := NewManager(s)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/setup", nil)
+	request.RemoteAddr = "127.0.0.1:3210"
+	for i := 0; i < authFailureThreshold; i++ {
+		m.failed(request.RemoteAddr)
+	}
+	if err := m.SetupRequest(context.Background(), request, "invalid", "long enough password"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("setup rate-limit error = %v", err)
+	}
+
+	request.RemoteAddr = "127.0.0.1:3211"
+	for i := 0; i < authFailureThreshold; i++ {
+		m.failed(request.RemoteAddr)
+	}
+	if _, _, err := m.LoginAs(context.Background(), request, "admin", "long enough password", "", ""); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("login rate-limit error = %v", err)
+	}
+}
+
+func TestUnknownUserAttemptsConsumeLoginBudget(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := NewManager(s)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "127.0.0.1:3220"
+	for attempt := 0; attempt < authFailureThreshold; attempt++ {
+		if _, _, err := m.LoginAs(context.Background(), request, "missing-user", "wrong password", "", ""); err == nil {
+			t.Fatal("unknown user unexpectedly authenticated")
+		}
+	}
+	if _, _, err := m.LoginAs(context.Background(), request, "another-missing-user", "wrong password", "", ""); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("unknown user rate-limit error = %v", err)
+	}
+}
+
 func TestAuthLimiterBoundsRotatingSourcesAndExpiresEntries(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -282,5 +326,81 @@ func TestRecoveryCodeIsCaseInsensitiveAndSingleUse(t *testing.T) {
 	request.RemoteAddr = "127.0.0.1:1234"
 	if _, _, err := m.Login(ctx, request, "correct horse battery staple", "", plain[0]); err == nil {
 		t.Fatal("recovery code was reusable")
+	}
+}
+
+func TestLoginAsUserAndPasswordConfirmationAreScoped(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := NewManager(s)
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+	operatorHash, err := PasswordHash("operator password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operator, err := s.CreateUser(ctx, store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: operatorHash, Enabled: true}, store.AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "127.0.0.1:4444"
+	raw, loggedIn, err := m.LoginAs(ctx, request, "operator", "operator password", "", "")
+	if err != nil || raw == "" || loggedIn.ID != operator.ID || loggedIn.Role != store.RoleOperator {
+		t.Fatalf("operator login = %q %#v, err=%v", raw, loggedIn, err)
+	}
+	session, err := s.GetSession(ctx, digest(raw))
+	if err != nil || session.UserID != operator.ID {
+		t.Fatalf("session identity = %#v, err=%v", session, err)
+	}
+	if err := m.ConfirmPasswordForUser(ctx, request, operator.ID, "operator password"); err != nil {
+		t.Fatalf("operator password confirmation failed: %v", err)
+	}
+	if err := m.ConfirmPasswordForUser(ctx, request, operator.ID, "administrator password"); err == nil {
+		t.Fatal("administrator password unexpectedly confirmed operator account")
+	}
+	if _, _, err := m.LoginAs(ctx, request, "operator", "wrong password", "", ""); err == nil {
+		t.Fatal("wrong operator password accepted")
+	}
+	operator.Enabled = false
+	operator.UpdatedAt = time.Now().UTC()
+	if err := s.UpdateUser(ctx, operator, false, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: SessionCookie, Value: raw})
+	if _, ok := m.Authenticate(ctx, request); ok {
+		t.Fatal("disabled user session remained valid")
+	}
+}
+
+func TestEnsureSetupTokenHonorsAuthoritativeAdministratorUser(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	hash, err := PasswordHash("administrator password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateUser(ctx, store.User{Username: "managed-admin", DisplayName: "Managed Admin", Role: store.RoleAdministrator, PasswordHash: hash, Enabled: true}, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	token, err := NewManager(s).EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" {
+		t.Fatalf("setup token issued despite configured administrator: %q", token)
 	}
 }

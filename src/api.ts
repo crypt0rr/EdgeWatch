@@ -1,4 +1,4 @@
-import type { ActiveScan, BaselineHostsResponse, Change, GlobalHostsResponse, HostDetailResponse, Incident, Job, JobForm, Pagination, RdapResult, Scan, ScanSummary, Unit } from './types'
+import type { ActiveScan, BaselineHostsResponse, Change, GlobalHostsResponse, HostDetailResponse, Incident, Job, JobForm, Pagination, RdapResult, Scan, ScanSummary, Unit, NaabuOptions } from './types'
 
 export type NotificationDestination = {
   id: string
@@ -130,6 +130,20 @@ export const createNotificationDestination = (name: string, url: string, passwor
 export const updateNotificationDestination = (id: string, revision: number, name: string, password: string, options: { url?: string; enabled?: boolean } = {}) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ name, revision, password, ...options }) })
 export const deleteNotificationDestination = (id: string, revision: number, password: string) => api<void>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ revision, password }) })
 export const testNotificationDestination = (id: string) => api<{ sent: number }>(`/notifications/destinations/${encodeURIComponent(id)}/test`, { method: 'POST' })
+
+export type NumericBound = { min: number; max: number }
+export type ScannerProfileDefinition = { engine: string; naabu: NaabuOptions; naabu_args?: string[]; nmap_args?: string[]; enrichment_args?: string[]; nse_profile?: string; nse_args?: Record<string, string>; operator_adjustable?: string[]; operator_bounds?: Record<string, NumericBound>; description?: string }
+export type ScannerProfile = { id: string; name: string; description?: string; built_in: boolean; archived: boolean; revision: number; created_by?: string; updated_by?: string; created_at?: string; updated_at?: string; definition: ScannerProfileDefinition }
+export type ScannerProfilePayload = { name: string; description?: string; engine: string; naabu?: NaabuOptions; naabu_args?: string[]; nmap_args?: string[]; enrichment_args?: string[]; nse_profile?: string; nse_args?: Record<string, string>; operator_adjustable?: string[]; operator_bounds?: Record<string, NumericBound>; password?: string; revision?: number }
+export type ScannerCapabilities = { engines: string[]; nmap: { path: string; version: string; available?: boolean }; naabu: { path: string; version: string; available: boolean; syn_supported: boolean } }
+export const scannerCapabilities = () => api<ScannerCapabilities>('/scanner/capabilities')
+export const listScannerProfiles = (includeArchived = false) => api<{ profiles: ScannerProfile[] }>(`/scanner-profiles?include_archived=${includeArchived}`)
+export const getScannerProfile = (id: string) => api<ScannerProfile>(`/scanner-profiles/${encodeURIComponent(id)}`)
+export const createScannerProfile = (value: ScannerProfilePayload) => api<ScannerProfile>('/scanner-profiles', { method: 'POST', body: JSON.stringify(value) })
+export const updateScannerProfile = (id: string, value: ScannerProfilePayload, revision: number) => api<ScannerProfile>(`/scanner-profiles/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...value, revision }) })
+export const archiveScannerProfile = (id: string, revision: number, password: string) => api<void>(`/scanner-profiles/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ revision, password }) })
+export const restoreScannerProfile = (id: string, revision: number, password: string) => api<void>(`/scanner-profiles/${encodeURIComponent(id)}/restore`, { method: 'POST', body: JSON.stringify({ revision, password }) })
+export const validateScannerProfile = (value: ScannerProfilePayload) => api<{ valid: boolean; preview: { executable: string; args: string[] }[] }>('/scanner-profiles/validate', { method: 'POST', body: JSON.stringify(value) })
 
 export type UserSummary = { id: string; username: string; display_name: string; role: Role; enabled: boolean; pending?: boolean; totp_enabled: boolean; created_at: string; updated_at: string; last_login_at?: string }
 export const listUsers = () => api<{ users: UserSummary[] }>('/users')

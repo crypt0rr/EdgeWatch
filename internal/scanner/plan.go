@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -12,11 +13,17 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
-// WorkUnit is one independently checkpointable Nmap invocation. Targets are
-// repeated in the plan deliberately: a plan is persisted as a self-contained
+// WorkUnit is one independently checkpointable scanner invocation. Targets
+// are repeated in the plan deliberately: a plan is persisted as a self-contained
 // immutable snapshot so it can resume after a process restart or DNS change.
 type WorkUnit struct {
-	Sequence  int              `json:"sequence"`
+	Sequence int `json:"sequence"`
+	// Engine and Phase identify alternate scanner orchestration without
+	// changing the legacy Nmap unit shape. A Naabu pipeline starts with one
+	// pinned full-range discovery unit per address batch; deterministic Nmap
+	// enrichment units are appended after committed discovery checkpoints.
+	Engine    string           `json:"engine,omitempty"`
+	Phase     string           `json:"phase,omitempty"`
 	Protocol  string           `json:"protocol"`
 	Family    int              `json:"family"`
 	Targets   []ResolvedTarget `json:"targets"`
@@ -53,8 +60,10 @@ const (
 	// maxWorkUnitProbes keeps one invocation small enough to checkpoint. It is
 	// an execution guard, not a deployment budget; the latter remains enforced
 	// by App.CheckScanWorkBudget.
-	maxWorkUnitProbes int64 = 65_536
-	maxWorkUnitPorts        = 4_096
+	MaxWorkUnitProbes int64 = 65_536
+	MaxWorkUnitPorts        = 4_096
+	maxWorkUnitProbes       = MaxWorkUnitProbes
+	maxWorkUnitPorts        = MaxWorkUnitPorts
 	minRetryPortChunk       = 256
 )
 
@@ -74,6 +83,9 @@ func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 	targets, err := n.resolve(ctx, job)
 	if err != nil {
 		return WorkPlan{}, err
+	}
+	if job.TCP != nil && job.TCP.Engine == config.EngineNaabuNmap {
+		return n.planNaabuPipeline(ctx, job, targets)
 	}
 	plan := WorkPlan{CreatedAt: time.Now().UTC(), Job: job, Targets: exportResolvedTargets(targets), DNS: map[string][]string{}}
 	for _, target := range targets {
@@ -160,9 +172,147 @@ func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 	return plan, nil
 }
 
+// planNaabuPipeline resolves the complete target set once and creates one
+// checkpointable discovery unit per Naabu address batch. Nmap enrichment and
+// optional UDP units are deliberately generated only after discovery
+// checkpoints are committed by the store; this keeps the persisted plan
+// phase-aware and makes a restart unable to repeat a completed full-range
+// discovery pass.
+func (n *Nmap) planNaabuPipeline(ctx context.Context, job config.Job, targets []resolvedTarget) (WorkPlan, error) {
+	if job.TCP == nil {
+		return WorkPlan{}, fmt.Errorf("naabu pipeline requires tcp")
+	}
+	options := *job.TCP.Naabu
+	config.ApplyNaabuDefaultsForScanner(&options)
+	if err := config.ValidateNaabuOptions(options); err != nil {
+		return WorkPlan{}, fmt.Errorf("tcp naabu: %w", err)
+	}
+	addresses := uniqueAddresses(targets)
+	if len(addresses) == 0 {
+		return WorkPlan{}, errors.New("no effective targets")
+	}
+	if err := ctx.Err(); err != nil {
+		return WorkPlan{}, err
+	}
+	plan := WorkPlan{CreatedAt: time.Now().UTC(), Job: job, Targets: exportResolvedTargets(targets), DNS: map[string][]string{}}
+	for _, target := range targets {
+		if target.Hostname {
+			plan.DNS[target.Name] = append([]string(nil), target.Addresses...)
+		}
+		plan.Scopes = append(plan.Scopes, model.Scope{Target: target.Name, Protocol: "tcp", Ports: naabuFullPortExpression, ServiceDetection: job.TCP.ServiceDetection})
+		if job.UDP != nil {
+			plan.Scopes = append(plan.Scopes, model.Scope{Target: target.Name, Protocol: "udp", Ports: job.UDP.Ports, ServiceDetection: job.UDP.ServiceDetection})
+		}
+	}
+	batchSize := options.AddressBatchSize
+	if batchSize < 1 {
+		batchSize = 16
+	}
+	// Naabu can accept mixed address families, but keeping each checkpoint
+	// family-homogeneous makes the immutable plan truthful and lets the
+	// enrichment phase render deterministic -4/-6 arguments for custom
+	// profiles. Preserve the resolver's sorted order within each family.
+	addressesByFamily := map[int][]string{4: {}, 6: {}}
+	for _, address := range addresses {
+		family := 4
+		if net.ParseIP(address).To4() == nil {
+			family = 6
+		}
+		addressesByFamily[family] = append(addressesByFamily[family], address)
+	}
+	for _, family := range []int{4, 6} {
+		familyAddresses := addressesByFamily[family]
+		for start := 0; start < len(familyAddresses); start += batchSize {
+			if err := ctx.Err(); err != nil {
+				return WorkPlan{}, err
+			}
+			end := min(start+batchSize, len(familyAddresses))
+			batch := append([]string(nil), familyAddresses[start:end]...)
+			unitTargets := subsetResolvedTargets(targets, batch)
+			// Discovery probes are known exactly. Nmap enrichment is data-dependent
+			// and is added transactionally once this unit's JSONL checkpoint exists;
+			// UDP units are added after all discovery units so the phase order is
+			// discovery → enrichment → UDP.
+			probes := int64(len(batch)) * 65535
+			plan.Units = append(plan.Units, WorkUnit{
+				Sequence:  len(plan.Units),
+				Engine:    config.EngineNaabuNmap,
+				Phase:     "discovery",
+				Protocol:  "tcp",
+				Family:    family,
+				Targets:   exportResolvedTargets(unitTargets),
+				Addresses: batch,
+				Ports:     naabuFullPortExpression,
+				PortCount: 65535,
+				Probes:    probes,
+			})
+			plan.TotalProbes += probes
+		}
+	}
+	plan.TotalUnits = len(plan.Units)
+	return plan, nil
+}
+
+func familyForBatch(addresses []string) int {
+	if len(addresses) > 0 && net.ParseIP(addresses[0]).To4() == nil {
+		return 6
+	}
+	return 4
+}
+
+func phaseLabel(phase string) string {
+	switch phase {
+	case "discovery":
+		return "tcp discovery"
+	case "pipeline":
+		return "tcp pipeline"
+	default:
+		return phase
+	}
+}
+
 // ScanWorkUnit executes exactly one planned Nmap invocation and returns a
 // fragment that can be committed independently by the application.
 func (n *Nmap) ScanWorkUnit(ctx context.Context, job config.Job, unit WorkUnit, report ProgressReporter) (model.Snapshot, error) {
+	if unit.Engine == config.EngineNaabuNmap || (unit.Engine == "" && job.TCP != nil && job.TCP.Engine == config.EngineNaabuNmap && (unit.Phase == "" || unit.Phase == "pipeline")) {
+		started := time.Now().UTC()
+		emit := func(progress Progress) {
+			if progress.ElapsedSeconds <= 0 {
+				progress.ElapsedSeconds = int64(time.Since(started).Seconds())
+			}
+			reportProgress(report, progress)
+		}
+		phase := unit.Phase
+		if phase == "" {
+			phase = "pipeline"
+		}
+		if phase != "pipeline" && phase != "discovery" {
+			return model.Snapshot{}, fmt.Errorf("unsupported Naabu work-unit phase %q", phase)
+		}
+		emit(Progress{StartedAt: started, Phase: phaseLabel(phase), Protocol: "tcp", TotalProbes: unit.Probes, TotalInvocations: 1, CurrentInvocation: 1, TotalBatches: 1, CurrentUnit: unit.Sequence + 1, TotalUnits: 1, UnitPorts: naabuFullPortExpression, UnitAddresses: len(unit.Addresses), ProcessAlive: true})
+		runReport := func(progress Progress) {
+			progress.StartedAt = started
+			progress.CurrentUnit = unit.Sequence + 1
+			progress.TotalUnits = 1
+			if progress.TotalProbes <= 0 {
+				progress.TotalProbes = unit.Probes
+			}
+			emit(progress)
+		}
+		var result model.Snapshot
+		var err error
+		if phase == "discovery" {
+			result, err = n.scanNaabuDiscoveryResolved(ctx, job, importResolvedTargets(unit.Targets), runReport)
+		} else {
+			result, err = n.scanNaabuPipelineResolved(ctx, job, importResolvedTargets(unit.Targets), runReport)
+		}
+		if err != nil {
+			emit(Progress{StartedAt: started, Phase: "failed", Protocol: "tcp", TotalProbes: unit.Probes, CurrentUnit: unit.Sequence + 1, TotalUnits: 1, UnitAddresses: len(unit.Addresses), ProcessAlive: false})
+			return model.Snapshot{}, err
+		}
+		emit(Progress{StartedAt: started, Phase: phase + " complete", Protocol: "tcp", TotalProbes: unit.Probes, CompletedProbes: unit.Probes, CompletedInvocations: 1, TotalInvocations: 1, CurrentUnit: unit.Sequence + 1, TotalUnits: 1, UnitPorts: naabuFullPortExpression, UnitAddresses: len(unit.Addresses), ProcessAlive: false})
+		return result, nil
+	}
 	pc, ok := protocolForJob(job, unit.Protocol)
 	if !ok {
 		return model.Snapshot{}, fmt.Errorf("%s scan is not enabled", unit.Protocol)
@@ -183,7 +333,11 @@ func (n *Nmap) ScanWorkUnit(ctx context.Context, job config.Job, unit WorkUnit, 
 	emit(Progress{StartedAt: started, TotalProbes: unit.Probes, TotalInvocations: 1, Phase: unit.Protocol + " scanning", Protocol: unit.Protocol, TotalBatches: 1, CurrentUnit: unit.Sequence + 1, TotalUnits: 1, UnitPorts: unit.Ports, UnitAddresses: len(unit.Addresses), ProcessAlive: true})
 	lastOutput := ""
 	lastFraction := 0.0
-	result, err := n.scanProtocolBatchDetailedProgress(ctx, importResolvedTargets(unit.Targets), unit.Protocol, pc, job.Timing, job.AssumesAlive(), nil, func(update invocationProgress) {
+	template := pc.NmapArgs
+	if unit.Phase == "enrichment" {
+		template = pc.EnrichmentArgs
+	}
+	result, err := n.scanProtocolBatchDetailedProgressWithTemplate(ctx, importResolvedTargets(unit.Targets), unit.Protocol, pc, job.Timing, job.AssumesAlive(), template, nil, func(update invocationProgress) {
 		lastOutput = update.Output
 		if update.Fraction > lastFraction {
 			lastFraction = update.Fraction
@@ -290,6 +444,12 @@ func MergeWorkSnapshots(plan WorkPlan, fragments []model.Snapshot) model.Snapsho
 		// collapse those observations before restoring the configured scope so
 		// consumers see one TCP and one UDP record per effective host.
 		dedupeHostObservation(&result.Hosts[hostIndex])
+		// Resumable Naabu scans merge discovery and enrichment as separate
+		// checkpoints. Reconstruct the same disagreement evidence produced by
+		// the direct pipeline after those fragments have been coalesced. The
+		// evidence remains descriptive only; markNaabuDisagreements never adds
+		// ports to Units or the comparison hash.
+		markMergedNaabuDisagreements(&result.Hosts[hostIndex])
 		for protocolIndex := range result.Hosts[hostIndex].Protocols {
 			protocol := &result.Hosts[hostIndex].Protocols[protocolIndex]
 			if scope, ok := scopeByProtocol[protocol.Protocol]; ok {
@@ -303,6 +463,28 @@ func MergeWorkSnapshots(plan WorkPlan, fragments []model.Snapshot) model.Snapsho
 	}
 	result.Normalize()
 	return result
+}
+
+func markMergedNaabuDisagreements(host *model.HostObservation) {
+	if host == nil {
+		return
+	}
+	seen := make(map[int]struct{})
+	discovered := make([]int, 0)
+	for _, protocol := range host.Protocols {
+		if protocol.Protocol != "tcp" || protocol.DiscoveryEngine != "naabu" {
+			continue
+		}
+		for _, port := range protocol.DiscoveredPorts {
+			if _, exists := seen[port.Port]; exists {
+				continue
+			}
+			seen[port.Port] = struct{}{}
+			discovered = append(discovered, port.Port)
+		}
+	}
+	sort.Ints(discovered)
+	markNaabuDisagreements(host, discovered)
 }
 
 func uniqueSorted(values []string) []string {
@@ -341,6 +523,13 @@ func SplitWorkUnit(unit WorkUnit) (WorkUnit, WorkUnit, bool) {
 		first.Probes = scaleWorkUnitProbes(unit, len(firstAddresses), unit.PortCount)
 		second.Probes = scaleWorkUnitProbes(unit, len(secondAddresses), unit.PortCount)
 		return first, second, true
+	}
+	// A Naabu unit's port field is the mandatory full-range discovery scope;
+	// splitting it would silently turn a retry into a partial discovery pass.
+	// Keep a single difficult address intact and let the cycle retry/stall
+	// policy surface the issue for operator intervention.
+	if unit.Engine == config.EngineNaabuNmap {
+		return WorkUnit{}, WorkUnit{}, false
 	}
 	ports, err := config.ParsePorts(unit.Ports)
 	if err != nil || len(ports) <= minRetryPortChunk {

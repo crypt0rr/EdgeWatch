@@ -60,16 +60,30 @@ type ProtocolObservation struct {
 	ScannedPorts     string            `json:"scanned_ports"`
 	ScannedPortCount int               `json:"scanned_port_count"`
 	ServiceDetection bool              `json:"service_detection"`
+	DiscoveryEngine  string            `json:"discovery_engine,omitempty"`
+	DiscoveredPorts  []PortObservation `json:"discovered_ports,omitempty"`
+	UnconfirmedPorts []PortObservation `json:"unconfirmed_ports,omitempty"`
 	Ports            []PortObservation `json:"ports,omitempty"`
 	StateSummaries   []StateSummary    `json:"state_summaries,omitempty"`
+	NSEProfile       string            `json:"nse_profile,omitempty"`
+	NSEArgs          map[string]string `json:"nse_args,omitempty"`
+	NSEOutput        []string          `json:"nse_output,omitempty"`
+	// CommandFingerprint identifies the fixed executable and sanitized argv
+	// template used for this protocol. It is diagnostic metadata only and is
+	// intentionally excluded from Snapshot.Hash through the host exclusion.
+	CommandFingerprint string `json:"command_fingerprint,omitempty"`
 }
 
 type PortObservation struct {
-	Port      int                 `json:"port"`
-	State     string              `json:"state"`
-	Reason    string              `json:"reason,omitempty"`
-	ReasonTTL int                 `json:"reason_ttl,omitempty"`
-	Service   *ServiceObservation `json:"service,omitempty"`
+	Port      int    `json:"port"`
+	State     string `json:"state"`
+	Reason    string `json:"reason,omitempty"`
+	ReasonTTL int    `json:"reason_ttl,omitempty"`
+	// Verification distinguishes a Naabu discovery from the Nmap result that
+	// is authoritative for baselines. Values are discovered, confirmed, or
+	// unconfirmed; an empty value preserves legacy snapshots.
+	Verification string              `json:"verification,omitempty"`
+	Service      *ServiceObservation `json:"service,omitempty"`
 }
 
 type ServiceObservation struct {
@@ -111,16 +125,24 @@ type Snapshot struct {
 }
 
 type Scan struct {
-	ID          string    `json:"id"`
-	JobID       string    `json:"job_id,omitempty"`
-	Job         string    `json:"job"`
-	JobRevision int64     `json:"job_revision,omitempty"`
-	StartedAt   time.Time `json:"started_at"`
-	FinishedAt  time.Time `json:"finished_at"`
-	Status      string    `json:"status"`
-	Error       string    `json:"error,omitempty"`
-	NmapVersion string    `json:"nmap_version,omitempty"`
-	ConfigHash  string    `json:"config_hash"`
+	ID                     string    `json:"id"`
+	JobID                  string    `json:"job_id,omitempty"`
+	Job                    string    `json:"job"`
+	JobRevision            int64     `json:"job_revision,omitempty"`
+	StartedAt              time.Time `json:"started_at"`
+	FinishedAt             time.Time `json:"finished_at"`
+	Status                 string    `json:"status"`
+	Error                  string    `json:"error,omitempty"`
+	NmapVersion            string    `json:"nmap_version,omitempty"`
+	ScannerEngine          string    `json:"scanner_engine,omitempty"`
+	ScannerProfileID       string    `json:"scanner_profile_id,omitempty"`
+	ScannerProfileRevision int64     `json:"scanner_profile_revision,omitempty"`
+	NaabuVersion           string    `json:"naabu_version,omitempty"`
+	DiscoveryPorts         int       `json:"discovery_ports,omitempty"`
+	ConfirmedPorts         int       `json:"confirmed_ports,omitempty"`
+	DiscoveryDurationMS    int64     `json:"discovery_duration_ms,omitempty"`
+	EnrichmentDurationMS   int64     `json:"enrichment_duration_ms,omitempty"`
+	ConfigHash             string    `json:"config_hash"`
 	// Cycle fields describe a resumable broad-scan attempt. They are additive
 	// metadata and never participate in snapshot comparison or hashing.
 	CycleID         string `json:"cycle_id,omitempty"`
@@ -145,27 +167,35 @@ type Scan struct {
 // snapshots remain available through the scan detail/results endpoints and are
 // intentionally not loaded for paginated list responses.
 type ScanSummary struct {
-	ID                 string    `json:"id"`
-	JobID              string    `json:"job_id,omitempty"`
-	Job                string    `json:"job"`
-	JobRevision        int64     `json:"job_revision,omitempty"`
-	StartedAt          time.Time `json:"started_at"`
-	FinishedAt         time.Time `json:"finished_at"`
-	Status             string    `json:"status"`
-	Error              string    `json:"error,omitempty"`
-	NmapVersion        string    `json:"nmap_version,omitempty"`
-	ConfigHash         string    `json:"config_hash"`
-	CycleID            string    `json:"cycle_id,omitempty"`
-	CycleAttempt       int       `json:"cycle_attempt,omitempty"`
-	CycleStatus        string    `json:"cycle_status,omitempty"`
-	Resumable          bool      `json:"resumable,omitempty"`
-	CompletedProbes    int64     `json:"completed_probes,omitempty"`
-	TotalProbes        int64     `json:"total_probes,omitempty"`
-	CompletedUnits     int       `json:"completed_units,omitempty"`
-	TotalUnits         int       `json:"total_units,omitempty"`
-	NoProgressTries    int       `json:"no_progress_attempts,omitempty"`
-	BaselineScanID     string    `json:"baseline_scan_id,omitempty"`
-	BaselineConfigHash string    `json:"baseline_config_hash,omitempty"`
+	ID                     string    `json:"id"`
+	JobID                  string    `json:"job_id,omitempty"`
+	Job                    string    `json:"job"`
+	JobRevision            int64     `json:"job_revision,omitempty"`
+	StartedAt              time.Time `json:"started_at"`
+	FinishedAt             time.Time `json:"finished_at"`
+	Status                 string    `json:"status"`
+	Error                  string    `json:"error,omitempty"`
+	NmapVersion            string    `json:"nmap_version,omitempty"`
+	ScannerEngine          string    `json:"scanner_engine,omitempty"`
+	ScannerProfileID       string    `json:"scanner_profile_id,omitempty"`
+	ScannerProfileRevision int64     `json:"scanner_profile_revision,omitempty"`
+	NaabuVersion           string    `json:"naabu_version,omitempty"`
+	DiscoveryPorts         int       `json:"discovery_ports,omitempty"`
+	ConfirmedPorts         int       `json:"confirmed_ports,omitempty"`
+	DiscoveryDurationMS    int64     `json:"discovery_duration_ms,omitempty"`
+	EnrichmentDurationMS   int64     `json:"enrichment_duration_ms,omitempty"`
+	ConfigHash             string    `json:"config_hash"`
+	CycleID                string    `json:"cycle_id,omitempty"`
+	CycleAttempt           int       `json:"cycle_attempt,omitempty"`
+	CycleStatus            string    `json:"cycle_status,omitempty"`
+	Resumable              bool      `json:"resumable,omitempty"`
+	CompletedProbes        int64     `json:"completed_probes,omitempty"`
+	TotalProbes            int64     `json:"total_probes,omitempty"`
+	CompletedUnits         int       `json:"completed_units,omitempty"`
+	TotalUnits             int       `json:"total_units,omitempty"`
+	NoProgressTries        int       `json:"no_progress_attempts,omitempty"`
+	BaselineScanID         string    `json:"baseline_scan_id,omitempty"`
+	BaselineConfigHash     string    `json:"baseline_config_hash,omitempty"`
 }
 
 // ActiveScan describes a scan that has acquired its lease and is currently
@@ -187,6 +217,13 @@ type ActiveScan struct {
 	ProgressPercent         int       `json:"progress_percent"`
 	Phase                   string    `json:"phase,omitempty"`
 	Protocol                string    `json:"protocol,omitempty"`
+	Scanner                 string    `json:"scanner,omitempty"`
+	ScannerProfileID        string    `json:"scanner_profile_id,omitempty"`
+	ScannerProfileRevision  int64     `json:"scanner_profile_revision,omitempty"`
+	DiscoveryPortsFound     int       `json:"discovery_ports_found,omitempty"`
+	DiscoveryAddresses      int       `json:"discovery_addresses,omitempty"`
+	DiscoveryDurationMS     int64     `json:"discovery_duration_ms,omitempty"`
+	EnrichmentDurationMS    int64     `json:"enrichment_duration_ms,omitempty"`
 	CurrentInvocation       int64     `json:"current_invocation,omitempty"`
 	TotalBatches            int64     `json:"total_batches,omitempty"`
 	ProcessProgressPercent  int       `json:"process_progress_percent,omitempty"`
@@ -371,6 +408,15 @@ func (s *Snapshot) Normalize() {
 		})
 		for j := range host.Protocols {
 			protocol := &host.Protocols[j]
+			sort.Strings(protocol.NSEOutput)
+			for _, ports := range []*[]PortObservation{&protocol.Ports, &protocol.DiscoveredPorts, &protocol.UnconfirmedPorts} {
+				sort.Slice(*ports, func(a, b int) bool {
+					if (*ports)[a].Port == (*ports)[b].Port {
+						return (*ports)[a].State < (*ports)[b].State
+					}
+					return (*ports)[a].Port < (*ports)[b].Port
+				})
+			}
 			sort.Slice(protocol.Ports, func(a, b int) bool { return protocol.Ports[a].Port < protocol.Ports[b].Port })
 			for k := range protocol.Ports {
 				if protocol.Ports[k].Service != nil {

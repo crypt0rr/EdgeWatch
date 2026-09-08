@@ -1,0 +1,265 @@
+package scanner
+
+import (
+	"context"
+	"net"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/config"
+)
+
+func TestNaabuArgsUseFixedFullRangeAndDiscoveryPolicy(t *testing.T) {
+	options := config.NaabuOptions{ScanType: "connect", Rate: 1000, Workers: 25, Retries: 3, TimeoutMS: 1000, WarmUpSeconds: 2, Verify: true}
+	withDiscovery := naabuArgs(options, "/tmp/targets", false)
+	for _, expected := range []string{"-list", "/tmp/targets", "-p", "-", "-json", "-silent", "-no-stdin", "-disable-update-check", "-scan-type", "c", "-verify", "-with-host-discovery"} {
+		if !slices.Contains(withDiscovery, expected) {
+			t.Fatalf("Naabu args omitted %q: %v", expected, withDiscovery)
+		}
+	}
+	if slices.Contains(withDiscovery, "-skip-host-discovery") {
+		t.Fatalf("host discovery was disabled unexpectedly: %v", withDiscovery)
+	}
+	withoutDiscovery := naabuArgs(options, "/tmp/targets", true)
+	if !slices.Contains(withoutDiscovery, "-skip-host-discovery") || slices.Contains(withoutDiscovery, "-with-host-discovery") {
+		t.Fatalf("assume_alive policy was not rendered: %v", withoutDiscovery)
+	}
+}
+
+func TestNaabuProfilePlaceholdersRenderManagedArguments(t *testing.T) {
+	options := config.NaabuOptions{ScanType: "connect", Rate: 1000, Workers: 25, Retries: 3, TimeoutMS: 1000, WarmUpSeconds: 2, Verify: true}
+	template := []string{config.PlaceholderTargetsFile, config.PlaceholderPorts, config.PlaceholderStructuredOutput, config.PlaceholderHostDiscovery, "-verbose"}
+	args := naabuArgsWithTemplate(options, "/tmp/targets", false, template)
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, "{targets_file}") || strings.Contains(joined, "{ports}") || strings.Contains(joined, "{structured_output}") {
+		t.Fatalf("placeholder leaked into Naabu command: %v", args)
+	}
+	count := func(want string) int {
+		var total int
+		for _, value := range args {
+			if value == want {
+				total++
+			}
+		}
+		return total
+	}
+	if count("-list") != 1 || count("-p") != 1 || count("-json") != 1 || !strings.Contains(joined, "-with-host-discovery") {
+		t.Fatalf("Naabu placeholders were not rendered exactly once: %v", args)
+	}
+}
+
+func TestNaabuCustomProfileKeepsHostDiscoveryDefaultWhenOmitted(t *testing.T) {
+	options := config.NaabuOptions{ScanType: "connect", Rate: 1000, Workers: 25, Retries: 3, TimeoutMS: 1000, WarmUpSeconds: 2, Verify: true}
+	template := []string{config.PlaceholderTargetsFile, config.PlaceholderPorts, config.PlaceholderStructuredOutput}
+	args := naabuArgsWithTemplate(options, "/tmp/targets", false, template)
+	if !slices.Contains(args, "-with-host-discovery") {
+		t.Fatalf("custom Naabu profile omitted host-discovery default: %v", args)
+	}
+	if slices.Contains(args, "-skip-host-discovery") {
+		t.Fatalf("custom Naabu profile unexpectedly skipped host discovery: %v", args)
+	}
+}
+
+func TestParseNaabuJSONRejectsMalformedAndOversizedLines(t *testing.T) {
+	if _, err := parseNaabuJSON([]byte(`{"ip":"192.0.2.1","port":22}`)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := parseNaabuJSON([]byte(`{"ip":`)); err == nil {
+		t.Fatal("malformed Naabu JSON was accepted")
+	}
+	if _, err := parseNaabuJSON([]byte(strings.Repeat("x", 1<<20))); err == nil {
+		t.Fatal("oversized Naabu JSON line was accepted")
+	}
+}
+
+func TestNaabuPipelineKeepsDiscoveryEvidenceOutOfUnits(t *testing.T) {
+	dir := t.TempDir()
+	naabuPath := filepath.Join(dir, "naabu")
+	if err := os.WriteFile(naabuPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nmapPath := filepath.Join(dir, "nmap")
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+sampleXML+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := NewWithNaabu(nmapPath, naabuPath)
+	job := config.NormalizeJob(config.Job{
+		Name: "pipeline", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Mode: "syn", ServiceDetection: true, Naabu: &config.NaabuOptions{ScanType: "connect", Verify: true}},
+	})
+	snapshot, err := n.Scan(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Units) != 1 || len(snapshot.Units[0].Ports) != 1 || snapshot.Units[0].Ports[0].Port != 22 {
+		t.Fatalf("unexpected authoritative units: %#v", snapshot.Units)
+	}
+	if len(snapshot.Hosts) != 1 || len(snapshot.Hosts[0].Protocols) != 1 {
+		t.Fatalf("unexpected host evidence: %#v", snapshot.Hosts)
+	}
+	protocol := snapshot.Hosts[0].Protocols[0]
+	if len(protocol.DiscoveredPorts) != 1 || protocol.DiscoveredPorts[0].Verification != "discovered" || len(protocol.Ports) != 1 || protocol.Ports[0].Verification != "confirmed" {
+		t.Fatalf("discovery/confirmation evidence was not merged: %#v", protocol)
+	}
+}
+
+func TestNaabuPipelinePreservesDistinctDNSConfirmationPorts(t *testing.T) {
+	dir := t.TempDir()
+	naabuPath := filepath.Join(dir, "naabu")
+	naabuScript := "#!/bin/sh\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}' '{\"ip\":\"192.0.2.2\",\"port\":443,\"protocol\":\"tcp\"}'\n"
+	if err := os.WriteFile(naabuPath, []byte(naabuScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nmapPath := filepath.Join(dir, "nmap")
+	nmapScript := `#!/bin/sh
+case "$*" in
+  *"-p 22"*) printf '%s' '<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>' ;;
+  *"-p 443"*) printf '%s' '<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.2" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open" reason="syn-ack"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>' ;;
+esac
+`
+	if err := os.WriteFile(nmapPath, []byte(nmapScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := NewWithNaabu(nmapPath, naabuPath)
+	n.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("192.0.2.2"), net.ParseIP("192.0.2.1")}}
+	job := config.NormalizeJob(config.Job{
+		Name: "dns-pipeline", Targets: []string{"edge.example"}, MaxExpandedHosts: 2,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Mode: "syn", Naabu: &config.NaabuOptions{ScanType: "connect"}},
+	})
+	snapshot, err := n.Scan(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Units) != 1 || snapshot.Units[0].Target != "edge.example" || len(snapshot.Units[0].Ports) != 2 {
+		t.Fatalf("DNS aggregate lost confirmed ports: %#v", snapshot.Units)
+	}
+	for _, port := range snapshot.Units[0].Ports {
+		if port.State != "open" || len(port.Evidence) != 1 {
+			t.Fatalf("unexpected aggregate port evidence: %#v", port)
+		}
+		if port.Port == 22 && port.Evidence[0] != "192.0.2.1" {
+			t.Fatalf("port 22 evidence = %#v", port)
+		}
+		if port.Port == 443 && port.Evidence[0] != "192.0.2.2" {
+			t.Fatalf("port 443 evidence = %#v", port)
+		}
+	}
+	if len(snapshot.Hosts) != 2 {
+		t.Fatalf("DNS host observations = %#v", snapshot.Hosts)
+	}
+	for _, host := range snapshot.Hosts {
+		if len(host.Protocols) != 1 || len(host.Protocols[0].Ports) != 1 || len(host.Protocols[0].DiscoveredPorts) != 1 {
+			t.Fatalf("per-address DNS evidence = %#v", host)
+		}
+	}
+}
+
+func TestNaabuPipelineWithNoDiscoveriesCompletesFullCoverage(t *testing.T) {
+	dir := t.TempDir()
+	naabuPath := filepath.Join(dir, "naabu")
+	if err := os.WriteFile(naabuPath, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := NewWithNaabu(filepath.Join(dir, "missing-nmap"), naabuPath)
+	job := config.NormalizeJob(config.Job{
+		Name: "empty", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{ScanType: "connect"}},
+	})
+	snapshot, err := n.Scan(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Units) != 1 || len(snapshot.Units[0].Ports) != 0 || len(snapshot.Hosts) != 1 {
+		t.Fatalf("empty full-range scan was not successful: %#v", snapshot)
+	}
+	protocol := snapshot.Hosts[0].Protocols[0]
+	if protocol.ScannedPortCount != 65535 || len(protocol.StateSummaries) != 1 || protocol.StateSummaries[0].Count != 65535 {
+		t.Fatalf("full-range non-open summary missing: %#v", protocol)
+	}
+}
+
+func TestNaabuResultAddressNormalization(t *testing.T) {
+	if got := normalizeAddress(net.ParseIP("2001:0db8::1").String()); got != "2001:db8::1" {
+		t.Fatalf("normalized address = %q", got)
+	}
+}
+
+func TestNaabuVersionReadsDiagnosticOutput(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "naabu")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' '[INF] Current Version: 2.6.1' >&2\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if got := NewWithNaabu("missing-nmap", path).NaabuVersion(context.Background()); got != "2.6.1" {
+		t.Fatalf("Naabu version = %q, want 2.6.1", got)
+	}
+}
+
+func TestRunNaabuReportsOutputAndHeartbeat(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "naabu")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nprintf '%s\\n' 'working' >&2\nsleep 2\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := NewWithNaabu("missing-nmap", path)
+	options := config.BuiltinNaabuProfile().Naabu
+	updates := make(chan invocationProgress, 32)
+	results, _, err := n.runNaabu(context.Background(), options, nil, []string{"192.0.2.1"}, true, func(update invocationProgress) {
+		select {
+		case updates <- update:
+		default:
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 || results[0].Port != 22 {
+		t.Fatalf("Naabu result = %#v", results)
+	}
+	seenOutput, seenAlive, seenTerminal := false, false, false
+	for {
+		select {
+		case update := <-updates:
+			if update.Output == "working" {
+				seenOutput = true
+			}
+			if update.Alive {
+				seenAlive = true
+			} else {
+				seenTerminal = true
+			}
+		case <-time.After(200 * time.Millisecond):
+			if seenTerminal {
+				if !seenOutput || !seenAlive {
+					t.Fatalf("Naabu heartbeat updates: output=%t alive=%t terminal=%t", seenOutput, seenAlive, seenTerminal)
+				}
+				return
+			}
+		}
+	}
+}
+
+func TestNaabuDiscoveryWorkUnitDoesNotRunNmap(t *testing.T) {
+	dir := t.TempDir()
+	naabuPath := filepath.Join(dir, "naabu")
+	if err := os.WriteFile(naabuPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := NewWithNaabu(filepath.Join(dir, "missing-nmap"), naabuPath)
+	job := config.NormalizeJob(config.Job{Name: "discovery", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1, TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{ScanType: "connect"}}})
+	unit := WorkUnit{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Targets: []ResolvedTarget{{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}}}, Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535}
+	snapshot, err := n.ScanWorkUnit(context.Background(), job, unit, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Hosts) != 1 || len(snapshot.Hosts[0].Protocols) != 1 || len(snapshot.Hosts[0].Protocols[0].DiscoveredPorts) != 1 {
+		t.Fatalf("discovery checkpoint = %#v", snapshot)
+	}
+	if len(snapshot.Units) != 1 || len(snapshot.Units[0].Ports) != 0 {
+		t.Fatalf("discovery checkpoint affected authoritative units: %#v", snapshot.Units)
+	}
+}

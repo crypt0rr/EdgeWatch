@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/google/uuid"
@@ -62,19 +65,21 @@ type ScanCycleUnit struct {
 // ScanCycleUnitSummary is the safe progress view returned to the web console.
 // It omits checkpoint payloads, which can be very large for a full-range job.
 type ScanCycleUnitSummary struct {
-	CycleID    string
-	Sequence   int
-	Protocol   string
-	Family     int
-	Ports      string
-	PortCount  int
-	Addresses  int
-	Probes     int64
-	Status     string
-	Attempts   int
-	StartedAt  time.Time
-	FinishedAt time.Time
-	LastError  string
+	CycleID    string    `json:"cycle_id"`
+	Sequence   int       `json:"sequence"`
+	Engine     string    `json:"engine,omitempty"`
+	Phase      string    `json:"phase,omitempty"`
+	Protocol   string    `json:"protocol"`
+	Family     int       `json:"family"`
+	Ports      string    `json:"ports"`
+	PortCount  int       `json:"port_count"`
+	Addresses  int       `json:"addresses"`
+	Probes     int64     `json:"probes"`
+	Status     string    `json:"status"`
+	Attempts   int       `json:"attempts"`
+	StartedAt  time.Time `json:"started_at"`
+	FinishedAt time.Time `json:"finished_at"`
+	LastError  string    `json:"last_error,omitempty"`
 }
 
 func (s *Store) CreateScanCycle(ctx context.Context, cycle ScanCycleRecord) (ScanCycleRecord, error) {
@@ -138,6 +143,381 @@ func (s *Store) CreateScanCycle(ctx context.Context, cycle ScanCycleRecord) (Sca
 		return ScanCycleRecord{}, err
 	}
 	return cycle, nil
+}
+
+type scanCycleUnitState struct {
+	sequence int
+	unit     scanner.WorkUnit
+	status   string
+	snapshot model.Snapshot
+}
+
+// ReconcileScanCycleEnrichment expands a phase-aware Naabu cycle from durable
+// discovery checkpoints. Discovery units are committed before this method is
+// called; the transaction below then derives deterministic Nmap enrichment
+// units (and, once every discovery unit is complete, the ordinary UDP units).
+// Re-running it after a crash is safe: the unit identity includes phase,
+// family, address set, and port scope, so an already committed unit is never
+// inserted twice.
+func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var status string
+	var planRaw []byte
+	if err := tx.QueryRowContext(ctx, `SELECT status,plan_json FROM scan_cycles WHERE id=?`, cycleID).Scan(&status, &planRaw); errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %s", ErrNoScanCycle, cycleID)
+	} else if err != nil {
+		return err
+	}
+	if status != "running" && status != "paused" && status != "stalled" {
+		return nil
+	}
+	var plan scanner.WorkPlan
+	if err := json.Unmarshal(planRaw, &plan); err != nil {
+		return err
+	}
+	if plan.Job.TCP == nil || plan.Job.TCP.Engine != config.EngineNaabuNmap {
+		return nil
+	}
+
+	rows, err := tx.QueryContext(ctx, `SELECT sequence,work_unit_json,status,snapshot_json FROM scan_cycle_units WHERE cycle_id=? ORDER BY sequence`, cycleID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	var units []scanCycleUnitState
+	existing := map[string]struct{}{}
+	discoveryCount := 0
+	discoveryComplete := true
+	for rows.Next() {
+		var row scanCycleUnitState
+		var unitRaw, snapshotRaw []byte
+		if err := rows.Scan(&row.sequence, &unitRaw, &row.status, &snapshotRaw); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(unitRaw, &row.unit); err != nil {
+			return err
+		}
+		existing[scanCycleUnitIdentity(row.unit)] = struct{}{}
+		if row.unit.Phase == "discovery" {
+			discoveryCount++
+			if row.status != "completed" {
+				discoveryComplete = false
+			}
+			if row.status == "completed" && len(snapshotRaw) > 0 && string(snapshotRaw) != "{}" && string(snapshotRaw) != "null" {
+				if err := json.Unmarshal(snapshotRaw, &row.snapshot); err != nil {
+					return err
+				}
+			}
+		}
+		units = append(units, row)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if discoveryCount == 0 {
+		return tx.Commit()
+	}
+
+	// Gather one deterministic port set per effective address. A discovery
+	// checkpoint contains one host observation per address; duplicate records
+	// are unioned defensively so retry/split recovery cannot lose a port.
+	type discoveryGroup struct {
+		family    int
+		ports     []int
+		addresses []string
+	}
+	portsByAddress := map[string]map[int]struct{}{}
+	for _, row := range units {
+		if row.unit.Phase != "discovery" || row.status != "completed" {
+			continue
+		}
+		for _, host := range row.snapshot.Hosts {
+			address := normalizeCycleAddress(host.Address)
+			if address == "" {
+				continue
+			}
+			for _, protocol := range host.Protocols {
+				if protocol.Protocol != "tcp" || protocol.DiscoveryEngine != "naabu" {
+					continue
+				}
+				set := portsByAddress[address]
+				if set == nil {
+					set = map[int]struct{}{}
+					portsByAddress[address] = set
+				}
+				for _, port := range protocol.DiscoveredPorts {
+					if port.Port >= 1 && port.Port <= 65535 {
+						set[port.Port] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+	groups := map[string]*discoveryGroup{}
+	for address, set := range portsByAddress {
+		if len(set) == 0 {
+			continue
+		}
+		ports := make([]int, 0, len(set))
+		for port := range set {
+			ports = append(ports, port)
+		}
+		sort.Ints(ports)
+		family := 4
+		if ip := net.ParseIP(address); ip != nil && ip.To4() == nil {
+			family = 6
+		}
+		key := fmt.Sprintf("%d\x00%s", family, formatCyclePorts(ports))
+		group := groups[key]
+		if group == nil {
+			group = &discoveryGroup{family: family, ports: ports}
+			groups[key] = group
+		}
+		group.addresses = append(group.addresses, address)
+	}
+	groupKeys := make([]string, 0, len(groups))
+	for key := range groups {
+		groupKeys = append(groupKeys, key)
+	}
+	sort.Strings(groupKeys)
+
+	nextSequence := 0
+	for _, row := range units {
+		if row.sequence >= nextSequence {
+			nextSequence = row.sequence + 1
+		}
+	}
+	var added []scanner.WorkUnit
+	for _, key := range groupKeys {
+		group := groups[key]
+		sort.Strings(group.addresses)
+		factor := boolFactor(plan.Job.TCP.ServiceDetection)
+		for addressStart := 0; addressStart < len(group.addresses); addressStart += 128 {
+			addressEnd := addressStart + 128
+			if addressEnd > len(group.addresses) {
+				addressEnd = len(group.addresses)
+			}
+			addresses := append([]string(nil), group.addresses[addressStart:addressEnd]...)
+			// Keep dynamically generated Nmap work within the same probe and
+			// argv-size limits as the initial Nmap plan. A discovery result can
+			// contain tens of thousands of ports, so address-only chunking would
+			// otherwise create a single unbounded command.
+			perChunk := scanner.MaxWorkUnitPorts
+			if capacity := int(scanner.MaxWorkUnitProbes / (int64(len(addresses)) * factor)); capacity > 0 && perChunk > capacity {
+				perChunk = capacity
+			}
+			if perChunk < 1 {
+				perChunk = 1
+			}
+			for portStart := 0; portStart < len(group.ports); portStart += perChunk {
+				portEnd := portStart + perChunk
+				if portEnd > len(group.ports) {
+					portEnd = len(group.ports)
+				}
+				portChunk := group.ports[portStart:portEnd]
+				unit := scanner.WorkUnit{Sequence: nextSequence, Engine: config.EngineNmap, Phase: "enrichment", Protocol: "tcp", Family: group.family, Targets: subsetCycleTargets(plan.Targets, addresses), Addresses: addresses, Ports: formatCyclePorts(portChunk), PortCount: len(portChunk), Probes: int64(len(addresses)) * int64(len(portChunk)) * factor}
+				nextSequence++
+				if _, exists := existing[scanCycleUnitIdentity(unit)]; exists {
+					continue
+				}
+				added = append(added, unit)
+				existing[scanCycleUnitIdentity(unit)] = struct{}{}
+			}
+		}
+	}
+
+	// UDP is intentionally added only after all full-range discovery units are
+	// committed. This preserves the advertised phase order and still allows a
+	// zero-discovery result to proceed successfully to UDP. Include units added
+	// during this reconciliation when checking the phase so a repeated call in
+	// the same transaction cannot enqueue a second UDP set.
+	udpAlreadyPresent := hasCyclePhase(units, "udp", "udp")
+	if discoveryComplete && plan.Job.UDP != nil && !udpAlreadyPresent {
+		udpUnits := buildCycleUDPUnits(plan, nextSequence)
+		for _, unit := range udpUnits {
+			if _, exists := existing[scanCycleUnitIdentity(unit)]; exists {
+				continue
+			}
+			added = append(added, unit)
+			existing[scanCycleUnitIdentity(unit)] = struct{}{}
+			udpAlreadyPresent = true
+		}
+	}
+	if len(added) == 0 {
+		return tx.Commit()
+	}
+	plan.Units = append(plan.Units, added...)
+	plan.TotalUnits = len(plan.Units)
+	plan.TotalProbes = 0
+	for _, unit := range plan.Units {
+		plan.TotalProbes += unit.Probes
+	}
+	updatedPlan, err := json.Marshal(plan)
+	if err != nil {
+		return err
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, unit := range added {
+		raw, err := json.Marshal(unit)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?)`, cycleID, unit.Sequence, raw, "pending", 0, []byte(`{}`), "", "", ""); err != nil {
+			return err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET plan_json=?,total_units=?,total_probes=?,updated_at=? WHERE id=? AND status IN ('running','paused','stalled')`, updatedPlan, plan.TotalUnits, plan.TotalProbes, stamp, cycleID)
+	if err != nil {
+		return err
+	}
+	if count, _ := result.RowsAffected(); count != 1 {
+		return ErrCycleNotResumable
+	}
+	return tx.Commit()
+}
+
+func scanCycleUnitIdentity(unit scanner.WorkUnit) string {
+	addresses := append([]string(nil), unit.Addresses...)
+	sort.Strings(addresses)
+	return unit.Engine + "\x00" + unit.Phase + "\x00" + unit.Protocol + "\x00" + fmt.Sprint(unit.Family) + "\x00" + unit.Ports + "\x00" + strings.Join(addresses, ",")
+}
+
+func normalizeCycleAddress(raw string) string {
+	if ip := net.ParseIP(strings.TrimSpace(raw)); ip != nil {
+		return ip.String()
+	}
+	return ""
+}
+
+func formatCyclePorts(ports []int) string {
+	if len(ports) == 0 {
+		return ""
+	}
+	sort.Ints(ports)
+	parts := make([]string, 0, len(ports))
+	start, previous := ports[0], ports[0]
+	flush := func() {
+		if start == previous {
+			parts = append(parts, fmt.Sprint(start))
+		} else {
+			parts = append(parts, fmt.Sprintf("%d-%d", start, previous))
+		}
+	}
+	for _, port := range ports[1:] {
+		if port == previous+1 {
+			previous = port
+			continue
+		}
+		flush()
+		start, previous = port, port
+	}
+	flush()
+	return strings.Join(parts, ",")
+}
+
+func boolFactor(serviceDetection bool) int64 {
+	if serviceDetection {
+		return 2
+	}
+	return 1
+}
+
+func subsetCycleTargets(targets []scanner.ResolvedTarget, addresses []string) []scanner.ResolvedTarget {
+	set := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		if normalized := normalizeCycleAddress(address); normalized != "" {
+			set[normalized] = struct{}{}
+		}
+	}
+	var out []scanner.ResolvedTarget
+	for _, target := range targets {
+		selected := make([]string, 0, len(target.Addresses))
+		for _, address := range target.Addresses {
+			if normalized := normalizeCycleAddress(address); normalized != "" {
+				if _, ok := set[normalized]; ok {
+					selected = append(selected, normalized)
+				}
+			}
+		}
+		if len(selected) == 0 {
+			continue
+		}
+		sort.Strings(selected)
+		out = append(out, scanner.ResolvedTarget{Name: target.Name, ConfiguredTarget: target.ConfiguredTarget, Addresses: selected, Aggregate: target.Aggregate, Hostname: target.Hostname})
+	}
+	return out
+}
+
+func hasCyclePhase(rows []scanCycleUnitState, phase, protocol string) bool {
+	for _, row := range rows {
+		if row.unit.Phase == phase && row.unit.Protocol == protocol {
+			return true
+		}
+	}
+	return false
+}
+
+func buildCycleUDPUnits(plan scanner.WorkPlan, sequence int) []scanner.WorkUnit {
+	if plan.Job.UDP == nil {
+		return nil
+	}
+	ports, err := config.ParsePorts(plan.Job.UDP.Ports)
+	if err != nil || len(ports) == 0 {
+		return nil
+	}
+	byFamily := map[int][]string{4: {}, 6: {}}
+	seen := map[string]struct{}{}
+	for _, target := range plan.Targets {
+		for _, raw := range target.Addresses {
+			address := normalizeCycleAddress(raw)
+			if address == "" {
+				continue
+			}
+			if _, exists := seen[address]; exists {
+				continue
+			}
+			seen[address] = struct{}{}
+			family := 4
+			if net.ParseIP(address).To4() == nil {
+				family = 6
+			}
+			byFamily[family] = append(byFamily[family], address)
+		}
+	}
+	var out []scanner.WorkUnit
+	for _, family := range []int{4, 6} {
+		addresses := byFamily[family]
+		sort.Strings(addresses)
+		for start := 0; start < len(addresses); start += 128 {
+			end := start + 128
+			if end > len(addresses) {
+				end = len(addresses)
+			}
+			batch := append([]string(nil), addresses[start:end]...)
+			factor := boolFactor(plan.Job.UDP.ServiceDetection)
+			perChunk := 4096
+			if capacity := int(65536 / (int64(len(batch)) * factor)); capacity > 0 && perChunk > capacity {
+				perChunk = capacity
+			}
+			if perChunk < 1 {
+				perChunk = 1
+			}
+			for portStart := 0; portStart < len(ports); portStart += perChunk {
+				portEnd := portStart + perChunk
+				if portEnd > len(ports) {
+					portEnd = len(ports)
+				}
+				chunk := append([]int(nil), ports[portStart:portEnd]...)
+				out = append(out, scanner.WorkUnit{Sequence: sequence, Engine: config.EngineNmap, Phase: "udp", Protocol: "udp", Family: family, Targets: subsetCycleTargets(plan.Targets, batch), Addresses: batch, Ports: formatCyclePorts(chunk), PortCount: len(chunk), Probes: int64(len(batch)) * int64(len(chunk)) * factor})
+				sequence++
+			}
+		}
+	}
+	return out
 }
 
 func (s *Store) GetScanCycle(ctx context.Context, id string) (ScanCycleRecord, error) {
@@ -230,6 +610,7 @@ func (s *Store) ListScanCycleUnitSummaries(ctx context.Context, cycleID string) 
 		if err := json.Unmarshal(raw, &unit); err != nil {
 			return nil, err
 		}
+		item.Engine, item.Phase = unit.Engine, unit.Phase
 		item.Protocol, item.Family, item.Ports, item.PortCount, item.Addresses, item.Probes = unit.Protocol, unit.Family, unit.Ports, unit.PortCount, len(unit.Addresses), unit.Probes
 		item.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
 		item.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)

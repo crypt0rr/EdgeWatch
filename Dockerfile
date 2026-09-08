@@ -7,6 +7,15 @@ COPY index.html tsconfig.json tsconfig.node.json vite.config.ts ./
 COPY src ./src
 RUN npm run build
 
+FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS naabu
+ARG NAABU_VERSION=v2.6.1
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /naabu
+RUN apk add --no-cache ca-certificates=20260611-r0 git=2.54.0-r0
+RUN git clone --depth 1 --branch ${NAABU_VERSION} https://github.com/projectdiscovery/naabu.git .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/naabu ./cmd/naabu
+
 FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates=20260611-r0 git=2.54.0-r0
@@ -20,9 +29,10 @@ ARG TARGETARCH
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/edgewatch ./cmd/edgewatch
 
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
-RUN apk add --no-cache ca-certificates=20260611-r0 nmap=7.99-r0 tzdata=2026c-r0 \
+RUN apk add --no-cache ca-certificates=20260611-r0 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026c-r0 \
     && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets \
     && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets
 COPY --from=build /out/edgewatch /usr/local/bin/edgewatch
+COPY --from=naabu /out/naabu /usr/local/bin/naabu
 ENTRYPOINT ["edgewatch"]
 CMD ["daemon", "--config", "/etc/edgewatch/config.yaml"]

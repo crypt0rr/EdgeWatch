@@ -1,11 +1,13 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 )
@@ -86,6 +88,134 @@ func TestScanCycleAuxiliaryLifecycleAndFragments(t *testing.T) {
 	}
 	if notified, err := s.ScanCycleExpiryNotified(ctx, cycle.ID); err != nil || !notified {
 		t.Fatalf("expiry notification after timeout = %v, %v", notified, err)
+	}
+}
+
+func TestReconcileNaabuDiscoveryAddsDeterministicEnrichmentAndUDP(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+	jobValue := config.NormalizeJob(config.Job{Name: "naabu-cycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"edge.example"}, MaxExpandedHosts: 1, TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{AddressBatchSize: 1}}, UDP: &config.Protocol{Ports: "53"}})
+	job, err := s.CreateJob(ctx, jobValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := scanner.WorkPlan{Job: job.Job, Targets: []scanner.ResolvedTarget{{Name: "edge.example", ConfiguredTarget: "edge.example", Addresses: []string{"192.0.2.1"}, Aggregate: true, Hostname: true}}, DNS: map[string][]string{"edge.example": {"192.0.2.1"}}, Scopes: []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "1-65535"}, {Target: "edge.example", Protocol: "udp", Ports: "53"}}, Units: []scanner.WorkUnit{{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Targets: []scanner.ResolvedTarget{{Name: "edge.example", ConfiguredTarget: "edge.example", Addresses: []string{"192.0.2.1"}, Aggregate: true, Hostname: true}}, Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535}}, TotalUnits: 1, TotalProbes: 65535}
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	fragment := model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", DiscoveryEngine: "naabu", DiscoveredPorts: []model.PortObservation{{Port: 22, State: "open", Verification: "discovered"}, {Port: 443, State: "open", Verification: "discovered"}}}}}}}
+	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := s.GetScanCycle(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.TotalUnits != 3 || updated.TotalProbes <= 65535 {
+		t.Fatalf("dynamic phase expansion = units %d probes %d", updated.TotalUnits, updated.TotalProbes)
+	}
+	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	if err != nil || len(summaries) != 3 {
+		t.Fatalf("expanded summaries = %#v, %v", summaries, err)
+	}
+	if summaries[1].Phase != "enrichment" || summaries[1].Engine != config.EngineNmap || summaries[1].Ports != "22,443" || summaries[2].Phase != "udp" {
+		t.Fatalf("expanded phase order = %#v", summaries)
+	}
+	if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	if err != nil || len(again) != 3 {
+		t.Fatalf("reconciliation duplicated units: %#v, %v", again, err)
+	}
+}
+
+func TestReconcileNaabuDiscoveryChunksLargePortSets(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+	jobValue := config.NormalizeJob(config.Job{
+		Name: "naabu-large", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", ServiceDetection: true, Naabu: &config.NaabuOptions{AddressBatchSize: 1}},
+	})
+	job, err := s.CreateJob(ctx, jobValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := scanner.WorkPlan{
+		Job:     job.Job,
+		Targets: []scanner.ResolvedTarget{{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}}},
+		Scopes:  []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535", ServiceDetection: true}},
+		Units: []scanner.WorkUnit{{
+			Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4,
+			Targets:   []scanner.ResolvedTarget{{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}}},
+			Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535,
+		}},
+		TotalUnits: 1, TotalProbes: 65535,
+	}
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
+		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	discovered := make([]model.PortObservation, 5000)
+	for i := range discovered {
+		discovered[i] = model.PortObservation{Port: i + 1, State: "open", Verification: "discovered"}
+	}
+	fragment := model.Snapshot{Hosts: []model.HostObservation{{
+		Address: "192.0.2.1",
+		Protocols: []model.ProtocolObservation{{
+			Protocol: "tcp", DiscoveryEngine: "naabu", DiscoveredPorts: discovered,
+		}},
+	}}}
+	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 3 {
+		t.Fatalf("large discovery produced %d units, want discovery plus two bounded enrichments: %#v", len(summaries), summaries)
+	}
+	for _, summary := range summaries[1:] {
+		if summary.Phase != "enrichment" || summary.Engine != config.EngineNmap || summary.PortCount > scanner.MaxWorkUnitPorts || summary.Probes > scanner.MaxWorkUnitProbes {
+			t.Fatalf("enrichment unit exceeded checkpoint bounds: %#v", summary)
+		}
+	}
+	if summaries[1].Ports != "1-4096" || summaries[2].Ports != "4097-5000" {
+		t.Fatalf("large port set was not split deterministically: %#v", summaries)
 	}
 }
 

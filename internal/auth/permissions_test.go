@@ -9,11 +9,11 @@ import (
 
 func TestPermissionsForRoleIsDeterministicAndComplete(t *testing.T) {
 	admin := PermissionsForRole(store.RoleAdministrator)
-	if len(admin) != 17 || !sortStrings(admin) {
+	if len(admin) != 19 || !sortStrings(admin) {
 		t.Fatalf("administrator permissions = %#v", admin)
 	}
 	operator := PermissionsForRole(store.RoleOperator)
-	if len(operator) != 12 || !sortStrings(operator) {
+	if len(operator) != 13 || !sortStrings(operator) {
 		t.Fatalf("operator permissions = %#v", operator)
 	}
 	viewer := PermissionsForRole(store.RoleViewer)

@@ -54,7 +54,7 @@ func run(args []string) error {
 	jobName := fs.String("job", "", "job name")
 	scanID := fs.String("scan-id", "", "scan ID")
 	limit := fs.Int("limit", 50, "history limit")
-	nmapPath := fs.String("nmap", "nmap", "Nmap executable")
+	nmapPath := fs.String("nmap", "/usr/bin/nmap", "Nmap executable (fixed runtime binary; override only for local tests)")
 	passwordFile := fs.String("password-file", "", "file containing a new administrator password")
 	username := fs.String("username", "admin", "username for administrator recovery actions")
 	force := fs.Bool("force", false, "confirm replacement of the current setup token")

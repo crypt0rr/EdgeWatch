@@ -93,3 +93,65 @@ func TestMergeWorkSnapshotsDeduplicatesChunkedHostProtocols(t *testing.T) {
 		t.Fatalf("merged protocol scope/evidence = %#v", protocol)
 	}
 }
+
+func TestPlanNaabuUsesPinnedFullRangeAddressBatches(t *testing.T) {
+	n := New("nmap")
+	n.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("192.0.2.2"), net.ParseIP("192.0.2.1")}}
+	job := config.NormalizeJob(config.Job{
+		Name: "naabu", Targets: []string{"edge.example"}, MaxExpandedHosts: 2,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Mode: "syn", Naabu: &config.NaabuOptions{AddressBatchSize: 1}},
+	})
+	plan, err := n.Plan(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Units) != 2 || plan.TotalUnits != 2 {
+		t.Fatalf("unexpected Naabu unit count: %#v", plan.Units)
+	}
+	for _, unit := range plan.Units {
+		if unit.Engine != config.EngineNaabuNmap || unit.Phase != "discovery" || unit.Ports != "1-65535" || unit.PortCount != 65535 || len(unit.Addresses) != 1 {
+			t.Fatalf("Naabu unit lost full-range scope: %#v", unit)
+		}
+	}
+}
+
+func TestPlanNaabuSeparatesAddressFamilies(t *testing.T) {
+	n := New("nmap")
+	n.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("2001:db8::2"), net.ParseIP("192.0.2.2"), net.ParseIP("2001:db8::1"), net.ParseIP("192.0.2.1")}}
+	job := config.NormalizeJob(config.Job{
+		Name: "naabu-families", Targets: []string{"edge.example"}, MaxExpandedHosts: 4,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{AddressBatchSize: 4}},
+	})
+	plan, err := n.Plan(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Units) != 2 {
+		t.Fatalf("expected one discovery unit per address family, got %#v", plan.Units)
+	}
+	for _, unit := range plan.Units {
+		if len(unit.Addresses) != 2 {
+			t.Fatalf("family unit addresses = %#v", unit)
+		}
+		for _, address := range unit.Addresses {
+			if unit.Family == 4 && net.ParseIP(address).To4() == nil {
+				t.Fatalf("IPv6 address in IPv4 unit: %#v", unit)
+			}
+			if unit.Family == 6 && net.ParseIP(address).To4() != nil {
+				t.Fatalf("IPv4 address in IPv6 unit: %#v", unit)
+			}
+		}
+	}
+}
+
+func TestSplitNaabuUnitNeverSplitsFullPortScope(t *testing.T) {
+	unit := WorkUnit{Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535}
+	if first, second, ok := SplitWorkUnit(unit); ok || first.Sequence != 0 || second.Sequence != 0 {
+		t.Fatalf("single-address Naabu unit was split: %#v %#v %v", first, second, ok)
+	}
+	unit.Addresses = []string{"192.0.2.1", "192.0.2.2"}
+	first, second, ok := SplitWorkUnit(unit)
+	if !ok || len(first.Addresses) != 1 || len(second.Addresses) != 1 || first.Engine != config.EngineNaabuNmap || second.Engine != config.EngineNaabuNmap {
+		t.Fatalf("multi-address Naabu unit did not split by address: %#v %#v %v", first, second, ok)
+	}
+}

@@ -42,7 +42,7 @@ func TestScannerObservationMergeCoversDuplicateEvidence(t *testing.T) {
 	var hosts []model.HostObservation
 	mergeHostObservations(&hosts, map[string]model.HostObservation{"198.51.100.1": {Address: "198.51.100.1", AddressFamily: "IPv4", Status: "up"}})
 	mergeHostObservations(&hosts, map[string]model.HostObservation{"198.51.100.1": {Address: "", AddressFamily: "", Status: "", StatusReason: "arp", ReasonTTL: 64, LatencyMS: 1}, "2001:db8::1": {Address: "2001:db8::1"}})
-	if len(hosts) != 2 || hosts[0].Address != "198.51.100.1" || hosts[0].StatusReason != "" {
+	if len(hosts) != 2 || hosts[0].Address != "198.51.100.1" || hosts[0].StatusReason != "arp" || hosts[0].ReasonTTL != 64 || hosts[0].LatencyMS != 1 {
 		t.Fatalf("merged hosts = %#v", hosts)
 	}
 	merged := map[string]model.HostObservation{}

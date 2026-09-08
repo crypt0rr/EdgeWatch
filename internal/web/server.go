@@ -240,6 +240,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNoContent, nil)
 	case path == "/status" && r.Method == http.MethodGet:
 		s.adminStatus(w, r, session)
+	case path == "/scanner/capabilities" && r.Method == http.MethodGet:
+		s.scannerCapabilities(w, r)
+	case path == "/scanner-profiles" || strings.HasPrefix(path, "/scanner-profiles/"):
+		s.scannerProfilesRoute(w, r, session, strings.TrimPrefix(path, "/scanner-profiles"))
+	case path == "/scanner/profiles" || strings.HasPrefix(path, "/scanner/profiles/"):
+		s.scannerProfilesRoute(w, r, session, strings.TrimPrefix(path, "/scanner/profiles"))
 	case path == "/users" || strings.HasPrefix(path, "/users/"):
 		s.usersRoute(w, r, session, strings.TrimPrefix(path, "/users"))
 	case path == "/public-dashboard" && (r.Method == http.MethodGet || r.Method == http.MethodPut):
@@ -305,6 +311,15 @@ func requiredPermission(path, method string) string {
 	}
 	if path == "/status" {
 		return auth.PermissionOverviewRead
+	}
+	if path == "/scanner/capabilities" {
+		return auth.PermissionScannerProfilesRead
+	}
+	if path == "/scanner-profiles" || strings.HasPrefix(path, "/scanner-profiles/") || path == "/scanner/profiles" || strings.HasPrefix(path, "/scanner/profiles/") {
+		if method == http.MethodGet {
+			return auth.PermissionScannerProfilesRead
+		}
+		return auth.PermissionScannerProfilesManage
 	}
 	if path == "/stream" {
 		return auth.PermissionStreamRead
@@ -840,9 +855,20 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 }
 
 type protocolPayload struct {
-	Ports            string `json:"ports"`
-	Mode             string `json:"mode,omitempty"`
-	ServiceDetection bool   `json:"service_detection"`
+	Ports                  string               `json:"ports"`
+	Mode                   string               `json:"mode,omitempty"`
+	ServiceDetection       bool                 `json:"service_detection"`
+	Engine                 string               `json:"engine,omitempty"`
+	ProfileID              string               `json:"profile_id,omitempty"`
+	ProfileRevision        int64                `json:"profile_revision,omitempty"`
+	Naabu                  *config.NaabuOptions `json:"naabu,omitempty"`
+	NaabuArgs              []string             `json:"naabu_args,omitempty"`
+	NmapArgs               []string             `json:"nmap_args,omitempty"`
+	EnrichmentArgs         []string             `json:"enrichment_args,omitempty"`
+	NSEProfile             string               `json:"nse_profile,omitempty"`
+	NSEArgs                map[string]string    `json:"nse_args,omitempty"`
+	ProfileUpdateAvailable bool                 `json:"profile_update_available,omitempty"`
+	ProfileLatestRevision  int64                `json:"profile_latest_revision,omitempty"`
 }
 type jobPayload struct {
 	Name                     string           `json:"name"`
@@ -871,6 +897,35 @@ type lifecyclePayload struct {
 	Revision *int64 `json:"revision"`
 }
 
+// validateManagedScannerInput keeps the browser job API from becoming a
+// second command-customization surface. Scanner argument arrays, NSE
+// selection, and Naabu tuning are administrator-owned profile data; a job may
+// only reference a profile revision. Legacy records already stored in SQLite
+// remain readable and executable, but new writes must use the profile API.
+func validateManagedScannerInput(protocol *protocolPayload, label string) error {
+	if protocol == nil {
+		return nil
+	}
+	// UDP is intentionally Nmap-only. Do not let a profile ID bypass this
+	// boundary and smuggle Naabu/NSE or custom argv into a UDP job payload.
+	if label == "udp" {
+		if strings.TrimSpace(protocol.ProfileID) != "" || len(protocol.NaabuArgs) > 0 || len(protocol.NmapArgs) > 0 || len(protocol.EnrichmentArgs) > 0 || strings.TrimSpace(protocol.NSEProfile) != "" || len(protocol.NSEArgs) > 0 || protocol.Naabu != nil {
+			return errors.New("udp scanner profiles and custom scanner arguments are not supported; UDP uses Nmap defaults")
+		}
+		return nil
+	}
+	if strings.TrimSpace(protocol.ProfileID) != "" {
+		return nil
+	}
+	if len(protocol.NaabuArgs) > 0 || len(protocol.NmapArgs) > 0 || len(protocol.EnrichmentArgs) > 0 || strings.TrimSpace(protocol.NSEProfile) != "" || len(protocol.NSEArgs) > 0 || protocol.Naabu != nil {
+		return fmt.Errorf("%s scanner arguments and Naabu tuning require an administrator-managed profile", label)
+	}
+	if strings.TrimSpace(protocol.Engine) == config.EngineNaabuNmap {
+		return fmt.Errorf("%s naabu_nmap jobs must select an administrator-managed scanner profile", label)
+	}
+	return nil
+}
+
 func (p jobPayload) config() (config.Job, error) {
 	job := config.Job{Name: strings.TrimSpace(p.Name), Schedule: strings.TrimSpace(p.Schedule), Timezone: strings.TrimSpace(p.Timezone), RunOnStart: p.RunOnStart, AssumeAlive: p.AssumeAlive, Targets: p.Targets, MaxExpandedHosts: p.MaxExpandedHosts, Timing: p.Timing, AllowHighCost: p.AllowHighCost}
 	if p.NotificationDestinations != nil {
@@ -891,10 +946,16 @@ func (p jobPayload) config() (config.Job, error) {
 		job.ResumeWindow = config.Duration(d)
 	}
 	if p.TCP != nil {
-		job.TCP = &config.Protocol{Ports: p.TCP.Ports, Mode: p.TCP.Mode, ServiceDetection: p.TCP.ServiceDetection}
+		if err := validateManagedScannerInput(p.TCP, "tcp"); err != nil {
+			return job, err
+		}
+		job.TCP = &config.Protocol{Ports: p.TCP.Ports, Mode: p.TCP.Mode, ServiceDetection: p.TCP.ServiceDetection, Engine: p.TCP.Engine, ProfileID: strings.TrimSpace(p.TCP.ProfileID), ProfileRevision: p.TCP.ProfileRevision, Naabu: p.TCP.Naabu, NaabuArgs: cloneStrings(p.TCP.NaabuArgs), NmapArgs: cloneStrings(p.TCP.NmapArgs), EnrichmentArgs: cloneStrings(p.TCP.EnrichmentArgs), NSEProfile: strings.TrimSpace(p.TCP.NSEProfile), NSEArgs: cloneStringMap(p.TCP.NSEArgs)}
 	}
 	if p.UDP != nil {
-		job.UDP = &config.Protocol{Ports: p.UDP.Ports, Mode: p.UDP.Mode, ServiceDetection: p.UDP.ServiceDetection}
+		if err := validateManagedScannerInput(p.UDP, "udp"); err != nil {
+			return job, err
+		}
+		job.UDP = &config.Protocol{Ports: p.UDP.Ports, Mode: p.UDP.Mode, ServiceDetection: p.UDP.ServiceDetection, Engine: p.UDP.Engine, ProfileID: strings.TrimSpace(p.UDP.ProfileID), ProfileRevision: p.UDP.ProfileRevision, Naabu: p.UDP.Naabu, NaabuArgs: cloneStrings(p.UDP.NaabuArgs), NmapArgs: cloneStrings(p.UDP.NmapArgs), EnrichmentArgs: cloneStrings(p.UDP.EnrichmentArgs), NSEProfile: strings.TrimSpace(p.UDP.NSEProfile), NSEArgs: cloneStringMap(p.UDP.NSEArgs)}
 	}
 	job.Baseline.Samples, job.Change.Confirmations = p.BaselineSamples, p.ChangeConfirmations
 	return config.NormalizeJob(job), nil
@@ -916,6 +977,18 @@ func jobJSON(record store.JobRecord, state model.JobState) map[string]any {
 
 func (s *Server) jobJSONWithCycle(ctx context.Context, record store.JobRecord, state model.JobState) map[string]any {
 	value := jobJSON(record, state)
+	// A profile edit is intentionally non-breaking: jobs retain their pinned
+	// revision until an operator explicitly applies the newer one. Surface the
+	// availability on the job payload so the editor can offer that deliberate
+	// upgrade (and its rebaseline confirmation) instead of silently changing a
+	// running scope.
+	if payload, ok := value["job"].(jobPayload); ok && payload.TCP != nil && payload.TCP.ProfileID != "" {
+		if profile, err := s.Store.GetScannerProfile(ctx, payload.TCP.ProfileID); err == nil && profile.Revision > payload.TCP.ProfileRevision {
+			payload.TCP.ProfileUpdateAvailable = true
+			payload.TCP.ProfileLatestRevision = profile.Revision
+			value["job"] = payload
+		}
+	}
 	cycle, err := s.Store.GetActiveScanCycle(ctx, record.ID)
 	if errors.Is(err, store.ErrNoScanCycle) {
 		value["scan_cycle"] = nil
@@ -941,10 +1014,10 @@ func fromConfig(j config.Job) jobPayload {
 		p.NotificationDestinations = &selection
 	}
 	if j.TCP != nil {
-		p.TCP = &protocolPayload{Ports: j.TCP.Ports, Mode: j.TCP.Mode, ServiceDetection: j.TCP.ServiceDetection}
+		p.TCP = &protocolPayload{Ports: j.TCP.Ports, Mode: j.TCP.Mode, ServiceDetection: j.TCP.ServiceDetection, Engine: j.TCP.Engine, ProfileID: j.TCP.ProfileID, ProfileRevision: j.TCP.ProfileRevision, Naabu: j.TCP.Naabu, NaabuArgs: cloneStrings(j.TCP.NaabuArgs), NmapArgs: cloneStrings(j.TCP.NmapArgs), EnrichmentArgs: cloneStrings(j.TCP.EnrichmentArgs), NSEProfile: j.TCP.NSEProfile, NSEArgs: cloneStringMap(j.TCP.NSEArgs)}
 	}
 	if j.UDP != nil {
-		p.UDP = &protocolPayload{Ports: j.UDP.Ports, Mode: j.UDP.Mode, ServiceDetection: j.UDP.ServiceDetection}
+		p.UDP = &protocolPayload{Ports: j.UDP.Ports, Mode: j.UDP.Mode, ServiceDetection: j.UDP.ServiceDetection, Engine: j.UDP.Engine, ProfileID: j.UDP.ProfileID, ProfileRevision: j.UDP.ProfileRevision, Naabu: j.UDP.Naabu, NaabuArgs: cloneStrings(j.UDP.NaabuArgs), NmapArgs: cloneStrings(j.UDP.NmapArgs), EnrichmentArgs: cloneStrings(j.UDP.EnrichmentArgs), NSEProfile: j.UDP.NSEProfile, NSEArgs: cloneStringMap(j.UDP.NSEArgs)}
 	}
 	return p
 }
@@ -993,6 +1066,14 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 		writeValidationError(w, err)
 		return
 	}
+	if err := s.applySelectedScannerProfile(r.Context(), &job, false); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "profile_conflict", "scanner profile was modified; reload and select its current revision", nil)
+		} else {
+			writeValidationError(w, err)
+		}
+		return
+	}
 	if !s.validateNotificationSelection(w, r, job) {
 		return
 	}
@@ -1028,6 +1109,17 @@ func cloneStrings(values []string) []string {
 	}
 	cloned := make([]string, len(values))
 	copy(cloned, values)
+	return cloned
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if values == nil {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
 	return cloned
 }
 
@@ -1224,12 +1316,31 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		writeValidationError(w, err)
 		return
 	}
-	if !s.validateNotificationSelection(w, r, job) {
-		return
-	}
 	current, err := s.Store.GetJob(r.Context(), id)
 	if err != nil {
 		writeError(w, 404, "not_found", "job not found", nil)
+		return
+	}
+	// Preserve the immutable profile revision when an older client sends the
+	// profile ID without a revision. This also permits routine edits to jobs
+	// pinned to a profile that has since been archived; selecting that archived
+	// profile for a new job remains disallowed.
+	allowArchivedProfile := false
+	if job.TCP != nil && current.Job.TCP != nil && strings.TrimSpace(job.TCP.ProfileID) != "" && job.TCP.ProfileID == current.Job.TCP.ProfileID {
+		if job.TCP.ProfileRevision == 0 {
+			job.TCP.ProfileRevision = current.Job.TCP.ProfileRevision
+		}
+		allowArchivedProfile = job.TCP.ProfileRevision > 0 && job.TCP.ProfileRevision == current.Job.TCP.ProfileRevision
+	}
+	if err := s.applySelectedScannerProfile(r.Context(), &job, allowArchivedProfile); err != nil {
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "profile_conflict", "scanner profile was modified; reload and select its current revision", nil)
+		} else {
+			writeValidationError(w, err)
+		}
+		return
+	}
+	if !s.validateNotificationSelection(w, r, job) {
 		return
 	}
 	// Routing is additive to the job API. Older clients that do not send the
@@ -1300,6 +1411,11 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 }
 
 func securityScopeChanges(old, next config.Job) []string {
+	// Compare effective jobs so omitted legacy defaults (notably Nmap engine,
+	// SYN mode, and assume_alive) produce the same human-readable scope as an
+	// explicitly configured value.
+	old = config.NormalizeJob(old)
+	next = config.NormalizeJob(next)
 	var changes []string
 	if !sameStrings(old.Targets, next.Targets) {
 		changes = append(changes, fmt.Sprintf("targets: %s → %s", strings.Join(old.Targets, ", "), strings.Join(next.Targets, ", ")))
@@ -1313,6 +1429,9 @@ func securityScopeChanges(old, next config.Job) []string {
 	if (old.TCP == nil) != (next.TCP == nil) {
 		changes = append(changes, fmt.Sprintf("TCP scan: %s → %s", protocolSummary(old.TCP), protocolSummary(next.TCP)))
 	} else if old.TCP != nil && next.TCP != nil {
+		if old.TCP.Engine != next.TCP.Engine {
+			changes = append(changes, fmt.Sprintf("TCP scanner: %s → %s", old.TCP.Engine, next.TCP.Engine))
+		}
 		if old.TCP.Ports != next.TCP.Ports {
 			changes = append(changes, fmt.Sprintf("TCP ports: %s → %s", old.TCP.Ports, next.TCP.Ports))
 		}
@@ -1321,6 +1440,19 @@ func securityScopeChanges(old, next config.Job) []string {
 		}
 		if old.TCP.ServiceDetection != next.TCP.ServiceDetection {
 			changes = append(changes, fmt.Sprintf("TCP service detection: %t → %t", old.TCP.ServiceDetection, next.TCP.ServiceDetection))
+		}
+		if !sameStringMap(old.TCP.NSEArgs, next.TCP.NSEArgs) || old.TCP.NSEProfile != next.TCP.NSEProfile {
+			changes = append(changes, fmt.Sprintf("TCP NSE: %s → %s", nseSummary(old.TCP), nseSummary(next.TCP)))
+		}
+		if (old.TCP.Naabu == nil) != (next.TCP.Naabu == nil) {
+			changes = append(changes, fmt.Sprintf("TCP Naabu verification: %s → %s", naabuSecuritySummary(old.TCP), naabuSecuritySummary(next.TCP)))
+		} else if old.TCP.Naabu != nil && next.TCP.Naabu != nil {
+			if old.TCP.Naabu.ScanType != next.TCP.Naabu.ScanType {
+				changes = append(changes, fmt.Sprintf("TCP discovery mode: %s → %s", old.TCP.Naabu.ScanType, next.TCP.Naabu.ScanType))
+			}
+			if old.TCP.Naabu.Verify != next.TCP.Naabu.Verify {
+				changes = append(changes, fmt.Sprintf("TCP discovery verification: %t → %t", old.TCP.Naabu.Verify, next.TCP.Naabu.Verify))
+			}
 		}
 	}
 	if (old.UDP == nil) != (next.UDP == nil) {
@@ -1334,6 +1466,32 @@ func securityScopeChanges(old, next config.Job) []string {
 		}
 	}
 	return changes
+}
+
+func sameStringMap(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for key, value := range a {
+		if b[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func nseSummary(protocol *config.Protocol) string {
+	if protocol == nil || strings.TrimSpace(protocol.NSEProfile) == "" {
+		return "disabled"
+	}
+	return protocol.NSEProfile
+}
+
+func naabuSecuritySummary(protocol *config.Protocol) string {
+	if protocol == nil || protocol.Naabu == nil {
+		return "disabled"
+	}
+	return fmt.Sprintf("%s (verify=%t)", protocol.Naabu.ScanType, protocol.Naabu.Verify)
 }
 
 func sameStrings(a, b []string) bool {
@@ -2450,7 +2608,7 @@ func writeValidationError(w http.ResponseWriter, err error) {
 	// Keep validation responses useful to form clients without exposing an
 	// implementation-specific error type. The API returns a stable field name
 	// when the validator can identify one, while preserving the full message.
-	fields := []string{"schedule", "timezone", "target", "tcp", "udp", "ports", "timeout", "resume_window", "timing", "baseline", "confirmations", "max_expanded_hosts", "name"}
+	fields := []string{"schedule", "timezone", "target", "tcp", "udp", "ports", "timeout", "resume_window", "timing", "baseline", "confirmations", "max_expanded_hosts", "name", "engine", "profile", "naabu", "scan_type", "rate", "workers", "retries", "warm_up_seconds", "address_batch_size", "operator_adjustable", "operator_bounds", "nse"}
 	for _, field := range fields {
 		if strings.Contains(lower, field) {
 			details[field] = message

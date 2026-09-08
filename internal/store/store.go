@@ -27,6 +27,10 @@ type Store struct {
 	authAutoKey bool
 }
 
+type rowQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 var ErrJobBusy = errors.New("job is already running")
 
 const legacySchema = `
@@ -58,7 +62,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 13
+const schemaVersion = 14
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -545,6 +549,57 @@ func migrate(db *sql.DB) error {
 );`,
 			`INSERT OR IGNORE INTO application_update_state(id,check_status) VALUES(1,'unknown')`,
 		},
+		14: {
+			// Scanner profiles are append-only definitions. Jobs retain the
+			// selected revision, so editing a profile never changes an existing
+			// scan's effective command implicitly.
+			`CREATE TABLE IF NOT EXISTS scans (
+ id TEXT PRIMARY KEY, job TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT NOT NULL,
+ status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', nmap_version TEXT NOT NULL DEFAULT '',
+ config_hash TEXT NOT NULL, snapshot_json BLOB NOT NULL,
+ job_id TEXT, job_revision INTEGER,
+ baseline_scan_id TEXT NOT NULL DEFAULT '', baseline_config_hash TEXT NOT NULL DEFAULT '',
+ changes_json BLOB NOT NULL DEFAULT '[]', cycle_id TEXT NOT NULL DEFAULT '',
+ cycle_attempt INTEGER NOT NULL DEFAULT 0, cycle_status TEXT NOT NULL DEFAULT '',
+ resumable INTEGER NOT NULL DEFAULT 0, completed_probes INTEGER NOT NULL DEFAULT 0,
+ total_probes INTEGER NOT NULL DEFAULT 0, completed_units INTEGER NOT NULL DEFAULT 0,
+ total_units INTEGER NOT NULL DEFAULT 0, no_progress_attempts INTEGER NOT NULL DEFAULT 0
+);`,
+			`CREATE TABLE IF NOT EXISTS scanner_profiles (
+ id TEXT PRIMARY KEY,
+ name TEXT NOT NULL COLLATE NOCASE,
+ description TEXT NOT NULL DEFAULT '',
+ definition_json BLOB NOT NULL,
+ built_in INTEGER NOT NULL DEFAULT 0,
+ archived INTEGER NOT NULL DEFAULT 0,
+ revision INTEGER NOT NULL DEFAULT 1,
+ created_by TEXT NOT NULL DEFAULT '',
+ updated_by TEXT NOT NULL DEFAULT '',
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ UNIQUE(name)
+);`,
+			`CREATE TABLE IF NOT EXISTS scanner_profile_revisions (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ profile_id TEXT NOT NULL,
+ revision INTEGER NOT NULL,
+ definition_json BLOB NOT NULL,
+ created_by TEXT NOT NULL DEFAULT '',
+ created_at TEXT NOT NULL,
+ UNIQUE(profile_id, revision),
+ FOREIGN KEY(profile_id) REFERENCES scanner_profiles(id) ON DELETE CASCADE
+);`,
+			"CREATE INDEX IF NOT EXISTS scanner_profiles_active ON scanner_profiles(archived,name)",
+			"CREATE INDEX IF NOT EXISTS scanner_profile_revisions_profile ON scanner_profile_revisions(profile_id,revision DESC)",
+			"ALTER TABLE scans ADD COLUMN scanner_engine TEXT NOT NULL DEFAULT 'nmap'",
+			"ALTER TABLE scans ADD COLUMN scanner_profile_id TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE scans ADD COLUMN scanner_profile_revision INTEGER NOT NULL DEFAULT 0",
+			"ALTER TABLE scans ADD COLUMN naabu_version TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE scans ADD COLUMN discovery_ports INTEGER NOT NULL DEFAULT 0",
+			"ALTER TABLE scans ADD COLUMN confirmed_ports INTEGER NOT NULL DEFAULT 0",
+			"ALTER TABLE scans ADD COLUMN discovery_duration_ms INTEGER NOT NULL DEFAULT 0",
+			"ALTER TABLE scans ADD COLUMN enrichment_duration_ms INTEGER NOT NULL DEFAULT 0",
+		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
 		statements, ok := migrations[next]
@@ -569,7 +624,7 @@ func migrate(db *sql.DB) error {
 		}
 		version = next
 	}
-	return nil
+	return ensureBuiltinScannerProfiles(db)
 }
 func (s *Store) Close() error { return s.DB.Close() }
 
@@ -1235,7 +1290,7 @@ func (s *Store) ListJobScansPage(ctx context.Context, jobID string, limit, offse
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -1248,7 +1303,7 @@ func (s *Store) ListJobScansPage(ctx context.Context, jobID string, limit, offse
 		var snapshot, changesJSON []byte
 		var baselineScanID, baselineConfigHash string
 		var resumable int
-		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot); err != nil {
+		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot); err != nil {
 			return page, err
 		}
 		v.Resumable = resumable != 0
@@ -1281,7 +1336,7 @@ func (s *Store) ListJobScanSummariesPage(ctx context.Context, jobID string, limi
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -1292,7 +1347,7 @@ func (s *Store) ListJobScanSummariesPage(ctx context.Context, jobID string, limi
 		var revision sql.NullInt64
 		var started, finished string
 		var resumable int
-		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash); err != nil {
+		if err := rows.Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash); err != nil {
 			return page, err
 		}
 		v.Resumable = resumable != 0
@@ -1733,12 +1788,26 @@ func saveScanExec(ctx context.Context, execer contextExecer, scan model.Scan) er
 	if err != nil {
 		return err
 	}
-	_, err = execer.ExecContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		scan.ID, nullString(scan.JobID), nullInt64(scan.JobRevision), scan.Job, scan.StartedAt.UTC().Format(time.RFC3339Nano), scan.FinishedAt.UTC().Format(time.RFC3339Nano), scan.Status, scan.Error, scan.NmapVersion, scan.ConfigHash, scan.CycleID, scan.CycleAttempt, scan.CycleStatus, boolInt(scan.Resumable), scan.CompletedProbes, scan.TotalProbes, scan.CompletedUnits, scan.TotalUnits, scan.NoProgressTries, scan.BaselineScanID, scan.BaselineConfigHash, changesJSON, snapshot)
+	_, err = execer.ExecContext(ctx, `INSERT INTO scans(id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		scan.ID, nullString(scan.JobID), nullInt64(scan.JobRevision), scan.Job, scan.StartedAt.UTC().Format(time.RFC3339Nano), scan.FinishedAt.UTC().Format(time.RFC3339Nano), scan.Status, scan.Error, scan.NmapVersion, scan.ScannerEngine, scan.ScannerProfileID, scan.ScannerProfileRevision, scan.NaabuVersion, scan.DiscoveryPorts, scan.ConfirmedPorts, scan.DiscoveryDurationMS, scan.EnrichmentDurationMS, scan.ConfigHash, scan.CycleID, scan.CycleAttempt, scan.CycleStatus, boolInt(scan.Resumable), scan.CompletedProbes, scan.TotalProbes, scan.CompletedUnits, scan.TotalUnits, scan.NoProgressTries, scan.BaselineScanID, scan.BaselineConfigHash, changesJSON, snapshot)
 	if err != nil {
 		return err
 	}
 	return saveScanHostsExec(ctx, execer, scan)
+}
+
+func loadScanMetadata(ctx context.Context, queryer rowQueryer, id string, scan *model.Scan) error {
+	if scan == nil {
+		return nil
+	}
+	return queryer.QueryRowContext(ctx, `SELECT scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms FROM scans WHERE id=?`, id).Scan(&scan.ScannerEngine, &scan.ScannerProfileID, &scan.ScannerProfileRevision, &scan.NaabuVersion, &scan.DiscoveryPorts, &scan.ConfirmedPorts, &scan.DiscoveryDurationMS, &scan.EnrichmentDurationMS)
+}
+
+func loadScanSummaryMetadata(ctx context.Context, queryer rowQueryer, id string, scan *model.ScanSummary) error {
+	if scan == nil {
+		return nil
+	}
+	return queryer.QueryRowContext(ctx, `SELECT scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms FROM scans WHERE id=?`, id).Scan(&scan.ScannerEngine, &scan.ScannerProfileID, &scan.ScannerProfileRevision, &scan.NaabuVersion, &scan.DiscoveryPorts, &scan.ConfirmedPorts, &scan.DiscoveryDurationMS, &scan.EnrichmentDurationMS)
 }
 
 func saveScanHostsExec(ctx context.Context, execer contextExecer, scan model.Scan) error {
@@ -1953,6 +2022,9 @@ func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {
 	if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
 		return v, err
 	}
+	if err := loadScanMetadata(ctx, s.DB, id, &v); err != nil {
+		return v, err
+	}
 	return v, nil
 }
 
@@ -1978,6 +2050,9 @@ func (s *Store) GetScanSummary(ctx context.Context, id string) (model.ScanSummar
 	}
 	v.Resumable = resumable != 0
 	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
+	if err := loadScanSummaryMetadata(ctx, s.DB, id, &v); err != nil {
+		return v, err
+	}
 	return v, nil
 }
 
@@ -2005,6 +2080,9 @@ func (s *Store) GetScanComparison(ctx context.Context, id string) (model.ScanSum
 	}
 	v.Resumable = resumable != 0
 	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
+	if err := loadScanSummaryMetadata(ctx, s.DB, id, &v); err != nil {
+		return v, nil, err
+	}
 	var changes []model.Change
 	if len(changesJSON) > 0 && string(changesJSON) != "null" {
 		if err := json.Unmarshal(changesJSON, &changes); err != nil {
@@ -2151,6 +2229,9 @@ func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {
 	if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
 		return v, err
 	}
+	if err := loadScanMetadata(ctx, tx, id, &v); err != nil {
+		return v, err
+	}
 	return v, nil
 }
 
@@ -2162,7 +2243,7 @@ func (s *Store) ListScans(ctx context.Context, job string, limit int) ([]model.S
 func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int) (Page[model.Scan], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Scan]
-	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans`
+	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans`
 	countQuery := `SELECT COUNT(*) FROM scans`
 	args := []any{}
 	countArgs := []any{}
@@ -2190,7 +2271,7 @@ func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int
 		var snapshot, changesJSON []byte
 		var baselineScanID, baselineConfigHash string
 		var resumable int
-		if err := rows.Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot); err != nil {
+		if err := rows.Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot); err != nil {
 			return page, err
 		}
 		v.Resumable = resumable != 0
@@ -2221,7 +2302,7 @@ func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int
 func (s *Store) ListScanSummariesPage(ctx context.Context, job string, limit, offset int) (Page[model.ScanSummary], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.ScanSummary]
-	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans`
+	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans`
 	countQuery := `SELECT COUNT(*) FROM scans`
 	args := []any{}
 	countArgs := []any{}
@@ -2247,7 +2328,7 @@ func (s *Store) ListScanSummariesPage(ctx context.Context, job string, limit, of
 		var revision sql.NullInt64
 		var started, finished string
 		var resumable int
-		if err := rows.Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash); err != nil {
+		if err := rows.Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash); err != nil {
 			return page, err
 		}
 		v.Resumable = resumable != 0

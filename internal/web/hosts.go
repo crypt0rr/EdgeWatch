@@ -303,6 +303,8 @@ func dedupeHost(host *model.HostObservation) {
 
 func mergeProtocolObservation(destination *model.ProtocolObservation, incoming model.ProtocolObservation) {
 	destination.Ports = append(destination.Ports, incoming.Ports...)
+	destination.DiscoveredPorts = append(destination.DiscoveredPorts, incoming.DiscoveredPorts...)
+	destination.UnconfirmedPorts = append(destination.UnconfirmedPorts, incoming.UnconfirmedPorts...)
 	if destination.ScanType == "" {
 		destination.ScanType = incoming.ScanType
 	}
@@ -313,6 +315,19 @@ func mergeProtocolObservation(destination *model.ProtocolObservation, incoming m
 		destination.ScannedPortCount = incoming.ScannedPortCount
 	}
 	destination.ServiceDetection = destination.ServiceDetection || incoming.ServiceDetection
+	if destination.DiscoveryEngine == "" {
+		destination.DiscoveryEngine = incoming.DiscoveryEngine
+	}
+	if destination.NSEProfile == "" {
+		destination.NSEProfile = incoming.NSEProfile
+	}
+	if destination.NSEArgs == nil && incoming.NSEArgs != nil {
+		destination.NSEArgs = cloneStringMap(incoming.NSEArgs)
+	}
+	destination.NSEOutput = append(destination.NSEOutput, incoming.NSEOutput...)
+	if destination.CommandFingerprint == "" {
+		destination.CommandFingerprint = incoming.CommandFingerprint
+	}
 	for _, summary := range incoming.StateSummaries {
 		found := false
 		for index := range destination.StateSummaries {
@@ -362,9 +377,43 @@ func dedupeProtocolPorts(protocol *model.ProtocolObservation) {
 		if destination.Reason == "" {
 			destination.Reason, destination.ReasonTTL = incoming.Reason, incoming.ReasonTTL
 		}
+		if verificationRank(incoming.Verification) > verificationRank(destination.Verification) {
+			destination.Verification = incoming.Verification
+		}
 		mergeServiceObservation(destination, incoming)
 	}
 	protocol.Ports = merged
+	for _, field := range []*[]model.PortObservation{&protocol.DiscoveredPorts, &protocol.UnconfirmedPorts} {
+		seen := map[int]int{}
+		mergedEvidence := make([]model.PortObservation, 0, len(*field))
+		for _, incoming := range *field {
+			if index, exists := seen[incoming.Port]; exists {
+				if verificationRank(incoming.Verification) > verificationRank(mergedEvidence[index].Verification) {
+					mergedEvidence[index].Verification = incoming.Verification
+				}
+				if mergedEvidence[index].Reason == "" {
+					mergedEvidence[index].Reason, mergedEvidence[index].ReasonTTL = incoming.Reason, incoming.ReasonTTL
+				}
+				continue
+			}
+			seen[incoming.Port] = len(mergedEvidence)
+			mergedEvidence = append(mergedEvidence, incoming)
+		}
+		*field = mergedEvidence
+	}
+}
+
+func verificationRank(value string) int {
+	switch value {
+	case "confirmed":
+		return 3
+	case "discovered":
+		return 2
+	case "unconfirmed":
+		return 1
+	default:
+		return 0
+	}
 }
 
 func mergeServiceObservation(destination *model.PortObservation, incoming model.PortObservation) {

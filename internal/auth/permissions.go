@@ -3,23 +3,25 @@ package auth
 import "github.com/crypt0rr/edgewatch/internal/store"
 
 const (
-	PermissionOverviewRead        = "overview.read"
-	PermissionJobsRead            = "jobs.read"
-	PermissionJobsWrite           = "jobs.write"
-	PermissionJobsRun             = "jobs.run"
-	PermissionHostsRead           = "hosts.read"
-	PermissionScansRead           = "scans.read"
-	PermissionBaselinesRead       = "baselines.read"
-	PermissionBaselinesManage     = "baselines.manage"
-	PermissionIncidentsRead       = "incidents.read"
-	PermissionIncidentsManage     = "incidents.manage"
-	PermissionNotificationOptions = "notification_options.read"
-	PermissionNotificationsRead   = "notifications.read"
-	PermissionNotificationsManage = "notifications.manage"
-	PermissionUsersManage         = "users.manage"
-	PermissionAuditRead           = "audit.read"
-	PermissionPublicManage        = "public_dashboard.manage"
-	PermissionStreamRead          = "stream.read"
+	PermissionOverviewRead          = "overview.read"
+	PermissionJobsRead              = "jobs.read"
+	PermissionJobsWrite             = "jobs.write"
+	PermissionJobsRun               = "jobs.run"
+	PermissionHostsRead             = "hosts.read"
+	PermissionScansRead             = "scans.read"
+	PermissionBaselinesRead         = "baselines.read"
+	PermissionBaselinesManage       = "baselines.manage"
+	PermissionIncidentsRead         = "incidents.read"
+	PermissionIncidentsManage       = "incidents.manage"
+	PermissionNotificationOptions   = "notification_options.read"
+	PermissionNotificationsRead     = "notifications.read"
+	PermissionNotificationsManage   = "notifications.manage"
+	PermissionUsersManage           = "users.manage"
+	PermissionAuditRead             = "audit.read"
+	PermissionPublicManage          = "public_dashboard.manage"
+	PermissionStreamRead            = "stream.read"
+	PermissionScannerProfilesRead   = "scanner_profiles.read"
+	PermissionScannerProfilesManage = "scanner_profiles.manage"
 )
 
 var rolePermissions = map[string]map[string]bool{
@@ -31,6 +33,7 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionNotificationOptions: true, PermissionNotificationsRead: true,
 		PermissionNotificationsManage: true, PermissionUsersManage: true,
 		PermissionAuditRead: true, PermissionPublicManage: true, PermissionStreamRead: true,
+		PermissionScannerProfilesRead: true, PermissionScannerProfilesManage: true,
 	},
 	store.RoleOperator: {
 		PermissionOverviewRead: true, PermissionJobsRead: true, PermissionJobsWrite: true,
@@ -38,6 +41,7 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionBaselinesRead: true, PermissionBaselinesManage: true,
 		PermissionIncidentsRead: true, PermissionIncidentsManage: true,
 		PermissionNotificationOptions: true, PermissionStreamRead: true,
+		PermissionScannerProfilesRead: true,
 	},
 	store.RoleViewer: {
 		// Viewers get the deliberately narrow read-only console: overview,
@@ -65,10 +69,16 @@ func PermissionsForRole(role string) []string {
 }
 
 func HasPermission(session store.Session, permission string) bool {
+	if permission == PermissionScannerProfilesRead {
+		return session.Role == store.RoleAdministrator || session.Role == store.RoleOperator || session.Role == ""
+	}
+	if permission == PermissionScannerProfilesManage {
+		return session.Role == store.RoleAdministrator || session.Role == ""
+	}
 	if session.Role == "" {
 		// Sessions created by pre-RBAC binaries are only ever valid for the
 		// original administrator and are upgraded by Authenticate when possible.
-		return permission == PermissionOverviewRead || permission == PermissionJobsRead || permission == PermissionJobsWrite || permission == PermissionJobsRun || permission == PermissionHostsRead || permission == PermissionScansRead || permission == PermissionBaselinesRead || permission == PermissionBaselinesManage || permission == PermissionIncidentsRead || permission == PermissionIncidentsManage || permission == PermissionNotificationOptions || permission == PermissionNotificationsRead || permission == PermissionNotificationsManage || permission == PermissionUsersManage || permission == PermissionAuditRead || permission == PermissionPublicManage || permission == PermissionStreamRead
+		return permission == PermissionOverviewRead || permission == PermissionJobsRead || permission == PermissionJobsWrite || permission == PermissionJobsRun || permission == PermissionHostsRead || permission == PermissionScansRead || permission == PermissionBaselinesRead || permission == PermissionBaselinesManage || permission == PermissionIncidentsRead || permission == PermissionIncidentsManage || permission == PermissionNotificationOptions || permission == PermissionNotificationsRead || permission == PermissionNotificationsManage || permission == PermissionUsersManage || permission == PermissionAuditRead || permission == PermissionPublicManage || permission == PermissionStreamRead || permission == PermissionScannerProfilesRead || permission == PermissionScannerProfilesManage
 	}
 	return rolePermissions[session.Role][permission]
 }

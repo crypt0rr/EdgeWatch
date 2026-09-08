@@ -5,8 +5,9 @@ import { z } from 'zod'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Bell, ChevronDown, Info, Plus, Save, Trash2, TriangleAlert } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { APIError, createJob, getJob, listNotificationDestinations, scheduleSuggestion, updateJob } from '../api'
+import { APIError, createJob, getJob, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
 import type { JobForm, Protocol } from '../types'
+import type { ScannerCapabilities, ScannerProfile } from '../api'
 import { cidrWarning, duplicateTarget, targetKind } from '../target'
 import { ActionDialog } from '../components/ActionDialog'
 
@@ -51,8 +52,10 @@ export function JobEditor() {
   const client = useQueryClient()
   const existing = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id!), enabled: edit })
   const notificationDestinations = useQuery({ queryKey: ['notifications'], queryFn: listNotificationDestinations, staleTime: 30_000 })
+  const scannerProfiles = useQuery({ queryKey: ['scanner-profiles'], queryFn: () => listScannerProfiles(false), staleTime: 60_000 })
+  const scannerCapabilityState = useQuery({ queryKey: ['scanner-capabilities'], queryFn: scannerCapabilities, staleTime: 5 * 60_000, retry: false })
   const [targets, setTargets] = useState<string[]>(blank.targets)
-  const [tcp, setTCP] = useState<Protocol | undefined>({ ports: '1-1024', mode: 'syn', service_detection: false })
+  const [tcp, setTCP] = useState<Protocol | undefined>({ ports: '1-1024', mode: 'syn', service_detection: false, engine: 'nmap' })
   const [udp, setUDP] = useState<Protocol | undefined>()
   const [selectedNotificationIDs, setSelectedNotificationIDs] = useState<string[]>([])
   const [notificationSelectionTouched, setNotificationSelectionTouched] = useState(false)
@@ -224,8 +227,8 @@ export function JobEditor() {
 
           <div className="panel form-panel">
             <div className="panel-heading"><div><h2>Scan types</h2><p className="muted">Enable one or both protocols and set their options independently.</p></div></div>
-            <ProtocolCard label="TCP" enabled={!!tcp} onToggle={(enabled) => { setDraftDirty(true); setTCP(enabled ? { ports: '1-1024', mode: 'syn', service_detection: false } : undefined) }} protocol={tcp} setProtocol={(value) => { setDraftDirty(true); setTCP(value) }} />
-            <ProtocolCard label="UDP" enabled={!!udp} onToggle={(enabled) => { setDraftDirty(true); setUDP(enabled ? { ports: '53', service_detection: true } : undefined) }} protocol={udp} setProtocol={(value) => { setDraftDirty(true); setUDP(value) }} />
+            <ProtocolCard label="TCP" enabled={!!tcp} profiles={scannerProfiles.data?.profiles ?? []} capabilities={scannerCapabilityState.data} onToggle={(enabled) => { setDraftDirty(true); setTCP(enabled ? { ports: '1-1024', mode: 'syn', service_detection: false, engine: 'nmap' } : undefined) }} protocol={tcp} setProtocol={(value) => { setDraftDirty(true); setTCP(value) }} />
+            <ProtocolCard label="UDP" profiles={[]} capabilities={scannerCapabilityState.data} enabled={!!udp} onToggle={(enabled) => { setDraftDirty(true); setUDP(enabled ? { ports: '53', service_detection: true, engine: 'nmap' } : undefined) }} protocol={udp} setProtocol={(value) => { setDraftDirty(true); setUDP(value) }} />
             {fieldErrors.protocols && <small className="field-error">{fieldErrors.protocols}</small>}
             {fieldErrors.tcp && <small className="field-error">{fieldErrors.tcp}</small>}
             {fieldErrors.udp && <small className="field-error">{fieldErrors.udp}</small>}
@@ -283,8 +286,72 @@ function TargetRow({ value, index, total, onChange, onRemove }: { value: string;
   return <div className="target-row"><input value={value} onChange={(event) => onChange(event.target.value)} placeholder={index === 0 ? '192.168.1.1 or 10.0.0.0/24 or router.example.com' : 'Add another target'} aria-label={`Target ${index + 1}`} /><span className="target-kind">{targetKind(value)}</span>{total > 1 && <button type="button" className="icon-button" aria-label="Remove target" onClick={onRemove}><Trash2 size={15} /></button>}</div>
 }
 
-function ProtocolCard({ label, enabled, onToggle, protocol, setProtocol }: { label: string; enabled: boolean; onToggle: (enabled: boolean) => void; protocol?: Protocol; setProtocol: (value: Protocol | undefined) => void }) {
-  return <div className={enabled ? 'protocol-card enabled' : 'protocol-card'}><div className="protocol-header"><label className="switch-row protocol-toggle"><input type="checkbox" checked={enabled} onChange={(event) => onToggle(event.target.checked)} /><span><strong>{label} scan</strong><small>{enabled ? 'Included in this job' : 'Not included'}</small></span></label><span className={enabled ? 'pill blue' : 'pill gray'}>{enabled ? 'On' : 'Off'}</span></div>{enabled && protocol && <div className="protocol-options"><label>Ports<input value={protocol.ports} onChange={(event) => setProtocol({ ...protocol, ports: event.target.value })} placeholder="1-1024,8080" /><small>Ranges and comma-separated ports, 1–65535.</small></label>{label === 'TCP' && <label>Connection mode<select value={protocol.mode ?? 'syn'} onChange={(event) => setProtocol({ ...protocol, mode: event.target.value })}><option value="syn">SYN (requires NET_RAW)</option><option value="connect">TCP connect</option></select></label>}<label className="switch-row"><input type="checkbox" checked={protocol.service_detection} onChange={(event) => setProtocol({ ...protocol, service_detection: event.target.checked })} /><span><strong>Service detection</strong><small>Identify likely services on open ports.</small></span></label></div>}</div>
+function ProtocolCard({ label, enabled, onToggle, protocol, setProtocol, profiles, capabilities }: { label: string; enabled: boolean; onToggle: (enabled: boolean) => void; protocol?: Protocol; setProtocol: (value: Protocol | undefined) => void; profiles: ScannerProfile[]; capabilities?: ScannerCapabilities }) {
+  const engine = protocol?.engine ?? 'nmap'
+  const selectedProfile = profiles.find(profile => profile.id === protocol?.profile_id)
+  const profileOptions = profiles.filter(profile => !profile.archived && profile.definition.engine === engine)
+  const defaults = { scan_type: 'connect', rate: 1000, workers: 25, retries: 3, timeout_ms: 1000, warm_up_seconds: 2, verify: true, address_batch_size: 16 }
+  const naabu = { ...defaults, ...(selectedProfile?.definition.naabu ?? {}), ...(protocol?.naabu ?? {}) }
+  const adjustable = selectedProfile?.definition.operator_adjustable ?? []
+  const canTune = (field: string) => !selectedProfile || adjustable.includes(field)
+  const updateNaabu = (field: string, value: number | string | boolean) => setProtocol({ ...protocol!, naabu: { ...naabu, [field]: value } })
+  const profileValues = (profile?: ScannerProfile, fallbackEngine = engine) => ({
+    profile_id: profile?.id,
+    profile_revision: profile?.revision,
+    engine: profile?.definition.engine ?? fallbackEngine,
+    naabu: profile?.definition.engine === 'naabu_nmap' ? profile.definition.naabu : undefined,
+    naabu_args: profile?.definition.naabu_args,
+    nmap_args: profile?.definition.nmap_args,
+    enrichment_args: profile?.definition.enrichment_args,
+    nse_profile: profile?.definition.nse_profile,
+    nse_args: profile?.definition.nse_args,
+  })
+  const setEngine = (value: string) => {
+    // Search all active profiles when switching engines. `profileOptions` is
+    // intentionally filtered to the current engine for the select below, so
+    // using it here made the Naabu switch lose its required profile ID.
+    const profile = profiles.find(item => !item.archived && item.definition.engine === value)
+    const values = profileValues(profile, value)
+    setProtocol({ ...protocol!, ...values, engine: value, ports: value === 'naabu_nmap' ? '1-65535' : protocol!.ports })
+  }
+  const setProfile = (value: string) => {
+    const profile = profileOptions.find(item => item.id === value)
+    const values = profileValues(profile, engine)
+    setProtocol({ ...protocol!, ...values, ports: values.engine === 'naabu_nmap' ? '1-65535' : protocol!.ports })
+  }
+  const applyLatestProfile = () => {
+    if (!protocol || !selectedProfile) return
+    const values = profileValues(selectedProfile)
+    setProtocol({ ...protocol, ...values, ports: values.engine === 'naabu_nmap' ? '1-65535' : protocol.ports, profile_update_available: undefined, profile_latest_revision: undefined })
+  }
+  const synUnsupported = engine === 'naabu_nmap' && naabu.scan_type === 'syn' && capabilities?.naabu && !capabilities.naabu.syn_supported
+  return <div className={enabled ? 'protocol-card enabled' : 'protocol-card'}>
+    <div className="protocol-header"><label className="switch-row protocol-toggle"><input type="checkbox" checked={enabled} onChange={(event) => onToggle(event.target.checked)} /><span><strong>{label} scan</strong><small>{enabled ? 'Included in this job' : 'Not included'}</small></span></label><span className={enabled ? 'pill blue' : 'pill gray'}>{enabled ? 'On' : 'Off'}</span></div>
+    {enabled && protocol && <div className="protocol-options">
+      {label === 'TCP' && <>
+        <label>TCP engine<select value={engine} onChange={(event) => setEngine(event.target.value)}><option value="nmap">Nmap only</option><option value="naabu_nmap">Naabu discovery → Nmap</option></select><small>Nmap confirms monitored state. Naabu mode always discovers TCP ports 1–65535.</small></label>
+        <label>Scanner profile<select value={protocol.profile_id ?? ''} onChange={(event) => setProfile(event.target.value)} disabled={profileOptions.length === 0}><option value="">{engine === 'naabu_nmap' ? 'Choose a managed profile' : 'Built-in Nmap defaults'}</option>{profileOptions.map(profile => <option key={profile.id} value={profile.id}>{profile.name} (r{profile.revision})</option>)}</select>{selectedProfile && <small>Revision r{protocol.profile_revision ?? selectedProfile.revision} is pinned to this job. {protocol.profile_update_available ? <><span> A newer revision (r{protocol.profile_latest_revision}) is available.</span> <button type="button" className="link-button" onClick={applyLatestProfile}>Apply latest profile</button></> : ''}</small>}</label>
+        {engine === 'naabu_nmap' && <div className="notice"><Info size={15} /><span>Full-range discovery scope is fixed at TCP 1–65535. Connect mode works with the default Compose capabilities; SYN needs NET_ADMIN and NET_RAW.</span></div>}
+      </>}
+      <label>Ports<input disabled={engine === 'naabu_nmap'} value={engine === 'naabu_nmap' ? '1-65535' : protocol.ports} onChange={(event) => setProtocol({ ...protocol, ports: event.target.value })} placeholder="1-1024,8080" /><small>Ranges and comma-separated ports, 1–65535.</small></label>
+      {label === 'TCP' && <label>Connection mode<select value={protocol.mode ?? 'syn'} onChange={(event) => setProtocol({ ...protocol, mode: event.target.value })}><option value="syn">SYN (requires NET_RAW)</option><option value="connect">TCP connect</option></select></label>}
+      <label className="switch-row"><input type="checkbox" checked={protocol.service_detection} onChange={(event) => setProtocol({ ...protocol, service_detection: event.target.checked })} /><span><strong>Service detection</strong><small>Identify likely services on open ports.</small></span></label>
+      {engine === 'naabu_nmap' && <>
+        <div className="two-fields">
+          <label>Discovery type<select value={naabu.scan_type} disabled={!canTune('scan_type')} onChange={(event) => updateNaabu('scan_type', event.target.value)}><option value="connect">Connect</option><option value="syn">SYN</option></select></label>
+          <label>Rate<input type="number" min={1} max={100000} value={naabu.rate} disabled={!canTune('rate')} onChange={(event) => updateNaabu('rate', Number(event.target.value))} /></label>
+          <label>Workers<input type="number" min={1} max={1024} value={naabu.workers} disabled={!canTune('workers')} onChange={(event) => updateNaabu('workers', Number(event.target.value))} /></label>
+          <label>Retries<input type="number" min={0} max={10} value={naabu.retries} disabled={!canTune('retries')} onChange={(event) => updateNaabu('retries', Number(event.target.value))} /></label>
+          <label>Probe timeout (ms)<input type="number" min={100} max={60000} value={naabu.timeout_ms} disabled={!canTune('timeout_ms')} onChange={(event) => updateNaabu('timeout_ms', Number(event.target.value))} /></label>
+          <label>Warm-up (seconds)<input type="number" min={0} max={60} value={naabu.warm_up_seconds} disabled={!canTune('warm_up_seconds')} onChange={(event) => updateNaabu('warm_up_seconds', Number(event.target.value))} /></label>
+          <label>Address batch size<input type="number" min={1} max={256} value={naabu.address_batch_size} disabled={!canTune('address_batch_size')} onChange={(event) => updateNaabu('address_batch_size', Number(event.target.value))} /></label>
+          <label className="switch-row"><input type="checkbox" checked={naabu.verify} disabled={!canTune('verify')} onChange={(event) => updateNaabu('verify', event.target.checked)} /><span><strong>Verify discoveries</strong><small>Ask Naabu to re-check discovered ports.</small></span></label>
+        </div>
+        {protocol.nse_profile && <div className="helper">Approved NSE profile: <strong>{protocol.nse_profile}</strong>{protocol.nse_args && Object.keys(protocol.nse_args).length ? ` · ${Object.keys(protocol.nse_args).length} structured argument${Object.keys(protocol.nse_args).length === 1 ? '' : 's'}` : ''}</div>}
+        {synUnsupported && <div className="notice warning" role="alert"><TriangleAlert size={15} /><span>SYN discovery is unavailable with the current container capabilities. Choose connect mode or add NET_ADMIN alongside NET_RAW.</span></div>}
+      </>}
+    </div>}
+  </div>
 }
 
 function presetFor(schedule: string) {

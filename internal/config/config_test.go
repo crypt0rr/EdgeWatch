@@ -346,3 +346,166 @@ jobs:
 		t.Fatalf("auth key file not retained: %q", cfg.Web.AuthKeyFile)
 	}
 }
+
+func TestNaabuOptionsJSONRoundTripPreservesExplicitZeroValues(t *testing.T) {
+	original := NaabuOptions{
+		ScanType: "connect", Rate: 1000, Workers: 25, Retries: 0,
+		TimeoutMS: 1000, WarmUpSeconds: 0, Verify: false, AddressBatchSize: 16,
+		RetriesSet: true, WarmUpSecondsSet: true, VerifySet: true,
+	}
+	raw, err := json.Marshal(original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "RetriesSet") || strings.Contains(string(raw), "VerifySet") {
+		t.Fatalf("presence markers leaked into JSON: %s", raw)
+	}
+	var roundTrip NaabuOptions
+	if err := json.Unmarshal(raw, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	ApplyNaabuDefaultsForScanner(&roundTrip)
+	if roundTrip.Retries != 0 || roundTrip.WarmUpSeconds != 0 || roundTrip.Verify {
+		t.Fatalf("explicit zero/false values were defaulted: %#v", roundTrip)
+	}
+	if !roundTrip.RetriesSet || !roundTrip.WarmUpSecondsSet || !roundTrip.VerifySet {
+		t.Fatalf("presence markers were not restored: %#v", roundTrip)
+	}
+}
+
+func TestScannerProfileExecutionAndSecurityHashes(t *testing.T) {
+	base := NormalizeJob(Job{Targets: []string{"192.0.2.1"}, TCP: &Protocol{Ports: "443", Mode: "syn", Engine: EngineNmap}})
+	pinned := base
+	protocol := *base.TCP
+	pinned.TCP = &protocol
+	pinned.TCP.ProfileID = "profile-a"
+	pinned.TCP.ProfileRevision = 2
+	if base.SecurityHash() != pinned.SecurityHash() {
+		t.Fatal("profile provenance unexpectedly changed the monitored security hash")
+	}
+	if base.ExecutionHash() == pinned.ExecutionHash() {
+		t.Fatal("profile provenance did not change the execution hash")
+	}
+	changed := base
+	changedProtocol := *base.TCP
+	changed.TCP = &changedProtocol
+	changed.TCP.Engine = EngineNaabuNmap
+	changed.TCP.Naabu = &NaabuOptions{ScanType: "syn", Rate: 1000, Workers: 25, Retries: 3, TimeoutMS: 1000, WarmUpSeconds: 2, Verify: true, AddressBatchSize: 16}
+	if base.SecurityHash() == changed.SecurityHash() {
+		t.Fatal("scanner engine change did not change the security hash")
+	}
+}
+
+func TestNormalizeNaabuForcesFullTCPRange(t *testing.T) {
+	job := NormalizeJob(Job{
+		Targets: []string{"192.0.2.1"},
+		TCP:     &Protocol{Engine: EngineNaabuNmap, Ports: "22", Naabu: &NaabuOptions{}},
+	})
+	if job.TCP == nil || job.TCP.Ports != NaabuFullPortExpression {
+		t.Fatalf("Naabu port scope = %#v, want %q", job.TCP, NaabuFullPortExpression)
+	}
+	if _, err := ParsePorts(job.TCP.Ports); err != nil {
+		t.Fatalf("normalized Naabu scope is not parseable: %v", err)
+	}
+}
+
+func TestScannerProfileValidationRejectsUnsafeFlagsAndEngineMismatch(t *testing.T) {
+	validNaabu := ScannerProfile{Engine: EngineNaabuNmap, Naabu: BuiltinNaabuProfile().Naabu, NaabuArgs: []string{PlaceholderTargetsFile, PlaceholderPorts, PlaceholderStructuredOutput}}
+	for _, value := range []string{"-A", "-O", "-R", "-sC", "--traceroute", "-Pn", "--script=default", "$(touch /tmp/x)", "/bin/sh", "evil.example", "evil", "192.0.2.10", "-", "--"} {
+		profile := validNaabu
+		profile.NaabuArgs = append([]string(nil), validNaabu.NaabuArgs...)
+		profile.NaabuArgs = append(profile.NaabuArgs, value)
+		if err := ValidateScannerProfile(profile); err == nil {
+			t.Errorf("unsafe scanner argument %q was accepted", value)
+		}
+	}
+	profile := ScannerProfile{Engine: EngineNmap, NaabuArgs: []string{"-rate", "100"}}
+	if err := ValidateScannerProfile(profile); err == nil || !strings.Contains(err.Error(), "naabu arguments") {
+		t.Fatalf("Nmap profile accepted Naabu arguments: %v", err)
+	}
+}
+
+func TestScannerProfileValidationAllowsSafeScalarOperands(t *testing.T) {
+	profile := ScannerProfile{Engine: EngineNmap, NmapArgs: []string{PlaceholderAddress, PlaceholderPorts, PlaceholderStructuredOutput, "--host-timeout", "5m", "--min-rate", "1000"}}
+	if err := ValidateScannerProfile(profile); err != nil {
+		t.Fatalf("safe scalar operands were rejected: %v", err)
+	}
+	for _, value := range []string{"--host-timeout=/etc/passwd", "--min-rate=$(touch /tmp/x)", "--max-rate=evil.example", "--max-rate=foo=bar"} {
+		profile.NmapArgs = []string{PlaceholderAddress, PlaceholderPorts, PlaceholderStructuredOutput, value}
+		if err := ValidateScannerProfile(profile); err == nil {
+			t.Errorf("unsafe inline operand %q was accepted", value)
+		}
+	}
+	for _, args := range [][]string{
+		{PlaceholderAddress, PlaceholderPorts, PlaceholderStructuredOutput, "--host-timeout"},
+		{PlaceholderAddress, PlaceholderPorts, PlaceholderStructuredOutput, "--host-timeout", PlaceholderAddress},
+		{PlaceholderAddress, PlaceholderPorts, PlaceholderStructuredOutput, "--host-timeout", "--min-rate"},
+	} {
+		profile.NmapArgs = args
+		if err := ValidateScannerProfile(profile); err == nil {
+			t.Errorf("malformed operand list was accepted: %#v", args)
+		}
+	}
+}
+
+func TestScannerProfileValidationRejectsBareScalarTargets(t *testing.T) {
+	profile := ScannerProfile{Engine: EngineNmap, NmapArgs: []string{PlaceholderAddress, PlaceholderPorts, PlaceholderStructuredOutput, "123"}}
+	if err := ValidateScannerProfile(profile); err == nil {
+		t.Fatal("bare numeric positional argument was accepted as a safe profile value")
+	}
+	profile.NmapArgs = []string{PlaceholderAddress, PlaceholderPorts, PlaceholderStructuredOutput, "connect"}
+	if err := ValidateScannerProfile(profile); err == nil {
+		t.Fatal("bare enum positional argument was accepted as a safe profile value")
+	}
+}
+
+func TestScannerProfileValidationRejectsDuplicatePlaceholders(t *testing.T) {
+	profile := ScannerProfile{Engine: EngineNmap, NmapArgs: []string{PlaceholderAddress, PlaceholderAddress, PlaceholderPorts, PlaceholderStructuredOutput}}
+	if err := ValidateScannerProfile(profile); err == nil {
+		t.Fatal("duplicate address placeholder was accepted")
+	}
+}
+
+func TestScannerProfileValidationRejectsUnknownFlags(t *testing.T) {
+	profile := ScannerProfile{Engine: EngineNmap, NmapArgs: []string{PlaceholderAddress, PlaceholderPorts, PlaceholderStructuredOutput, "--not-an-edgewatch-option"}}
+	if err := ValidateScannerProfile(profile); err == nil || !strings.Contains(err.Error(), "approved scanner option") {
+		t.Fatalf("unknown scanner flag was accepted: %v", err)
+	}
+}
+
+func TestScannerProfilePreviewDoesNotDuplicateManagedArguments(t *testing.T) {
+	profile := ScannerProfile{
+		Engine:    EngineNaabuNmap,
+		Naabu:     BuiltinNaabuProfile().Naabu,
+		NaabuArgs: []string{PlaceholderTargetsFile, PlaceholderPorts, PlaceholderStructuredOutput, "-verbose"},
+		NmapArgs:  []string{PlaceholderAddress, PlaceholderPorts, PlaceholderStructuredOutput, "-v"},
+	}
+	previews, err := RenderScannerProfilePreview(profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(previews) != 2 {
+		t.Fatalf("preview count = %d, want Naabu and Nmap", len(previews))
+	}
+	if got := strings.Count(strings.Join(previews[0].Args, " "), "/tmp/edgewatch-targets.txt"); got != 1 {
+		t.Fatalf("Naabu preview rendered target file %d times: %#v", got, previews[0].Args)
+	}
+	if got := strings.Count(strings.Join(previews[1].Args, " "), "192.0.2.10"); got != 1 {
+		t.Fatalf("Nmap preview rendered address %d times: %#v", got, previews[1].Args)
+	}
+	countArg := func(args []string, want string) int {
+		count := 0
+		for _, arg := range args {
+			if arg == want {
+				count++
+			}
+		}
+		return count
+	}
+	if got := countArg(previews[0].Args, "-p"); got != 1 {
+		t.Fatalf("Naabu preview rendered managed port scope %d times: %#v", got, previews[0].Args)
+	}
+	if got := countArg(previews[1].Args, "-oX"); got != 1 {
+		t.Fatalf("Nmap preview rendered structured output %d times: %#v", got, previews[1].Args)
+	}
+}

@@ -293,6 +293,15 @@ export function JobDetail() {
                   {canOperate && <button className="button secondary" onClick={() => { setActionError(''); setDialog('approve') }} disabled={!!actionBusy}>{actionBusy === 'approve' ? 'Approving…' : 'Use as baseline'}</button>}
                 </div>
               )}
+              {(detail.data.scan.scanner_engine === 'naabu_nmap' || detail.data.scan.naabu_version || detail.data.scan.scanner_profile_id) && (
+                <div className="scanner-run-summary" role="status">
+                  <div><strong>Scanner provenance</strong><span>{detail.data.scan.scanner_engine === 'naabu_nmap' ? 'Naabu full TCP discovery → Nmap confirmation' : detail.data.scan.scanner_engine || 'Nmap'}</span></div>
+                  <div><strong>Profile</strong><span>{detail.data.scan.scanner_profile_id ? `${detail.data.scan.scanner_profile_id} · revision ${detail.data.scan.scanner_profile_revision ?? 'current'}` : 'Built-in'}</span></div>
+                  {detail.data.scan.naabu_version && <div><strong>Naabu</strong><span>{detail.data.scan.naabu_version}</span></div>}
+                  {detail.data.scan.discovery_ports != null && <div><strong>Discovery</strong><span>{detail.data.scan.discovery_ports.toLocaleString()} ports · {formatRunDuration(detail.data.scan.discovery_duration_ms)}</span></div>}
+                  {detail.data.scan.confirmed_ports != null && <div><strong>Confirmed</strong><span>{detail.data.scan.confirmed_ports.toLocaleString()} ports · {formatRunDuration(detail.data.scan.enrichment_duration_ms)}</span></div>}
+                </div>
+              )}
               {detail.data.changes?.length ? (
                 <div className="change-list">
                   {detail.data.changes.map((change, index) => (
@@ -361,4 +370,10 @@ function formatEstimateDuration(seconds: number) {
   const minutes = Math.ceil(seconds / 60)
   if (minutes < 60) return `${minutes}m`
   return `${Math.ceil(minutes / 60)}h`
+}
+
+function formatRunDuration(ms?: number) {
+  if (!ms || ms < 1) return '—'
+  if (ms < 1000) return `${ms} ms`
+  return `${(ms / 1000).toFixed(ms >= 10000 ? 0 : 1)} s`
 }

@@ -42,6 +42,7 @@ type App struct {
 	runStarted        bool
 	sem               chan struct{}
 	nmapVersion       string
+	naabuVersion      string
 	scheduleMu        sync.Mutex
 	cron              *cron.Cron
 	entries           map[string]cron.EntryID
@@ -128,6 +129,13 @@ type ProgressScanner interface {
 }
 
 func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logger) (*App, error) {
+	return NewWithScannerPaths(cfg, s, nmapPath, "/usr/local/bin/naabu", logger)
+}
+
+// NewWithScannerPaths is the production constructor used when the daemon
+// needs to locate both fixed scanner binaries. New remains the compatibility
+// entry point for tests and embedded callers that only know about Nmap.
+func NewWithScannerPaths(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logger *slog.Logger) (*App, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -166,10 +174,10 @@ func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logge
 		}
 		logger.Warn("legacy YAML jobs are inactive; recreate them in the web console", "jobs", legacyNames)
 	}
-	sc := scanner.New(nmapPath)
+	sc := scanner.NewWithNaabu(nmapPath, naabuPath)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second}, nil
+	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second}, nil
 }
 
 func (a *App) Job(name string) (config.Job, error) {
@@ -311,7 +319,18 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		}
 	}
 	started := time.Now().UTC()
-	scan := model.Scan{ID: scanner.NewID(started), JobID: jobID, JobRevision: revision, Job: job.Name, StartedAt: started, ConfigHash: job.SecurityHash(), NmapVersion: a.nmapVersion}
+	engineName := config.EngineNmap
+	profileID, profileRevision := "", int64(0)
+	if job.TCP != nil {
+		if job.TCP.Engine != "" {
+			engineName = job.TCP.Engine
+		}
+		profileID, profileRevision = job.TCP.ProfileID, job.TCP.ProfileRevision
+	}
+	scan := model.Scan{ID: scanner.NewID(started), JobID: jobID, JobRevision: revision, Job: job.Name, StartedAt: started, ConfigHash: job.SecurityHash(), NmapVersion: a.nmapVersion, ScannerEngine: engineName, ScannerProfileID: profileID, ScannerProfileRevision: profileRevision}
+	if engineName == config.EngineNaabuNmap {
+		scan.NaabuVersion = a.naabuVersion
+	}
 	leaseKey := job.Name
 	if managed {
 		leaseKey = jobID
@@ -329,7 +348,7 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		return model.Scan{}, nil, err
 	}
 	scanCtx, cancel := context.WithTimeout(ctx, job.Timeout.Value())
-	run := &activeRun{scan: model.ActiveScan{ID: scan.ID, JobID: jobID, Job: job.Name, JobRevision: revision, StartedAt: started, EstimatedProbes: estimate.Probes, NmapInvocations: estimate.NmapInvocations, EstimatedSeconds: estimate.EstimatedSeconds, TotalProbes: estimate.Probes, TotalInvocations: estimate.NmapInvocations, Phase: "starting"}, cancel: cancel}
+	run := &activeRun{scan: model.ActiveScan{ID: scan.ID, JobID: jobID, Job: job.Name, JobRevision: revision, StartedAt: started, EstimatedProbes: estimate.Probes, NmapInvocations: estimate.NmapInvocations, EstimatedSeconds: estimate.EstimatedSeconds, TotalProbes: estimate.Probes, TotalInvocations: estimate.NmapInvocations, Phase: "starting", Scanner: engineName, ScannerProfileID: profileID, ScannerProfileRevision: profileRevision}, cancel: cancel}
 	a.running.Store(scan.ID, run)
 	defer func() {
 		cancel()
@@ -363,7 +382,12 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	var snapshot model.Snapshot
 	var scanErr error
 	resumableRun := false
-	if managed {
+	// The scanner planner owns both ordinary Nmap units and Naabu pipeline
+	// batches. Naabu units checkpoint a pinned address batch after discovery and
+	// enrichment, so a paused cycle can resume without replaying completed
+	// batches or bypassing the discovery phase.
+	useResumable := managed
+	if useResumable {
 		if resumableScanner, ok := a.Scanner.(scanner.ResumableScanner); ok {
 			var handled bool
 			handled, snapshot, scanErr = a.runResumableAttempt(ctx, scanCtx, job, jobID, &scan, run, resumableScanner, manual)
@@ -385,8 +409,18 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 			snapshot, scanErr = a.Scanner.Scan(scanCtx, job)
 		}
 	}
+	// Scanner progress carries phase timing for the optional Naabu pipeline.
+	// Capture it before the active run is removed by the deferred cleanup so
+	// the immutable scan record remains useful after completion.
+	if current := run.snapshot(); current.DiscoveryDurationMS > 0 || current.EnrichmentDurationMS > 0 {
+		scan.DiscoveryDurationMS = current.DiscoveryDurationMS
+		scan.EnrichmentDurationMS = current.EnrichmentDurationMS
+	}
 	scan.FinishedAt = time.Now().UTC()
 	scan.Snapshot = snapshot
+	if scan.ScannerEngine == config.EngineNaabuNmap {
+		scan.DiscoveryPorts, scan.ConfirmedPorts = scannerDiscoveryStats(snapshot)
+	}
 	if scanErr != nil {
 		if !resumableRun {
 			if errors.Is(scanCtx.Err(), context.Canceled) {
@@ -532,6 +566,18 @@ func (a *App) updateActiveProgress(id string, progress scanner.Progress) {
 	if progress.CurrentInvocation > 0 {
 		run.scan.CurrentInvocation = progress.CurrentInvocation
 	}
+	if progress.DiscoveryPortsFound > run.scan.DiscoveryPortsFound {
+		run.scan.DiscoveryPortsFound = progress.DiscoveryPortsFound
+	}
+	if progress.DiscoveryAddresses > run.scan.DiscoveryAddresses {
+		run.scan.DiscoveryAddresses = progress.DiscoveryAddresses
+	}
+	if progress.DiscoveryDurationMS > run.scan.DiscoveryDurationMS {
+		run.scan.DiscoveryDurationMS = progress.DiscoveryDurationMS
+	}
+	if progress.EnrichmentDurationMS > run.scan.EnrichmentDurationMS {
+		run.scan.EnrichmentDurationMS = progress.EnrichmentDurationMS
+	}
 	if progress.TotalBatches > 0 {
 		run.scan.TotalBatches = progress.TotalBatches
 	}
@@ -594,6 +640,27 @@ func progressPercent(progress scanner.Progress) int {
 		return 100
 	}
 	return percent
+}
+
+func scannerDiscoveryStats(snapshot model.Snapshot) (discovered, confirmed int) {
+	seenDiscovered := map[string]struct{}{}
+	seenConfirmed := map[string]struct{}{}
+	for _, host := range snapshot.Hosts {
+		for _, protocol := range host.Protocols {
+			if protocol.Protocol != "tcp" {
+				continue
+			}
+			for _, port := range protocol.DiscoveredPorts {
+				seenDiscovered[host.Address+"/tcp/"+fmt.Sprint(port.Port)] = struct{}{}
+			}
+			for _, port := range protocol.Ports {
+				if port.State == "open" || port.State == "open|filtered" {
+					seenConfirmed[host.Address+"/tcp/"+fmt.Sprint(port.Port)] = struct{}{}
+				}
+			}
+		}
+	}
+	return len(seenDiscovered), len(seenConfirmed)
 }
 
 func (a *App) Daemon(ctx context.Context) error {

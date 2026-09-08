@@ -1,8 +1,9 @@
 # EdgeWatch
 
-EdgeWatch is a Docker-deployed Nmap monitor. It schedules TCP and UDP scans,
-records a baseline, and sends Shoutrrr notifications when the observed network
-surface changes.
+EdgeWatch is a Docker-deployed network-surface monitor. It schedules TCP and
+UDP scans, records a baseline, and sends Shoutrrr notifications when the
+observed network surface changes. TCP jobs can use Nmap directly or an optional
+Naabu full-range discovery pass followed by Nmap confirmation.
 
 Only scan systems you own or are authorized to assess. Full-range UDP scans can
 take many hours and generate significant traffic.
@@ -90,6 +91,25 @@ the replacement is issued.
 - Create all monitoring jobs in the web console. The YAML `jobs` section is
   not used for scheduling.
 
+Scanner profiles are managed by administrators in **Scanner profiles**. A TCP
+job can select **Nmap only** (the default for existing jobs) or **Naabu
+discovery → Nmap**. Naabu always discovers TCP ports `1-65535`; only Nmap's
+confirmed `open` and `open|filtered` results enter baselines and incidents.
+Naabu discoveries and disagreements remain available as diagnostic host
+evidence. UDP remains Nmap-only. Profiles pin a revision into each job, so
+editing a profile never changes a scheduled job silently; applying a newer
+revision is an explicit job edit and may require rebaselining.
+
+Profile command customization is an administrator-controlled, validated array
+of arguments for the fixed `/usr/local/bin/naabu` and `/usr/bin/nmap`
+executables. EdgeWatch uses `exec.CommandContext` directly and never executes
+shell strings, pipelines, substitutions, arbitrary binaries, or arbitrary NSE
+scripts. Operators can tune only fields that an administrator exposes within
+bounded limits. Connect discovery is the built-in default. Naabu SYN discovery
+requires both `NET_ADMIN` and `NET_RAW`; the default Compose file grants only
+`NET_RAW`, so add `NET_ADMIN` explicitly to the service capabilities when a
+reviewed SYN profile is required.
+
 ## Users and public status
 
 The first-run account is an `administrator`. Administrators can invite more
@@ -119,14 +139,13 @@ terminally failed deliveries, superseded job revisions, and terminal
 resumable-cycle metadata that no retained scan still references. Active
 baselines, the current revision of every job, pending/retryable deliveries,
 active scan cycles, and the security audit log are retained; audit records are
-intentionally indefinite.
-The daemon logs the row counts removed from each retention class at startup
-and during its daily pruning pass.
+intentionally indefinite. The daemon logs the row counts removed from each
+retention class at startup and during its daily pruning pass.
 
 The web job editor supports individual IP addresses, CIDRs, DNS names, target
 expansion limits, independent TCP and UDP scans, ports `1-65535`, TCP SYN or
 connect mode, service detection, timing, timeouts, cron schedules, timezones,
-pause/resume controls, and a preflight Nmap work estimate. Broad scans are
+pause/resume controls, and a preflight scanner work estimate. Broad scans are
 guarded by the scheduler probe budget; enable the explicit high-cost override
 only when the additional load is understood. Active scans expose completed
 probe/process counts in the dashboard and can be canceled without changing a
@@ -136,13 +155,17 @@ sent to configured notification destinations; the message includes the scan
 and failure reason.
 
 For broad jobs (more than 4,096 configured ports or 65,536 estimated probes),
-EdgeWatch automatically breaks the scan into deterministic Nmap work units.
-Each successful unit is checkpointed in SQLite. If the per-attempt timeout is
-reached, the current unit is split (addresses first, then ports) and the cycle
-is paused for the next scheduled or manual trigger; partial cycles never affect
-the baseline. Paused progress is retained for eight days by default. Configure
-the per-job `resume_window` between `1h` and `30d`, or use **Discard saved
-progress** on the job page to force a fresh full-range cycle. Three consecutive
+EdgeWatch automatically breaks the scan into deterministic work units. Nmap
+units are split by addresses and then ports. Naabu discovery units checkpoint
+one pinned full-range address batch. After all discovery units complete,
+deterministic Nmap enrichment units are derived from the committed discoveries,
+followed by any configured UDP units. A retry never changes that mandatory
+scope into a partial port scan. Each successful unit is checkpointed in SQLite.
+If the per-attempt timeout is reached, the
+cycle is paused for the next scheduled or manual trigger; partial cycles never
+affect the baseline. Paused progress is retained for eight days by default.
+Configure the per-job `resume_window` between `1h` and `30d`, or use **Discard
+saved progress** on the job page to force a fresh cycle. Three consecutive
 attempts without any completed work mark a cycle stalled and generate a failure
 notification. If the resume window expires, EdgeWatch records one terminal
 failure notification before the next trigger starts from a fresh plan. A
@@ -154,10 +177,10 @@ jobs and offers a non-blocking 30-minute offset when another run is too close.
 The suggestion is optional: keep the chosen schedule when concurrent runs are
 intentional.
 
-`assume_alive` defaults to `true` and passes `-Pn` to Nmap. Set it to `false`
-when host discovery is required. If discovery reports an expected target as
-down or omits it, the scan fails safely instead of treating the target as
-closed.
+`assume_alive` defaults to `true` and passes host-discovery skip flags to the
+selected scanner. Set it to `false` when host discovery is required. If Nmap
+discovery reports an expected target as down or omits it, the scan fails safely
+instead of treating the target as closed.
 
 When a baseline is ready, use **Explore baseline** on the job page to inspect
 every effective address produced by the configured targets. Host detail pages
@@ -208,8 +231,8 @@ To supply the key separately, set `notifications.encryption_key_file` to a
 `0600` file containing 32 raw bytes or 64 hexadecimal characters and mount it
 into the container. An explicitly supplied key path is never generated
 automatically. Back up the key with `./data/edgewatch.db`; a missing, invalid,
-or unsafe key locks web-managed destinations while scans and deployment-managed
-notifications continue.
+or unsafe key locks web-managed destinations while scans and
+deployment-managed notifications continue.
 
 The TOTP authentication key is independent of the notification key. Back up
 `./data/auth.key` together with `./data/edgewatch.db` (or the separately mounted
@@ -239,12 +262,11 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 13), but it is
-forward-only: an older binary refuses a newer schema. To roll back, stop the
-new service, restore the entire pre-upgrade `./data` directory and deployment
-configuration, then start the previous image. Do not point an older image at
-the upgraded database. The previous named Docker volume, if one exists, is
-not read or migrated automatically.
+version 14), but it is forward-only: an older binary refuses a newer schema.
+To roll back, stop the new service, restore the entire pre-upgrade `./data`
+directory and deployment configuration, then start the previous image. Do not
+point an older image at the upgraded database. The previous named Docker
+volume, if one exists, is not read or migrated automatically.
 
 ## Development
 

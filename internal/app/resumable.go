@@ -107,7 +107,12 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 			}
 			return true, model.Snapshot{}, planErr
 		}
-		if len(plan.Units) <= 1 {
+		// Ordinary one-unit plans are cheaper through the legacy Scanner path,
+		// preserving compatibility with lightweight scanner implementations. A
+		// single Naabu pipeline unit still represents a complete 1–65535 pass;
+		// persist it so timeouts/cancellation get the same checkpoint and retry
+		// semantics as multi-address plans.
+		if len(plan.Units) <= 1 && (len(plan.Units) == 0 || plan.Units[0].Engine != config.EngineNaabuNmap) {
 			return false, model.Snapshot{}, nil
 		}
 		// A scanner may return only the resolved work units from Plan. Persist the
@@ -148,6 +153,21 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		scan.Status = "failed"
 		scan.Error = message
 		return true, model.Snapshot{}, errors.New(message)
+	}
+	// A process can stop after committing the last discovery checkpoint but
+	// before the dynamic enrichment transaction. Reconcile before every retry
+	// (including the first attempt after restart) so that gap is repaired
+	// atomically and completed discovery work is never replayed.
+	if err := a.Store.ReconcileScanCycleEnrichment(stateCtx, cycle.ID); err != nil && !errors.Is(err, store.ErrNoScanCycle) {
+		scan.Status = "failed"
+		scan.Error = err.Error()
+		return true, model.Snapshot{}, err
+	}
+	cycle, err = a.Store.GetScanCycle(stateCtx, cycle.ID)
+	if err != nil {
+		scan.Status = "failed"
+		scan.Error = err.Error()
+		return true, model.Snapshot{}, err
 	}
 
 	cycle, err = a.Store.StartScanCycleAttempt(stateCtx, cycle.ID)
@@ -235,6 +255,16 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 					}
 				}
 				return true, model.Snapshot{}, completeErr
+			}
+			if claimed.Unit.Phase == "discovery" {
+				if expandErr := a.Store.ReconcileScanCycleEnrichment(stateCtx, cycle.ID); expandErr != nil {
+					scan.Status = "failed"
+					scan.Error = expandErr.Error()
+					if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, expandErr.Error()); stallErr == nil {
+						setScanCycleMetadata(scan, stalled)
+					}
+					return true, model.Snapshot{}, expandErr
+				}
 			}
 			completedThisAttempt++
 			cycle, err = a.Store.GetScanCycle(stateCtx, cycle.ID)

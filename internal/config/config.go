@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -114,6 +115,144 @@ type Protocol struct {
 	Ports            string `yaml:"ports"`
 	Mode             string `yaml:"mode,omitempty"`
 	ServiceDetection bool   `yaml:"service_detection"`
+	// Engine selects the TCP scanner. An empty value is intentionally treated
+	// as nmap so jobs written before the Naabu integration retain their exact
+	// behaviour. UDP is always handled by Nmap.
+	Engine          string        `yaml:"engine,omitempty" json:"engine,omitempty"`
+	ProfileID       string        `yaml:"profile_id,omitempty" json:"profile_id,omitempty"`
+	ProfileRevision int64         `yaml:"profile_revision,omitempty" json:"profile_revision,omitempty"`
+	Naabu           *NaabuOptions `yaml:"naabu,omitempty" json:"naabu,omitempty"`
+	NaabuArgs       []string      `yaml:"naabu_args,omitempty" json:"naabu_args,omitempty"`
+	// NmapArgs and EnrichmentArgs are validated argv fragments from an
+	// administrator-managed scanner profile. They are never interpreted by a
+	// shell and are intentionally kept separate so a discovery profile cannot
+	// alter target selection or output handling.
+	NmapArgs       []string          `yaml:"nmap_args,omitempty" json:"nmap_args,omitempty"`
+	EnrichmentArgs []string          `yaml:"enrichment_args,omitempty" json:"enrichment_args,omitempty"`
+	NSEProfile     string            `yaml:"nse_profile,omitempty" json:"nse_profile,omitempty"`
+	NSEArgs        map[string]string `yaml:"nse_args,omitempty" json:"nse_args,omitempty"`
+}
+
+// NaabuOptions are the bounded execution controls that can be captured in a
+// job revision. The scanner profile API validates these values before they
+// reach a job; keeping the type in config also makes persisted job JSON
+// forwards-compatible with older binaries (unknown fields are ignored when
+// reading historical JSON).
+type NaabuOptions struct {
+	// JSON intentionally keeps zero/false values present. A profile is an
+	// explicit revisioned contract, so `retries: 0`, `warm_up_seconds: 0`, and
+	// `verify: false` must survive a SQLite round trip instead of being
+	// mistaken for an omitted value and defaulted back on load. YAML retains
+	// omission-friendly tags for deployment compatibility.
+	ScanType         string `yaml:"scan_type,omitempty" json:"scan_type"`
+	Rate             int    `yaml:"rate,omitempty" json:"rate"`
+	Workers          int    `yaml:"workers,omitempty" json:"workers"`
+	Retries          int    `yaml:"retries,omitempty" json:"retries"`
+	TimeoutMS        int    `yaml:"timeout_ms,omitempty" json:"timeout_ms"`
+	WarmUpSeconds    int    `yaml:"warm_up_seconds,omitempty" json:"warm_up_seconds"`
+	Verify           bool   `yaml:"verify,omitempty" json:"verify"`
+	AddressBatchSize int    `yaml:"address_batch_size,omitempty" json:"address_batch_size"`
+	// Presence markers let YAML/JSON distinguish an intentional zero from an
+	// omitted value for fields whose safe default is non-zero. They are kept
+	// out of the public representation and only influence default resolution.
+	RateSet             bool `yaml:"-" json:"-"`
+	WorkersSet          bool `yaml:"-" json:"-"`
+	RetriesSet          bool `yaml:"-" json:"-"`
+	TimeoutMSSet        bool `yaml:"-" json:"-"`
+	WarmUpSecondsSet    bool `yaml:"-" json:"-"`
+	VerifySet           bool `yaml:"-" json:"-"`
+	AddressBatchSizeSet bool `yaml:"-" json:"-"`
+}
+
+// UnmarshalYAML keeps deployment configuration strict even though the
+// presence markers above are implementation details. yaml.Decoder's
+// KnownFields setting does not recurse through a custom unmarshaler, so check
+// the supported keys explicitly before decoding the alias.
+func (o *NaabuOptions) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("naabu options must be a mapping")
+	}
+	allowed := map[string]bool{"scan_type": true, "rate": true, "workers": true, "retries": true, "timeout_ms": true, "warm_up_seconds": true, "verify": true, "address_batch_size": true}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		key := node.Content[index].Value
+		if !allowed[key] {
+			return fmt.Errorf("naabu options: field %q not found", key)
+		}
+	}
+	type plain NaabuOptions
+	var value plain
+	if err := node.Decode(&value); err != nil {
+		return err
+	}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		switch node.Content[index].Value {
+		case "rate":
+			value.RateSet = true
+		case "workers":
+			value.WorkersSet = true
+		case "retries":
+			value.RetriesSet = true
+		case "timeout_ms":
+			value.TimeoutMSSet = true
+		case "warm_up_seconds":
+			value.WarmUpSecondsSet = true
+		case "verify":
+			value.VerifySet = true
+		case "address_batch_size":
+			value.AddressBatchSizeSet = true
+		}
+	}
+	*o = NaabuOptions(value)
+	return nil
+}
+
+// UnmarshalJSON mirrors UnmarshalYAML for profile API payloads. The markers
+// are deliberately not marshaled back to clients.
+func (o *NaabuOptions) UnmarshalJSON(data []byte) error {
+	type plain NaabuOptions
+	var value plain
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&value); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	value.RetriesSet = fields["retries"] != nil
+	value.RateSet = fields["rate"] != nil
+	value.WorkersSet = fields["workers"] != nil
+	value.TimeoutMSSet = fields["timeout_ms"] != nil
+	value.WarmUpSecondsSet = fields["warm_up_seconds"] != nil
+	value.VerifySet = fields["verify"] != nil
+	value.AddressBatchSizeSet = fields["address_batch_size"] != nil
+	*o = NaabuOptions(value)
+	return nil
+}
+
+// ScannerProfile describes the safe command surface exposed to the web
+// console. Profiles are persisted by the store package; the config shape is
+// shared with jobs so a job revision contains the exact effective settings.
+type ScannerProfile struct {
+	Engine             string                  `json:"engine"`
+	Naabu              NaabuOptions            `json:"naabu"`
+	NaabuArgs          []string                `json:"naabu_args,omitempty"`
+	NmapArgs           []string                `json:"nmap_args,omitempty"`
+	EnrichmentArgs     []string                `json:"enrichment_args,omitempty"`
+	NSEProfile         string                  `json:"nse_profile,omitempty"`
+	NSEArgs            map[string]string       `json:"nse_args,omitempty"`
+	OperatorAdjustable []string                `json:"operator_adjustable,omitempty"`
+	OperatorBounds     map[string]NumericBound `json:"operator_bounds,omitempty"`
+	Description        string                  `json:"description,omitempty"`
+}
+
+// NumericBound is an administrator-selected inclusive range for a Naabu
+// execution field that operators may tune on an individual job. Bounds are
+// validated against the product-wide safety limits before a profile is saved.
+type NumericBound struct {
+	Min int `json:"min"`
+	Max int `json:"max"`
 }
 type Baseline struct {
 	Samples int `yaml:"samples"`
@@ -267,8 +406,68 @@ func applyDefaults(c *Config) {
 		if j.TCP != nil && j.TCP.Mode == "" {
 			j.TCP.Mode = "syn"
 		}
+		if j.TCP != nil {
+			if j.TCP.Engine == "" {
+				j.TCP.Engine = "nmap"
+			}
+			if j.TCP.Engine == "naabu_nmap" {
+				// Naabu's discovery scope is deliberately not user-tunable. Keep
+				// the job model truthful even when an older API/client persisted a
+				// custom Nmap-looking port expression.
+				j.TCP.Ports = NaabuFullPortExpression
+				if j.TCP.Naabu == nil {
+					j.TCP.Naabu = &NaabuOptions{}
+				}
+				applyNaabuDefaults(j.TCP.Naabu)
+			}
+		}
 	}
 }
+
+const (
+	EngineNmap      = "nmap"
+	EngineNaabuNmap = "naabu_nmap"
+	// Naabu always owns a complete TCP discovery pass. The Nmap port
+	// expression on a Naabu job is normalized to this value so persisted jobs,
+	// API responses, estimates, and security hashes cannot imply a partial
+	// discovery scope.
+	NaabuFullPortExpression = "1-65535"
+)
+
+func applyNaabuDefaults(options *NaabuOptions) {
+	if options == nil {
+		return
+	}
+	if options.ScanType == "" {
+		options.ScanType = "connect"
+	}
+	if options.Rate == 0 && !options.RateSet {
+		options.Rate = 1000
+	}
+	if options.Workers == 0 && !options.WorkersSet {
+		options.Workers = 25
+	}
+	if options.Retries == 0 && !options.RetriesSet {
+		options.Retries = 3
+	}
+	if options.TimeoutMS == 0 && !options.TimeoutMSSet {
+		options.TimeoutMS = 1000
+	}
+	if options.WarmUpSeconds == 0 && !options.WarmUpSecondsSet {
+		options.WarmUpSeconds = 2
+	}
+	if !options.VerifySet && !options.Verify {
+		options.Verify = true
+	}
+	if options.AddressBatchSize == 0 && !options.AddressBatchSizeSet {
+		options.AddressBatchSize = 16
+	}
+}
+
+// ApplyNaabuDefaultsForScanner is kept as a small exported adapter for the
+// scanner package. Job normalization normally applies these defaults, but
+// callers may execute a standalone profile/options value in tests or tooling.
+func ApplyNaabuDefaultsForScanner(options *NaabuOptions) { applyNaabuDefaults(options) }
 
 // RDAPEnabled resolves the omission-defaulted deployment setting.
 func (c Config) RDAPEnabled() bool {
@@ -286,7 +485,11 @@ func (c Config) Validate() error {
 	}
 	seen := map[string]bool{}
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-	for _, j := range c.Jobs {
+	for _, rawJob := range c.Jobs {
+		// Apply the same omission defaults here as Load/ValidateJob. Direct
+		// callers frequently construct a Config value in tests or recovery
+		// tooling, and legacy TCP records omit the engine field by design.
+		j := NormalizeJob(rawJob)
 		if j.Name == "" || seen[j.Name] {
 			return fmt.Errorf("job names must be non-empty and unique: %q", j.Name)
 		}
@@ -343,6 +546,27 @@ func (c Config) Validate() error {
 			if j.TCP.Mode != "syn" && j.TCP.Mode != "connect" {
 				return fmt.Errorf("job %s: tcp mode must be syn or connect", j.Name)
 			}
+			if j.TCP.Engine != "" && j.TCP.Engine != EngineNmap && j.TCP.Engine != EngineNaabuNmap {
+				return fmt.Errorf("job %s: tcp engine must be nmap or naabu_nmap", j.Name)
+			}
+			if j.TCP.Engine == EngineNaabuNmap {
+				if j.TCP.Naabu == nil {
+					return fmt.Errorf("job %s: naabu options are required for naabu_nmap", j.Name)
+				}
+				if err := ValidateNaabuOptions(*j.TCP.Naabu); err != nil {
+					return fmt.Errorf("job %s tcp naabu: %w", j.Name, err)
+				}
+				if j.TCP.Mode != "syn" && j.TCP.Mode != "connect" {
+					return fmt.Errorf("job %s: tcp mode must be syn or connect", j.Name)
+				}
+			}
+			profile := ScannerProfile{Engine: j.TCP.Engine, NaabuArgs: j.TCP.NaabuArgs, NmapArgs: j.TCP.NmapArgs, EnrichmentArgs: j.TCP.EnrichmentArgs, NSEProfile: j.TCP.NSEProfile, NSEArgs: j.TCP.NSEArgs}
+			if j.TCP.Naabu != nil {
+				profile.Naabu = *j.TCP.Naabu
+			}
+			if err := ValidateScannerProfile(profile); err != nil {
+				return fmt.Errorf("job %s scanner profile: %w", j.Name, err)
+			}
 		}
 		if j.UDP != nil {
 			if _, err := ParsePorts(j.UDP.Ports); err != nil {
@@ -351,7 +575,41 @@ func (c Config) Validate() error {
 			if j.UDP.Mode != "" {
 				return fmt.Errorf("job %s: udp mode is not configurable", j.Name)
 			}
+			if j.UDP.Engine != "" && j.UDP.Engine != EngineNmap {
+				return fmt.Errorf("job %s: udp engine must be nmap", j.Name)
+			}
+			if err := ValidateScannerProfile(ScannerProfile{Engine: EngineNmap, NmapArgs: j.UDP.NmapArgs, EnrichmentArgs: j.UDP.EnrichmentArgs, NSEProfile: j.UDP.NSEProfile, NSEArgs: j.UDP.NSEArgs}); err != nil {
+				return fmt.Errorf("job %s udp scanner profile: %w", j.Name, err)
+			}
 		}
+	}
+	return nil
+}
+
+// ValidateNaabuOptions constrains the command surface exposed through job
+// profiles. EdgeWatch deliberately supports only the controls it can report,
+// cancel, and resume safely; arbitrary Naabu flags remain unavailable.
+func ValidateNaabuOptions(options NaabuOptions) error {
+	if options.ScanType != "connect" && options.ScanType != "syn" {
+		return fmt.Errorf("scan_type must be connect or syn")
+	}
+	if options.Rate < 1 || options.Rate > 100_000 {
+		return fmt.Errorf("rate must be between 1 and 100000")
+	}
+	if options.Workers < 1 || options.Workers > 1024 {
+		return fmt.Errorf("workers must be between 1 and 1024")
+	}
+	if options.Retries < 0 || options.Retries > 10 {
+		return fmt.Errorf("retries must be between 0 and 10")
+	}
+	if options.TimeoutMS < 100 || options.TimeoutMS > 60_000 {
+		return fmt.Errorf("timeout_ms must be between 100 and 60000")
+	}
+	if options.WarmUpSeconds < 0 || options.WarmUpSeconds > 60 {
+		return fmt.Errorf("warm_up_seconds must be between 0 and 60")
+	}
+	if options.AddressBatchSize < 1 || options.AddressBatchSize > 256 {
+		return fmt.Errorf("address_batch_size must be between 1 and 256")
 	}
 	return nil
 }
@@ -515,7 +773,16 @@ func EstimateJobWork(j Job) (WorkEstimate, error) {
 		if err != nil {
 			return estimate, fmt.Errorf("tcp: %w", err)
 		}
-		estimate.TCPPorts = len(ports)
+		if j.TCP.Engine == EngineNaabuNmap {
+			// Naabu owns a fixed full-range discovery pass regardless of the
+			// configured Nmap enrichment expression. Keep the estimate honest so
+			// operators see the cost before a lease is acquired.
+			estimate.TCPPorts = 65535
+			_ = ports
+		}
+		if j.TCP.Engine != EngineNaabuNmap {
+			estimate.TCPPorts = len(ports)
+		}
 	}
 	if j.UDP != nil {
 		ports, err := ParsePorts(j.UDP.Ports)
@@ -702,17 +969,55 @@ func (j Job) ResumeWindowValue() time.Duration {
 }
 
 func (j Job) SecurityHash() string {
+	// Hash the effective job rather than the raw struct. Jobs loaded from the
+	// web store are normally normalized already, but callers such as recovery
+	// tooling and scheduler fixtures may construct a value directly. Treat an
+	// omitted engine/default as the same scope as its explicit default.
+	j = NormalizeJob(j)
 	type securityJob struct {
 		Targets     []string
 		Max         int
 		AssumeAlive bool
-		TCP, UDP    *Protocol
+		TCP, UDP    *securityProtocol
 	}
-	v := securityJob{append([]string(nil), j.Targets...), j.MaxExpandedHosts, j.AssumesAlive(), j.TCP, j.UDP}
+	toSecurity := func(protocol *Protocol) *securityProtocol {
+		if protocol == nil {
+			return nil
+		}
+		// A profile revision is execution provenance, not monitored scope. A
+		// profile may change rate/workers/retries without requiring a fresh
+		// baseline; only the effective security fields below participate in the
+		// scope hash. Applying a profile to a job still records its ID/revision
+		// in the execution hash and scan metadata.
+		value := &securityProtocol{Ports: protocol.Ports, Mode: protocol.Mode, ServiceDetection: protocol.ServiceDetection, Engine: protocol.Engine, NSEProfile: protocol.NSEProfile, NSEArgs: protocol.NSEArgs}
+		// Naabu controls only the Naabu→Nmap engine. A stale pointer on an
+		// Nmap-only job is legacy/persistence noise and must not change the
+		// monitored scope hash or force a rebaseline.
+		if protocol.Engine == EngineNaabuNmap && protocol.Naabu != nil {
+			value.Naabu = &securityNaabu{ScanType: protocol.Naabu.ScanType, Verify: protocol.Naabu.Verify}
+		}
+		return value
+	}
+	v := securityJob{append([]string(nil), j.Targets...), j.MaxExpandedHosts, j.AssumesAlive(), toSecurity(j.TCP), toSecurity(j.UDP)}
 	sort.Strings(v.Targets)
 	b, _ := yaml.Marshal(v)
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
+}
+
+type securityProtocol struct {
+	Ports            string
+	Mode             string
+	ServiceDetection bool
+	Engine           string
+	NSEProfile       string
+	NSEArgs          map[string]string
+	Naabu            *securityNaabu
+}
+
+type securityNaabu struct {
+	ScanType string
+	Verify   bool
 }
 
 // ExecutionHash identifies the settings that affect how a pinned scan plan is
@@ -727,12 +1032,44 @@ func (j Job) ExecutionHash() string {
 	// defaults cannot create a false cycle mismatch.
 	j = NormalizeJob(j)
 	type executionJob struct {
-		SecurityHash string
-		Timing       string
-		Timeout      Duration
-		ResumeWindow Duration
+		SecurityHash  string
+		Timing        string
+		Timeout       Duration
+		ResumeWindow  Duration
+		TCPProfileID  string
+		TCPProfileRev int64
+		UDPProfileID  string
+		UDPProfileRev int64
+		TCPNaabu      *NaabuOptions
+		TCPArgs       []string
+		TCPEnrichment []string
+		UDPArgs       []string
+		UDPEnrichment []string
+	}
+	cloneNaabu := func(value *NaabuOptions) *NaabuOptions {
+		if value == nil {
+			return nil
+		}
+		copy := *value
+		return &copy
 	}
 	v := executionJob{SecurityHash: j.SecurityHash(), Timing: j.Timing, Timeout: j.Timeout, ResumeWindow: j.ResumeWindow}
+	if j.TCP != nil {
+		v.TCPProfileID = j.TCP.ProfileID
+		v.TCPProfileRev = j.TCP.ProfileRevision
+		if j.TCP.Engine == EngineNaabuNmap {
+			v.TCPNaabu = cloneNaabu(j.TCP.Naabu)
+			v.TCPArgs = append([]string(nil), j.TCP.NaabuArgs...)
+			v.TCPEnrichment = append([]string(nil), j.TCP.EnrichmentArgs...)
+		} else {
+			v.TCPArgs = append([]string(nil), j.TCP.NmapArgs...)
+		}
+	}
+	if j.UDP != nil {
+		v.UDPProfileID = j.UDP.ProfileID
+		v.UDPProfileRev = j.UDP.ProfileRevision
+		v.UDPArgs = append([]string(nil), j.UDP.NmapArgs...)
+	}
 	b, _ := yaml.Marshal(v)
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])

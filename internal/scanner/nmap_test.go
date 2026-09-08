@@ -29,7 +29,7 @@ func TestParseXML(t *testing.T) {
 }
 
 func TestParseXMLCapturesHostEvidenceAndSummaries(t *testing.T) {
-	data := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up" reason="arp-response" reason_ttl="64"/><address addr="198.51.100.10" addrtype="ipv4"/><address addr="AA:BB:CC:DD:EE:FF" addrtype="mac" vendor="Example Vendor"/><hostnames><hostname name="edge.example" type="user"/></hostnames><times srtt="2500"/><ports><extraports state="closed" count="2"><extrareasons reason="conn-refused" count="2"/></extraports><port protocol="tcp" portid="443"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="https" product="Example" version="1.2" extrainfo="TLS" method="probed" conf="9" tunnel="ssl" ostype="Linux" devicetype="general purpose"><cpe>cpe:/a:example:server:1.2</cpe></service></port><port protocol="tcp" portid="8443"><state state="open|filtered" reason="no-response"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	data := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up" reason="arp-response" reason_ttl="64"/><address addr="198.51.100.10" addrtype="ipv4"/><address addr="AA:BB:CC:DD:EE:FF" addrtype="mac" vendor="Example Vendor"/><hostnames><hostname name="edge.example" type="user"/></hostnames><hostscript><script id="smb-os-discovery" output="OS: Example&#10;Computer name: edge"/></hostscript><times srtt="2500"/><ports><extraports state="closed" count="2"><extrareasons reason="conn-refused" count="2"/></extraports><port protocol="tcp" portid="443"><state state="open" reason="syn-ack" reason_ttl="64"/><service name="https" product="Example" version="1.2" extrainfo="TLS" method="probed" conf="9" tunnel="ssl" ostype="Linux" devicetype="general purpose"><cpe>cpe:/a:example:server:1.2</cpe></service></port><port protocol="tcp" portid="8443"><state state="open|filtered" reason="no-response"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
 	run, err := parseXMLWithConfig(data, "tcp", config.Protocol{Ports: "1-1000,8443", Mode: "syn", ServiceDetection: true})
 	if err != nil {
 		t.Fatal(err)
@@ -47,6 +47,9 @@ func TestParseXMLCapturesHostEvidenceAndSummaries(t *testing.T) {
 	}
 	if len(protocol.StateSummaries) != 3 || protocol.StateSummaries[0].State != "closed" || protocol.StateSummaries[0].Reasons[0].Reason != "conn-refused" {
 		t.Fatalf("state summaries missing: %#v", protocol.StateSummaries)
+	}
+	if len(protocol.NSEOutput) != 1 || protocol.NSEOutput[0] != "smb-os-discovery: OS: Example Computer name: edge" {
+		t.Fatalf("host NSE evidence missing: %#v", protocol.NSEOutput)
 	}
 }
 
@@ -130,6 +133,40 @@ func TestNmapArgsHostDiscovery(t *testing.T) {
 	withDiscovery := nmapArgs(4, "tcp", protocol, "balanced", false, addresses)
 	if slices.Contains(withDiscovery, "-Pn") {
 		t.Fatalf("assume_alive=false args: %v", withDiscovery)
+	}
+}
+
+func TestNmapProfilePlaceholdersRenderManagedArguments(t *testing.T) {
+	pc := config.Protocol{Ports: "22,443", Mode: "connect", ServiceDetection: true, NmapArgs: []string{
+		config.PlaceholderAddresses, config.PlaceholderPorts, config.PlaceholderStructuredOutput,
+		config.PlaceholderHostDiscovery, config.PlaceholderScanType, config.PlaceholderServiceDetection,
+	}}
+	args := nmapArgs(4, "tcp", pc, "balanced", true, []string{"192.0.2.1", "192.0.2.2"})
+	joined := strings.Join(args, " ")
+	if strings.Contains(joined, config.PlaceholderAddresses) || strings.Contains(joined, config.PlaceholderPorts) {
+		t.Fatalf("placeholder leaked into command: %v", args)
+	}
+	if strings.Count(joined, "-p") != 1 || strings.Count(joined, "22,443") != 1 || strings.Count(joined, "-oX") != 1 {
+		t.Fatalf("managed arguments were not rendered exactly once: %v", args)
+	}
+	if !strings.Contains(joined, "192.0.2.1") || !strings.Contains(joined, "192.0.2.2") || !strings.Contains(joined, "-sT") || !strings.Contains(joined, "-sV") || !strings.Contains(joined, "-Pn") {
+		t.Fatalf("profile placeholders were not rendered: %v", args)
+	}
+}
+
+func TestNmapCustomProfileKeepsTypedDefaultsWhenPlaceholdersOmitted(t *testing.T) {
+	pc := config.Protocol{Ports: "443", Mode: "syn", ServiceDetection: true, NmapArgs: []string{
+		config.PlaceholderAddress, config.PlaceholderPorts, config.PlaceholderStructuredOutput, "--host-timeout", "5m",
+	}}
+	args := nmapArgs(6, "tcp", pc, "balanced", true, []string{"2001:db8::10"})
+	joined := strings.Join(args, " ")
+	for _, expected := range []string{"-Pn", "-6", "-sS", "-sV", "--version-light", "--host-timeout", "5m"} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("custom Nmap profile omitted typed default %q: %v", expected, args)
+		}
+	}
+	if strings.Contains(joined, config.PlaceholderAddress) || strings.Contains(joined, config.PlaceholderPorts) {
+		t.Fatalf("placeholder leaked into custom Nmap command: %v", args)
 	}
 }
 

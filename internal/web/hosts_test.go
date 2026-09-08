@@ -89,7 +89,7 @@ func TestAllHostsReturnsLatestSuccessfulResultPerAddress(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	old := model.Scan{ID: "old-host-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now.Add(-time.Minute), FinishedAt: now.Add(-time.Minute), Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 22, State: "open"}}}}}}}}
-	latest := model.Scan{ID: "latest-host-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1", SourceTargets: []string{"router.example"}, Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}, {Address: "2001:db8::1", Protocols: []model.ProtocolObservation{{Protocol: "udp", ScannedPorts: "53", ScannedPortCount: 1}}}}}}
+	latest := model.Scan{ID: "latest-host-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1", SourceTargets: []string{"router.example"}, Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}, {Address: "198.51.100.222", SourceTargets: []string{"switch-222.example"}, Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1}}}, {Address: "2001:db8::1", Protocols: []model.ProtocolObservation{{Protocol: "udp", ScannedPorts: "53", ScannedPortCount: 1}}}}}}
 	for _, scan := range []model.Scan{old, latest} {
 		if err := db.SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
@@ -109,6 +109,21 @@ func TestAllHostsReturnsLatestSuccessfulResultPerAddress(t *testing.T) {
 	}
 	if len(response.Hosts) != 1 || response.Hosts[0].ScanID != latest.ID || response.Hosts[0].OpenPorts != 1 || response.Hosts[0].SourceTargets[0] != "router.example" {
 		t.Fatalf("unexpected global host response: %#v", response.Hosts)
+	}
+	queryRequest := httptest.NewRequest(http.MethodGet, "/api/v1/hosts?q=222", nil)
+	queryRecorder := httptest.NewRecorder()
+	server.listHosts(queryRecorder, queryRequest)
+	if queryRecorder.Code != http.StatusOK {
+		t.Fatalf("query status %d: %s", queryRecorder.Code, queryRecorder.Body.String())
+	}
+	response = struct {
+		Hosts []allHostSummary `json:"hosts"`
+	}{}
+	if err := json.Unmarshal(queryRecorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Hosts) != 1 || response.Hosts[0].Address != "198.51.100.222" {
+		t.Fatalf("query returned unrelated hosts: %#v", response.Hosts)
 	}
 }
 

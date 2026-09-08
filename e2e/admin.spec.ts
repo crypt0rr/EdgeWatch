@@ -35,6 +35,10 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       { protocol: 'udp', scan_type: 'udp', scanned_ports: '53', scanned_port_count: 1, service_detection: false, ports: [{ port: 53, state: 'open|filtered', reason: 'udp-response', reason_ttl: 64 }], state_summaries: [{ state: 'open|filtered', count: 1 }] },
     ],
   }
+  const globalHosts = [
+    { address: '192.0.2.1', address_family: 'IPv4', source_targets: ['router.example.com'], protocols: [{ protocol: 'tcp', scanned_ports: '22', scanned_port_count: 1, service_detection: false, open_ports: 1, open_filtered_ports: 0 }], open_ports: 1, open_filtered_ports: 0, has_open_ports: true, job_id: 'job-1', job: 'edge-router', scan_id: 'scan-1', scanned_at: '2026-01-01T00:00:01Z', data_quality: 'detailed' },
+    { address: '192.0.2.222', address_family: 'IPv4', source_targets: ['switch-222.example.com'], protocols: [{ protocol: 'tcp', scanned_ports: '443', scanned_port_count: 1, service_detection: false, open_ports: 0, open_filtered_ports: 0 }], open_ports: 0, open_filtered_ports: 0, has_open_ports: false, job_id: 'job-2', job: 'switches', scan_id: 'scan-2', scanned_at: '2026-01-01T00:00:01Z', data_quality: 'detailed' },
+  ]
 
   await page.route('**/api/v1/**', async (route) => {
     const request = route.request()
@@ -68,7 +72,12 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       return
     }
     if (path === '/hosts' && method === 'GET') {
-      await json({ hosts: [{ address: '192.0.2.1', address_family: 'IPv4', source_targets: ['router.example.com'], protocols: [{ protocol: 'tcp', scanned_ports: '22', scanned_port_count: 1, service_detection: false, open_ports: 1, open_filtered_ports: 0 }], open_ports: 1, open_filtered_ports: 0, has_open_ports: true, job_id: 'job-1', job: 'edge-router', scan_id: 'scan-1', scanned_at: '2026-01-01T00:00:01Z', data_quality: 'detailed' }], pagination: { limit: 50, offset: 0, total: 1, has_more: false, next_offset: null } })
+      const query = new URL(request.url()).searchParams.get('q')?.trim().toLowerCase() ?? ''
+      // Keep the mocked response asynchronous so the regression test exercises
+      // the loading transition that previously detached the focused input.
+      if (query) await new Promise(resolve => setTimeout(resolve, 75))
+      const hosts = query ? globalHosts.filter(host => JSON.stringify(host).toLowerCase().includes(query)) : globalHosts
+      await json({ hosts, pagination: { limit: 50, offset: 0, total: hosts.length, has_more: false, next_offset: null } })
       return
     }
     if (path === '/scans/scan-1/hosts/192.0.2.1/rdap' && method === 'GET') {
@@ -182,6 +191,15 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await navigateFromShell(page, 'Hosts')
   await expect(page.getByRole('heading', { name: 'Hosts', exact: true })).toBeVisible()
   await expect(page.getByText('192.0.2.1')).toBeVisible()
+  const hostSearch = page.getByRole('textbox', { name: 'Search hosts' })
+  await hostSearch.focus()
+  await page.keyboard.type('222')
+  await expect(hostSearch).toHaveValue('222')
+  await expect(page.locator('.global-host-row')).toHaveCount(1)
+  await expect(page.getByText('192.0.2.222')).toBeVisible()
+  await expect(page.getByText('192.0.2.1')).not.toBeVisible()
+  await hostSearch.fill('')
+  await expect(page.locator('.global-host-row')).toHaveCount(2)
   await page.getByRole('link', { name: /192\.0\.2\.1/ }).click()
   await expect(page.getByRole('heading', { name: '192.0.2.1' })).toBeVisible()
   await navigateFromShell(page, 'Jobs')

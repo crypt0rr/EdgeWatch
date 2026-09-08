@@ -212,7 +212,10 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
     await expect(page.getByRole('heading', { name: 'Create a monitoring job' })).toBeVisible()
     await page.getByLabel('Job name').fill('real-stack-fixture')
     await page.getByLabel('Target 1').fill('127.0.0.1')
-    await page.getByLabel('Ports').first().fill('22-23')
+    // The TCP engine label contains explanatory text mentioning "ports", so
+    // a substring getByLabel('Ports') can resolve the engine <select> before
+    // the actual port-range textbox. Target the textbox role explicitly.
+    await page.getByRole('textbox', { name: /Ports Ranges/ }).first().fill('22-23')
     await page.getByLabel('Baseline samples').fill('1')
     await page.getByLabel('Five-field cron').fill('0 0 * * *')
     await page.getByLabel('Timezone').fill('UTC')

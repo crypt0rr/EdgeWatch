@@ -15,7 +15,7 @@ const blank: JobForm = {
   name: '',
   schedule: '0 */6 * * *',
   timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-  run_on_start: true,
+  run_on_start: false,
   assume_alive: true,
   targets: [''],
   max_expanded_hosts: 256,

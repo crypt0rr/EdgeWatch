@@ -24,6 +24,10 @@ func TestNaabuArgsUseFixedFullRangeAndDiscoveryPolicy(t *testing.T) {
 	if slices.Contains(withDiscovery, "-skip-host-discovery") {
 		t.Fatalf("host discovery was disabled unexpectedly: %v", withDiscovery)
 	}
+	timeoutIndex := slices.Index(withDiscovery, "-timeout")
+	if timeoutIndex < 0 || timeoutIndex+1 >= len(withDiscovery) || withDiscovery[timeoutIndex+1] != "1000ms" {
+		t.Fatalf("Naabu timeout must preserve milliseconds: %v", withDiscovery)
+	}
 	withoutDiscovery := naabuArgs(options, "/tmp/targets", true)
 	if !slices.Contains(withoutDiscovery, "-skip-host-discovery") || slices.Contains(withoutDiscovery, "-with-host-discovery") {
 		t.Fatalf("assume_alive policy was not rendered: %v", withoutDiscovery)
@@ -49,6 +53,10 @@ func TestNaabuProfilePlaceholdersRenderManagedArguments(t *testing.T) {
 	}
 	if count("-list") != 1 || count("-p") != 1 || count("-json") != 1 || !strings.Contains(joined, "-with-host-discovery") {
 		t.Fatalf("Naabu placeholders were not rendered exactly once: %v", args)
+	}
+	timeoutIndex := slices.Index(args, "-timeout")
+	if timeoutIndex < 0 || timeoutIndex+1 >= len(args) || args[timeoutIndex+1] != "1000ms" {
+		t.Fatalf("custom Naabu profile must preserve timeout milliseconds: %v", args)
 	}
 }
 

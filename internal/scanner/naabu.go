@@ -605,7 +605,7 @@ func naabuArgsWithTemplate(options config.NaabuOptions, targetsFile string, assu
 		scanType = "s"
 	}
 	if len(template) == 0 {
-		args := []string{"-list", targetsFile, "-p", "-", "-json", "-silent", "-no-stdin", "-disable-update-check", "-auth=false", "-pd=false", "-scan-type", scanType, "-rate", strconv.Itoa(options.Rate), "-c", strconv.Itoa(options.Workers), "-retries", strconv.Itoa(options.Retries), "-timeout", strconv.Itoa(options.TimeoutMS), "-warm-up-time", strconv.Itoa(options.WarmUpSeconds)}
+		args := []string{"-list", targetsFile, "-p", "-", "-json", "-silent", "-no-stdin", "-disable-update-check", "-auth=false", "-pd=false", "-scan-type", scanType, "-rate", strconv.Itoa(options.Rate), "-c", strconv.Itoa(options.Workers), "-retries", strconv.Itoa(options.Retries), "-timeout", strconv.Itoa(options.TimeoutMS) + "ms", "-warm-up-time", strconv.Itoa(options.WarmUpSeconds)}
 		if options.Verify {
 			args = append(args, "-verify")
 		}
@@ -625,7 +625,7 @@ func naabuArgsWithTemplate(options config.NaabuOptions, targetsFile string, assu
 	if !templateContains(template, config.PlaceholderScanType) {
 		args = append(args, "-scan-type", scanType)
 	}
-	args = append(args, "-rate", strconv.Itoa(options.Rate), "-c", strconv.Itoa(options.Workers), "-retries", strconv.Itoa(options.Retries), "-timeout", strconv.Itoa(options.TimeoutMS), "-warm-up-time", strconv.Itoa(options.WarmUpSeconds))
+	args = append(args, "-rate", strconv.Itoa(options.Rate), "-c", strconv.Itoa(options.Workers), "-retries", strconv.Itoa(options.Retries), "-timeout", strconv.Itoa(options.TimeoutMS)+"ms", "-warm-up-time", strconv.Itoa(options.WarmUpSeconds))
 	if options.Verify {
 		// Naabu's verification is a typed option, not service detection. Keep
 		// it fixed unless a future placeholder is added; profiles currently use

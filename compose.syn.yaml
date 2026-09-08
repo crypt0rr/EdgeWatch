@@ -1,0 +1,15 @@
+# Optional Docker Compose override for Naabu SYN discovery.
+#
+# Use this file only when an administrator has deliberately selected a Naabu
+# profile with scan_type: syn:
+#
+#   docker compose -f compose.yaml -f compose.syn.yaml pull
+#   docker compose -f compose.yaml -f compose.syn.yaml up -d
+#
+# The base compose.yaml intentionally stays least-privilege and supports the
+# default Naabu CONNECT profile without NET_ADMIN.
+services:
+  edgewatch:
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN

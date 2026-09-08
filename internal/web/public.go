@@ -84,10 +84,21 @@ func (s *Server) allowPublicRequest(r *http.Request) bool {
 }
 
 type publicDashboardPayload struct {
-	Enabled      bool                        `json:"enabled"`
-	Title        string                      `json:"title"`
-	Introduction string                      `json:"introduction"`
-	Hosts        []store.PublicDashboardHost `json:"hosts"`
+	Enabled      bool                         `json:"enabled"`
+	Title        string                       `json:"title"`
+	Introduction string                       `json:"introduction"`
+	Hosts        []publicDashboardHostPayload `json:"hosts"`
+}
+
+// publicDashboardHostPayload contains only the writable host selection. The
+// GET response includes created_at as read-only metadata, so accept that
+// field when a client round-trips a response but never require it (or decode
+// it as time.Time). Older console builds sent an empty created_at string,
+// which strict JSON decoding correctly rejected as an invalid timestamp.
+type publicDashboardHostPayload struct {
+	JobID     string  `json:"job_id"`
+	Address   string  `json:"address"`
+	CreatedAt *string `json:"created_at,omitempty"`
 }
 
 func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, session store.Session) {
@@ -120,6 +131,7 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 		writeError(w, http.StatusBadRequest, "validation_failed", "at most 1000 hosts may be published", nil)
 		return
 	}
+	hosts := make([]store.PublicDashboardHost, 0, len(input.Hosts))
 	for _, selection := range input.Hosts {
 		if _, err := s.latestPublishedHost(r.Context(), selection.JobID, selection.Address); err != nil {
 			if errors.Is(err, store.ErrNotFound) {
@@ -129,9 +141,10 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 			writeError(w, http.StatusInternalServerError, "store", "published host could not be checked", nil)
 			return
 		}
+		hosts = append(hosts, store.PublicDashboardHost{JobID: selection.JobID, Address: selection.Address})
 	}
 	dashboard.Enabled, dashboard.Title, dashboard.Introduction = input.Enabled, input.Title, input.Introduction
-	if err := s.Store.SavePublicDashboard(r.Context(), dashboard, input.Hosts, store.AuditEntry{Action: "public_dashboard.updated", Detail: fmt.Sprintf("dashboard updated by %s; enabled=%t; hosts=%d", session.Username, input.Enabled, len(input.Hosts)), ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+	if err := s.Store.SavePublicDashboard(r.Context(), dashboard, hosts, store.AuditEntry{Action: "public_dashboard.updated", Detail: fmt.Sprintf("dashboard updated by %s; enabled=%t; hosts=%d", session.Username, input.Enabled, len(hosts)), ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
 		if s.writeAuditUnavailable(w, err, "public_dashboard.updated") {
 			return
 		}

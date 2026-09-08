@@ -212,6 +212,9 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
     await expect(page.getByRole('heading', { name: 'Create a monitoring job' })).toBeVisible()
     await page.getByLabel('Job name').fill('real-stack-fixture')
     await page.getByLabel('Target 1').fill('127.0.0.1')
+    // This fixture supplies a deterministic fake Nmap binary but no Naabu
+    // binary, so opt into the Nmap-only engine explicitly.
+    await page.getByLabel('TCP engine').selectOption('nmap')
     // The TCP engine label contains explanatory text mentioning "ports", so
     // a substring getByLabel('Ports') can resolve the engine <select> before
     // the actual port-range textbox. Target the textbox role explicitly.

@@ -187,7 +187,10 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	if unknownRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("unknown host status = %d: %s", unknownRecorder.Code, unknownRecorder.Body.String())
 	}
-	publish := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","introduction":"Selected host","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.10"}]}`))
+	// Older console builds round-tripped the read-only created_at field as an
+	// empty string. The write API accepts that compatibility field while only
+	// persisting the job/address selection.
+	publish := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","introduction":"Selected host","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.10","created_at":""}]}`))
 	publish.Header.Set("Content-Type", "application/json")
 	publishRecorder := httptest.NewRecorder()
 	server.publicDashboardRoute(publishRecorder, publish, admin)

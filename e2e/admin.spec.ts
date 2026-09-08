@@ -158,6 +158,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await page.locator('input[autocomplete="new-password"]').nth(1).fill('correct horse battery staple')
   await page.getByRole('button', { name: 'Create administrator' }).click()
   await expect(page.getByRole('heading', { name: 'Sign in to EdgeWatch' })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Activate an account' })).toHaveAttribute('href', '/activate')
 
   await page.locator('input[autocomplete="current-password"]').fill('correct horse battery staple')
   await page.getByRole('button', { name: 'Sign in' }).click()
@@ -186,6 +187,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await navigateFromShell(page, 'Jobs')
   await page.getByRole('button', { name: 'New job' }).click()
   await expect(page.getByRole('heading', { name: 'Create a monitoring job' })).toBeVisible()
+  await expect(page.getByLabel('TCP engine')).toHaveValue('naabu_nmap')
   await expect(page.getByText('Stagger scheduled scans')).toBeVisible()
   await page.getByRole('button', { name: 'Use later time' }).click()
   await expect(page.getByLabel('Five-field cron')).toHaveValue('30 */6 * * *')

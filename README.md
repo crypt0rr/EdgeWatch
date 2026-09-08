@@ -91,9 +91,10 @@ the replacement is issued.
 - Create all monitoring jobs in the web console. The YAML `jobs` section is
   not used for scheduling.
 
-Scanner profiles are managed by administrators in **Scanner profiles**. A TCP
-job can select **Nmap only** (the default for existing jobs) or **Naabu
-discovery → Nmap**. Naabu always discovers TCP ports `1-65535`; only Nmap's
+Scanner profiles are managed by administrators in **Scanner profiles**. New
+TCP jobs default to **Naabu discovery → Nmap**; existing and legacy jobs pinned
+to Nmap remain unchanged. Users may select **Nmap only** or the Naabu pipeline.
+Naabu always discovers TCP ports `1-65535`; only Nmap's
 confirmed `open` and `open|filtered` results enter baselines and incidents.
 Naabu discoveries and disagreements remain available as diagnostic host
 evidence. UDP remains Nmap-only. Profiles pin a revision into each job, so
@@ -107,8 +108,18 @@ shell strings, pipelines, substitutions, arbitrary binaries, or arbitrary NSE
 scripts. Operators can tune only fields that an administrator exposes within
 bounded limits. Connect discovery is the built-in default. Naabu SYN discovery
 requires both `NET_ADMIN` and `NET_RAW`; the default Compose file grants only
-`NET_RAW`, so add `NET_ADMIN` explicitly to the service capabilities when a
-reviewed SYN profile is required.
+`NET_RAW` so it remains least-privilege. For a reviewed SYN profile, use the
+opt-in `compose.syn.yaml` override, then select or create a profile with
+`scan_type: syn` in the administration UI:
+
+```sh
+docker compose -f compose.yaml -f compose.syn.yaml pull
+docker compose -f compose.yaml -f compose.syn.yaml up -d
+```
+
+Adding the override alone does not switch existing jobs or profiles to SYN.
+The extra capability broadens the container's packet-access privileges, so
+omit the override when connect discovery is sufficient.
 
 ## Users and public status
 

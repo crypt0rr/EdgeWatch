@@ -87,6 +87,11 @@ jobs:
             echo "Compose must pull the published image and use ./data"
             exit 1
           fi
+          docker compose -f compose.yaml -f compose.syn.yaml config --quiet
+          if ! docker compose -f compose.yaml -f compose.syn.yaml config | grep -Eq '^[[:space:]]+- NET_ADMIN$'; then
+            echo "The SYN Compose override must grant NET_ADMIN"
+            exit 1
+          fi
       - name: Set up QEMU
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
       - name: Set up Docker Buildx

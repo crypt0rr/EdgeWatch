@@ -116,8 +116,9 @@ type Protocol struct {
 	Mode             string `yaml:"mode,omitempty"`
 	ServiceDetection bool   `yaml:"service_detection"`
 	// Engine selects the TCP scanner. An empty value is intentionally treated
-	// as nmap so jobs written before the Naabu integration retain their exact
-	// behaviour. UDP is always handled by Nmap.
+	// as nmap so legacy jobs and direct callers retain their exact behaviour;
+	// the web editor explicitly selects the Naabu profile for new jobs. UDP is
+	// always handled by Nmap.
 	Engine          string        `yaml:"engine,omitempty" json:"engine,omitempty"`
 	ProfileID       string        `yaml:"profile_id,omitempty" json:"profile_id,omitempty"`
 	ProfileRevision int64         `yaml:"profile_revision,omitempty" json:"profile_revision,omitempty"`

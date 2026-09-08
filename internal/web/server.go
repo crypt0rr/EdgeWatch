@@ -1061,6 +1061,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 	if !decodeJSON(w, r, &p) {
 		return
 	}
+	defaultNewScannerProfile(&p)
 	job, err := p.config()
 	if err != nil {
 		writeValidationError(w, err)
@@ -1097,6 +1098,24 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 	state, _ := s.Store.RuntimeState(r.Context(), record.ID)
 	s.broadcast(map[string]any{"type": "job.created", "job_id": record.ID})
 	writeJSON(w, http.StatusCreated, s.jobJSONWithCycle(r.Context(), record, state))
+}
+
+// defaultNewScannerProfile keeps new web-created TCP jobs on the faster,
+// full-range Naabu discovery pipeline while preserving the Nmap behavior of
+// legacy jobs and direct callers. An explicit engine/profile or any managed
+// scanner field is always respected; only a completely unspecified TCP
+// scanner gets the built-in Naabu profile.
+func defaultNewScannerProfile(p *jobPayload) {
+	if p == nil || p.TCP == nil {
+		return
+	}
+	tcp := p.TCP
+	if strings.TrimSpace(tcp.Engine) != "" || strings.TrimSpace(tcp.ProfileID) != "" || tcp.ProfileRevision != 0 || len(tcp.NaabuArgs) > 0 || len(tcp.NmapArgs) > 0 || len(tcp.EnrichmentArgs) > 0 || strings.TrimSpace(tcp.NSEProfile) != "" || len(tcp.NSEArgs) > 0 || tcp.Naabu != nil {
+		return
+	}
+	tcp.Engine = config.EngineNaabuNmap
+	tcp.ProfileID = store.BuiltinNaabuProfileID
+	tcp.ProfileRevision = 1
 }
 
 func isUnique(err error) bool {

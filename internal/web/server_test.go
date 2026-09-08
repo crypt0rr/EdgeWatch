@@ -25,6 +25,26 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
+func TestDefaultNewScannerProfileUsesNaabuOnlyWhenTCPScannerIsUnspecified(t *testing.T) {
+	naabu := &jobPayload{TCP: &protocolPayload{Ports: "1-1024"}}
+	defaultNewScannerProfile(naabu)
+	if naabu.TCP.Engine != config.EngineNaabuNmap || naabu.TCP.ProfileID != store.BuiltinNaabuProfileID || naabu.TCP.ProfileRevision != 1 {
+		t.Fatalf("default TCP scanner = %#v", naabu.TCP)
+	}
+
+	nmap := &jobPayload{TCP: &protocolPayload{Ports: "22", Engine: config.EngineNmap}}
+	defaultNewScannerProfile(nmap)
+	if nmap.TCP.Engine != config.EngineNmap || nmap.TCP.ProfileID != "" || nmap.TCP.ProfileRevision != 0 {
+		t.Fatalf("explicit Nmap scanner was changed = %#v", nmap.TCP)
+	}
+
+	profile := &jobPayload{TCP: &protocolPayload{Ports: "1-65535", ProfileID: store.BuiltinNmapProfileID}}
+	defaultNewScannerProfile(profile)
+	if profile.TCP.Engine != "" || profile.TCP.ProfileID != store.BuiltinNmapProfileID {
+		t.Fatalf("explicit profile scanner was changed = %#v", profile.TCP)
+	}
+}
+
 type fakeScanner struct{}
 
 func (fakeScanner) Version(context.Context) string { return "fake" }
@@ -134,6 +154,14 @@ func TestConsoleSetupLoginCreateAndRun(t *testing.T) {
 		ID       string `json:"id"`
 		Revision int64  `json:"revision"`
 		Enabled  bool   `json:"enabled"`
+		Job      struct {
+			TCP *struct {
+				Engine          string `json:"engine"`
+				ProfileID       string `json:"profile_id"`
+				ProfileRevision int64  `json:"profile_revision"`
+				Ports           string `json:"ports"`
+			} `json:"tcp"`
+		} `json:"job"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&created)
 	resp.Body.Close()
@@ -142,6 +170,9 @@ func TestConsoleSetupLoginCreateAndRun(t *testing.T) {
 	}
 	if created.Revision != 1 || created.Enabled {
 		t.Fatalf("created paused job was not persisted atomically: %#v", created)
+	}
+	if created.Job.TCP == nil || created.Job.TCP.Engine != config.EngineNaabuNmap || created.Job.TCP.ProfileID != store.BuiltinNaabuProfileID || created.Job.TCP.ProfileRevision != 1 || created.Job.TCP.Ports != config.NaabuFullPortExpression {
+		t.Fatalf("new TCP job did not default to the built-in Naabu profile: %#v", created.Job.TCP)
 	}
 	resp = post("/api/v1/jobs/"+created.ID+"/run", "{}", loginResult.CSRF)
 	if resp.StatusCode != http.StatusAccepted {
@@ -1121,7 +1152,7 @@ func TestNotificationAPIIsWriteOnlyAndUsesOptimisticConcurrency(t *testing.T) {
 		t.Fatalf("disable status %d: %s", response.StatusCode, body)
 	}
 	response.Body.Close()
-	response = request(http.MethodPost, "/api/v1/jobs", `{"name":"selected-alerts","schedule":"0 * * * *","timezone":"UTC","targets":["127.0.0.1"],"tcp":{"ports":"1","mode":"connect"},"timeout":"1m","timing":"balanced","baseline_samples":1,"change_confirmations":1,"max_expanded_hosts":256,"notification_destinations":["`+created.ID+`"]}`, login.CSRF)
+	response = request(http.MethodPost, "/api/v1/jobs", `{"name":"selected-alerts","schedule":"0 * * * *","timezone":"UTC","targets":["127.0.0.1"],"tcp":{"ports":"1","mode":"connect","engine":"nmap"},"timeout":"1m","timing":"balanced","baseline_samples":1,"change_confirmations":1,"max_expanded_hosts":256,"notification_destinations":["`+created.ID+`"]}`, login.CSRF)
 	if response.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(response.Body)
 		response.Body.Close()

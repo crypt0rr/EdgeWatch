@@ -226,6 +226,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).targets).toEqual(['router.example.com', '192.0.2.1/32'])
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).udp).toMatchObject({ ports: '53,123' })
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).assume_alive).toBe(false)
+  expect(createdJob?.job && (createdJob.job as Record<string, unknown>).run_on_start).toBe(false)
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).schedule).toBe('*/15 * * * *')
   expect(createdJob?.job && (createdJob.job as Record<string, unknown>).notification_destinations).toEqual(['dest-1'])
   await page.getByRole('link', { name: /edge-router/ }).click()

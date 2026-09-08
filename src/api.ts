@@ -88,6 +88,9 @@ export const deleteJob = (id: string, confirm_name: string) => api(`/jobs/${id}?
 export const pauseJob = (id: string, revision: number) => api(`/jobs/${id}/pause`, { method: 'POST', body: JSON.stringify({ revision }) })
 export const resumeJob = (id: string, revision: number) => api(`/jobs/${id}/resume`, { method: 'POST', body: JSON.stringify({ revision }) })
 export const runJob = (id: string) => api<{ status: string; job_id: string; mode?: string; cycle_id?: string }>(`/jobs/${id}/run`, { method: 'POST' })
+// Stable identifier of the built-in Naabu → Nmap profile. New jobs select it
+// explicitly so legacy persisted jobs that omit a profile remain Nmap-only.
+export const BUILTIN_NAABU_PROFILE_ID = '00000000-0000-0000-0000-000000000014'
 export const scanCycle = (id: string) => api<{ cycle: import('./types').ScanCycle | null }>(`/jobs/${id}/scan-cycle`)
 export const discardScanCycle = (jobId: string, cycleId: string) => api<void>(`/jobs/${jobId}/scan-cycle/${encodeURIComponent(cycleId)}`, { method: 'DELETE' })
 export const cancelScan = (id: string) => api<{ status: string; scan_id: string }>(`/scans/${id}/cancel`, { method: 'POST' })
@@ -152,13 +155,14 @@ export const updateUser = (id: string, value: { display_name?: string; role?: Ro
 export const issueUserActivation = (id: string) => api<{ activation_token: string; activation_path: string; expires_at: string }>(`/users/${encodeURIComponent(id)}/activation`, { method: 'POST' })
 export const revokeUserSessions = (id: string) => api<void>(`/users/${encodeURIComponent(id)}/sessions`, { method: 'DELETE' })
 
-export type PublicDashboardHost = { job_id: string; address: string; created_at: string }
+export type PublicDashboardHost = { job_id: string; address: string; created_at?: string }
+export type PublicDashboardHostSelection = Pick<PublicDashboardHost, 'job_id' | 'address'>
 export type PublicDashboardConfig = { enabled: boolean; title: string; introduction: string; updated_at: string; hosts: PublicDashboardHost[] }
 export type PublicPort = { protocol: string; port: number; service?: string; product?: string; version?: string }
 export type PublicHost = { job: string; address: string; address_family?: string; public: boolean; private: boolean; available: boolean; stale?: boolean; last_successful_scan?: string; open_ports?: PublicPort[]; open_filtered_ports?: PublicPort[]; rdap?: { status: string; network_name?: string; country?: string; registry?: string; organizations?: string[]; prefix?: string; source_url?: string; fetched_at?: string; stale?: boolean; message?: string } }
 export type PublicDashboard = { title: string; introduction?: string; updated_at: string; hosts: PublicHost[] }
 export const getPublicDashboardConfig = () => api<PublicDashboardConfig>('/public-dashboard')
-export const savePublicDashboardConfig = (value: { enabled: boolean; title: string; introduction: string; hosts: PublicDashboardHost[] }) => api<PublicDashboardConfig>('/public-dashboard', { method: 'PUT', body: JSON.stringify(value) })
+export const savePublicDashboardConfig = (value: { enabled: boolean; title: string; introduction: string; hosts: PublicDashboardHostSelection[] }) => api<PublicDashboardConfig>('/public-dashboard', { method: 'PUT', body: JSON.stringify(value) })
 export async function getPublicDashboard(): Promise<PublicDashboard> {
   const response = await fetch('/api/public/v1/dashboard', { credentials: 'omit' })
   const body = await response.json().catch(() => ({}))

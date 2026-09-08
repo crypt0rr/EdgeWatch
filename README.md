@@ -91,9 +91,10 @@ the replacement is issued.
 - Create all monitoring jobs in the web console. The YAML `jobs` section is
   not used for scheduling.
 
-Scanner profiles are managed by administrators in **Scanner profiles**. A TCP
-job can select **Nmap only** (the default for existing jobs) or **Naabu
-discovery → Nmap**. Naabu always discovers TCP ports `1-65535`; only Nmap's
+Scanner profiles are managed by administrators in **Scanner profiles**. New
+TCP jobs default to **Naabu discovery → Nmap**; existing and legacy jobs pinned
+to Nmap remain unchanged. Users may select **Nmap only** or the Naabu pipeline.
+Naabu always discovers TCP ports `1-65535`; only Nmap's
 confirmed `open` and `open|filtered` results enter baselines and incidents.
 Naabu discoveries and disagreements remain available as diagnostic host
 evidence. UDP remains Nmap-only. Profiles pin a revision into each job, so

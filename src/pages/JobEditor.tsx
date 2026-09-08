@@ -5,7 +5,7 @@ import { z } from 'zod'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Bell, ChevronDown, Info, Plus, Save, Trash2, TriangleAlert } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { APIError, createJob, getJob, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
+import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, getJob, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
 import type { JobForm, Protocol } from '../types'
 import type { ScannerCapabilities, ScannerProfile } from '../api'
 import { cidrWarning, duplicateTarget, targetKind } from '../target'
@@ -27,6 +27,15 @@ const blank: JobForm = {
   allow_high_cost: false,
   enabled: true,
 }
+
+const defaultTCP = (): Protocol => ({
+  ports: '1-65535',
+  mode: 'syn',
+  service_detection: false,
+  engine: 'naabu_nmap',
+  profile_id: BUILTIN_NAABU_PROFILE_ID,
+  profile_revision: 1,
+})
 
 const jobFormSchema = z.object({
   name: z.string().trim().min(1, 'A name is required.'),
@@ -55,7 +64,7 @@ export function JobEditor() {
   const scannerProfiles = useQuery({ queryKey: ['scanner-profiles'], queryFn: () => listScannerProfiles(false), staleTime: 60_000 })
   const scannerCapabilityState = useQuery({ queryKey: ['scanner-capabilities'], queryFn: scannerCapabilities, staleTime: 5 * 60_000, retry: false })
   const [targets, setTargets] = useState<string[]>(blank.targets)
-  const [tcp, setTCP] = useState<Protocol | undefined>({ ports: '1-1024', mode: 'syn', service_detection: false, engine: 'nmap' })
+  const [tcp, setTCP] = useState<Protocol | undefined>(() => defaultTCP())
   const [udp, setUDP] = useState<Protocol | undefined>()
   const [selectedNotificationIDs, setSelectedNotificationIDs] = useState<string[]>([])
   const [notificationSelectionTouched, setNotificationSelectionTouched] = useState(false)
@@ -227,7 +236,7 @@ export function JobEditor() {
 
           <div className="panel form-panel">
             <div className="panel-heading"><div><h2>Scan types</h2><p className="muted">Enable one or both protocols and set their options independently.</p></div></div>
-            <ProtocolCard label="TCP" enabled={!!tcp} profiles={scannerProfiles.data?.profiles ?? []} capabilities={scannerCapabilityState.data} onToggle={(enabled) => { setDraftDirty(true); setTCP(enabled ? { ports: '1-1024', mode: 'syn', service_detection: false, engine: 'nmap' } : undefined) }} protocol={tcp} setProtocol={(value) => { setDraftDirty(true); setTCP(value) }} />
+            <ProtocolCard label="TCP" enabled={!!tcp} profiles={scannerProfiles.data?.profiles ?? []} capabilities={scannerCapabilityState.data} onToggle={(enabled) => { setDraftDirty(true); setTCP(enabled ? defaultTCP() : undefined) }} protocol={tcp} setProtocol={(value) => { setDraftDirty(true); setTCP(value) }} />
             <ProtocolCard label="UDP" profiles={[]} capabilities={scannerCapabilityState.data} enabled={!!udp} onToggle={(enabled) => { setDraftDirty(true); setUDP(enabled ? { ports: '53', service_detection: true, engine: 'nmap' } : undefined) }} protocol={udp} setProtocol={(value) => { setDraftDirty(true); setUDP(value) }} />
             {fieldErrors.protocols && <small className="field-error">{fieldErrors.protocols}</small>}
             {fieldErrors.tcp && <small className="field-error">{fieldErrors.tcp}</small>}
@@ -312,6 +321,13 @@ function ProtocolCard({ label, enabled, onToggle, protocol, setProtocol, profile
     // using it here made the Naabu switch lose its required profile ID.
     const profile = profiles.find(item => !item.archived && item.definition.engine === value)
     const values = profileValues(profile, value)
+    // Keep the built-in pipeline selectable even while the profile request is
+    // still loading (or when an isolated deployment temporarily cannot load
+    // the list). The server validates and resolves this stable built-in ID.
+    if (value === 'naabu_nmap' && !profile) {
+      values.profile_id = BUILTIN_NAABU_PROFILE_ID
+      values.profile_revision = 1
+    }
     setProtocol({ ...protocol!, ...values, engine: value, ports: value === 'naabu_nmap' ? '1-65535' : protocol!.ports })
   }
   const setProfile = (value: string) => {

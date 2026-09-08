@@ -44,11 +44,11 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionScannerProfilesRead: true,
 	},
 	store.RoleViewer: {
-		// Viewers get the deliberately narrow read-only console: overview,
-		// configured jobs, and their current baseline. They do not get the
-		// global host/scan inventory or incident stream; the unauthenticated
+		// Viewers get the deliberately narrow read-only console: configured
+		// jobs and their current baseline. They do not get the overview,
+		// global host/scan inventory, or incident stream; the unauthenticated
 		// highlights page is the separate guest-facing projection.
-		PermissionOverviewRead: true, PermissionJobsRead: true, PermissionBaselinesRead: true,
+		PermissionJobsRead: true, PermissionBaselinesRead: true,
 	},
 }
 

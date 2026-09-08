@@ -17,7 +17,7 @@ func TestPermissionsForRoleIsDeterministicAndComplete(t *testing.T) {
 		t.Fatalf("operator permissions = %#v", operator)
 	}
 	viewer := PermissionsForRole(store.RoleViewer)
-	wantViewer := []string{PermissionBaselinesRead, PermissionJobsRead, PermissionOverviewRead}
+	wantViewer := []string{PermissionBaselinesRead, PermissionJobsRead}
 	if !reflect.DeepEqual(viewer, wantViewer) {
 		t.Fatalf("viewer permissions = %#v, want %#v", viewer, wantViewer)
 	}
@@ -43,7 +43,7 @@ func TestHasPermissionHandlesLegacyAndRoleScopedSessions(t *testing.T) {
 		}
 	}
 	viewer := store.Session{Role: store.RoleViewer}
-	if !HasPermission(viewer, PermissionBaselinesRead) || HasPermission(viewer, PermissionHostsRead) || HasPermission(viewer, PermissionJobsWrite) {
+	if !HasPermission(viewer, PermissionBaselinesRead) || HasPermission(viewer, PermissionOverviewRead) || HasPermission(viewer, PermissionHostsRead) || HasPermission(viewer, PermissionJobsWrite) {
 		t.Fatal("viewer permission boundary is incorrect")
 	}
 }

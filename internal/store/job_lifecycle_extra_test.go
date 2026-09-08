@@ -113,6 +113,45 @@ func TestJobListingLifecycleIdempotenceAndPermanentDeletionGuards(t *testing.T) 
 	}
 }
 
+func TestListJobsPlacesArchivedJobsAfterActiveJobs(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+
+	activeLate, err := s.CreateJob(ctx, testJob("zulu-active"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedEarly, err := s.CreateJob(ctx, testJob("aardvark-archived"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeEarly, err := s.CreateJob(ctx, testJob("alpha-active"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedLate, err := s.CreateJob(ctx, testJob("zulu-archived"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetJobArchived(ctx, archivedEarly.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetJobArchived(ctx, archivedLate.ID, true); err != nil {
+		t.Fatal(err)
+	}
+
+	jobs, err := s.ListJobs(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 4 {
+		t.Fatalf("listed %d jobs, want 4", len(jobs))
+	}
+	if jobs[0].ID != activeEarly.ID || jobs[1].ID != activeLate.ID || !jobs[2].Archived || !jobs[3].Archived {
+		t.Fatalf("job order = %#v, want active jobs first and archived jobs last", jobs)
+	}
+}
+
 func TestJobActiveAndLeaseExpiry(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

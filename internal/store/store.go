@@ -818,7 +818,10 @@ func (s *Store) ListJobs(ctx context.Context, includeArchived bool) ([]JobRecord
 	if !includeArchived {
 		query += ` WHERE archived=0`
 	}
-	query += ` ORDER BY name`
+	// Keep archived jobs grouped after active and paused jobs. The web console
+	// requests archived records so they can be restored, and ordering only by
+	// name otherwise lets an archived job appear between active entries.
+	query += ` ORDER BY archived ASC, name, id`
 	rows, err := s.DB.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err

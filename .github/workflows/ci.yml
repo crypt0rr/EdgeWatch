@@ -40,6 +40,10 @@ jobs:
           cache: true
       - name: Download Go dependencies for real-stack browser tests
         run: go mod download
+      - name: Remove stale Google Chrome apt source
+        # Playwright installs Chromium and does not need the runner's Chrome repository.
+        # Removing it avoids unrelated apt index hash mismatches during dependency setup.
+        run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list
       - name: Install Chromium for browser acceptance tests
         run: npx playwright install --with-deps chromium
       - name: Browser acceptance tests

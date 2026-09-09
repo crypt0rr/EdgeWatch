@@ -236,16 +236,31 @@ func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 				SourceTargets: []string{"router.example"},
 				Hostnames:     []model.Hostname{{Name: "edge-router.example"}},
 				Protocols: []model.ProtocolObservation{{
-					Protocol:         "tcp",
-					ScannedPorts:     "443",
-					ScannedPortCount: 1,
-					Ports:            []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https", Product: "nginx", Version: "1.25"}}},
+					Protocol:           "tcp",
+					ScannedPorts:       "443",
+					ScannedPortCount:   1,
+					NSEOutput:          []string{"evidence-must-not-be-indexed"},
+					CommandFingerprint: "fingerprint-must-not-be-indexed",
+					Ports:              []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https", Product: "nginx", Version: "1.25"}}},
 				}},
 			},
 		}},
 	}
 	if err := s.SaveScan(ctx, job); err != nil {
 		t.Fatal(err)
+	}
+	var searchText, indexedContent string
+	if err := s.DB.QueryRowContext(ctx, `SELECT search_text FROM latest_scan_hosts WHERE address=?`, "198.51.100.44").Scan(&searchText); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(searchText, "nginx") || strings.Contains(searchText, "evidence-must-not-be-indexed") || strings.Contains(searchText, "fingerprint-must-not-be-indexed") {
+		t.Fatalf("bounded host search text = %q", searchText)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT content FROM latest_host_search WHERE address=?`, "198.51.100.44").Scan(&indexedContent); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(indexedContent, "evidence-must-not-be-indexed") || strings.Contains(indexedContent, "fingerprint-must-not-be-indexed") {
+		t.Fatalf("FTS indexed unbounded host evidence: %q", indexedContent)
 	}
 	for _, query := range []string{"nginx", "edge-router", "production", "router.example", "198.51.100.4"} {
 		page, err := s.ListLatestScanHostsPage(ctx, query, "", nil, 50, 0)
@@ -298,6 +313,23 @@ func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 	}
 }
 
+func TestHostSearchContentIsBoundedForLargeEvidence(t *testing.T) {
+	ports := make([]model.PortObservation, 10000)
+	for i := range ports {
+		ports[i] = model.PortObservation{Port: i + 1, State: "open", Service: &model.ServiceObservation{Product: fmt.Sprintf("product-%d", i), Version: strings.Repeat("v", 16)}}
+	}
+	content := hostSearchContent("large-job", model.HostObservation{
+		Address:   "203.0.113.44",
+		Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: ports}},
+	})
+	if len(content) > maxHostSearchTextBytes {
+		t.Fatalf("host search content length %d exceeds %d", len(content), maxHostSearchTextBytes)
+	}
+	if !strings.Contains(content, "203.0.113.44") || !strings.Contains(content, "large-job") {
+		t.Fatalf("bounded host search content lost identity fields: %q", content[:min(len(content), 200)])
+	}
+}
+
 func TestOpenRejectsSQLiteSidecarSymlink(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "symlink.db")
@@ -327,6 +359,35 @@ func TestSQLiteMemoryPathDetectionDoesNotSkipFilesystemNames(t *testing.T) {
 		if isSQLiteMemoryPath(path) {
 			t.Fatalf("filesystem SQLite path was misclassified as memory: %s", path)
 		}
+	}
+}
+
+func TestSQLiteConnectionScopedPragmasReapplyAfterConnectionRecycle(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	// Force database/sql to close an idle physical connection. The next query
+	// must receive the same connection-scoped settings as the first one.
+	s.DB.SetMaxOpenConns(1)
+	s.DB.SetMaxIdleConns(0)
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Millisecond)
+	rows, err := s.DB.QueryContext(queryCtx, `WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM nums WHERE n<2000) SELECT sum(a.n+b.n+c.n) FROM nums a CROSS JOIN nums b CROSS JOIN nums c`)
+	if rows != nil {
+		_ = rows.Next()
+		_ = rows.Close()
+	}
+	cancel()
+	// The large query is expected to be interrupted, but a fast driver or a
+	// busy CI host may complete it before the deadline. Either way, the
+	// following query opens a fresh connection under the connector.
+	var foreignKeys, busyTimeout int
+	if err := s.DB.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&busyTimeout); err != nil {
+		t.Fatal(err)
+	}
+	if foreignKeys != 1 || busyTimeout != 5000 {
+		t.Fatalf("connection pragmas after recycle = foreign_keys=%d busy_timeout=%d (query error %v)", foreignKeys, busyTimeout, err)
 	}
 }
 

@@ -76,6 +76,28 @@ var ErrScanWorkBudget = errors.New("estimated scan work exceeds the configured p
 // checkpointed cycle explicitly.
 var ErrScanCycleStalled = errors.New("scan cycle is stalled; manual retry required")
 
+const (
+	scanPersistenceTimeoutFloor   = 10 * time.Second
+	scanPersistenceTimeoutPerHost = 25 * time.Millisecond
+	scanPersistenceTimeoutMax     = 5 * time.Minute
+)
+
+// scanPersistenceTimeout gives the final database transaction enough time to
+// serialize detailed host evidence without allowing a pathological result to
+// block shutdown forever. The previous fixed ten-second budget was adequate
+// for small jobs but could cancel a large successful scan midway through its
+// SaveScan transaction.
+func scanPersistenceTimeout(hostCount int) time.Duration {
+	if hostCount <= 0 {
+		return scanPersistenceTimeoutFloor
+	}
+	maxAdditional := (scanPersistenceTimeoutMax - scanPersistenceTimeoutFloor) / scanPersistenceTimeoutPerHost
+	if int64(hostCount) >= int64(maxAdditional) {
+		return scanPersistenceTimeoutMax
+	}
+	return scanPersistenceTimeoutFloor + time.Duration(hostCount)*scanPersistenceTimeoutPerHost
+}
+
 type ScanWorkBudgetError struct {
 	Estimate config.WorkEstimate
 	Budget   int64
@@ -438,7 +460,11 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		scan.Status = "success"
 	}
 	a.updateActivePhase(scan.ID, "finalizing")
-	persistCtx, persistCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	persistTimeout := scanPersistenceTimeout(len(scan.Snapshot.Hosts))
+	if a.Logger != nil {
+		a.Logger.Debug("persisting scan result", "scan_id", scan.ID, "hosts", len(scan.Snapshot.Hosts), "timeout", persistTimeout)
+	}
+	persistCtx, persistCancel := context.WithTimeout(context.Background(), persistTimeout)
 	defer persistCancel()
 	completionEvent := model.Event{Type: "scan.completed", JobID: jobID, Job: job.Name, ScanID: scan.ID, Message: "Scan " + scan.Status, CreatedAt: scan.FinishedAt}
 	var destinations []string

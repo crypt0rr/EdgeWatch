@@ -118,6 +118,35 @@ func TestPublicDashboardNotFoundAndLatestSuccessfulHostScope(t *testing.T) {
 	}
 }
 
+func TestLatestSuccessfulJobHostsResolvesSelectionsInOneSet(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	jobA, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "batch-a", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.1"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobB, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "batch-b", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"2001:db8::1"}, TCP: &config.Protocol{Ports: "443", Mode: "syn"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, scan := range []model.Scan{
+		{ID: "batch-a-scan", JobID: jobA.ID, JobRevision: jobA.Revision, Job: jobA.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 22, State: "open"}}}}}}}},
+		{ID: "batch-b-scan", JobID: jobB.ID, JobRevision: jobB.Revision, Job: jobB.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "2001:db8::1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}}}},
+	} {
+		if err := s.SaveScan(ctx, scan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	results, err := s.GetLatestSuccessfulJobHosts(ctx, []PublicDashboardHost{{JobID: jobA.ID, Address: "198.51.100.1"}, {JobID: jobB.ID, Address: "2001:0db8::1"}, {JobID: "missing", Address: "198.51.100.1"}})
+	if err != nil || len(results) != 2 {
+		t.Fatalf("batch latest hosts = %#v, %v", results, err)
+	}
+	if results[0].Summary.ID == "" || results[1].Summary.ID == "" {
+		t.Fatalf("batch summaries missing: %#v", results)
+	}
+}
+
 func TestPublicDashboardDefaultsBlankTitle(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

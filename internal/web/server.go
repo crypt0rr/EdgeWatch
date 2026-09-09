@@ -2749,6 +2749,8 @@ func (s *Server) spa(w http.ResponseWriter, r *http.Request) {
 
 const fallbackHTML = `<!doctype html><html><head><meta charset="utf-8"><title>EdgeWatch</title></head><body><main><h1>EdgeWatch</h1><p>The web assets have not been built into this binary yet.</p></main></body></html>`
 
+const maxPaginationOffset = 10_000_000
+
 func queryLimit(r *http.Request) int {
 	n, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if n <= 0 {
@@ -2767,16 +2769,20 @@ func queryOffset(r *http.Request) int {
 	}
 	// Keep offsets bounded so an accidental huge value cannot turn into an
 	// expensive SQLite scan. Clients can continue walking pages from zero.
-	if n > 10_000_000 {
-		return 10_000_000
+	if n > maxPaginationOffset {
+		return maxPaginationOffset
 	}
 	return n
 }
 
 func paginationJSON(offset, limit, total int) map[string]any {
-	hasMore := offset+limit < total
+	// Only add offset and limit after proving both values are in a range where
+	// the addition cannot wrap. Paginated handlers normally normalize these
+	// values, but this helper is also used by compatibility paths and tests.
+	hasMore := false
 	var next any
-	if hasMore {
+	if offset >= 0 && limit > 0 && total >= 0 && offset < total && limit < total-offset {
+		hasMore = true
 		next = offset + limit
 	}
 	return map[string]any{"limit": limit, "offset": offset, "total": total, "has_more": hasMore, "next_offset": next}

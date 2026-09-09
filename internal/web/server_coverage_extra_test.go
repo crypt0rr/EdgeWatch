@@ -293,6 +293,11 @@ func TestServerPaginationAndSSEBoundaryHelpers(t *testing.T) {
 	if paginationJSON(0, 10, 5)["has_more"] != false || paginationJSON(0, 10, 15)["next_offset"] != 10 {
 		t.Fatal("pagination metadata is incorrect")
 	}
+	maxInt := int(^uint(0) >> 1)
+	overflow := paginationJSON(maxInt, 50, maxInt)
+	if overflow["has_more"] != false || overflow["next_offset"] != nil {
+		t.Fatalf("pagination overflow was not suppressed: %#v", overflow)
+	}
 	if got, _ := pageSlice([]string{"a", "b"}, -1, 0); len(got) != 2 {
 		t.Fatal("default page slice failed")
 	}

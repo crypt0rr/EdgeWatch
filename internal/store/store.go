@@ -1500,9 +1500,19 @@ func hostSearchPredicate(filter hostFilter, searchTable string, keyColumns strin
 	}
 	join = " JOIN " + searchTable + " hs ON " + keyColumns
 	if len([]rune(filter.searchText)) < 3 {
-		return join, "hs.content LIKE ?", []any{"%" + filter.searchText + "%"}
+		return join, "hs.content LIKE ? ESCAPE '\\'", []any{"%" + escapeLikePattern(filter.searchText) + "%"}
 	}
 	return join, searchTable + " MATCH ?", []any{hostSearchMatchQuery(filter.searchText)}
+}
+
+// escapeLikePattern keeps the short-query fallback literal. FTS5 handles
+// wildcard characters safely when a value is quoted as a phrase, but the
+// one- and two-character path uses LIKE for trigram-tokenizer boundaries.
+func escapeLikePattern(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	value = strings.ReplaceAll(value, `_`, `\_`)
+	return value
 }
 
 func scanHostStats(host model.HostObservation) (open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered int) {

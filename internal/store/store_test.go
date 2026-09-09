@@ -163,6 +163,37 @@ func TestScanHostIndexSupportsFilteringPaginationAndLatestRows(t *testing.T) {
 	}
 }
 
+func TestHostSearchShortQueriesEscapeLikeWildcards(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	for _, scan := range []model.Scan{
+		{ID: "literal-underscore", JobID: "job-underscore", Job: "edge_core", StartedAt: time.Unix(100, 0).UTC(), FinishedAt: time.Unix(100, 0).UTC(), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1"}}}},
+		{ID: "literal-underscore-x", JobID: "job-underscore-x", Job: "edge_x", StartedAt: time.Unix(101, 0).UTC(), FinishedAt: time.Unix(101, 0).UTC(), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.2"}}}},
+		{ID: "wildcard-lookalike", JobID: "job-wildcard", Job: "axb", StartedAt: time.Unix(102, 0).UTC(), FinishedAt: time.Unix(102, 0).UTC(), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.3"}}}},
+	} {
+		if err := s.SaveScan(ctx, scan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := s.ListLatestScanHostsPage(ctx, "_", "", nil, 50, 0)
+	if err != nil || page.Total != 2 {
+		t.Fatalf("literal underscore search = %#v, %v", page, err)
+	}
+	for _, item := range page.Items {
+		if item.Job == "axb" {
+			t.Fatalf("underscore wildcard matched unrelated job: %#v", page.Items)
+		}
+	}
+	page, err = s.ListLatestScanHostsPage(ctx, "_x", "", nil, 50, 0)
+	if err != nil || page.Total != 1 || page.Items[0].Job != "edge_x" {
+		t.Fatalf("literal underscore suffix search = %#v, %v", page, err)
+	}
+	page, err = s.ListLatestScanHostsPage(ctx, "%", "", nil, 50, 0)
+	if err != nil || page.Total != 0 {
+		t.Fatalf("literal percent search = %#v, %v", page, err)
+	}
+}
+
 func TestLatestScanHostProjectionPreservesSuccessfulOrdering(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

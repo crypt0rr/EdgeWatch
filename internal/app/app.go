@@ -1049,8 +1049,13 @@ func (a *App) reconcileSchedules(ctx context.Context, runOnStart bool) error {
 	invalid := map[string]error{}
 	for id, record := range desired {
 		spec := "CRON_TZ=" + record.Job.Timezone + " " + record.Job.Schedule
-		if _, err := parser.Parse(spec); err != nil {
+		parsed, err := parser.Parse(spec)
+		if err != nil {
 			invalid[id] = fmt.Errorf("job %s: %w", record.Job.Name, err)
+			continue
+		}
+		if parsed.Next(time.Now().UTC()).IsZero() {
+			invalid[id] = fmt.Errorf("job %s: schedule never fires", record.Job.Name)
 			continue
 		}
 		specs[id] = spec

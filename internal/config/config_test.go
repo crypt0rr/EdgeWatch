@@ -198,6 +198,19 @@ func TestScheduleRejectsEmbeddedTimezonePrefix(t *testing.T) {
 	}
 }
 
+func TestValidateJobRejectsScheduleThatNeverFires(t *testing.T) {
+	job := NormalizeJob(Job{
+		Name:     "impossible",
+		Schedule: "0 0 30 2 *",
+		Timezone: "UTC",
+		Targets:  []string{"192.0.2.1"},
+		TCP:      &Protocol{Ports: "443", Mode: "connect"},
+	})
+	if err := ValidateJob(job); err == nil || !strings.Contains(err.Error(), "schedule never fires") {
+		t.Fatalf("expected never-firing schedule to be rejected, got %v", err)
+	}
+}
+
 func TestSecurityHashIncludesAssumeAlive(t *testing.T) {
 	trueValue, falseValue := true, false
 	base := Job{Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1, AssumeAlive: &trueValue, TCP: &Protocol{Ports: "443", Mode: "syn"}}

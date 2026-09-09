@@ -105,6 +105,7 @@ func TestParseNextRunAndShiftCronMinuteBoundaries(t *testing.T) {
 		{"embedded TZ", "TZ=UTC 0 * * * *", "UTC", "five cron fields"},
 		{"bad timezone", "0 * * * *", "Not/AZone", "invalid timezone"},
 		{"bad schedule", "invalid", "UTC", "invalid schedule"},
+		{"never fires", "0 0 30 2 *", "UTC", "schedule never fires"},
 	} {
 		if _, err := parseNextRun(parser, test.schedule, test.timezone, now); err == nil || !strings.Contains(err.Error(), test.wantErr) {
 			t.Errorf("%s error = %v", test.name, err)

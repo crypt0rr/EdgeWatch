@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 20
+const schemaVersion = 21
 
 // sqlitePragmaConnector applies connection-scoped SQLite settings whenever
 // database/sql opens a physical connection. database/sql can discard a
@@ -824,6 +824,17 @@ FROM scan_hosts;`,
 			`INSERT INTO latest_host_search(address,content)
 SELECT address,lower(coalesce(search_text,'') || ' ' || coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,''))
 FROM latest_scan_hosts;`,
+		},
+		21: {
+			// Managed history queries are keyed by the stable job identity rather
+			// than the legacy display name. Keep the ordering columns in the same
+			// indexes used by the console and retain a dedicated cycle index for
+			// resumable-cycle promotion checks. The revision index also keeps
+			// retention's current-revision protection set-based as history grows.
+			"CREATE INDEX IF NOT EXISTS scans_job_id_time ON scans(job_id, finished_at DESC, id DESC)",
+			"CREATE INDEX IF NOT EXISTS scans_job_id_revision ON scans(job_id, job_revision)",
+			"CREATE INDEX IF NOT EXISTS scans_finished_at ON scans(finished_at DESC)",
+			"CREATE INDEX IF NOT EXISTS scans_cycle_id ON scans(cycle_id)",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
@@ -1662,11 +1673,32 @@ func (s *Store) updateRuntime(ctx context.Context, jobID, securityHash string, d
 }
 
 func (s *Store) updateRuntimeWithOutboxAndAudits(ctx context.Context, jobID, securityHash string, destinations []string, audits []AuditEntry, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	return s.updateRuntimeWithOutboxAndAuditsGuarded(ctx, jobID, securityHash, destinations, audits, false, fn)
+}
+
+// updateRuntimeWithOutboxAndAuditsGuarded is the common transactional runtime
+// mutation path. Some operator actions replace the complete comparison state
+// (rather than applying one incident) and therefore need the same active-scan
+// exclusion as incident actions. Scan finalization deliberately uses the
+// unguarded path so it can commit its own result while its lease is held.
+func (s *Store) updateRuntimeWithOutboxAndAuditsGuarded(ctx context.Context, jobID, securityHash string, destinations []string, audits []AuditEntry, rejectActive bool, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	if rejectActive {
+		if _, err := getJobTx(ctx, tx, jobID); err != nil {
+			return nil, err
+		}
+		active, err := jobActiveTx(ctx, tx, jobID, time.Now().UTC())
+		if err != nil {
+			return nil, err
+		}
+		if active {
+			return nil, ErrJobScanActive
+		}
+	}
 	if securityHash != "" {
 		var raw []byte
 		if err := tx.QueryRowContext(ctx, `SELECT definition_json FROM jobs WHERE id=?`, jobID).Scan(&raw); err != nil {
@@ -1948,7 +1980,7 @@ func (s *Store) ResetRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name 
 }
 
 func (s *Store) resetRuntimeWithAudits(ctx context.Context, jobID, name string, destinations []string, audits []AuditEntry) ([]model.Event, error) {
-	return s.updateRuntimeWithOutboxAndAudits(ctx, jobID, "", destinations, audits, func(state *model.JobState) ([]model.Event, error) {
+	return s.updateRuntimeWithOutboxAndAuditsGuarded(ctx, jobID, "", destinations, audits, true, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = nil
 		state.BaselineScanID = ""
 		state.BaselineConfigHash = ""
@@ -1993,6 +2025,13 @@ func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string
 	record, err := getJobTx(ctx, tx, jobID)
 	if err != nil {
 		return nil, err
+	}
+	active, err := jobActiveTx(ctx, tx, jobID, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	if active {
+		return nil, ErrJobScanActive
 	}
 	stored, err := getScanTx(ctx, tx, scan.ID)
 	if err != nil {

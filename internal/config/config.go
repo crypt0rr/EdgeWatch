@@ -503,15 +503,20 @@ func (c Config) Validate() error {
 			return fmt.Errorf("job names must be non-empty and unique: %q", j.Name)
 		}
 		seen[j.Name] = true
-		if _, err := time.LoadLocation(j.Timezone); err != nil {
+		location, err := time.LoadLocation(j.Timezone)
+		if err != nil {
 			return fmt.Errorf("job %s: invalid timezone: %w", j.Name, err)
 		}
 		schedule := strings.TrimSpace(j.Schedule)
 		if strings.HasPrefix(schedule, "TZ=") || strings.HasPrefix(schedule, "CRON_TZ=") {
 			return fmt.Errorf("job %s: schedule must contain five cron fields; set timezone in the timezone field", j.Name)
 		}
-		if _, err := parser.Parse(schedule); err != nil {
+		parsed, err := parser.Parse(schedule)
+		if err != nil {
 			return fmt.Errorf("job %s: invalid schedule: %w", j.Name, err)
+		}
+		if parsed.Next(time.Now().UTC().In(location)).IsZero() {
+			return fmt.Errorf("job %s: schedule never fires", j.Name)
 		}
 		if len(j.Targets) == 0 {
 			return fmt.Errorf("job %s: at least one target is required", j.Name)

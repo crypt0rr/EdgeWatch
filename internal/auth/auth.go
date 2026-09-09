@@ -48,6 +48,17 @@ const (
 
 var ErrRateLimited = errors.New("too many authentication attempts; try again later")
 
+// dummyPasswordHash is used for unknown and disabled accounts so an invalid
+// login spends the same Argon2id work regardless of whether the username is
+// present. It is generated once with the same parameters as real passwords.
+var dummyPasswordHash = func() string {
+	hash, err := PasswordHash("edgewatch-invalid-login-sentinel")
+	if err != nil {
+		panic(fmt.Sprintf("create authentication timing sentinel: %v", err))
+	}
+	return hash
+}()
+
 type Manager struct {
 	Store *store.Store
 	Now   func() time.Time
@@ -330,10 +341,12 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 	source := m.sourceScope(request)
 	account := "setup:" + digest(strings.TrimSpace(token))
 	if !m.allowScoped(source, account) {
+		m.auditAuthFailure(ctx, "auth.rate_limited", "setup", request)
 		return ErrRateLimited
 	}
 	if err := m.Setup(ctx, token, password); err != nil {
 		m.failedScoped(source, account, "", false)
+		m.auditAuthFailure(ctx, "auth.setup_failed", "setup", request)
 		return err
 	}
 	m.clearScoped(source, account, "")
@@ -348,16 +361,19 @@ func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, to
 	source := m.sourceScope(request)
 	account := "activation:" + digest(strings.TrimSpace(token))
 	if !m.allowScoped(source, account) {
+		m.auditAuthFailure(ctx, "auth.rate_limited", "activation", request)
 		return ErrRateLimited
 	}
 	hash, err := PasswordHash(password)
 	if err != nil {
 		m.failedScoped(source, account, "", false)
+		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
 		return err
 	}
 	now := m.now()
 	if _, err := m.Store.ActivateUser(ctx, digest(token), hash, now, store.AuditEntry{Action: "user.activated", Detail: "user account activated"}); err != nil {
 		m.failedScoped(source, account, "", false)
+		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
 		return err
 	}
 	m.clearScoped(source, account, "")
@@ -381,6 +397,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	account := "login:" + identity
 	unknownSource := "unknown-login:" + strings.TrimPrefix(source, "source:")
 	if !m.allowScoped(source, account) {
+		m.auditAuthFailure(ctx, "auth.rate_limited", identity, request)
 		return "", store.User{}, ErrRateLimited
 	}
 	user, err := m.Store.GetUserByUsername(ctx, identity)
@@ -397,12 +414,15 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	}
 	if err != nil {
 		if !m.allowUnknownSource(unknownSource) {
+			m.auditAuthFailure(ctx, "auth.rate_limited", identity, request)
 			return "", store.User{}, ErrRateLimited
 		}
 		// Unknown usernames still consume the failure budget. Otherwise an
 		// attacker could bypass the login limiter by rotating arbitrary account
 		// names while probing the endpoint for a real administrator or invitee.
 		m.failedScoped(source, account, unknownSource, true)
+		_ = VerifyPassword(dummyPasswordHash, password)
+		m.auditAuthFailure(ctx, "auth.login_failed", identity, request)
 		return "", store.User{}, errors.New("invalid credentials")
 	}
 	if !user.Enabled {
@@ -410,19 +430,26 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		// Keep disabled accounts indistinguishable from unknown usernames. This
 		// prevents the login endpoint from becoming an account-enumeration oracle
 		// while the administration UI can still show the disabled state.
+		_ = VerifyPassword(dummyPasswordHash, password)
+		m.auditAuthFailure(ctx, "auth.login_failed", identity, request)
 		return "", user, errors.New("invalid credentials")
 	}
 	if !VerifyPassword(user.PasswordHash, password) {
 		m.failedScoped(source, account, "", false)
+		m.auditAuthFailure(ctx, "auth.login_failed", identity, request)
 		return "", user, errors.New("invalid credentials")
 	}
 	if user.TOTPEnabled {
 		valid := user.TOTPSecretError == nil && VerifyTOTPAt(user.TOTPSecret, otp, m.now())
 		if !valid && recovery != "" {
-			valid, err = m.Store.ConsumeRecoveryCodeForUser(ctx, user.ID, digest(strings.ToUpper(strings.TrimSpace(recovery))), m.now())
+			valid, err = m.Store.ConsumeRecoveryCodeTextForUser(ctx, user.ID, recovery, m.now())
+			if valid {
+				m.auditAuthFailure(ctx, "auth.recovery_code_used", identity, request)
+			}
 		}
 		if !valid {
 			m.failedScoped(source, account, "", false)
+			m.auditAuthFailure(ctx, "auth.totp_failed", identity, request)
 			return "", user, errors.New("one-time code is required")
 		}
 	}
@@ -466,15 +493,33 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 	source := m.sourceScope(request)
 	account := "confirm:" + strings.TrimSpace(userID)
 	if !m.allowScoped(source, account) {
+		m.auditAuthFailure(ctx, "auth.rate_limited", "password-confirmation", request)
 		return ErrRateLimited
 	}
 	user, err := m.Store.GetUser(ctx, userID)
 	if err != nil || !user.Enabled || !VerifyPassword(user.PasswordHash, password) {
 		m.failedScoped(source, account, "", false)
+		m.auditAuthFailure(ctx, "auth.password_confirmation_failed", userID, request)
 		return errors.New("password confirmation failed")
 	}
 	m.clearScoped(source, account, "")
 	return nil
+}
+
+// auditAuthFailure records an authentication security event without allowing
+// an unavailable audit table to alter the response to the original request.
+// Values are bounded and never contain passwords, OTPs, or recovery codes.
+func (m *Manager) auditAuthFailure(ctx context.Context, action, subject string, request *http.Request) {
+	subject = strings.TrimSpace(subject)
+	if len(subject) > 80 {
+		subject = subject[:80]
+	}
+	_ = m.Store.AuditEntry(ctx, store.AuditEntry{
+		Action:        action,
+		Detail:        "authentication event for " + subject,
+		ActorUsername: subject,
+		SourceIP:      m.ClientIP(request),
+	})
 }
 
 func requestRemote(request *http.Request) string {
@@ -877,9 +922,13 @@ func VerifyTOTPAt(secret, code string, at time.Time) bool {
 			return false
 		}
 	}
+	raw, err := decodeTOTPSecret(secret)
+	if err != nil || len(raw) < 10 {
+		return false
+	}
 	now := at.Unix() / 30
 	for offset := int64(-1); offset <= 1; offset++ {
-		if totpCode(secret, now+offset) == code {
+		if totpCodeRaw(raw, now+offset) == code {
 			return true
 		}
 	}
@@ -887,10 +936,22 @@ func VerifyTOTPAt(secret, code string, at time.Time) bool {
 }
 
 func totpCode(secret string, counter int64) string {
-	raw, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(strings.TrimSpace(secret)))
+	raw, err := decodeTOTPSecret(secret)
 	if err != nil {
 		return ""
 	}
+	return totpCodeRaw(raw, counter)
+}
+
+func decodeTOTPSecret(secret string) ([]byte, error) {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		return nil, errors.New("TOTP secret is empty")
+	}
+	return base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(secret))
+}
+
+func totpCodeRaw(raw []byte, counter int64) string {
 	var msg [8]byte
 	binary.BigEndian.PutUint64(msg[:], uint64(counter))
 	h := hmac.New(sha1.New, raw)
@@ -905,12 +966,19 @@ func RecoveryCodes() ([]string, []string, error) {
 	plain := make([]string, 10)
 	hashes := make([]string, 10)
 	for i := range plain {
-		raw, err := randomBytes(5)
+		raw, err := randomBytes(16)
 		if err != nil {
 			return nil, nil, err
 		}
-		plain[i] = strings.ToUpper(hex.EncodeToString(raw))
-		hashes[i] = digest(plain[i])
+		plain[i] = base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw)
+		salt, err := randomBytes(16)
+		if err != nil {
+			return nil, nil, err
+		}
+		h := sha256.New()
+		_, _ = h.Write(salt)
+		_, _ = h.Write([]byte(plain[i]))
+		hashes[i] = "v2$" + base64.RawStdEncoding.EncodeToString(salt) + "$" + hex.EncodeToString(h.Sum(nil))
 	}
 	return plain, hashes, nil
 }

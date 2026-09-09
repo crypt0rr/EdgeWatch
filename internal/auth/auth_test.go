@@ -286,6 +286,15 @@ func TestTOTPUsesInjectedTime(t *testing.T) {
 	}
 }
 
+func TestTOTPRejectsMissingOrTooShortSecrets(t *testing.T) {
+	at := time.Unix(1_700_000_000, 0).UTC()
+	for _, secret := range []string{"", "   ", "AAAAAAA"} {
+		if VerifyTOTPAt(secret, "000000", at) {
+			t.Fatalf("invalid TOTP secret %q was accepted", secret)
+		}
+	}
+}
+
 func TestRecoveryCodeIsCaseInsensitiveAndSingleUse(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -326,6 +335,53 @@ func TestRecoveryCodeIsCaseInsensitiveAndSingleUse(t *testing.T) {
 	request.RemoteAddr = "127.0.0.1:1234"
 	if _, _, err := m.Login(ctx, request, "correct horse battery staple", "", plain[0]); err == nil {
 		t.Fatal("recovery code was reusable")
+	}
+}
+
+func TestRecoveryCodesHaveSufficientEntropyAndSaltedStorage(t *testing.T) {
+	plain, hashes, err := RecoveryCodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plain) != 10 || len(hashes) != 10 {
+		t.Fatalf("recovery code count = %d/%d", len(plain), len(hashes))
+	}
+	for i := range plain {
+		if len(plain[i]) < 20 {
+			t.Fatalf("recovery code %q is too short", plain[i])
+		}
+		if hashes[i] == digest(plain[i]) || !strings.HasPrefix(hashes[i], "v2$") {
+			t.Fatalf("recovery code %q has an unsalted storage format: %q", plain[i], hashes[i])
+		}
+	}
+}
+
+func TestFailedLoginIsAuditedWithoutCredentials(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := NewManager(s)
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "correct horse battery staple"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "192.0.2.10:1234"
+	if _, _, err := m.LoginAs(ctx, request, "admin", "wrong password", "", ""); err == nil {
+		t.Fatal("invalid password unexpectedly authenticated")
+	}
+	var action, detail string
+	if err := s.DB.QueryRowContext(ctx, `SELECT action,detail FROM security_audit WHERE action='auth.login_failed' ORDER BY rowid DESC LIMIT 1`).Scan(&action, &detail); err != nil {
+		t.Fatal(err)
+	}
+	if action != "auth.login_failed" || !strings.Contains(detail, "admin") || strings.Contains(detail, "wrong password") {
+		t.Fatalf("unexpected login audit = %q %q", action, detail)
 	}
 }
 

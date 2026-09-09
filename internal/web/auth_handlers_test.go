@@ -109,3 +109,23 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 		t.Fatalf("TOTP disable status = %d: %s", disableRecorder.Code, disableRecorder.Body.String())
 	}
 }
+
+func TestPasswordConfirmationIsRateLimited(t *testing.T) {
+	server, _, admin := newUsersTestServer(t)
+	for attempt := 0; attempt < 5; attempt++ {
+		request := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", strings.NewReader(`{"current_password":"wrong password","new_password":"replacement password"}`))
+		request.Header.Set("Content-Type", "application/json")
+		response := httptest.NewRecorder()
+		server.changePassword(response, request, admin)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("wrong password attempt %d returned %d: %s", attempt+1, response.Code, response.Body.String())
+		}
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", strings.NewReader(`{"current_password":"wrong password","new_password":"replacement password"}`))
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.changePassword(response, request, admin)
+	if response.Code != http.StatusTooManyRequests {
+		t.Fatalf("sixth wrong password attempt returned %d: %s", response.Code, response.Body.String())
+	}
+}

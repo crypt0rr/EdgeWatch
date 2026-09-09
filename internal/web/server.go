@@ -785,8 +785,12 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 		return
 	}
 	user, err := s.Store.GetUser(r.Context(), session.UserID)
-	if err != nil || !auth.VerifyPassword(user.PasswordHash, input.Current) {
-		writeError(w, http.StatusBadRequest, "invalid_password", "current password is incorrect", nil)
+	if err != nil {
+		s.writePasswordConfirmationError(w, err, "current password is incorrect")
+		return
+	}
+	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, input.Current); err != nil {
+		s.writePasswordConfirmationError(w, err, "current password is incorrect")
 		return
 	}
 	hash, err := auth.PasswordHash(input.Password)
@@ -822,8 +826,12 @@ func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	user, err := s.Store.GetUser(r.Context(), session.UserID)
-	if err != nil || !auth.VerifyPassword(user.PasswordHash, input.Password) {
-		writeError(w, http.StatusBadRequest, "invalid_password", "password is incorrect", nil)
+	if err != nil {
+		s.writePasswordConfirmationError(w, err, "password is incorrect")
+		return
+	}
+	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, input.Password); err != nil {
+		s.writePasswordConfirmationError(w, err, "password is incorrect")
 		return
 	}
 	secret, err := auth.NewTOTPSecret()
@@ -902,8 +910,12 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 		return
 	}
 	user, err := s.Store.GetUser(r.Context(), session.UserID)
-	if err != nil || !auth.VerifyPassword(user.PasswordHash, input.Password) {
-		writeError(w, http.StatusBadRequest, "invalid_password", "password is incorrect", nil)
+	if err != nil {
+		s.writePasswordConfirmationError(w, err, "password is incorrect")
+		return
+	}
+	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, input.Password); err != nil {
+		s.writePasswordConfirmationError(w, err, "password is incorrect")
 		return
 	}
 	user.TOTPEnabled, user.TOTPSecret, user.UpdatedAt = false, "", time.Now().UTC()
@@ -2407,6 +2419,15 @@ func (s *Server) writeNotificationAuthError(w http.ResponseWriter, err error) {
 		return
 	}
 	writeError(w, http.StatusUnauthorized, "invalid_password", "password confirmation failed", nil)
+}
+
+func (s *Server) writePasswordConfirmationError(w http.ResponseWriter, err error, message string) {
+	if errors.Is(err, auth.ErrRateLimited) {
+		w.Header().Set("Retry-After", "300")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many password confirmation attempts; try again later", nil)
+		return
+	}
+	writeError(w, http.StatusBadRequest, "invalid_password", message, nil)
 }
 
 func (s *Server) writeNotificationError(w http.ResponseWriter, err error) {

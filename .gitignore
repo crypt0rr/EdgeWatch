@@ -3,6 +3,7 @@
 /data/
 /config.yaml
 /notification-urls.txt
+*.key
 *.db
 *.db-shm
 *.db-wal

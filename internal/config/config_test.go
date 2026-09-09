@@ -63,7 +63,7 @@ jobs:
 	if cfg.Scheduler.MaxProbeCount != DefaultMaxProbeCount {
 		t.Fatalf("probe budget default %d", cfg.Scheduler.MaxProbeCount)
 	}
-	if cfg.Jobs[0].Baseline.Samples != 1 || !cfg.Jobs[0].AssumesAlive() || !cfg.Jobs[0].RunsOnStart() || cfg.Jobs[0].RunOnStart == nil || cfg.Jobs[0].AssumeAlive == nil {
+	if cfg.Jobs[0].Baseline.Samples != 1 || !cfg.Jobs[0].AssumesAlive() || cfg.Jobs[0].RunsOnStart() || cfg.Jobs[0].RunOnStart == nil || cfg.Jobs[0].AssumeAlive == nil {
 		t.Fatal("defaults not applied")
 	}
 	if err := os.WriteFile(path, []byte(strings.Replace(yaml, "tcp:", "assume_alive: false\n    tcp:", 1)), 0o600); err != nil {
@@ -95,6 +95,18 @@ jobs:
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("unknown field accepted")
+	}
+}
+
+func TestRunOnStartDefaultAndExplicitTrue(t *testing.T) {
+	defaultJob := NormalizeJob(Job{})
+	if defaultJob.RunOnStart == nil || defaultJob.RunsOnStart() {
+		t.Fatalf("omitted run_on_start resolved to %#v, want false", defaultJob.RunOnStart)
+	}
+	explicit := true
+	explicitJob := NormalizeJob(Job{RunOnStart: &explicit})
+	if !explicitJob.RunsOnStart() {
+		t.Fatal("explicit run_on_start=true was not preserved")
 	}
 }
 

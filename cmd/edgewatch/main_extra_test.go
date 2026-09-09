@@ -98,6 +98,19 @@ func TestRunStatusReportsUnknownManagedJob(t *testing.T) {
 	}
 }
 
+func TestStatusFallsBackToUTCForInvalidTimezone(t *testing.T) {
+	dir := t.TempDir()
+	s, err := store.Open(filepath.Join(dir, "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Jobs: []config.Job{{Name: "invalid-zone", Schedule: "0 * * * *", Timezone: "Not/AZone"}}}
+	if err := status(context.Background(), s, cfg, "", "json"); err != nil {
+		t.Fatalf("status returned an error for an invalid timezone: %v", err)
+	}
+}
+
 func TestRunStatusHistoryAndBaselineForManagedJob(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

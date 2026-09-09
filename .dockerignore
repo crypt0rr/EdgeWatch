@@ -6,6 +6,7 @@ data
 edgewatch
 config.yaml
 notification-urls.txt
+*.key
 *.db*
 coverage.out
 node_modules

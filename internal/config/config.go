@@ -377,7 +377,7 @@ func applyDefaults(c *Config) {
 	for i := range c.Jobs {
 		j := &c.Jobs[i]
 		if j.RunOnStart == nil {
-			runOnStart := true
+			runOnStart := false
 			j.RunOnStart = &runOnStart
 		}
 		if j.Timezone == "" {
@@ -974,7 +974,7 @@ func PortContains(raw string, port int) bool {
 	return i < len(ports) && ports[i] == port
 }
 
-func (j Job) RunsOnStart() bool { return j.RunOnStart == nil || *j.RunOnStart }
+func (j Job) RunsOnStart() bool { return j.RunOnStart != nil && *j.RunOnStart }
 
 func (j Job) AssumesAlive() bool { return j.AssumeAlive == nil || *j.AssumeAlive }
 

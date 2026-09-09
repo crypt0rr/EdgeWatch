@@ -305,7 +305,7 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 			entry.LastScanID, entry.LastScanStatus = scans[0].ID, scans[0].Status
 			entry.LastScanFinished = scans[0].FinishedAt.Format(time.RFC3339)
 		}
-		location, _ := time.LoadLocation(record.Job.Timezone)
+		location := statusLocation(record.Job.Timezone)
 		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 		if schedule, parseErr := parser.Parse(record.Job.Schedule); parseErr == nil {
 			entry.NextRun = schedule.Next(time.Now().In(location)).Format(time.RFC3339)
@@ -337,7 +337,7 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 			entry.LastScanStatus = scans[0].Status
 			entry.LastScanFinished = scans[0].FinishedAt.Format(time.RFC3339)
 		}
-		location, _ := time.LoadLocation(j.Timezone)
+		location := statusLocation(j.Timezone)
 		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 		if schedule, parseErr := parser.Parse(j.Schedule); parseErr == nil {
 			entry.NextRun = schedule.Next(time.Now().In(location)).Format(time.RFC3339)
@@ -348,6 +348,14 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 		return fmt.Errorf("unknown job %q", filter)
 	}
 	return printValue(output, rows)
+}
+
+func statusLocation(timezone string) *time.Location {
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		return time.UTC
+	}
+	return location
 }
 
 func baseline(ctx context.Context, action string, s *store.Store, a *app.App, job, scanID, output string) error {

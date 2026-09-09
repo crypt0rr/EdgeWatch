@@ -5,8 +5,29 @@
 # annotated tags and falls back to the lightweight-tag ref when necessary.
 set -eu
 
-version=${1:-v2.6.1}
-expected=${2:-5a0ca8bde91b5bb16213e9e8b5c6871eac954bd8}
+dockerfile=${NAABU_DOCKERFILE:-Dockerfile}
+if [ "$#" -gt 2 ]; then
+  echo "usage: $0 [version] [commit]" >&2
+  exit 2
+fi
+if [ ! -f "$dockerfile" ]; then
+  echo "Dockerfile not found: ${dockerfile}" >&2
+  exit 2
+fi
+if [ "$#" -ge 1 ]; then
+  version=$1
+else
+  version=$(awk '$1 == "ARG" && $2 ~ /^NAABU_VERSION=/ { sub(/^NAABU_VERSION=/, "", $2); print $2; exit }' "$dockerfile")
+fi
+if [ "$#" -ge 2 ]; then
+  expected=$2
+else
+  expected=$(awk '$1 == "ARG" && $2 ~ /^NAABU_COMMIT=/ { sub(/^NAABU_COMMIT=/, "", $2); print $2; exit }' "$dockerfile")
+fi
+if [ -z "$version" ] || [ -z "$expected" ]; then
+  echo "could not read NAABU_VERSION and NAABU_COMMIT from ${dockerfile}" >&2
+  exit 2
+fi
 remote=https://github.com/projectdiscovery/naabu.git
 
 actual=$(git ls-remote "$remote" "refs/tags/${version}^{}" | awk 'NR == 1 { print $1 }')

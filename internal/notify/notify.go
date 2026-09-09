@@ -34,17 +34,25 @@ const (
 )
 
 type DestinationView struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Provider  string    `json:"provider"`
-	Source    string    `json:"source"`
-	Enabled   bool      `json:"enabled"`
-	Locked    bool      `json:"locked"`
-	ReadOnly  bool      `json:"read_only"`
-	Revision  int64     `json:"revision,omitempty"`
-	CreatedAt time.Time `json:"created_at,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
-	ErrorCode string    `json:"error_code,omitempty"`
+	ID                   string    `json:"id"`
+	Name                 string    `json:"name"`
+	Provider             string    `json:"provider"`
+	Source               string    `json:"source"`
+	Enabled              bool      `json:"enabled"`
+	Locked               bool      `json:"locked"`
+	ReadOnly             bool      `json:"read_only"`
+	Revision             int64     `json:"revision,omitempty"`
+	CreatedAt            time.Time `json:"created_at,omitempty"`
+	UpdatedAt            time.Time `json:"updated_at,omitempty"`
+	ErrorCode            string    `json:"error_code,omitempty"`
+	Pending              int       `json:"pending,omitempty"`
+	Retrying             int       `json:"retrying,omitempty"`
+	TerminalFailures     int       `json:"terminal_failures,omitempty"`
+	LastSuccessAt        string    `json:"last_success_at,omitempty"`
+	LastFailureAt        string    `json:"last_failure_at,omitempty"`
+	LastTerminalAt       string    `json:"last_terminal_at,omitempty"`
+	LastErrorCode        string    `json:"last_error_code,omitempty"`
+	LastErrorFingerprint string    `json:"last_error_fingerprint,omitempty"`
 }
 
 type managedDestination struct {
@@ -390,7 +398,13 @@ func (n *Notifier) Destination(ctx context.Context, id string) (DestinationView,
 	if !ok {
 		return DestinationView{}, fmt.Errorf("%w: notification %s", store.ErrNotFound, id)
 	}
-	return viewFromManaged(entry), nil
+	view := viewFromManaged(entry)
+	if n.Store != nil {
+		if health, healthErr := n.Store.ListDeliveryHealth(ctx); healthErr == nil {
+			applyDeliveryHealth(&view, health["managed:"+id])
+		}
+	}
+	return view, nil
 }
 
 func viewFromManaged(entry managedDestination) DestinationView {
@@ -402,6 +416,13 @@ func viewFromRecord(record store.ManagedNotification, locked bool, code string) 
 }
 
 func (n *Notifier) Destinations() []DestinationView {
+	return n.DestinationsContext(context.Background())
+}
+
+// DestinationsContext returns redacted destination metadata and the durable
+// delivery health for each current destination. Health is joined by stable
+// identity, so managed credential revisions share one operator-facing view.
+func (n *Notifier) DestinationsContext(ctx context.Context) []DestinationView {
 	n.mu.RLock()
 	views := make([]DestinationView, 0, len(n.fileURLs)+len(n.managed))
 	for id, raw := range n.fileURLs {
@@ -411,6 +432,17 @@ func (n *Notifier) Destinations() []DestinationView {
 		views = append(views, viewFromManaged(entry))
 	}
 	n.mu.RUnlock()
+	if n.Store != nil {
+		if health, err := n.Store.ListDeliveryHealth(ctx); err == nil {
+			for i := range views {
+				identity := "managed:" + views[i].ID
+				if views[i].Source == "deployment" {
+					identity = strings.TrimPrefix(views[i].ID, "file:")
+				}
+				applyDeliveryHealth(&views[i], health[identity])
+			}
+		}
+	}
 	sort.Slice(views, func(i, j int) bool {
 		if views[i].Source != views[j].Source {
 			return views[i].Source < views[j].Source
@@ -418,6 +450,26 @@ func (n *Notifier) Destinations() []DestinationView {
 		return strings.ToLower(views[i].Name) < strings.ToLower(views[j].Name)
 	})
 	return views
+}
+
+func applyDeliveryHealth(view *DestinationView, health store.DeliveryHealth) {
+	if view == nil || health.DestinationIdentity == "" {
+		return
+	}
+	view.Pending = health.Pending
+	view.Retrying = health.Retrying
+	view.TerminalFailures = health.TerminalFailures
+	if !health.LastSuccessAt.IsZero() {
+		view.LastSuccessAt = health.LastSuccessAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !health.LastFailureAt.IsZero() {
+		view.LastFailureAt = health.LastFailureAt.UTC().Format(time.RFC3339Nano)
+	}
+	if !health.LastTerminalAt.IsZero() {
+		view.LastTerminalAt = health.LastTerminalAt.UTC().Format(time.RFC3339Nano)
+	}
+	view.LastErrorCode = health.LastErrorCode
+	view.LastErrorFingerprint = health.LastErrorFingerprint
 }
 
 // LegacySelection returns the stable selectors for destinations that currently
@@ -453,10 +505,16 @@ func (n *Notifier) ActiveCount() int {
 }
 
 func (n *Notifier) Status() map[string]any {
+	return n.StatusContext(context.Background())
+}
+
+func (n *Notifier) StatusContext(ctx context.Context) map[string]any {
 	n.mu.RLock()
-	defer n.mu.RUnlock()
 	locked := 0
 	activeManaged := 0
+	managedCount := len(n.managed)
+	fileCount := len(n.fileURLs)
+	keyErr := n.keyErr
 	for _, entry := range n.managed {
 		if entry.locked {
 			locked++
@@ -465,16 +523,31 @@ func (n *Notifier) Status() map[string]any {
 			activeManaged++
 		}
 	}
+	n.mu.RUnlock()
 	keyState := "not_required"
-	if len(n.managed) > 0 {
+	if managedCount > 0 {
 		keyState = "ready"
-		if n.keyErr != nil {
-			keyState = keyErrorCode(n.keyErr)
+		if keyErr != nil {
+			keyState = keyErrorCode(keyErr)
 		} else if locked > 0 {
 			keyState = "decrypt_failed"
 		}
 	}
-	return map[string]any{"deployment": len(n.fileURLs), "managed": len(n.managed), "active": len(n.fileURLs) + activeManaged, "locked": locked, "key_state": keyState}
+	status := map[string]any{"deployment": fileCount, "managed": managedCount, "active": fileCount + activeManaged, "locked": locked, "key_state": keyState}
+	if n.Store != nil {
+		if health, err := n.Store.ListDeliveryHealth(ctx); err == nil {
+			pending, retrying, terminal := 0, 0, 0
+			for _, item := range health {
+				pending += item.Pending
+				retrying += item.Retrying
+				terminal += item.TerminalFailures
+			}
+			status["delivery_pending"] = pending
+			status["delivery_retrying"] = retrying
+			status["delivery_terminal_failures"] = terminal
+		}
+	}
+	return status
 }
 
 func (n *Notifier) destinationSnapshot() map[string]string {

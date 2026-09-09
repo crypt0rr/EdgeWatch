@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 18
+const schemaVersion = 19
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -726,6 +726,24 @@ FROM scan_hosts;`,
 			`INSERT INTO latest_host_search(address,content)
 SELECT address,lower(coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,'') || ' ' || coalesce(host_json,''))
 FROM latest_scan_hosts;`,
+		},
+		19: {
+			// Keep durable delivery outcomes by stable destination identity. The
+			// outbox itself uses revisioned managed selectors, so the identity is
+			// canonicalized to managed:<id> (or the already-hashed deployment key)
+			// by the store before it is written here. URLs and provider responses
+			// never enter this table.
+			`CREATE TABLE IF NOT EXISTS notification_delivery_health (
+ destination_identity TEXT PRIMARY KEY,
+ terminal_failures INTEGER NOT NULL DEFAULT 0,
+ last_success_at TEXT NOT NULL DEFAULT '',
+ last_failure_at TEXT NOT NULL DEFAULT '',
+ last_terminal_at TEXT NOT NULL DEFAULT '',
+ last_error_code TEXT NOT NULL DEFAULT '',
+ last_error_fingerprint TEXT NOT NULL DEFAULT '',
+ updated_at TEXT NOT NULL
+);`,
+			"CREATE INDEX IF NOT EXISTS notification_delivery_health_updated ON notification_delivery_health(updated_at)",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
@@ -1710,8 +1728,14 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 					continue
 				}
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, destination, payload, now); err != nil {
+			result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, destination, payload, now)
+			if err != nil {
 				return err
+			}
+			if inserted, _ := result.RowsAffected(); inserted == 1 {
+				if err := ensureDeliveryHealthTx(ctx, tx, destination, time.Now().UTC()); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -2772,8 +2796,15 @@ func (s *Store) QueueEvent(ctx context.Context, destination string, event model.
 			return tx.Commit()
 		}
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, destination, b, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	now := time.Now().UTC()
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, destination, b, now.Format(time.RFC3339Nano))
+	if err != nil {
 		return err
+	}
+	if inserted, _ := result.RowsAffected(); inserted == 1 {
+		if err := ensureDeliveryHealthTx(ctx, tx, destination, now); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -2844,33 +2875,58 @@ func (s *Store) DeliveryResultClaim(ctx context.Context, id int64, claim string,
 	if claim == "" {
 		return ErrDeliveryClaimLost
 	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var attempts int
+	var destination string
+	if err := tx.QueryRowContext(ctx, `SELECT attempts,destination FROM outbox WHERE id=? AND sent_at IS NULL AND claim_token=?`, id, claim).Scan(&attempts, &destination); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrDeliveryClaimLost
+		}
+		return err
+	}
+	now := time.Now().UTC()
 	if sendErr == nil {
-		result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET sent_at=?,last_error='',claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, time.Now().UTC().Format(time.RFC3339Nano), id, claim)
+		result, err := tx.ExecContext(ctx, `UPDATE outbox SET sent_at=?,last_error='',claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, now.Format(time.RFC3339Nano), id, claim)
 		if err != nil {
 			return err
 		}
 		if affected, _ := result.RowsAffected(); affected != 1 {
 			return ErrDeliveryClaimLost
 		}
-		return nil
-	}
-	var attempts int
-	if err := s.DB.QueryRowContext(ctx, `SELECT attempts FROM outbox WHERE id=? AND sent_at IS NULL AND claim_token=?`, id, claim).Scan(&attempts); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrDeliveryClaimLost
+		if err := recordDeliverySuccessTx(ctx, tx, destination, now); err != nil {
+			return err
 		}
-		return err
+		return tx.Commit()
 	}
 	attempts++
+	terminal := attempts >= deliveryMaxAttempts
 	delay := deliveryRetryDelay(attempts)
-	result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=?,last_error=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, attempts, time.Now().UTC().Add(delay).Format(time.RFC3339Nano), truncate(sendErr.Error(), 500), id, claim)
+	result, err := tx.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=?,last_error=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, attempts, now.Add(delay).Format(time.RFC3339Nano), deliveryErrorCode(sendErr), id, claim)
 	if err != nil {
 		return err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrDeliveryClaimLost
 	}
-	return nil
+	if err := recordDeliveryFailureTx(ctx, tx, destination, sendErr, terminal, now); err != nil {
+		return err
+	}
+	if terminal {
+		fingerprint := deliveryErrorFingerprint(sendErr)
+		event := model.Event{Type: "notification-delivery-terminal", Message: fmt.Sprintf("Notification delivery dropped after retry limit (destination fingerprint %s; error code %s; error fingerprint %s)", deliverySelectorFingerprint(destination), deliveryErrorCode(sendErr), fingerprint), CreatedAt: now}
+		bounded, payload, marshalErr := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at) VALUES(?,?,?,?,?)`, bounded.Type, "", "", payload, now.Format(time.RFC3339Nano)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func deliveryRetryDelay(attempts int) time.Duration {
@@ -2897,7 +2953,7 @@ func (s *Store) DeferDelivery(ctx context.Context, id int64, claim, reason strin
 	if delay < time.Minute {
 		delay = time.Minute
 	}
-	result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=?,last_error=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, time.Now().UTC().Add(delay).Format(time.RFC3339Nano), truncate(reason, 500), id, claim)
+	result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=?,last_error=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, time.Now().UTC().Add(delay).Format(time.RFC3339Nano), deliveryErrorCode(errors.New(reason)), id, claim)
 	if err != nil {
 		return err
 	}

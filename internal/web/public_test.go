@@ -225,6 +225,99 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	}
 }
 
+func TestLatestLegacyPublicHostsLimitsEachJobIndependently(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	jobA, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "busy-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.10"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobB, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "quiet-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.11"}, TCP: &config.Protocol{Ports: "443", Mode: "syn"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{Store: db}
+	now := time.Now().UTC()
+	// More than the legacy global window belongs to one job. The quiet job's
+	// only successful scan is older and would be starved by a cross-job LIMIT.
+	for i := 0; i <= legacyPublicScanLimit; i++ {
+		when := now.Add(time.Duration(i) * time.Second)
+		scan := model.Scan{
+			ID:          "busy-" + strconv.Itoa(i),
+			JobID:       jobA.ID,
+			JobRevision: jobA.Revision,
+			Job:         jobA.Job.Name,
+			StartedAt:   when,
+			FinishedAt:  when,
+			Status:      "success",
+			Snapshot:    model.Snapshot{Units: []model.Unit{{Target: "198.51.100.10", Addresses: []string{"198.51.100.10"}, Protocol: "tcp", Ports: []model.PortState{{Port: 22, State: "open"}}}}},
+		}
+		if err := db.SaveScan(ctx, scan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	quietWhen := now.Add(-time.Hour)
+	if err := db.SaveScan(ctx, model.Scan{
+		ID:          "quiet-1",
+		JobID:       jobB.ID,
+		JobRevision: jobB.Revision,
+		Job:         jobB.Job.Name,
+		StartedAt:   quietWhen,
+		FinishedAt:  quietWhen,
+		Status:      "success",
+		Snapshot:    model.Snapshot{Units: []model.Unit{{Target: "198.51.100.11", Addresses: []string{"198.51.100.11"}, Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := server.latestLegacyPublicHosts(ctx, []store.PublicDashboardHost{{JobID: jobA.ID, Address: "198.51.100.10"}, {JobID: jobB.ID, Address: "198.51.100.11"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("legacy host lookup returned %d hosts, want both jobs: %#v", len(results), results)
+	}
+	if results[publicSelectionKey(jobA.ID, "198.51.100.10")].Summary.ID != "busy-1000" {
+		t.Fatalf("busy job did not return its newest scan: %#v", results)
+	}
+	if results[publicSelectionKey(jobB.ID, "198.51.100.11")].Summary.ID != "quiet-1" {
+		t.Fatalf("quiet job was starved by another job's history: %#v", results)
+	}
+}
+
+func TestCachedPublicDashboardPayloadReusesShortLivedProjection(t *testing.T) {
+	server := &Server{}
+	dashboard := store.PublicDashboard{Enabled: true, Title: "Status", Introduction: "hello"}
+	first, err := server.cachedPublicDashboardPayload(context.Background(), dashboard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := server.cachedPublicDashboardPayload(context.Background(), dashboard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(first) != string(second) {
+		t.Fatalf("cached payload changed: first=%s second=%s", first, second)
+	}
+	server.publicCacheMu.Lock()
+	cached := server.publicCache
+	server.publicCacheMu.Unlock()
+	if cached == nil || cached.key == "" || len(cached.payload) == 0 || !cached.expiresAt.After(time.Now().UTC()) {
+		t.Fatalf("short-lived public cache was not populated: %#v", cached)
+	}
+	server.invalidatePublicDashboardCache()
+	server.publicCacheMu.Lock()
+	cleared := server.publicCache
+	server.publicCacheMu.Unlock()
+	if cleared != nil {
+		t.Fatal("public dashboard cache was not invalidated")
+	}
+}
+
 func containsJSONField(raw []byte, field string) bool {
 	needle := `"` + field + `"`
 	return strings.Contains(string(raw), needle)

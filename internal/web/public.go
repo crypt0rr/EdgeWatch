@@ -16,6 +16,21 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
+const (
+	// Public dashboards are deliberately cached only in memory. The cache is
+	// short-lived so an administrator's publication changes become visible
+	// quickly, while repeated anonymous requests cannot repeatedly walk legacy
+	// scan history.
+	publicDashboardCacheTTL     = 5 * time.Second
+	publicDashboardBuildTimeout = 5 * time.Second
+)
+
+type publicDashboardCache struct {
+	key       string
+	expiresAt time.Time
+	payload   []byte
+}
+
 // publicAPI is intentionally separate from /api/v1. It has no session
 // middleware and exposes one fixed, sanitized projection without resource
 // selectors that could be used to enumerate jobs or hosts.
@@ -31,12 +46,18 @@ func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
-	dashboard, err := s.Store.GetPublicDashboard(r.Context())
+	ctx, cancel := context.WithTimeout(r.Context(), publicDashboardBuildTimeout)
+	defer cancel()
+	dashboard, err := s.Store.GetPublicDashboard(ctx)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
 		return
 	}
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeError(w, http.StatusGatewayTimeout, "public_dashboard_timeout", "public status took too long to load", nil)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "public_dashboard", "public status could not be loaded", nil)
 		return
 	}
@@ -44,12 +65,55 @@ func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
 		return
 	}
-	response, err := s.publicDashboardResponse(r.Context(), dashboard)
+	payload, err := s.cachedPublicDashboardPayload(ctx, dashboard)
 	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeError(w, http.StatusGatewayTimeout, "public_dashboard_timeout", "public status took too long to load", nil)
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "public_dashboard", "public status could not be loaded", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, response)
+	writeJSON(w, http.StatusOK, json.RawMessage(payload))
+}
+
+func publicDashboardCacheKey(dashboard store.PublicDashboard) string {
+	raw, err := json.Marshal(dashboard)
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+func (s *Server) cachedPublicDashboardPayload(ctx context.Context, dashboard store.PublicDashboard) ([]byte, error) {
+	key := publicDashboardCacheKey(dashboard)
+	now := time.Now().UTC()
+	s.publicCacheMu.Lock()
+	if cached := s.publicCache; cached != nil && cached.key == key && now.Before(cached.expiresAt) {
+		payload := append([]byte(nil), cached.payload...)
+		s.publicCacheMu.Unlock()
+		return payload, nil
+	}
+	s.publicCacheMu.Unlock()
+
+	response, err := s.publicDashboardResponse(ctx, dashboard)
+	if err != nil {
+		return nil, err
+	}
+	payload, err := json.Marshal(response)
+	if err != nil {
+		return nil, err
+	}
+	s.publicCacheMu.Lock()
+	s.publicCache = &publicDashboardCache{key: key, expiresAt: time.Now().UTC().Add(publicDashboardCacheTTL), payload: append([]byte(nil), payload...)}
+	s.publicCacheMu.Unlock()
+	return payload, nil
+}
+
+func (s *Server) invalidatePublicDashboardCache() {
+	s.publicCacheMu.Lock()
+	s.publicCache = nil
+	s.publicCacheMu.Unlock()
 }
 
 func (s *Server) allowPublicRequest(r *http.Request) bool {
@@ -160,6 +224,7 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 		writeError(w, http.StatusBadRequest, "save_failed", err.Error(), nil)
 		return
 	}
+	s.invalidatePublicDashboardCache()
 	result, err := s.Store.GetPublicDashboard(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", "public dashboard could not be loaded after saving", nil)
@@ -345,58 +410,60 @@ func (s *Server) latestLegacyPublicHosts(ctx context.Context, selections []store
 	if len(wanted) == 0 {
 		return results, nil
 	}
-	placeholders := make([]string, len(jobIDs))
-	args := make([]any, 0, len(jobIDs)+1)
-	for i, jobID := range jobIDs {
-		placeholders[i] = "?"
-		args = append(args, jobID)
-	}
-	args = append(args, legacyPublicScanLimit)
-	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json
-FROM scans WHERE status='success' AND job_id IN (` + strings.Join(placeholders, ",") + `)
-ORDER BY finished_at DESC,id DESC LIMIT ?`
-	rows, err := s.Store.DB.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id, job string
-		var jobID sql.NullString
-		var revision sql.NullInt64
-		var started, finished, status, scanError, nmapVersion, configHash string
-		var raw []byte
-		if err := rows.Scan(&id, &jobID, &revision, &job, &started, &finished, &status, &scanError, &nmapVersion, &configHash, &raw); err != nil {
-			return nil, err
-		}
-		if !jobID.Valid || len(raw) > 8<<20 {
-			continue
-		}
-		page, err := observationsForSnapshotBytes(raw)
+	// Query each job independently. A single LIMIT across all jobs lets a
+	// high-volume job consume the entire window and starve a low-volume job's
+	// published host.
+	for _, requestedJobID := range jobIDs {
+		rows, err := s.Store.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json
+FROM scans WHERE status='success' AND job_id=?
+ORDER BY finished_at DESC,id DESC LIMIT ?`, requestedJobID, legacyPublicScanLimit)
 		if err != nil {
 			return nil, err
 		}
-		for _, host := range page.Items {
-			key := publicSelectionKey(jobID.String, host.Address)
-			selection, ok := wanted[key]
-			if !ok {
+		for rows.Next() {
+			var id, job string
+			var jobID sql.NullString
+			var revision sql.NullInt64
+			var started, finished, status, scanError, nmapVersion, configHash string
+			var raw []byte
+			if err := rows.Scan(&id, &jobID, &revision, &job, &started, &finished, &status, &scanError, &nmapVersion, &configHash, &raw); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			if !jobID.Valid || len(raw) > 8<<20 {
 				continue
 			}
-			if _, already := results[key]; already {
-				continue
+			page, err := observationsForSnapshotBytes(raw)
+			if err != nil {
+				_ = rows.Close()
+				return nil, err
 			}
-			summary := model.ScanSummary{ID: id, JobID: jobID.String, Job: job, Status: status, Error: scanError, NmapVersion: nmapVersion, ConfigHash: configHash, StartedAt: parsePublicTime(started), FinishedAt: parsePublicTime(finished)}
-			if revision.Valid {
-				summary.JobRevision = revision.Int64
+			for _, host := range page.Items {
+				key := publicSelectionKey(jobID.String, host.Address)
+				selection, ok := wanted[key]
+				if !ok {
+					continue
+				}
+				if _, already := results[key]; already {
+					continue
+				}
+				summary := model.ScanSummary{ID: id, JobID: jobID.String, Job: job, Status: status, Error: scanError, NmapVersion: nmapVersion, ConfigHash: configHash, StartedAt: parsePublicTime(started), FinishedAt: parsePublicTime(finished)}
+				if revision.Valid {
+					summary.JobRevision = revision.Int64
+				}
+				results[key] = store.PublicDashboardHostResult{Selection: selection, Host: store.ScanHost{ScanID: id, DataQuality: page.DataQuality, Host: host}, Summary: summary}
 			}
-			results[key] = store.PublicDashboardHostResult{Selection: selection, Host: store.ScanHost{ScanID: id, DataQuality: page.DataQuality, Host: host}, Summary: summary}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
 		}
 		if len(results) == len(wanted) {
 			break
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	return results, nil
 }

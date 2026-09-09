@@ -25,7 +25,13 @@ import (
 var ErrManagedNotificationLocked = errors.New("managed notification is locked")
 var ErrInvalidDestinationSelection = errors.New("invalid notification destination selection")
 
-const notificationWorkers = 4
+const (
+	notificationWorkers   = 4
+	notificationBatchSize = 16
+	// A pass is deliberately bounded so a provider outage cannot monopolize
+	// the daemon worker. The next wake/tick drains any remaining due rows.
+	notificationMaxBatches = 4
+)
 
 type DestinationView struct {
 	ID        string    `json:"id"`
@@ -639,12 +645,30 @@ func (n *Notifier) Drain(ctx context.Context) error {
 		return err
 	}
 	destinations := n.destinationSnapshot()
-	// Keep one pass short enough that a provider outage cannot make the daemon
-	// heartbeat stale. The application worker will pick up the next batch.
-	deliveries, err := n.Store.ClaimDueDeliveries(ctx, 4, uuid.NewString())
-	if err != nil {
-		return err
+	var all []error
+	for batch := 0; batch < notificationMaxBatches; batch++ {
+		if ctx.Err() != nil {
+			break
+		}
+		// A bounded pass drains several batches so a burst of events does not
+		// wait for multiple 30-second worker ticks. The batch and pass limits
+		// keep provider latency from starving scans and schedule reconciliation.
+		deliveries, err := n.Store.ClaimDueDeliveries(ctx, notificationBatchSize, uuid.NewString())
+		if err != nil {
+			return errors.Join(append(all, err)...)
+		}
+		if len(deliveries) == 0 {
+			break
+		}
+		all = append(all, n.deliverBatch(ctx, deliveries, destinations)...)
+		if ctx.Err() != nil {
+			break
+		}
 	}
+	return errors.Join(all...)
+}
+
+func (n *Notifier) deliverBatch(ctx context.Context, deliveries []store.Delivery, destinations map[string]string) []error {
 	workers := notificationWorkers
 	if len(deliveries) < workers {
 		workers = len(deliveries)
@@ -681,7 +705,7 @@ func (n *Notifier) Drain(ctx context.Context) error {
 			all = append(all, err)
 		}
 	}
-	return errors.Join(all...)
+	return all
 }
 
 func lockContext(ctx context.Context, mu *sync.Mutex) error {

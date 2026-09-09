@@ -156,6 +156,13 @@ active scan cycles, and the security audit log are retained; audit records are
 intentionally indefinite. The daemon logs the row counts removed from each
 retention class at startup and during its daily pruning pass.
 
+Notification deliveries are attempted by four workers in bounded passes so a
+large event burst does not delay scans. A failed delivery is retried up to
+eight times with exponential delays starting at two minutes and capped at one
+hour; after the eighth failure it is marked terminal and remains visible until
+retention pruning. Claims expire after 30 minutes so an interrupted worker can
+be recovered by the next pass.
+
 The web job editor supports individual IP addresses, CIDRs, DNS names, target
 expansion limits, independent TCP and UDP scans, ports `1-65535`, TCP SYN or
 connect mode, service detection, timing, timeouts, cron schedules, timezones,

@@ -1,8 +1,10 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -114,7 +116,7 @@ func TestStoreHistoryRuntimeAndLeaseWrappers(t *testing.T) {
 		t.Fatalf("reset legacy baseline = %#v, %v", state, err)
 	}
 
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,attempts,next_at) VALUES(?,?,3,?)`, "failed-destination", []byte(`{}`), now.Format(time.RFC3339Nano)); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,attempts,next_at) VALUES(?,?,?,?)`, "failed-destination", []byte(`{}`), deliveryMaxAttempts, now.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	if failed, err := s.FailedDeliveries(ctx); err != nil || failed != 1 {
@@ -148,5 +150,41 @@ func TestStoreDaemonLeaseHealthTransitions(t *testing.T) {
 	}
 	if err := s.Healthy(ctx); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("released lease health error = %v", err)
+	}
+}
+
+func TestDeliveryRetryPolicyIsDurableAndBounded(t *testing.T) {
+	if got := deliveryRetryDelay(1); got != 2*time.Minute {
+		t.Fatalf("first delivery retry delay = %s, want 2m", got)
+	}
+	if got := deliveryRetryDelay(2); got != 4*time.Minute {
+		t.Fatalf("second delivery retry delay = %s, want 4m", got)
+	}
+	if got := deliveryRetryDelay(deliveryMaxAttempts); got != time.Hour {
+		t.Fatalf("terminal delivery retry delay = %s, want 1h cap", got)
+	}
+
+	ctx := context.Background()
+	s := openTestStore(t)
+	if err := s.QueueEvent(ctx, "retry-policy", model.Event{Type: "retry-policy", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	for attempt := 0; attempt < deliveryMaxAttempts; attempt++ {
+		if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE destination=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), "retry-policy"); err != nil {
+			t.Fatal(err)
+		}
+		due, err := s.ClaimDueDeliveries(ctx, 1, fmt.Sprintf("retry-owner-%d", attempt))
+		if err != nil || len(due) != 1 {
+			t.Fatalf("retry claim %d = %#v, %v", attempt+1, due, err)
+		}
+		if err := s.DeliveryResult(ctx, due[0].ID, errors.New("temporary provider failure")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if failed, err := s.FailedDeliveries(ctx); err != nil || failed != 1 {
+		t.Fatalf("terminal delivery count = %d, %v", failed, err)
+	}
+	if due, err := s.ClaimDueDeliveries(ctx, 1, "after-terminal"); err != nil || len(due) != 0 {
+		t.Fatalf("terminal delivery was claimable again: %#v, %v", due, err)
 	}
 }

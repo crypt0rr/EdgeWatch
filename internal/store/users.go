@@ -305,6 +305,15 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 			return err
 		}
 	}
+	// A disabled account must not retain an activation or password-reset link.
+	// Otherwise a link issued before the disable could silently re-enable the
+	// account when redeemed later. Keep this revocation in the same transaction
+	// as the user-state change so there is no race window.
+	if !u.Enabled {
+		if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL`, u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID); err != nil {
+			return err
+		}
+	}
 	if audit.Action != "" {
 		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
 			return err
@@ -473,6 +482,43 @@ func (s *Store) CreateUserInviteWithAudit(ctx context.Context, idHash, userID st
 	return tx.Commit()
 }
 
+// RevokeUserInvitesWithAudit invalidates every outstanding activation or
+// password-reset link for one account. Only the token hash is stored, and the
+// operation is audited atomically with the revocation.
+func (s *Store) RevokeUserInvitesWithAudit(ctx context.Context, userID string, now time.Time, audit AuditEntry) (int, error) {
+	if strings.TrimSpace(userID) == "" {
+		return 0, errors.New("user is required")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var present int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id=?`, userID).Scan(&present); errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	} else if err != nil {
+		return 0, err
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), userID)
+	if err != nil {
+		return 0, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if audit.Action != "" {
+		if err := insertAuditEntryExec(ctx, tx, audit, now.UTC()); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return int(affected), nil
+}
+
 // ActivateUser atomically consumes an invite and installs the new Argon2id
 // password. A failed audit write rolls the activation back so the token can
 // be retried after the audit store is repaired.
@@ -485,15 +531,24 @@ func (s *Store) ActivateUser(ctx context.Context, idHash, passwordHash string, n
 		return User{}, err
 	}
 	defer tx.Rollback()
-	var userID, expires string
+	var userID, expires, currentPasswordHash string
+	var currentEnabled int
 	var used sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT user_id,expires_at,used_at FROM user_invites WHERE id_hash=?`, idHash).Scan(&userID, &expires, &used); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT i.user_id,i.expires_at,i.used_at,u.password_hash,u.enabled FROM user_invites i JOIN users u ON u.id=i.user_id WHERE i.id_hash=?`, idHash).Scan(&userID, &expires, &used, &currentPasswordHash, &currentEnabled); errors.Is(err, sql.ErrNoRows) {
 		return User{}, errors.New("invalid activation token")
 	} else if err != nil {
 		return User{}, err
 	}
 	if used.Valid || !now.Before(scanTime(expires)) {
 		return User{}, errors.New("activation token expired or already used")
+	}
+	// Pending users start disabled and have the sentinel password, so their
+	// first activation remains valid. A previously configured account that an
+	// administrator disabled must not be re-enabled by an older reset link;
+	// disabling also revokes the link transactionally, but this check is a
+	// defence in depth for legacy rows and concurrent callers.
+	if currentEnabled == 0 && !strings.HasPrefix(currentPasswordHash, "!pending") {
+		return User{}, errors.New("account is disabled")
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE id_hash=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), idHash)
 	if err != nil {

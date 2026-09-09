@@ -46,6 +46,42 @@ func TestUsersValidateAndInviteLifecycle(t *testing.T) {
 	}
 }
 
+func TestRevokeUserInviteAndDisablePreventActivation(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	user, err := s.CreateUser(ctx, User{Username: "revokable", DisplayName: "Revokable", Role: RoleViewer, PasswordHash: "existing-password-hash", Enabled: true}, AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateUserInvite(ctx, "invite-to-revoke", user.ID, now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	affected, err := s.RevokeUserInvitesWithAudit(ctx, user.ID, now.Add(time.Minute), AuditEntry{Action: "user.activation_revoked"})
+	if err != nil || affected != 1 {
+		t.Fatalf("revoked invites = %d, err=%v", affected, err)
+	}
+	if _, err := s.ActivateUser(ctx, "invite-to-revoke", "replacement-hash", now.Add(2*time.Minute), AuditEntry{}); err == nil {
+		t.Fatal("revoked activation invite was accepted")
+	}
+
+	if err := s.CreateUserInvite(ctx, "invite-before-disable", user.ID, now.Add(3*time.Minute), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := s.GetUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.Enabled = false
+	loaded.UpdatedAt = now.Add(4 * time.Minute)
+	if err := s.UpdateUser(ctx, loaded, false, AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActivateUser(ctx, "invite-before-disable", "replacement-hash", now.Add(5*time.Minute), AuditEntry{}); err == nil {
+		t.Fatal("invite issued before disabling an account was accepted")
+	}
+}
+
 func TestUserInviteAuditFailureRollsBackAndOlderInviteIsInvalidated(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

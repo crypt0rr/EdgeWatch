@@ -33,7 +33,12 @@ const (
 
 	authFailureWindow    = 5 * time.Minute
 	authFailureThreshold = 5
-	authBlockDuration    = 5 * time.Minute
+	// Account and token buckets remain deliberately strict. The source bucket
+	// is a backstop for high-volume abuse, not the primary login lockout: a
+	// reverse proxy or SSH tunnel may legitimately carry many administrators'
+	// requests and must not let one account lock out the others.
+	authSourceFailureThreshold = 100
+	authBlockDuration          = 5 * time.Minute
 	// The limiter is process-local by design, but it must remain bounded when
 	// an attacker rotates source addresses. Keys are evicted oldest-first once
 	// this ceiling is reached; expired entries are swept on every decision.
@@ -46,13 +51,25 @@ type Manager struct {
 	Store *store.Store
 	Now   func() time.Time
 
-	mu      sync.Mutex
-	fails   map[string][]time.Time
-	blocked map[string]time.Time
+	mu sync.Mutex
+	// fails and blocked are the source-address backstop. Scoped authentication
+	// paths use the account and unknown-source maps below so different
+	// operations and accounts do not share a lockout bucket.
+	fails                map[string][]time.Time
+	blocked              map[string]time.Time
+	accountFails         map[string][]time.Time
+	accountBlocked       map[string]time.Time
+	unknownSourceFails   map[string][]time.Time
+	unknownSourceBlocked map[string]time.Time
 }
 
 func NewManager(s *store.Store) *Manager {
-	return &Manager{Store: s, Now: time.Now, fails: map[string][]time.Time{}, blocked: map[string]time.Time{}}
+	return &Manager{
+		Store: s, Now: time.Now,
+		fails: map[string][]time.Time{}, blocked: map[string]time.Time{},
+		accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{},
+		unknownSourceFails: map[string][]time.Time{}, unknownSourceBlocked: map[string]time.Time{},
+	}
 }
 
 func (m *Manager) now() time.Time {
@@ -181,15 +198,16 @@ func (m *Manager) Setup(ctx context.Context, token, password string) error {
 // login. The non-HTTP Setup method remains available to trusted callers and
 // tests, while the web endpoint should use this wrapper.
 func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token, password string) error {
-	remote := requestRemote(request)
-	if !m.allow(remote) {
+	source := sourceScope(request)
+	account := "setup:" + digest(strings.TrimSpace(token))
+	if !m.allowScoped(source, account) {
 		return ErrRateLimited
 	}
 	if err := m.Setup(ctx, token, password); err != nil {
-		m.failed(remote)
+		m.failedScoped(source, account, "", false)
 		return err
 	}
-	m.clear(remote)
+	m.clearScoped(source, account, "")
 	return nil
 }
 
@@ -198,21 +216,22 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 // Argon2id hash are handled inside the store transaction; a failed attempt
 // never consumes the invite.
 func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, token, password string) error {
-	remote := requestRemote(request)
-	if !m.allow(remote) {
+	source := sourceScope(request)
+	account := "activation:" + digest(strings.TrimSpace(token))
+	if !m.allowScoped(source, account) {
 		return ErrRateLimited
 	}
 	hash, err := PasswordHash(password)
 	if err != nil {
-		m.failed(remote)
+		m.failedScoped(source, account, "", false)
 		return err
 	}
 	now := m.now()
 	if _, err := m.Store.ActivateUser(ctx, digest(token), hash, now, store.AuditEntry{Action: "user.activated", Detail: "user account activated"}); err != nil {
-		m.failed(remote)
+		m.failedScoped(source, account, "", false)
 		return err
 	}
-	m.clear(remote)
+	m.clearScoped(source, account, "")
 	return nil
 }
 
@@ -228,11 +247,14 @@ func (m *Manager) Login(ctx context.Context, request *http.Request, password, ot
 // above intentionally remains as a compatibility wrapper for CLI and tests
 // that always sign in as the original administrator.
 func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, password, otp, recovery string) (string, store.User, error) {
-	remote := requestRemote(request)
-	if !m.allow(remote) {
+	identity := normalizeLoginIdentity(username)
+	source := sourceScope(request)
+	account := "login:" + identity
+	unknownSource := "unknown-login:" + strings.TrimPrefix(source, "source:")
+	if !m.allowScoped(source, account) {
 		return "", store.User{}, ErrRateLimited
 	}
-	user, err := m.Store.GetUserByUsername(ctx, username)
+	user, err := m.Store.GetUserByUsername(ctx, identity)
 	if errors.Is(err, store.ErrNotFound) && strings.EqualFold(strings.TrimSpace(username), "admin") {
 		// Databases created by older test fixtures may not have the migrated
 		// users row yet. Preserve the original administrator behavior while the
@@ -245,21 +267,24 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		err = nil
 	}
 	if err != nil {
+		if !m.allowUnknownSource(unknownSource) {
+			return "", store.User{}, ErrRateLimited
+		}
 		// Unknown usernames still consume the failure budget. Otherwise an
 		// attacker could bypass the login limiter by rotating arbitrary account
 		// names while probing the endpoint for a real administrator or invitee.
-		m.failed(remote)
+		m.failedScoped(source, account, unknownSource, true)
 		return "", store.User{}, errors.New("invalid credentials")
 	}
 	if !user.Enabled {
-		m.failed(remote)
+		m.failedScoped(source, account, "", false)
 		// Keep disabled accounts indistinguishable from unknown usernames. This
 		// prevents the login endpoint from becoming an account-enumeration oracle
 		// while the administration UI can still show the disabled state.
 		return "", user, errors.New("invalid credentials")
 	}
 	if !VerifyPassword(user.PasswordHash, password) {
-		m.failed(remote)
+		m.failedScoped(source, account, "", false)
 		return "", user, errors.New("invalid credentials")
 	}
 	if user.TOTPEnabled {
@@ -268,7 +293,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			valid, err = m.Store.ConsumeRecoveryCodeForUser(ctx, user.ID, digest(strings.ToUpper(strings.TrimSpace(recovery))), m.now())
 		}
 		if !valid {
-			m.failed(remote)
+			m.failedScoped(source, account, "", false)
 			return "", user, errors.New("one-time code is required")
 		}
 	}
@@ -291,7 +316,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		return "", user, err
 	}
 	_ = m.Store.SetUserLastLogin(ctx, user.ID, now)
-	m.clear(remote)
+	m.clearScoped(source, account, "")
 	return session, user, nil
 }
 
@@ -309,16 +334,17 @@ func (m *Manager) ConfirmPassword(ctx context.Context, request *http.Request, pa
 // web-managed administrators must be able to confirm with their own password
 // rather than the original admin account's credential.
 func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Request, userID, password string) error {
-	remote := requestRemote(request)
-	if !m.allow(remote) {
+	source := sourceScope(request)
+	account := "confirm:" + strings.TrimSpace(userID)
+	if !m.allowScoped(source, account) {
 		return ErrRateLimited
 	}
 	user, err := m.Store.GetUser(ctx, userID)
 	if err != nil || !user.Enabled || !VerifyPassword(user.PasswordHash, password) {
-		m.failed(remote)
+		m.failedScoped(source, account, "", false)
 		return errors.New("password confirmation failed")
 	}
-	m.clear(remote)
+	m.clearScoped(source, account, "")
 	return nil
 }
 
@@ -327,6 +353,18 @@ func requestRemote(request *http.Request) string {
 		return "unknown"
 	}
 	return request.RemoteAddr
+}
+
+func sourceScope(request *http.Request) string {
+	return "source:" + limiterKey(requestRemote(request))
+}
+
+func normalizeLoginIdentity(username string) string {
+	identity := strings.ToLower(strings.TrimSpace(username))
+	if identity == "" {
+		return "admin"
+	}
+	return identity
 }
 
 func (m *Manager) allow(remote string) bool {
@@ -339,6 +377,42 @@ func (m *Manager) allow(remote string) bool {
 		return false
 	}
 	return true
+}
+
+// allowScoped checks the source backstop and the operation/account bucket.
+// Unknown-login probing has a separate source bucket, checked only after the
+// username lookup so a proxy that carried invalid traffic cannot lock out a
+// real account.
+func (m *Manager) allowScoped(source, account string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	m.ensureScopedLimiterMapsLocked()
+	m.sweepLimiterLocked(now)
+	if legacy := strings.TrimPrefix(source, "source:"); legacy != source {
+		if until, ok := m.blocked[legacy]; ok && now.Before(until) {
+			return false
+		}
+	}
+	if until, ok := m.blocked[source]; ok && now.Before(until) {
+		return false
+	}
+	if account != "" {
+		if until, ok := m.accountBlocked[account]; ok && now.Before(until) {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *Manager) allowUnknownSource(scope string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	m.ensureScopedLimiterMapsLocked()
+	m.sweepLimiterLocked(now)
+	until, ok := m.unknownSourceBlocked[scope]
+	return !ok || !now.Before(until)
 }
 
 func (m *Manager) failed(remote string) {
@@ -370,12 +444,47 @@ func (m *Manager) failed(remote string) {
 	}
 }
 
+func (m *Manager) failedScoped(source, account, unknownSource string, unknown bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	now := m.now()
+	m.ensureScopedLimiterMapsLocked()
+	m.sweepLimiterLocked(now)
+	if source != "" {
+		recordFailureLocked(now, source, authSourceFailureThreshold, m.fails, m.blocked)
+	}
+	if account != "" {
+		recordFailureLocked(now, account, authFailureThreshold, m.accountFails, m.accountBlocked)
+	}
+	if unknown && unknownSource != "" {
+		recordFailureLocked(now, unknownSource, authFailureThreshold, m.unknownSourceFails, m.unknownSourceBlocked)
+	}
+}
+
 func (m *Manager) clear(remote string) {
 	key := limiterKey(remote)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.fails, key)
 	delete(m.blocked, key)
+}
+
+func (m *Manager) clearScoped(source, account, unknownSource string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureScopedLimiterMapsLocked()
+	delete(m.accountFails, account)
+	delete(m.accountBlocked, account)
+	delete(m.unknownSourceFails, unknownSource)
+	delete(m.unknownSourceBlocked, unknownSource)
+	delete(m.fails, source)
+	delete(m.blocked, source)
+	// Clear a legacy bucket as well when a compatibility caller and a normal
+	// request share a source. This avoids a successful login being followed by
+	// a stale test/old-client lockout.
+	legacy := strings.TrimPrefix(source, "source:")
+	delete(m.fails, legacy)
+	delete(m.blocked, legacy)
 }
 
 func limiterKey(remote string) string {
@@ -385,9 +494,97 @@ func limiterKey(remote string) string {
 	return remote
 }
 
-func (m *Manager) sweepLimiterLocked(now time.Time) {
+func (m *Manager) ensureScopedLimiterMapsLocked() {
+	if m.fails == nil {
+		m.fails = map[string][]time.Time{}
+	}
+	if m.blocked == nil {
+		m.blocked = map[string]time.Time{}
+	}
+	if m.accountFails == nil {
+		m.accountFails = map[string][]time.Time{}
+	}
+	if m.accountBlocked == nil {
+		m.accountBlocked = map[string]time.Time{}
+	}
+	if m.unknownSourceFails == nil {
+		m.unknownSourceFails = map[string][]time.Time{}
+	}
+	if m.unknownSourceBlocked == nil {
+		m.unknownSourceBlocked = map[string]time.Time{}
+	}
+}
+
+func recordFailureLocked(now time.Time, key string, threshold int, fails map[string][]time.Time, blocked map[string]time.Time) {
+	if _, exists := fails[key]; !exists {
+		if _, exists := blocked[key]; !exists {
+			evictFailureBucketLocked(now, fails, blocked)
+		}
+	}
+	values := fails[key]
 	cut := now.Add(-authFailureWindow)
-	for key, values := range m.fails {
+	kept := values[:0]
+	for _, value := range values {
+		if value.After(cut) {
+			kept = append(kept, value)
+		}
+	}
+	kept = append(kept, now)
+	if len(kept) > threshold {
+		kept = kept[len(kept)-threshold:]
+	}
+	fails[key] = kept
+	if len(kept) >= threshold {
+		blocked[key] = now.Add(authBlockDuration)
+	}
+}
+
+func evictFailureBucketLocked(now time.Time, fails map[string][]time.Time, blocked map[string]time.Time) {
+	count := len(fails)
+	for key := range blocked {
+		if _, present := fails[key]; !present {
+			count++
+		}
+	}
+	if count < authLimiterMaxEntries {
+		return
+	}
+	oldestKey := ""
+	oldestAt := now
+	for key, values := range fails {
+		if len(values) == 0 {
+			continue
+		}
+		activity := values[len(values)-1]
+		if oldestKey == "" || activity.Before(oldestAt) {
+			oldestKey, oldestAt = key, activity
+		}
+	}
+	for key, until := range blocked {
+		activity := until.Add(-authBlockDuration)
+		if oldestKey == "" || activity.Before(oldestAt) {
+			oldestKey, oldestAt = key, activity
+		}
+	}
+	if oldestKey != "" {
+		delete(fails, oldestKey)
+		delete(blocked, oldestKey)
+	}
+}
+
+func (m *Manager) sweepLimiterLocked(now time.Time) {
+	sweepFailureBucketLocked(now, m.fails, m.blocked, authSourceFailureThreshold)
+	if m.accountFails != nil {
+		sweepFailureBucketLocked(now, m.accountFails, m.accountBlocked, authFailureThreshold)
+	}
+	if m.unknownSourceFails != nil {
+		sweepFailureBucketLocked(now, m.unknownSourceFails, m.unknownSourceBlocked, authFailureThreshold)
+	}
+}
+
+func sweepFailureBucketLocked(now time.Time, fails map[string][]time.Time, blocked map[string]time.Time, threshold int) {
+	cut := now.Add(-authFailureWindow)
+	for key, values := range fails {
 		kept := values[:0]
 		for _, value := range values {
 			if value.After(cut) {
@@ -395,17 +592,17 @@ func (m *Manager) sweepLimiterLocked(now time.Time) {
 			}
 		}
 		if len(kept) == 0 {
-			delete(m.fails, key)
+			delete(fails, key)
 			continue
 		}
-		if len(kept) > authFailureThreshold {
-			kept = kept[len(kept)-authFailureThreshold:]
+		if len(kept) > threshold {
+			kept = kept[len(kept)-threshold:]
 		}
-		m.fails[key] = kept
+		fails[key] = kept
 	}
-	for key, until := range m.blocked {
+	for key, until := range blocked {
 		if !now.Before(until) {
-			delete(m.blocked, key)
+			delete(blocked, key)
 		}
 	}
 }

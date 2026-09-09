@@ -4,6 +4,16 @@ Please report security vulnerabilities privately through GitHub's security advis
 
 EdgeWatch executes Nmap with validated argument arrays and does not expose arbitrary Nmap flags. Treat its configuration, SQLite volume, notification URL file, and notification encryption key as sensitive. Only configure targets you own or are explicitly authorized to scan.
 
+TCP jobs may use the optional Naabu discovery-to-Nmap pipeline. Both scanners
+are fixed, image-bundled executables (`/usr/local/bin/naabu` and
+`/usr/bin/nmap`); administrators can edit only validated argument arrays and
+approved placeholders. EdgeWatch invokes them directly without a shell, so
+shell syntax, alternate binaries, arbitrary output paths, and unapproved NSE
+scripts are rejected. Naabu discovery is JSONL and Nmap confirmation remains
+authoritative for baselines and incidents. Connect discovery is the least
+privileged default; SYN discovery additionally requires the explicitly opted-in
+`NET_ADMIN` and `NET_RAW` container capabilities.
+
 The administration console is bound to a loopback address by default and uses
 server-side sessions, CSRF protection, and Argon2id password storage. Keep the
 Docker host and any SSH tunnel access restricted to trusted administrators.
@@ -25,7 +35,7 @@ If the key is lost or replaced, web-managed destinations become unavailable;
 they cannot be recovered from the database alone. Restore the original key and
 database together, or delete and recreate the affected destinations after
 confirming that the old credentials are revoked. A database upgraded to schema
-13 must not be opened by an older EdgeWatch binary; downgrade by restoring the
+17 must not be opened by an older EdgeWatch binary; downgrade by restoring the
 complete pre-upgrade `./data` backup before starting the old version.
 
 By default, EdgeWatch checks the latest stable release on GitHub at startup and

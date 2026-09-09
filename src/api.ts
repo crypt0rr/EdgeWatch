@@ -183,7 +183,7 @@ export const revokeUserSessions = (id: string) => api<void>(`/users/${encodeURIC
 export type PublicDashboardHost = { job_id: string; address: string; created_at?: string }
 export type PublicDashboardHostSelection = Pick<PublicDashboardHost, 'job_id' | 'address'>
 export type PublicDashboardConfig = { enabled: boolean; title: string; introduction: string; updated_at: string; hosts: PublicDashboardHost[] }
-export type PublicPort = { protocol: string; port: number; service?: string; product?: string; version?: string }
+export type PublicPort = { protocol: string; port: number; service?: string }
 export type PublicHost = { job: string; address: string; address_family?: string; public: boolean; private: boolean; available: boolean; stale?: boolean; last_successful_scan?: string; open_ports?: PublicPort[]; open_filtered_ports?: PublicPort[]; rdap?: { status: string; network_name?: string; country?: string; registry?: string; organizations?: string[]; prefix?: string; source_url?: string; fetched_at?: string; stale?: boolean; message?: string } }
 export type PublicDashboard = { title: string; introduction?: string; updated_at: string; hosts: PublicHost[] }
 export const getPublicDashboardConfig = () => api<PublicDashboardConfig>('/public-dashboard')

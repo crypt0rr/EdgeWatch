@@ -165,9 +165,11 @@ and chooses an Argon2id password in the browser. Roles are deliberately small:
 To publish a limited unauthenticated highlights page, an administrator enables
 **Public status** and explicitly selects effective hosts. The page is available
 at `/public` and contains only the selected job names, latest successful scan
-time, positive ports, and cached normalized network-registration data. It does
-not provide a host selector or proxy arbitrary RDAP requests. Keep the page
-disabled for isolated or privacy-sensitive deployments.
+time, positive ports (protocol, port, and service name), and cached normalized
+network-registration data. Product/version fingerprints and raw Nmap evidence
+remain private to the authenticated console. It does not provide a host
+selector or proxy arbitrary RDAP requests. Keep the page disabled for isolated
+or privacy-sensitive deployments.
 
 Retention applies to completed scans, events, sent notification deliveries,
 terminally failed deliveries, superseded job revisions, and terminal

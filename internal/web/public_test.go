@@ -44,7 +44,7 @@ func TestPublicHostProjectionRedactsAndSortsPositivePorts(t *testing.T) {
 	if response.Address != "198.51.100.10" || !response.Public || response.Private || len(response.OpenPorts) != 1 || len(response.OpenFiltered) != 1 {
 		t.Fatalf("projection = %#v", response)
 	}
-	if response.OpenPorts[0].Protocol != "tcp" || response.OpenPorts[0].Service != "https" || response.OpenPorts[0].Product != "nginx" || response.OpenPorts[0].Version != "1.2" || response.OpenPorts[0].Port != 443 {
+	if response.OpenPorts[0].Protocol != "tcp" || response.OpenPorts[0].Service != "https" || response.OpenPorts[0].Port != 443 {
 		t.Fatalf("open projection = %#v", response.OpenPorts)
 	}
 	if response.OpenFiltered[0].Protocol != "udp" || response.OpenFiltered[0].Port != 53 || response.OpenFiltered[0].Service != "domain" {
@@ -53,6 +53,9 @@ func TestPublicHostProjectionRedactsAndSortsPositivePorts(t *testing.T) {
 	encoded, err := json.Marshal(response)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if containsJSONField(encoded, "product") || containsJSONField(encoded, "version") {
+		t.Fatalf("software fingerprints leaked into public projection: %s", encoded)
 	}
 	if string(encoded) == "" || containsJSONField(encoded, "extra_info") || containsJSONField(encoded, "reason") {
 		t.Fatalf("private evidence leaked into public projection: %s", encoded)
@@ -136,11 +139,30 @@ func TestPublicAPIDisabledEnabledAndRateLimited(t *testing.T) {
 	if len(server.publicHits) != 1 {
 		t.Fatalf("expired rate-limit entries were not removed: %d remain", len(server.publicHits))
 	}
+	server.publicHits = map[string][]time.Time{}
+	for i := 0; i < 120; i++ {
+		if rec := call(http.MethodGet, "/api/public/v1/dashboard", "198.51.100.22:1000"); rec.Code != http.StatusOK {
+			t.Fatalf("public request %d status = %d: %s", i+1, rec.Code, rec.Body.String())
+		}
+	}
+	if rec := call(http.MethodGet, "/api/public/v1/dashboard", "198.51.100.22:1000"); rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "60" {
+		t.Fatalf("public rate limit response = %d, headers=%v", rec.Code, rec.Header())
+	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if rec := call(http.MethodGet, "/api/public/v1/dashboard", "198.51.100.21:1000"); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("public API store failure status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPublicHTMLCarriesNoIndexHeader(t *testing.T) {
+	server := &Server{}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/public", nil)
+	server.Handler().ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK || recorder.Header().Get("X-Robots-Tag") != "noindex, nofollow" {
+		t.Fatalf("public HTML = %d, headers=%v", recorder.Code, recorder.Header())
 	}
 }
 

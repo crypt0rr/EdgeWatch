@@ -1041,6 +1041,29 @@ func TestOutboxClaimsAreExclusiveAndRequireOwner(t *testing.T) {
 	}
 }
 
+func TestReleaseDeliveryClaimsMakesRowsImmediatelyClaimable(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if err := s.QueueEvent(ctx, "destination", model.Event{Type: "claim-recovery", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.ClaimDueDeliveries(ctx, 1, "stale-owner")
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("initial claim %#v %v", claimed, err)
+	}
+	released, err := s.ReleaseDeliveryClaims(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if released != 1 {
+		t.Fatalf("released claims = %d, want 1", released)
+	}
+	reclaimed, err := s.ClaimDueDeliveries(ctx, 1, "new-owner")
+	if err != nil || len(reclaimed) != 1 || reclaimed[0].ClaimToken != "new-owner" {
+		t.Fatalf("reclaimed %#v %v", reclaimed, err)
+	}
+}
+
 func TestDeferredDeliveryDoesNotConsumeAttempts(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

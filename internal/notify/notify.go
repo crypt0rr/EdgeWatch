@@ -25,12 +25,25 @@ import (
 var ErrManagedNotificationLocked = errors.New("managed notification is locked")
 var ErrInvalidDestinationSelection = errors.New("invalid notification destination selection")
 
+// ErrNotificationSendIndeterminate means the provider did not report an
+// outcome before cancellation. The outbox claim is deferred for a full lease
+// rather than immediately retried, preventing a duplicate when the provider
+// accepted the request just as the daemon stopped waiting.
+var ErrNotificationSendIndeterminate = errors.New("notification send outcome is indeterminate")
+
 const (
 	notificationWorkers   = 4
 	notificationBatchSize = 16
 	// A pass is deliberately bounded so a provider outage cannot monopolize
 	// the daemon worker. The next wake/tick drains any remaining due rows.
 	notificationMaxBatches = 4
+	// Shoutrrr sends are bounded by the provider's 15-second timeout. If the
+	// caller is canceled first, wait briefly for a definitive result before
+	// treating the delivery as indeterminate and deferring it.
+	notificationSendCancellationGrace = 2 * time.Second
+	// Match the store's claim lease so an uncertain provider outcome cannot be
+	// retried while the original request may still complete.
+	notificationIndeterminateDelay = 30 * time.Minute
 )
 
 type DestinationView struct {
@@ -565,6 +578,19 @@ func (n *Notifier) destinationSnapshot() map[string]string {
 	return out
 }
 
+func (n *Notifier) lockedDestinationKeys() []string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	keys := make([]string, 0)
+	for id, entry := range n.managed {
+		if entry.record.Enabled && entry.locked {
+			keys = append(keys, managedKey(id, entry.record.Revision))
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // destinationKeys returns the destinations that were enabled when an event
 // was created. A managed destination may be locked because its encryption key
 // is temporarily unavailable; its durable outbox entry must still be created
@@ -718,6 +744,7 @@ func (n *Notifier) Drain(ctx context.Context) error {
 		return err
 	}
 	destinations := n.destinationSnapshot()
+	lockedDestinations := n.lockedDestinationKeys()
 	var all []error
 	for batch := 0; batch < notificationMaxBatches; batch++ {
 		if ctx.Err() != nil {
@@ -726,7 +753,7 @@ func (n *Notifier) Drain(ctx context.Context) error {
 		// A bounded pass drains several batches so a burst of events does not
 		// wait for multiple 30-second worker ticks. The batch and pass limits
 		// keep provider latency from starving scans and schedule reconciliation.
-		deliveries, err := n.Store.ClaimDueDeliveries(ctx, notificationBatchSize, uuid.NewString())
+		deliveries, err := n.Store.ClaimDueDeliveriesExcluding(ctx, notificationBatchSize, uuid.NewString(), lockedDestinations)
 		if err != nil {
 			return errors.Join(append(all, err)...)
 		}
@@ -761,12 +788,12 @@ func (n *Notifier) deliverBatch(ctx context.Context, deliveries []store.Delivery
 			}
 		}()
 	}
+	var unsent []store.Delivery
 	for _, delivery := range deliveries {
 		select {
 		case jobs <- delivery:
 		case <-ctx.Done():
-			// Unsent claims are left for the normal claim lease to expire. This
-			// avoids marking them delivered when a caller canceled the pass.
+			unsent = append(unsent, delivery)
 		}
 	}
 	close(jobs)
@@ -775,6 +802,11 @@ func (n *Notifier) deliverBatch(ctx context.Context, deliveries []store.Delivery
 	var all []error
 	for err := range results {
 		if err != nil && !errors.Is(err, store.ErrDeliveryClaimLost) {
+			all = append(all, err)
+		}
+	}
+	for _, delivery := range unsent {
+		if err := n.releaseClaim(delivery, "notification pass canceled before send", time.Minute); err != nil && !errors.Is(err, store.ErrDeliveryClaimLost) {
 			all = append(all, err)
 		}
 	}
@@ -802,14 +834,14 @@ func lockContext(ctx context.Context, mu *sync.Mutex) error {
 }
 
 func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, destinations map[string]string) error {
-	if ctx.Err() != nil {
-		return ctx.Err()
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, n.releaseClaim(delivery, "notification pass canceled before send", time.Minute))
 	}
 	// Refresh before each managed send so an update/delete after the batch was
 	// claimed cannot use the stale URL from the first snapshot.
 	if strings.HasPrefix(delivery.Destination, "managed:") {
 		if reloadErr := n.Reload(ctx); reloadErr != nil {
-			deferErr := n.Store.DeferDelivery(ctx, delivery.ID, delivery.ClaimToken, "managed notification state unavailable", time.Minute)
+			deferErr := n.releaseClaim(delivery, "managed notification state unavailable", time.Minute)
 			return errors.Join(reloadErr, deferErr)
 		}
 		destinations = n.destinationSnapshot()
@@ -818,14 +850,26 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 	var sendErr error
 	if !ok {
 		if strings.HasPrefix(delivery.Destination, "managed:") {
-			return n.Store.DeferDelivery(ctx, delivery.ID, delivery.ClaimToken, "managed notification is locked or no longer configured", time.Minute)
+			return n.releaseClaim(delivery, "managed notification is locked or no longer configured", time.Minute)
 		}
 		sendErr = errors.New("notification destination is no longer configured")
 	} else {
 		sendErr = safeSendContext(ctx, raw, engine.FormatEvent(delivery.Event))
 	}
-	resultErr := n.Store.DeliveryResultClaim(ctx, delivery.ID, delivery.ClaimToken, sendErr)
+	if errors.Is(sendErr, ErrNotificationSendIndeterminate) {
+		deferErr := n.releaseClaim(delivery, "notification send outcome is indeterminate", notificationIndeterminateDelay)
+		return errors.Join(sendErr, deferErr)
+	}
+	resultCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resultErr := n.Store.DeliveryResultClaim(resultCtx, delivery.ID, delivery.ClaimToken, sendErr)
 	return errors.Join(sendErr, resultErr)
+}
+
+func (n *Notifier) releaseClaim(delivery store.Delivery, reason string, delay time.Duration) error {
+	releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return n.Store.DeferDelivery(releaseCtx, delivery.ID, delivery.ClaimToken, reason, delay)
 }
 
 func send(rawURL, message string) error {
@@ -848,7 +892,7 @@ func safeSend(rawURL, message string) error {
 
 func safeSendContext(ctx context.Context, rawURL, message string) error {
 	if err := sendContext(ctx, rawURL, message); err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrNotificationSendIndeterminate) {
 			return err
 		}
 		id := hashURL(rawURL)
@@ -870,7 +914,14 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 	case err := <-result:
 		return err
 	case <-ctx.Done():
-		return ctx.Err()
+		timer := time.NewTimer(notificationSendCancellationGrace)
+		defer timer.Stop()
+		select {
+		case err := <-result:
+			return err
+		case <-timer.C:
+			return ErrNotificationSendIndeterminate
+		}
 	}
 }
 

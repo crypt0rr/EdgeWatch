@@ -333,6 +333,106 @@ func TestLockedManagedDeliveryIsDeferredWithoutAttempts(t *testing.T) {
 	}
 }
 
+func TestLockedDestinationDoesNotStarveHealthyDelivery(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := store.Open(filepath.Join(dir, "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	keyPath := filepath.Join(dir, "notification.key")
+	creator, err := New(db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := creator.CreateManaged(ctx, "Locked", "generic://localhost/locked?disabletls=yes&template=json", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	healthy := "generic://" + parsed.Host + "/healthy?disabletls=yes&template=json"
+	managedDestination := managedKey(created.ID, created.Revision)
+	for i := 0; i < 10; i++ {
+		if err := db.QueueEvent(ctx, managedDestination, model.Event{Type: "locked", Job: "job", ScanID: fmt.Sprintf("locked-%d", i), CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.QueueEvent(ctx, hashURL(healthy), model.Event{Type: "healthy", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(keyPath); err != nil {
+		t.Fatal(err)
+	}
+	locked, err := NewWithKeyFile(db, []string{healthy}, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := locked.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("healthy destination calls = %d, want 1", calls.Load())
+	}
+	var pendingLocked, liveClaims int
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination=? AND attempts=0`, managedDestination).Scan(&pendingLocked); err != nil {
+		t.Fatal(err)
+	}
+	if pendingLocked != 10 {
+		t.Fatalf("locked rows changed during healthy drain: %d", pendingLocked)
+	}
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE claim_token<>''`).Scan(&liveClaims); err != nil {
+		t.Fatal(err)
+	}
+	if liveClaims != 0 {
+		t.Fatalf("locked rows retained live claims: %d", liveClaims)
+	}
+}
+
+func TestCanceledBatchReleasesUnsentClaims(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	notifier, err := New(db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < notificationBatchSize; i++ {
+		if err := db.QueueEvent(ctx, "destination", model.Event{Type: "cancel", Job: "job", ScanID: fmt.Sprintf("scan-%d", i), CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deliveries, err := db.ClaimDueDeliveries(ctx, notificationBatchSize, "owner")
+	if err != nil || len(deliveries) != notificationBatchSize {
+		t.Fatalf("claimed deliveries = %d, error = %v", len(deliveries), err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	_ = notifier.deliverBatch(canceled, deliveries, nil)
+	var liveClaims, attempts int
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE claim_token<>''`).Scan(&liveClaims); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRowContext(ctx, `SELECT COALESCE(SUM(attempts),0) FROM outbox`).Scan(&attempts); err != nil {
+		t.Fatal(err)
+	}
+	if liveClaims != 0 || attempts != 0 {
+		t.Fatalf("canceled batch left claims/attempts: claims=%d attempts=%d", liveClaims, attempts)
+	}
+}
+
 func TestInvalidURLDoesNotLeakSecret(t *testing.T) {
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -362,7 +462,7 @@ func TestSafeSendRedactsProviderErrors(t *testing.T) {
 	}
 }
 
-func TestSafeSendContextStopsWaitingWhenCallerCancels(t *testing.T) {
+func TestSafeSendContextWaitsForInFlightSendAfterCancellation(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -385,15 +485,18 @@ func TestSafeSendContextStopsWaitingWhenCallerCancels(t *testing.T) {
 		t.Fatal("notification send did not reach the provider")
 	}
 	cancel()
+	// A canceled caller must not immediately requeue an in-flight request: the
+	// provider may already have accepted it. Let the handler finish and verify
+	// the definitive result is observed.
+	close(release)
 	select {
 	case err := <-done:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("cancelled send error = %v, want context cancellation", err)
+		if errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled in-flight send returned context cancellation: %v", err)
 		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("cancelled notification send continued waiting for the provider")
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight notification send did not settle")
 	}
-	close(release)
 }
 
 func TestManagedNotificationCRUDEncryptsAndCancelsOldDeliveries(t *testing.T) {

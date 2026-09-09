@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 17
+const schemaVersion = 18
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -678,6 +678,55 @@ FROM (
 			// reverse proxy; otherwise it is the peer address observed by Go.
 			"ALTER TABLE security_audit ADD COLUMN source_ip TEXT NOT NULL DEFAULT ''",
 		},
+		18: {
+			// Host inventory search must not scan the serialized host payload on
+			// every request. These FTS5 projections contain only a normalized,
+			// lower-case search document for the fields users can search (address,
+			// job, configured targets, DNS names, hostnames, and services). The
+			// trigram tokenizer preserves partial IP/name/service searches while
+			// keeping the large evidence JSON out of the query predicates.
+			`CREATE VIRTUAL TABLE IF NOT EXISTS scan_host_search USING fts5(
+ scan_id UNINDEXED,
+ address UNINDEXED,
+ content,
+ tokenize='trigram'
+);`,
+			`CREATE VIRTUAL TABLE IF NOT EXISTS latest_host_search USING fts5(
+ address UNINDEXED,
+ content,
+ tokenize='trigram'
+);`,
+			`CREATE TRIGGER IF NOT EXISTS scan_hosts_search_ai AFTER INSERT ON scan_hosts BEGIN
+ INSERT INTO scan_host_search(scan_id,address,content)
+ VALUES(NEW.scan_id,NEW.address,lower(coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'') || ' ' || coalesce(NEW.host_json,'')));
+END;`,
+			`CREATE TRIGGER IF NOT EXISTS scan_hosts_search_au AFTER UPDATE ON scan_hosts BEGIN
+ DELETE FROM scan_host_search WHERE rowid IN (SELECT rowid FROM scan_host_search WHERE scan_id=OLD.scan_id AND address=OLD.address);
+ INSERT INTO scan_host_search(scan_id,address,content)
+ VALUES(NEW.scan_id,NEW.address,lower(coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'') || ' ' || coalesce(NEW.host_json,'')));
+END;`,
+			`CREATE TRIGGER IF NOT EXISTS scan_hosts_search_ad AFTER DELETE ON scan_hosts BEGIN
+ DELETE FROM scan_host_search WHERE rowid IN (SELECT rowid FROM scan_host_search WHERE scan_id=OLD.scan_id AND address=OLD.address);
+END;`,
+			`CREATE TRIGGER IF NOT EXISTS latest_scan_hosts_search_ai AFTER INSERT ON latest_scan_hosts BEGIN
+ INSERT INTO latest_host_search(address,content)
+ VALUES(NEW.address,lower(coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'') || ' ' || coalesce(NEW.host_json,'')));
+END;`,
+			`CREATE TRIGGER IF NOT EXISTS latest_scan_hosts_search_au AFTER UPDATE ON latest_scan_hosts BEGIN
+ DELETE FROM latest_host_search WHERE rowid IN (SELECT rowid FROM latest_host_search WHERE address=OLD.address);
+ INSERT INTO latest_host_search(address,content)
+ VALUES(NEW.address,lower(coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'') || ' ' || coalesce(NEW.host_json,'')));
+END;`,
+			`CREATE TRIGGER IF NOT EXISTS latest_scan_hosts_search_ad AFTER DELETE ON latest_scan_hosts BEGIN
+ DELETE FROM latest_host_search WHERE rowid IN (SELECT rowid FROM latest_host_search WHERE address=OLD.address);
+END;`,
+			`INSERT INTO scan_host_search(scan_id,address,content)
+SELECT scan_id,address,lower(coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,'') || ' ' || coalesce(host_json,''))
+FROM scan_hosts;`,
+			`INSERT INTO latest_host_search(address,content)
+SELECT address,lower(coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,'') || ' ' || coalesce(host_json,''))
+FROM latest_scan_hosts;`,
+		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
 		statements, ok := migrations[next]
@@ -1281,43 +1330,60 @@ type LatestScanHost struct {
 }
 
 type hostFilter struct {
-	where []string
-	args  []any
+	where      []string
+	args       []any
+	searchText string
 }
 
 func buildHostFilter(query, protocol string, hasOpen *bool) hostFilter {
 	filter := hostFilter{}
 	if query = strings.TrimSpace(strings.ToLower(query)); query != "" {
-		like := "%" + query + "%"
-		filter.where = append(filter.where, "(LOWER(address) LIKE ? OR LOWER(job) LIKE ? OR LOWER(source_targets_json) LIKE ? OR LOWER(dns_names_json) LIKE ? OR LOWER(host_json) LIKE ?)")
-		filter.args = append(filter.args, like, like, like, like, like)
+		filter.searchText = query
 	}
 	if protocol == "tcp" {
-		filter.where = append(filter.where, "tcp_present=1")
+		filter.where = append(filter.where, "h.tcp_present=1")
 		if hasOpen != nil {
 			if *hasOpen {
-				filter.where = append(filter.where, "(tcp_open_ports > 0 OR tcp_open_filtered_ports > 0)")
+				filter.where = append(filter.where, "(h.tcp_open_ports > 0 OR h.tcp_open_filtered_ports > 0)")
 			} else {
-				filter.where = append(filter.where, "tcp_open_ports = 0 AND tcp_open_filtered_ports = 0")
+				filter.where = append(filter.where, "h.tcp_open_ports = 0 AND h.tcp_open_filtered_ports = 0")
 			}
 		}
 	} else if protocol == "udp" {
-		filter.where = append(filter.where, "udp_present=1")
+		filter.where = append(filter.where, "h.udp_present=1")
 		if hasOpen != nil {
 			if *hasOpen {
-				filter.where = append(filter.where, "(udp_open_ports > 0 OR udp_open_filtered_ports > 0)")
+				filter.where = append(filter.where, "(h.udp_open_ports > 0 OR h.udp_open_filtered_ports > 0)")
 			} else {
-				filter.where = append(filter.where, "udp_open_ports = 0 AND udp_open_filtered_ports = 0")
+				filter.where = append(filter.where, "h.udp_open_ports = 0 AND h.udp_open_filtered_ports = 0")
 			}
 		}
 	} else if hasOpen != nil {
 		if *hasOpen {
-			filter.where = append(filter.where, "(open_ports > 0 OR open_filtered_ports > 0)")
+			filter.where = append(filter.where, "(h.open_ports > 0 OR h.open_filtered_ports > 0)")
 		} else {
-			filter.where = append(filter.where, "open_ports = 0 AND open_filtered_ports = 0")
+			filter.where = append(filter.where, "h.open_ports = 0 AND h.open_filtered_ports = 0")
 		}
 	}
 	return filter
+}
+
+// hostSearchMatchQuery quotes a user-provided value as one FTS phrase. The
+// trigram tokenizer then supports partial addresses, names, and service text
+// without allowing FTS operators to alter the query semantics.
+func hostSearchMatchQuery(query string) string {
+	return `"` + strings.ReplaceAll(query, `"`, `""`) + `"`
+}
+
+func hostSearchPredicate(filter hostFilter, searchTable string, keyColumns string) (join, predicate string, args []any) {
+	if filter.searchText == "" {
+		return "", "", nil
+	}
+	join = " JOIN " + searchTable + " hs ON " + keyColumns
+	if len([]rune(filter.searchText)) < 3 {
+		return join, "hs.content LIKE ?", []any{"%" + filter.searchText + "%"}
+	}
+	return join, searchTable + " MATCH ?", []any{hostSearchMatchQuery(filter.searchText)}
 }
 
 func scanHostStats(host model.HostObservation) (open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered int) {
@@ -1989,14 +2055,19 @@ func decodeScanHost(address, dataQuality string, raw []byte) (ScanHost, error) {
 func (s *Store) ListScanHostsPage(ctx context.Context, scanID, query, protocol string, hasOpen *bool, limit, offset int) (Page[ScanHost], error) {
 	limit, offset = normalizePage(limit, offset)
 	filter := buildHostFilter(query, protocol, hasOpen)
-	where := append([]string{"scan_id=?"}, filter.where...)
+	where := append([]string{"h.scan_id=?"}, filter.where...)
 	args := append([]any{scanID}, filter.args...)
+	join, predicate, searchArgs := hostSearchPredicate(filter, "scan_host_search", "hs.scan_id=h.scan_id AND hs.address=h.address")
+	if predicate != "" {
+		where = append(where, predicate)
+		args = append(args, searchArgs...)
+	}
 	var page Page[ScanHost]
-	countQuery := `SELECT COUNT(*) FROM scan_hosts WHERE ` + strings.Join(where, " AND ")
+	countQuery := `SELECT COUNT(*) FROM scan_hosts h` + join + ` WHERE ` + strings.Join(where, " AND ")
 	if err := s.DB.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	querySQL := `SELECT address,data_quality,host_json FROM scan_hosts WHERE ` + strings.Join(where, " AND ") + ` ORDER BY address LIMIT ? OFFSET ?`
+	querySQL := `SELECT h.address,h.data_quality,h.host_json FROM scan_hosts h` + join + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY h.address LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 	rows, err := s.DB.QueryContext(ctx, querySQL, args...)
 	if err != nil {
@@ -2073,12 +2144,17 @@ func (s *Store) ListLatestScanHostsPage(ctx context.Context, query, protocol str
 		where = []string{"1=1"}
 	}
 	args := append([]any(nil), filter.args...)
+	join, predicate, searchArgs := hostSearchPredicate(filter, "latest_host_search", "hs.address=h.address")
+	if predicate != "" {
+		where = append(where, predicate)
+		args = append(args, searchArgs...)
+	}
 	var page Page[LatestScanHost]
-	countQuery := `SELECT COUNT(*) FROM latest_scan_hosts WHERE ` + strings.Join(where, " AND ")
+	countQuery := `SELECT COUNT(*) FROM latest_scan_hosts h` + join + ` WHERE ` + strings.Join(where, " AND ")
 	if err := s.DB.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	querySQL := `SELECT scan_id,address,data_quality,host_json,job_id,job,finished_at FROM latest_scan_hosts WHERE ` + strings.Join(where, " AND ") + ` ORDER BY address LIMIT ? OFFSET ?`
+	querySQL := `SELECT h.scan_id,h.address,h.data_quality,h.host_json,h.job_id,h.job,h.finished_at FROM latest_scan_hosts h` + join + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY h.address LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 	rows, err := s.DB.QueryContext(ctx, querySQL, args...)
 	if err != nil {

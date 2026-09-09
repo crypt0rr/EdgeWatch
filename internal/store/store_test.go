@@ -225,6 +225,79 @@ func TestLatestScanHostProjectionRebuildsAfterSourceRemoval(t *testing.T) {
 	}
 }
 
+func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	job := model.Scan{
+		ID: "search-scan", JobID: "search-job", Job: "Production edge", StartedAt: time.Unix(500, 0).UTC(), FinishedAt: time.Unix(500, 0).UTC(), Status: "success",
+		Snapshot: model.Snapshot{Hosts: []model.HostObservation{
+			{
+				Address:       "198.51.100.44",
+				SourceTargets: []string{"router.example"},
+				Hostnames:     []model.Hostname{{Name: "edge-router.example"}},
+				Protocols: []model.ProtocolObservation{{
+					Protocol:         "tcp",
+					ScannedPorts:     "443",
+					ScannedPortCount: 1,
+					Ports:            []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https", Product: "nginx", Version: "1.25"}}},
+				}},
+			},
+		}},
+	}
+	if err := s.SaveScan(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []string{"nginx", "edge-router", "production", "router.example", "198.51.100.4"} {
+		page, err := s.ListLatestScanHostsPage(ctx, query, "", nil, 50, 0)
+		if err != nil {
+			t.Fatalf("search %q: %v", query, err)
+		}
+		if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Host.Address != "198.51.100.44" {
+			t.Fatalf("search %q returned %#v", query, page)
+		}
+	}
+
+	// The FTS virtual-table plan proves the search predicate is served by the
+	// normalized index rather than a LIKE over host_json.
+	rows, err := s.DB.QueryContext(ctx, `EXPLAIN QUERY PLAN SELECT h.address FROM latest_scan_hosts h JOIN latest_host_search hs ON hs.address=h.address WHERE latest_host_search MATCH ?`, hostSearchMatchQuery("nginx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			rows.Close()
+			t.Fatal(err)
+		}
+		plan = append(plan, strings.ToLower(detail))
+	}
+	if err := rows.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(plan, " "), "virtual table") {
+		t.Fatalf("search query did not use FTS virtual table: %v", plan)
+	}
+
+	// Direct projection writes are covered by triggers as well, which keeps
+	// supported maintenance/test fixtures searchable without Go-side hooks.
+	if _, err := s.DB.ExecContext(ctx, `UPDATE latest_scan_hosts SET job=? WHERE address=?`, "Database edge", "198.51.100.44"); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.ListLatestScanHostsPage(ctx, "database", "", nil, 50, 0)
+	if err != nil || page.Total != 1 {
+		t.Fatalf("updated projection search = %#v, %v", page, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM latest_scan_hosts WHERE address=?`, "198.51.100.44"); err != nil {
+		t.Fatal(err)
+	}
+	page, err = s.ListLatestScanHostsPage(ctx, "database", "", nil, 50, 0)
+	if err != nil || page.Total != 0 {
+		t.Fatalf("deleted projection search = %#v, %v", page, err)
+	}
+}
+
 func TestOpenRejectsSQLiteSidecarSymlink(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "symlink.db")

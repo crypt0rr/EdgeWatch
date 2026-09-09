@@ -713,6 +713,11 @@ func (a *App) Daemon(ctx context.Context) error {
 	} else if released > 0 {
 		a.Logger.Info("startup notification claims released", "claims", released)
 	}
+	if released, err := a.Store.ReleaseAllJobLeases(ctx); err != nil {
+		a.Logger.Error("startup job lease cleanup failed", "error", err)
+	} else if released > 0 {
+		a.Logger.Info("startup job leases released", "leases", released)
+	}
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -789,14 +794,24 @@ func (a *App) Daemon(ctx context.Context) error {
 	// cadence. Version tracking remains active even when outbound checks are
 	// disabled so a later deployment can still report a real upgrade.
 	a.runUpdateCheck(ctx)
+	missedHeartbeats := 0
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-heartbeat.C:
 			if err := a.Store.Heartbeat(ctx, owner); err != nil {
-				return err
+				if errors.Is(err, store.ErrLeaseLost) {
+					return err
+				}
+				missedHeartbeats++
+				a.Logger.Error("daemon lease heartbeat failed", "error", err, "consecutive", missedHeartbeats)
+				if missedHeartbeats >= 3 {
+					return err
+				}
+				continue
 			}
+			missedHeartbeats = 0
 		case <-prune.C:
 			if removed, err := a.Store.DeleteExpiredSessions(ctx, time.Now().UTC()); err != nil {
 				a.Logger.Error("expired-session cleanup failed", "error", err)

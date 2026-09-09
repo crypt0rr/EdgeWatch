@@ -2583,6 +2583,10 @@ func boundedSSEPayload(value map[string]any) []byte {
 }
 
 func (s *Server) replayLocked(lastID uint64) []sseMessage {
+	if lastID > s.nextEventID {
+		payload, _ := json.Marshal(map[string]any{"type": "refresh_required", "after": lastID, "reason": "event_history_restarted"})
+		return []sseMessage{{id: s.nextEventID, payload: payload}}
+	}
 	if lastID == 0 || len(s.history) == 0 {
 		return nil
 	}

@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -61,6 +62,7 @@ type Manager struct {
 	accountBlocked       map[string]time.Time
 	unknownSourceFails   map[string][]time.Time
 	unknownSourceBlocked map[string]time.Time
+	trustedProxies       []*net.IPNet
 }
 
 func NewManager(s *store.Store) *Manager {
@@ -70,6 +72,133 @@ func NewManager(s *store.Store) *Manager {
 		accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{},
 		unknownSourceFails: map[string][]time.Time{}, unknownSourceBlocked: map[string]time.Time{},
 	}
+}
+
+// SetTrustedProxies enables forwarding-header processing for the explicitly
+// configured proxy networks. An empty list keeps the secure default: all
+// forwarding headers are ignored and the directly connected peer is used.
+func (m *Manager) SetTrustedProxies(values []string) error {
+	networks := make([]*net.IPNet, 0, len(values))
+	for index, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			return fmt.Errorf("trusted proxy %d is empty", index)
+		}
+		if ip := net.ParseIP(value); ip != nil {
+			bits := 128
+			if ip.To4() != nil {
+				ip = ip.To4()
+				bits = 32
+			}
+			networks = append(networks, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		_, network, err := net.ParseCIDR(value)
+		if err != nil {
+			return fmt.Errorf("trusted proxy %d is not an IP address or CIDR: %q", index, raw)
+		}
+		networks = append(networks, network)
+	}
+	m.mu.Lock()
+	m.trustedProxies = networks
+	m.mu.Unlock()
+	return nil
+}
+
+// ClientIP resolves the request identity for rate limiting and audit records.
+// Forwarding headers are considered only when the directly connected peer is
+// in the configured trusted-proxy set. The chain is walked from right to left
+// and stops at the first untrusted hop, preventing clients from spoofing an
+// address through an untrusted connection.
+func (m *Manager) ClientIP(request *http.Request) string {
+	remote := limiterKey(requestRemote(request))
+	peer := net.ParseIP(strings.TrimSpace(remote))
+	if peer == nil {
+		return remote
+	}
+	m.mu.Lock()
+	trusted := append([]*net.IPNet(nil), m.trustedProxies...)
+	m.mu.Unlock()
+	if !ipInNetworks(peer, trusted) {
+		return peer.String()
+	}
+	current := peer
+	candidates := forwardedCandidates(request)
+	for index := len(candidates) - 1; index >= 0; index-- {
+		if !ipInNetworks(current, trusted) {
+			break
+		}
+		parsed := net.ParseIP(candidates[index])
+		if parsed == nil {
+			break
+		}
+		current = parsed
+	}
+	return current.String()
+}
+
+func ipInNetworks(ip net.IP, networks []*net.IPNet) bool {
+	for _, network := range networks {
+		if network != nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func forwardedCandidates(request *http.Request) []string {
+	if request == nil {
+		return nil
+	}
+	if values := request.Header.Values("X-Forwarded-For"); len(values) > 0 {
+		var candidates []string
+		for _, value := range values {
+			for _, item := range strings.Split(value, ",") {
+				// Keep an empty sentinel for malformed hops. Dropping an invalid
+				// middle value could make an untrusted client look adjacent to a
+				// trusted proxy and would weaken the chain validation.
+				candidates = append(candidates, parseForwardedAddress(item))
+			}
+		}
+		return candidates
+	}
+	var candidates []string
+	for _, value := range request.Header.Values("Forwarded") {
+		for _, element := range strings.Split(value, ",") {
+			for _, parameter := range strings.Split(element, ";") {
+				key, raw, ok := strings.Cut(strings.TrimSpace(parameter), "=")
+				if !ok || !strings.EqualFold(key, "for") {
+					continue
+				}
+				candidates = append(candidates, parseForwardedAddress(raw))
+				break
+			}
+		}
+	}
+	return candidates
+}
+
+func parseForwardedAddress(raw string) string {
+	value := strings.Trim(strings.TrimSpace(raw), `"`)
+	if value == "" || value == "unknown" || strings.HasPrefix(value, "_") {
+		return ""
+	}
+	if ip := net.ParseIP(value); ip != nil {
+		return ip.String()
+	}
+	if strings.HasPrefix(value, "[") {
+		if end := strings.IndexByte(value, ']'); end > 1 {
+			if ip := net.ParseIP(value[1:end]); ip != nil {
+				return ip.String()
+			}
+		}
+	}
+	if host, _, err := netSplitHostPort(value); err == nil {
+		if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+			return ip.String()
+		}
+	}
+	return ""
 }
 
 func (m *Manager) now() time.Time {
@@ -198,7 +327,7 @@ func (m *Manager) Setup(ctx context.Context, token, password string) error {
 // login. The non-HTTP Setup method remains available to trusted callers and
 // tests, while the web endpoint should use this wrapper.
 func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token, password string) error {
-	source := sourceScope(request)
+	source := m.sourceScope(request)
 	account := "setup:" + digest(strings.TrimSpace(token))
 	if !m.allowScoped(source, account) {
 		return ErrRateLimited
@@ -216,7 +345,7 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 // Argon2id hash are handled inside the store transaction; a failed attempt
 // never consumes the invite.
 func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, token, password string) error {
-	source := sourceScope(request)
+	source := m.sourceScope(request)
 	account := "activation:" + digest(strings.TrimSpace(token))
 	if !m.allowScoped(source, account) {
 		return ErrRateLimited
@@ -248,7 +377,7 @@ func (m *Manager) Login(ctx context.Context, request *http.Request, password, ot
 // that always sign in as the original administrator.
 func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, password, otp, recovery string) (string, store.User, error) {
 	identity := normalizeLoginIdentity(username)
-	source := sourceScope(request)
+	source := m.sourceScope(request)
 	account := "login:" + identity
 	unknownSource := "unknown-login:" + strings.TrimPrefix(source, "source:")
 	if !m.allowScoped(source, account) {
@@ -312,7 +441,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	if user.Role == store.RoleAdministrator {
 		action = "admin.login"
 	}
-	if err := m.Store.CreateSessionForUserWithAuditEntry(ctx, user.ID, digest(session), csrf, now, now.Add(SessionTTL), store.AuditEntry{Action: action, Detail: "successful login", ActorUserID: user.ID, ActorUsername: user.Username}); err != nil {
+	if err := m.Store.CreateSessionForUserWithAuditEntry(ctx, user.ID, digest(session), csrf, now, now.Add(SessionTTL), store.AuditEntry{Action: action, Detail: "successful login", ActorUserID: user.ID, ActorUsername: user.Username, SourceIP: m.ClientIP(request)}); err != nil {
 		return "", user, err
 	}
 	_ = m.Store.SetUserLastLogin(ctx, user.ID, now)
@@ -334,7 +463,7 @@ func (m *Manager) ConfirmPassword(ctx context.Context, request *http.Request, pa
 // web-managed administrators must be able to confirm with their own password
 // rather than the original admin account's credential.
 func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Request, userID, password string) error {
-	source := sourceScope(request)
+	source := m.sourceScope(request)
 	account := "confirm:" + strings.TrimSpace(userID)
 	if !m.allowScoped(source, account) {
 		return ErrRateLimited
@@ -357,6 +486,10 @@ func requestRemote(request *http.Request) string {
 
 func sourceScope(request *http.Request) string {
 	return "source:" + limiterKey(requestRemote(request))
+}
+
+func (m *Manager) sourceScope(request *http.Request) string {
+	return "source:" + limiterKey(m.ClientIP(request))
 }
 
 func normalizeLoginIdentity(username string) string {
@@ -681,6 +814,7 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (store.Sess
 	// extend a session beyond its 30-day expiry.
 	_ = m.Store.TouchSession(ctx, session.IDHash, now, session.ExpiresAt)
 	session.Username, session.DisplayName, session.Role = user.Username, user.DisplayName, user.Role
+	session.SourceIP = m.ClientIP(r)
 	return session, true
 }
 

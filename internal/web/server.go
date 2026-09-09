@@ -86,6 +86,11 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 		logger.Warn("rdap cache write failed", "error", err)
 	}
 	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
+	if a != nil && a.Config != nil {
+		if err := v.Auth.SetTrustedProxies(a.Config.Web.TrustedProxies); err != nil {
+			logger.Error("trusted proxy configuration rejected", "error", err)
+		}
+	}
 	if s != nil {
 		if token, err := v.Auth.EnsureSetupToken(context.Background()); err != nil {
 			logger.Error("admin setup token generation failed", "error", err)
@@ -2414,7 +2419,7 @@ func (s *Server) writeNotificationError(w http.ResponseWriter, err error) {
 }
 
 func (s *Server) allowNotificationTest(r *http.Request) bool {
-	key := r.RemoteAddr
+	key := s.clientIP(r)
 	if cookie, err := r.Cookie(auth.SessionCookie); err == nil && cookie.Value != "" {
 		key = digest(cookie.Value)
 	}
@@ -2431,6 +2436,16 @@ func (s *Server) allowNotificationTest(r *http.Request) bool {
 	}
 	s.testLast[key] = now
 	return true
+}
+
+func (s *Server) clientIP(r *http.Request) string {
+	if s.Auth != nil {
+		return s.Auth.ClientIP(r)
+	}
+	if r == nil {
+		return "unknown"
+	}
+	return r.RemoteAddr
 }
 
 func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request, session store.Session) {
@@ -2708,7 +2723,7 @@ func (s *Server) auditOptional(ctx context.Context, action, detail string) {
 }
 
 func actorAudit(session store.Session, action, detail string) store.AuditEntry {
-	return store.AuditEntry{Action: action, Detail: detail, ActorUserID: session.UserID, ActorUsername: session.Username}
+	return store.AuditEntry{Action: action, Detail: detail, ActorUserID: session.UserID, ActorUsername: session.Username, SourceIP: session.SourceIP}
 }
 
 func (s *Server) auditOptionalEntry(ctx context.Context, entry store.AuditEntry) {

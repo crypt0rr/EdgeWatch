@@ -64,6 +64,11 @@ the replacement is issued.
   rejected before scanning unless `allow_high_cost` is explicitly enabled.
 - `web.listen` must be a loopback address; the default is
   `127.0.0.1:8080`.
+- Forwarding headers are ignored by default. If a local reverse proxy is used,
+  set `web.trusted_proxies` to its exact IP address or CIDR. EdgeWatch then
+  resolves the first untrusted address in the validated `X-Forwarded-For` or
+  `Forwarded` chain for authentication throttling and security-audit records;
+  do not trust a network that is not fully controlled by the operator.
 - `enrichment.rdap.enabled` controls on-demand network-registration lookups
   from the host explorer. It defaults to `true`; set it to `false` for an
   isolated or privacy-sensitive deployment. Host detail pages query the

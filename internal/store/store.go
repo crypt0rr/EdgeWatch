@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 16
+const schemaVersion = 17
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -671,6 +671,12 @@ FROM (
  FOREIGN KEY(cycle_id) REFERENCES scan_cycles(id) ON DELETE CASCADE
 );`,
 			"CREATE INDEX IF NOT EXISTS scan_cycle_discovery_checkpoints_cycle ON scan_cycle_discovery_checkpoints(cycle_id,sequence)",
+		},
+		17: {
+			// Record the resolved client address on security audits. The value is
+			// only populated when the HTTP layer has explicitly trusted its direct
+			// reverse proxy; otherwise it is the peer address observed by Go.
+			"ALTER TABLE security_audit ADD COLUMN source_ip TEXT NOT NULL DEFAULT ''",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {

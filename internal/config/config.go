@@ -73,8 +73,9 @@ type RDAP struct {
 // appliance deliberately only permits loopback listeners; users who need
 // remote access should put a TLS reverse proxy or an SSH tunnel in front of it.
 type Web struct {
-	Listen      string `yaml:"listen"`
-	AuthKeyFile string `yaml:"auth_key_file"`
+	Listen         string   `yaml:"listen"`
+	AuthKeyFile    string   `yaml:"auth_key_file"`
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 type Scheduler struct {
 	MaxConcurrent int   `yaml:"max_concurrent_scans"`
@@ -647,6 +648,17 @@ func (c Config) ValidateDeployment() error {
 	}
 	if err := validateWebListen(c.Web.Listen); err != nil {
 		return err
+	}
+	for index, raw := range c.Web.TrustedProxies {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			return fmt.Errorf("web.trusted_proxies[%d] must not be empty", index)
+		}
+		if net.ParseIP(value) == nil {
+			if _, _, err := net.ParseCIDR(value); err != nil {
+				return fmt.Errorf("web.trusted_proxies[%d] must be an IP address or CIDR: %q", index, raw)
+			}
+		}
 	}
 	return nil
 }

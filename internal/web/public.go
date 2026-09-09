@@ -52,10 +52,7 @@ func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) allowPublicRequest(r *http.Request) bool {
-	key := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		key = host
-	}
+	key := s.clientIP(r)
 	now := time.Now().UTC()
 	cutoff := now.Add(-time.Minute)
 	s.publicMu.Lock()

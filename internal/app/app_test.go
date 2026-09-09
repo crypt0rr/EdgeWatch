@@ -901,6 +901,24 @@ func TestManagedSchedulerRejectsInvalidDesiredSetWithoutUnscheduling(t *testing.
 	if got := a.entries[otherRecord.ID]; got != otherEntry {
 		t.Fatalf("failed reconciliation disturbed a healthy entry from %d to %d", otherEntry, got)
 	}
+	// robfig/cron accepts calendar expressions such as 30 February but its
+	// schedule returns the zero time because no occurrence can ever exist.
+	// Keep the last-known-good entry and report the persisted job as invalid.
+	impossible := job
+	impossible.Schedule = "0 0 30 2 *"
+	rawImpossible, err := json.Marshal(impossible)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE jobs SET definition_json=? WHERE id=?`, rawImpossible, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.reconcileSchedules(ctx, false); err == nil || !strings.Contains(err.Error(), "schedule never fires") {
+		t.Fatalf("never-firing schedule was accepted: %v", err)
+	}
+	if got := a.entries[record.ID]; got != entry {
+		t.Fatalf("never-firing schedule changed the active entry from %d to %d", entry, got)
+	}
 }
 
 func TestManagedScanPublishesLifecycleEvents(t *testing.T) {

@@ -122,7 +122,11 @@ func parseNextRun(parser cron.Parser, schedule, timezone string, now time.Time) 
 	if err != nil {
 		return time.Time{}, errors.New("invalid schedule: " + err.Error())
 	}
-	return parsed.Next(now.In(location)).UTC(), nil
+	next := parsed.Next(now.In(location))
+	if next.IsZero() {
+		return time.Time{}, errors.New("schedule never fires")
+	}
+	return next.UTC(), nil
 }
 
 // shiftCronMinute returns a safe five-field cron expression when its minute

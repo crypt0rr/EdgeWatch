@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"time"
@@ -60,6 +61,24 @@ type activeRun struct {
 	mu     sync.RWMutex
 	scan   model.ActiveScan
 	cancel context.CancelFunc
+}
+
+type cronSlogLogger struct{ logger *slog.Logger }
+
+func (l cronSlogLogger) Info(msg string, keysAndValues ...interface{}) {
+	if l.logger != nil {
+		l.logger.Info(msg, keysAndValues...)
+	}
+}
+
+func (l cronSlogLogger) Error(err error, msg string, keysAndValues ...interface{}) {
+	if l.logger == nil {
+		return
+	}
+	args := make([]any, 0, len(keysAndValues)+2)
+	args = append(args, "error", err)
+	args = append(args, keysAndValues...)
+	l.logger.Error(msg, args...)
 }
 
 // ErrShuttingDown is returned when a new asynchronous managed scan cannot be
@@ -280,6 +299,19 @@ func (a *App) StopRun() {
 	a.wg.Wait()
 }
 
+// recoverBackgroundPanic keeps a defect in one daemon-owned goroutine from
+// taking down the scanner and web console together. The full stack is retained
+// in structured logs so recovery is observable and actionable.
+func (a *App) recoverBackgroundPanic(name string) {
+	if recovered := recover(); recovered != nil {
+		logger := a.Logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Error("background goroutine panic recovered", "goroutine", name, "panic", recovered, "stack", string(debug.Stack()))
+	}
+}
+
 // StartManagedRun accepts a web-triggered managed scan and tracks it in the
 // same wait group as scheduled work. The callback runs after the scan has
 // reached a terminal state (or could not be started).
@@ -301,6 +333,7 @@ func (a *App) StartManagedRun(id string, done func(model.Scan, []model.Event, er
 	a.runMu.Unlock()
 	go func() {
 		defer a.wg.Done()
+		defer a.recoverBackgroundPanic("managed-scan")
 		latest, err := a.Store.GetJob(ctx, id)
 		if err != nil {
 			if done != nil {
@@ -730,7 +763,8 @@ func (a *App) Daemon(ctx context.Context) error {
 		_ = a.Store.ReleaseLease(releaseCtx, owner)
 	}()
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-	c := cron.New(cron.WithParser(parser))
+	cronLogger := cronSlogLogger{logger: a.Logger}
+	c := cron.New(cron.WithParser(parser), cron.WithLogger(cronLogger), cron.WithChain(cron.Recover(cronLogger)))
 	a.scheduleMu.Lock()
 	a.cron = c
 	a.scheduleMu.Unlock()
@@ -998,6 +1032,7 @@ func (a *App) startTracked(fn func()) bool {
 	a.runMu.Unlock()
 	go func() {
 		defer a.wg.Done()
+		defer a.recoverBackgroundPanic("scheduled-run")
 		fn()
 	}()
 	return true
@@ -1167,9 +1202,11 @@ func (a *App) startDeliveryWorker(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		defer a.recoverBackgroundPanic("notification-delivery-worker")
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		drain := func() {
+			defer a.recoverBackgroundPanic("notification-delivery")
 			passCtx, cancel := context.WithTimeout(ctx, 70*time.Second)
 			defer cancel()
 			if err := a.Notifier.Drain(passCtx); err != nil && !errors.Is(err, context.Canceled) {

@@ -132,7 +132,9 @@ func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	testRequest := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/"+destination.ID+"/test", nil)
-	testRequest.RemoteAddr = "127.0.0.1:4002"
+	// Notification-test throttling follows the resolved client address, not
+	// the ephemeral source port. Use a distinct client for the successful call.
+	testRequest.RemoteAddr = "127.0.0.2:4002"
 	recorder = httptest.NewRecorder()
 	server.notificationDestinationRoute(recorder, testRequest, admin, destination.ID+"/test")
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"sent":1`) || calls.Load() != 1 {

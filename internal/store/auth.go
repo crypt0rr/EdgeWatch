@@ -23,6 +23,7 @@ type AuditEntry struct {
 	Detail        string
 	ActorUserID   string
 	ActorUsername string
+	SourceIP      string
 }
 
 type Admin struct {
@@ -52,6 +53,9 @@ type Session struct {
 	LastSeenAt  time.Time
 	ExpiresAt   time.Time
 	CSRFToken   string
+	// SourceIP is populated by the HTTP authentication layer after resolving
+	// a trusted proxy chain. It is not persisted in the session row.
+	SourceIP string
 }
 
 type SetupToken struct {
@@ -546,7 +550,7 @@ func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry Audit
 	if strings.TrimSpace(entry.Action) == "" {
 		return nil
 	}
-	if _, err := execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,created_at) VALUES(?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, now.UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,created_at) VALUES(?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, now.UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
 	}
 	return nil

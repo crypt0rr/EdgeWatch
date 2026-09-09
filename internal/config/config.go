@@ -404,12 +404,19 @@ func applyDefaults(c *Config) {
 		if j.Change.Confirmations == 0 {
 			j.Change.Confirmations = 1
 		}
-		if j.TCP != nil && j.TCP.Mode == "" {
-			j.TCP.Mode = "syn"
-		}
 		if j.TCP != nil {
 			if j.TCP.Engine == "" {
 				j.TCP.Engine = "nmap"
+			}
+			if j.TCP.Mode == "" {
+				// Naabu discovery and its Nmap confirmation share the
+				// least-privilege connect default. Nmap-only jobs retain the
+				// historical SYN default. Explicit modes are never changed.
+				if j.TCP.Engine == EngineNaabuNmap {
+					j.TCP.Mode = "connect"
+				} else {
+					j.TCP.Mode = "syn"
+				}
 			}
 			if j.TCP.Engine == "naabu_nmap" {
 				// Naabu's discovery scope is deliberately not user-tunable. Keep

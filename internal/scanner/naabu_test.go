@@ -34,6 +34,20 @@ func TestNaabuArgsUseFixedFullRangeAndDiscoveryPolicy(t *testing.T) {
 	}
 }
 
+func TestNaabuConfirmationUsesResolvedConnectMode(t *testing.T) {
+	job := config.NormalizeJob(config.Job{TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Naabu: &config.NaabuOptions{ScanType: "connect"}}})
+	if job.TCP == nil {
+		t.Fatal("missing TCP configuration")
+	}
+	args := nmapEnrichmentArgs(4, "tcp", *job.TCP, "balanced", true, []string{"192.0.2.1"})
+	if !slices.Contains(args, "-sT") || slices.Contains(args, "-sS") {
+		t.Fatalf("Naabu confirmation did not use connect mode: %v", args)
+	}
+	if naabu := naabuArgs(*job.TCP.Naabu, "/tmp/targets", true); !slices.Contains(naabu, "c") {
+		t.Fatalf("Naabu discovery did not use connect scan type: %v", naabu)
+	}
+}
+
 func TestNaabuProfilePlaceholdersRenderManagedArguments(t *testing.T) {
 	options := config.NaabuOptions{ScanType: "connect", Rate: 1000, Workers: 25, Retries: 3, TimeoutMS: 1000, WarmUpSeconds: 2, Verify: true}
 	template := []string{config.PlaceholderTargetsFile, config.PlaceholderPorts, config.PlaceholderStructuredOutput, config.PlaceholderHostDiscovery, "-verbose"}

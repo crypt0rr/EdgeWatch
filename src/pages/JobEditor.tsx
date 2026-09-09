@@ -30,7 +30,7 @@ const blank: JobForm = {
 
 const defaultTCP = (): Protocol => ({
   ports: '1-65535',
-  mode: 'syn',
+  mode: 'connect',
   service_detection: false,
   engine: 'naabu_nmap',
   profile_id: BUILTIN_NAABU_PROFILE_ID,

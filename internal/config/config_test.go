@@ -201,6 +201,21 @@ func TestSecurityHashIncludesAssumeAlive(t *testing.T) {
 	}
 }
 
+func TestNaabuPipelineDefaultsConfirmationToConnect(t *testing.T) {
+	job := NormalizeJob(Job{TCP: &Protocol{Engine: EngineNaabuNmap, Naabu: &NaabuOptions{ScanType: "connect"}}})
+	if job.TCP == nil || job.TCP.Mode != "connect" {
+		t.Fatalf("Naabu confirmation mode = %#v, want connect", job.TCP)
+	}
+	explicit := NormalizeJob(Job{TCP: &Protocol{Engine: EngineNaabuNmap, Mode: "syn", Naabu: &NaabuOptions{ScanType: "connect"}}})
+	if explicit.TCP == nil || explicit.TCP.Mode != "syn" {
+		t.Fatalf("explicit Naabu confirmation mode changed = %#v", explicit.TCP)
+	}
+	nmap := NormalizeJob(Job{TCP: &Protocol{Engine: EngineNmap, Naabu: nil}})
+	if nmap.TCP == nil || nmap.TCP.Mode != "syn" {
+		t.Fatalf("Nmap-only default mode = %#v, want syn", nmap.TCP)
+	}
+}
+
 func TestResumeWindowDefaultsAndExecutionHash(t *testing.T) {
 	job := NormalizeJob(Job{Name: "resume", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &Protocol{Ports: "1", Mode: "syn"}})
 	if job.ResumeWindowValue() != 8*24*time.Hour {

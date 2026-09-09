@@ -163,6 +163,68 @@ func TestScanHostIndexSupportsFilteringPaginationAndLatestRows(t *testing.T) {
 	}
 }
 
+func TestLatestScanHostProjectionPreservesSuccessfulOrdering(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	host := func(address, state string) model.HostObservation {
+		return model.HostObservation{Address: address, AddressFamily: "IPv4", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: state}}}}}
+	}
+	scans := []model.Scan{
+		{ID: "projection-new", JobID: "job", Job: "edge", StartedAt: time.Unix(200, 0).UTC(), FinishedAt: time.Unix(200, 0).UTC(), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{host("198.51.100.7", "open")}}},
+		{ID: "projection-old", JobID: "job", Job: "edge", StartedAt: time.Unix(100, 0).UTC(), FinishedAt: time.Unix(100, 0).UTC(), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{host("198.51.100.7", "closed")}}},
+		{ID: "projection-failed", JobID: "job", Job: "edge", StartedAt: time.Unix(300, 0).UTC(), FinishedAt: time.Unix(300, 0).UTC(), Status: "failed", Snapshot: model.Snapshot{Hosts: []model.HostObservation{host("198.51.100.7", "closed")}}},
+	}
+	for _, scan := range scans {
+		if err := s.SaveScan(ctx, scan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := s.ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
+	if err != nil || page.Total != 1 || len(page.Items) != 1 {
+		t.Fatalf("projection page = %#v, %v", page, err)
+	}
+	if got := page.Items[0].ScanID; got != "projection-new" {
+		t.Fatalf("projection selected %q, want newest successful scan", got)
+	}
+	if got := page.Items[0].Host.Protocols[0].Ports[0].State; got != "open" {
+		t.Fatalf("projection retained state %q, want open", got)
+	}
+}
+
+func TestLatestScanHostProjectionRebuildsAfterSourceRemoval(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	makeScan := func(id string, finished time.Time, state string) model.Scan {
+		return model.Scan{ID: id, JobID: "job", Job: "edge", StartedAt: finished, FinishedAt: finished, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.8", AddressFamily: "IPv4", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: state}}}}}}}}
+	}
+	if err := s.SaveScan(ctx, makeScan("projection-retained", time.Unix(100, 0).UTC(), "closed")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveScan(ctx, makeScan("projection-removed", time.Unix(200, 0).UTC(), "open")); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM scans WHERE id=?`, "projection-removed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := rebuildLatestScanHostsTx(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	page, err := s.ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
+	if err != nil || page.Total != 1 || len(page.Items) != 1 {
+		t.Fatalf("rebuilt projection page = %#v, %v", page, err)
+	}
+	if got := page.Items[0].ScanID; got != "projection-retained" {
+		t.Fatalf("rebuilt projection selected %q, want retained source", got)
+	}
+}
+
 func TestOpenRejectsSQLiteSidecarSymlink(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "symlink.db")

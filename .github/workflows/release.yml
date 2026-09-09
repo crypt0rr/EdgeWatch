@@ -208,7 +208,14 @@ jobs:
             tar -xzf "$archive" -C "$extract_dir"
             binary="$(find "$extract_dir" -type f -name edgewatch -print -quit)"
             test -n "$binary"
-            test "$("$binary" version)" = "$expected"
+            # The release contains both AMD64 and ARM64 archives, while the
+            # smoke runner is AMD64. Execute the native archive and inspect
+            # the embedded version string for the non-native binary.
+            if file -b "$binary" | grep -q 'x86-64'; then
+              test "$("$binary" version)" = "$expected"
+            else
+              strings "$binary" | grep -Fq "$expected"
+            fi
           done
       - name: Check out source for runtime verification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

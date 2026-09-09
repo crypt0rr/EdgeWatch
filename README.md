@@ -98,6 +98,10 @@ the replacement is issued.
 - Notification URLs can be supplied with `notifications.urls`,
   `notifications.urls_file`, or an environment value such as
   `${SHOUTRRR_URL}`.
+- The Notifications page shows per-destination pending and retrying counts,
+  last successful delivery, and redacted terminal-failure status. A delivery
+  that reaches the retry limit is recorded as a system event; provider
+  responses and destination credentials are never retained.
 - Create all monitoring jobs in the web console. The YAML `jobs` section is
   not used for scheduling.
 
@@ -295,7 +299,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 18), but it is forward-only: an older binary refuses a newer schema.
+version 19), but it is forward-only: an older binary refuses a newer schema.
 To roll back, stop the new service, restore the entire pre-upgrade `./data`
 directory and deployment configuration, then start the previous image. Do not
 point an older image at the upgraded database. The previous named Docker

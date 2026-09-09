@@ -25,6 +25,11 @@ configured. Protect that key as a credential, keep it mode `0600`, and include
 it in backups of the corresponding SQLite database. Do not report notification
 URLs or key material in issues, logs, screenshots, or audit records.
 
+Notification delivery health is exposed only as named-destination counts and
+timestamps. Terminal drops store a stable destination/error fingerprint and a
+bounded error code; raw provider responses, URLs, and credentials are not
+included in API responses, logs, or system events.
+
 Optional TOTP seeds are encrypted independently with AES-256-GCM. The default
 authentication key is `./data/auth.key`; set `web.auth_key_file` for a separate
 mode-`0600` mount. Back up that key with the database. If it is unavailable,
@@ -35,7 +40,7 @@ If the key is lost or replaced, web-managed destinations become unavailable;
 they cannot be recovered from the database alone. Restore the original key and
 database together, or delete and recreate the affected destinations after
 confirming that the old credentials are revoked. A database upgraded to schema
-18 must not be opened by an older EdgeWatch binary; downgrade by restoring the
+19 must not be opened by an older EdgeWatch binary; downgrade by restoring the
 complete pre-upgrade `./data` backup before starting the old version.
 
 By default, EdgeWatch checks the latest stable release on GitHub at startup and

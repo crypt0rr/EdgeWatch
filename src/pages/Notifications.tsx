@@ -204,7 +204,23 @@ function DestinationRow({ destination, editing, busy, canManage, onEdit, onCance
   return <div className={destination.locked ? 'notification-row locked' : 'notification-row'}>
     <div className="notification-row-main"><span className={deployment ? 'notification-icon deployment' : 'notification-icon'}>{deployment ? <Plug size={16} /> : <Send size={16} />}</span><div className="notification-meta"><strong>{destination.name}</strong><span>{destination.provider || 'unknown provider'} · {deployment ? 'deployment configuration' : `revision ${destination.revision}`}</span></div><div className="notification-state">{destination.locked ? <span className="pill amber"><LockKeyhole size={11} /> Locked</span> : deployment ? <span className="pill gray">Read-only</span> : <span className={destination.enabled ? 'pill green' : 'pill gray'}>{destination.enabled ? 'Enabled' : 'Paused'}</span>}</div></div>
     {destination.locked && <div className="notification-lock"><AlertTriangle size={14} /> Credentials cannot be decrypted ({destination.error_code ?? 'key unavailable'}). Restore the key before editing or enabling it; if it cannot be recovered, remove and recreate this destination.</div>}
+    <DeliveryHealth destination={destination} />
     {!deployment && editing && <form className="notification-edit" onSubmit={onSave}><div className="two-fields"><label>Name<input value={editing.name} onChange={event => onChange({ ...editing, name: event.target.value })} maxLength={100} required /></label><label>Replace URL <span className="helper">(optional)</span><input type="url" value={editing.url} onChange={event => onChange({ ...editing, url: event.target.value })} placeholder="Leave blank to keep the encrypted URL" autoComplete="off" spellCheck={false} /></label></div><label className="switch-row notification-check"><input type="checkbox" checked={editing.enabled} onChange={event => onChange({ ...editing, enabled: event.target.checked })} /><span><strong>{editing.enabled ? 'Enabled' : 'Paused'}</strong><small>Saving creates a new destination revision.</small></span></label><div className="notification-edit-actions"><button className="button primary" type="submit" disabled={busy === destination.id}>Save changes</button><button className="button ghost" type="button" onClick={onCancel}>Cancel</button></div></form>}
     {canManage && !deployment && !editing && <div className="notification-actions"><button className="button ghost" type="button" onClick={() => onTest(destination)} disabled={destination.locked || busy === `test:${destination.id}`}><Send size={14} />{busy === `test:${destination.id}` ? 'Sending…' : 'Test'}</button><button className="button ghost" type="button" onClick={() => onToggle(destination)} disabled={destination.locked || busy === destination.id}>{destination.enabled ? 'Pause' : 'Enable'}</button><button className="button ghost" type="button" onClick={() => onEdit(destination)} disabled={destination.locked || busy === destination.id}><Pencil size={14} />Edit</button><button className="button ghost danger-text" type="button" onClick={() => onDelete(destination)} disabled={busy === destination.id}><Trash2 size={14} />Remove</button></div>}
   </div>
+}
+
+function DeliveryHealth({ destination }: { destination: NotificationDestination }) {
+  const pending = destination.pending ?? 0
+  const retrying = destination.retrying ?? 0
+  const terminal = destination.terminal_failures ?? 0
+  const lastSuccess = destination.last_success_at ? formatDeliveryTime(destination.last_success_at) : ''
+  const lastFailure = destination.last_failure_at ? formatDeliveryTime(destination.last_failure_at) : ''
+  if (!pending && !retrying && !terminal && !lastSuccess && !lastFailure) return null
+  return <div className="notification-health" role="status"><span className="notification-health-label">Delivery health</span>{pending > 0 && <span className="pill blue">{pending} pending</span>}{retrying > 0 && <span className="pill amber">{retrying} retrying</span>}{terminal > 0 && <span className="pill red">{terminal} terminal failure{terminal === 1 ? '' : 's'}</span>}{lastSuccess && <span className="notification-health-detail">Last success {lastSuccess}</span>}{lastFailure && !terminal && <span className="notification-health-detail">Last failure {lastFailure}{destination.last_error_code ? ` · ${destination.last_error_code}` : ''}</span>}</div>
+}
+
+function formatDeliveryTime(value: string) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? 'unknown time' : date.toLocaleString()
 }

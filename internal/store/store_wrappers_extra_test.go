@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -186,5 +187,69 @@ func TestDeliveryRetryPolicyIsDurableAndBounded(t *testing.T) {
 	}
 	if due, err := s.ClaimDueDeliveries(ctx, 1, "after-terminal"); err != nil || len(due) != 0 {
 		t.Fatalf("terminal delivery was claimable again: %#v, %v", due, err)
+	}
+}
+
+func TestDeliveryHealthTracksRedactedOutcomesAndTerminalEvent(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	secret := "provider password=super-secret"
+	if err := s.QueueEvent(ctx, "destination", model.Event{Type: "health", Job: "job", Message: "first", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	health, err := s.ListDeliveryHealth(ctx)
+	if err != nil || health["destination"].Pending != 1 {
+		t.Fatalf("pending health = %#v, %v", health, err)
+	}
+
+	for attempt := 1; attempt <= deliveryMaxAttempts; attempt++ {
+		if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE destination=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), "destination"); err != nil {
+			t.Fatal(err)
+		}
+		due, err := s.ClaimDueDeliveries(ctx, 1, fmt.Sprintf("health-owner-%d", attempt))
+		if err != nil || len(due) != 1 {
+			t.Fatalf("claim %d = %#v, %v", attempt, due, err)
+		}
+		if err := s.DeliveryResult(ctx, due[0].ID, errors.New(secret)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	health, err = s.ListDeliveryHealth(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := health["destination"]
+	if item.Pending != 0 || item.Retrying != 0 || item.TerminalFailures != 1 || item.LastErrorCode != "delivery_failed" || item.LastErrorFingerprint == "" {
+		t.Fatalf("terminal health = %#v", item)
+	}
+	var storedError string
+	if err := s.DB.QueryRowContext(ctx, `SELECT last_error FROM outbox WHERE destination=?`, "destination").Scan(&storedError); err != nil {
+		t.Fatal(err)
+	}
+	if storedError == secret || strings.Contains(storedError, "super-secret") {
+		t.Fatalf("provider error leaked into outbox: %q", storedError)
+	}
+	var payload []byte
+	if err := s.DB.QueryRowContext(ctx, `SELECT payload_json FROM events WHERE type=?`, "notification-delivery-terminal").Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), secret) || !strings.Contains(string(payload), "delivery_failed") {
+		t.Fatalf("terminal event was not redacted: %s", payload)
+	}
+
+	if err := s.QueueEvent(ctx, "destination", model.Event{Type: "health", Job: "job", Message: "second", CreatedAt: time.Now().UTC().Add(time.Second)}); err != nil {
+		t.Fatal(err)
+	}
+	due, err := s.ClaimDueDeliveries(ctx, 1, "health-success")
+	if err != nil || len(due) != 1 {
+		t.Fatalf("success claim = %#v, %v", due, err)
+	}
+	if err := s.DeliveryResult(ctx, due[0].ID, nil); err != nil {
+		t.Fatal(err)
+	}
+	health, err = s.ListDeliveryHealth(ctx)
+	if err != nil || health["destination"].LastSuccessAt.IsZero() {
+		t.Fatalf("success health = %#v, %v", health, err)
 	}
 }

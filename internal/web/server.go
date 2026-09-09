@@ -476,7 +476,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	if reloadErr := s.App.Notifier.Reload(r.Context()); reloadErr != nil {
 		s.Log.Warn("notification state refresh failed", "error", reloadErr)
 	}
-	notificationStatus := s.App.Notifier.Status()
+	notificationStatus := s.App.Notifier.StatusContext(r.Context())
 	status := map[string]any{
 		"configured":                true,
 		"username":                  user.Username,
@@ -2257,7 +2257,7 @@ func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"destinations": s.App.Notifier.Destinations(), "status": s.App.Notifier.Status()})
+	writeJSON(w, http.StatusOK, map[string]any{"destinations": s.App.Notifier.DestinationsContext(r.Context()), "status": s.App.Notifier.StatusContext(r.Context())})
 }
 
 func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session) {

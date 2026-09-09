@@ -12,6 +12,14 @@ export type NotificationDestination = {
   created_at?: string
   updated_at?: string
   error_code?: string
+  pending?: number
+  retrying?: number
+  terminal_failures?: number
+  last_success_at?: string
+  last_failure_at?: string
+  last_terminal_at?: string
+  last_error_code?: string
+  last_error_fingerprint?: string
 }
 export type NotificationStatus = {
   deployment: number
@@ -19,6 +27,9 @@ export type NotificationStatus = {
   active: number
   locked: number
   key_state: string
+  delivery_pending?: number
+  delivery_retrying?: number
+  delivery_terminal_failures?: number
 }
 export type ApplicationUpdateStatus = {
   enabled: boolean

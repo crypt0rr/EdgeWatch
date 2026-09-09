@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 21
+const schemaVersion = 22
 
 // sqlitePragmaConnector applies connection-scoped SQLite settings whenever
 // database/sql opens a physical connection. database/sql can discard a
@@ -638,6 +638,8 @@ func migrate(db *sql.DB) error {
 			// projection intentionally has no foreign key to scans: when retention
 			// removes a source scan it is rebuilt from the remaining history, which
 			// preserves the legacy "latest retained successful observation" semantics.
+			// Source observations retain a foreign key so pruning a scan cannot leak
+			// its detailed host rows.
 			// A few supported recovery fixtures carry a schema marker without the
 			// indexed host table; ensure the source table exists before backfilling.
 			`CREATE TABLE IF NOT EXISTS scan_hosts (
@@ -655,9 +657,10 @@ func migrate(db *sql.DB) error {
  udp_present INTEGER NOT NULL DEFAULT 0,
  tcp_open_ports INTEGER NOT NULL DEFAULT 0,
  tcp_open_filtered_ports INTEGER NOT NULL DEFAULT 0,
- udp_open_ports INTEGER NOT NULL DEFAULT 0,
- udp_open_filtered_ports INTEGER NOT NULL DEFAULT 0,
- PRIMARY KEY(scan_id, address)
+			udp_open_ports INTEGER NOT NULL DEFAULT 0,
+			udp_open_filtered_ports INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY(scan_id, address),
+			FOREIGN KEY(scan_id) REFERENCES scans(id) ON DELETE CASCADE
 );`,
 			`CREATE TABLE IF NOT EXISTS latest_scan_hosts (
  address TEXT PRIMARY KEY,
@@ -752,12 +755,6 @@ END;`,
 			`CREATE TRIGGER IF NOT EXISTS latest_scan_hosts_search_ad AFTER DELETE ON latest_scan_hosts BEGIN
  DELETE FROM latest_host_search WHERE rowid IN (SELECT rowid FROM latest_host_search WHERE address=OLD.address);
 END;`,
-			`INSERT INTO scan_host_search(scan_id,address,content)
-SELECT scan_id,address,lower(coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,'') || ' ' || coalesce(host_json,''))
-FROM scan_hosts;`,
-			`INSERT INTO latest_host_search(address,content)
-SELECT address,lower(coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,'') || ' ' || coalesce(host_json,''))
-FROM latest_scan_hosts;`,
 		},
 		19: {
 			// Keep durable delivery outcomes by stable destination identity. The
@@ -784,8 +781,6 @@ FROM latest_scan_hosts;`,
 			// over service metadata, state summaries, and command fingerprints.
 			"ALTER TABLE scan_hosts ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
 			"ALTER TABLE latest_scan_hosts ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
-			`UPDATE scan_hosts SET search_text=lower(coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,''))`,
-			`UPDATE latest_scan_hosts SET search_text=lower(coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,''))`,
 			"DROP TRIGGER IF EXISTS scan_hosts_search_ai",
 			"DROP TRIGGER IF EXISTS scan_hosts_search_au",
 			"DROP TRIGGER IF EXISTS scan_hosts_search_ad",
@@ -816,14 +811,6 @@ END;`,
 			`CREATE TRIGGER latest_scan_hosts_search_ad AFTER DELETE ON latest_scan_hosts BEGIN
  DELETE FROM latest_host_search WHERE rowid IN (SELECT rowid FROM latest_host_search WHERE address=OLD.address);
 END;`,
-			"DELETE FROM scan_host_search",
-			`INSERT INTO scan_host_search(scan_id,address,content)
-SELECT scan_id,address,lower(coalesce(search_text,'') || ' ' || coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,''))
-FROM scan_hosts;`,
-			"DELETE FROM latest_host_search",
-			`INSERT INTO latest_host_search(address,content)
-SELECT address,lower(coalesce(search_text,'') || ' ' || coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,''))
-FROM latest_scan_hosts;`,
 		},
 		21: {
 			// Managed history queries are keyed by the stable job identity rather
@@ -835,6 +822,23 @@ FROM latest_scan_hosts;`,
 			"CREATE INDEX IF NOT EXISTS scans_job_id_revision ON scans(job_id, job_revision)",
 			"CREATE INDEX IF NOT EXISTS scans_finished_at ON scans(finished_at DESC)",
 			"CREATE INDEX IF NOT EXISTS scans_cycle_id ON scans(cycle_id)",
+		},
+		22: {
+			// Large FTS rebuilds are resumable and run in bounded transactions. The
+			// state rows are initialized by backfillHostSearchIndexes after the
+			// migration commits, so a restart can continue from the last rowid.
+			// The additive column guards also make supported recovery fixtures with a
+			// schema marker but an older host-table shape safe to upgrade.
+			"ALTER TABLE scan_hosts ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE latest_scan_hosts ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
+			`CREATE TABLE IF NOT EXISTS fts_backfill_state (
+ table_name TEXT PRIMARY KEY,
+ last_rowid INTEGER NOT NULL DEFAULT 0,
+ initialized INTEGER NOT NULL DEFAULT 0,
+ complete INTEGER NOT NULL DEFAULT 0,
+ updated_at TEXT NOT NULL
+);`,
+			"CREATE INDEX IF NOT EXISTS fts_backfill_state_complete ON fts_backfill_state(complete,table_name)",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
@@ -852,15 +856,6 @@ FROM latest_scan_hosts;`,
 				return err
 			}
 		}
-		if next == 20 {
-			// Rebuild the bounded search document from legacy host evidence after
-			// the new triggers are installed. This keeps existing service and
-			// hostname searches useful without retaining host_json in the FTS
-			// projection; new rows use the same helper during SaveScan.
-			if err := backfillHostSearchTextTx(tx); err != nil {
-				return err
-			}
-		}
 		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", next)); err != nil {
 			return err
 		}
@@ -868,6 +863,12 @@ FROM latest_scan_hosts;`,
 			return err
 		}
 		version = next
+	}
+	if err := repairScanHostsForeignKey(db); err != nil {
+		return err
+	}
+	if err := backfillHostSearchIndexes(db); err != nil {
+		return err
 	}
 	return ensureBuiltinScannerProfiles(db)
 }

@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
@@ -57,6 +58,30 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete} {
 		if !isMutation(method) {
 			t.Errorf("%s was not classified as mutation", method)
+		}
+	}
+	permanent := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/id?permanent=true", nil)
+	if got := requestPermission("/jobs/id", permanent); got != auth.PermissionJobsDelete {
+		t.Fatalf("permanent job delete permission = %q, want %q", got, auth.PermissionJobsDelete)
+	}
+	archive := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/id", nil)
+	if got := requestPermission("/jobs/id", archive); got != auth.PermissionJobsWrite {
+		t.Fatalf("job archive permission = %q, want %q", got, auth.PermissionJobsWrite)
+	}
+	for _, test := range []struct {
+		role       string
+		permission string
+		allowed    bool
+	}{
+		{store.RoleAdministrator, auth.PermissionJobsDelete, true},
+		{store.RoleOperator, auth.PermissionJobsDelete, false},
+		{store.RoleViewer, auth.PermissionJobsDelete, false},
+		{store.RoleAdministrator, auth.PermissionScannerProfilesManage, true},
+		{store.RoleOperator, auth.PermissionScannerProfilesManage, false},
+		{store.RoleViewer, auth.PermissionScannerProfilesManage, false},
+	} {
+		if got := auth.HasPermission(store.Session{Role: test.role}, test.permission); got != test.allowed {
+			t.Errorf("%s permission %s = %t, want %t", test.role, test.permission, got, test.allowed)
 		}
 	}
 }

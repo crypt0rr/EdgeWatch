@@ -9,7 +9,7 @@ import (
 
 func TestPermissionsForRoleIsDeterministicAndComplete(t *testing.T) {
 	admin := PermissionsForRole(store.RoleAdministrator)
-	if len(admin) != 19 || !sortStrings(admin) {
+	if len(admin) != 20 || !sortStrings(admin) {
 		t.Fatalf("administrator permissions = %#v", admin)
 	}
 	operator := PermissionsForRole(store.RoleOperator)
@@ -45,6 +45,38 @@ func TestHasPermissionHandlesLegacyAndRoleScopedSessions(t *testing.T) {
 	viewer := store.Session{Role: store.RoleViewer}
 	if !HasPermission(viewer, PermissionBaselinesRead) || HasPermission(viewer, PermissionOverviewRead) || HasPermission(viewer, PermissionHostsRead) || HasPermission(viewer, PermissionJobsWrite) {
 		t.Fatal("viewer permission boundary is incorrect")
+	}
+}
+
+func TestPermissionListsAreTheSingleAuthorizationSource(t *testing.T) {
+	permissions := map[string][]string{
+		store.RoleAdministrator: PermissionsForRole(store.RoleAdministrator),
+		store.RoleOperator:      PermissionsForRole(store.RoleOperator),
+		store.RoleViewer:        PermissionsForRole(store.RoleViewer),
+	}
+	for role, values := range permissions {
+		session := store.Session{Role: role}
+		for _, permission := range values {
+			if !HasPermission(session, permission) {
+				t.Fatalf("permission list for %s contains %q but HasPermission rejected it", role, permission)
+			}
+		}
+		for _, permission := range []string{PermissionJobsDelete, PermissionUsersManage, PermissionScannerProfilesManage} {
+			listed := false
+			for _, value := range values {
+				if value == permission {
+					listed = true
+					break
+				}
+			}
+			if listed != HasPermission(session, permission) {
+				t.Fatalf("permission list and HasPermission disagree for %s/%s", role, permission)
+			}
+		}
+	}
+	legacy := store.Session{}
+	if !HasPermission(legacy, PermissionJobsDelete) || !reflect.DeepEqual(PermissionsForRole(""), PermissionsForRole(store.RoleAdministrator)) {
+		t.Fatal("legacy administrator permission compatibility drifted")
 	}
 }
 

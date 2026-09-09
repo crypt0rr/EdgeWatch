@@ -280,18 +280,10 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 		return err
 	}
 	// Keep the last enabled administrator invariant inside the same write
-	// transaction as the role/state update. The HTTP layer performs an early
-	// check for a friendly response, but this guard also closes the race where
-	// two administrators attempt to demote or disable the final account at the
-	// same time.
-	if currentRole == RoleAdministrator && currentEnabled != 0 && (u.Role != RoleAdministrator || !u.Enabled) {
-		var otherAdministrators int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=? AND enabled=1 AND id<>?`, RoleAdministrator, u.ID).Scan(&otherAdministrators); err != nil {
-			return err
-		}
-		if otherAdministrators == 0 {
-			return ErrLastAdministrator
-		}
+	// transaction as the role/state update. This is the authoritative guard;
+	// callers should validate request shape, then map ErrLastAdministrator.
+	if err := ensureLastAdministratorTx(ctx, tx, u.ID, currentRole, currentEnabled != 0, u.Role, u.Enabled); err != nil {
+		return err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=? WHERE id=?`, u.Username, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID)
 	if err != nil {
@@ -366,18 +358,10 @@ func (s *Store) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []st
 	} else if err != nil {
 		return err
 	}
-	// TOTP and host-recovery writes must enforce the same last-administrator
-	// invariant as profile updates. Keeping this check in the transaction
-	// closes the race where two security mutations demote or disable the final
-	// enabled administrator concurrently.
-	if currentRole == RoleAdministrator && currentEnabled != 0 && (u.Role != RoleAdministrator || !u.Enabled) {
-		var otherAdministrators int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=? AND enabled=1 AND id<>?`, RoleAdministrator, u.ID).Scan(&otherAdministrators); err != nil {
-			return err
-		}
-		if otherAdministrators == 0 {
-			return ErrLastAdministrator
-		}
+	// TOTP and host-recovery writes use the same transactional invariant as
+	// profile updates. Keeping one guard prevents the two paths from drifting.
+	if err := ensureLastAdministratorTx(ctx, tx, u.ID, currentRole, currentEnabled != 0, u.Role, u.Enabled); err != nil {
+		return err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE users SET display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=? WHERE id=?`, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID)
 	if err != nil {
@@ -407,6 +391,24 @@ func (s *Store) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []st
 		}
 	}
 	return tx.Commit()
+}
+
+// ensureLastAdministratorTx is the single persistence boundary for the
+// enabled-administrator invariant. It must be called while the caller owns a
+// write transaction so concurrent role/enable changes cannot both observe a
+// final administrator and then remove it.
+func ensureLastAdministratorTx(ctx context.Context, tx *sql.Tx, userID, currentRole string, currentEnabled bool, nextRole string, nextEnabled bool) error {
+	if currentRole != RoleAdministrator || !currentEnabled || (nextRole == RoleAdministrator && nextEnabled) {
+		return nil
+	}
+	var otherAdministrators int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=? AND enabled=1 AND id<>?`, RoleAdministrator, userID).Scan(&otherAdministrators); err != nil {
+		return err
+	}
+	if otherAdministrators == 0 {
+		return ErrLastAdministrator
+	}
+	return nil
 }
 
 func (s *Store) userTOTPForSave(u User) (string, error) {

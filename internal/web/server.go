@@ -215,7 +215,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "csrf", "missing or invalid CSRF token", nil)
 		return
 	}
-	if permission := requiredPermission(path, r.Method); permission != "" && !auth.HasPermission(session, permission) {
+	if permission := requestPermission(path, r); permission != "" && !auth.HasPermission(session, permission) {
 		writeError(w, http.StatusForbidden, "forbidden", "your account is not allowed to perform this action", map[string]string{"permission": permission})
 		return
 	}
@@ -413,6 +413,19 @@ func requiredPermission(path, method string) string {
 		return auth.PermissionJobsWrite
 	}
 	return ""
+}
+
+// requestPermission applies the route matrix and then handles the one
+// query-controlled action whose authorization differs from the ordinary
+// resource mutation. Keeping this decision next to requiredPermission means
+// handlers do not need their own role checks that can drift from the API
+// boundary.
+func requestPermission(path string, r *http.Request) string {
+	permission := requiredPermission(path, r.Method)
+	if strings.HasPrefix(path, "/jobs/") && r.Method == http.MethodDelete && r.URL.Query().Get("permanent") == "true" {
+		return auth.PermissionJobsDelete
+	}
+	return permission
 }
 
 func isMutation(method string) bool {
@@ -1626,8 +1639,8 @@ func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, session stor
 }
 
 func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
-	if session.Role != store.RoleAdministrator {
-		writeError(w, http.StatusForbidden, "forbidden", "only an administrator can permanently delete a job", nil)
+	if !auth.HasPermission(session, auth.PermissionJobsDelete) {
+		writeError(w, http.StatusForbidden, "forbidden", "only an administrator can permanently delete a job", map[string]string{"permission": auth.PermissionJobsDelete})
 		return
 	}
 	var input struct {

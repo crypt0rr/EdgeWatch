@@ -333,8 +333,8 @@ func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, se
 }
 
 func (s *Server) confirmProfilePassword(w http.ResponseWriter, r *http.Request, session store.Session, password string) bool {
-	if session.Role != store.RoleAdministrator {
-		writeError(w, http.StatusForbidden, "forbidden", "only an administrator can manage scanner profiles", nil)
+	if !auth.HasPermission(session, auth.PermissionScannerProfilesManage) {
+		writeError(w, http.StatusForbidden, "forbidden", "only an administrator can manage scanner profiles", map[string]string{"permission": auth.PermissionScannerProfilesManage})
 		return false
 	}
 	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, password); err != nil {

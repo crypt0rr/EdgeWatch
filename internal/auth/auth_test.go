@@ -382,6 +382,45 @@ func TestLoginAsUserAndPasswordConfirmationAreScoped(t *testing.T) {
 	}
 }
 
+func TestLoginFailuresDoNotLockOutAnotherAccountBehindSameSource(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := NewManager(s)
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := PasswordHash("operator account password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	operator, err := s.CreateUser(ctx, store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "10.0.0.10:443"
+	for i := 0; i < authFailureThreshold; i++ {
+		if _, _, err := m.LoginAs(ctx, request, "admin", "wrong administrator password", "", ""); err == nil {
+			t.Fatal("wrong administrator password was accepted")
+		}
+	}
+	if _, _, err := m.LoginAs(ctx, request, "admin", "administrator password", "", ""); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("locked administrator login error = %v", err)
+	}
+	raw, loggedIn, err := m.LoginAs(ctx, request, operator.Username, "operator account password", "", "")
+	if err != nil || raw == "" || loggedIn.ID != operator.ID {
+		t.Fatalf("operator behind same source was blocked: session=%q user=%#v err=%v", raw, loggedIn, err)
+	}
+}
+
 func TestEnsureSetupTokenHonorsAuthoritativeAdministratorUser(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

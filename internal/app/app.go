@@ -708,6 +708,11 @@ func (a *App) Daemon(ctx context.Context) error {
 	if err := a.Store.AcquireLease(ctx, owner); err != nil {
 		return err
 	}
+	if released, err := a.Store.ReleaseDeliveryClaims(ctx); err != nil {
+		a.Logger.Error("startup notification claim cleanup failed", "error", err)
+	} else if released > 0 {
+		a.Logger.Info("startup notification claims released", "claims", released)
+	}
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -756,6 +761,13 @@ func (a *App) Daemon(ctx context.Context) error {
 		stopped := c.Stop()
 		<-stopped.Done()
 		<-deliveryDone
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if released, err := a.Store.ReleaseDeliveryClaims(releaseCtx); err != nil {
+			a.Logger.Error("shutdown notification claim cleanup failed", "error", err)
+		} else if released > 0 {
+			a.Logger.Info("shutdown notification claims released", "claims", released)
+		}
 	}()
 	a.wakeDelivery()
 	if removed, err := a.Store.DeleteExpiredSessions(ctx, time.Now().UTC()); err != nil {

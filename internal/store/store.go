@@ -3048,6 +3048,18 @@ const (
 // Expired claims can be recovered by a later process, while active claims are
 // invisible to concurrent drains until the owner records a result.
 func (s *Store) ClaimDueDeliveries(ctx context.Context, limit int, owner string) ([]Delivery, error) {
+	return s.claimDueDeliveries(ctx, limit, owner, nil)
+}
+
+// ClaimDueDeliveriesExcluding leases due outbox rows while skipping the
+// supplied destination identities. The notifier uses this for destinations
+// whose credentials are currently unavailable so one locked backlog cannot
+// occupy every delivery slot needed by healthy destinations.
+func (s *Store) ClaimDueDeliveriesExcluding(ctx context.Context, limit int, owner string, excluded []string) ([]Delivery, error) {
+	return s.claimDueDeliveries(ctx, limit, owner, excluded)
+}
+
+func (s *Store) claimDueDeliveries(ctx context.Context, limit int, owner string, excluded []string) ([]Delivery, error) {
 	if limit < 1 {
 		return nil, nil
 	}
@@ -3055,7 +3067,24 @@ func (s *Store) ClaimDueDeliveries(ctx context.Context, limit int, owner string)
 		owner = uuid.NewString()
 	}
 	now := time.Now().UTC()
-	rows, err := s.DB.QueryContext(ctx, `UPDATE outbox SET claim_token=?,claim_until=? WHERE id IN (SELECT id FROM outbox WHERE sent_at IS NULL AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?) ORDER BY id LIMIT ?) RETURNING id,destination,payload_json,attempts,claim_token`, owner, now.Add(deliveryClaimLease).Format(time.RFC3339Nano), deliveryMaxAttempts, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), limit)
+	query := `UPDATE outbox SET claim_token=?,claim_until=? WHERE id IN (SELECT id FROM outbox WHERE sent_at IS NULL AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?)`
+	args := []any{owner, now.Add(deliveryClaimLease).Format(time.RFC3339Nano), deliveryMaxAttempts, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)}
+	if len(excluded) > 0 {
+		placeholders := make([]string, 0, len(excluded))
+		for _, destination := range excluded {
+			if strings.TrimSpace(destination) == "" {
+				continue
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, destination)
+		}
+		if len(placeholders) > 0 {
+			query += " AND destination NOT IN (" + strings.Join(placeholders, ",") + ")"
+		}
+	}
+	query += ` ORDER BY id LIMIT ?) RETURNING id,destination,payload_json,attempts,claim_token`
+	args = append(args, limit)
+	rows, err := s.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -3073,6 +3102,18 @@ func (s *Store) ClaimDueDeliveries(ctx context.Context, limit int, owner string)
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// ReleaseDeliveryClaims clears all active outbox leases. It is used when a
+// daemon starts (or shuts down cleanly) so rows claimed by a previous process
+// do not remain unavailable for the full claim lease. Delivery attempts and
+// next-at timestamps are intentionally preserved; only ownership is reset.
+func (s *Store) ReleaseDeliveryClaims(ctx context.Context) (int64, error) {
+	result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET claim_token='',claim_until='' WHERE sent_at IS NULL AND claim_token<>''`)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 // DeliveryResult records the result for the current claim. It retains the

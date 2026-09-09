@@ -99,7 +99,10 @@ confirmed `open` and `open|filtered` results enter baselines and incidents.
 Naabu discoveries and disagreements remain available as diagnostic host
 evidence. UDP remains Nmap-only. Profiles pin a revision into each job, so
 editing a profile never changes a scheduled job silently; applying a newer
-revision is an explicit job edit and may require rebaselining.
+revision is an explicit job edit and may require rebaselining. Built-in profile
+definitions are checked at startup; when a release changes one, EdgeWatch
+appends a new revision for future jobs while preserving every existing job's
+pinned revision.
 
 Profile command customization is an administrator-controlled, validated array
 of arguments for the fixed `/usr/local/bin/naabu` and `/usr/bin/nmap`

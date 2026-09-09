@@ -66,6 +66,18 @@ func loadKey(path string) ([]byte, error) {
 	return append([]byte(nil), raw...), nil
 }
 
+// ValidateKeyFile verifies an explicitly configured notification key during
+// daemon startup. The notifier still keeps its lazy default-key generation
+// behavior, but an operator-managed path must be present, private, and a
+// correctly sized raw or hexadecimal key before the process starts.
+func ValidateKeyFile(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return ErrKeyUnavailable
+	}
+	_, err := loadKey(strings.TrimSpace(path))
+	return err
+}
+
 func createKey(path string) ([]byte, error) {
 	if path == "" {
 		return nil, ErrKeyUnavailable

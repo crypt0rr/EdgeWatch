@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -263,7 +264,15 @@ type Change struct {
 	Confirmations int `yaml:"confirmations"`
 }
 
-var envOnly = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
+var (
+	envOnly       = regexp.MustCompile(`^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$`)
+	envExpression = regexp.MustCompile(`\$\{[^}]*\}`)
+)
+
+// notificationURLsFileMaxBytes bounds the deployment-managed secret file.
+// A notification URL is short, so allowing an unbounded read here would only
+// make a typo or a mounted log/archive file an avoidable startup hazard.
+const notificationURLsFileMaxBytes = 1 << 20
 
 func Load(path string) (*Config, error) {
 	cfg, err := decode(path)
@@ -324,27 +333,81 @@ func decode(path string) (*Config, error) {
 
 func resolveNotifications(cfg *Config) error {
 	for i, raw := range cfg.Notifications.URLs {
-		if match := envOnly.FindStringSubmatch(raw); match != nil {
-			value, ok := os.LookupEnv(match[1])
-			if !ok {
-				return fmt.Errorf("environment variable %s is not set", match[1])
-			}
-			cfg.Notifications.URLs[i] = value
+		value, err := resolveNotificationURL(raw)
+		if err != nil {
+			return fmt.Errorf("notification URL %d: %w", i+1, err)
 		}
+		cfg.Notifications.URLs[i] = value
 	}
 	if cfg.Notifications.URLsFile != "" {
-		secret, err := os.ReadFile(cfg.Notifications.URLsFile)
+		secret, err := readNotificationURLsFile(cfg.Notifications.URLsFile)
 		if err != nil {
 			return fmt.Errorf("read notification URLs file: %w", err)
 		}
 		for _, line := range strings.Split(string(secret), "\n") {
 			line = strings.TrimSpace(line)
 			if line != "" && !strings.HasPrefix(line, "#") {
-				cfg.Notifications.URLs = append(cfg.Notifications.URLs, line)
+				value, resolveErr := resolveNotificationURL(line)
+				if resolveErr != nil {
+					return fmt.Errorf("notification URL file entry: %w", resolveErr)
+				}
+				cfg.Notifications.URLs = append(cfg.Notifications.URLs, value)
 			}
 		}
 	}
 	return nil
+}
+
+func resolveNotificationURL(raw string) (string, error) {
+	value := strings.TrimSpace(raw)
+	if match := envOnly.FindStringSubmatch(value); match != nil {
+		envValue, ok := os.LookupEnv(match[1])
+		if !ok || strings.TrimSpace(envValue) == "" {
+			return "", fmt.Errorf("environment variable %s is unset or empty", match[1])
+		}
+		envValue = strings.TrimSpace(envValue)
+		if envExpression.MatchString(envValue) || strings.Contains(envValue, "${") {
+			return "", fmt.Errorf("environment variable %s contains an unresolved expression", match[1])
+		}
+		return envValue, nil
+	}
+	// Only a complete URL may be supplied through an environment variable.
+	// Reject a partially expanded expression rather than passing a value that
+	// looks like a valid destination but still contains secret placeholders.
+	if strings.Contains(value, "${") || envExpression.MatchString(value) {
+		return "", errors.New("contains an unsupported or partially expanded environment expression")
+	}
+	return value, nil
+}
+
+func readNotificationURLsFile(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, errors.New("notification URLs file must be a regular file")
+	}
+	perm := info.Mode().Perm()
+	if perm != 0o400 && perm != 0o600 {
+		return nil, fmt.Errorf("notification URLs file permissions are unsafe (want 0400 or 0600, got %04o)", perm)
+	}
+	if info.Size() > notificationURLsFileMaxBytes {
+		return nil, fmt.Errorf("notification URLs file exceeds %d-byte limit", notificationURLsFileMaxBytes)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	content, err := io.ReadAll(io.LimitReader(file, notificationURLsFileMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(content) > notificationURLsFileMaxBytes {
+		return nil, fmt.Errorf("notification URLs file exceeds %d-byte limit", notificationURLsFileMaxBytes)
+	}
+	return content, nil
 }
 
 func applyDefaults(c *Config) {

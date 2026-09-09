@@ -83,6 +83,17 @@ func loadAuthKey(path string) ([]byte, error) {
 	return raw, nil
 }
 
+// ValidateAuthKeyFile verifies an explicitly configured authentication key
+// before the web server starts. The default key is still created lazily when
+// TOTP is first enabled; this helper is only for operator-managed paths.
+func ValidateAuthKeyFile(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return ErrAuthKeyUnavailable
+	}
+	_, err := loadAuthKey(strings.TrimSpace(path))
+	return err
+}
+
 func hexDecode(raw []byte) ([]byte, error) {
 	if len(raw)%2 != 0 {
 		return nil, ErrAuthKeyInvalid

@@ -52,6 +52,9 @@ func TestNotificationValidationAndSecretCryptoBranches(t *testing.T) {
 	if _, err := loadKey(filepath.Join(t.TempDir(), "missing.key")); !errors.Is(err, ErrKeyUnavailable) {
 		t.Fatalf("missing key error = %v", err)
 	}
+	if err := ValidateKeyFile(filepath.Join(t.TempDir(), "missing.key")); !errors.Is(err, ErrKeyUnavailable) {
+		t.Fatalf("missing configured key error = %v", err)
+	}
 	dir := t.TempDir()
 	if _, err := loadKey(dir); !errors.Is(err, ErrKeyPermissions) {
 		t.Fatalf("directory key error = %v", err)
@@ -70,6 +73,9 @@ func TestNotificationValidationAndSecretCryptoBranches(t *testing.T) {
 	loaded, err := loadKey(keyPath)
 	if err != nil || string(loaded) != string(key) {
 		t.Fatalf("raw key load = %x, %v", loaded, err)
+	}
+	if err := ValidateKeyFile(keyPath); err != nil {
+		t.Fatalf("valid configured key rejected: %v", err)
 	}
 	hexPath := filepath.Join(t.TempDir(), "hex-key")
 	if err := os.WriteFile(hexPath, []byte(strings.ToUpper(hex.EncodeToString(key))+"\n"), 0o600); err != nil {

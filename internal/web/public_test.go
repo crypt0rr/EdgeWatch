@@ -60,6 +60,9 @@ func TestPublicHostProjectionRedactsAndSortsPositivePorts(t *testing.T) {
 	if string(encoded) == "" || containsJSONField(encoded, "extra_info") || containsJSONField(encoded, "reason") {
 		t.Fatalf("private evidence leaked into public projection: %s", encoded)
 	}
+	if containsJSONField(encoded, "available") || containsJSONField(encoded, "stale") {
+		t.Fatalf("deprecated host freshness fields leaked into public projection: %s", encoded)
+	}
 	private := s.publicHostFromObservation(context.Background(), "private-job", model.HostObservation{Address: "192.168.1.4"}, model.ScanSummary{})
 	if !private.Private || private.Public {
 		t.Fatalf("private projection = %#v", private)

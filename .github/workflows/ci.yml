@@ -60,6 +60,8 @@ jobs:
         run: go mod verify
       - name: Check formatting
         run: test -z "$(gofmt -l cmd internal)"
+      - name: Verify schema documentation
+        run: ./scripts/check-schema-docs.sh
       - name: Vet
         run: go vet ./...
       - name: Test

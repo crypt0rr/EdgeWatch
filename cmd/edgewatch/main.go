@@ -90,11 +90,15 @@ func run(args []string) error {
 		return adminActionForUser(context.Background(), action, s, *passwordFile, *username, *force)
 	}
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	application, err := app.New(cfg, s, *nmapPath, logger)
-	if err != nil {
-		return err
+	var application *app.App
+	switch cmd {
+	case "daemon", "scan", "baseline", "notify":
+		application, err = app.New(cfg, s, *nmapPath, logger)
+		if err != nil {
+			return err
+		}
+		application.Version = version
 	}
-	application.Version = version
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	switch cmd {

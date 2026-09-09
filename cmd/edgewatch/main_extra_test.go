@@ -85,6 +85,38 @@ func TestRunVersionHelpAndConfigValidation(t *testing.T) {
 	}
 }
 
+func TestHealthDoesNotConstructScannerApplication(t *testing.T) {
+	dir := t.TempDir()
+	database := filepath.Join(dir, "edgewatch.db")
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AcquireLease(context.Background(), "health-test"); err != nil {
+		s.Close()
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("database: "+database+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "scanner-invoked")
+	script := filepath.Join(dir, "scanner")
+	contents := "#!/bin/sh\necho invoked > " + marker + "\n"
+	if err := os.WriteFile(script, []byte(contents), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"health", "--config", configPath, "--nmap", script}); err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("health invoked scanner constructor: stat=%v", err)
+	}
+}
+
 func TestRunStatusReportsUnknownManagedJob(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "config.yaml")

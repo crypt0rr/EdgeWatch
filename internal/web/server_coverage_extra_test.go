@@ -288,9 +288,13 @@ func TestServerPaginationAndSSEBoundaryHelpers(t *testing.T) {
 		server.mu.Unlock()
 		t.Fatalf("normal replay = %#v", got)
 	}
-	if got := server.replayLocked(99); len(got) != 0 {
+	if got := server.replayLocked(99); len(got) != 1 || !strings.Contains(string(got[0].payload), "event_history_restarted") {
 		server.mu.Unlock()
-		t.Fatalf("future replay = %#v", got)
+		t.Fatalf("future replay did not request refresh: %#v", got)
+	}
+	restarted := &Server{subscribers: map[chan sseMessage]struct{}{}}
+	if got := restarted.replayLocked(999999); len(got) != 1 || !strings.Contains(string(got[0].payload), "refresh_required") {
+		t.Fatalf("restart replay did not request refresh: %#v", got)
 	}
 	server.history = []sseMessage{{id: 10, payload: []byte(`{"type":"old"}`)}}
 	if got := server.replayLocked(1); len(got) != 2 || !strings.Contains(string(got[0].payload), "refresh_required") {

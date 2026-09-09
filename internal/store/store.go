@@ -33,6 +33,7 @@ type rowQueryer interface {
 }
 
 var ErrJobBusy = errors.New("job is already running")
+var ErrLeaseLost = errors.New("daemon lease lost")
 
 const legacySchema = `
 CREATE TABLE IF NOT EXISTS scans (
@@ -3372,9 +3373,21 @@ func (s *Store) Heartbeat(ctx context.Context, owner string) error {
 	}
 	n, _ := r.RowsAffected()
 	if n == 0 {
-		return errors.New("daemon lease lost")
+		return ErrLeaseLost
 	}
 	return nil
+}
+
+// ReleaseAllJobLeases clears scan leases after the daemon has acquired the
+// exclusive daemon lease. A process that crashed cannot run its deferred
+// release, so without this reconciliation a job would remain blocked until
+// its full scan timeout. The daemon lease makes clearing all rows safe.
+func (s *Store) ReleaseAllJobLeases(ctx context.Context) (int64, error) {
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM job_leases`)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 func (s *Store) ReleaseLease(ctx context.Context, owner string) error {
 	_, err := s.DB.ExecContext(ctx, `DELETE FROM daemon_lease WHERE id=1 AND owner=?`, owner)

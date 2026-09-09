@@ -962,6 +962,20 @@ func TestLeaseCanBeReleased(t *testing.T) {
 	}
 }
 
+func TestReleaseAllJobLeasesRecoversStaleScanLease(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if err := s.AcquireJobLease(ctx, "job", "stale-scan", time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if released, err := s.ReleaseAllJobLeases(ctx); err != nil || released != 1 {
+		t.Fatalf("released job leases = %d, error = %v", released, err)
+	}
+	if err := s.AcquireJobLease(ctx, "job", "new-scan", time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatalf("job lease was not recoverable after reconciliation: %v", err)
+	}
+}
+
 func TestJobLeasePreventsConcurrentRunsAndExpires(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

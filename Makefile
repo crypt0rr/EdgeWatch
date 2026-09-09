@@ -1,3 +1,6 @@
+VERSION ?= dev
+GO_LDFLAGS ?= -s -w -X main.version=$(VERSION)
+
 .PHONY: build frontend test check
 
 frontend:
@@ -5,7 +8,7 @@ frontend:
 	npm run build
 
 build: frontend
-	go build -trimpath -o edgewatch ./cmd/edgewatch
+	go build -trimpath -ldflags "$(GO_LDFLAGS)" -o edgewatch ./cmd/edgewatch
 
 test:
 	go test -race -cover ./...

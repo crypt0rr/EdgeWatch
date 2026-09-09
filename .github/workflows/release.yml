@@ -48,6 +48,11 @@ jobs:
         run: npm ci && npm run lint
       - name: Build frontend assets
         run: npm run build
+      - name: Ensure frontend build leaves no TypeScript artifacts
+        run: |
+          for artifact in vite.config.js vite.config.d.ts tsconfig.tsbuildinfo tsconfig.node.tsbuildinfo; do
+            test ! -e "$artifact"
+          done
       - name: Frontend unit tests
         run: npm test
       - name: Remove stale Google Chrome apt source
@@ -83,6 +88,8 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - name: Check out source and tags
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -108,6 +115,10 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attest release archives
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-checksums: dist/checksums.txt
 
   image:
     name: Publish GHCR image
@@ -141,7 +152,6 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
-            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
           labels: |
             org.opencontainers.image.title=EdgeWatch
             org.opencontainers.image.description=Scheduled Nmap port monitoring with baseline change notifications
@@ -184,6 +194,22 @@ jobs:
           assets="$(gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets | length')"
           test "$assets" -ge 3
           gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -q 'checksums.txt'
+      - name: Verify release archive versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          archive_dir="$(mktemp -d)"
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern '*.tar.gz' --dir "$archive_dir"
+          expected="EdgeWatch ${GITHUB_REF_NAME#v}"
+          archives=("$archive_dir"/*.tar.gz)
+          test -e "${archives[0]}"
+          for archive in "${archives[@]}"; do
+            extract_dir="$(mktemp -d)"
+            tar -xzf "$archive" -C "$extract_dir"
+            binary="$(find "$extract_dir" -type f -name edgewatch -print -quit)"
+            test -n "$binary"
+            test "$("$binary" version)" = "$expected"
+          done
       - name: Check out source for runtime verification
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Log in to GHCR for immutable image verification
@@ -310,3 +336,29 @@ jobs:
           cleanup
           trap - EXIT
           test -s "$smoke_dir/data/edgewatch.db"
+
+  promote-latest:
+    name: Promote verified image to latest
+    needs: smoke
+    if: ${{ needs.smoke.result == 'success' && !contains(github.ref_name, '-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote semver image after verification
+        env:
+          IMAGE: ${{ env.REGISTRY_IMAGE }}
+        run: |
+          image_tag="${GITHUB_REF_NAME#v}"
+          docker buildx imagetools create \
+            --tag "$IMAGE:latest" \
+            "$IMAGE:$image_tag"

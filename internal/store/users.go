@@ -272,9 +272,9 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 		return err
 	}
 	defer tx.Rollback()
-	var currentRole string
+	var currentRole, currentPasswordHash string
 	var currentEnabled int
-	if err := tx.QueryRowContext(ctx, `SELECT role,enabled FROM users WHERE id=?`, u.ID).Scan(&currentRole, &currentEnabled); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT role,password_hash,enabled FROM users WHERE id=?`, u.ID).Scan(&currentRole, &currentPasswordHash, &currentEnabled); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
@@ -301,7 +301,10 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	// Otherwise a link issued before the disable could silently re-enable the
 	// account when redeemed later. Keep this revocation in the same transaction
 	// as the user-state change so there is no race window.
-	if !u.Enabled {
+	// Revocation is a transition, not a property of the resulting row. Pending
+	// invitees are intentionally disabled while their password hash carries a
+	// sentinel; editing their display name or role must not kill the invite.
+	if currentEnabled != 0 && !u.Enabled && !strings.HasPrefix(currentPasswordHash, "!pending") {
 		if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL`, u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID); err != nil {
 			return err
 		}

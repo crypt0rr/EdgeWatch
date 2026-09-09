@@ -69,6 +69,82 @@ func TestBaselineHostExplorerReturnsDetailedAndFilteredHosts(t *testing.T) {
 	}
 }
 
+func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := app.New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	job := config.NormalizeJob(config.Job{Name: "accepted-host", Schedule: "0 * * * *", Targets: []string{"198.51.100.1"}, TCP: &config.Protocol{Ports: "22,443", Mode: "syn"}})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	scan := model.Scan{
+		ID: "accepted-baseline-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name,
+		StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(),
+		Snapshot: model.Snapshot{
+			Units:  []model.Unit{{Target: "198.51.100.1", Protocol: "tcp", Addresses: []string{"198.51.100.1"}, Ports: []model.PortState{{Port: 22, State: "open"}}}},
+			Scopes: []model.Scope{{Target: "198.51.100.1", Protocol: "tcp", Ports: "22,443"}},
+			Hosts:  []model.HostObservation{{Address: "198.51.100.1", SourceTargets: []string{"198.51.100.1"}, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22,443", ScannedPortCount: 2, Ports: []model.PortObservation{{Port: 22, State: "open"}}}}}},
+		},
+	}
+	if err := db.SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ApproveRuntime(ctx, record.ID, record.Job.Name, scan); err != nil {
+		t.Fatal(err)
+	}
+	key := "port|198.51.100.1|tcp|443"
+	if _, err := db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents[key] = model.Incident{Change: model.Change{Key: key, Kind: "port", Target: "198.51.100.1", Protocol: "tcp", Port: 443, Old: "not-open", New: "open", Severity: "critical"}}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, key, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+
+	listRecorder := httptest.NewRecorder()
+	server.jobBaselineHosts(listRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts", nil), record.ID)
+	if listRecorder.Code != http.StatusOK {
+		t.Fatalf("baseline host list status %d: %s", listRecorder.Code, listRecorder.Body.String())
+	}
+	var listResponse struct {
+		Hosts []hostSummary `json:"hosts"`
+	}
+	if err := json.Unmarshal(listRecorder.Body.Bytes(), &listResponse); err != nil {
+		t.Fatal(err)
+	}
+	if len(listResponse.Hosts) != 1 || listResponse.Hosts[0].OpenPorts != 2 {
+		t.Fatalf("accepted baseline list = %#v", listResponse.Hosts)
+	}
+
+	detailRecorder := httptest.NewRecorder()
+	server.jobBaselineHost(detailRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts/198.51.100.1", nil), record.ID, "198.51.100.1")
+	if detailRecorder.Code != http.StatusOK {
+		t.Fatalf("baseline host detail status %d: %s", detailRecorder.Code, detailRecorder.Body.String())
+	}
+	var detailResponse struct {
+		Host model.HostObservation `json:"host"`
+	}
+	if err := json.Unmarshal(detailRecorder.Body.Bytes(), &detailResponse); err != nil {
+		t.Fatal(err)
+	}
+	if len(detailResponse.Host.Protocols) != 1 || len(detailResponse.Host.Protocols[0].Ports) != 2 {
+		t.Fatalf("accepted baseline detail = %#v", detailResponse.Host)
+	}
+}
+
 func TestAllHostsReturnsLatestSuccessfulResultPerAddress(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

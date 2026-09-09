@@ -117,6 +117,7 @@ func advanceCandidate(state *model.JobState, scan model.Scan, required int, merg
 		}
 		state.BaselineScanID = scan.ID
 		state.BaselineConfigHash = scan.ConfigHash
+		state.BaselineModified = false
 		state.Candidate = nil
 		state.CandidateHash = ""
 		state.CandidateCount = 0
@@ -202,6 +203,10 @@ func learnMissingFingerprints(state *model.JobState, current model.Snapshot, req
 			state.FingerprintCandidates[key] = candidate
 			if candidate.Count >= required {
 				setBaselineService(state.Baseline, unit.Target, unit.Protocol, port.Port, candidate.Value)
+				// The learned service is an expected-state mutation that does not
+				// replace the immutable source scan. Host explorer reads must use the
+				// runtime baseline until a later scan establishes a new source.
+				state.BaselineModified = true
 				delete(state.FingerprintCandidates, key)
 			}
 		}

@@ -774,7 +774,12 @@ func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, id str
 		writeError(w, http.StatusInternalServerError, "store", metaErr.Error(), nil)
 		return
 	}
-	if baselineScanID != "" {
+	baselineModified, modifiedErr := s.Store.RuntimeBaselineModified(r.Context(), id)
+	if modifiedErr != nil {
+		writeError(w, http.StatusInternalServerError, "store", modifiedErr.Error(), nil)
+		return
+	}
+	if baselineScanID != "" && !baselineModified {
 		indexed, indexErr := s.Store.ListScanHostsPage(r.Context(), baselineScanID, query, protocol, hasOpen, limit, offset)
 		if indexErr != nil {
 			writeError(w, http.StatusInternalServerError, "store", indexErr.Error(), nil)
@@ -834,7 +839,12 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, raw
 		writeError(w, http.StatusNotFound, "not_found", "host not found", nil)
 		return
 	}
-	if baselineScanID, _, metaErr := s.Store.RuntimeBaselineMeta(r.Context(), id); metaErr == nil && baselineScanID != "" {
+	baselineModified, modifiedErr := s.Store.RuntimeBaselineModified(r.Context(), id)
+	if modifiedErr != nil {
+		writeError(w, http.StatusInternalServerError, "store", modifiedErr.Error(), nil)
+		return
+	}
+	if baselineScanID, _, metaErr := s.Store.RuntimeBaselineMeta(r.Context(), id); metaErr == nil && baselineScanID != "" && !baselineModified {
 		if indexed, indexErr := s.Store.GetScanHost(r.Context(), baselineScanID, address); indexErr == nil {
 			dedupeHost(&indexed.Host)
 			hosts := []model.HostObservation{indexed.Host}
@@ -885,7 +895,12 @@ func (s *Server) jobBaselineHostRDAP(w http.ResponseWriter, r *http.Request, id,
 		writeError(w, http.StatusNotFound, "not_found", "host not found", nil)
 		return
 	}
-	if baselineScanID, _, metaErr := s.Store.RuntimeBaselineMeta(r.Context(), id); metaErr == nil && baselineScanID != "" {
+	baselineModified, modifiedErr := s.Store.RuntimeBaselineModified(r.Context(), id)
+	if modifiedErr != nil {
+		writeError(w, http.StatusInternalServerError, "store", modifiedErr.Error(), nil)
+		return
+	}
+	if baselineScanID, _, metaErr := s.Store.RuntimeBaselineMeta(r.Context(), id); metaErr == nil && baselineScanID != "" && !baselineModified {
 		if _, indexErr := s.Store.GetScanHost(r.Context(), baselineScanID, address); indexErr == nil {
 			result := rdapUnavailable(address)
 			if s.RDAP != nil {

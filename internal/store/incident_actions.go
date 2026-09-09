@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -28,6 +29,10 @@ func (s *Store) AcceptIncidentWithAudit(ctx context.Context, jobID, jobName, key
 		if err := applyAcceptedChange(state.Baseline, change); err != nil {
 			return nil, err
 		}
+		// The accepted comparison state is now a deliberate runtime overlay on
+		// the immutable source scan. Host explorer endpoints use this marker to
+		// avoid serving the source scan's stale expected ports or services.
+		state.BaselineModified = true
 		delete(state.Incidents, key)
 		delete(state.Pending, key)
 		delete(state.Suppressed, key)
@@ -103,8 +108,10 @@ func fingerprintCandidateKey(change model.Change) string {
 	return fmt.Sprintf("service|%s|%s|%d", change.Target, change.Protocol, change.Port)
 }
 
-// applyAcceptedChange updates only the comparison fields represented by an
-// incident. Host observation metadata and scan history remain untouched.
+// applyAcceptedChange updates the comparison fields represented by an
+// incident. The immutable scan history remains untouched; the runtime
+// baseline's host evidence is updated only enough for the expected host view
+// to agree with its accepted port/service state.
 func applyAcceptedChange(snapshot *model.Snapshot, change model.Change) error {
 	if snapshot == nil {
 		return ErrBaselineNotReady
@@ -137,6 +144,7 @@ func acceptPortChange(snapshot *model.Snapshot, change model.Change) error {
 			}
 		}
 		snapshot.Units[unitIndex].Ports = ports
+		syncAcceptedPortHosts(snapshot, change)
 		snapshot.Normalize()
 		return nil
 	}
@@ -150,11 +158,13 @@ func acceptPortChange(snapshot *model.Snapshot, change model.Change) error {
 	for i := range snapshot.Units[unitIndex].Ports {
 		if snapshot.Units[unitIndex].Ports[i].Port == change.Port {
 			snapshot.Units[unitIndex].Ports[i].State = change.New
+			syncAcceptedPortHosts(snapshot, change)
 			snapshot.Normalize()
 			return nil
 		}
 	}
 	snapshot.Units[unitIndex].Ports = append(snapshot.Units[unitIndex].Ports, model.PortState{Port: change.Port, State: change.New})
+	syncAcceptedPortHosts(snapshot, change)
 	snapshot.Normalize()
 	return nil
 }
@@ -183,6 +193,7 @@ func acceptServiceChange(snapshot *model.Snapshot, change model.Change) error {
 				}
 				snapshot.Units[unitIndex].Ports[i].Service = change.New
 			}
+			syncAcceptedServiceHosts(snapshot, change)
 			snapshot.Normalize()
 			return nil
 		}
@@ -193,6 +204,100 @@ func acceptServiceChange(snapshot *model.Snapshot, change model.Change) error {
 		return nil
 	}
 	return fmt.Errorf("%w: baseline port is missing", ErrUnsupportedIncidentChange)
+}
+
+func normalizedAcceptedTarget(target string) string {
+	target = strings.TrimSpace(target)
+	if ip := net.ParseIP(target); ip != nil {
+		return ip.String()
+	}
+	return target
+}
+
+func acceptedHostMatches(snapshot *model.Snapshot, host model.HostObservation, target string) bool {
+	target = normalizedAcceptedTarget(target)
+	if normalizedAcceptedTarget(host.Address) == target {
+		return true
+	}
+	for _, value := range append(append([]string(nil), host.SourceTargets...), host.DNSNames...) {
+		if normalizedAcceptedTarget(value) == target {
+			return true
+		}
+	}
+	for _, unit := range snapshot.Units {
+		if normalizedAcceptedTarget(unit.Target) != target {
+			continue
+		}
+		for _, address := range unit.Addresses {
+			if normalizedAcceptedTarget(address) == normalizedAcceptedTarget(host.Address) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func syncAcceptedPortHosts(snapshot *model.Snapshot, change model.Change) {
+	for hostIndex := range snapshot.Hosts {
+		host := &snapshot.Hosts[hostIndex]
+		if !acceptedHostMatches(snapshot, *host, change.Target) {
+			continue
+		}
+		for protocolIndex := range host.Protocols {
+			protocol := &host.Protocols[protocolIndex]
+			if protocol.Protocol != change.Protocol {
+				continue
+			}
+			if change.New == "not-open" {
+				ports := protocol.Ports[:0]
+				for _, port := range protocol.Ports {
+					if port.Port != change.Port {
+						ports = append(ports, port)
+					}
+				}
+				protocol.Ports = ports
+				continue
+			}
+			found := false
+			for portIndex := range protocol.Ports {
+				if protocol.Ports[portIndex].Port != change.Port {
+					continue
+				}
+				protocol.Ports[portIndex].State = change.New
+				found = true
+				break
+			}
+			if !found {
+				protocol.Ports = append(protocol.Ports, model.PortObservation{Port: change.Port, State: change.New})
+			}
+		}
+	}
+}
+
+func syncAcceptedServiceHosts(snapshot *model.Snapshot, change model.Change) {
+	for hostIndex := range snapshot.Hosts {
+		host := &snapshot.Hosts[hostIndex]
+		if !acceptedHostMatches(snapshot, *host, change.Target) {
+			continue
+		}
+		for protocolIndex := range host.Protocols {
+			protocol := &host.Protocols[protocolIndex]
+			if protocol.Protocol != change.Protocol {
+				continue
+			}
+			for portIndex := range protocol.Ports {
+				port := &protocol.Ports[portIndex]
+				if port.Port != change.Port {
+					continue
+				}
+				if change.New == "not-open" {
+					port.Service = nil
+				} else {
+					port.Service = &model.ServiceObservation{Product: change.New, Method: "accepted"}
+				}
+			}
+		}
+	}
 }
 
 func acceptDNSChange(snapshot *model.Snapshot, change model.Change) error {

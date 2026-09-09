@@ -273,15 +273,21 @@ type Incident struct {
 }
 
 type JobState struct {
-	Baseline           *Snapshot           `json:"baseline,omitempty"`
-	BaselineScanID     string              `json:"baseline_scan_id,omitempty"`
-	BaselineConfigHash string              `json:"baseline_config_hash,omitempty"`
-	Candidate          *Snapshot           `json:"candidate,omitempty"`
-	CandidateHash      string              `json:"candidate_hash,omitempty"`
-	CandidateCount     int                 `json:"candidate_count"`
-	CandidateAttempts  int                 `json:"candidate_attempts"`
-	Pending            map[string]Pending  `json:"pending,omitempty"`
-	Incidents          map[string]Incident `json:"incidents,omitempty"`
+	Baseline           *Snapshot `json:"baseline,omitempty"`
+	BaselineScanID     string    `json:"baseline_scan_id,omitempty"`
+	BaselineConfigHash string    `json:"baseline_config_hash,omitempty"`
+	// BaselineModified is true when an administrator has accepted an incident
+	// (or otherwise changed the expected comparison state) without replacing
+	// the immutable source scan. Host explorer pages must then read the
+	// runtime baseline rather than the source scan's indexed evidence, which
+	// would otherwise show a stale expected port or service.
+	BaselineModified  bool                `json:"baseline_modified"`
+	Candidate         *Snapshot           `json:"candidate,omitempty"`
+	CandidateHash     string              `json:"candidate_hash,omitempty"`
+	CandidateCount    int                 `json:"candidate_count"`
+	CandidateAttempts int                 `json:"candidate_attempts"`
+	Pending           map[string]Pending  `json:"pending,omitempty"`
+	Incidents         map[string]Incident `json:"incidents,omitempty"`
 	// Suppressed contains incident keys whose next successful scan should be
 	// ignored. Values are remaining successful scans; the UI currently uses one
 	// scan, while keeping the counter makes the state forward-compatible.

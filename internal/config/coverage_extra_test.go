@@ -69,6 +69,60 @@ func TestLoadResolvesNotificationFilesAndReportsMissingEnvironment(t *testing.T)
 	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "read notification URLs file") {
 		t.Fatalf("missing URLs file error = %v", err)
 	}
+	if err := os.WriteFile(secretPath, []byte("generic://file-one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(secretPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("database: "+db+"\nretention: 24h\nnotifications:\n  urls_file: "+secretPath+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "permissions are unsafe") {
+		t.Fatalf("unsafe URLs file permissions error = %v", err)
+	}
+	if err := os.Chmod(secretPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(dir, "notification-urls-link.txt")
+	if err := os.Symlink(secretPath, linkPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("database: "+db+"\nretention: 24h\nnotifications:\n  urls_file: "+linkPath+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "regular file") {
+		t.Fatalf("symlink URLs file error = %v", err)
+	}
+	if err := os.Remove(linkPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secretPath, []byte(strings.Repeat("x", notificationURLsFileMaxBytes+1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("database: "+db+"\nretention: 24h\nnotifications:\n  urls_file: "+secretPath+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized URLs file error = %v", err)
+	}
+	if err := os.WriteFile(secretPath, []byte("generic://file-one\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EDGEWATCH_EMPTY_NOTIFICATION_ENV", "")
+	if err := os.WriteFile(configPath, []byte("database: "+db+"\nretention: 24h\nnotifications:\n  urls: [\"${EDGEWATCH_EMPTY_NOTIFICATION_ENV}\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "unset or empty") {
+		t.Fatalf("empty environment variable error = %v", err)
+	}
+	t.Setenv("EDGEWATCH_PARTIAL_NOTIFICATION_ENV", "generic://localhost")
+	if err := os.WriteFile(configPath, []byte("database: "+db+"\nretention: 24h\nnotifications:\n  urls: [\"${EDGEWATCH_PARTIAL_NOTIFICATION_ENV}/path\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(configPath); err == nil || !strings.Contains(err.Error(), "partially expanded") {
+		t.Fatalf("partially expanded environment variable error = %v", err)
+	}
 }
 
 func validCoverageJob() Job {

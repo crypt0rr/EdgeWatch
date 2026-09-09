@@ -29,8 +29,12 @@ Web-managed Shoutrrr destinations are write-only through the API. Their URLs
 are encrypted at rest with AES-256-GCM; the key is stored in
 `./data/notification.key` unless `notifications.encryption_key_file` is
 configured. Protect that key as a credential, keep it mode `0600`, and include
-it in backups of the corresponding SQLite database. Do not report notification
-URLs or key material in issues, logs, screenshots, or audit records.
+it in backups of the corresponding SQLite database. An explicitly configured
+key is checked at startup and must be present, valid, and owner-readable.
+Deployment URL files are likewise checked at startup, must be regular files
+with mode `0400` or `0600`, and are capped at 1 MiB. Do not report
+notification URLs or key material in issues, logs, screenshots, or audit
+records.
 
 Notification delivery health is exposed only as named-destination counts and
 timestamps. Terminal drops store a stable destination/error fingerprint and a

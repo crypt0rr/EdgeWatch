@@ -163,10 +163,16 @@ func NewWithScannerPaths(cfg *config.Config, s *store.Store, nmapPath, naabuPath
 	}
 	if cfg.Web.AuthKeyFile != "" {
 		s.SetAuthKeyPath(cfg.Web.AuthKeyFile)
+		if err := store.ValidateAuthKeyFile(cfg.Web.AuthKeyFile); err != nil {
+			return nil, fmt.Errorf("validate authentication key file: %w", err)
+		}
 	}
 	var n *notify.Notifier
 	var err error
 	if cfg.Notifications.EncryptionKeyFile != "" {
+		if err := notify.ValidateKeyFile(cfg.Notifications.EncryptionKeyFile); err != nil {
+			return nil, fmt.Errorf("validate notification encryption key file: %w", err)
+		}
 		// An explicitly configured path is operator-managed. It must already
 		// contain a valid key; the notifier only generates the default key next
 		// to the database when no override is configured.

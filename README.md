@@ -103,8 +103,11 @@ the replacement is issued.
   hexadecimal characters when the key must be supplied separately; an
   explicitly supplied path is never generated automatically.
 - Notification URLs can be supplied with `notifications.urls`,
-  `notifications.urls_file`, or an environment value such as
-  `${SHOUTRRR_URL}`.
+  `notifications.urls_file`, or a complete environment value such as
+  `${SHOUTRRR_URL}`. Environment variables must be set and non-empty; partial
+  or unresolved expressions are rejected. The URL file must be a regular
+  owner-readable file with mode `0400` or `0600`, is limited to 1 MiB, and is
+  validated before the daemon starts.
 - The Notifications page shows per-destination pending and retrying counts,
   last successful delivery, and redacted terminal-failure status. A delivery
   that reaches the retry limit is recorded as a system event; provider
@@ -274,9 +277,10 @@ enabled for an existing job. An explicitly empty selection keeps a job silent.
 To supply the key separately, set `notifications.encryption_key_file` to a
 `0600` file containing 32 raw bytes or 64 hexadecimal characters and mount it
 into the container. An explicitly supplied key path is never generated
-automatically. Back up the key with `./data/edgewatch.db`; a missing, invalid,
-or unsafe key locks web-managed destinations while scans and
-deployment-managed notifications continue.
+automatically and is validated before the daemon starts; a missing, invalid,
+or unsafe key is a startup error. The default key is still generated lazily
+beside the database when the first web-managed destination is created. Back
+up the key with `./data/edgewatch.db`.
 
 The TOTP authentication key is independent of the notification key. Back up
 `./data/auth.key` together with `./data/edgewatch.db` (or the separately mounted

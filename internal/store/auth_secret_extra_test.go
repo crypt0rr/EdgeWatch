@@ -36,6 +36,9 @@ func TestLoadAuthKeyFormatsAndPermissions(t *testing.T) {
 	if _, err := loadAuthKey(""); !errors.Is(err, ErrAuthKeyUnavailable) {
 		t.Fatalf("empty auth key error = %v", err)
 	}
+	if err := ValidateAuthKeyFile(""); !errors.Is(err, ErrAuthKeyUnavailable) {
+		t.Fatalf("empty configured auth key error = %v", err)
+	}
 	if _, err := loadAuthKey(filepath.Join(t.TempDir(), "missing")); !errors.Is(err, ErrAuthKeyUnavailable) {
 		t.Fatalf("missing auth key error = %v", err)
 	}
@@ -53,6 +56,9 @@ func TestLoadAuthKeyFormatsAndPermissions(t *testing.T) {
 	key, err := loadAuthKey(keyPath)
 	if err != nil || len(key) != authKeySize || key[0] != 0xab {
 		t.Fatalf("hex auth key = %x, %v", key, err)
+	}
+	if err := ValidateAuthKeyFile(keyPath); err != nil {
+		t.Fatalf("valid configured auth key rejected: %v", err)
 	}
 	if err := os.WriteFile(keyPath, []byte{1, 2, 3}, 0o600); err != nil {
 		t.Fatal(err)

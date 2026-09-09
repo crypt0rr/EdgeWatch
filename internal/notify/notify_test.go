@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -55,6 +56,46 @@ func TestQueueAndDeliverGenericWebhook(t *testing.T) {
 	due, err := db.DueDeliveries(context.Background(), 10)
 	if err != nil || len(due) != 0 {
 		t.Fatalf("delivery remains due: %#v %v", due, err)
+	}
+}
+
+func TestDrainProcessesMultipleBoundedBatches(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destination := "generic://" + parsed.Host + "/edgewatch?disabletls=yes&template=json"
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	notifier, err := New(db, []string{destination})
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := make([]model.Event, 40)
+	for i := range events {
+		events[i] = model.Event{Type: "batch", Job: "job", ScanID: fmt.Sprintf("scan-%d", i), Message: fmt.Sprintf("event-%d", i), CreatedAt: time.Now().UTC()}
+	}
+	if err := notifier.Queue(context.Background(), events); err != nil {
+		t.Fatal(err)
+	}
+	if err := notifier.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != int32(len(events)) {
+		t.Fatalf("webhook calls = %d, want %d", calls.Load(), len(events))
+	}
+	due, err := db.DueDeliveries(context.Background(), 100)
+	if err != nil || len(due) != 0 {
+		t.Fatalf("deliveries remain after bounded multi-batch drain: %#v %v", due, err)
 	}
 }
 

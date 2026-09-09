@@ -2525,7 +2525,7 @@ func (s *Store) ListJobEventsPage(ctx context.Context, jobID string, limit, offs
 
 func (s *Store) FailedDeliveries(ctx context.Context) (int, error) {
 	var count int
-	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND attempts >= 3`).Scan(&count)
+	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND attempts >= ?`, deliveryMaxAttempts).Scan(&count)
 	return count, err
 }
 
@@ -2710,7 +2710,12 @@ func (s *Store) DueDeliveries(ctx context.Context, limit int) ([]Delivery, error
 
 var ErrDeliveryClaimLost = errors.New("notification delivery claim was lost")
 
-const deliveryClaimLease = 30 * time.Minute
+const (
+	deliveryClaimLease   = 30 * time.Minute
+	deliveryMaxAttempts  = 8
+	deliveryInitialDelay = 2 * time.Minute
+	deliveryMaxDelay     = time.Hour
+)
 
 // ClaimDueDeliveries atomically leases due outbox rows to one drain owner.
 // Expired claims can be recovered by a later process, while active claims are
@@ -2723,7 +2728,7 @@ func (s *Store) ClaimDueDeliveries(ctx context.Context, limit int, owner string)
 		owner = uuid.NewString()
 	}
 	now := time.Now().UTC()
-	rows, err := s.DB.QueryContext(ctx, `UPDATE outbox SET claim_token=?,claim_until=? WHERE id IN (SELECT id FROM outbox WHERE sent_at IS NULL AND attempts < 3 AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?) ORDER BY id LIMIT ?) RETURNING id,destination,payload_json,attempts,claim_token`, owner, now.Add(deliveryClaimLease).Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), limit)
+	rows, err := s.DB.QueryContext(ctx, `UPDATE outbox SET claim_token=?,claim_until=? WHERE id IN (SELECT id FROM outbox WHERE sent_at IS NULL AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?) ORDER BY id LIMIT ?) RETURNING id,destination,payload_json,attempts,claim_token`, owner, now.Add(deliveryClaimLease).Format(time.RFC3339Nano), deliveryMaxAttempts, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -2775,7 +2780,7 @@ func (s *Store) DeliveryResultClaim(ctx context.Context, id int64, claim string,
 		return err
 	}
 	attempts++
-	delay := time.Duration(1<<min(attempts, 6)) * time.Minute
+	delay := deliveryRetryDelay(attempts)
 	result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=?,last_error=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, attempts, time.Now().UTC().Add(delay).Format(time.RFC3339Nano), truncate(sendErr.Error(), 500), id, claim)
 	if err != nil {
 		return err
@@ -2784,6 +2789,21 @@ func (s *Store) DeliveryResultClaim(ctx context.Context, id int64, claim string,
 		return ErrDeliveryClaimLost
 	}
 	return nil
+}
+
+func deliveryRetryDelay(attempts int) time.Duration {
+	if attempts < 1 {
+		return deliveryInitialDelay
+	}
+	shift := attempts - 1
+	if shift > 6 {
+		shift = 6
+	}
+	delay := deliveryInitialDelay * time.Duration(1<<shift)
+	if delay > deliveryMaxDelay {
+		return deliveryMaxDelay
+	}
+	return delay
 }
 
 // DeferDelivery releases a claim without consuming an attempt. This is used
@@ -2879,7 +2899,7 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	}
 	stats.SentOutbox, _ = result.RowsAffected()
 
-	result, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE sent_at IS NULL AND attempts >= 3 AND next_at < ?`, cutoff)
+	result, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE sent_at IS NULL AND attempts >= ? AND next_at < ?`, deliveryMaxAttempts, cutoff)
 	if err != nil {
 		return stats, err
 	}

@@ -1009,7 +1009,7 @@ func TestPruneRetentionClassesAndAuditPolicy(t *testing.T) {
 	if err := s.QueueEvent(ctx, "failed", model.Event{Type: "failed", Job: "retention", CreatedAt: old}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempts=3,next_at=? WHERE destination=?`, oldText, "failed"); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=? WHERE destination=?`, deliveryMaxAttempts, oldText, "failed"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.QueueEvent(ctx, "pending", model.Event{Type: "pending", Job: "retention", CreatedAt: old}); err != nil {

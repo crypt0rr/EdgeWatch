@@ -80,6 +80,11 @@ the replacement is issued.
   privacy-sensitive deployments. Checks reveal the host's public IP and the
   EdgeWatch user agent to GitHub. EdgeWatch reports releases only; Docker image
   updates and restarts remain operator-controlled.
+- The authenticated administrator status response and Overview page include
+  cached deployment telemetry: allocated database size, retained scans,
+  effective hosts, host observations, events, resumable cycles, and pending or
+  failed notification deliveries. Counts are sampled at most every 30 seconds
+  so status polling does not repeatedly decode retained history.
 - TOTP is optional. Its seed is encrypted with a separate authentication key
   generated at `./data/auth.key` when TOTP is first enabled. Set
   `web.auth_key_file` to a mode-`0600` file containing 32 raw bytes or 64

@@ -786,3 +786,13 @@
   .public-header { display: block; }
   .public-updated { display: block; margin-top: 10px; }
 }
+
+.deployment-telemetry { margin-bottom: 18px; }
+.telemetry-grid { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 9px; }
+.telemetry-metric { min-width: 0; padding: 10px; border: 1px solid #1d3854; border-radius: 7px; background: #0a1929; }
+.telemetry-metric span, .telemetry-metric strong { display: block; }
+.telemetry-metric span { overflow: hidden; color: #7895b2; font-size: 9px; letter-spacing: .07em; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.telemetry-metric strong { margin-top: 5px; color: #dcecff; font-size: 16px; }
+.telemetry-updated { display: block; margin-top: 10px; font-size: 10px; }
+@media (max-width: 1050px) { .telemetry-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 760px) { .telemetry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

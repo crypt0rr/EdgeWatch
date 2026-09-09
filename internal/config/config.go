@@ -79,8 +79,9 @@ type Web struct {
 	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 type Scheduler struct {
-	MaxConcurrent int   `yaml:"max_concurrent_scans"`
-	MaxProbeCount int64 `yaml:"max_probe_count"`
+	MaxConcurrent      int   `yaml:"max_concurrent_scans"`
+	MaxProbeCount      int64 `yaml:"max_probe_count"`
+	MaxNaabuProbeCount int64 `yaml:"max_naabu_probe_count"`
 }
 type Notifications struct {
 	URLs              []string `yaml:"urls"`
@@ -426,6 +427,9 @@ func applyDefaults(c *Config) {
 	if c.Scheduler.MaxProbeCount == 0 {
 		c.Scheduler.MaxProbeCount = DefaultMaxProbeCount
 	}
+	if c.Scheduler.MaxNaabuProbeCount == 0 {
+		c.Scheduler.MaxNaabuProbeCount = DefaultNaabuMaxProbeCount
+	}
 	if c.Web.Listen == "" {
 		c.Web.Listen = "127.0.0.1:8080"
 	}
@@ -711,8 +715,15 @@ func (c Config) ValidateDeployment() error {
 	if probeBudget == 0 {
 		probeBudget = DefaultMaxProbeCount
 	}
-	if probeBudget < 1 || probeBudget > 100_000_000 {
-		return fmt.Errorf("max_probe_count must be between 1 and 100000000")
+	if probeBudget < 1 || probeBudget > MaxProbeCountLimit {
+		return fmt.Errorf("max_probe_count must be between 1 and %d", MaxProbeCountLimit)
+	}
+	naabuProbeBudget := c.Scheduler.MaxNaabuProbeCount
+	if naabuProbeBudget == 0 {
+		naabuProbeBudget = DefaultNaabuMaxProbeCount
+	}
+	if naabuProbeBudget < 1 || naabuProbeBudget > MaxProbeCountLimit {
+		return fmt.Errorf("max_naabu_probe_count must be between 1 and %d", MaxProbeCountLimit)
 	}
 	if err := validateWebListen(c.Web.Listen); err != nil {
 		return err
@@ -806,7 +817,16 @@ const (
 	// execution. Jobs may explicitly opt into a larger workload with
 	// allow_high_cost; the estimate is still shown before every run.
 	DefaultMaxProbeCount int64 = 5_000_000
-	workBatchSize        int64 = 128
+	// DefaultNaabuMaxProbeCount accounts for Naabu's fixed 1-65535 discovery
+	// pass and the editor's default 256-host expansion limit. It is kept
+	// separate from the Nmap budget because a Naabu probe is substantially
+	// lighter than an Nmap probe.
+	DefaultNaabuMaxProbeCount int64 = 20_000_000
+	// MaxProbeCountLimit is an absolute per-run safety ceiling. The
+	// allow_high_cost job override can bypass a configured budget, but never
+	// this limit.
+	MaxProbeCountLimit int64 = 100_000_000
+	workBatchSize      int64 = 128
 )
 
 // WorkEstimate describes the approximate cost of a job before DNS resolution

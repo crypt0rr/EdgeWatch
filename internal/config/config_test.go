@@ -63,6 +63,9 @@ jobs:
 	if cfg.Scheduler.MaxProbeCount != DefaultMaxProbeCount {
 		t.Fatalf("probe budget default %d", cfg.Scheduler.MaxProbeCount)
 	}
+	if cfg.Scheduler.MaxNaabuProbeCount != DefaultNaabuMaxProbeCount {
+		t.Fatalf("Naabu probe budget default %d", cfg.Scheduler.MaxNaabuProbeCount)
+	}
 	if cfg.Jobs[0].Baseline.Samples != 1 || !cfg.Jobs[0].AssumesAlive() || cfg.Jobs[0].RunsOnStart() || cfg.Jobs[0].RunOnStart == nil || cfg.Jobs[0].AssumeAlive == nil {
 		t.Fatal("defaults not applied")
 	}

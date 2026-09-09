@@ -100,6 +100,34 @@ func TestCheckScanWorkBudgetAndBeginRunFallback(t *testing.T) {
 	a.StopRun()
 }
 
+func TestNaabuUsesDedicatedBudgetAndHardCeiling(t *testing.T) {
+	a := &App{Config: &config.Config{Scheduler: config.Scheduler{
+		MaxProbeCount:      config.DefaultMaxProbeCount,
+		MaxNaabuProbeCount: config.DefaultNaabuMaxProbeCount,
+	}}}
+	job := config.NormalizeJob(config.Job{
+		Targets: []string{"192.0.2.0/24"},
+		TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Mode: "connect", Ports: "1-65535"},
+	})
+	estimate, err := a.CheckScanWorkBudget(job)
+	if err != nil {
+		t.Fatalf("default Naabu /24 budget rejected: %v (estimate %#v)", err, estimate)
+	}
+	if estimate.Probes != 256*65535 {
+		t.Fatalf("Naabu estimate = %d, want %d", estimate.Probes, 256*65535)
+	}
+
+	oversized := job
+	oversized.Targets = []string{"192.0.0.0/16"}
+	if _, err := a.CheckScanWorkBudget(oversized); !errors.Is(err, ErrScanWorkBudget) {
+		t.Fatalf("oversized Naabu job error = %v, want probe budget error", err)
+	}
+	oversized.AllowHighCost = true
+	if _, err := a.CheckScanWorkBudget(oversized); !errors.Is(err, ErrScanWorkBudget) {
+		t.Fatalf("hard ceiling override error = %v, want probe budget error", err)
+	}
+}
+
 func TestStartManagedRunReportsLookupAndArchivedErrors(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "managed-run.db"))

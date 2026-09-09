@@ -188,3 +188,24 @@ func TestJobListAndAPIDispatchCoverage(t *testing.T) {
 		t.Fatalf("closed list jobs = %d", closed.Code)
 	}
 }
+
+func TestHighCostOverrideRequiresAdministrator(t *testing.T) {
+	server, _, admin := newUsersTestServer(t)
+	operator := admin
+	operator.Role = store.RoleOperator
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs", strings.NewReader(`{"name":"operator-high-cost","schedule":"0 * * * *","timezone":"UTC","targets":["192.0.2.1"],"tcp":{"ports":"1-65535","mode":"connect"},"allow_high_cost":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	server.createJob(rec, req, operator)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "high_cost_admin_required") {
+		t.Fatalf("operator high-cost create = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	adminReq := httptest.NewRequest(http.MethodPost, "/api/v1/jobs", strings.NewReader(`{"name":"admin-high-cost","schedule":"0 * * * *","timezone":"UTC","targets":["192.0.2.1"],"tcp":{"ports":"1","mode":"connect"},"allow_high_cost":true}`))
+	adminReq.Header.Set("Content-Type", "application/json")
+	adminRec := httptest.NewRecorder()
+	server.createJob(adminRec, adminReq, admin)
+	if adminRec.Code != http.StatusCreated {
+		t.Fatalf("administrator high-cost create = %d: %s", adminRec.Code, adminRec.Body.String())
+	}
+}

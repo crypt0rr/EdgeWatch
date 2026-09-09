@@ -135,6 +135,9 @@ func TestResumableProgressAndFailureMetadataHelpers(t *testing.T) {
 	}
 	setActiveCycle(nil, cycle, "ignored", 0)
 	setActiveCycleProgress(nil, cycle, scanner.Progress{}, scanner.WorkUnit{})
+	if after := run.snapshot(); after != active {
+		t.Fatalf("nil active-run helpers changed state: before=%#v after=%#v", active, after)
+	}
 
 	db, err := store.Open(filepath.Join(t.TempDir(), "cycle.db"))
 	if err != nil {

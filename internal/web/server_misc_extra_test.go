@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -49,20 +50,27 @@ func TestServerStaticSSEAndAuditHelpers(t *testing.T) {
 		t.Fatalf("asset directory status = %d, want 404", directoryResponse.Code)
 	}
 	entries, err := fs.ReadDir(webui.Files(), "dist/assets")
-	if err == nil && len(entries) > 0 {
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("embedded assets directory: %v", err)
+	}
+	if err == nil {
+		if len(entries) == 0 {
+			t.Fatal("embedded assets directory is empty")
+		}
 		knownName := ""
 		for _, entry := range entries {
-			if !entry.IsDir() {
+			if !entry.IsDir() && entry.Name() != ".gitkeep" {
 				knownName = entry.Name()
 				break
 			}
 		}
-		if knownName != "" {
-			knownAsset := httptest.NewRecorder()
-			server.asset(knownAsset, httptest.NewRequest(http.MethodGet, "/assets/"+knownName, nil))
-			if knownAsset.Code != http.StatusOK || knownAsset.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
-				t.Fatalf("known asset response = %d, cache-control=%q", knownAsset.Code, knownAsset.Header().Get("Cache-Control"))
-			}
+		if knownName == "" {
+			t.Fatal("embedded assets directory has no build output")
+		}
+		knownAsset := httptest.NewRecorder()
+		server.asset(knownAsset, httptest.NewRequest(http.MethodGet, "/assets/"+knownName, nil))
+		if knownAsset.Code != http.StatusOK || knownAsset.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+			t.Fatalf("known asset response = %d, cache-control=%q", knownAsset.Code, knownAsset.Header().Get("Cache-Control"))
 		}
 	}
 	spaResponse := httptest.NewRecorder()

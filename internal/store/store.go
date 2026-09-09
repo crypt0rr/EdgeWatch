@@ -3328,7 +3328,8 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	// old scan from pruning.
 	result, err := tx.ExecContext(ctx, `DELETE FROM scans AS scan WHERE scan.finished_at < ?
 		AND NOT EXISTS (SELECT 1 FROM job_states AS legacy WHERE json_extract(legacy.state_json,'$.baseline_scan_id') = scan.id)
-		AND NOT EXISTS (SELECT 1 FROM job_runtime AS managed WHERE json_extract(managed.state_json,'$.baseline_scan_id') = scan.id)`, cutoff)
+		AND NOT EXISTS (SELECT 1 FROM job_runtime AS managed WHERE json_extract(managed.state_json,'$.baseline_scan_id') = scan.id)
+		AND NOT EXISTS (SELECT 1 FROM job_runtime AS active, json_each(active.state_json,'$.incidents') AS incident WHERE json_extract(incident.value,'$.scan_id') = scan.id)`, cutoff)
 	if err != nil {
 		return stats, err
 	}

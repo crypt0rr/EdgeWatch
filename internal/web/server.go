@@ -2484,6 +2484,12 @@ func (s *Server) writeNotificationError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, "notification_key_unavailable", "managed notification credentials are unavailable; restore the encryption key before replacing or enabling this destination", nil)
 	case isUnique(err):
 		writeError(w, http.StatusConflict, "conflict", "notification name is already in use", map[string]string{"name": "notification name is already in use"})
+	case strings.Contains(lower, "notification delivery failed"):
+		// A managed destination test reached the provider, but the provider
+		// rejected or could not deliver the message. Report this as a bad
+		// gateway so clients can distinguish destination failures from an
+		// EdgeWatch configuration/server error (500).
+		writeError(w, http.StatusBadGateway, "notification_failed", "notification destination delivery failed", nil)
 	case strings.Contains(lower, "notification url"), strings.Contains(lower, "notification name"):
 		field := "url"
 		if strings.Contains(lower, "name") {

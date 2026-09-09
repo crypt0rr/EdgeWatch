@@ -34,6 +34,7 @@ func TestServerErrorMappingHelpers(t *testing.T) {
 		{"unique", errors.New("UNIQUE constraint failed"), http.StatusConflict, "conflict"},
 		{"URL validation", errors.New("notification URL is invalid"), http.StatusBadRequest, "validation_failed"},
 		{"name validation", errors.New("notification name is empty"), http.StatusBadRequest, "validation_failed"},
+		{"delivery failure", errors.New("notification delivery failed (fingerprint)"), http.StatusBadGateway, "notification_failed"},
 		{"other", errors.New("delivery failed"), http.StatusInternalServerError, "notification_failed"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -147,6 +148,21 @@ func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 	identity.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "session-cookie"})
 	if !server.allowNotificationTest(identity) {
 		t.Fatal("expired notification test identity was unexpectedly limited")
+	}
+}
+
+func TestNotificationDestinationDeliveryFailureUsesGatewayStatus(t *testing.T) {
+	server, _, admin := newUsersTestServer(t)
+	destination, err := server.App.Notifier.CreateManaged(context.Background(), "Unreachable", "generic://127.0.0.1:1/edgewatch?disabletls=yes&template=json", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/"+destination.ID+"/test", nil)
+	request.RemoteAddr = "127.0.0.3:4003"
+	recorder := httptest.NewRecorder()
+	server.notificationDestinationRoute(recorder, request, admin, destination.ID+"/test")
+	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), `"code":"notification_failed"`) {
+		t.Fatalf("destination delivery failure = %d %s", recorder.Code, recorder.Body.String())
 	}
 }
 

@@ -360,6 +360,9 @@ func (s *Server) createScannerProfile(w http.ResponseWriter, r *http.Request, se
 	definition := payload.definition()
 	profile, err := s.Store.CreateScannerProfile(r.Context(), payload.Name, payload.Description, definition, session.Username, actorAudit(session, "scanner_profile.created", strings.TrimSpace(payload.Name)))
 	if err != nil {
+		if s.writeAuditUnavailable(w, err, "scanner_profile.created") {
+			return
+		}
 		if isUnique(err) {
 			writeError(w, http.StatusConflict, "conflict", "scanner profile name is already in use", nil)
 		} else {
@@ -384,6 +387,9 @@ func (s *Server) updateScannerProfile(w http.ResponseWriter, r *http.Request, se
 		return
 	}
 	profile, err := s.Store.UpdateScannerProfile(r.Context(), id, payload.Revision, payload.Name, payload.Description, payload.definition(), session.Username, actorAudit(session, "scanner_profile.updated", id))
+	if s.writeAuditUnavailable(w, err, "scanner_profile.updated") {
+		return
+	}
 	if errors.Is(err, store.ErrConflict) {
 		writeError(w, http.StatusConflict, "conflict", "scanner profile was modified; reload before saving", nil)
 		return
@@ -420,6 +426,9 @@ func (s *Server) setScannerProfileArchived(w http.ResponseWriter, r *http.Reques
 		action = "scanner_profile.restored"
 	}
 	err := s.Store.SetScannerProfileArchived(r.Context(), id, archived, payload.Revision, session.Username, actorAudit(session, action, id))
+	if s.writeAuditUnavailable(w, err, action) {
+		return
+	}
 	if errors.Is(err, store.ErrConflict) {
 		writeError(w, http.StatusConflict, "conflict", "scanner profile was modified; reload before changing its lifecycle", nil)
 		return

@@ -31,6 +31,11 @@ jobs:
         run: npm run lint
       - name: Type-check and build frontend
         run: npm run build
+      - name: Ensure frontend build leaves no TypeScript artifacts
+        run: |
+          for artifact in vite.config.js vite.config.d.ts tsconfig.tsbuildinfo tsconfig.node.tsbuildinfo; do
+            test ! -e "$artifact"
+          done
       - name: Frontend unit tests
         run: npm test
       - name: Set up Go for real-stack browser tests

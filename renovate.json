@@ -2,5 +2,18 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "description": "Renovate owns version updates for Go, npm, Dockerfiles, Docker images, and GitHub Actions. GitHub security alerts remain enabled separately.",
+  "customManagers": [
+    {
+      "customType": "regex",
+      "managerFilePatterns": ["/(^|/)Dockerfile$/"],
+      "matchStrings": [
+        "(?<depName>ca-certificates|git|nmap|nmap-scripts|tzdata)=(?<currentValue>[0-9][0-9A-Za-z.+~-]*)"
+      ],
+      "datasourceTemplate": "repology",
+      "packageNameTemplate": "alpine_3_24/{{{depName}}}",
+      "versioningTemplate": "loose"
+    }
   ]
 }

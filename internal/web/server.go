@@ -52,6 +52,8 @@ type Server struct {
 	testLast      map[string]time.Time
 	publicMu      sync.Mutex
 	publicHits    map[string][]time.Time
+	publicCacheMu sync.Mutex
+	publicCache   *publicDashboardCache
 	telemetryMu   sync.Mutex
 	telemetry     *store.DeploymentTelemetry
 	telemetryAt   time.Time

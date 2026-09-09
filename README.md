@@ -171,8 +171,11 @@ at `/public` and contains only the selected job names, latest successful scan
 time, positive ports (protocol, port, and service name), and cached normalized
 network-registration data. Product/version fingerprints and raw Nmap evidence
 remain private to the authenticated console. It does not provide a host
-selector or proxy arbitrary RDAP requests. Keep the page disabled for isolated
-or privacy-sensitive deployments.
+selector or proxy arbitrary RDAP requests. Public responses use a short-lived
+in-memory cache and a bounded legacy-history lookup; a request that exceeds the
+five-second build budget receives a timeout response instead of running
+unbounded database work. Keep the page disabled for isolated or
+privacy-sensitive deployments.
 
 Retention applies to completed scans, events, sent notification deliveries,
 terminally failed deliveries, superseded job revisions, and terminal

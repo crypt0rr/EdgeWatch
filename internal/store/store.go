@@ -1660,6 +1660,26 @@ func (s *Store) RuntimeBaselineMeta(ctx context.Context, jobID string) (scanID, 
 	return scan.String, hash.String, nil
 }
 
+// RuntimeBaselineModified reports whether the current comparison baseline has
+// been changed independently of its immutable source scan. Databases written
+// before the marker was introduced are treated conservatively as modified so
+// host pages cannot silently render stale indexed evidence after an older
+// administrator acceptance.
+func (s *Store) RuntimeBaselineModified(ctx context.Context, jobID string) (bool, error) {
+	var marker sql.NullInt64
+	err := s.DB.QueryRowContext(ctx, `SELECT json_extract(state_json,'$.baseline_modified') FROM job_runtime WHERE job_id=?`, jobID).Scan(&marker)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !marker.Valid {
+		return true, nil
+	}
+	return marker.Int64 != 0, nil
+}
+
 func (s *Store) UpdateRuntime(ctx context.Context, jobID string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	return s.updateRuntime(ctx, jobID, "", nil, fn)
 }
@@ -1984,6 +2004,7 @@ func (s *Store) resetRuntimeWithAudits(ctx context.Context, jobID, name string, 
 		state.Baseline = nil
 		state.BaselineScanID = ""
 		state.BaselineConfigHash = ""
+		state.BaselineModified = false
 		state.Candidate = nil
 		state.CandidateHash = ""
 		state.CandidateCount = 0
@@ -2047,6 +2068,7 @@ func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string
 		state.Baseline = &stored.Snapshot
 		state.BaselineScanID = stored.ID
 		state.BaselineConfigHash = stored.ConfigHash
+		state.BaselineModified = false
 		state.Candidate = nil
 		state.CandidateHash = ""
 		state.CandidateCount = 0
@@ -3514,6 +3536,7 @@ func (s *Store) Approve(ctx context.Context, job string, scan model.Scan) ([]mod
 		state.Baseline = &scan.Snapshot
 		state.BaselineScanID = scan.ID
 		state.BaselineConfigHash = scan.ConfigHash
+		state.BaselineModified = false
 		state.Candidate = nil
 		state.CandidateHash = ""
 		state.CandidateCount = 0
@@ -3531,6 +3554,7 @@ func (s *Store) ResetBaseline(ctx context.Context, job string) ([]model.Event, e
 		state.Baseline = nil
 		state.BaselineScanID = ""
 		state.BaselineConfigHash = ""
+		state.BaselineModified = false
 		state.Candidate = nil
 		state.CandidateHash = ""
 		state.CandidateCount = 0

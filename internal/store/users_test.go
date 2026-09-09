@@ -82,6 +82,29 @@ func TestRevokeUserInviteAndDisablePreventActivation(t *testing.T) {
 	}
 }
 
+func TestUpdatePendingUserKeepsActivationInvite(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	user, err := s.CreateUserWithInvite(ctx, User{Username: "pending-edit", DisplayName: "Pending", Role: RoleViewer, PasswordHash: "!pending"}, "pending-edit-invite", now, now.Add(time.Hour), AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := s.GetUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.DisplayName = "Corrected name"
+	loaded.Role = RoleOperator
+	loaded.UpdatedAt = now.Add(time.Minute)
+	if err := s.UpdateUser(ctx, loaded, false, AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActivateUser(ctx, "pending-edit-invite", "activated-hash", now.Add(2*time.Minute), AuditEntry{}); err != nil {
+		t.Fatalf("editing pending user revoked activation invite: %v", err)
+	}
+}
+
 func TestUserInviteAuditFailureRollsBackAndOlderInviteIsInvalidated(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

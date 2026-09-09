@@ -153,6 +153,7 @@ export const listUsers = () => api<{ users: UserSummary[] }>('/users')
 export const createUser = (username: string, display_name: string, role: Role) => api<{ user: UserSummary; activation_token: string; activation_path: string }>('/users', { method: 'POST', body: JSON.stringify({ username, display_name, role }) })
 export const updateUser = (id: string, value: { display_name?: string; role?: Role; enabled?: boolean }) => api<UserSummary>(`/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(value) })
 export const issueUserActivation = (id: string) => api<{ activation_token: string; activation_path: string; expires_at: string }>(`/users/${encodeURIComponent(id)}/activation`, { method: 'POST' })
+export const revokeUserActivation = (id: string) => api<void>(`/users/${encodeURIComponent(id)}/activation`, { method: 'DELETE' })
 export const revokeUserSessions = (id: string) => api<void>(`/users/${encodeURIComponent(id)}/sessions`, { method: 'DELETE' })
 
 export type PublicDashboardHost = { job_id: string; address: string; created_at?: string }

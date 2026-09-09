@@ -48,6 +48,10 @@ func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session stor
 		s.issueActivation(w, r, session, id, "user.activation_issued")
 		return
 	}
+	if len(parts) == 2 && parts[1] == "activation" && r.Method == http.MethodDelete {
+		s.revokeActivation(w, r, session, id)
+		return
+	}
 	if len(parts) == 2 && parts[1] == "password-reset" && r.Method == http.MethodPost {
 		s.issueActivation(w, r, session, id, "user.password_reset_issued")
 		return
@@ -266,6 +270,32 @@ func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor s
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"activation_token": plain, "activation_path": "/activate?token=" + plain, "expires_at": createdAt.Add(30 * time.Minute)})
+}
+
+func (s *Server) revokeActivation(w http.ResponseWriter, r *http.Request, actor store.Session, id string) {
+	w.Header().Set("Cache-Control", "no-store")
+	user, err := s.Store.GetUser(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", "user could not be loaded", nil)
+		return
+	}
+	affected, err := s.Store.RevokeUserInvitesWithAudit(r.Context(), user.ID, time.Now().UTC(), store.AuditEntry{Action: "user.activation_revoked", Detail: fmt.Sprintf("activation links revoked for %s", user.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username})
+	if err != nil {
+		if s.writeAuditUnavailable(w, err, "user.activation_revoked") {
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "revoke_failed", "activation link could not be revoked", nil)
+		return
+	}
+	if affected == 0 {
+		writeError(w, http.StatusNotFound, "no_active_activation", "no active activation link exists for this user", nil)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) activateUser(w http.ResponseWriter, r *http.Request) {

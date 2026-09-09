@@ -39,8 +39,21 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	if rec := call(http.MethodPost, "", `{"display_name":"Missing username"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "username") {
 		t.Fatalf("missing username = %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := call(http.MethodPost, "", `{"username":"bad","display_name":""}`); rec.Code != http.StatusCreated {
-		t.Fatalf("empty display name should use username default = %d: %s", rec.Code, rec.Body.String())
+	created := call(http.MethodPost, "", `{"username":"revokable","display_name":""}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("empty display name should use username default = %d: %s", created.Code, created.Body.String())
+	}
+	var createdResponse struct {
+		User store.UserSummary `json:"user"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &createdResponse); err != nil {
+		t.Fatal(err)
+	}
+	if rec := call(http.MethodDelete, "/"+createdResponse.User.ID+"/activation", ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("revoke activation = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := call(http.MethodDelete, "/"+createdResponse.User.ID+"/activation", ""); rec.Code != http.StatusNotFound {
+		t.Fatalf("revoke missing activation = %d: %s", rec.Code, rec.Body.String())
 	}
 	if rec := call(http.MethodPost, "", `{"username":"bad","display_name":"bad\nname"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "display_name") {
 		t.Fatalf("control display name = %d: %s", rec.Code, rec.Body.String())

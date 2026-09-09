@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -131,17 +132,27 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 		writeError(w, http.StatusBadRequest, "validation_failed", "at most 1000 hosts may be published", nil)
 		return
 	}
-	hosts := make([]store.PublicDashboardHost, 0, len(input.Hosts))
+	selections := make([]store.PublicDashboardHost, 0, len(input.Hosts))
 	for _, selection := range input.Hosts {
-		if _, err := s.latestPublishedHost(r.Context(), selection.JobID, selection.Address); err != nil {
-			if errors.Is(err, store.ErrNotFound) {
-				writeError(w, http.StatusBadRequest, "validation_failed", fmt.Sprintf("host %s is not present in a successful scan for this job", selection.Address), map[string]string{"hosts": "each published host must belong to a successful scan"})
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "store", "published host could not be checked", nil)
+		if strings.TrimSpace(selection.JobID) == "" || net.ParseIP(strings.TrimSpace(selection.Address)) == nil {
+			writeError(w, http.StatusBadRequest, "validation_failed", fmt.Sprintf("host %s is not present in a successful scan for this job", selection.Address), map[string]string{"hosts": "each published host must belong to a successful scan"})
 			return
 		}
-		hosts = append(hosts, store.PublicDashboardHost{JobID: selection.JobID, Address: selection.Address})
+		selections = append(selections, store.PublicDashboardHost{JobID: strings.TrimSpace(selection.JobID), Address: canonicalHostAddress(selection.Address)})
+	}
+	published, err := s.loadPublishedHosts(r.Context(), selections)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", "published hosts could not be checked", nil)
+		return
+	}
+	hosts := make([]store.PublicDashboardHost, 0, len(selections))
+	for _, selection := range selections {
+		key := publicSelectionKey(selection.JobID, selection.Address)
+		if _, ok := published[key]; !ok {
+			writeError(w, http.StatusBadRequest, "validation_failed", fmt.Sprintf("host %s is not present in a successful scan for this job", selection.Address), map[string]string{"hosts": "each published host must belong to a successful scan"})
+			return
+		}
+		hosts = append(hosts, selection)
 	}
 	dashboard.Enabled, dashboard.Title, dashboard.Introduction = input.Enabled, input.Title, input.Introduction
 	if err := s.Store.SavePublicDashboard(r.Context(), dashboard, hosts, store.AuditEntry{Action: "public_dashboard.updated", Detail: fmt.Sprintf("dashboard updated by %s; enabled=%t; hosts=%d", session.Username, input.Enabled, len(hosts)), ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
@@ -160,25 +171,90 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 }
 
 func (s *Server) latestPublishedHost(ctx context.Context, jobID, address string) (store.ScanHost, error) {
-	if strings.TrimSpace(jobID) == "" {
-		return store.ScanHost{}, store.ErrNotFound
-	}
-	job, err := s.Store.GetJob(ctx, jobID)
-	if errors.Is(err, store.ErrNotFound) || job.Archived {
-		return store.ScanHost{}, store.ErrNotFound
-	}
+	lookup, err := s.loadPublishedHosts(ctx, []store.PublicDashboardHost{{JobID: jobID, Address: address}})
 	if err != nil {
 		return store.ScanHost{}, err
 	}
-	host, _, err := s.Store.GetLatestSuccessfulJobHost(ctx, jobID, address)
-	if err == nil {
-		return host, nil
+	if item, ok := lookup[publicSelectionKey(jobID, canonicalHostAddress(address))]; ok {
+		return item.Host, nil
 	}
-	if !errors.Is(err, store.ErrNotFound) {
-		return store.ScanHost{}, err
+	return store.ScanHost{}, store.ErrNotFound
+}
+
+type publicHostLookup struct {
+	Job     store.JobRecord
+	Host    store.ScanHost
+	Summary model.ScanSummary
+}
+
+func publicSelectionKey(jobID, address string) string {
+	return strings.TrimSpace(jobID) + "\x00" + canonicalHostAddress(address)
+}
+
+// loadPublishedHosts resolves all selected addresses through bounded set-based
+// reads. Indexed observations are loaded in one query; only selections absent
+// from that projection use the bounded legacy fallback.
+func (s *Server) loadPublishedHosts(ctx context.Context, selections []store.PublicDashboardHost) (map[string]publicHostLookup, error) {
+	lookup := map[string]publicHostLookup{}
+	if len(selections) == 0 {
+		return lookup, nil
 	}
-	host, _, err = s.latestLegacyPublicHost(ctx, jobID, address)
-	return host, err
+	jobs, err := s.Store.ListJobs(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]store.JobRecord, len(jobs))
+	for _, job := range jobs {
+		byID[job.ID] = job
+	}
+	normalized := make([]store.PublicDashboardHost, 0, len(selections))
+	seen := make(map[string]struct{}, len(selections))
+	for _, selection := range selections {
+		selection.JobID = strings.TrimSpace(selection.JobID)
+		selection.Address = canonicalHostAddress(selection.Address)
+		key := publicSelectionKey(selection.JobID, selection.Address)
+		if selection.JobID == "" || net.ParseIP(selection.Address) == nil {
+			continue
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, selection)
+	}
+	indexed, err := s.Store.GetLatestSuccessfulJobHosts(ctx, normalized)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range indexed {
+		job, ok := byID[item.Selection.JobID]
+		if !ok || job.Archived {
+			continue
+		}
+		lookup[publicSelectionKey(item.Selection.JobID, item.Selection.Address)] = publicHostLookup{Job: job, Host: item.Host, Summary: item.Summary}
+	}
+	missing := make([]store.PublicDashboardHost, 0)
+	for _, selection := range normalized {
+		if _, ok := lookup[publicSelectionKey(selection.JobID, selection.Address)]; ok {
+			continue
+		}
+		job, ok := byID[selection.JobID]
+		if ok && !job.Archived {
+			missing = append(missing, selection)
+		}
+	}
+	legacy, err := s.latestLegacyPublicHosts(ctx, missing)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range legacy {
+		job, ok := byID[item.Selection.JobID]
+		if !ok || job.Archived {
+			continue
+		}
+		lookup[publicSelectionKey(item.Selection.JobID, item.Selection.Address)] = publicHostLookup{Job: job, Host: item.Host, Summary: item.Summary}
+	}
+	return lookup, nil
 }
 
 type publicDashboardResponse struct {
@@ -225,58 +301,125 @@ type publicRdapResponse struct {
 
 func (s *Server) publicDashboardResponse(ctx context.Context, dashboard store.PublicDashboard) (publicDashboardResponse, error) {
 	response := publicDashboardResponse{Title: dashboard.Title, Introduction: dashboard.Introduction, UpdatedAt: dashboard.UpdatedAt, Hosts: []publicHostResponse{}}
+	lookup, err := s.loadPublishedHosts(ctx, dashboard.Hosts)
+	if err != nil {
+		return response, err
+	}
 	for _, selection := range dashboard.Hosts {
-		job, err := s.Store.GetJob(ctx, selection.JobID)
-		if errors.Is(err, store.ErrNotFound) || job.Archived {
+		item, ok := lookup[publicSelectionKey(selection.JobID, selection.Address)]
+		if !ok {
 			continue
 		}
-		if err != nil {
-			return response, err
-		}
-		host, summary, err := s.Store.GetLatestSuccessfulJobHost(ctx, selection.JobID, selection.Address)
-		if errors.Is(err, store.ErrNotFound) {
-			// Legacy scans can predate scan_hosts. Keep their publication safe by
-			// deriving only the selected address from the snapshot; no arbitrary
-			// host lookup is exposed to the caller.
-			host, summary, err = s.latestLegacyPublicHost(ctx, selection.JobID, selection.Address)
-		}
-		if errors.Is(err, store.ErrNotFound) {
-			continue
-		}
-		if err != nil {
-			return response, err
-		}
-		response.Hosts = append(response.Hosts, s.publicHostFromObservation(ctx, job.Job.Name, host.Host, summary))
+		response.Hosts = append(response.Hosts, s.publicHostFromObservation(ctx, item.Job.Job.Name, item.Host.Host, item.Summary))
 	}
 	return response, nil
 }
 
 func (s *Server) latestLegacyPublicHost(ctx context.Context, jobID, address string) (store.ScanHost, model.ScanSummary, error) {
-	wanted := canonicalHostAddress(address)
-	for offset := 0; ; offset += 100 {
-		page, err := s.Store.ListJobScansPage(ctx, jobID, 100, offset)
-		if err != nil {
-			return store.ScanHost{}, model.ScanSummary{}, err
+	results, err := s.latestLegacyPublicHosts(ctx, []store.PublicDashboardHost{{JobID: jobID, Address: address}})
+	if err != nil {
+		return store.ScanHost{}, model.ScanSummary{}, err
+	}
+	if item, ok := results[publicSelectionKey(jobID, address)]; ok {
+		return item.Host, item.Summary, nil
+	}
+	return store.ScanHost{}, model.ScanSummary{}, store.ErrNotFound
+}
+
+const legacyPublicScanLimit = 1000
+
+func (s *Server) latestLegacyPublicHosts(ctx context.Context, selections []store.PublicDashboardHost) (map[string]store.PublicDashboardHostResult, error) {
+	wanted := make(map[string]store.PublicDashboardHost, len(selections))
+	jobIDs := make([]string, 0, len(selections))
+	seenJobs := map[string]struct{}{}
+	for _, selection := range selections {
+		selection.JobID = strings.TrimSpace(selection.JobID)
+		selection.Address = canonicalHostAddress(selection.Address)
+		if selection.JobID == "" || net.ParseIP(selection.Address) == nil {
+			continue
 		}
-		for _, scan := range page.Items {
-			if scan.Status != "success" {
+		key := publicSelectionKey(selection.JobID, selection.Address)
+		wanted[key] = selection
+		if _, ok := seenJobs[selection.JobID]; !ok {
+			seenJobs[selection.JobID] = struct{}{}
+			jobIDs = append(jobIDs, selection.JobID)
+		}
+	}
+	results := make(map[string]store.PublicDashboardHostResult, len(wanted))
+	if len(wanted) == 0 {
+		return results, nil
+	}
+	placeholders := make([]string, len(jobIDs))
+	args := make([]any, 0, len(jobIDs)+1)
+	for i, jobID := range jobIDs {
+		placeholders[i] = "?"
+		args = append(args, jobID)
+	}
+	args = append(args, legacyPublicScanLimit)
+	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json
+FROM scans WHERE status='success' AND job_id IN (` + strings.Join(placeholders, ",") + `)
+ORDER BY finished_at DESC,id DESC LIMIT ?`
+	rows, err := s.Store.DB.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, job string
+		var jobID sql.NullString
+		var revision sql.NullInt64
+		var started, finished, status, scanError, nmapVersion, configHash string
+		var raw []byte
+		if err := rows.Scan(&id, &jobID, &revision, &job, &started, &finished, &status, &scanError, &nmapVersion, &configHash, &raw); err != nil {
+			return nil, err
+		}
+		if !jobID.Valid || len(raw) > 8<<20 {
+			continue
+		}
+		page, err := observationsForSnapshotBytes(raw)
+		if err != nil {
+			return nil, err
+		}
+		for _, host := range page.Items {
+			key := publicSelectionKey(jobID.String, host.Address)
+			selection, ok := wanted[key]
+			if !ok {
 				continue
 			}
-			hostPage, err := observationsForSnapshot(scan.Snapshot)
-			if err != nil {
-				return store.ScanHost{}, model.ScanSummary{}, err
+			if _, already := results[key]; already {
+				continue
 			}
-			for _, host := range hostPage.Items {
-				if canonicalHostAddress(host.Address) == wanted {
-					return store.ScanHost{ScanID: scan.ID, DataQuality: hostPage.DataQuality, Host: host}, model.ScanSummary{ID: scan.ID, JobID: scan.JobID, Job: scan.Job, JobRevision: scan.JobRevision, StartedAt: scan.StartedAt, FinishedAt: scan.FinishedAt, Status: scan.Status, NmapVersion: scan.NmapVersion, ConfigHash: scan.ConfigHash}, nil
-				}
+			summary := model.ScanSummary{ID: id, JobID: jobID.String, Job: job, Status: status, Error: scanError, NmapVersion: nmapVersion, ConfigHash: configHash, StartedAt: parsePublicTime(started), FinishedAt: parsePublicTime(finished)}
+			if revision.Valid {
+				summary.JobRevision = revision.Int64
 			}
+			results[key] = store.PublicDashboardHostResult{Selection: selection, Host: store.ScanHost{ScanID: id, DataQuality: page.DataQuality, Host: host}, Summary: summary}
 		}
-		if len(page.Items) == 0 || offset+len(page.Items) >= page.Total {
+		if len(results) == len(wanted) {
 			break
 		}
 	}
-	return store.ScanHost{}, model.ScanSummary{}, store.ErrNotFound
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+func observationsForSnapshotBytes(raw []byte) (hostPage, error) {
+	var snapshot model.Snapshot
+	if err := json.Unmarshal(raw, &snapshot); err != nil {
+		return hostPage{}, err
+	}
+	return observationsForSnapshot(snapshot)
+}
+
+func parsePublicTime(raw string) time.Time {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999", "2006-01-02 15:04:05"} {
+		if value, err := time.ParseInLocation(layout, strings.TrimSpace(raw), time.UTC); err == nil {
+			return value
+		}
+	}
+	return time.Time{}
 }
 
 func (s *Server) publicHostFromObservation(ctx context.Context, job string, host model.HostObservation, scan model.ScanSummary) publicHostResponse {

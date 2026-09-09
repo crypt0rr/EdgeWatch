@@ -7,6 +7,7 @@ const (
 	PermissionJobsRead              = "jobs.read"
 	PermissionJobsWrite             = "jobs.write"
 	PermissionJobsRun               = "jobs.run"
+	PermissionJobsDelete            = "jobs.delete"
 	PermissionHostsRead             = "hosts.read"
 	PermissionScansRead             = "scans.read"
 	PermissionBaselinesRead         = "baselines.read"
@@ -27,7 +28,7 @@ const (
 var rolePermissions = map[string]map[string]bool{
 	store.RoleAdministrator: {
 		PermissionOverviewRead: true, PermissionJobsRead: true, PermissionJobsWrite: true,
-		PermissionJobsRun: true, PermissionHostsRead: true, PermissionScansRead: true,
+		PermissionJobsRun: true, PermissionJobsDelete: true, PermissionHostsRead: true, PermissionScansRead: true,
 		PermissionBaselinesRead: true, PermissionBaselinesManage: true,
 		PermissionIncidentsRead: true, PermissionIncidentsManage: true,
 		PermissionNotificationOptions: true, PermissionNotificationsRead: true,
@@ -53,6 +54,14 @@ var rolePermissions = map[string]map[string]bool{
 }
 
 func PermissionsForRole(role string) []string {
+	// Empty roles are only used by sessions created by pre-RBAC versions. The
+	// migration path upgrades those sessions to the legacy administrator, so
+	// resolve the compatibility value here as well. Keeping that fallback in
+	// this single permission table avoids a second, inevitably drifting list of
+	// permissions in HasPermission.
+	if role == "" {
+		role = store.RoleAdministrator
+	}
 	values := rolePermissions[role]
 	result := make([]string, 0, len(values))
 	for permission := range values {
@@ -69,16 +78,11 @@ func PermissionsForRole(role string) []string {
 }
 
 func HasPermission(session store.Session, permission string) bool {
-	if permission == PermissionScannerProfilesRead {
-		return session.Role == store.RoleAdministrator || session.Role == store.RoleOperator || session.Role == ""
-	}
-	if permission == PermissionScannerProfilesManage {
-		return session.Role == store.RoleAdministrator || session.Role == ""
-	}
-	if session.Role == "" {
+	role := session.Role
+	if role == "" {
 		// Sessions created by pre-RBAC binaries are only ever valid for the
 		// original administrator and are upgraded by Authenticate when possible.
-		return permission == PermissionOverviewRead || permission == PermissionJobsRead || permission == PermissionJobsWrite || permission == PermissionJobsRun || permission == PermissionHostsRead || permission == PermissionScansRead || permission == PermissionBaselinesRead || permission == PermissionBaselinesManage || permission == PermissionIncidentsRead || permission == PermissionIncidentsManage || permission == PermissionNotificationOptions || permission == PermissionNotificationsRead || permission == PermissionNotificationsManage || permission == PermissionUsersManage || permission == PermissionAuditRead || permission == PermissionPublicManage || permission == PermissionStreamRead || permission == PermissionScannerProfilesRead || permission == PermissionScannerProfilesManage
+		role = store.RoleAdministrator
 	}
-	return rolePermissions[session.Role][permission]
+	return rolePermissions[role][permission]
 }

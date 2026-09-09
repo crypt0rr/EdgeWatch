@@ -199,29 +199,6 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 		writeError(w, http.StatusBadRequest, "self_admin_change", "you cannot demote or disable your own account", nil)
 		return
 	}
-	if user.Role != store.RoleAdministrator || !user.Enabled {
-		count, countErr := s.Store.CountEnabledAdministrators(r.Context())
-		if countErr != nil {
-			writeError(w, http.StatusInternalServerError, "store", "administrator count could not be checked", nil)
-			return
-		}
-		if user.Role == store.RoleAdministrator && user.Enabled {
-			// This branch is retained for clarity; the final-admin check below is
-			// the relevant invariant when demoting or disabling an administrator.
-			_ = count
-		}
-		if count <= 1 && (user.Role != store.RoleAdministrator || !user.Enabled) {
-			wasAdmin, wasEnabled := false, false
-			current, getErr := s.Store.GetUser(r.Context(), id)
-			if getErr == nil {
-				wasAdmin, wasEnabled = current.Role == store.RoleAdministrator, current.Enabled
-			}
-			if wasAdmin && wasEnabled {
-				writeError(w, http.StatusBadRequest, "last_admin", "EdgeWatch must keep one enabled administrator", nil)
-				return
-			}
-		}
-	}
 	user.UpdatedAt = time.Now().UTC()
 	if err := s.Store.UpdateUser(r.Context(), user, true, store.AuditEntry{Action: "user.updated", Detail: fmt.Sprintf("user %s updated by %s", user.Username, actor.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
 		if s.writeAuditUnavailable(w, err, "user.updated") {

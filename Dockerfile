@@ -9,11 +9,19 @@ RUN npm run build
 
 FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS naabu
 ARG NAABU_VERSION=v2.6.1
+ARG NAABU_COMMIT=5a0ca8bde91b5bb16213e9e8b5c6871eac954bd8
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /naabu
 RUN apk add --no-cache ca-certificates=20260611-r0 git=2.54.0-r0
-RUN git clone --depth 1 --branch ${NAABU_VERSION} https://github.com/projectdiscovery/naabu.git .
+# Fetch the immutable commit and the human-readable release tag, then verify
+# that the tag still resolves to the pinned commit before compiling.
+RUN git init . \
+    && git remote add origin https://github.com/projectdiscovery/naabu.git \
+    && git fetch --depth 1 origin ${NAABU_COMMIT} \
+    && git fetch --depth 1 origin refs/tags/${NAABU_VERSION}:refs/tags/${NAABU_VERSION} \
+    && test "$(git rev-parse ${NAABU_VERSION}^{commit})" = "${NAABU_COMMIT}" \
+    && git checkout --detach ${NAABU_COMMIT}
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /out/naabu ./cmd/naabu
 
 FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS build

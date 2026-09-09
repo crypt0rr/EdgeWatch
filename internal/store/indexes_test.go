@@ -10,7 +10,7 @@ func TestScanHistoryIndexesSupportManagedQueries(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 
-	// Exercise the actual 20 -> 21 upgrade path rather than only checking a
+	// Exercise the actual 20 -> 22 upgrade path rather than only checking a
 	// fresh database. This also catches a future migration that forgets to add
 	// an index when an operator upgrades an existing installation.
 	if _, err := s.DB.ExecContext(ctx, `DROP INDEX IF EXISTS scans_job_id_time;
@@ -21,7 +21,7 @@ PRAGMA user_version = 20;`); err != nil {
 		t.Fatal(err)
 	}
 	if err := migrate(s.DB); err != nil {
-		t.Fatalf("reapply schema 21 migration: %v", err)
+		t.Fatalf("reapply schema 22 migration: %v", err)
 	}
 
 	want := map[string]bool{

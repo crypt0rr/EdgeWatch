@@ -27,6 +27,13 @@ networking for scan routing, and persists all runtime state in `./data`.
 Run `docker compose pull` explicitly before starting when you want the latest
 image.
 
+The final image keeps the daemon at UID 0 for scanner compatibility. All
+capabilities are dropped before adding only the raw-packet capability needed
+by the default Nmap modes; an explicit `compose.syn.yaml` override adds
+`NET_ADMIN` for Naabu SYN profiles. The compatibility matrix and the reasons a
+non-root default is not enabled are documented in
+[`docs/container-hardening.md`](docs/container-hardening.md).
+
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080). On the first start,
 EdgeWatch prints a one-time setup token in the container log:
 

@@ -1,9 +1,7 @@
-import { execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
-import { promisify } from 'node:util'
 
-const execFileAsync = promisify(execFile)
 const outputDirectory = resolve('internal/webui/dist')
 const marker = resolve(outputDirectory, '.gitkeep')
 
@@ -15,4 +13,14 @@ await mkdir(dirname(marker), { recursive: true })
 await writeFile(marker, '')
 
 const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx'
-await execFileAsync(npx, ['--no-install', 'vite', 'build'], { stdio: 'inherit' })
+await new Promise((resolveBuild, rejectBuild) => {
+  const child = spawn(npx, ['--no-install', 'vite', 'build'], { stdio: 'inherit' })
+  child.on('error', rejectBuild)
+  child.on('close', (code, signal) => {
+    if (code === 0) {
+      resolveBuild()
+      return
+    }
+    rejectBuild(new Error(`frontend build exited with ${signal ? `signal ${signal}` : `status ${code}`}`))
+  })
+})

@@ -153,8 +153,17 @@ notifications:
     child = undefined
   }
 
-  await start()
-  return { url, setupToken: () => setupToken, start, stop }
+  const harness: Harness = { url, setupToken: () => setupToken, start, stop }
+  // Register cleanup before waiting for readiness. If compilation, binding,
+  // or database startup fails, the caller never receives a harness on which it
+  // could run its normal finally block.
+  try {
+    await start()
+    return harness
+  } catch (error) {
+    await stop()
+    throw error
+  }
 }
 
 type APIResult = { status: number; body: any }

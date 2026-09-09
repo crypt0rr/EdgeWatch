@@ -1147,6 +1147,52 @@ func TestPrunePreservesLegacyAndManagedBaselines(t *testing.T) {
 	}
 }
 
+func TestPrunePreservesScansReferencedByOpenIncidents(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	job, err := s.CreateJob(ctx, testJob("incident-retention"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	if err := s.SaveScan(ctx, model.Scan{ID: "incident-retained", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: old, FinishedAt: old, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents["port|198.51.100.10|tcp|443"] = model.Incident{
+			Change:     model.Change{Key: "port|198.51.100.10|tcp|443", Kind: "port", Target: "198.51.100.10", Protocol: "tcp", Port: 443, New: "open"},
+			ScanID:     "incident-retained",
+			OpenedAt:   old,
+			LastSeenAt: old,
+		}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Scans != 0 {
+		t.Fatalf("open-incident scan was pruned: %#v", stats)
+	}
+	if _, err := s.GetScan(ctx, "incident-retained"); err != nil {
+		t.Fatalf("scan referenced by open incident was removed: %v", err)
+	}
+	if _, err := s.UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		delete(state.Incidents, "port|198.51.100.10|tcp|443")
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetScan(ctx, "incident-retained"); err == nil {
+		t.Fatal("scan without an open incident reference was not pruned")
+	}
+}
+
 func TestPruneRetentionClassesAndAuditPolicy(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

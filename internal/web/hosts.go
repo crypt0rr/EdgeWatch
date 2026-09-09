@@ -87,6 +87,9 @@ func parseHostPagination(r *http.Request) (int, int, error) {
 		if err != nil || value < 0 {
 			return 0, 0, errors.New("offset must be zero or greater")
 		}
+		if value > maxPaginationOffset {
+			value = maxPaginationOffset
+		}
 		offset = value
 	}
 	return limit, offset, nil

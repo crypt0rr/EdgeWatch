@@ -41,17 +41,22 @@ type Server struct {
 	Log     *slog.Logger
 	Version string
 
-	mu           sync.Mutex
-	subscribers  map[chan sseMessage]struct{}
-	history      []sseMessage
-	historyBytes int
-	nextEventID  uint64
-	dropped      uint64
-	pendingTOTP  map[string]pendingTOTP
-	testMu       sync.Mutex
-	testLast     map[string]time.Time
-	publicMu     sync.Mutex
-	publicHits   map[string][]time.Time
+	mu            sync.Mutex
+	subscribers   map[chan sseMessage]struct{}
+	history       []sseMessage
+	historyBytes  int
+	nextEventID   uint64
+	dropped       uint64
+	pendingTOTP   map[string]pendingTOTP
+	testMu        sync.Mutex
+	testLast      map[string]time.Time
+	publicMu      sync.Mutex
+	publicHits    map[string][]time.Time
+	telemetryMu   sync.Mutex
+	telemetry     *store.DeploymentTelemetry
+	telemetryAt   time.Time
+	telemetryRun  bool
+	telemetryDone chan struct{}
 }
 
 type sseMessage struct {
@@ -483,7 +488,56 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	status["live_updates"] = map[string]any{"history_size": len(s.history), "dropped_events": s.dropped}
 	s.mu.Unlock()
 	status["updates"] = s.applicationUpdateStatus(r.Context())
+	if telemetry, telemetryErr := s.cachedDeploymentTelemetry(r.Context()); telemetryErr != nil {
+		s.Log.Warn("deployment telemetry refresh failed", "error", telemetryErr)
+	} else {
+		status["telemetry"] = telemetry
+	}
 	writeJSON(w, http.StatusOK, status)
+}
+
+const deploymentTelemetryTTL = 30 * time.Second
+
+// cachedDeploymentTelemetry keeps status polling cheap while still reflecting
+// normal scan and retention activity promptly. Concurrent requests share one
+// refresh instead of issuing duplicate aggregate queries.
+func (s *Server) cachedDeploymentTelemetry(ctx context.Context) (store.DeploymentTelemetry, error) {
+	if s.Store == nil {
+		return store.DeploymentTelemetry{}, errors.New("store is unavailable")
+	}
+	for {
+		s.telemetryMu.Lock()
+		if s.telemetry != nil && time.Since(s.telemetryAt) < deploymentTelemetryTTL {
+			value := *s.telemetry
+			s.telemetryMu.Unlock()
+			return value, nil
+		}
+		if !s.telemetryRun {
+			s.telemetryRun = true
+			s.telemetryDone = make(chan struct{})
+			done := s.telemetryDone
+			s.telemetryMu.Unlock()
+
+			value, err := s.Store.DeploymentTelemetry(ctx)
+			s.telemetryMu.Lock()
+			if err == nil {
+				s.telemetry = &value
+				s.telemetryAt = time.Now()
+			}
+			s.telemetryRun = false
+			close(done)
+			s.telemetryMu.Unlock()
+			return value, err
+		}
+		done := s.telemetryDone
+		s.telemetryMu.Unlock()
+		select {
+		case <-done:
+			continue
+		case <-ctx.Done():
+			return store.DeploymentTelemetry{}, ctx.Err()
+		}
+	}
 }
 
 func (s *Server) applicationUpdateStatus(ctx context.Context) map[string]any {

@@ -423,6 +423,13 @@ func TestSetupStatusDoesNotExposeOperationalDetails(t *testing.T) {
 			t.Fatalf("authenticated status omitted %q: %#v", key, private)
 		}
 	}
+	telemetry, ok := private["telemetry"].(map[string]any)
+	if !ok {
+		t.Fatalf("authenticated status omitted deployment telemetry: %#v", private)
+	}
+	if _, ok := telemetry["database_bytes"]; !ok {
+		t.Fatalf("deployment telemetry omitted database size: %#v", telemetry)
+	}
 }
 
 func TestSSEHistoryAssignsIDsAndSupportsReplay(t *testing.T) {

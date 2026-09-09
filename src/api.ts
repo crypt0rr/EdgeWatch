@@ -34,6 +34,19 @@ export type ApplicationUpdateStatus = {
   stale?: boolean
   error?: string
 }
+export type DeploymentTelemetry = {
+  collected_at: string
+  database_bytes: number
+  jobs: number
+  scans: number
+  host_observations: number
+  effective_hosts: number
+  events: number
+  scan_cycles: number
+  outbox_pending: number
+  outbox_retrying: number
+  outbox_failed: number
+}
 
 let csrf = ''
 export function setCSRF(value: string) { csrf = value }
@@ -59,7 +72,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 }
 export type Role = 'administrator' | 'operator' | 'viewer'
 export type SessionUser = { user_id: string; username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_enabled: boolean; password_requirements: { minimum_length: number } }
-export type AdminStatus = { configured: boolean; username: string; display_name?: string; role?: Role; permissions?: string[]; version: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; max_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number }; updates?: ApplicationUpdateStatus }
+export type AdminStatus = { configured: boolean; username: string; display_name?: string; role?: Role; permissions?: string[]; version: string; legacy_yaml_jobs?: string[]; notification_destinations: number; notifications: NotificationStatus; retention: string; max_concurrent_scans: number; max_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number }; updates?: ApplicationUpdateStatus; telemetry?: DeploymentTelemetry }
 export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; public_dashboard_enabled?: boolean; version: string; password_requirements: { minimum_length: number } }>('/setup/status')
 export const adminStatus = () => api<AdminStatus>('/status')
 export const getSession = () => api<SessionUser>('/auth/session')

@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 14
+const schemaVersion = 15
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -599,6 +599,64 @@ func migrate(db *sql.DB) error {
 			"ALTER TABLE scans ADD COLUMN confirmed_ports INTEGER NOT NULL DEFAULT 0",
 			"ALTER TABLE scans ADD COLUMN discovery_duration_ms INTEGER NOT NULL DEFAULT 0",
 			"ALTER TABLE scans ADD COLUMN enrichment_duration_ms INTEGER NOT NULL DEFAULT 0",
+		},
+		15: {
+			// Keep an exact, maintained latest-host projection so inventory reads do
+			// not rank the complete retained scan history on every request. The
+			// projection intentionally has no foreign key to scans: when retention
+			// removes a source scan it is rebuilt from the remaining history, which
+			// preserves the legacy "latest retained successful observation" semantics.
+			// A few supported recovery fixtures carry a schema marker without the
+			// indexed host table; ensure the source table exists before backfilling.
+			`CREATE TABLE IF NOT EXISTS scan_hosts (
+ scan_id TEXT NOT NULL,
+ address TEXT NOT NULL,
+ job TEXT NOT NULL DEFAULT '',
+ address_family TEXT NOT NULL DEFAULT '',
+ source_targets_json BLOB NOT NULL DEFAULT '[]',
+ dns_names_json BLOB NOT NULL DEFAULT '[]',
+ host_json BLOB NOT NULL,
+ data_quality TEXT NOT NULL DEFAULT 'detailed',
+ open_ports INTEGER NOT NULL DEFAULT 0,
+ open_filtered_ports INTEGER NOT NULL DEFAULT 0,
+ tcp_present INTEGER NOT NULL DEFAULT 0,
+ udp_present INTEGER NOT NULL DEFAULT 0,
+ tcp_open_ports INTEGER NOT NULL DEFAULT 0,
+ tcp_open_filtered_ports INTEGER NOT NULL DEFAULT 0,
+ udp_open_ports INTEGER NOT NULL DEFAULT 0,
+ udp_open_filtered_ports INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(scan_id, address)
+);`,
+			`CREATE TABLE IF NOT EXISTS latest_scan_hosts (
+ address TEXT PRIMARY KEY,
+ scan_id TEXT NOT NULL,
+ job_id TEXT NOT NULL DEFAULT '',
+ job TEXT NOT NULL DEFAULT '',
+ finished_at TEXT NOT NULL,
+ data_quality TEXT NOT NULL DEFAULT 'detailed',
+ address_family TEXT NOT NULL DEFAULT '',
+ source_targets_json BLOB NOT NULL DEFAULT '[]',
+ dns_names_json BLOB NOT NULL DEFAULT '[]',
+ host_json BLOB NOT NULL,
+ open_ports INTEGER NOT NULL DEFAULT 0,
+ open_filtered_ports INTEGER NOT NULL DEFAULT 0,
+ tcp_present INTEGER NOT NULL DEFAULT 0,
+ udp_present INTEGER NOT NULL DEFAULT 0,
+ tcp_open_ports INTEGER NOT NULL DEFAULT 0,
+ tcp_open_filtered_ports INTEGER NOT NULL DEFAULT 0,
+ udp_open_ports INTEGER NOT NULL DEFAULT 0,
+ udp_open_filtered_ports INTEGER NOT NULL DEFAULT 0
+);`,
+			"CREATE INDEX IF NOT EXISTS latest_scan_hosts_open ON latest_scan_hosts(open_ports, open_filtered_ports)",
+			"CREATE INDEX IF NOT EXISTS latest_scan_hosts_protocol_open ON latest_scan_hosts(tcp_present, udp_present, tcp_open_ports, udp_open_ports)",
+			`INSERT OR IGNORE INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
+SELECT address,scan_id,COALESCE(job_id,''),job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports
+FROM (
+ SELECT h.address,h.scan_id,s.job_id,s.job,s.finished_at,h.data_quality,h.address_family,h.source_targets_json,h.dns_names_json,h.host_json,h.open_ports,h.open_filtered_ports,h.tcp_present,h.udp_present,h.tcp_open_ports,h.tcp_open_filtered_ports,h.udp_open_ports,h.udp_open_filtered_ports,
+        ROW_NUMBER() OVER (PARTITION BY h.address ORDER BY s.finished_at DESC,s.id DESC) AS rn
+ FROM scan_hosts h JOIN scans s ON s.id=h.scan_id
+ WHERE s.status='success'
+) ranked WHERE rn=1;`,
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
@@ -1844,8 +1902,44 @@ func saveScanHostsExec(ctx context.Context, execer contextExecer, scan model.Sca
 			scan.ID, address, scan.Job, host.AddressFamily, sourceTargets, dnsNames, hostJSON, "detailed", open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
 			return err
 		}
+		if scan.Status == "success" {
+			if err := upsertLatestScanHostExec(ctx, execer, scan, address, host.AddressFamily, sourceTargets, dnsNames, hostJSON, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
+}
+
+// upsertLatestScanHostExec maintains the exact latest successful observation
+// for one effective address. The finished-at/id ordering mirrors the historical
+// ranking query, including deterministic ties between scans with equal times.
+func upsertLatestScanHostExec(ctx context.Context, execer contextExecer, scan model.Scan, address, addressFamily string, sourceTargets, dnsNames, hostJSON []byte, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered int) error {
+	finishedAt := scan.FinishedAt.UTC().Format(time.RFC3339Nano)
+	_, err := execer.ExecContext(ctx, `INSERT INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(address) DO UPDATE SET
+ scan_id=excluded.scan_id,
+ job_id=excluded.job_id,
+ job=excluded.job,
+ finished_at=excluded.finished_at,
+ data_quality=excluded.data_quality,
+ address_family=excluded.address_family,
+ source_targets_json=excluded.source_targets_json,
+ dns_names_json=excluded.dns_names_json,
+ host_json=excluded.host_json,
+ open_ports=excluded.open_ports,
+ open_filtered_ports=excluded.open_filtered_ports,
+ tcp_present=excluded.tcp_present,
+ udp_present=excluded.udp_present,
+ tcp_open_ports=excluded.tcp_open_ports,
+ tcp_open_filtered_ports=excluded.tcp_open_filtered_ports,
+ udp_open_ports=excluded.udp_open_ports,
+ udp_open_filtered_ports=excluded.udp_open_filtered_ports
+WHERE excluded.finished_at > latest_scan_hosts.finished_at
+   OR (excluded.finished_at = latest_scan_hosts.finished_at AND excluded.scan_id > latest_scan_hosts.scan_id)`,
+		address, scan.ID, scan.JobID, scan.Job, finishedAt, "detailed", addressFamily, sourceTargets, dnsNames, hostJSON, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered)
+	return err
 }
 
 func normalizeStoredHostAddress(raw string) (string, error) {
@@ -1948,29 +2042,23 @@ func (s *Store) GetScanHost(ctx context.Context, scanID, address string) (ScanHo
 	return item, nil
 }
 
-// ListLatestScanHostsPage returns the newest successful indexed observation
-// for each effective address across all jobs. Window ranking is performed by
-// SQLite before host JSON is decoded.
+// ListLatestScanHostsPage returns the maintained newest successful observation
+// for each effective address across all jobs. The projection is updated in the
+// same transaction as a successful scan and rebuilt after retention deletes.
 func (s *Store) ListLatestScanHostsPage(ctx context.Context, query, protocol string, hasOpen *bool, limit, offset int) (Page[LatestScanHost], error) {
 	limit, offset = normalizePage(limit, offset)
 	filter := buildHostFilter(query, protocol, hasOpen)
-	base := `WITH ranked AS (
-	 SELECT h.scan_id,h.address,h.data_quality,h.host_json,h.source_targets_json,h.dns_names_json,
-        h.open_ports,h.open_filtered_ports,h.tcp_present,h.udp_present,
-        h.tcp_open_ports,h.tcp_open_filtered_ports,h.udp_open_ports,h.udp_open_filtered_ports,
-        s.job_id,s.job,s.finished_at,
-        ROW_NUMBER() OVER (PARTITION BY h.address ORDER BY s.finished_at DESC,s.id DESC) AS rn
- FROM scan_hosts h JOIN scans s ON s.id=h.scan_id
- WHERE s.status='success'
-) `
-	where := append([]string{"rn=1"}, filter.where...)
+	where := filter.where
+	if len(where) == 0 {
+		where = []string{"1=1"}
+	}
 	args := append([]any(nil), filter.args...)
 	var page Page[LatestScanHost]
-	countQuery := base + `SELECT COUNT(*) FROM ranked WHERE ` + strings.Join(where, " AND ")
+	countQuery := `SELECT COUNT(*) FROM latest_scan_hosts WHERE ` + strings.Join(where, " AND ")
 	if err := s.DB.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	querySQL := base + `SELECT scan_id,address,data_quality,host_json,job_id,job,finished_at FROM ranked WHERE ` + strings.Join(where, " AND ") + ` ORDER BY address LIMIT ? OFFSET ?`
+	querySQL := `SELECT scan_id,address,data_quality,host_json,job_id,job,finished_at FROM latest_scan_hosts WHERE ` + strings.Join(where, " AND ") + ` ORDER BY address LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 	rows, err := s.DB.QueryContext(ctx, querySQL, args...)
 	if err != nil {
@@ -2755,6 +2843,15 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 		return stats, err
 	}
 	stats.Scans, _ = result.RowsAffected()
+	if stats.Scans > 0 {
+		// A projection row is a copy rather than a foreign-key child of its
+		// source scan. Rebuild it after cascaded scan deletion so an older
+		// retained observation becomes visible when the previous latest row
+		// expires.
+		if err := rebuildLatestScanHostsTx(ctx, tx); err != nil {
+			return stats, err
+		}
+	}
 
 	result, err = tx.ExecContext(ctx, `DELETE FROM events WHERE created_at < ?`, cutoff)
 	if err != nil {
@@ -2805,6 +2902,21 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 		return stats, err
 	}
 	return stats, nil
+}
+
+func rebuildLatestScanHostsTx(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM latest_scan_hosts`); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
+SELECT address,scan_id,COALESCE(job_id,''),job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports
+FROM (
+ SELECT h.address,h.scan_id,s.job_id,s.job,s.finished_at,h.data_quality,h.address_family,h.source_targets_json,h.dns_names_json,h.host_json,h.open_ports,h.open_filtered_ports,h.tcp_present,h.udp_present,h.tcp_open_ports,h.tcp_open_filtered_ports,h.udp_open_ports,h.udp_open_filtered_ports,
+        ROW_NUMBER() OVER (PARTITION BY h.address ORDER BY s.finished_at DESC,s.id DESC) AS rn
+ FROM scan_hosts h JOIN scans s ON s.id=h.scan_id
+ WHERE s.status='success'
+) ranked WHERE rn=1`)
+	return err
 }
 
 // Prune is retained for callers that only need the total row count.

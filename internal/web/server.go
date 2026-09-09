@@ -475,16 +475,21 @@ func (s *Server) withAuth(w http.ResponseWriter, r *http.Request, fn func(http.R
 }
 
 func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.allowPublicRequest(r) {
+		w.Header().Set("Retry-After", "60")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "setup status requests are temporarily rate limited", nil)
+		return
+	}
 	configured, err := s.Store.HasAdministrator(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", "setup status could not be loaded", nil)
 		return
 	}
-	status := map[string]any{
-		"configured":            configured,
-		"username":              "admin",
-		"version":               s.Version,
-		"password_requirements": auth.PasswordRequirements(),
+	status := map[string]any{"configured": configured, "username": "admin", "password_requirements": auth.PasswordRequirements()}
+	if configured {
+		// Keep the pre-setup endpoint useful without advertising the exact
+		// installed release to unauthenticated callers.
+		status["version"] = s.Version
 	}
 	if dashboard, dashboardErr := s.Store.GetPublicDashboard(r.Context()); dashboardErr == nil {
 		status["public_dashboard_enabled"] = dashboard.Enabled

@@ -171,7 +171,10 @@ at `/public` and contains only the selected job names, latest successful scan
 time, positive ports (protocol, port, and service name), and cached normalized
 network-registration data. Product/version fingerprints and raw Nmap evidence
 remain private to the authenticated console. It does not provide a host
-selector or proxy arbitrary RDAP requests. Public responses use a short-lived
+selector or proxy arbitrary RDAP requests. If you place it behind a reverse
+proxy, allow only `/public`, `/assets/*`, `/favicon.svg`, and
+`/api/public/v1/dashboard`; keep the authenticated `/api/v1/*` routes private.
+Public responses use a short-lived
 in-memory cache and a bounded legacy-history lookup; a request that exceeds the
 five-second build budget receives a timeout response instead of running
 unbounded database work. Keep the page disabled for isolated or

@@ -333,8 +333,6 @@ type publicHostResponse struct {
 	AddressFamily  string               `json:"address_family,omitempty"`
 	Public         bool                 `json:"public"`
 	Private        bool                 `json:"private"`
-	Available      bool                 `json:"available"`
-	Stale          bool                 `json:"stale,omitempty"`
 	LastSuccessful interface{}          `json:"last_successful_scan,omitempty"`
 	OpenPorts      []publicPortResponse `json:"open_ports,omitempty"`
 	OpenFiltered   []publicPortResponse `json:"open_filtered_ports,omitempty"`
@@ -488,7 +486,7 @@ func parsePublicTime(raw string) time.Time {
 func (s *Server) publicHostFromObservation(ctx context.Context, job string, host model.HostObservation, scan model.ScanSummary) publicHostResponse {
 	address := canonicalHostAddress(host.Address)
 	ip := net.ParseIP(address)
-	result := publicHostResponse{Job: job, Address: address, AddressFamily: host.AddressFamily, Available: true, LastSuccessful: scan.FinishedAt}
+	result := publicHostResponse{Job: job, Address: address, AddressFamily: host.AddressFamily, LastSuccessful: scan.FinishedAt}
 	if ip != nil {
 		result.Private = isPrivateAddress(ip)
 		result.Public = !result.Private

@@ -190,6 +190,8 @@ jobs:
           docker buildx imagetools inspect "$image" | tee image-manifest.txt
           grep -q 'linux/amd64' image-manifest.txt
           grep -q 'linux/arm64' image-manifest.txt
+      - name: Verify container runtime capability matrix
+        run: ./scripts/verify-container-runtime.sh "$IMAGE"
       - name: Verify binary version and configuration
         run: |
           expected="EdgeWatch ${GITHUB_REF_NAME#v}"

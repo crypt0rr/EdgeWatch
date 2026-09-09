@@ -14,6 +14,13 @@ authoritative for baselines and incidents. Connect discovery is the least
 privileged default; SYN discovery additionally requires the explicitly opted-in
 `NET_ADMIN` and `NET_RAW` container capabilities.
 
+The final image intentionally retains UID 0 because the supported Docker
+capability model does not reliably expose raw packet privileges to an
+unprivileged process. Nmap UDP/SYN and Naabu SYN fail closed without those
+privileges. The compatibility matrix, bind-mount ownership guidance, and
+reconsideration criteria are maintained in
+[`docs/container-hardening.md`](docs/container-hardening.md).
+
 The administration console is bound to a loopback address by default and uses
 server-side sessions, CSRF protection, and Argon2id password storage. Keep the
 Docker host and any SSH tunnel access restricted to trusted administrators.

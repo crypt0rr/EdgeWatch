@@ -369,12 +369,12 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 		pc.Engine = config.EngineNmap
 		pc.Ports = scope
 		pc.NSEProfile = job.TCP.NSEProfile
-		// The discovery mode is also the safest default for confirmation. Keep
-		// the two phases consistent unless an administrator deliberately chose a
-		// different Nmap mode in the job revision.
-		if job.TCP.Mode == "" {
-			pc.Mode = options.ScanType
-		}
+		// NormalizeJob resolves an omitted Naabu confirmation mode to connect;
+		// an explicit job mode (including SYN) is preserved here. Keeping this
+		// assignment unconditional makes the confirmation command deterministic
+		// and avoids an unreachable fallback that could silently couple the two
+		// phases.
+		pc.Mode = job.TCP.Mode
 		if report != nil {
 			reportProgress(report, Progress{StartedAt: started, Phase: "nmap enrichment", Protocol: "tcp", TotalProbes: discoveryTotal, CompletedProbes: discoveryTotal, ProcessAlive: true, UnitAddresses: len(group), UnitPorts: pc.Ports, DiscoveryPortsFound: portsFound, DiscoveryAddresses: addressesFound, DiscoveryDurationMS: discoveryDuration, EnrichmentDurationMS: time.Since(enrichmentStarted).Milliseconds()})
 		}

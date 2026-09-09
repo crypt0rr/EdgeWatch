@@ -489,6 +489,58 @@ func TestSSEPayloadAndHistoryAreByteBounded(t *testing.T) {
 	}
 }
 
+func TestSSEStopsDeliveringAfterSessionRevocation(t *testing.T) {
+	server, db, _ := newUsersTestServer(t)
+	ctx := context.Background()
+	raw, _, err := auth.NewManager(db).Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := httptest.NewServer(server.Handler())
+	defer h.Close()
+	request, err := http.NewRequest(http.MethodGet, h.URL+"/api/v1/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	done := make(chan string, 1)
+	go func() {
+		body, _ := io.ReadAll(response.Body)
+		done <- string(body)
+	}()
+	// Wait until the initial connection has registered before revoking it.
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.mu.Lock()
+		registered := len(server.subscribers) == 1
+		server.mu.Unlock()
+		if registered || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d", response.StatusCode)
+	}
+	if err := db.DeleteAllSessions(ctx); err != nil {
+		t.Fatal(err)
+	}
+	server.broadcast(map[string]any{"type": "should-not-deliver"})
+	select {
+	case body := <-done:
+		if strings.Contains(body, "should-not-deliver") {
+			t.Fatalf("revoked stream delivered an event: %s", body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("revoked SSE stream did not close")
+	}
+}
+
 func TestAPIRequiresSessionCSRFAndRejectsUnvalidatedOptions(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

@@ -149,6 +149,28 @@ func TestFormatEventUsesApplicationUpdateMessages(t *testing.T) {
 	}
 }
 
+func TestFormatEventSanitizesScanDerivedText(t *testing.T) {
+	event := model.Event{
+		Type:    "changes-detected",
+		Message: "banner <@channel>\nnext",
+		Job:     "edge_[prod]",
+		Changes: []model.Change{{Severity: "critical", Kind: "service", Target: "host<1>", Protocol: "tcp", Port: 443, Old: "old", New: "[x](javascript:alert(1))"}},
+	}
+	got := FormatEvent(event)
+	for _, unsafe := range []string{"<@channel>", "[x](javascript:alert(1))", "\nnext"} {
+		if strings.Contains(got, unsafe) {
+			t.Fatalf("notification retained unsafe text %q: %q", unsafe, got)
+		}
+	}
+	if !strings.Contains(got, "‹@channel›") || !strings.Contains(got, "［x］（javascript:alert（1））") || !strings.Contains(got, "old ->") {
+		t.Fatalf("notification did not preserve a readable neutralized form: %q", got)
+	}
+	long := FormatEvent(model.Event{Message: strings.Repeat("x", maxNotificationFieldRunes+20)})
+	if len([]rune(long)) > len("EdgeWatch: ")+maxNotificationFieldRunes {
+		t.Fatalf("notification field was not bounded: %d runes", len([]rune(long)))
+	}
+}
+
 func TestIncompleteFailuresDoNotChangeBaseline(t *testing.T) {
 	ctx := context.Background()
 	db, _ := store.Open(filepath.Join(t.TempDir(), "db"))

@@ -540,15 +540,27 @@ func (s *Server) cachedDeploymentTelemetry(ctx context.Context) (store.Deploymen
 			done := s.telemetryDone
 			s.telemetryMu.Unlock()
 
-			value, err := s.Store.DeploymentTelemetry(ctx)
-			s.telemetryMu.Lock()
-			if err == nil {
-				s.telemetry = &value
-				s.telemetryAt = time.Now()
-			}
-			s.telemetryRun = false
-			close(done)
-			s.telemetryMu.Unlock()
+			var value store.DeploymentTelemetry
+			var err error
+			// Always release the single-flight gate, including when a storage
+			// implementation panics. net/http recovers a handler panic, but
+			// without this cleanup every later status request would wait forever.
+			func() {
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						err = fmt.Errorf("deployment telemetry panic: %v", recovered)
+					}
+					s.telemetryMu.Lock()
+					if err == nil {
+						s.telemetry = &value
+						s.telemetryAt = time.Now()
+					}
+					s.telemetryRun = false
+					close(done)
+					s.telemetryMu.Unlock()
+				}()
+				value, err = s.Store.DeploymentTelemetry(ctx)
+			}()
 			return value, err
 		}
 		done := s.telemetryDone
@@ -2542,9 +2554,28 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
+			// Sessions and roles can be revoked while a browser keeps its
+			// EventSource open. Re-check before delivering every event so a
+			// disabled or demoted principal cannot receive the next change, and
+			// the heartbeat below bounds exposure when the stream is otherwise
+			// quiet.
+			if s.Auth == nil {
+				return
+			}
+			current, authorized := s.Auth.Authenticate(r.Context(), r)
+			if !authorized || !auth.HasPermission(current, auth.PermissionStreamRead) {
+				return
+			}
 			writeSSEMessage(w, message)
 			flusher.Flush()
 		case <-heartbeat.C:
+			if s.Auth == nil {
+				return
+			}
+			current, authorized := s.Auth.Authenticate(r.Context(), r)
+			if !authorized || !auth.HasPermission(current, auth.PermissionStreamRead) {
+				return
+			}
 			_, _ = w.Write([]byte(": heartbeat\n\n"))
 			flusher.Flush()
 		}
@@ -2639,6 +2670,20 @@ func (s *Server) asset(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	name := strings.TrimPrefix(r.URL.Path, "/")
+	if name == "" || !strings.HasPrefix(name, "assets/") {
+		http.NotFound(w, r)
+		return
+	}
+	info, err := fs.Stat(sub, name)
+	if err != nil || info.IsDir() {
+		http.NotFound(w, r)
+		return
+	}
+	// Vite emits content-hashed asset names. They are immutable for a given
+	// build and can safely be cached for a year; the SPA shell remains
+	// explicitly revalidated in spa below.
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 	http.FileServer(http.FS(sub)).ServeHTTP(w, r)
 }
 func (s *Server) spa(w http.ResponseWriter, r *http.Request) {
@@ -2646,6 +2691,10 @@ func (s *Server) spa(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// The shell and stable auxiliary paths (such as the favicon) must be
+	// revalidated after an upgrade so a browser never keeps a shell pointing
+	// at bundles that no longer exist.
+	w.Header().Set("Cache-Control", "no-cache")
 	if r.URL.Path != "/" {
 		sub, err := fs.Sub(webui.Files(), "dist")
 		if err == nil {

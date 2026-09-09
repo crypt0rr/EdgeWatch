@@ -2,7 +2,11 @@ package store
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -528,6 +532,64 @@ func (s *Store) ConsumeRecoveryCodeForUser(ctx context.Context, userID, hash str
 	}
 	n, err := r.RowsAffected()
 	return n == 1, err
+}
+
+// ConsumeRecoveryCodeTextForUser verifies a presented recovery code against
+// the user's unused codes and atomically marks the matching row consumed.
+// Version 2 records use a per-code salt; legacy SHA-256 digests remain
+// readable so an upgrade does not invalidate codes that were already issued.
+func (s *Store) ConsumeRecoveryCodeTextForUser(ctx context.Context, userID, code string, now time.Time) (bool, error) {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if code == "" {
+		return false, nil
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT id_hash FROM recovery_codes WHERE user_id=? AND used_at IS NULL`, userID)
+	if err != nil {
+		return false, err
+	}
+	var match string
+	for rows.Next() {
+		var stored string
+		if err := rows.Scan(&stored); err != nil {
+			_ = rows.Close()
+			return false, err
+		}
+		if recoveryCodeMatches(stored, code) {
+			match = stored
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return false, err
+	}
+	_ = rows.Close()
+	if match == "" {
+		return false, nil
+	}
+	result, err := s.DB.ExecContext(ctx, `UPDATE recovery_codes SET used_at=? WHERE user_id=? AND id_hash=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), userID, match)
+	if err != nil {
+		return false, err
+	}
+	count, err := result.RowsAffected()
+	return count == 1, err
+}
+
+func recoveryCodeMatches(stored, code string) bool {
+	parts := strings.Split(stored, "$")
+	if len(parts) == 3 && parts[0] == "v2" {
+		salt, saltErr := base64.RawStdEncoding.DecodeString(parts[1])
+		expected, hashErr := hex.DecodeString(parts[2])
+		if saltErr != nil || hashErr != nil || len(salt) < 16 || len(expected) != sha256.Size {
+			return false
+		}
+		h := sha256.New()
+		_, _ = h.Write(salt)
+		_, _ = h.Write([]byte(code))
+		return hmac.Equal(h.Sum(nil), expected)
+	}
+	legacy := sha256.Sum256([]byte(code))
+	return hmac.Equal([]byte(strings.ToLower(stored)), []byte(hex.EncodeToString(legacy[:])))
 }
 
 func (s *Store) Audit(ctx context.Context, action, detail string) error {

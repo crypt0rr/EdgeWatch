@@ -92,6 +92,8 @@ jobs:
             echo "The SYN Compose override must grant NET_ADMIN"
             exit 1
           fi
+      - name: Verify pinned Naabu release
+        run: ./scripts/verify-naabu-pin.sh
       - name: Set up QEMU
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
       - name: Set up Docker Buildx

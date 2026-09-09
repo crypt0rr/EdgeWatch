@@ -175,6 +175,10 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
+		// Keep both the console shell and the unauthenticated public HTML out
+		// of search indexes. The API handler also sets this header explicitly,
+		// but the global middleware is what covers the document crawlers fetch.
+		w.Header().Set("X-Robots-Tag", "noindex, nofollow")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'")
 		next.ServeHTTP(w, r)
 	})

@@ -25,6 +25,7 @@ func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.allowPublicRequest(r) {
+		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "public status requests are temporarily rate limited", nil)
 		return
 	}
@@ -279,8 +280,6 @@ type publicPortResponse struct {
 	Protocol string `json:"protocol"`
 	Port     int    `json:"port"`
 	Service  string `json:"service,omitempty"`
-	Product  string `json:"product,omitempty"`
-	Version  string `json:"version,omitempty"`
 }
 
 type publicRdapResponse struct {
@@ -431,7 +430,7 @@ func (s *Server) publicHostFromObservation(ctx context.Context, job string, host
 		for _, port := range protocol.Ports {
 			entry := publicPortResponse{Protocol: protocol.Protocol, Port: port.Port}
 			if port.Service != nil {
-				entry.Service, entry.Product, entry.Version = port.Service.Name, port.Service.Product, port.Service.Version
+				entry.Service = port.Service.Name
 			}
 			switch port.State {
 			case "open":

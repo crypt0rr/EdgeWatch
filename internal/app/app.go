@@ -133,12 +133,28 @@ func (a *App) CheckScanWorkBudget(job config.Job) (config.WorkEstimate, error) {
 	if err != nil {
 		return estimate, err
 	}
-	if job.AllowHighCost {
-		return estimate, nil
-	}
+	// A Naabu pipeline always performs a full-range discovery pass. Keep its
+	// budget separate from the Nmap budget so the default 256-host expansion
+	// remains usable without weakening the Nmap safety rail.
+	effectiveJob := config.NormalizeJob(job)
 	budget := a.Config.Scheduler.MaxProbeCount
 	if budget <= 0 {
 		budget = config.DefaultMaxProbeCount
+	}
+	if effectiveJob.TCP != nil && effectiveJob.TCP.Engine == config.EngineNaabuNmap {
+		budget = a.Config.Scheduler.MaxNaabuProbeCount
+		if budget <= 0 {
+			budget = config.DefaultNaabuMaxProbeCount
+		}
+	}
+	// allow_high_cost is an explicit opt-in to the configured engine budget,
+	// never permission to schedule an unbounded scan. Keep this check before
+	// the opt-in branch so even administrators cannot exceed the hard ceiling.
+	if estimate.Probes > config.MaxProbeCountLimit {
+		return estimate, &ScanWorkBudgetError{Estimate: estimate, Budget: config.MaxProbeCountLimit}
+	}
+	if job.AllowHighCost {
+		return estimate, nil
 	}
 	if estimate.Probes > budget {
 		return estimate, &ScanWorkBudgetError{Estimate: estimate, Budget: budget}

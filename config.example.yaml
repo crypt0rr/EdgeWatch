@@ -15,8 +15,13 @@ web:
 
 scheduler:
   max_concurrent_scans: 1
-  # Approximate probes permitted per run unless a job opts into high-cost work.
+  # Approximate Nmap probes permitted per run unless an administrator enables
+  # high-cost work for a job. Naabu has a separate budget below because its
+  # full-range discovery probes are much lighter than Nmap probes.
   max_probe_count: 5000000
+  # Naabu 1-65535 discovery budget. The default covers the editor's 256-host
+  # expansion limit (about 16.8M probes) with headroom.
+  max_naabu_probe_count: 20000000
 
 # Check the latest stable GitHub release at startup and every three hours.
 # Set enabled: false for offline or privacy-sensitive deployments. A check

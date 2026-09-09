@@ -201,6 +201,7 @@ func TestValidateChecksDeploymentAndDuplicateJobs(t *testing.T) {
 		{"retention", func(c *Config) { c.Retention = Duration(time.Hour) }, "retention"},
 		{"concurrency", func(c *Config) { c.Scheduler.MaxConcurrent = 65 }, "max_concurrent"},
 		{"probe budget", func(c *Config) { c.Scheduler.MaxProbeCount = 100_000_001 }, "max_probe_count"},
+		{"Naabu probe budget", func(c *Config) { c.Scheduler.MaxNaabuProbeCount = 100_000_001 }, "max_naabu_probe_count"},
 		{"duplicate jobs", func(c *Config) { c.Jobs = []Job{base, base} }, "job names"},
 	}
 	for _, test := range cases {

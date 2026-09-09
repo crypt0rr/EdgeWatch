@@ -527,6 +527,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		"retention":                 s.App.Config.Retention.Value().String(),
 		"max_concurrent_scans":      s.App.Config.Scheduler.MaxConcurrent,
 		"max_probe_count":           s.App.Config.Scheduler.MaxProbeCount,
+		"max_naabu_probe_count":     s.App.Config.Scheduler.MaxNaabuProbeCount,
 		"rdap_enabled":              s.App.Config.RDAPEnabled(),
 	}
 	if user.Role == store.RoleViewer {
@@ -1201,6 +1202,10 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 		writeValidationError(w, err)
 		return
 	}
+	if job.AllowHighCost && !canOverrideHighCost(session) {
+		writeError(w, http.StatusForbidden, "high_cost_admin_required", "only administrators may enable high-cost scans", nil)
+		return
+	}
 	if err := s.applySelectedScannerProfile(r.Context(), &job, false); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, "profile_conflict", "scanner profile was modified; reload and select its current revision", nil)
@@ -1472,6 +1477,10 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		writeValidationError(w, err)
 		return
 	}
+	if job.AllowHighCost && !canOverrideHighCost(session) {
+		writeError(w, http.StatusForbidden, "high_cost_admin_required", "only administrators may enable high-cost scans", nil)
+		return
+	}
 	current, err := s.Store.GetJob(r.Context(), id)
 	if err != nil {
 		writeError(w, 404, "not_found", "job not found", nil)
@@ -1564,6 +1573,14 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 	state, _ := s.Store.RuntimeState(r.Context(), id)
 	s.broadcast(map[string]any{"type": "job.updated", "job_id": id})
 	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), record, state))
+}
+
+// canOverrideHighCost deliberately reuses the administrator-only users.manage
+// permission instead of checking role strings in job handlers. Empty roles
+// are treated as legacy administrator sessions by the auth permission table;
+// every managed operator and viewer is denied.
+func canOverrideHighCost(session store.Session) bool {
+	return auth.HasPermission(session, auth.PermissionUsersManage)
 }
 
 func securityScopeChanges(old, next config.Job) []string {

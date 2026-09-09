@@ -65,10 +65,15 @@ the replacement is issued.
 `config.yaml` contains deployment settings only. See
 [`config.example.yaml`](config.example.yaml) for the complete schema.
 
-- `database`, `retention`, `scheduler.max_concurrent_scans`, and
-  `scheduler.max_probe_count` control local storage and scan capacity. A job's
-  estimated probe count is shown in the console and runs over the budget are
-  rejected before scanning unless `allow_high_cost` is explicitly enabled.
+- `database`, `retention`, `scheduler.max_concurrent_scans`,
+  `scheduler.max_probe_count`, and `scheduler.max_naabu_probe_count` control
+  local storage and scan capacity. Nmap-only jobs use the 5,000,000-probe
+  default; Naabu pipeline jobs use a separate 20,000,000-probe default, which
+  covers the editor's 256-host full-range (1–65535) discovery scope with
+  headroom. A job's estimated probe count is shown in the console and runs
+  over the applicable budget are rejected before scanning unless an
+  administrator explicitly enables `allow_high_cost`. That override is still
+  bounded by the 100,000,000-probe per-run safety ceiling.
 - `web.listen` must be a loopback address; the default is
   `127.0.0.1:8080`.
 - Forwarding headers are ignored by default. If a local reverse proxy is used,

@@ -139,20 +139,47 @@ func (s *Server) ListenAndServe(ctx context.Context, address string) error {
 	if err != nil {
 		return err
 	}
+	return s.serveListener(ctx, listener, address, s.Handler())
+}
+
+// serveListener runs the HTTP server and does not return until a graceful
+// shutdown has completed. Keeping the shutdown join in this call prevents the
+// database owner from closing while handlers or SSE subscribers are still
+// draining.
+func (s *Server) serveListener(ctx context.Context, listener net.Listener, address string, handler http.Handler) error {
 	// WriteTimeout must stay disabled for the SSE endpoint; its heartbeat keeps
 	// the connection alive and individual API writes are small and bounded.
-	server := &http.Server{Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10}
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10}
+	serveDone := make(chan struct{})
+	shutdownDone := make(chan struct{})
+	var shutdownOnce sync.Once
+	shutdown := func() {
+		shutdownOnce.Do(func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = server.Shutdown(shutdownCtx)
+			close(shutdownDone)
+		})
+	}
 	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdownCtx)
+		select {
+		case <-ctx.Done():
+			shutdown()
+		case <-serveDone:
+		}
 	}()
 	s.Log.Info("web interface listening", "address", address)
-	err = server.Serve(listener)
+	err := server.Serve(listener)
+	close(serveDone)
 	if errors.Is(err, http.ErrServerClosed) {
+		shutdown()
+		<-shutdownDone
 		return nil
 	}
+	// A listener error is terminal too. Stop the server and join the watcher so
+	// it cannot outlive this component when the daemon supervisor closes state.
+	shutdown()
+	<-shutdownDone
 	return err
 }
 

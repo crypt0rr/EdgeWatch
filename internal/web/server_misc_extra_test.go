@@ -7,13 +7,75 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/webui"
 )
+
+func TestServeListenerWaitsForGracefulShutdown(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	server.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	serveDone := make(chan error, 1)
+	go func() {
+		serveDone <- server.serveListener(ctx, listener, listener.Addr().String(), handler)
+	}()
+	clientDone := make(chan error, 1)
+	go func() {
+		response, requestErr := http.Get("http://" + listener.Addr().String())
+		if requestErr == nil {
+			response.Body.Close()
+		}
+		clientDone <- requestErr
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("slow handler did not start")
+	}
+	cancel()
+	// The production server is shutting down, but the listener must remain
+	// joined until the in-flight handler has drained.
+	select {
+	case err := <-serveDone:
+		t.Fatalf("server returned before handler drained: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-clientDone:
+		if err != nil {
+			t.Fatalf("slow request failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("slow request did not finish")
+	}
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("graceful server shutdown error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not finish after the handler drained")
+	}
+}
 
 func TestServerStaticSSEAndAuditHelpers(t *testing.T) {
 	server, _, _ := newUsersTestServer(t)

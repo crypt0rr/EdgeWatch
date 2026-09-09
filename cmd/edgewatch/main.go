@@ -9,7 +9,9 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,6 +25,12 @@ import (
 )
 
 var version = "dev"
+
+// exitProcess is a variable so lifecycle tests can exercise the second-signal
+// path without terminating the test binary.
+var exitProcess = os.Exit
+
+const daemonShutdownTimeout = 30 * time.Second
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
@@ -99,7 +107,7 @@ func run(args []string) error {
 		}
 		application.Version = version
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, stop := contextWithSignals(context.Background())
 	defer stop()
 	switch cmd {
 	case "daemon":
@@ -220,17 +228,86 @@ func runDaemon(ctx context.Context, application *app.App, listen string, s *stor
 	runCtx, _ := application.BeginRun(ctx)
 	server := web.NewServer(application, s, logger)
 	errCh := make(chan error, 2)
-	go func() { errCh <- application.Daemon(runCtx) }()
-	go func() { errCh <- server.ListenAndServe(runCtx, listen) }()
+	go runComponent(errCh, logger, "daemon", func() error { return application.Daemon(runCtx) })
+	go runComponent(errCh, logger, "web", func() error { return server.ListenAndServe(runCtx, listen) })
 	first := <-errCh
 	// One component returning (including an HTTP bind or daemon lease error)
-	// must stop the other component before the database is closed by run().
-	application.StopRun()
-	second := <-errCh
+	// must stop the other component before the database is closed by run(). A
+	// bounded join prevents a scanner that ignores cancellation from keeping a
+	// container alive indefinitely; a second OS signal can still force-exit.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), daemonShutdownTimeout)
+	defer cancel()
+	stopDone := make(chan struct{})
+	go func() {
+		application.StopRun()
+		close(stopDone)
+	}()
+	select {
+	case <-stopDone:
+	case <-shutdownCtx.Done():
+		logger.Error("daemon shutdown timed out", "timeout", daemonShutdownTimeout, "first_error", first)
+		return shutdownCtx.Err()
+	}
+	var second error
+	select {
+	case second = <-errCh:
+	case <-shutdownCtx.Done():
+		logger.Error("component shutdown timed out", "timeout", daemonShutdownTimeout, "first_error", first)
+		return shutdownCtx.Err()
+	}
 	if first != nil {
 		return first
 	}
 	return second
+}
+
+func runComponent(errCh chan<- error, logger *slog.Logger, name string, fn func() error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Error("component goroutine panic recovered", "component", name, "panic", recovered, "stack", string(debug.Stack()))
+			errCh <- fmt.Errorf("%s component panicked: %v", name, recovered)
+		}
+	}()
+	errCh <- fn()
+}
+
+// contextWithSignals cancels on the first termination signal and reserves a
+// second signal for an immediate process exit. The watcher is explicitly
+// stoppable so commands that finish without a signal do not leak a goroutine.
+func contextWithSignals(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	stop := make(chan struct{})
+	watcherDone := make(chan struct{})
+	var stopOnce sync.Once
+	go func() {
+		defer close(watcherDone)
+		select {
+		case <-parent.Done():
+			return
+		case <-stop:
+			return
+		case <-signals:
+			cancel()
+		}
+		select {
+		case <-signals:
+			exitProcess(1)
+		case <-parent.Done():
+		case <-stop:
+		}
+	}()
+	cleanup := func() {
+		stopOnce.Do(func() { close(stop) })
+		signal.Stop(signals)
+		cancel()
+		<-watcherDone
+	}
+	return ctx, cleanup
 }
 func printValue(format string, v any) error {
 	if format == "json" {

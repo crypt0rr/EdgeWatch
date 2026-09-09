@@ -1115,7 +1115,10 @@ func defaultNewScannerProfile(p *jobPayload) {
 	}
 	tcp.Engine = config.EngineNaabuNmap
 	tcp.ProfileID = store.BuiltinNaabuProfileID
-	tcp.ProfileRevision = 1
+	// Leave the revision unresolved here. applySelectedScannerProfile resolves
+	// it from the current built-in profile, so a new job never pins a stale
+	// hard-coded revision after a forward profile upgrade.
+	tcp.ProfileRevision = 0
 }
 
 func isUnique(err error) bool {

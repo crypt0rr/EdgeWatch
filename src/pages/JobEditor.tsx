@@ -34,7 +34,6 @@ const defaultTCP = (): Protocol => ({
   service_detection: false,
   engine: 'naabu_nmap',
   profile_id: BUILTIN_NAABU_PROFILE_ID,
-  profile_revision: 1,
 })
 
 const jobFormSchema = z.object({
@@ -326,7 +325,9 @@ function ProtocolCard({ label, enabled, onToggle, protocol, setProtocol, profile
     // the list). The server validates and resolves this stable built-in ID.
     if (value === 'naabu_nmap' && !profile) {
       values.profile_id = BUILTIN_NAABU_PROFILE_ID
-      values.profile_revision = 1
+      // The API resolves the current built-in revision when this field is
+      // omitted. Do not pin new jobs to a stale revision while profiles load.
+      values.profile_revision = undefined
     }
     setProtocol({ ...protocol!, ...values, engine: value, ports: value === 'naabu_nmap' ? '1-65535' : protocol!.ports })
   }

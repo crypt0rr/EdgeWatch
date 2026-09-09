@@ -28,7 +28,7 @@ import (
 func TestDefaultNewScannerProfileUsesNaabuOnlyWhenTCPScannerIsUnspecified(t *testing.T) {
 	naabu := &jobPayload{TCP: &protocolPayload{Ports: "1-1024"}}
 	defaultNewScannerProfile(naabu)
-	if naabu.TCP.Engine != config.EngineNaabuNmap || naabu.TCP.ProfileID != store.BuiltinNaabuProfileID || naabu.TCP.ProfileRevision != 1 {
+	if naabu.TCP.Engine != config.EngineNaabuNmap || naabu.TCP.ProfileID != store.BuiltinNaabuProfileID || naabu.TCP.ProfileRevision != 0 {
 		t.Fatalf("default TCP scanner = %#v", naabu.TCP)
 	}
 

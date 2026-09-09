@@ -52,25 +52,72 @@ func ensureBuiltinScannerProfiles(db *sql.DB) error {
 		{BuiltinNmapProfileID, "Nmap standard", config.BuiltinNmapProfile()},
 		{BuiltinNaabuProfileID, "Naabu full TCP → Nmap", config.BuiltinNaabuProfile()},
 	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	for _, builtin := range definitions {
-		raw, err := json.Marshal(builtin.value)
+		raw, err := marshalProfileDefinition(builtin.value)
 		if err != nil {
 			return err
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		_, err = db.ExecContext(ctx, `INSERT OR IGNORE INTO scanner_profiles(id,name,description,definition_json,built_in,archived,revision,created_by,updated_by,created_at,updated_at) VALUES(?,?,?,?,1,0,1,'system','system',?,?)`, builtin.id, builtin.name, builtin.value.Description, raw, now, now)
-		if err != nil {
+		var currentRaw []byte
+		var builtIn, currentRevision int
+		rowErr := tx.QueryRowContext(ctx, `SELECT definition_json,built_in,revision FROM scanner_profiles WHERE id=?`, builtin.id).Scan(&currentRaw, &builtIn, &currentRevision)
+		if errors.Is(rowErr, sql.ErrNoRows) {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profiles(id,name,description,definition_json,built_in,archived,revision,created_by,updated_by,created_at,updated_at) VALUES(?,?,?,?,1,0,1,'system','system',?,?)`, builtin.id, builtin.name, builtin.value.Description, raw, now, now); err != nil {
+				return err
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) VALUES(?,?,?,'system',?)`, builtin.id, 1, raw, now); err != nil {
+				return err
+			}
+			continue
+		}
+		if rowErr != nil {
+			return rowErr
+		}
+		if builtIn == 0 {
+			return fmt.Errorf("scanner profile %s conflicts with the built-in profile", builtin.id)
+		}
+		if currentRevision < 1 {
+			currentRevision = 1
+		}
+
+		// Keep the revision table and the current row consistent even if an
+		// older startup was interrupted between the two seed writes. A profile
+		// change is always represented by a new immutable revision; existing
+		// jobs continue to use the revision they already pinned.
+		var revisionRaw []byte
+		revisionErr := tx.QueryRowContext(ctx, `SELECT definition_json FROM scanner_profile_revisions WHERE profile_id=? AND revision=?`, builtin.id, currentRevision).Scan(&revisionRaw)
+		currentMatches := string(currentRaw) == string(raw)
+		revisionMatches := revisionErr == nil && string(revisionRaw) == string(raw)
+		if revisionErr != nil && !errors.Is(revisionErr, sql.ErrNoRows) {
+			return revisionErr
+		}
+		if currentMatches && revisionMatches {
+			continue
+		}
+		if currentMatches && errors.Is(revisionErr, sql.ErrNoRows) {
+			// Repair a missing current revision without changing the profile's
+			// revision number. This is safe because no immutable history exists
+			// for that number yet.
+			if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) VALUES(?,?,?,'system',?)`, builtin.id, currentRevision, raw, now); err != nil {
+				return err
+			}
+			continue
+		}
+
+		nextRevision := currentRevision + 1
+		if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) VALUES(?,?,?,'system',?)`, builtin.id, nextRevision, raw, now); err != nil {
 			return err
 		}
-		// Seed the immutable revision independently of the profile row. A
-		// partially populated database (for example, one interrupted between
-		// the two inserts during the first v0.13 startup) must be repaired on
-		// the next open without replacing an administrator's existing data.
-		if _, err := db.ExecContext(ctx, `INSERT OR IGNORE INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) VALUES(?,?,?,'system',?)`, builtin.id, 1, raw, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE scanner_profiles SET name=?,description=?,definition_json=?,revision=?,updated_by='system',updated_at=? WHERE id=? AND revision=?`, builtin.name, builtin.value.Description, raw, nextRevision, now, builtin.id, currentRevision); err != nil {
 			return err
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 func validateScannerProfileRecord(name string, definition config.ScannerProfile) error {

@@ -251,7 +251,7 @@ export function JobDetail() {
             </div>
             <Clock3 size={18} className="muted-icon" />
           </div>
-          {scans.isLoading ? <div className="skeleton-list" /> : scans.data?.scans.length ? (
+          {scans.isLoading ? <div className="skeleton-list" /> : scans.error ? <div className="error-card" role="alert">Could not load recent scans.</div> : scans.data?.scans.length ? (
             <div className="scan-list">
               {scans.data.scans.map((scan) => (
                 <button
@@ -275,6 +275,8 @@ export function JobDetail() {
           ) : <div className="inline-empty">No scans have run yet.</div>}
           <Pagination page={scans.data?.pagination} onChange={setScanOffset} />
 
+          {selectedScan && detail.isLoading && <div className="loading"><span className="spinner" />Loading scan details…</div>}
+          {selectedScan && detail.error && <div className="error-card" role="alert">Could not load this scan’s details.</div>}
           {selectedScan && detail.data && (
             <div className="scan-detail">
               <div className="panel-heading">

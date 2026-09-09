@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/webui"
 )
 
 func TestServerStaticSSEAndAuditHelpers(t *testing.T) {
@@ -41,10 +43,31 @@ func TestServerStaticSSEAndAuditHelpers(t *testing.T) {
 	if assetResponse.Code != http.StatusNotFound {
 		t.Fatalf("missing asset status = %d", assetResponse.Code)
 	}
+	directoryResponse := httptest.NewRecorder()
+	server.asset(directoryResponse, httptest.NewRequest(http.MethodGet, "/assets/", nil))
+	if directoryResponse.Code != http.StatusNotFound {
+		t.Fatalf("asset directory status = %d, want 404", directoryResponse.Code)
+	}
+	entries, err := fs.ReadDir(webui.Files(), "dist/assets")
+	if err != nil || len(entries) == 0 {
+		t.Fatalf("embedded assets unavailable: %v", err)
+	}
+	knownName := ""
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			knownName = entry.Name()
+			break
+		}
+	}
+	knownAsset := httptest.NewRecorder()
+	server.asset(knownAsset, httptest.NewRequest(http.MethodGet, "/assets/"+knownName, nil))
+	if knownAsset.Code != http.StatusOK || knownAsset.Header().Get("Cache-Control") != "public, max-age=31536000, immutable" {
+		t.Fatalf("known asset response = %d, cache-control=%q", knownAsset.Code, knownAsset.Header().Get("Cache-Control"))
+	}
 	spaResponse := httptest.NewRecorder()
 	server.spa(spaResponse, httptest.NewRequest(http.MethodGet, "/", nil))
-	if spaResponse.Code != http.StatusOK || !bytes.Contains(spaResponse.Body.Bytes(), []byte("EdgeWatch")) {
-		t.Fatalf("SPA response = %d %q", spaResponse.Code, spaResponse.Body.String())
+	if spaResponse.Code != http.StatusOK || spaResponse.Header().Get("Cache-Control") != "no-cache" || !bytes.Contains(spaResponse.Body.Bytes(), []byte("EdgeWatch")) {
+		t.Fatalf("SPA response = %d cache-control=%q %q", spaResponse.Code, spaResponse.Header().Get("Cache-Control"), spaResponse.Body.String())
 	}
 	apiResponse := httptest.NewRecorder()
 	server.spa(apiResponse, httptest.NewRequest(http.MethodGet, "/api/v1/missing", nil))

@@ -31,6 +31,19 @@ describe('API pagination contract', () => {
     await expect(request).rejects.toMatchObject({ code: 'conflict', details: { revision: 2 } })
     expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
   })
+
+  it('signals session expiry for authenticated requests without redirecting login failures', async () => {
+    const dispatchEvent = vi.fn()
+    vi.stubGlobal('window', { dispatchEvent })
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'authentication required' } }), { status: 401, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(api('/status')).rejects.toMatchObject({ code: 'unauthorized' })
+    await expect(api('/auth/login', { method: 'POST', body: '{}' })).rejects.toMatchObject({ code: 'unauthorized' })
+
+    expect(dispatchEvent).toHaveBeenCalledTimes(1)
+    expect(dispatchEvent.mock.calls[0][0].type).toBe('edgewatch:unauthorized')
+  })
 })
 
 describe('notification API contract', () => {

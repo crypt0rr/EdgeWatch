@@ -78,6 +78,13 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`/api/v1${path}`, { ...init, headers, credentials: 'same-origin' })
   if (response.status === 204) return undefined as T
   const body = await response.json().catch(() => ({}))
+  if (response.status === 401 && !/^\/(?:setup|auth\/(?:login|activate))(?:\/|\?|$)/.test(path)) {
+    // A session can expire while the console remains open. Let the shell
+    // clear its cached principal and return to the login route instead of
+    // leaving each page to render an authentication error independently.
+    csrf = ''
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event('edgewatch:unauthorized'))
+  }
   if (!response.ok) throw new APIError(body?.error?.message || 'Request failed', body?.error?.code, body?.error?.details)
   return body as T
 }

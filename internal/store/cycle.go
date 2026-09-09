@@ -145,20 +145,13 @@ func (s *Store) CreateScanCycle(ctx context.Context, cycle ScanCycleRecord) (Sca
 	return cycle, nil
 }
 
-type scanCycleUnitState struct {
-	sequence int
-	unit     scanner.WorkUnit
-	status   string
-	snapshot model.Snapshot
-}
-
 // ReconcileScanCycleEnrichment expands a phase-aware Naabu cycle from durable
-// discovery checkpoints. Discovery units are committed before this method is
-// called; the transaction below then derives deterministic Nmap enrichment
-// units (and, once every discovery unit is complete, the ordinary UDP units).
-// Re-running it after a crash is safe: the unit identity includes phase,
-// family, address set, and port scope, so an already committed unit is never
-// inserted twice.
+// discovery checkpoints. Each completed discovery unit is marked in the same
+// transaction that creates its Nmap enrichment work. This makes the first
+// reconciliation after an upgrade or restart a full recovery pass, while
+// normal progress only reads and decodes the newly completed unit snapshots.
+// The unit identity still makes recovery idempotent if a checkpoint marker is
+// missing or an older database has no markers yet.
 func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -183,58 +176,91 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 		return nil
 	}
 
-	rows, err := tx.QueryContext(ctx, `SELECT sequence,work_unit_json,status,snapshot_json FROM scan_cycle_units WHERE cycle_id=? ORDER BY sequence`, cycleID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	var units []scanCycleUnitState
-	existing := map[string]struct{}{}
-	discoveryCount := 0
-	discoveryComplete := true
-	for rows.Next() {
-		var row scanCycleUnitState
-		var unitRaw, snapshotRaw []byte
-		if err := rows.Scan(&row.sequence, &unitRaw, &row.status, &snapshotRaw); err != nil {
-			return err
-		}
-		if err := json.Unmarshal(unitRaw, &row.unit); err != nil {
-			return err
-		}
-		existing[scanCycleUnitIdentity(row.unit)] = struct{}{}
-		if row.unit.Phase == "discovery" {
-			discoveryCount++
-			if row.status != "completed" {
-				discoveryComplete = false
-			}
-			if row.status == "completed" && len(snapshotRaw) > 0 && string(snapshotRaw) != "{}" && string(snapshotRaw) != "null" {
-				if err := json.Unmarshal(snapshotRaw, &row.snapshot); err != nil {
-					return err
-				}
-			}
-		}
-		units = append(units, row)
-	}
-	if err := rows.Err(); err != nil {
+	// JSON1 is already required by the legacy-history queries. Using it here
+	// lets SQLite count phase rows without loading every checkpoint payload.
+	var discoveryCount, completedDiscoveryCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0) FROM scan_cycle_units WHERE cycle_id=? AND json_extract(work_unit_json,'$.phase')='discovery'`, cycleID).Scan(&discoveryCount, &completedDiscoveryCount); err != nil {
 		return err
 	}
 	if discoveryCount == 0 {
 		return tx.Commit()
 	}
+	discoveryComplete := completedDiscoveryCount == discoveryCount
 
-	// Gather one deterministic port set per effective address. A discovery
-	// checkpoint contains one host observation per address; duplicate records
-	// are unioned defensively so retry/split recovery cannot lose a port.
-	type discoveryGroup struct {
-		family    int
-		ports     []int
-		addresses []string
+	// Existing dynamic units are the only rows needed for duplicate detection.
+	// Discovery work units themselves are deliberately not unmarshaled again.
+	existing := map[string]struct{}{}
+	dynamicRows, err := tx.QueryContext(ctx, `SELECT work_unit_json FROM scan_cycle_units WHERE cycle_id=? AND json_extract(work_unit_json,'$.phase')<>'discovery'`, cycleID)
+	if err != nil {
+		return err
 	}
-	portsByAddress := map[string]map[int]struct{}{}
-	for _, row := range units {
-		if row.unit.Phase != "discovery" || row.status != "completed" {
-			continue
+	for dynamicRows.Next() {
+		var raw []byte
+		var unit scanner.WorkUnit
+		if err := dynamicRows.Scan(&raw); err != nil {
+			dynamicRows.Close()
+			return err
 		}
+		if err := json.Unmarshal(raw, &unit); err != nil {
+			dynamicRows.Close()
+			return err
+		}
+		existing[scanCycleUnitIdentity(unit)] = struct{}{}
+	}
+	if err := dynamicRows.Err(); err != nil {
+		dynamicRows.Close()
+		return err
+	}
+	dynamicRows.Close()
+
+	var nextSequence int
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),-1)+1 FROM scan_cycle_units WHERE cycle_id=?`, cycleID).Scan(&nextSequence); err != nil {
+		return err
+	}
+
+	// Gather ports only from discovery units that have not yet been committed
+	// to the reconciliation checkpoint table. A missing table is handled by
+	// migration 16; an empty table intentionally means a full recovery pass.
+	type discoveryRow struct {
+		sequence int
+		unit     scanner.WorkUnit
+		snapshot model.Snapshot
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT u.sequence,u.work_unit_json,u.snapshot_json FROM scan_cycle_units AS u WHERE u.cycle_id=? AND u.status='completed' AND json_extract(u.work_unit_json,'$.phase')='discovery' AND NOT EXISTS (SELECT 1 FROM scan_cycle_discovery_checkpoints AS c WHERE c.cycle_id=u.cycle_id AND c.sequence=u.sequence) ORDER BY u.sequence`, cycleID)
+	if err != nil {
+		return err
+	}
+	var pending []discoveryRow
+	for rows.Next() {
+		var row discoveryRow
+		var unitRaw, snapshotRaw []byte
+		if err := rows.Scan(&row.sequence, &unitRaw, &snapshotRaw); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := json.Unmarshal(unitRaw, &row.unit); err != nil {
+			rows.Close()
+			return err
+		}
+		if len(snapshotRaw) > 0 && string(snapshotRaw) != "{}" && string(snapshotRaw) != "null" {
+			if err := json.Unmarshal(snapshotRaw, &row.snapshot); err != nil {
+				rows.Close()
+				return err
+			}
+		}
+		pending = append(pending, row)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+
+	// Gather one deterministic port set per effective address from only this
+	// batch. Discovery address batches are disjoint; unioning within the batch
+	// still protects against duplicate host observations during recovery.
+	portsByAddress := map[string]map[int]struct{}{}
+	for _, row := range pending {
 		for _, host := range row.snapshot.Hosts {
 			address := normalizeCycleAddress(host.Address)
 			if address == "" {
@@ -256,6 +282,12 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 				}
 			}
 		}
+	}
+
+	type discoveryGroup struct {
+		family    int
+		ports     []int
+		addresses []string
 	}
 	groups := map[string]*discoveryGroup{}
 	for address, set := range portsByAddress {
@@ -285,17 +317,11 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 	}
 	sort.Strings(groupKeys)
 
-	nextSequence := 0
-	for _, row := range units {
-		if row.sequence >= nextSequence {
-			nextSequence = row.sequence + 1
-		}
-	}
 	var added []scanner.WorkUnit
+	factor := boolFactor(plan.Job.TCP.ServiceDetection)
 	for _, key := range groupKeys {
 		group := groups[key]
 		sort.Strings(group.addresses)
-		factor := boolFactor(plan.Job.TCP.ServiceDetection)
 		for addressStart := 0; addressStart < len(group.addresses); addressStart += 128 {
 			addressEnd := addressStart + 128
 			if addressEnd > len(group.addresses) {
@@ -330,21 +356,26 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 		}
 	}
 
-	// UDP is intentionally added only after all full-range discovery units are
-	// committed. This preserves the advertised phase order and still allows a
-	// zero-discovery result to proceed successfully to UDP. Include units added
-	// during this reconciliation when checking the phase so a repeated call in
-	// the same transaction cannot enqueue a second UDP set.
-	udpAlreadyPresent := hasCyclePhase(units, "udp", "udp")
-	if discoveryComplete && plan.Job.UDP != nil && !udpAlreadyPresent {
-		udpUnits := buildCycleUDPUnits(plan, nextSequence)
-		for _, unit := range udpUnits {
+	// UDP is intentionally added only after every full-range discovery unit is
+	// complete. This query is aggregate-only and does not decode old snapshots.
+	var udpCount int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycle_units WHERE cycle_id=? AND json_extract(work_unit_json,'$.phase')='udp'`, cycleID).Scan(&udpCount); err != nil {
+		return err
+	}
+	if discoveryComplete && plan.Job.UDP != nil && udpCount == 0 {
+		for _, unit := range buildCycleUDPUnits(plan, nextSequence) {
 			if _, exists := existing[scanCycleUnitIdentity(unit)]; exists {
 				continue
 			}
 			added = append(added, unit)
 			existing[scanCycleUnitIdentity(unit)] = struct{}{}
-			udpAlreadyPresent = true
+		}
+	}
+
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, row := range pending {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO scan_cycle_discovery_checkpoints(cycle_id,sequence,processed_at) VALUES(?,?,?)`, cycleID, row.sequence, stamp); err != nil {
+			return err
 		}
 	}
 	if len(added) == 0 {
@@ -352,15 +383,13 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 	}
 	plan.Units = append(plan.Units, added...)
 	plan.TotalUnits = len(plan.Units)
-	plan.TotalProbes = 0
-	for _, unit := range plan.Units {
+	for _, unit := range added {
 		plan.TotalProbes += unit.Probes
 	}
 	updatedPlan, err := json.Marshal(plan)
 	if err != nil {
 		return err
 	}
-	stamp := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, unit := range added {
 		raw, err := json.Marshal(unit)
 		if err != nil {
@@ -450,15 +479,6 @@ func subsetCycleTargets(targets []scanner.ResolvedTarget, addresses []string) []
 		out = append(out, scanner.ResolvedTarget{Name: target.Name, ConfiguredTarget: target.ConfiguredTarget, Addresses: selected, Aggregate: target.Aggregate, Hostname: target.Hostname})
 	}
 	return out
-}
-
-func hasCyclePhase(rows []scanCycleUnitState, phase, protocol string) bool {
-	for _, row := range rows {
-		if row.unit.Phase == phase && row.unit.Protocol == protocol {
-			return true
-		}
-	}
-	return false
 }
 
 func buildCycleUDPUnits(plan scanner.WorkPlan, sequence int) []scanner.WorkUnit {

@@ -304,6 +304,92 @@ func TestReconcileNaabuDiscoveryIsIncremental(t *testing.T) {
 	}
 }
 
+func TestReconcileNaabuDiscoveryRepairsSplitPlanCounters(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+	jobValue := config.NormalizeJob(config.Job{
+		Name: "naabu-split", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.1", "192.0.2.2"}, MaxExpandedHosts: 2,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{AddressBatchSize: 1}},
+	})
+	job, err := s.CreateJob(ctx, jobValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets := []scanner.ResolvedTarget{
+		{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}},
+		{Name: "192.0.2.2", ConfiguredTarget: "192.0.2.2", Addresses: []string{"192.0.2.2"}},
+	}
+	plan := scanner.WorkPlan{
+		Job: job.Job, Targets: targets,
+		Scopes:     []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}, {Target: "192.0.2.2", Protocol: "tcp", Ports: "1-65535"}},
+		Units:      []scanner.WorkUnit{{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Targets: targets[:1], Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535}},
+		TotalUnits: 1, TotalProbes: 65535,
+	}
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	first := unit.Unit
+	first.Addresses = []string{"192.0.2.1"}
+	first.Targets = targets[:1]
+	second := unit.Unit
+	second.Addresses = []string{"192.0.2.2"}
+	second.Targets = targets[1:]
+	if err := s.SplitScanCycleUnit(ctx, cycle.ID, unit.Sequence, first, second, "split for test"); err != nil {
+		t.Fatal(err)
+	}
+
+	complete := func(sequence int, address string, port int) {
+		t.Helper()
+		if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, sequence); err != nil {
+			t.Fatal(err)
+		}
+		fragment := model.Snapshot{Hosts: []model.HostObservation{{Address: address, Protocols: []model.ProtocolObservation{{Protocol: "tcp", DiscoveryEngine: "naabu", DiscoveredPorts: []model.PortObservation{{Port: port, State: "open", Verification: "discovered"}}}}}}}
+		if err := s.CompleteScanCycleUnit(ctx, cycle.ID, sequence, fragment); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The split leaves plan_json with one unit while the durable table has two.
+	// Reconciliation must repair the plan and totals before adding enrichment.
+	complete(0, "192.0.2.1", 22)
+	updated, err := s.GetScanCycle(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.TotalUnits != 3 || updated.Plan.TotalUnits != 3 || updated.TotalProbes != 65535*2+1 {
+		t.Fatalf("split counters after first discovery = total=%d plan=%d probes=%d", updated.TotalUnits, updated.Plan.TotalUnits, updated.TotalProbes)
+	}
+	complete(1, "192.0.2.2", 443)
+	updated, err = s.GetScanCycle(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.TotalUnits != 4 || updated.Plan.TotalUnits != 4 || updated.TotalProbes != 65535*2+2 {
+		t.Fatalf("split counters after second discovery = total=%d plan=%d probes=%d", updated.TotalUnits, updated.Plan.TotalUnits, updated.TotalProbes)
+	}
+	complete(2, "192.0.2.1", 22)
+	complete(3, "192.0.2.2", 443)
+	if _, err := s.CompleteScanCycle(ctx, cycle.ID); err != nil {
+		t.Fatalf("completed split cycle = %v", err)
+	}
+}
+
 func TestScanCycleRetrySplitStallAndDiscard(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})

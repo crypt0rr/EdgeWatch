@@ -16,6 +16,23 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
+func TestScanPersistenceTimeoutScalesWithResultSize(t *testing.T) {
+	for _, test := range []struct {
+		hosts int
+		want  time.Duration
+	}{
+		{hosts: 0, want: 10 * time.Second},
+		{hosts: 100, want: 12*time.Second + 500*time.Millisecond},
+		{hosts: 400, want: 20 * time.Second},
+		{hosts: 100000, want: 5 * time.Minute},
+		{hosts: -1, want: 10 * time.Second},
+	} {
+		if got := scanPersistenceTimeout(test.hosts); got != test.want {
+			t.Fatalf("scanPersistenceTimeout(%d) = %s, want %s", test.hosts, got, test.want)
+		}
+	}
+}
+
 func TestProgressPercentAndActiveRunUpdates(t *testing.T) {
 	for _, test := range []struct {
 		name string

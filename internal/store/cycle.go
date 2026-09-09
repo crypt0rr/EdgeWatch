@@ -213,6 +213,47 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 	}
 	dynamicRows.Close()
 
+	// A running unit can be split after the plan was persisted. The split adds
+	// a new row and increments the durable counter, but older plan JSON does
+	// not contain that row. Reconcile only units beyond the plan's highest
+	// sequence so normal incremental passes do not decode every completed
+	// discovery checkpoint just to repair the plan representation.
+	planSequences := make(map[int]struct{}, len(plan.Units))
+	maxPlanSequence := -1
+	for _, unit := range plan.Units {
+		planSequences[unit.Sequence] = struct{}{}
+		if unit.Sequence > maxPlanSequence {
+			maxPlanSequence = unit.Sequence
+		}
+	}
+	missingRows, err := tx.QueryContext(ctx, `SELECT sequence,work_unit_json FROM scan_cycle_units WHERE cycle_id=? AND sequence>? ORDER BY sequence`, cycleID, maxPlanSequence)
+	if err != nil {
+		return err
+	}
+	for missingRows.Next() {
+		var sequence int
+		var raw []byte
+		if err := missingRows.Scan(&sequence, &raw); err != nil {
+			missingRows.Close()
+			return err
+		}
+		if _, exists := planSequences[sequence]; exists {
+			continue
+		}
+		var unit scanner.WorkUnit
+		if err := json.Unmarshal(raw, &unit); err != nil {
+			missingRows.Close()
+			return err
+		}
+		plan.Units = append(plan.Units, unit)
+		planSequences[sequence] = struct{}{}
+	}
+	if err := missingRows.Err(); err != nil {
+		missingRows.Close()
+		return err
+	}
+	missingRows.Close()
+
 	var nextSequence int
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence),-1)+1 FROM scan_cycle_units WHERE cycle_id=?`, cycleID).Scan(&nextSequence); err != nil {
 		return err
@@ -378,18 +419,8 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 			return err
 		}
 	}
-	if len(added) == 0 {
-		return tx.Commit()
-	}
 	plan.Units = append(plan.Units, added...)
-	plan.TotalUnits = len(plan.Units)
-	for _, unit := range added {
-		plan.TotalProbes += unit.Probes
-	}
-	updatedPlan, err := json.Marshal(plan)
-	if err != nil {
-		return err
-	}
+	sort.Slice(plan.Units, func(i, j int) bool { return plan.Units[i].Sequence < plan.Units[j].Sequence })
 	for _, unit := range added {
 		raw, err := json.Marshal(unit)
 		if err != nil {
@@ -398,6 +429,21 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 		if _, err := tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?)`, cycleID, unit.Sequence, raw, "pending", 0, []byte(`{}`), "", "", ""); err != nil {
 			return err
 		}
+	}
+	// scan_cycle_units is authoritative for both totals. In particular, a
+	// retry split may have added rows without updating plan_json; deriving the
+	// counters here prevents a stale plan from making a complete cycle appear
+	// finished before its replacement units have run.
+	var totalUnits int
+	var totalProbes int64
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CAST(json_extract(work_unit_json,'$.probes') AS INTEGER)),0) FROM scan_cycle_units WHERE cycle_id=?`, cycleID).Scan(&totalUnits, &totalProbes); err != nil {
+		return err
+	}
+	plan.TotalUnits = totalUnits
+	plan.TotalProbes = totalProbes
+	updatedPlan, err := json.Marshal(plan)
+	if err != nil {
+		return err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET plan_json=?,total_units=?,total_probes=?,updated_at=? WHERE id=? AND status IN ('running','paused','stalled')`, updatedPlan, plan.TotalUnits, plan.TotalProbes, stamp, cycleID)
 	if err != nil {

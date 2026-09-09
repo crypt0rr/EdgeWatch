@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/google/uuid"
-	_ "modernc.org/sqlite"
+	"modernc.org/sqlite"
 )
 
 type Store struct {
@@ -62,7 +63,35 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 19
+const schemaVersion = 20
+
+// sqlitePragmaConnector applies connection-scoped SQLite settings whenever
+// database/sql opens a physical connection. database/sql can discard a
+// connection after a cancelled query, so issuing these PRAGMAs once through
+// db.Exec is not sufficient: a replacement connection would silently revert
+// to SQLite's defaults.
+type sqlitePragmaConnector struct {
+	driver.Connector
+}
+
+func (c sqlitePragmaConnector) Connect(ctx context.Context) (driver.Conn, error) {
+	conn, err := c.Connector.Connect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	execer, ok := conn.(driver.ExecerContext)
+	if !ok {
+		_ = conn.Close()
+		return nil, errors.New("SQLite driver does not support connection setup")
+	}
+	for _, statement := range []string{"PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"} {
+		if _, err := execer.ExecContext(ctx, statement, nil); err != nil {
+			_ = conn.Close()
+			return nil, err
+		}
+	}
+	return conn, nil
+}
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -90,11 +119,13 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	db, err := sql.Open("sqlite", dsn)
+	connector, err := sqlite.NewConnector(dsn)
 	if err != nil {
 		return nil, err
 	}
+	db := sql.OpenDB(sqlitePragmaConnector{Connector: connector})
 	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"} {
 		if _, err := db.Exec(pragma); err != nil {
 			db.Close()
@@ -745,6 +776,54 @@ FROM latest_scan_hosts;`,
 );`,
 			"CREATE INDEX IF NOT EXISTS notification_delivery_health_updated ON notification_delivery_health(updated_at)",
 		},
+		20: {
+			// Keep the FTS documents bounded to fields that are intentionally
+			// searchable. Earlier migrations accidentally indexed the complete
+			// host evidence JSON, making every scan commit pay for trigram tokens
+			// over service metadata, state summaries, and command fingerprints.
+			"ALTER TABLE scan_hosts ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE latest_scan_hosts ADD COLUMN search_text TEXT NOT NULL DEFAULT ''",
+			`UPDATE scan_hosts SET search_text=lower(coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,''))`,
+			`UPDATE latest_scan_hosts SET search_text=lower(coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,''))`,
+			"DROP TRIGGER IF EXISTS scan_hosts_search_ai",
+			"DROP TRIGGER IF EXISTS scan_hosts_search_au",
+			"DROP TRIGGER IF EXISTS scan_hosts_search_ad",
+			"DROP TRIGGER IF EXISTS latest_scan_hosts_search_ai",
+			"DROP TRIGGER IF EXISTS latest_scan_hosts_search_au",
+			"DROP TRIGGER IF EXISTS latest_scan_hosts_search_ad",
+			`CREATE TRIGGER scan_hosts_search_ai AFTER INSERT ON scan_hosts BEGIN
+ INSERT INTO scan_host_search(scan_id,address,content)
+ VALUES(NEW.scan_id,NEW.address,lower(coalesce(NEW.search_text,'') || ' ' || coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'')));
+END;`,
+			`CREATE TRIGGER scan_hosts_search_au AFTER UPDATE ON scan_hosts BEGIN
+ DELETE FROM scan_host_search WHERE rowid IN (SELECT rowid FROM scan_host_search WHERE scan_id=OLD.scan_id AND address=OLD.address);
+ INSERT INTO scan_host_search(scan_id,address,content)
+ VALUES(NEW.scan_id,NEW.address,lower(coalesce(NEW.search_text,'') || ' ' || coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'')));
+END;`,
+			`CREATE TRIGGER scan_hosts_search_ad AFTER DELETE ON scan_hosts BEGIN
+ DELETE FROM scan_host_search WHERE rowid IN (SELECT rowid FROM scan_host_search WHERE scan_id=OLD.scan_id AND address=OLD.address);
+END;`,
+			`CREATE TRIGGER latest_scan_hosts_search_ai AFTER INSERT ON latest_scan_hosts BEGIN
+ INSERT INTO latest_host_search(address,content)
+ VALUES(NEW.address,lower(coalesce(NEW.search_text,'') || ' ' || coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'')));
+END;`,
+			`CREATE TRIGGER latest_scan_hosts_search_au AFTER UPDATE ON latest_scan_hosts BEGIN
+ DELETE FROM latest_host_search WHERE rowid IN (SELECT rowid FROM latest_host_search WHERE address=OLD.address);
+ INSERT INTO latest_host_search(address,content)
+ VALUES(NEW.address,lower(coalesce(NEW.search_text,'') || ' ' || coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'')));
+END;`,
+			`CREATE TRIGGER latest_scan_hosts_search_ad AFTER DELETE ON latest_scan_hosts BEGIN
+ DELETE FROM latest_host_search WHERE rowid IN (SELECT rowid FROM latest_host_search WHERE address=OLD.address);
+END;`,
+			"DELETE FROM scan_host_search",
+			`INSERT INTO scan_host_search(scan_id,address,content)
+SELECT scan_id,address,lower(coalesce(search_text,'') || ' ' || coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,''))
+FROM scan_hosts;`,
+			"DELETE FROM latest_host_search",
+			`INSERT INTO latest_host_search(address,content)
+SELECT address,lower(coalesce(search_text,'') || ' ' || coalesce(address,'') || ' ' || coalesce(job,'') || ' ' || coalesce(source_targets_json,'') || ' ' || coalesce(dns_names_json,''))
+FROM latest_scan_hosts;`,
+		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
 		statements, ok := migrations[next]
@@ -758,6 +837,15 @@ FROM latest_scan_hosts;`,
 		defer tx.Rollback()
 		for _, statement := range statements {
 			if _, err := tx.Exec(statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+				return err
+			}
+		}
+		if next == 20 {
+			// Rebuild the bounded search document from legacy host evidence after
+			// the new triggers are installed. This keeps existing service and
+			// hostname searches useful without retaining host_json in the FTS
+			// projection; new rows use the same helper during SaveScan.
+			if err := backfillHostSearchTextTx(tx); err != nil {
 				return err
 			}
 		}
@@ -2007,13 +2095,14 @@ func saveScanHostsExec(ctx context.Context, execer contextExecer, scan model.Sca
 		if err != nil {
 			return err
 		}
+		searchText := hostSearchContent(scan.Job, host)
 		open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered := scanHostStats(host)
-		if _, err := execer.ExecContext(ctx, `INSERT INTO scan_hosts(scan_id,address,job,address_family,source_targets_json,dns_names_json,host_json,data_quality,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			scan.ID, address, scan.Job, host.AddressFamily, sourceTargets, dnsNames, hostJSON, "detailed", open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
+		if _, err := execer.ExecContext(ctx, `INSERT INTO scan_hosts(scan_id,address,job,address_family,source_targets_json,dns_names_json,host_json,search_text,data_quality,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			scan.ID, address, scan.Job, host.AddressFamily, sourceTargets, dnsNames, hostJSON, searchText, "detailed", open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
 			return err
 		}
 		if scan.Status == "success" {
-			if err := upsertLatestScanHostExec(ctx, execer, scan, address, host.AddressFamily, sourceTargets, dnsNames, hostJSON, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
+			if err := upsertLatestScanHostExec(ctx, execer, scan, address, host.AddressFamily, sourceTargets, dnsNames, hostJSON, searchText, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered); err != nil {
 				return err
 			}
 		}
@@ -2021,13 +2110,137 @@ func saveScanHostsExec(ctx context.Context, execer contextExecer, scan model.Sca
 	return nil
 }
 
+const maxHostSearchTextBytes = 64 * 1024
+
+// hostSearchContent is deliberately built from the small set of fields that
+// the host inventory promises to search. Keeping the serialized evidence out
+// of this document bounds FTS maintenance time as service and Nmap metadata
+// grows while preserving address, job, target, DNS, hostname, port, and
+// service searches. Values are de-duplicated and the document has a hard byte
+// cap so a host with thousands of open services cannot recreate the old
+// host_json write amplification through the search projection.
+func hostSearchContent(job string, host model.HostObservation) string {
+	var builder strings.Builder
+	seen := make(map[string]struct{})
+	appendValue := func(raw string) bool {
+		value := strings.ToLower(strings.TrimSpace(raw))
+		if value == "" {
+			return true
+		}
+		if _, exists := seen[value]; exists {
+			return true
+		}
+		if builder.Len()+len(value)+1 > maxHostSearchTextBytes {
+			return false
+		}
+		seen[value] = struct{}{}
+		builder.WriteString(value)
+		builder.WriteByte(' ')
+		return true
+	}
+	if !appendValue(host.Address) || !appendValue(job) {
+		return strings.TrimSpace(builder.String())
+	}
+	for _, target := range host.SourceTargets {
+		if !appendValue(target) {
+			return strings.TrimSpace(builder.String())
+		}
+	}
+	for _, name := range host.DNSNames {
+		if !appendValue(name) {
+			return strings.TrimSpace(builder.String())
+		}
+	}
+	for _, hostname := range host.Hostnames {
+		if !appendValue(hostname.Name) {
+			return strings.TrimSpace(builder.String())
+		}
+	}
+	for _, protocol := range host.Protocols {
+		for _, port := range protocol.Ports {
+			if !appendValue(strconv.Itoa(port.Port)) {
+				return strings.TrimSpace(builder.String())
+			}
+			if port.Service == nil {
+				continue
+			}
+			service := port.Service
+			for _, value := range []string{service.Name, service.Product, service.Version, service.ExtraInfo, service.OSType, service.DeviceType} {
+				if !appendValue(value) {
+					return strings.TrimSpace(builder.String())
+				}
+			}
+			for _, cpe := range service.CPEs {
+				if !appendValue(cpe) {
+					return strings.TrimSpace(builder.String())
+				}
+			}
+		}
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+func backfillHostSearchTextTx(tx *sql.Tx) error {
+	type hostRow struct {
+		rowID int64
+		job   string
+		addr  string
+		raw   []byte
+	}
+	load := func(query string) ([]hostRow, error) {
+		rows, err := tx.Query(query)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		var out []hostRow
+		for rows.Next() {
+			var row hostRow
+			if err := rows.Scan(&row.rowID, &row.job, &row.addr, &row.raw); err != nil {
+				return nil, err
+			}
+			out = append(out, row)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
+	backfill := func(table string, rows []hostRow) error {
+		for _, row := range rows {
+			var host model.HostObservation
+			if len(row.raw) > 0 {
+				_ = json.Unmarshal(row.raw, &host)
+			}
+			host.Address = row.addr
+			searchText := hostSearchContent(row.job, host)
+			if _, err := tx.Exec(`UPDATE `+table+` SET search_text=? WHERE rowid=?`, searchText, row.rowID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	scanRows, err := load(`SELECT rowid,job,address,host_json FROM scan_hosts`)
+	if err != nil {
+		return err
+	}
+	if err := backfill("scan_hosts", scanRows); err != nil {
+		return err
+	}
+	latestRows, err := load(`SELECT rowid,job,address,host_json FROM latest_scan_hosts`)
+	if err != nil {
+		return err
+	}
+	return backfill("latest_scan_hosts", latestRows)
+}
+
 // upsertLatestScanHostExec maintains the exact latest successful observation
 // for one effective address. The finished-at/id ordering mirrors the historical
 // ranking query, including deterministic ties between scans with equal times.
-func upsertLatestScanHostExec(ctx context.Context, execer contextExecer, scan model.Scan, address, addressFamily string, sourceTargets, dnsNames, hostJSON []byte, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered int) error {
+func upsertLatestScanHostExec(ctx context.Context, execer contextExecer, scan model.Scan, address, addressFamily string, sourceTargets, dnsNames, hostJSON []byte, searchText string, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered int) error {
 	finishedAt := scan.FinishedAt.UTC().Format(time.RFC3339Nano)
-	_, err := execer.ExecContext(ctx, `INSERT INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err := execer.ExecContext(ctx, `INSERT INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(address) DO UPDATE SET
  scan_id=excluded.scan_id,
  job_id=excluded.job_id,
@@ -2036,9 +2249,10 @@ ON CONFLICT(address) DO UPDATE SET
  data_quality=excluded.data_quality,
  address_family=excluded.address_family,
  source_targets_json=excluded.source_targets_json,
- dns_names_json=excluded.dns_names_json,
- host_json=excluded.host_json,
- open_ports=excluded.open_ports,
+	dns_names_json=excluded.dns_names_json,
+	host_json=excluded.host_json,
+	search_text=excluded.search_text,
+	open_ports=excluded.open_ports,
  open_filtered_ports=excluded.open_filtered_ports,
  tcp_present=excluded.tcp_present,
  udp_present=excluded.udp_present,
@@ -2048,7 +2262,7 @@ ON CONFLICT(address) DO UPDATE SET
  udp_open_filtered_ports=excluded.udp_open_filtered_ports
 WHERE excluded.finished_at > latest_scan_hosts.finished_at
    OR (excluded.finished_at = latest_scan_hosts.finished_at AND excluded.scan_id > latest_scan_hosts.scan_id)`,
-		address, scan.ID, scan.JobID, scan.Job, finishedAt, "detailed", addressFamily, sourceTargets, dnsNames, hostJSON, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered)
+		address, scan.ID, scan.JobID, scan.Job, finishedAt, "detailed", addressFamily, sourceTargets, dnsNames, hostJSON, searchText, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered)
 	return err
 }
 
@@ -3080,10 +3294,10 @@ func rebuildLatestScanHostsTx(ctx context.Context, tx *sql.Tx) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM latest_scan_hosts`); err != nil {
 		return err
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
-SELECT address,scan_id,COALESCE(job_id,''),job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports
+	_, err := tx.ExecContext(ctx, `INSERT INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
+SELECT address,scan_id,COALESCE(job_id,''),job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports
 FROM (
- SELECT h.address,h.scan_id,s.job_id,s.job,s.finished_at,h.data_quality,h.address_family,h.source_targets_json,h.dns_names_json,h.host_json,h.open_ports,h.open_filtered_ports,h.tcp_present,h.udp_present,h.tcp_open_ports,h.tcp_open_filtered_ports,h.udp_open_ports,h.udp_open_filtered_ports,
+ SELECT h.address,h.scan_id,s.job_id,s.job,s.finished_at,h.data_quality,h.address_family,h.source_targets_json,h.dns_names_json,h.host_json,h.search_text,h.open_ports,h.open_filtered_ports,h.tcp_present,h.udp_present,h.tcp_open_ports,h.tcp_open_filtered_ports,h.udp_open_ports,h.udp_open_filtered_ports,
         ROW_NUMBER() OVER (PARTITION BY h.address ORDER BY s.finished_at DESC,s.id DESC) AS rn
  FROM scan_hosts h JOIN scans s ON s.id=h.scan_id
  WHERE s.status='success'

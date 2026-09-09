@@ -45,3 +45,27 @@ func TestApplyAcceptedServiceAndDNSChanges(t *testing.T) {
 		}
 	}
 }
+
+func TestAcceptServiceRemovalAfterPortRemoval(t *testing.T) {
+	snapshot := &model.Snapshot{
+		Units: []model.Unit{{
+			Target:   "192.0.2.10",
+			Protocol: "tcp",
+			Ports:    []model.PortState{{Port: 25, State: "open", Service: "smtp"}},
+		}},
+	}
+
+	// A single scan can report both the port disappearing and its service
+	// fingerprint disappearing. Accepting the port first removes the port from
+	// the baseline, so accepting the related service change must be idempotent.
+	if err := acceptPortChange(snapshot, model.Change{
+		Kind: "port", Target: "192.0.2.10", Protocol: "tcp", Port: 25, New: "not-open",
+	}); err != nil {
+		t.Fatalf("port removal = %v", err)
+	}
+	if err := acceptServiceChange(snapshot, model.Change{
+		Kind: "service", Target: "192.0.2.10", Protocol: "tcp", Port: 25, New: "not-open",
+	}); err != nil {
+		t.Fatalf("service removal after port removal = %v", err)
+	}
+}

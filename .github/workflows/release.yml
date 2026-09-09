@@ -50,6 +50,15 @@ jobs:
         run: npm run build
       - name: Frontend unit tests
         run: npm test
+      - name: Remove stale Google Chrome apt source
+        # Playwright installs Chromium and does not need the runner's Chrome repository.
+        # Removing it avoids unrelated apt index hash mismatches during dependency setup.
+        run: |
+          for source in /etc/apt/sources.list.d/*; do
+            if [ -f "$source" ] && grep -q 'dl.google.com/linux/chrome' "$source"; then
+              sudo rm -f "$source"
+            fi
+          done
       - name: Install Chromium for browser acceptance tests
         run: npx playwright install --with-deps chromium
       - name: Browser acceptance tests

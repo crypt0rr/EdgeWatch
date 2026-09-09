@@ -62,7 +62,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 15
+const schemaVersion = 16
 
 func Open(path string) (*Store, error) {
 	if path == "" {
@@ -657,6 +657,20 @@ FROM (
  FROM scan_hosts h JOIN scans s ON s.id=h.scan_id
  WHERE s.status='success'
 ) ranked WHERE rn=1;`,
+		},
+		16: {
+			// A reconciliation marker lets the resumable Naabu pipeline process
+			// only newly completed discovery units. The marker and any generated
+			// enrichment work are committed together, so a restart either repeats
+			// the complete transaction or observes it as finished.
+			`CREATE TABLE IF NOT EXISTS scan_cycle_discovery_checkpoints (
+ cycle_id TEXT NOT NULL,
+ sequence INTEGER NOT NULL,
+ processed_at TEXT NOT NULL,
+ PRIMARY KEY(cycle_id, sequence),
+ FOREIGN KEY(cycle_id) REFERENCES scan_cycles(id) ON DELETE CASCADE
+);`,
+			"CREATE INDEX IF NOT EXISTS scan_cycle_discovery_checkpoints_cycle ON scan_cycle_discovery_checkpoints(cycle_id,sequence)",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {

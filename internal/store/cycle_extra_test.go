@@ -219,6 +219,91 @@ func TestReconcileNaabuDiscoveryChunksLargePortSets(t *testing.T) {
 	}
 }
 
+func TestReconcileNaabuDiscoveryIsIncremental(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+	jobValue := config.NormalizeJob(config.Job{
+		Name: "naabu-incremental", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.1", "192.0.2.2"}, MaxExpandedHosts: 2,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{AddressBatchSize: 1}},
+	})
+	job, err := s.CreateJob(ctx, jobValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := scanner.WorkPlan{
+		Job: job.Job,
+		Targets: []scanner.ResolvedTarget{
+			{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}},
+			{Name: "192.0.2.2", ConfiguredTarget: "192.0.2.2", Addresses: []string{"192.0.2.2"}},
+		},
+		Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}, {Target: "192.0.2.2", Protocol: "tcp", Ports: "1-65535"}},
+		Units: []scanner.WorkUnit{
+			{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Targets: []scanner.ResolvedTarget{{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}}}, Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535},
+			{Sequence: 1, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Targets: []scanner.ResolvedTarget{{Name: "192.0.2.2", ConfiguredTarget: "192.0.2.2", Addresses: []string{"192.0.2.2"}}}, Addresses: []string{"192.0.2.2"}, Ports: "1-65535", PortCount: 65535, Probes: 65535},
+		},
+		TotalUnits: 2, TotalProbes: 131070,
+	}
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	completeDiscovery := func(port, sequence int, address string) {
+		t.Helper()
+		unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+		if err != nil || unit.Sequence != sequence {
+			t.Fatalf("next discovery unit = %#v, %v", unit, err)
+		}
+		if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, sequence); err != nil {
+			t.Fatal(err)
+		}
+		fragment := model.Snapshot{Hosts: []model.HostObservation{{Address: address, Protocols: []model.ProtocolObservation{{Protocol: "tcp", DiscoveryEngine: "naabu", DiscoveredPorts: []model.PortObservation{{Port: port, State: "open", Verification: "discovered"}}}}}}}
+		if err := s.CompleteScanCycleUnit(ctx, cycle.ID, sequence, fragment); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	completeDiscovery(22, 0, "192.0.2.1")
+	var checkpoints int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycle_discovery_checkpoints WHERE cycle_id=?`, cycle.ID).Scan(&checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	if checkpoints != 1 {
+		t.Fatalf("checkpoint count after first batch = %d, want 1", checkpoints)
+	}
+	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	if err != nil || len(summaries) != 3 {
+		t.Fatalf("first incremental reconciliation = %#v, %v", summaries, err)
+	}
+	completeDiscovery(443, 1, "192.0.2.2")
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycle_discovery_checkpoints WHERE cycle_id=?`, cycle.ID).Scan(&checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	if checkpoints != 2 {
+		t.Fatalf("checkpoint count after second batch = %d, want 2", checkpoints)
+	}
+	summaries, err = s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	if err != nil || len(summaries) != 4 {
+		t.Fatalf("second incremental reconciliation = %#v, %v", summaries, err)
+	}
+	if summaries[2].Ports != "22" || summaries[3].Ports != "443" {
+		t.Fatalf("incremental enrichment scopes = %#v", summaries)
+	}
+	if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	again, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	if err != nil || len(again) != 4 {
+		t.Fatalf("reconciliation duplicated units: %#v, %v", again, err)
+	}
+}
+
 func TestScanCycleRetrySplitStallAndDiscard(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})

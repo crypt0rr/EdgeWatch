@@ -165,6 +165,13 @@ func acceptServiceChange(snapshot *model.Snapshot, change model.Change) error {
 	}
 	unitIndex := findUnit(snapshot, change.Target, change.Protocol)
 	if unitIndex < 0 {
+		// A port-removal incident and its service-removal incident are emitted
+		// together. If the administrator accepts the port first, the related
+		// service change is already reflected by the missing unit and is safe to
+		// acknowledge as an idempotent no-op.
+		if change.New == "not-open" {
+			return nil
+		}
 		return fmt.Errorf("%w: baseline port is missing", ErrUnsupportedIncidentChange)
 	}
 	for i := range snapshot.Units[unitIndex].Ports {
@@ -179,6 +186,11 @@ func acceptServiceChange(snapshot *model.Snapshot, change model.Change) error {
 			snapshot.Normalize()
 			return nil
 		}
+	}
+	if change.New == "not-open" {
+		// The port may have been accepted first and removed from this unit. The
+		// service is absent as a consequence, so there is nothing left to write.
+		return nil
 	}
 	return fmt.Errorf("%w: baseline port is missing", ErrUnsupportedIncidentChange)
 }

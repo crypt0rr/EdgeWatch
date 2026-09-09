@@ -86,3 +86,38 @@ func TestSuppressIncidentStoresOneScanWindow(t *testing.T) {
 		t.Fatalf("suppressed change = %#v", state.SuppressedChanges[key])
 	}
 }
+
+func TestAcceptRelatedPortAndServiceRemovalsInEitherOrder(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("accept-related-removals"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	portKey := "port|192.0.2.10|tcp|25"
+	serviceKey := "service|192.0.2.10|tcp|25"
+	changePort := model.Change{Key: portKey, Kind: "port", Target: "192.0.2.10", Protocol: "tcp", Port: 25, Old: "open", New: "not-open", Severity: "info"}
+	changeService := model.Change{Key: serviceKey, Kind: "service", Target: "192.0.2.10", Protocol: "tcp", Port: 25, Old: "smtp", New: "not-open", Severity: "info"}
+	_, err = s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &model.Snapshot{Units: []model.Unit{{Target: "192.0.2.10", Protocol: "tcp", Ports: []model.PortState{{Port: 25, State: "open", Service: "smtp"}}}}}
+		state.Incidents[portKey] = model.Incident{Change: changePort}
+		state.Incidents[serviceKey] = model.Incident{Change: changeService}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, portKey, AuditEntry{Action: "incident.accepted", Detail: record.ID + ":" + portKey}); err != nil {
+		t.Fatalf("accept port change = %v", err)
+	}
+	if _, err := s.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, serviceKey, AuditEntry{Action: "incident.accepted", Detail: record.ID + ":" + serviceKey}); err != nil {
+		t.Fatalf("accept related service change = %v", err)
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Incidents) != 0 || len(state.Baseline.Units[0].Ports) != 0 {
+		t.Fatalf("related removals state = %#v", state)
+	}
+}

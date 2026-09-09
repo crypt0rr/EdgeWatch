@@ -268,8 +268,10 @@ deployment-managed notifications continue.
 The TOTP authentication key is independent of the notification key. Back up
 `./data/auth.key` together with `./data/edgewatch.db` (or the separately mounted
 `web.auth_key_file`); losing it prevents TOTP verification until the key is
-restored. Existing plaintext TOTP seeds from older databases are re-encrypted
-on the first administrator read when the key is available.
+restored. TOTP ciphertext is authenticated to the owning stable user ID, so a
+value copied between accounts fails closed. Existing plaintext or older
+unbound encrypted seeds are re-encrypted in the owner-bound format on the
+first read when the key is available.
 
 ## Operations
 

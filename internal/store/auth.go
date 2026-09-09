@@ -81,13 +81,13 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	a.TOTPEnabled = totp != 0
 	a.CreatedAt, a.UpdatedAt = scanTime(created), scanTime(updated)
 	a.TOTPSecretStored = stored
-	secret, secretErr := s.openTOTPSecret(stored)
+	secret, migrate, secretErr := s.openTOTPSecretForOwner(LegacyAdminUserID, stored)
 	if secretErr != nil {
 		a.TOTPSecretError = secretErr
 	} else {
 		a.TOTPSecret = secret
-		if a.TOTPEnabled && secret != "" && !strings.HasPrefix(stored, authCiphertext) {
-			if encrypted, encryptErr := s.sealTOTPSecret(secret); encryptErr == nil {
+		if a.TOTPEnabled && secret != "" && migrate {
+			if encrypted, encryptErr := s.sealTOTPSecretForOwner(LegacyAdminUserID, secret); encryptErr == nil {
 				_, _ = s.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=?,updated_at=? WHERE id=1 AND totp_secret=?`, encrypted, time.Now().UTC().Format(time.RFC3339Nano), stored)
 				a.TOTPSecretStored = encrypted
 			}
@@ -229,7 +229,7 @@ func (s *Store) adminTOTPForSave(a Admin) (string, error) {
 		}
 		return "", nil
 	}
-	return s.sealTOTPSecret(a.TOTPSecret)
+	return s.sealTOTPSecretForOwner(LegacyAdminUserID, a.TOTPSecret)
 }
 
 func (s *Store) PutSetupToken(ctx context.Context, hash string, expires time.Time) error {

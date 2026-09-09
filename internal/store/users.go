@@ -107,13 +107,13 @@ func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
 	u.TOTPEnabled = totp != 0
 	u.Enabled = enabled != 0
 	u.CreatedAt, u.UpdatedAt, u.LastLoginAt = scanTime(created), scanTime(updated), scanTime(lastLogin)
-	secret, secretErr := s.openTOTPSecret(u.TOTPSecretStored)
+	secret, migrate, secretErr := s.openTOTPSecretForOwner(u.ID, u.TOTPSecretStored)
 	if secretErr != nil {
 		u.TOTPSecretError = secretErr
 	} else {
 		u.TOTPSecret = secret
-		if u.TOTPEnabled && secret != "" && !strings.HasPrefix(u.TOTPSecretStored, authCiphertext) {
-			if encrypted, encryptErr := s.sealTOTPSecret(secret); encryptErr == nil {
+		if u.TOTPEnabled && secret != "" && migrate {
+			if encrypted, encryptErr := s.sealTOTPSecretForOwner(u.ID, secret); encryptErr == nil {
 				_, _ = s.DB.ExecContext(ctx, `UPDATE users SET totp_secret=?,updated_at=? WHERE id=? AND totp_secret=?`, encrypted, time.Now().UTC().Format(time.RFC3339Nano), u.ID, u.TOTPSecretStored)
 				u.TOTPSecretStored = encrypted
 			}
@@ -421,7 +421,7 @@ func (s *Store) userTOTPForSave(u User) (string, error) {
 		}
 		return "", nil
 	}
-	return s.sealTOTPSecret(u.TOTPSecret)
+	return s.sealTOTPSecretForOwner(u.ID, u.TOTPSecret)
 }
 
 func (s *Store) CountEnabledAdministrators(ctx context.Context) (int, error) {

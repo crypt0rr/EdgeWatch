@@ -14,8 +14,13 @@ import (
 )
 
 const (
-	authKeySize    = 32
-	authCiphertext = "ew1:"
+	authKeySize = 32
+	// authCiphertext is the legacy format. It remains readable so upgrades do
+	// not lock administrators out of TOTP, but all new writes use the owner-
+	// bound v2 format below.
+	authCiphertext     = "ew1:"
+	authCiphertextV2   = "ew2:"
+	totpOwnerAADPrefix = "edgewatch-totp-v2:"
 )
 
 var (
@@ -145,6 +150,20 @@ func (s *Store) authKeyForWrite() ([]byte, error) {
 }
 
 func (s *Store) sealTOTPSecret(secret string) (string, error) {
+	// Keep the old helper available to compatibility callers and migration
+	// tests. Production save paths use sealTOTPSecretForOwner so the stable user
+	// identity is authenticated with the ciphertext.
+	return s.sealTOTPSecretVersion("", secret, false)
+}
+
+func (s *Store) sealTOTPSecretForOwner(owner, secret string) (string, error) {
+	if strings.TrimSpace(owner) == "" {
+		return "", errors.New("TOTP secret owner is required")
+	}
+	return s.sealTOTPSecretVersion(owner, secret, true)
+}
+
+func (s *Store) sealTOTPSecretVersion(owner, secret string, bindOwner bool) (string, error) {
 	if secret == "" {
 		return "", nil
 	}
@@ -164,42 +183,65 @@ func (s *Store) sealTOTPSecret(secret string) (string, error) {
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
 		return "", err
 	}
-	ciphertext := gcm.Seal(nil, nonce, []byte(secret), []byte("edgewatch-totp-v1"))
+	aad, prefix := []byte("edgewatch-totp-v1"), authCiphertext
+	if bindOwner {
+		aad, prefix = []byte(totpOwnerAADPrefix+owner), authCiphertextV2
+	}
+	ciphertext := gcm.Seal(nil, nonce, []byte(secret), aad)
 	encoded := make([]byte, 0, len(nonce)+len(ciphertext))
 	encoded = append(encoded, nonce...)
 	encoded = append(encoded, ciphertext...)
-	return authCiphertext + base64.RawStdEncoding.EncodeToString(encoded), nil
+	return prefix + base64.RawStdEncoding.EncodeToString(encoded), nil
 }
 
 func (s *Store) openTOTPSecret(stored string) (string, error) {
+	secret, _, err := s.openTOTPSecretForOwner("", stored)
+	return secret, err
+}
+
+// openTOTPSecretForOwner returns whether the value was successfully decoded
+// from a legacy/plaintext format and should be rewritten in the owner-bound
+// v2 format. A v2 value is authenticated against owner, so copying encrypted
+// data between users fails closed even when the database key is shared.
+func (s *Store) openTOTPSecretForOwner(owner, stored string) (string, bool, error) {
 	if stored == "" {
-		return "", nil
+		return "", false, nil
 	}
-	if !strings.HasPrefix(stored, authCiphertext) {
+	if !strings.HasPrefix(stored, authCiphertext) && !strings.HasPrefix(stored, authCiphertextV2) {
 		// v0.3/v0.4 records used plaintext TOTP seeds. GetAdmin returns the
-		// legacy value and rewrites it through sealTOTPSecret so an existing
-		// installation is upgraded on its first authenticated read.
-		return stored, nil
+		// legacy value and rewrites it through sealTOTPSecretForOwner so an
+		// existing installation is upgraded on its first authenticated read.
+		return stored, true, nil
+	}
+	prefix, aad := authCiphertext, []byte("edgewatch-totp-v1")
+	legacy := true
+	if strings.HasPrefix(stored, authCiphertextV2) {
+		prefix = authCiphertextV2
+		if strings.TrimSpace(owner) == "" {
+			return "", false, fmt.Errorf("%w: owner is unavailable", ErrTOTPSecretLocked)
+		}
+		aad = []byte(totpOwnerAADPrefix + owner)
+		legacy = false
 	}
 	key, err := loadAuthKey(s.authKeyPath)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrTOTPSecretLocked, err)
+		return "", false, fmt.Errorf("%w: %v", ErrTOTPSecretLocked, err)
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrTOTPSecretLocked, err)
+		return "", false, fmt.Errorf("%w: %v", ErrTOTPSecretLocked, err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrTOTPSecretLocked, err)
+		return "", false, fmt.Errorf("%w: %v", ErrTOTPSecretLocked, err)
 	}
-	encoded, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(stored, authCiphertext))
+	encoded, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(stored, prefix))
 	if err != nil || len(encoded) < gcm.NonceSize() {
-		return "", fmt.Errorf("%w: malformed ciphertext", ErrTOTPSecretLocked)
+		return "", false, fmt.Errorf("%w: malformed ciphertext", ErrTOTPSecretLocked)
 	}
-	plain, err := gcm.Open(nil, encoded[:gcm.NonceSize()], encoded[gcm.NonceSize():], []byte("edgewatch-totp-v1"))
+	plain, err := gcm.Open(nil, encoded[:gcm.NonceSize()], encoded[gcm.NonceSize():], aad)
 	if err != nil {
-		return "", fmt.Errorf("%w: authentication failed", ErrTOTPSecretLocked)
+		return "", false, fmt.Errorf("%w: authentication failed", ErrTOTPSecretLocked)
 	}
-	return string(plain), nil
+	return string(plain), legacy, nil
 }

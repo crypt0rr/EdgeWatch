@@ -119,3 +119,32 @@ PRAGMA user_version = 21;`); err != nil {
 		t.Fatalf("backfilled search text = %q", searchText)
 	}
 }
+
+func TestMigration28AddsFTSProgressToLegacyState(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+	if _, err := s.DB.ExecContext(ctx, `
+DROP TABLE fts_backfill_state;
+CREATE TABLE fts_backfill_state (
+ table_name TEXT PRIMARY KEY,
+ last_rowid INTEGER NOT NULL DEFAULT 0,
+ initialized INTEGER NOT NULL DEFAULT 0,
+ complete INTEGER NOT NULL DEFAULT 0,
+ updated_at TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO fts_backfill_state(table_name) VALUES('scan_hosts'),('latest_scan_hosts');
+PRAGMA user_version = 24;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(s.DB); err != nil {
+		t.Fatalf("migrate legacy FTS state: %v", err)
+	}
+	var present int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('fts_backfill_state') WHERE name='processed_rows'`).Scan(&present); err != nil {
+		t.Fatal(err)
+	}
+	if present != 1 {
+		t.Fatal("migration 28 did not add processed_rows to legacy FTS state")
+	}
+}

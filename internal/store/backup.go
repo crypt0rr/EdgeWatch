@@ -55,17 +55,20 @@ func (e *VerificationError) Error() string {
 }
 
 // Verify runs SQLite's full integrity and foreign-key checks against the
-// writer connection. It intentionally does not mutate the database, making it
-// safe to use against a live daemon or immediately after restoring a backup.
+// read-only connection. It intentionally does not mutate the database, making
+// it safe to use against a live daemon or immediately after restoring a
+// backup. Using the reader also prevents a diagnostic command from consuming
+// the single writer connection while a scan is committing.
 func (s *Store) Verify(ctx context.Context) (DatabaseVerification, error) {
 	result := DatabaseVerification{ForeignKeyViolations: []ForeignKeyViolation{}}
 	if s == nil || s.DB == nil {
 		return result, errors.New("database is not open")
 	}
-	if err := s.DB.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&result.IntegrityCheck); err != nil {
+	reader := s.reader()
+	if err := reader.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&result.IntegrityCheck); err != nil {
 		return result, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	rows, err := reader.QueryContext(ctx, `PRAGMA foreign_key_check`)
 	if err != nil {
 		return result, err
 	}
@@ -151,7 +154,22 @@ func (s *Store) Backup(ctx context.Context, output string) (string, error) {
 		return "", err
 	}
 	tempPath := filepath.Join(tempDir, "edgewatch.db")
-	if _, err := s.DB.ExecContext(ctx, `VACUUM INTO ?`, tempPath); err != nil {
+	// VACUUM INTO obtains a consistent snapshot, but it still holds a read
+	// transaction for the duration of the copy. Run it through an independent
+	// connection for on-disk stores so the daemon's writer pool remains
+	// available for scan commits and notification state. OpenExisting performs
+	// no migrations or repair work, which keeps backup a read-only operation.
+	backupSource := s
+	var sourceStore *Store
+	if !isSQLiteMemoryPath(s.Path) {
+		sourceStore, err = OpenExistingContext(ctx, s.Path)
+		if err != nil {
+			return "", fmt.Errorf("open SQLite backup source: %w", err)
+		}
+		backupSource = sourceStore
+		defer sourceStore.Close()
+	}
+	if _, err := backupSource.DB.ExecContext(ctx, `VACUUM INTO ?`, tempPath); err != nil {
 		return "", fmt.Errorf("create SQLite backup: %w", err)
 	}
 	if err := enforcePrivateSQLiteArtifacts(tempPath); err != nil {

@@ -4,7 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -122,7 +122,7 @@ func repairScanHostsForeignKey(db *sql.DB) error {
 	// Force the bounded rebuild to run after the source table was replaced. The
 	// state table is created by migration 22, but this update is harmless when a
 	// recovery fixture already carried it.
-	if _, err = tx.Exec(`UPDATE fts_backfill_state SET last_rowid=0, initialized=0, complete=0, updated_at=?`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.Exec(`UPDATE fts_backfill_state SET last_rowid=0, processed_rows=0, initialized=0, complete=0, updated_at=?`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "no such table") {
 			return rollback()
 		}
@@ -281,24 +281,39 @@ func backfillHostSearchIndexes(db *sql.DB) error {
 		return err
 	}
 	for {
-		scanDone, scanRows, err := backfillFTSTableBatch(db, "scan_hosts")
+		scanProgress, err := backfillFTSTableBatch(db, "scan_hosts")
 		if err != nil {
 			return err
 		}
-		latestDone, latestRows, err := backfillFTSTableBatch(db, "latest_scan_hosts")
+		latestProgress, err := backfillFTSTableBatch(db, "latest_scan_hosts")
 		if err != nil {
 			return err
 		}
-		if scanRows > 0 {
-			log.Printf("edgewatch: rebuilt scan host search index (%d rows)", scanRows)
+		if scanProgress.batchRows > 0 {
+			logFTSProgress(scanProgress)
 		}
-		if latestRows > 0 {
-			log.Printf("edgewatch: rebuilt latest host search index (%d rows)", latestRows)
+		if latestProgress.batchRows > 0 {
+			logFTSProgress(latestProgress)
 		}
-		if scanDone && latestDone {
+		if scanProgress.complete && latestProgress.complete {
 			return nil
 		}
 	}
+}
+
+type ftsBatchProgress struct {
+	table         string
+	batchRows     int
+	processedRows int
+	lastRowID     int64
+	complete      bool
+}
+
+func logFTSProgress(progress ftsBatchProgress) {
+	// Migration logging is intentionally structured and cumulative. Operators
+	// can distinguish a large, healthy rebuild from a migration that repeatedly
+	// restarts at the same marker.
+	slog.Default().Info("rebuilt host search index", "table", progress.table, "batch_rows", progress.batchRows, "processed_rows", progress.processedRows, "last_rowid", progress.lastRowID, "complete", progress.complete)
 }
 
 func ensureHostSearchTriggers(db *sql.DB) error {
@@ -324,7 +339,7 @@ func ensureHostSearchTriggers(db *sql.DB) error {
 		// update only when this is the first startup before migration 22 creates
 		// the progress table; ensureFTSBackfillState will create it immediately
 		// afterwards.
-		if _, err := tx.Exec(`UPDATE fts_backfill_state SET last_rowid=0,initialized=0,complete=0,updated_at=?`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+		if _, err := tx.Exec(`UPDATE fts_backfill_state SET last_rowid=0,processed_rows=0,initialized=0,complete=0,updated_at=?`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
 			return err
 		}
 	}
@@ -340,6 +355,7 @@ func ensureFTSBackfillState(db *sql.DB) error {
 	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS fts_backfill_state (
  table_name TEXT PRIMARY KEY,
  last_rowid INTEGER NOT NULL DEFAULT 0,
+ processed_rows INTEGER NOT NULL DEFAULT 0,
  initialized INTEGER NOT NULL DEFAULT 0,
  complete INTEGER NOT NULL DEFAULT 0,
  updated_at TEXT NOT NULL
@@ -373,7 +389,7 @@ func initializeFTSBackfill(db *sql.DB) error {
 			return err
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		if _, err := tx.Exec(`UPDATE fts_backfill_state SET last_rowid=0, initialized=1, complete=0, updated_at=? WHERE table_name IN ('scan_hosts','latest_scan_hosts')`, now); err != nil {
+		if _, err := tx.Exec(`UPDATE fts_backfill_state SET last_rowid=0, processed_rows=0, initialized=1, complete=0, updated_at=? WHERE table_name IN ('scan_hosts','latest_scan_hosts')`, now); err != nil {
 			return err
 		}
 	}
@@ -387,53 +403,58 @@ type ftsHostRow struct {
 	raw   []byte
 }
 
-func backfillFTSTableBatch(db *sql.DB, sourceTable string) (bool, int, error) {
+func backfillFTSTableBatch(db *sql.DB, sourceTable string) (ftsBatchProgress, error) {
+	progress := ftsBatchProgress{table: sourceTable}
 	tx, err := db.Begin()
 	if err != nil {
-		return false, 0, err
+		return progress, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	var lastRowID int64
-	var complete int
-	if err := tx.QueryRow(`SELECT last_rowid,complete FROM fts_backfill_state WHERE table_name=?`, sourceTable).Scan(&lastRowID, &complete); err != nil {
-		return false, 0, err
+	var complete, processedRows int
+	if err := tx.QueryRow(`SELECT last_rowid,processed_rows,complete FROM fts_backfill_state WHERE table_name=?`, sourceTable).Scan(&lastRowID, &processedRows, &complete); err != nil {
+		return progress, err
 	}
+	progress.lastRowID = lastRowID
+	progress.processedRows = processedRows
+	progress.complete = complete != 0
 	if complete != 0 {
 		if err := tx.Commit(); err != nil {
-			return false, 0, err
+			return progress, err
 		}
-		return true, 0, nil
+		return progress, nil
 	}
 	query := `SELECT rowid,job,address,host_json FROM ` + sourceTable + ` WHERE rowid>? ORDER BY rowid LIMIT ?`
 	rows, err := tx.Query(query, lastRowID, ftsBackfillBatchSize)
 	if err != nil {
-		return false, 0, err
+		return progress, err
 	}
 	var batch []ftsHostRow
 	for rows.Next() {
 		var row ftsHostRow
 		if err := rows.Scan(&row.rowID, &row.job, &row.addr, &row.raw); err != nil {
 			_ = rows.Close()
-			return false, 0, err
+			return progress, err
 		}
 		batch = append(batch, row)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
-		return false, 0, err
+		return progress, err
 	}
 	if err := rows.Close(); err != nil {
-		return false, 0, err
+		return progress, err
 	}
 	if len(batch) == 0 {
 		now := time.Now().UTC().Format(time.RFC3339Nano)
 		if _, err := tx.Exec(`UPDATE fts_backfill_state SET complete=1,updated_at=? WHERE table_name=?`, now, sourceTable); err != nil {
-			return false, 0, err
+			return progress, err
 		}
 		if err := tx.Commit(); err != nil {
-			return false, 0, err
+			return progress, err
 		}
-		return true, 0, nil
+		progress.complete = true
+		return progress, nil
 	}
 	maxRowID := lastRowID
 	for _, row := range batch {
@@ -444,18 +465,22 @@ func backfillFTSTableBatch(db *sql.DB, sourceTable string) (bool, int, error) {
 		host.Address = row.addr
 		searchText := hostSearchContent(row.job, host)
 		if _, err := tx.Exec(`UPDATE `+sourceTable+` SET search_text=? WHERE rowid=?`, searchText, row.rowID); err != nil {
-			return false, 0, err
+			return progress, err
 		}
 		if row.rowID > maxRowID {
 			maxRowID = row.rowID
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.Exec(`UPDATE fts_backfill_state SET last_rowid=?,updated_at=? WHERE table_name=?`, maxRowID, now, sourceTable); err != nil {
-		return false, 0, err
+	processedRows += len(batch)
+	if _, err := tx.Exec(`UPDATE fts_backfill_state SET last_rowid=?,processed_rows=?,updated_at=? WHERE table_name=?`, maxRowID, processedRows, now, sourceTable); err != nil {
+		return progress, err
 	}
 	if err := tx.Commit(); err != nil {
-		return false, 0, err
+		return progress, err
 	}
-	return false, len(batch), nil
+	progress.batchRows = len(batch)
+	progress.lastRowID = maxRowID
+	progress.processedRows = processedRows
+	return progress, nil
 }

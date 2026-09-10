@@ -100,6 +100,13 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 		logger.Warn("rdap cache write failed", "error", err)
 	}
 	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
+	if s != nil {
+		if id, err := s.MaxEventID(context.Background()); err != nil {
+			logger.Warn("SSE event cursor could not be restored", "error", err)
+		} else {
+			v.nextEventID = id
+		}
+	}
 	if a != nil && a.Config != nil {
 		if s != nil {
 			if err := s.SetTargetExclusions(a.Config.Scanner.TargetExclusions); err != nil {

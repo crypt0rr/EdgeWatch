@@ -14,6 +14,8 @@ import (
 const (
 	jobSilenceMinimumInterval = time.Minute
 	jobSilenceLookback        = 5 * 365 * 24 * time.Hour
+	jobSilenceHorizon         = 2 * 365 * 24 * time.Hour
+	jobSilenceMaxOccurrences  = 4096
 )
 
 // nowUTC is kept behind a small injectable clock so the daemon watchdog can
@@ -100,28 +102,57 @@ func jobSilenceThreshold(parser cron.Parser, job config.Job, now time.Time) (tim
 	if parsed.Next(now.UTC()).IsZero() {
 		return 0, fmt.Errorf("schedule never fires")
 	}
-	last, next, interval, ok := cronWindow(parsed, now.UTC())
-	if !ok || interval <= 0 {
+	maxGap, typicalGap, ok := maxScheduleGap(parsed, now.UTC())
+	if !ok || maxGap <= 0 {
 		return 0, fmt.Errorf("schedule interval unavailable")
 	}
-	// Keep one complete interval of grace after the next expected occurrence.
-	// The gap from last to next can be much larger than the preceding interval
-	// (for example Friday -> Monday on a weekday schedule), so use that actual
-	// calendar gap rather than assuming schedules are evenly spaced.
-	threshold := interval * 2
-	if !last.IsZero() && !next.IsZero() && next.After(last) {
-		gap := next.Sub(last)
-		if gap > interval {
-			if gap > (time.Duration(1<<63-1) - interval) {
-				return 0, fmt.Errorf("schedule interval overflows watchdog window")
-			}
-			threshold = gap + interval
-		}
+	// Keep one representative interval of grace after the largest expected
+	// calendar gap. This catches weekend/month-end/year-boundary gaps while
+	// staying bounded for schedules that fire every minute.
+	if typicalGap <= 0 {
+		typicalGap = maxGap
 	}
-	if interval > (time.Duration(1<<63-1)/2) || threshold <= 0 {
+	if maxGap > time.Duration(1<<63-1)-typicalGap {
+		return 0, fmt.Errorf("schedule interval overflows watchdog window")
+	}
+	threshold := maxGap + typicalGap
+	if threshold <= 0 {
 		return 0, fmt.Errorf("schedule interval overflows watchdog window")
 	}
 	return threshold, nil
+}
+
+// maxScheduleGap samples a bounded occurrence window and returns both the
+// largest calendar gap and the smallest positive gap. The occurrence cap
+// keeps minute-level schedules cheap while the two-year horizon catches
+// weekend, month-end, and annual schedules.
+func maxScheduleGap(schedule cron.Schedule, now time.Time) (maxGap, typicalGap time.Duration, ok bool) {
+	if schedule == nil || now.IsZero() {
+		return 0, 0, false
+	}
+	start := now.Add(-jobSilenceHorizon)
+	previous := schedule.Next(start)
+	if previous.IsZero() {
+		return 0, 0, false
+	}
+	end := now.Add(jobSilenceHorizon)
+	for occurrence := 0; occurrence < jobSilenceMaxOccurrences && !previous.After(end); occurrence++ {
+		next := schedule.Next(previous)
+		if next.IsZero() {
+			break
+		}
+		gap := next.Sub(previous)
+		if gap >= jobSilenceMinimumInterval {
+			if gap > maxGap {
+				maxGap = gap
+			}
+			if typicalGap == 0 || gap < typicalGap {
+				typicalGap = gap
+			}
+		}
+		previous = next
+	}
+	return maxGap, typicalGap, maxGap > 0
 }
 
 // cronInterval derives the interval between the two most recent occurrences

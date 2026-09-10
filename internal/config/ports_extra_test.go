@@ -14,6 +14,11 @@ func TestPortContainsUsesValidatedRanges(t *testing.T) {
 		{raw: "1,22,80-82,65535", port: 0, want: false},
 		{raw: "1,22,80-82,65535", port: 65536, want: false},
 		{raw: "not-a-port", port: 1, want: false},
+		{raw: "22,", port: 22, want: false},
+		{raw: ",22", port: 22, want: false},
+		{raw: "22,,80", port: 22, want: false},
+		{raw: "22-", port: 22, want: false},
+		{raw: "22-80 nope", port: 22, want: false},
 	} {
 		if got := PortContains(test.raw, test.port); got != test.want {
 			t.Errorf("PortContains(%q, %d) = %t, want %t", test.raw, test.port, got, test.want)

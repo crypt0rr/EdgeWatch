@@ -33,6 +33,11 @@ const (
 	PermissionStreamRead            = "stream.read"
 	PermissionScannerProfilesRead   = "scanner_profiles.read"
 	PermissionScannerProfilesManage = "scanner_profiles.manage"
+	// PermissionAccountSelf covers authenticated self-service operations such
+	// as password, display-name, TOTP, session revocation, and logout. Keeping
+	// it explicit prevents a newly added /auth/* mutation from becoming an
+	// accidental authorization exemption.
+	PermissionAccountSelf = "account.self"
 )
 
 var rolePermissions = map[string]map[string]bool{
@@ -45,6 +50,7 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionNotificationsManage: true, PermissionUsersManage: true,
 		PermissionPublicManage: true, PermissionStreamRead: true,
 		PermissionScannerProfilesRead: true, PermissionScannerProfilesManage: true,
+		PermissionAccountSelf: true,
 	},
 	store.RoleOperator: {
 		PermissionOverviewRead: true, PermissionJobsRead: true, PermissionJobsWrite: true,
@@ -53,6 +59,7 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionIncidentsRead: true, PermissionIncidentsManage: true,
 		PermissionNotificationOptions: true, PermissionStreamRead: true,
 		PermissionScannerProfilesRead: true,
+		PermissionAccountSelf:         true,
 	},
 	store.RoleViewer: {
 		// Viewers get the deliberately narrow read-only console: configured
@@ -60,6 +67,7 @@ var rolePermissions = map[string]map[string]bool{
 		// global host/scan inventory, or incident stream; the unauthenticated
 		// highlights page is the separate guest-facing projection.
 		PermissionJobsRead: true, PermissionBaselinesRead: true,
+		PermissionAccountSelf: true,
 	},
 }
 

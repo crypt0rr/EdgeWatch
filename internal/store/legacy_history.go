@@ -200,6 +200,21 @@ func (s *Store) ListEventsPage(ctx context.Context, job string, limit, offset in
 	return page, rows.Err()
 }
 
+// MaxEventID returns the greatest durable event identifier currently stored.
+// The web server uses this as the starting point for its in-memory SSE cursor
+// so a process restart cannot immediately reuse IDs that a browser already
+// acknowledged. A missing or empty event table naturally returns zero.
+func (s *Store) MaxEventID(ctx context.Context) (uint64, error) {
+	var id int64
+	if err := s.reader().QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM events`).Scan(&id); err != nil {
+		return 0, err
+	}
+	if id < 0 {
+		return 0, nil
+	}
+	return uint64(id), nil
+}
+
 // ListJobEvents returns only events written by the immutable managed job ID.
 // Name-based ListEvents is retained for legacy CLI history compatibility.
 func (s *Store) ListJobEvents(ctx context.Context, jobID string, limit int) ([]model.Event, error) {

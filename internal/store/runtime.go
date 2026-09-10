@@ -212,6 +212,15 @@ func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID
 	if _, err := persistRuntimeTxWithOutbox(ctx, tx, jobID, state, events, destinations); err != nil {
 		return nil, err
 	}
+	if scan.Status == "success" {
+		// A successful result clears any silence watchdog backoff in the same
+		// transaction as the scan and runtime update. This prevents a delayed
+		// heartbeat from emitting a stale silence alert after recovery.
+		stamp := scan.FinishedAt.UTC().Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO job_silence_state(job_id,eligible_at,last_success_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET backoff_level=0,next_alert_at='',last_success_at=excluded.last_success_at,updated_at=excluded.updated_at`, jobID, stamp, stamp, stamp); err != nil {
+			return nil, err
+		}
+	}
 	if err := clearCompletedScanCycleCheckpointsTx(ctx, tx, scan.CycleID); err != nil {
 		return nil, err
 	}

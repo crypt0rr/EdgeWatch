@@ -33,7 +33,9 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 2
+          # Release verification runs the same complete-change security gate
+          # as pull requests; retain history so the merge base is available.
+          fetch-depth: 0
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
@@ -51,6 +53,8 @@ jobs:
       - name: Build frontend assets
         run: npm run build
       - name: Dependency and static-analysis checks
+        env:
+          GOLANGCI_LINT_BASE: ${{ github.event.before }}
         run: make security
       - name: Ensure frontend build leaves no TypeScript artifacts
         run: |

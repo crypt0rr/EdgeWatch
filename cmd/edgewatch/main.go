@@ -74,7 +74,7 @@ func run(args []string) error {
 		return usage()
 	}
 	loadConfig := config.Load
-	if cmd == "admin" || cmd == "backup" || cmd == "verify" || (cmd == "baseline" && action == "export") {
+	if cmd == "admin" || cmd == "backup" || cmd == "verify" || cmd == "health" || cmd == "status" || cmd == "history" || (cmd == "baseline" && action == "export") {
 		// Host recovery must not depend on monitor-only configuration such as
 		// Shoutrrr destinations, encryption keys, listener settings, or legacy
 		// YAML job semantics.

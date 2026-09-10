@@ -41,6 +41,11 @@ type allHostSummary struct {
 	ScanID      string    `json:"scan_id"`
 	ScannedAt   time.Time `json:"scanned_at"`
 	DataQuality string    `json:"data_quality"`
+	// host keeps the complete evidence for compatibility merges. It is not
+	// serialized; the regular indexed path already returns the summary from
+	// SQLite, while the mixed legacy path needs service/hostname fields for the
+	// same search semantics.
+	host model.HostObservation
 }
 
 type hostProtocolSummary struct {
@@ -71,6 +76,7 @@ func allSummaryFromIndexedHost(item store.LatestScanHost) allHostSummary {
 		ScanID:      item.ScanID,
 		ScannedAt:   item.ScannedAt,
 		DataQuality: item.DataQuality,
+		host:        item.Host,
 	}
 }
 
@@ -573,6 +579,7 @@ func (s *Server) latestScannedHosts(ctx context.Context) ([]allHostSummary, erro
 					ScanID:      scan.ID,
 					ScannedAt:   scan.FinishedAt,
 					DataQuality: hostPage.DataQuality,
+					host:        host,
 				}
 			}
 		}
@@ -610,17 +617,22 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
-	indexed, err := s.Store.ListLatestScanHostsPage(r.Context(), query, protocol, hasOpen, limit, offset)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
-		return
-	}
 	indexedExists, err := s.Store.SuccessfulScanHostIndexExists(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 		return
 	}
-	if indexedExists {
+	legacyExists, err := s.Store.LegacySuccessfulScanExists(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		return
+	}
+	if indexedExists && !legacyExists {
+		indexed, err := s.Store.ListLatestScanHostsPage(r.Context(), query, protocol, hasOpen, limit, offset)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+			return
+		}
 		items := make([]allHostSummary, 0, len(indexed.Items))
 		for _, item := range indexed.Items {
 			items = append(items, allSummaryFromIndexedHost(item))
@@ -628,14 +640,54 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"hosts": items, "pagination": paginationJSON(offset, limit, indexed.Total)})
 		return
 	}
-	hosts, err := s.latestScannedHosts(r.Context())
+
+	// Databases upgraded from before scan_hosts can contain both indexed scans
+	// and legacy snapshots. Merge the maintained projection with the bounded
+	// legacy walk before filtering and paginating, otherwise whichever path is
+	// selected would silently hide hosts from the other history format.
+	var hosts []allHostSummary
+	if indexedExists {
+		indexed, err := s.Store.ListLatestScanHosts(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+			return
+		}
+		hosts = make([]allHostSummary, 0, len(indexed))
+		for _, item := range indexed {
+			hosts = append(hosts, allSummaryFromIndexedHost(item))
+		}
+	}
+	legacyHosts, err := s.latestScannedHosts(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 		return
 	}
+	if !indexedExists {
+		hosts = legacyHosts
+	} else {
+		byAddress := make(map[string]int, len(hosts))
+		for index := range hosts {
+			byAddress[hosts[index].Address] = index
+		}
+		for _, incoming := range legacyHosts {
+			index, exists := byAddress[incoming.Address]
+			if !exists || incoming.ScannedAt.After(hosts[index].ScannedAt) ||
+				(incoming.ScannedAt.Equal(hosts[index].ScannedAt) && incoming.ScanID > hosts[index].ScanID) {
+				if !exists {
+					byAddress[incoming.Address] = len(hosts)
+					hosts = append(hosts, incoming)
+				} else {
+					hosts[index] = incoming
+				}
+			}
+		}
+	}
 	filtered := make([]allHostSummary, 0, len(hosts))
 	for _, item := range hosts {
-		host := model.HostObservation{Address: item.Address, SourceTargets: item.SourceTargets, DNSNames: item.DNSNames}
+		host := item.host
+		if host.Address == "" {
+			host = model.HostObservation{Address: item.Address, SourceTargets: item.SourceTargets, DNSNames: item.DNSNames}
+		}
 		if !hostMatches(host, item.hostSummary, "", protocol, hasOpen) {
 			continue
 		}
@@ -648,6 +700,12 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered = append(filtered, item)
 	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].Archived != filtered[j].Archived {
+			return !filtered[i].Archived
+		}
+		return filtered[i].Address < filtered[j].Address
+	})
 	total := len(filtered)
 	if offset >= total {
 		filtered = nil
@@ -704,6 +762,30 @@ func hostMatches(host model.HostObservation, summary hostSummary, query, protoco
 	for _, name := range host.Hostnames {
 		if strings.Contains(strings.ToLower(name.Name), query) {
 			return true
+		}
+	}
+	// The indexed path searches these fields through FTS. Keep the bounded
+	// legacy-compatibility path semantically equivalent when a database still
+	// contains snapshots without a host index.
+	for _, protocolItem := range host.Protocols {
+		for _, port := range protocolItem.Ports {
+			if strings.Contains(strconv.Itoa(port.Port), query) {
+				return true
+			}
+			if port.Service == nil {
+				continue
+			}
+			service := port.Service
+			for _, value := range []string{service.Name, service.Product, service.Version, service.ExtraInfo, service.OSType, service.DeviceType} {
+				if strings.Contains(strings.ToLower(value), query) {
+					return true
+				}
+			}
+			for _, cpe := range service.CPEs {
+				if strings.Contains(strings.ToLower(cpe), query) {
+					return true
+				}
+			}
 		}
 	}
 	return false

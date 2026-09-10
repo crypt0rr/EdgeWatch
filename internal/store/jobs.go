@@ -100,6 +100,9 @@ func (s *Store) createJobWithAudits(ctx context.Context, job config.Job, enabled
 	if _, err = tx.ExecContext(ctx, `INSERT INTO job_revisions(job_id,revision,definition_json,security_hash,created_at) VALUES(?,?,?,?,?)`, id, 1, raw, hash, now.Format(time.RFC3339Nano)); err != nil {
 		return JobRecord{}, err
 	}
+	if err = upsertJobSilenceStateTx(ctx, tx, id, now); err != nil {
+		return JobRecord{}, err
+	}
 	if err = insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return JobRecord{}, err
 	}
@@ -318,6 +321,11 @@ func (s *Store) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context, id st
 	if err = insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return JobRecord{}, false, nil, err
 	}
+	if current.Enabled != enabled || current.Archived != archived {
+		if err = updateJobSilenceLifecycleTx(ctx, tx, id, current.Enabled, current.Archived, enabled, archived, now); err != nil {
+			return JobRecord{}, false, nil, err
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return JobRecord{}, false, nil, err
 	}
@@ -389,6 +397,9 @@ func (s *Store) setJobArchived(ctx context.Context, id string, archived bool, ex
 	if err := appendJobRevisionTx(ctx, tx, id, next, raw, current.Job.SecurityHash(), now); err != nil {
 		return err
 	}
+	if err := updateJobSilenceLifecycleTx(ctx, tx, id, current.Enabled, current.Archived, enabled, archived, now); err != nil {
+		return err
+	}
 	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return err
 	}
@@ -449,10 +460,37 @@ func (s *Store) setJobEnabled(ctx context.Context, id string, enabled bool, expe
 	if err := appendJobRevisionTx(ctx, tx, id, next, raw, current.Job.SecurityHash(), now); err != nil {
 		return err
 	}
+	if err := updateJobSilenceLifecycleTx(ctx, tx, id, current.Enabled, current.Archived, enabled, current.Archived, now); err != nil {
+		return err
+	}
 	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+func upsertJobSilenceStateTx(ctx context.Context, tx *sql.Tx, jobID string, now time.Time) error {
+	stamp := now.UTC().Format(time.RFC3339Nano)
+	_, err := tx.ExecContext(ctx, `INSERT INTO job_silence_state(job_id,eligible_at,updated_at) VALUES(?,?,?) ON CONFLICT(job_id) DO NOTHING`, jobID, stamp, stamp)
+	return err
+}
+
+func updateJobSilenceLifecycleTx(ctx context.Context, tx *sql.Tx, jobID string, wasEnabled, wasArchived, enabled, archived bool, now time.Time) error {
+	if err := upsertJobSilenceStateTx(ctx, tx, jobID, now); err != nil {
+		return err
+	}
+	stamp := now.UTC().Format(time.RFC3339Nano)
+	// A newly enabled/restored job gets a fresh eligibility grace period. A
+	// pause/archive clears a pending alert, but does not delete history.
+	if enabled && !archived && (!wasEnabled || wasArchived) {
+		_, err := tx.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=?,next_alert_at='',backoff_level=0,updated_at=? WHERE job_id=?`, stamp, stamp, jobID)
+		return err
+	}
+	if !enabled || archived {
+		_, err := tx.ExecContext(ctx, `UPDATE job_silence_state SET next_alert_at='',updated_at=? WHERE job_id=?`, stamp, jobID)
+		return err
+	}
+	return nil
 }
 
 func appendJobRevisionTx(ctx context.Context, tx *sql.Tx, jobID string, revision int64, raw []byte, securityHash string, createdAt time.Time) error {

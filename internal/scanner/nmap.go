@@ -987,7 +987,8 @@ func parseNmapProgress(line string) (float64, bool) {
 
 type nmapRun struct {
 	Hosts []struct {
-		Status struct {
+		TimedOut string `xml:"timedout,attr"`
+		Status   struct {
 			State  string `xml:"state,attr"`
 			Reason string `xml:"reason,attr"`
 			TTL    int    `xml:"reason_ttl,attr"`
@@ -1063,6 +1064,19 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 	}
 	result := parsedRun{Exit: raw.RunStats.Exit, Units: map[string]model.Unit{}, Hosts: map[string]model.HostObservation{}}
 	for _, host := range raw.Hosts {
+		if strings.EqualFold(strings.TrimSpace(host.TimedOut), "true") {
+			address := ""
+			for _, candidate := range host.Addresses {
+				if candidate.Type == "ipv4" || candidate.Type == "ipv6" {
+					address = normalizeAddress(candidate.Addr)
+					break
+				}
+			}
+			if address == "" {
+				return parsedRun{}, errors.New("nmap host timed out")
+			}
+			return parsedRun{}, fmt.Errorf("nmap host %s timed out", address)
+		}
 		if host.Status.State != "up" {
 			continue
 		}

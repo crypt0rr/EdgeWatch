@@ -89,6 +89,13 @@ func TestParseXMLRejectsMalformed(t *testing.T) {
 	}
 }
 
+func TestParseXMLRejectsTimedOutHost(t *testing.T) {
+	data := []byte(`<?xml version="1.0"?><nmaprun><host timedout="true"><status state="up"/><address addr="192.0.2.10" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	if _, err := parseXMLWithConfig(data, "tcp", config.Protocol{Ports: "443", Mode: "connect"}); err == nil || !strings.Contains(err.Error(), "192.0.2.10") || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("timed-out host was accepted or error was unhelpful: %v", err)
+	}
+}
+
 type fakeResolver struct{ ips []net.IP }
 
 func (f fakeResolver) LookupIP(context.Context, string, string) ([]net.IP, error) { return f.ips, nil }

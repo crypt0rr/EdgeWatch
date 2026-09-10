@@ -27,9 +27,9 @@ func TestPermissionsForRoleIsDeterministicAndComplete(t *testing.T) {
 }
 
 func TestHasPermissionHandlesLegacyAndRoleScopedSessions(t *testing.T) {
-	legacy := store.Session{}
-	if !HasPermission(legacy, PermissionPublicManage) || HasPermission(legacy, "not-a-permission") {
-		t.Fatal("legacy session permission set is incorrect")
+	roleless := store.Session{}
+	if HasPermission(roleless, PermissionPublicManage) || HasPermission(roleless, PermissionJobsRead) {
+		t.Fatal("role-less session must not receive permissions")
 	}
 	operator := store.Session{Role: store.RoleOperator}
 	for _, permission := range []string{PermissionOverviewRead, PermissionJobsWrite, PermissionJobsRun, PermissionBaselinesManage, PermissionStreamRead} {
@@ -74,9 +74,9 @@ func TestPermissionListsAreTheSingleAuthorizationSource(t *testing.T) {
 			}
 		}
 	}
-	legacy := store.Session{}
-	if !HasPermission(legacy, PermissionJobsDelete) || !reflect.DeepEqual(PermissionsForRole(""), PermissionsForRole(store.RoleAdministrator)) {
-		t.Fatal("legacy administrator permission compatibility drifted")
+	roleless := store.Session{}
+	if HasPermission(roleless, PermissionJobsDelete) || len(PermissionsForRole("")) != 0 {
+		t.Fatal("role-less session permission compatibility must be fail-closed")
 	}
 }
 

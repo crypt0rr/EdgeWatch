@@ -54,14 +54,6 @@ var rolePermissions = map[string]map[string]bool{
 }
 
 func PermissionsForRole(role string) []string {
-	// Empty roles are only used by sessions created by pre-RBAC versions. The
-	// migration path upgrades those sessions to the legacy administrator, so
-	// resolve the compatibility value here as well. Keeping that fallback in
-	// this single permission table avoids a second, inevitably drifting list of
-	// permissions in HasPermission.
-	if role == "" {
-		role = store.RoleAdministrator
-	}
 	values := rolePermissions[role]
 	result := make([]string, 0, len(values))
 	for permission := range values {
@@ -78,11 +70,5 @@ func PermissionsForRole(role string) []string {
 }
 
 func HasPermission(session store.Session, permission string) bool {
-	role := session.Role
-	if role == "" {
-		// Sessions created by pre-RBAC binaries are only ever valid for the
-		// original administrator and are upgraded by Authenticate when possible.
-		role = store.RoleAdministrator
-	}
-	return rolePermissions[role][permission]
+	return rolePermissions[session.Role][permission]
 }

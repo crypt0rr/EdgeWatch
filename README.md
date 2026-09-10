@@ -115,6 +115,10 @@ the replacement is issued.
   effective hosts, host observations, events, resumable cycles, and pending or
   failed notification deliveries. Counts are sampled at most every 30 seconds
   so status polling does not repeatedly decode retained history.
+- History-heavy host inventory and public-dashboard reads use a bounded
+  read-only SQLite pool alongside the single writer connection. WAL keeps those
+  reads available during scan commits and pruning; in-memory test databases
+  intentionally continue to use their shared writer connection.
 - TOTP is optional. Its seed is encrypted with a separate authentication key
   generated at `./data/auth.key` when TOTP is first enabled. Set
   `web.auth_key_file` to a mode-`0600` file containing 32 raw bytes or 64

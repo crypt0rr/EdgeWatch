@@ -46,7 +46,8 @@ func (s *Store) GetPublicDashboard(ctx context.Context) (PublicDashboard, error)
 	var d PublicDashboard
 	var enabled int
 	var updated string
-	err := s.DB.QueryRowContext(ctx, `SELECT enabled,title,introduction,updated_at FROM public_dashboard WHERE id=1`).Scan(&enabled, &d.Title, &d.Introduction, &updated)
+	reader := s.reader()
+	err := reader.QueryRowContext(ctx, `SELECT enabled,title,introduction,updated_at FROM public_dashboard WHERE id=1`).Scan(&enabled, &d.Title, &d.Introduction, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return d, ErrNotFound
 	}
@@ -55,7 +56,7 @@ func (s *Store) GetPublicDashboard(ctx context.Context) (PublicDashboard, error)
 	}
 	d.Enabled = enabled != 0
 	d.UpdatedAt = scanTime(updated)
-	rows, err := s.DB.QueryContext(ctx, `SELECT job_id,address,created_at FROM public_dashboard_hosts WHERE dashboard_id=1 ORDER BY job_id,address`)
+	rows, err := reader.QueryContext(ctx, `SELECT job_id,address,created_at FROM public_dashboard_hosts WHERE dashboard_id=1 ORDER BY job_id,address`)
 	if err != nil {
 		return d, err
 	}
@@ -175,7 +176,7 @@ func (s *Store) GetLatestSuccessfulJobHosts(ctx context.Context, selections []Pu
          cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,
          baseline_scan_id,baseline_config_hash,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms
  FROM ranked WHERE rn=1 ORDER BY selected_address,selected_job_id`
-	rows, err := s.DB.QueryContext(ctx, query, args...)
+	rows, err := s.reader().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

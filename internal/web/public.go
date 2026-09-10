@@ -510,7 +510,18 @@ func (s *Server) publicHostFromObservation(ctx context.Context, job string, host
 	if result.Public && s.App != nil && s.App.Config != nil && s.App.Config.RDAPEnabled() {
 		if cached, err := s.Store.GetRDAPCache(ctx, address); err == nil {
 			if payload, decodeErr := decodeCachedPublicRDAP(cached.Payload); decodeErr == nil {
-				if !time.Now().UTC().Before(cached.ExpiresAt) {
+				now := time.Now().UTC()
+				if s.now != nil {
+					now = s.now().UTC()
+				}
+				// Guests may receive a stale cache entry only during the
+				// bounded seven-day fallback window. Once stale_until passes,
+				// omit registration data rather than publishing indefinitely old
+				// ownership information.
+				if cached.StaleUntil.IsZero() || !now.Before(cached.StaleUntil) {
+					return result
+				}
+				if !now.Before(cached.ExpiresAt) {
 					payload.Status, payload.Stale = "stale", true
 				} else if payload.Status == "" {
 					payload.Status = "cached"

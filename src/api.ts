@@ -168,10 +168,11 @@ export const testNotificationDestination = (id: string) => api<{ sent: number }>
 export type NumericBound = { min: number; max: number }
 export type ScannerProfileDefinition = { engine: string; naabu: NaabuOptions; naabu_args?: string[]; nmap_args?: string[]; enrichment_args?: string[]; nse_profile?: string; nse_args?: Record<string, string>; operator_adjustable?: string[]; operator_bounds?: Record<string, NumericBound>; description?: string }
 export type ScannerProfile = { id: string; name: string; description?: string; built_in: boolean; archived: boolean; revision: number; created_by?: string; updated_by?: string; created_at?: string; updated_at?: string; definition: ScannerProfileDefinition }
+export type InvalidScannerProfile = { id: string; name?: string; archived: boolean; error: string }
 export type ScannerProfilePayload = { name: string; description?: string; engine: string; naabu?: NaabuOptions; naabu_args?: string[]; nmap_args?: string[]; enrichment_args?: string[]; nse_profile?: string; nse_args?: Record<string, string>; operator_adjustable?: string[]; operator_bounds?: Record<string, NumericBound>; password?: string; revision?: number }
 export type ScannerCapabilities = { engines: string[]; nmap: { path: string; version: string; available?: boolean }; naabu: { path: string; version: string; available: boolean; syn_supported: boolean } }
 export const scannerCapabilities = () => api<ScannerCapabilities>('/scanner/capabilities')
-export const listScannerProfiles = (includeArchived = false) => api<{ profiles: ScannerProfile[] }>(`/scanner-profiles?include_archived=${includeArchived}`)
+export const listScannerProfiles = (includeArchived = false) => api<{ profiles: ScannerProfile[]; invalid_profiles?: InvalidScannerProfile[] }>(`/scanner-profiles?include_archived=${includeArchived}`)
 export const getScannerProfile = (id: string) => api<ScannerProfile>(`/scanner-profiles/${encodeURIComponent(id)}`)
 export const createScannerProfile = (value: ScannerProfilePayload) => api<ScannerProfile>('/scanner-profiles', { method: 'POST', body: JSON.stringify(value) })
 export const updateScannerProfile = (id: string, value: ScannerProfilePayload, revision: number) => api<ScannerProfile>(`/scanner-profiles/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ ...value, revision }) })

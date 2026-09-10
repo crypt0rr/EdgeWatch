@@ -126,3 +126,31 @@ func TestScannerProfilesSeedAndRevisionLifecycle(t *testing.T) {
 		t.Fatalf("unknown profile revision lookup error = %v", err)
 	}
 }
+
+func TestListScannerProfilesReportIsolatesInvalidDefinitions(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+
+	created, err := s.CreateScannerProfile(ctx, "Corruptible", "test", config.ScannerProfile{Engine: config.EngineNmap}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scanner_profiles SET definition_json=? WHERE id=?`, []byte(`{"engine":`), created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := s.ListScannerProfilesReport(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Profiles) < 2 {
+		t.Fatalf("valid profiles were hidden by corrupt row: %#v", result)
+	}
+	if len(result.Invalid) != 1 || result.Invalid[0].ID != created.ID || result.Invalid[0].Name != created.Name {
+		t.Fatalf("invalid profile report = %#v", result.Invalid)
+	}
+	if result.Invalid[0].Error == "" || len(result.Invalid[0].Error) > 256 {
+		t.Fatalf("invalid profile error was not bounded: %#v", result.Invalid[0])
+	}
+}

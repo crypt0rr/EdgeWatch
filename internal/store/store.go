@@ -3313,10 +3313,11 @@ type PruneStats struct {
 	FailedOutbox int64
 	Revisions    int64
 	Cycles       int64
+	RDAPCache    int64
 }
 
 func (p PruneStats) Total() int64 {
-	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.Revisions + p.Cycles
+	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.Revisions + p.Cycles + p.RDAPCache
 }
 
 // Prune removes rows outside the configured retention window while preserving
@@ -3398,6 +3399,16 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 		return stats, err
 	}
 	stats.Cycles, _ = result.RowsAffected()
+
+	// RDAP registration data is a short-lived enrichment cache rather than
+	// retained scan history. Remove rows once their seven-day stale window has
+	// elapsed, even when the deployment retains scans for much longer.
+	rdapCutoff := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err = tx.ExecContext(ctx, `DELETE FROM rdap_cache WHERE stale_until < ?`, rdapCutoff)
+	if err != nil {
+		return stats, err
+	}
+	stats.RDAPCache, _ = result.RowsAffected()
 
 	if err := tx.Commit(); err != nil {
 		return stats, err

@@ -1295,6 +1295,33 @@ func TestPruneRetentionClassesAndAuditPolicy(t *testing.T) {
 	}
 }
 
+func TestPruneRemovesRDAPEntriesOutsideStaleWindow(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+
+	now := time.Now().UTC()
+	if err := s.PutRDAPCache(ctx, RDAPCacheEntry{
+		Address:    "198.51.100.42",
+		Payload:    []byte(`{"status":"success"}`),
+		FetchedAt:  now.Add(-8 * 24 * time.Hour),
+		ExpiresAt:  now.Add(-7 * 24 * time.Hour),
+		StaleUntil: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.PruneWithStats(ctx, now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RDAPCache != 1 {
+		t.Fatalf("RDAP prune stats = %#v, want one removed row", stats)
+	}
+	if _, err := s.GetRDAPCache(ctx, "198.51.100.42"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired RDAP cache row remains: %v", err)
+	}
+}
+
 func TestPruneRetainsRevisionsReferencedByScans(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

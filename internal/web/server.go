@@ -44,6 +44,8 @@ type Server struct {
 
 	mu            sync.Mutex
 	subscribers   map[chan sseMessage]struct{}
+	subscriberKey map[chan sseMessage]string
+	subscriberUse map[string]int
 	history       []sseMessage
 	historyBytes  int
 	nextEventID   uint64
@@ -66,6 +68,10 @@ type Server struct {
 	// It is configurable only for deterministic server tests; production uses
 	// the default below.
 	writeTimeout time.Duration
+	// These limits are configurable only for deterministic server tests;
+	// production uses the bounded defaults below.
+	sseMaxSubscribers        int
+	sseMaxSubscribersPerUser int
 }
 
 type sseMessage struct {
@@ -79,6 +85,11 @@ type pendingTOTP struct {
 }
 
 const defaultHTTPWriteTimeout = 60 * time.Second
+
+const (
+	defaultMaxSSESubscribers        = 256
+	defaultMaxSSESubscribersPerUser = 4
+)
 
 // pendingTOTPMaxEntries bounds secrets held for enrolments that were started
 // but never completed. The enrolment window is short, so a large ceiling keeps
@@ -324,7 +335,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/notifications/destinations/"):
 		s.notificationDestinationRoute(w, r, session, strings.TrimPrefix(path, "/notifications/destinations/"))
 	case path == "/stream" && r.Method == http.MethodGet:
-		s.stream(w, r)
+		s.stream(w, r, session)
 	case path == "/jobs" && r.Method == http.MethodGet:
 		s.listJobs(w, r)
 	case path == "/jobs" && r.Method == http.MethodPost:
@@ -2590,7 +2601,7 @@ func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request, sessio
 	writeJSON(w, http.StatusOK, map[string]any{"sent": s.App.Notifier.ActiveCount()})
 }
 
-func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
+func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Session) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, 500, "stream_unsupported", "streaming is unavailable", nil)
@@ -2604,16 +2615,62 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	maxSubscribers := s.sseMaxSubscribers
+	if maxSubscribers <= 0 {
+		maxSubscribers = defaultMaxSSESubscribers
+	}
+	maxSubscribersPerUser := s.sseMaxSubscribersPerUser
+	if maxSubscribersPerUser <= 0 {
+		maxSubscribersPerUser = defaultMaxSSESubscribersPerUser
+	}
+	subscriberKey := strings.TrimSpace(session.IDHash)
+	if subscriberKey == "" {
+		subscriberKey = "user:" + strings.TrimSpace(session.UserID)
+	}
+	if subscriberKey == "user:" {
+		subscriberKey = "unknown"
+	}
 	lastID, _ := strconv.ParseUint(strings.TrimSpace(r.Header.Get("Last-Event-ID")), 10, 64)
 	ch := make(chan sseMessage, 64)
 	s.mu.Lock()
 	if s.subscribers == nil {
 		s.subscribers = map[chan sseMessage]struct{}{}
 	}
+	if s.subscriberKey == nil {
+		s.subscriberKey = map[chan sseMessage]string{}
+	}
+	if s.subscriberUse == nil {
+		s.subscriberUse = map[string]int{}
+	}
+	if len(s.subscribers) >= maxSubscribers {
+		s.mu.Unlock()
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "stream_limit", "too many live streams", nil)
+		return
+	}
+	if s.subscriberUse[subscriberKey] >= maxSubscribersPerUser {
+		s.mu.Unlock()
+		w.Header().Set("Retry-After", "5")
+		writeError(w, http.StatusServiceUnavailable, "stream_limit", "too many live streams for this session", nil)
+		return
+	}
 	replay := s.replayLocked(lastID)
 	s.subscribers[ch] = struct{}{}
+	s.subscriberKey[ch] = subscriberKey
+	s.subscriberUse[subscriberKey]++
 	s.mu.Unlock()
-	defer func() { s.mu.Lock(); delete(s.subscribers, ch); close(ch); s.mu.Unlock() }()
+	defer func() {
+		s.mu.Lock()
+		delete(s.subscribers, ch)
+		delete(s.subscriberKey, ch)
+		if use := s.subscriberUse[subscriberKey]; use <= 1 {
+			delete(s.subscriberUse, subscriberKey)
+		} else {
+			s.subscriberUse[subscriberKey] = use - 1
+		}
+		close(ch)
+		s.mu.Unlock()
+	}()
 	_, _ = w.Write([]byte(": connected\n\n"))
 	flusher.Flush()
 	for _, message := range replay {

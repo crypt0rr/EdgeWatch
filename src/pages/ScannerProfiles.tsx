@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Code2, LockKeyhole, Plus, RotateCcw, Save, ShieldCheck, Trash2 } from 'lucide-react'
-import { APIError, archiveScannerProfile, createScannerProfile, listScannerProfiles, restoreScannerProfile, updateScannerProfile, validateScannerProfile } from '../api'
+import { APIError, archiveScannerProfile, createScannerProfile, getSession, listScannerProfiles, restoreScannerProfile, updateScannerProfile, validateScannerProfile } from '../api'
 import type { ScannerProfile, ScannerProfilePayload } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
 
@@ -24,6 +24,8 @@ function formatCommand(command: PreviewCommand) {
 
 export function ScannerProfiles() {
   const client = useQueryClient()
+  const session = useQuery({ queryKey: ['session'], queryFn: getSession })
+  const canManage = session.data?.permissions.includes('scanner_profiles.manage') ?? false
   const profiles = useQuery({ queryKey: ['scanner-profiles', true], queryFn: () => listScannerProfiles(true) })
   const [draft, setDraft] = useState<ScannerProfilePayload>(empty)
   const [editing, setEditing] = useState<ScannerProfile | null>(null)
@@ -138,14 +140,14 @@ export function ScannerProfiles() {
   }
 
   return <section className="page">
-    <div className="page-heading"><div><p className="eyebrow">Administration</p><h1>Scanner profiles</h1><p className="muted">Tune fixed Naabu and Nmap executables with validated argument arrays. Profiles are revisioned and never execute through a shell.</p></div><button className="button primary" onClick={reset}><Plus size={16} /> New profile</button></div>
+    <div className="page-heading"><div><p className="eyebrow">Administration</p><h1>Scanner profiles</h1><p className="muted">Tune fixed Naabu and Nmap executables with validated argument arrays. Profiles are revisioned and never execute through a shell.</p></div>{canManage && <button className="button primary" onClick={reset}><Plus size={16} /> New profile</button>}</div>
     {message && <div className="success-banner" role="status"><ShieldCheck size={16} />{message}</div>}
     {error && <div className="form-error banner" role="alert">{error}</div>}
     <div className="dashboard-columns">
       <div className="panel"><div className="panel-heading"><div><h2>Available profiles</h2><p className="muted">Built-ins are immutable. Archived profiles remain available to existing jobs.</p></div><Code2 className="muted-icon" size={18} /></div>
-        {profiles.isLoading ? <div className="loading"><span className="spinner" />Loading profiles…</div> : profiles.error ? <div className="error-card" role="alert">Could not load scanner profiles.</div> : profiles.data?.profiles.length ? <div className="activity-list">{profiles.data.profiles.map(profile => <div className="activity-row" key={profile.id}><div><strong>{profile.name}</strong><span>{profile.definition.engine === 'naabu_nmap' ? 'Naabu full TCP → Nmap' : 'Nmap'} · revision {profile.revision}{profile.archived ? ' · archived' : ''}</span></div><span className={profile.built_in ? 'pill blue' : profile.archived ? 'pill gray' : 'pill green'}>{profile.built_in ? 'Built-in' : profile.archived ? 'Archived' : 'Managed'}</span>{!profile.built_in && <><button className="icon-button" aria-label={`Edit ${profile.name}`} onClick={() => select(profile)}><Save size={15} /></button>{profile.archived ? <button className="icon-button" aria-label={`Restore ${profile.name}`} onClick={() => requestLifecycle(profile, 'restore')}><RotateCcw size={15} /></button> : <button className="icon-button" aria-label={`Archive ${profile.name}`} onClick={() => requestLifecycle(profile, 'archive')}><Trash2 size={15} /></button>}</>}</div>)}</div> : <div className="inline-empty">No scanner profiles are configured.</div>}
+        {profiles.isLoading ? <div className="loading"><span className="spinner" />Loading profiles…</div> : profiles.error ? <div className="error-card" role="alert">Could not load scanner profiles.</div> : profiles.data?.profiles.length ? <div className="activity-list">{profiles.data.profiles.map(profile => <div className="activity-row" key={profile.id}><div><strong>{profile.name}</strong><span>{profile.definition.engine === 'naabu_nmap' ? 'Naabu full TCP → Nmap' : 'Nmap'} · revision {profile.revision}{profile.archived ? ' · archived' : ''}</span></div><span className={profile.built_in ? 'pill blue' : profile.archived ? 'pill gray' : 'pill green'}>{profile.built_in ? 'Built-in' : profile.archived ? 'Archived' : 'Managed'}</span>{canManage && !profile.built_in && <><button className="icon-button" aria-label={`Edit ${profile.name}`} onClick={() => select(profile)}><Save size={15} /></button>{profile.archived ? <button className="icon-button" aria-label={`Restore ${profile.name}`} onClick={() => requestLifecycle(profile, 'restore')}><RotateCcw size={15} /></button> : <button className="icon-button" aria-label={`Archive ${profile.name}`} onClick={() => requestLifecycle(profile, 'archive')}><Trash2 size={15} /></button>}</>}</div>)}</div> : <div className="inline-empty">No scanner profiles are configured.</div>}
       </div>
-      <div className="panel form-panel"><div className="panel-heading"><div><h2>{editing ? `Edit ${editing.name}` : 'Create profile'}</h2><p className="muted">Password confirmation is required for every mutation.</p></div><LockKeyhole className="muted-icon" size={18} /></div>
+      <div className="panel form-panel"><div className="panel-heading"><div><h2>{editing ? `Edit ${editing.name}` : 'Create profile'}</h2><p className="muted">{canManage ? 'Password confirmation is required for every mutation.' : 'Profiles are read-only for your account.'}</p></div><LockKeyhole className="muted-icon" size={18} /></div>{!canManage && <div className="notice notification-read-only" role="status"><LockKeyhole size={16} />Only administrators can create, validate, or revise scanner profiles.</div>}
         <label>Name<input value={draft.name ?? ''} onChange={event => setDraft({ ...draft, name: event.target.value })} placeholder="Careful Naabu defaults" /></label>
         <label>Description<textarea value={draft.description ?? ''} onChange={event => setDraft({ ...draft, description: event.target.value })} /></label>
         <label>Engine<select value={draft.engine} onChange={event => setDraft({ ...draft, engine: event.target.value })}><option value="nmap">Nmap only</option><option value="naabu_nmap">Naabu discovery → Nmap</option></select></label>
@@ -166,8 +168,7 @@ export function ScannerProfiles() {
         <label>Enrichment argument array<textarea value={args.enrichment} onChange={event => setArgs({ ...args, enrichment: event.target.value })} placeholder="Required placeholders: {address(es)}, {ports}, {structured_output}" /></label>
         <fieldset><legend>Operator-adjustable fields</legend><div className="two-fields">{adjustable.map(field => <label key={field} className="switch-row"><input type="checkbox" checked={(draft.operator_adjustable ?? []).includes(field)} onChange={event => toggleAdjustable(field, event.target.checked)} /><span><strong>{field}</strong><small>Permit job-level tuning within bounds</small></span></label>)}</div><p className="helper">Bounds use the product safety limits by default; the API validates any administrator changes.</p></fieldset>
         {preview.length > 0 && <div className="scanner-preview" role="region" aria-label="Effective command preview"><h3>Effective command preview</h3><p className="helper">Documentation-only examples use fixed EdgeWatch executables and safe sample values. They are never executed.</p>{preview.map((command, index) => <pre key={`${command.executable}-${index}`}><code>{formatCommand(command)}</code></pre>)}</div>}
-        <label>Password confirmation<input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="current-password" /></label>
-        <div className="heading-actions"><button className="button secondary" type="button" onClick={validate}>Validate & preview</button><button className="button primary" type="button" disabled={saving} onClick={save}><Save size={16} />{saving ? 'Saving…' : editing ? 'Save revision' : 'Create profile'}</button></div>
+        {canManage && <><label>Password confirmation<input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="current-password" /></label><div className="heading-actions"><button className="button secondary" type="button" onClick={validate}>Validate & preview</button><button className="button primary" type="button" disabled={saving} onClick={save}><Save size={16} />{saving ? 'Saving…' : editing ? 'Save revision' : 'Create profile'}</button></div></>}
       </div>
     </div>
     {pendingLifecycle && <ActionDialog

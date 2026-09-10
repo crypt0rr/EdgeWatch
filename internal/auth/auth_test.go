@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"golang.org/x/crypto/argon2"
 )
 
 func TestPasswordHashAndVerification(t *testing.T) {
@@ -27,6 +29,74 @@ func TestPasswordHashAndVerification(t *testing.T) {
 	}
 	if _, err := PasswordHash("too-short"); err == nil {
 		t.Fatal("short password accepted")
+	}
+}
+
+func TestLoginRehashesWeakerArgon2Parameters(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	password := "correct horse battery staple"
+	salt := []byte("0123456789abcdef")
+	key := argon2.IDKey([]byte(password), salt, 1, 8*1024, 1, 32)
+	legacy := fmt.Sprintf("$ew$argon2id$v=19$m=8192,t=1,p=1$%s$%s", base64.RawStdEncoding.EncodeToString(salt), base64.RawStdEncoding.EncodeToString(key))
+	now := time.Now().UTC()
+	if err := s.SaveAdmin(ctx, store.Admin{Username: "admin", PasswordHash: legacy, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(s)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "127.0.0.1:1234"
+	if _, _, err := m.LoginAs(ctx, request, "admin", password, "", ""); err != nil {
+		t.Fatalf("legacy login failed: %v", err)
+	}
+	user, err := s.GetUser(ctx, store.LegacyAdminUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.PasswordHash == legacy || !strings.Contains(user.PasswordHash, "m=19456,t=2,p=1") {
+		t.Fatalf("legacy hash was not upgraded: %q", user.PasswordHash)
+	}
+	admin, err := s.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.PasswordHash != user.PasswordHash {
+		t.Fatal("compatibility administrator hash was not upgraded with user hash")
+	}
+}
+
+func TestLoginDoesNotRewriteCurrentArgon2Hash(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	password := "correct horse battery staple"
+	hash, err := PasswordHash(password)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := s.SaveAdmin(ctx, store.Admin{Username: "admin", PasswordHash: hash, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(s)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "127.0.0.1:1235"
+	if _, _, err := m.LoginAs(ctx, request, "admin", password, "", ""); err != nil {
+		t.Fatalf("current login failed: %v", err)
+	}
+	user, err := s.GetUser(ctx, store.LegacyAdminUserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if user.PasswordHash != hash {
+		t.Fatal("current Argon2id hash was rewritten")
 	}
 }
 

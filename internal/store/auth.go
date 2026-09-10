@@ -419,6 +419,45 @@ func (s *Store) CreateSessionForUserWithAuditEntry(ctx context.Context, userID, 
 	return tx.Commit()
 }
 
+// CreateSessionForUserWithPasswordUpgrade atomically upgrades a verified
+// password hash with the login session and its audit record. The conditional
+// update protects against overwriting a password changed concurrently while
+// the login was in progress. The compatibility admins row is kept in sync for
+// the legacy administrator identity.
+func (s *Store) CreateSessionForUserWithPasswordUpgrade(ctx context.Context, userID, previousHash, upgradedHash, idHash, csrf string, created, expires time.Time, audit AuditEntry) error {
+	if strings.TrimSpace(upgradedHash) == "" {
+		return errors.New("upgraded password hash is required")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stamp := created.UTC().Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,last_login_at=?,updated_at=? WHERE id=? AND password_hash=?`, upgradedHash, stamp, stamp, userID, previousHash)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return errors.New("password changed during login")
+	}
+	if userID == LegacyAdminUserID {
+		if _, err := tx.ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at=? WHERE id=1 AND password_hash=?`, upgradedHash, stamp, previousHash); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, stamp, stamp, expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
+		return err
+	}
+	if audit.Action != "" {
+		if err := insertAuditEntryExec(ctx, tx, audit, created.UTC()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) GetSession(ctx context.Context, idHash string) (Session, error) {
 	var v Session
 	var created, lastSeen, expires string

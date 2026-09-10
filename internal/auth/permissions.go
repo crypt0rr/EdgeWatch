@@ -3,21 +3,26 @@ package auth
 import "github.com/crypt0rr/edgewatch/internal/store"
 
 const (
-	PermissionOverviewRead          = "overview.read"
-	PermissionJobsRead              = "jobs.read"
-	PermissionJobsWrite             = "jobs.write"
-	PermissionJobsRun               = "jobs.run"
-	PermissionJobsDelete            = "jobs.delete"
-	PermissionHostsRead             = "hosts.read"
-	PermissionScansRead             = "scans.read"
-	PermissionBaselinesRead         = "baselines.read"
-	PermissionBaselinesManage       = "baselines.manage"
-	PermissionIncidentsRead         = "incidents.read"
-	PermissionIncidentsManage       = "incidents.manage"
-	PermissionNotificationOptions   = "notification_options.read"
-	PermissionNotificationsRead     = "notifications.read"
-	PermissionNotificationsManage   = "notifications.manage"
-	PermissionUsersManage           = "users.manage"
+	PermissionOverviewRead        = "overview.read"
+	PermissionJobsRead            = "jobs.read"
+	PermissionJobsWrite           = "jobs.write"
+	PermissionJobsRun             = "jobs.run"
+	PermissionJobsDelete          = "jobs.delete"
+	PermissionHostsRead           = "hosts.read"
+	PermissionScansRead           = "scans.read"
+	PermissionBaselinesRead       = "baselines.read"
+	PermissionBaselinesManage     = "baselines.manage"
+	PermissionIncidentsRead       = "incidents.read"
+	PermissionIncidentsManage     = "incidents.manage"
+	PermissionNotificationOptions = "notification_options.read"
+	// PermissionNotificationsRead is retained as a source-compatible symbol
+	// for clients that imported the old name. Notification reads are covered by
+	// PermissionNotificationOptions because no route uses this capability.
+	PermissionNotificationsRead   = "notifications.read"
+	PermissionNotificationsManage = "notifications.manage"
+	PermissionUsersManage         = "users.manage"
+	// PermissionAuditRead remains source-compatible until an audit read
+	// endpoint exists, but is intentionally not granted to any role.
 	PermissionAuditRead             = "audit.read"
 	PermissionPublicManage          = "public_dashboard.manage"
 	PermissionStreamRead            = "stream.read"
@@ -31,9 +36,9 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionJobsRun: true, PermissionJobsDelete: true, PermissionHostsRead: true, PermissionScansRead: true,
 		PermissionBaselinesRead: true, PermissionBaselinesManage: true,
 		PermissionIncidentsRead: true, PermissionIncidentsManage: true,
-		PermissionNotificationOptions: true, PermissionNotificationsRead: true,
+		PermissionNotificationOptions: true,
 		PermissionNotificationsManage: true, PermissionUsersManage: true,
-		PermissionAuditRead: true, PermissionPublicManage: true, PermissionStreamRead: true,
+		PermissionPublicManage: true, PermissionStreamRead: true,
 		PermissionScannerProfilesRead: true, PermissionScannerProfilesManage: true,
 	},
 	store.RoleOperator: {

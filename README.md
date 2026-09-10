@@ -165,10 +165,8 @@ and chooses an Argon2id password in the browser. Roles are deliberately small:
   select existing notification destinations for a job. Operators cannot read
   or change destination URLs or manage users.
 - **Viewer** is read-only for the operational console and can inspect jobs and
-  baseline information. When public status is enabled, signing in as a viewer
-  opens the administrator-selected **Highlights** page first; the jobs and
-  baseline views remain available from the navigation. Every account can change
-  its own display name, password, and optional authenticator protection.
+  baseline information. Every account can change its own display name,
+  password, and optional authenticator protection.
 
 To publish a limited unauthenticated highlights page, an administrator enables
 **Public status** and explicitly selects effective hosts. The page is available
@@ -234,6 +232,13 @@ When creating a job, the editor compares its next scheduled run with active
 jobs and offers a non-blocking 30-minute offset when another run is too close.
 The suggestion is optional: keep the chosen schedule when concurrent runs are
 intentional.
+
+Schedules use standard five-field cron semantics in the configured IANA
+timezone. Daylight-saving transitions are not compensated for: a local time
+that is skipped during the spring-forward transition does not run that day,
+while a time in the repeated fall-back hour may run twice. When an exact
+once-per-day cadence matters, choose a time outside the local transition hours
+and keep the timezone's daylight-saving rules in mind.
 
 `assume_alive` defaults to `true` and passes host-discovery skip flags to the
 selected scanner. Set it to `false` when host discovery is required. If Nmap

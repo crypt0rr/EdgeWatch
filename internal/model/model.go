@@ -297,8 +297,15 @@ type JobState struct {
 	// one-scan suppression expires, without requiring confirmations again.
 	SuppressedChanges     map[string]Change     `json:"suppressed_changes,omitempty"`
 	FingerprintCandidates map[string]ValueCount `json:"fingerprint_candidates,omitempty"`
-	ConsecutiveFailures   int                   `json:"consecutive_failures"`
-	LastFailureAlert      int                   `json:"last_failure_alert"`
+	// TotalLossCandidateHash and TotalLossCandidateCount track a complete
+	// successful scan that returned no positive ports while the baseline still
+	// contains positive ports. The engine requires a second matching scan
+	// before comparing that result, preventing a transient empty discovery from
+	// opening one incident per previously observed port.
+	TotalLossCandidateHash  string `json:"total_loss_candidate_hash,omitempty"`
+	TotalLossCandidateCount int    `json:"total_loss_candidate_count,omitempty"`
+	ConsecutiveFailures     int    `json:"consecutive_failures"`
+	LastFailureAlert        int    `json:"last_failure_alert"`
 }
 
 type Event struct {

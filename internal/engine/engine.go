@@ -86,12 +86,25 @@ func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]m
 	// ports into removals (or advance a new baseline); wait for a complete
 	// observation on a later scan instead.
 	if snapshotHasUnreachableHost(scan.Snapshot) {
+		clearTotalLossCandidate(state)
 		return nil, nil
 	}
 	now := scan.FinishedAt
 	if state.Baseline == nil {
+		clearTotalLossCandidate(state)
 		events := advanceCandidate(state, scan, job.Baseline.Samples, false)
 		return events, nil
+	}
+	// A complete scan that suddenly reports no positive ports across a
+	// previously non-empty baseline is usually a degraded discovery result
+	// (for example, a transient firewall or scanner-capability problem). Do
+	// not turn that one result into an incident for every expected port. Require
+	// one consecutive matching result before allowing the normal comparison to
+	// proceed. An explicit security-scope change is exempt because it already
+	// requires a deliberate rebaseline and may legitimately narrow the scope to
+	// zero positive ports.
+	if totalLoss, event := guardTotalLoss(state, scan); totalLoss {
+		return event, nil
 	}
 	learnMissingFingerprints(state, scan.Snapshot, job.Baseline.Samples)
 	changes := Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
@@ -101,6 +114,67 @@ func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]m
 		events = append(events, candidateEvents...)
 	}
 	return events, nil
+}
+
+const totalLossConfirmationScans = 2
+
+// guardTotalLoss returns a scan-level anomaly event while a zero-positive
+// result is awaiting one matching confirmation. Once the confirmation count
+// is reached the candidate is cleared and normal comparison is allowed.
+func guardTotalLoss(state *model.JobState, scan model.Scan) (bool, []model.Event) {
+	baselinePositive := positivePortCount(*state.Baseline)
+	currentPositive := positivePortCount(scan.Snapshot)
+	// A changed security hash is an administrator-requested scope transition;
+	// don't block its fresh baseline collection. Missing hashes are legacy
+	// state, so retain the safety check for those installations.
+	if baselinePositive == 0 || currentPositive != 0 || (state.BaselineConfigHash != "" && scan.ConfigHash != "" && state.BaselineConfigHash != scan.ConfigHash) {
+		clearTotalLossCandidate(state)
+		return false, nil
+	}
+	hash := scan.Snapshot.Hash()
+	if state.TotalLossCandidateHash != hash {
+		state.TotalLossCandidateHash = hash
+		state.TotalLossCandidateCount = 1
+		return true, []model.Event{{
+			Type:      "scan-anomaly",
+			Job:       scan.Job,
+			ScanID:    scan.ID,
+			Message:   fmt.Sprintf("Scan returned zero positive ports while the baseline contains %d; awaiting confirmation", baselinePositive),
+			CreatedAt: scan.FinishedAt,
+		}}
+	}
+	state.TotalLossCandidateCount++
+	if state.TotalLossCandidateCount < totalLossConfirmationScans {
+		return true, []model.Event{{
+			Type:      "scan-anomaly",
+			Job:       scan.Job,
+			ScanID:    scan.ID,
+			Message:   fmt.Sprintf("Scan returned zero positive ports while the baseline contains %d; awaiting confirmation", baselinePositive),
+			CreatedAt: scan.FinishedAt,
+		}}
+	}
+	clearTotalLossCandidate(state)
+	return false, nil
+}
+
+func clearTotalLossCandidate(state *model.JobState) {
+	state.TotalLossCandidateHash = ""
+	state.TotalLossCandidateCount = 0
+}
+
+func positivePortCount(snapshot model.Snapshot) int {
+	seen := make(map[string]struct{})
+	for _, unit := range snapshot.Units {
+		for _, port := range unit.Ports {
+			state := strings.ToLower(strings.TrimSpace(port.State))
+			if state != "open" && state != "open|filtered" {
+				continue
+			}
+			key := fmt.Sprintf("%s\x00%s\x00%d", unit.Target, unit.Protocol, port.Port)
+			seen[key] = struct{}{}
+		}
+	}
+	return len(seen)
 }
 
 func snapshotHasUnreachableHost(snapshot model.Snapshot) bool {
@@ -284,6 +358,7 @@ func (e *Engine) FailureForJobWithDestinations(ctx context.Context, jobID, job s
 }
 
 func processFailure(state *model.JobState, job string, scan model.Scan) ([]model.Event, error) {
+	clearTotalLossCandidate(state)
 	if scan.Resumable && scan.CycleStatus == "paused" {
 		if scan.Status == "canceled" {
 			return []model.Event{{Type: "scan-canceled", Job: job, ScanID: scan.ID, Message: scanOutcomeMessage(scan), CreatedAt: scan.FinishedAt}}, nil
@@ -621,6 +696,8 @@ func FormatEvent(e model.Event) string {
 	switch {
 	case e.Type == "changes-recovered" || e.Type == "scan-recovered":
 		b.WriteString("🟢 ")
+	case e.Type == "scan-anomaly":
+		b.WriteString("⚠️ ")
 	case e.Type == "changes-detected" && hasCriticalChange(e.Changes):
 		b.WriteString("🔴 ")
 	}

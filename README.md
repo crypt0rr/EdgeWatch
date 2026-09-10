@@ -248,6 +248,14 @@ That partial result never treats the target as closed or changes a baseline;
 the next complete scan can resume comparison. A completely empty Nmap result
 still fails the scan as a scanner error.
 
+For an already established baseline, a complete scan that suddenly reports no
+positive ports is treated as a scan-level anomaly. EdgeWatch records one
+warning and waits for a matching successful scan before opening the individual
+port-change incidents. A genuine estate-wide loss is therefore still reported,
+but a single degraded discovery pass cannot create an alert storm. A later
+scan that finds any positive port clears the pending anomaly and is compared
+normally.
+
 When a baseline is ready, use **Explore baseline** on the job page to inspect
 every effective address produced by the configured targets. Host detail pages
 show the exact TCP/UDP scope, positive ports, service fingerprints, Nmap

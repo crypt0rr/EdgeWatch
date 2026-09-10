@@ -49,12 +49,16 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 			if state.Baseline != nil {
 				current.BaselineScanID = state.BaselineScanID
 				current.BaselineConfigHash = state.BaselineConfigHash
-				current.Changes = Diff(*state.Baseline, current.Snapshot, state.BaselineConfigHash != current.ConfigHash)
 			}
-			events, err := processSuccess(state, job, *current)
+			events, changes, err := processSuccessWithChanges(state, job, *current)
 			if err != nil {
 				return nil, err
 			}
+			// Persist exactly the change set that drove applyChanges. Fingerprint
+			// learning can mutate the runtime baseline during processSuccess; a
+			// pre-learning diff would otherwise appear in history without an
+			// incident or notification.
+			current.Changes = changes
 			// A scan can be the sample that completes the initial baseline. In
 			// that case there was no prior baseline to capture above, but the
 			// scan is still the immutable source of the newly established state.
@@ -77,6 +81,15 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 }
 
 func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, error) {
+	events, _, err := processSuccessWithChanges(state, job, scan)
+	return events, err
+}
+
+// processSuccessWithChanges applies a successful scan and returns the exact
+// change set handed to the incident engine. Keeping the set alongside the
+// events prevents immutable scan history from diverging when service
+// fingerprints are learned as part of the same transaction.
+func processSuccessWithChanges(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, []model.Change, error) {
 	state.ConsecutiveFailures = 0
 	state.LastFailureAlert = 0
 	// A successful Nmap process can still omit individual hosts when host
@@ -87,13 +100,13 @@ func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]m
 	// observation on a later scan instead.
 	if snapshotHasUnreachableHost(scan.Snapshot) {
 		clearTotalLossCandidate(state)
-		return nil, nil
+		return nil, nil, nil
 	}
 	now := scan.FinishedAt
 	if state.Baseline == nil {
 		clearTotalLossCandidate(state)
 		events := advanceCandidate(state, scan, job.Baseline.Samples, false)
-		return events, nil
+		return events, nil, nil
 	}
 	// A complete scan that suddenly reports no positive ports across a
 	// previously non-empty baseline is usually a degraded discovery result
@@ -104,7 +117,7 @@ func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]m
 	// requires a deliberate rebaseline and may legitimately narrow the scope to
 	// zero positive ports.
 	if totalLoss, event := guardTotalLoss(state, scan); totalLoss {
-		return event, nil
+		return event, nil, nil
 	}
 	learnMissingFingerprints(state, scan.Snapshot, job.Baseline.Samples)
 	changes := Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
@@ -113,7 +126,7 @@ func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]m
 		candidateEvents := advanceCandidate(state, scan, job.Baseline.Samples, true)
 		events = append(events, candidateEvents...)
 	}
-	return events, nil
+	return events, changes, nil
 }
 
 const totalLossConfirmationScans = 2

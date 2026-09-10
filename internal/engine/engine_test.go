@@ -401,6 +401,51 @@ func TestFinalizeManagedScanRecordsInitialBaselineScanMetadata(t *testing.T) {
 	}
 }
 
+func TestFinalizeManagedScanPersistsTheChangeSetAppliedByEngine(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	record, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "fingerprint-consistency", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
+		TCP: &config.Protocol{Ports: "443", Mode: "connect", ServiceDetection: true}, Timing: "balanced", Timeout: config.Duration(time.Minute),
+		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withService := func(service string) model.Snapshot {
+		snapshot := model.Snapshot{
+			Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "443", ServiceDetection: true}},
+			Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open", Service: service}}}},
+		}
+		snapshot.Normalize()
+		return snapshot
+	}
+	e := Engine{Store: db}
+	baseline := model.Scan{ID: "fingerprint-baseline", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: withService("")}
+	if _, err := e.FinalizeManagedScan(ctx, record.ID, record.Job, &baseline, nil); err != nil {
+		t.Fatal(err)
+	}
+	current := model.Scan{ID: "fingerprint-learned", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: withService("nginx")}
+	events, err := e.FinalizeManagedScan(ctx, record.ID, record.Job, &current, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("fingerprint learning emitted a change event: %#v", events)
+	}
+	stored, err := db.GetScan(ctx, current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Changes) != 0 {
+		t.Fatalf("persisted changes = %#v, want the same empty set acted on by the engine", stored.Changes)
+	}
+}
+
 func TestFingerprintStabilizesWithoutBlockingPortBaseline(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "db"))

@@ -79,6 +79,15 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, error) {
 	state.ConsecutiveFailures = 0
 	state.LastFailureAlert = 0
+	// A successful Nmap process can still omit individual hosts when host
+	// discovery receives no response. Those addresses are retained as explicit
+	// unreachable observations by the scanner, but the compact Unit view is
+	// necessarily incomplete. Do not let an incomplete scope turn missing
+	// ports into removals (or advance a new baseline); wait for a complete
+	// observation on a later scan instead.
+	if snapshotHasUnreachableHost(scan.Snapshot) {
+		return nil, nil
+	}
 	now := scan.FinishedAt
 	if state.Baseline == nil {
 		events := advanceCandidate(state, scan, job.Baseline.Samples, false)
@@ -92,6 +101,16 @@ func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]m
 		events = append(events, candidateEvents...)
 	}
 	return events, nil
+}
+
+func snapshotHasUnreachableHost(snapshot model.Snapshot) bool {
+	for _, host := range snapshot.Hosts {
+		switch strings.ToLower(strings.TrimSpace(host.Status)) {
+		case "unreachable", "down":
+			return true
+		}
+	}
+	return false
 }
 
 func advanceCandidate(state *model.JobState, scan model.Scan, required int, merge bool) []model.Event {

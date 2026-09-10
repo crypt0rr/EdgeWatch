@@ -193,6 +193,45 @@ func TestIncompleteFailuresDoNotChangeBaseline(t *testing.T) {
 	}
 }
 
+func TestUnreachableHostObservationDoesNotChangeBaseline(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := Engine{Store: db}
+	job := config.Job{Name: "partial", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{
+			{Target: "192.0.2.1", Protocol: "tcp", Ports: "443"},
+			{Target: "192.0.2.2", Protocol: "tcp", Ports: "443"},
+		},
+		Units: []model.Unit{
+			{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}}},
+			{Target: "192.0.2.2", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}}},
+		},
+	}
+	if events, err := e.Success(ctx, job, scan("baseline", baseline)); err != nil || len(events) != 1 || events[0].Type != "baseline-complete" {
+		t.Fatalf("baseline setup: %#v, %v", events, err)
+	}
+	partial := model.Snapshot{
+		Scopes: baseline.Scopes,
+		Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "closed"}}}},
+		Hosts:  []model.HostObservation{{Address: "192.0.2.2", Status: "unreachable", StatusReason: "nmap-omitted"}},
+	}
+	if events, err := e.Success(ctx, job, scan("partial", partial)); err != nil || len(events) != 0 {
+		t.Fatalf("partial scan generated state changes: %#v, %v", events, err)
+	}
+	state, err := db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Baseline == nil || len(state.Baseline.Units) != 2 || len(state.Incidents) != 0 {
+		t.Fatalf("partial scan changed baseline or incidents: %#v", state)
+	}
+}
+
 func TestEveryUnsuccessfulScanEmitsAnOutcomeEvent(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "db"))

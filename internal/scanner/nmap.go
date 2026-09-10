@@ -523,20 +523,53 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			if parsed.Exit != "success" {
 				return protocolScanResult{}, fmt.Errorf("nmap run incomplete: %s", parsed.Exit)
 			}
+			// A successful XML response with no host records is not a usable
+			// result. Keep this hard failure for a completely empty invocation,
+			// while allowing mixed responses to commit the addresses Nmap did
+			// report below.
+			hasExpectedHost := false
+			for _, address := range batch {
+				if _, unitOK := parsed.Units[address]; unitOK {
+					hasExpectedHost = true
+					break
+				}
+				if _, hostOK := parsed.Hosts[address]; hostOK {
+					hasExpectedHost = true
+					break
+				}
+			}
+			if !hasExpectedHost {
+				return protocolScanResult{}, fmt.Errorf("nmap output omitted expected address(s): %s", strings.Join(batch, ", "))
+			}
 			for _, address := range batch {
 				unit, ok := parsed.Units[address]
-				if !ok {
-					return protocolScanResult{}, fmt.Errorf("nmap output omitted expected address %s", address)
+				if ok {
+					all[address] = unit
 				}
-				all[address] = unit
-				if host, ok := parsed.Hosts[address]; ok {
-					// Fingerprint the fixed executable and argv shape without
-					// retaining target addresses or any profile values in logs.
-					for index := range host.Protocols {
-						host.Protocols[index].CommandFingerprint = commandFingerprint(args)
+				host, hostOK := parsed.Hosts[address]
+				if !hostOK {
+					// Nmap can omit a host entirely when discovery receives no
+					// response. Preserve an explicit state for the host explorer,
+					// but do not synthesize a Unit: an absent Unit must never be
+					// interpreted as a closed port by the comparison engine.
+					host = unreachableHostObservation(address, protocol, pc, "nmap-omitted")
+				} else if !ok {
+					// Down hosts are represented as observations by the XML parser
+					// without a compact Unit. Normalize any non-up status to the
+					// explicit state used for incomplete scan coverage.
+					if !strings.EqualFold(strings.TrimSpace(host.Status), "up") {
+						host.Status = "unreachable"
+						if strings.TrimSpace(host.StatusReason) == "" {
+							host.StatusReason = "nmap-host-down"
+						}
 					}
-					mergeHostObservationMap(allHosts, address, host)
 				}
+				// Fingerprint the fixed executable and argv shape without
+				// retaining target addresses or any profile values in logs.
+				for index := range host.Protocols {
+					host.Protocols[index].CommandFingerprint = commandFingerprint(args)
+				}
+				mergeHostObservationMap(allHosts, address, host)
 			}
 			if report != nil {
 				report(1, int64(len(batch))*int64(len(ports))*factor)
@@ -554,7 +587,10 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			continue
 		}
 		for _, address := range target.Addresses {
-			unit := all[address]
+			unit, ok := all[address]
+			if !ok {
+				continue
+			}
 			unit.Target = address
 			units = append(units, unit)
 		}
@@ -1077,9 +1113,6 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 			}
 			return parsedRun{}, fmt.Errorf("nmap host %s timed out", address)
 		}
-		if host.Status.State != "up" {
-			continue
-		}
 		var address string
 		var family string
 		var links []model.LinkAddress
@@ -1096,8 +1129,11 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 		if address == "" {
 			continue
 		}
-		unit := model.Unit{Target: address, Protocol: protocol, Addresses: []string{address}}
-		hostObservation := model.HostObservation{Address: address, AddressFamily: family, Status: host.Status.State, StatusReason: host.Status.Reason, ReasonTTL: host.Status.TTL, LinkAddresses: links}
+		status := strings.ToLower(strings.TrimSpace(host.Status.State))
+		if status == "" {
+			status = "unknown"
+		}
+		hostObservation := model.HostObservation{Address: address, AddressFamily: family, Status: status, StatusReason: host.Status.Reason, ReasonTTL: host.Status.TTL, LinkAddresses: links}
 		for _, hostname := range host.Hostnames {
 			hostObservation.Hostnames = append(hostObservation.Hostnames, model.Hostname{Name: strings.TrimSpace(hostname.Name), Type: strings.TrimSpace(hostname.Type)})
 		}
@@ -1113,13 +1149,33 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 			}
 		}
 		observation := model.ProtocolObservation{Protocol: protocol, ScanType: scanType(protocol, pc), ScannedPorts: pc.Ports, ServiceDetection: pc.ServiceDetection, NSEProfile: strings.TrimSpace(pc.NSEProfile), NSEArgs: cloneStringMap(pc.NSEArgs)}
+		if ports, err := config.ParsePorts(pc.Ports); err == nil {
+			observation.ScannedPortCount = len(ports)
+		}
+		if status != "up" {
+			// Nmap emits a host element with state=down when discovery is
+			// enabled. Keep that evidence as an explicit unreachable host
+			// rather than dropping it and making the caller guess whether the
+			// address was omitted. The compact Unit is intentionally absent.
+			hostObservation.Status = "unreachable"
+			if strings.TrimSpace(hostObservation.StatusReason) == "" {
+				hostObservation.StatusReason = "nmap-host-down"
+			}
+			count := observation.ScannedPortCount
+			if count == 0 {
+				count = 1
+			}
+			addStateSummary(&observation, "unreachable", hostObservation.StatusReason, count)
+			hostObservation.Protocols = append(hostObservation.Protocols, observation)
+			dedupeHostObservation(&hostObservation)
+			result.Hosts[address] = hostObservation
+			continue
+		}
+		unit := model.Unit{Target: address, Protocol: protocol, Addresses: []string{address}}
 		for _, script := range host.HostScripts {
 			if summary := summarizeNSEOutput(script.ID, script.Output); summary != "" {
 				observation.NSEOutput = append(observation.NSEOutput, summary)
 			}
-		}
-		if ports, err := config.ParsePorts(pc.Ports); err == nil {
-			observation.ScannedPortCount = len(ports)
 		}
 		for _, p := range host.Ports {
 			if p.Protocol != protocol {
@@ -1175,6 +1231,43 @@ func scanType(protocol string, pc config.Protocol) string {
 		return "tcp connect"
 	}
 	return "tcp syn"
+}
+
+// unreachableHostObservation is the explicit evidence retained when Nmap's
+// XML omits an expected address entirely. It carries the configured scope so
+// host-detail consumers can distinguish a covered, non-responsive address
+// from a legacy snapshot that never recorded host evidence. No compact Unit
+// is created for this state because an absent result is not equivalent to a
+// closed port.
+func unreachableHostObservation(address, protocol string, pc config.Protocol, reason string) model.HostObservation {
+	address = normalizeAddress(address)
+	if strings.TrimSpace(reason) == "" {
+		reason = "nmap-omitted"
+	}
+	count := 0
+	if ports, err := config.ParsePorts(pc.Ports); err == nil {
+		count = len(ports)
+	}
+	if count == 0 {
+		count = 1
+	}
+	observation := model.ProtocolObservation{
+		Protocol:         protocol,
+		ScanType:         scanType(protocol, pc),
+		ScannedPorts:     pc.Ports,
+		ScannedPortCount: count,
+		ServiceDetection: pc.ServiceDetection,
+		NSEProfile:       strings.TrimSpace(pc.NSEProfile),
+		NSEArgs:          cloneStringMap(pc.NSEArgs),
+	}
+	addStateSummary(&observation, "unreachable", reason, count)
+	return model.HostObservation{
+		Address:       address,
+		AddressFamily: addressFamily(address),
+		Status:        "unreachable",
+		StatusReason:  reason,
+		Protocols:     []model.ProtocolObservation{observation},
+	}
 }
 
 func hasServiceEvidence(service struct {

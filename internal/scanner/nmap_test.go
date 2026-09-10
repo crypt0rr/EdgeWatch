@@ -177,10 +177,36 @@ func TestNmapCustomProfileKeepsTypedDefaultsWhenPlaceholdersOmitted(t *testing.T
 	}
 }
 
-func TestScanProtocolFailsWhenDiscoveryOmitsHost(t *testing.T) {
+func TestScanProtocolRecordsOmittedHostWithoutDroppingBatch(t *testing.T) {
 	dir := t.TempDir()
 	nmapPath := filepath.Join(dir, "nmap")
-	output := `<?xml version="1.0"?><nmaprun><host><status state="down"/><address addr="192.0.2.1" addrtype="ipv4"/></host><runstats><finished exit="success"/></runstats></nmaprun>`
+	output := `<?xml version="1.0"?><nmaprun><host><status state="up" reason="arp-response"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open" reason="syn-ack"/></port></ports></host><host><status state="up" reason="arp-response"/><address addr="192.0.2.2" addrtype="ipv4"/><ports><port protocol="tcp" portid="80"><state state="open" reason="syn-ack"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`
+	script := "#!/bin/sh\nprintf '%s' '" + output + "'\n"
+	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := New(nmapPath)
+	target := resolvedTarget{Name: "batch", Addresses: []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"}}
+	result, err := n.scanProtocolBatchDetailedProgress(context.Background(), []resolvedTarget{target}, "tcp", config.Protocol{Ports: "22,80", Mode: "syn"}, "balanced", false, nil)
+	if err != nil {
+		t.Fatalf("partial host response failed the batch: %v", err)
+	}
+	if len(result.Units) != 2 {
+		t.Fatalf("units = %#v, want the two reported hosts only", result.Units)
+	}
+	missing, ok := result.Hosts["192.0.2.3"]
+	if !ok || missing.Status != "unreachable" || missing.StatusReason != "nmap-omitted" {
+		t.Fatalf("missing host observation = %#v", missing)
+	}
+	if len(missing.Protocols) != 1 || missing.Protocols[0].StateSummaries[0].State != "unreachable" {
+		t.Fatalf("missing host scope evidence = %#v", missing.Protocols)
+	}
+}
+
+func TestScanProtocolFailsWhenEntireInvocationOmitsHosts(t *testing.T) {
+	dir := t.TempDir()
+	nmapPath := filepath.Join(dir, "nmap")
+	output := `<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/></runstats></nmaprun>`
 	script := "#!/bin/sh\nprintf '%s' '" + output + "'\n"
 	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
@@ -189,7 +215,25 @@ func TestScanProtocolFailsWhenDiscoveryOmitsHost(t *testing.T) {
 	target := resolvedTarget{Name: "192.0.2.1", Addresses: []string{"192.0.2.1"}}
 	_, err := n.scanProtocol(context.Background(), target, "tcp", config.Protocol{Ports: "22", Mode: "syn"}, "balanced", false)
 	if err == nil || !strings.Contains(err.Error(), "omitted expected address") {
-		t.Fatalf("expected safe discovery failure, got %v", err)
+		t.Fatalf("expected empty invocation failure, got %v", err)
+	}
+}
+
+func TestParseXMLRecordsDownHostAsUnreachable(t *testing.T) {
+	data := []byte(`<?xml version="1.0"?><nmaprun><host><status state="down" reason="no-response" reason_ttl="64"/><address addr="192.0.2.9" addrtype="ipv4"/></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	run, err := parseXMLWithConfig(data, "tcp", config.Protocol{Ports: "1-100", Mode: "connect"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, ok := run.Hosts["192.0.2.9"]
+	if !ok || host.Status != "unreachable" || host.StatusReason != "no-response" || host.ReasonTTL != 64 {
+		t.Fatalf("down host observation = %#v", host)
+	}
+	if _, ok := run.Units["192.0.2.9"]; ok {
+		t.Fatal("down host unexpectedly produced a comparison unit")
+	}
+	if len(host.Protocols) != 1 || host.Protocols[0].StateSummaries[0].State != "unreachable" {
+		t.Fatalf("down host protocol evidence = %#v", host.Protocols)
 	}
 }
 

@@ -838,7 +838,7 @@ func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, sessi
 	var saveErr error
 	auditAction := "user.display_name_changed"
 	if user.ID == store.LegacyAdminUserID {
-		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt}
+		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Revision: user.Revision}
 		auditAction = "admin.display_name_changed"
 		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, nil, false, false, store.AuditEntry{Action: auditAction, Detail: "administrator display name changed", ActorUserID: session.UserID, ActorUsername: session.Username})
 	} else {
@@ -846,6 +846,10 @@ func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, sessi
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
+			return
+		}
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "conflict", "account was modified; reload and try again", nil)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "save_failed", "display name could not be saved", nil)
@@ -880,7 +884,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 	auditAction := "user.password_changed"
 	var saveErr error
 	if user.ID == store.LegacyAdminUserID {
-		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt}
+		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Revision: user.Revision}
 		auditAction = "admin.password_changed"
 		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, nil, false, true, store.AuditEntry{Action: auditAction, Detail: "password changed", ActorUserID: session.UserID, ActorUsername: session.Username})
 	} else {
@@ -888,6 +892,10 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
+			return
+		}
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "conflict", "account was modified; reload and try again", nil)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "save_failed", err.Error(), nil)
@@ -964,7 +972,7 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 	auditAction := "user.totp_enabled"
 	var saveErr error
 	if user.ID == store.LegacyAdminUserID {
-		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt}
+		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Revision: user.Revision}
 		auditAction = "admin.totp_enabled"
 		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username})
 	} else {
@@ -972,6 +980,10 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
+			return
+		}
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "conflict", "account was modified; reload and try again", nil)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
@@ -1000,7 +1012,7 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 	auditAction := "user.totp_disabled"
 	var saveErr error
 	if user.ID == store.LegacyAdminUserID {
-		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt}
+		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Revision: user.Revision}
 		auditAction = "admin.totp_disabled"
 		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, []string{}, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP disabled", ActorUserID: session.UserID, ActorUsername: session.Username})
 	} else {
@@ -1008,6 +1020,10 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
+			return
+		}
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "conflict", "account was modified; reload and try again", nil)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)

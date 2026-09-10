@@ -204,3 +204,62 @@ func TestSaveUserSecurityKeepsRoleValidationAndLastAdministratorInvariant(t *tes
 		t.Fatal("invalid role was accepted by SaveUserSecurity")
 	}
 }
+
+func TestUserMutationsRejectStaleRevision(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	created, err := s.CreateUser(ctx, User{Username: "concurrent", DisplayName: "Concurrent", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.GetUser(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := s.GetUser(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Revision != 1 || second.Revision != 1 {
+		t.Fatalf("initial revisions = %d and %d", first.Revision, second.Revision)
+	}
+	first.DisplayName = "First writer"
+	first.UpdatedAt = now.Add(time.Minute)
+	if err := s.UpdateUser(ctx, first, false, AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	second.DisplayName = "Stale writer"
+	second.UpdatedAt = now.Add(2 * time.Minute)
+	if err := s.UpdateUser(ctx, second, false, AuditEntry{}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale profile update error = %v", err)
+	}
+	current, err := s.GetUser(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.DisplayName != "First writer" || current.Revision != 2 {
+		t.Fatalf("stale profile update changed user = %#v", current)
+	}
+
+	staleSecurity := current
+	fresh, err := s.GetUser(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh.DisplayName = "Fresh writer"
+	fresh.UpdatedAt = now.Add(3 * time.Minute)
+	if err := s.UpdateUser(ctx, fresh, false, AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveUserSecurity(ctx, staleSecurity, nil, false, false, AuditEntry{}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale security update error = %v", err)
+	}
+	current, err = s.GetUser(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.DisplayName != "Fresh writer" || current.Revision != 3 {
+		t.Fatalf("stale security update changed user = %#v", current)
+	}
+}

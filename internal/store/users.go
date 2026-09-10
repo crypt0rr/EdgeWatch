@@ -50,10 +50,11 @@ type User struct {
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 	LastLoginAt      time.Time
+	Revision         int64
 }
 
 func (u User) Summary() UserSummary {
-	return UserSummary{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, Enabled: u.Enabled, Pending: strings.HasPrefix(u.PasswordHash, "!pending"), TOTPEnabled: u.TOTPEnabled, CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt, LastLoginAt: u.LastLoginAt}
+	return UserSummary{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, Role: u.Role, Enabled: u.Enabled, Pending: strings.HasPrefix(u.PasswordHash, "!pending"), TOTPEnabled: u.TOTPEnabled, CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt, LastLoginAt: u.LastLoginAt, Revision: u.Revision}
 }
 
 type UserSummary struct {
@@ -67,6 +68,7 @@ type UserSummary struct {
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	LastLoginAt time.Time `json:"last_login_at,omitempty"`
+	Revision    int64     `json:"revision"`
 }
 
 func ValidateUserRole(role string) error {
@@ -96,8 +98,8 @@ func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
 	var u User
 	var totp, enabled int
 	var created, updated, lastLogin string
-	err := s.DB.QueryRowContext(ctx, `SELECT id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at FROM users WHERE id=?`, id).
-		Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PasswordHash, &u.TOTPSecretStored, &totp, &enabled, &created, &updated, &lastLogin)
+	err := s.DB.QueryRowContext(ctx, `SELECT id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision FROM users WHERE id=?`, id).
+		Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PasswordHash, &u.TOTPSecretStored, &totp, &enabled, &created, &updated, &lastLogin, &u.Revision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return u, ErrNotFound
 	}
@@ -142,7 +144,7 @@ func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, e
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]UserSummary, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,username,display_name,role,password_hash,enabled,totp_enabled,created_at,updated_at,last_login_at FROM users ORDER BY username COLLATE NOCASE`)
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,username,display_name,role,password_hash,enabled,totp_enabled,created_at,updated_at,last_login_at,revision FROM users ORDER BY username COLLATE NOCASE`)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +155,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]UserSummary, error) {
 		var passwordHash string
 		var enabled, totp int
 		var created, updated, lastLogin string
-		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &passwordHash, &enabled, &totp, &created, &updated, &lastLogin); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &passwordHash, &enabled, &totp, &created, &updated, &lastLogin, &u.Revision); err != nil {
 			return nil, err
 		}
 		u.Enabled, u.Pending, u.TOTPEnabled = enabled != 0, strings.HasPrefix(passwordHash, "!pending"), totp != 0
@@ -210,6 +212,9 @@ func (s *Store) createUser(ctx context.Context, u User, invite *userInviteRecord
 	if u.UpdatedAt.IsZero() {
 		u.UpdatedAt = u.CreatedAt
 	}
+	// New users always begin at revision one. Callers never choose this value;
+	// it is advanced only by successful guarded mutations.
+	u.Revision = 1
 	if invite != nil {
 		// An invited account cannot authenticate until it redeems the one-time
 		// token. Keep it disabled as well as password-less so the lifecycle is
@@ -225,7 +230,7 @@ func (s *Store) createUser(ctx context.Context, u User, invite *userInviteRecord
 		return User{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, u.ID, u.Username, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.CreatedAt.UTC().Format(time.RFC3339Nano), u.UpdatedAt.UTC().Format(time.RFC3339Nano), ""); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, u.ID, u.Username, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.CreatedAt.UTC().Format(time.RFC3339Nano), u.UpdatedAt.UTC().Format(time.RFC3339Nano), "", u.Revision); err != nil {
 		return User{}, err
 	}
 	if invite != nil {
@@ -274,10 +279,18 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	defer tx.Rollback()
 	var currentRole, currentPasswordHash string
 	var currentEnabled int
-	if err := tx.QueryRowContext(ctx, `SELECT role,password_hash,enabled FROM users WHERE id=?`, u.ID).Scan(&currentRole, &currentPasswordHash, &currentEnabled); errors.Is(err, sql.ErrNoRows) {
+	var currentRevision int64
+	if err := tx.QueryRowContext(ctx, `SELECT role,password_hash,enabled,revision FROM users WHERE id=?`, u.ID).Scan(&currentRole, &currentPasswordHash, &currentEnabled, &currentRevision); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
+	}
+	// Zero is accepted for compatibility with older in-process callers that
+	// construct a User value directly. Web/API callers receive and round-trip
+	// the revision, so concurrent read-modify-write requests fail closed.
+	expectedRevision := u.Revision
+	if expectedRevision > 0 && expectedRevision != currentRevision {
+		return ErrConflict
 	}
 	// Keep the last enabled administrator invariant inside the same write
 	// transaction as the role/state update. This is the authoritative guard;
@@ -285,12 +298,15 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	if err := ensureLastAdministratorTx(ctx, tx, u.ID, currentRole, currentEnabled != 0, u.Role, u.Enabled); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=? WHERE id=?`, u.Username, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID)
+	if expectedRevision == 0 {
+		expectedRevision = currentRevision
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND revision=?`, u.Username, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID, expectedRevision)
 	if err != nil {
 		return err
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
-		return ErrNotFound
+		return ErrConflict
 	}
 	if revokeSessions {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, u.ID); err != nil {
@@ -356,22 +372,30 @@ func (s *Store) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []st
 	defer tx.Rollback()
 	var currentRole string
 	var currentEnabled int
-	if err := tx.QueryRowContext(ctx, `SELECT role,enabled FROM users WHERE id=?`, u.ID).Scan(&currentRole, &currentEnabled); errors.Is(err, sql.ErrNoRows) {
+	var currentRevision int64
+	if err := tx.QueryRowContext(ctx, `SELECT role,enabled,revision FROM users WHERE id=?`, u.ID).Scan(&currentRole, &currentEnabled, &currentRevision); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
+	}
+	expectedRevision := u.Revision
+	if expectedRevision > 0 && expectedRevision != currentRevision {
+		return ErrConflict
 	}
 	// TOTP and host-recovery writes use the same transactional invariant as
 	// profile updates. Keeping one guard prevents the two paths from drifting.
 	if err := ensureLastAdministratorTx(ctx, tx, u.ID, currentRole, currentEnabled != 0, u.Role, u.Enabled); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE users SET display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=? WHERE id=?`, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID)
+	if expectedRevision == 0 {
+		expectedRevision = currentRevision
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE users SET display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND revision=?`, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID, expectedRevision)
 	if err != nil {
 		return err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
-		return ErrNotFound
+		return ErrConflict
 	}
 	if replaceRecoveryCodes {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id=?`, u.ID); err != nil {
@@ -563,7 +587,7 @@ func (s *Store) ActivateUser(ctx context.Context, idHash, passwordHash string, n
 		return User{}, errors.New("activation token expired or already used")
 	}
 	updated := now.UTC().Format(time.RFC3339Nano)
-	result, err = tx.ExecContext(ctx, `UPDATE users SET password_hash=?,enabled=1,updated_at=? WHERE id=?`, passwordHash, updated, userID)
+	result, err = tx.ExecContext(ctx, `UPDATE users SET password_hash=?,enabled=1,updated_at=?,revision=revision+1 WHERE id=?`, passwordHash, updated, userID)
 	if err != nil {
 		return User{}, err
 	}
@@ -591,7 +615,7 @@ func (s *Store) ActivateUser(ctx context.Context, idHash, passwordHash string, n
 	var u User
 	var totp, enabled int
 	var created, updatedAt, lastLogin string
-	if err := tx.QueryRowContext(ctx, `SELECT id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at FROM users WHERE id=?`, userID).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PasswordHash, &u.TOTPSecretStored, &totp, &enabled, &created, &updatedAt, &lastLogin); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision FROM users WHERE id=?`, userID).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PasswordHash, &u.TOTPSecretStored, &totp, &enabled, &created, &updatedAt, &lastLogin, &u.Revision); err != nil {
 		return User{}, err
 	}
 	u.TOTPEnabled, u.Enabled = totp != 0, enabled != 0
@@ -628,7 +652,7 @@ func (s *Store) ConsumeUserInvite(ctx context.Context, idHash string, now time.T
 	var u User
 	var totp, enabled int
 	var created, updated, lastLogin string
-	if err := tx.QueryRowContext(ctx, `SELECT id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at FROM users WHERE id=?`, userID).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PasswordHash, &u.TOTPSecretStored, &totp, &enabled, &created, &updated, &lastLogin); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision FROM users WHERE id=?`, userID).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PasswordHash, &u.TOTPSecretStored, &totp, &enabled, &created, &updated, &lastLogin, &u.Revision); err != nil {
 		return User{}, err
 	}
 	u.TOTPEnabled, u.Enabled = totp != 0, enabled != 0

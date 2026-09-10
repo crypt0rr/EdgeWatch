@@ -180,10 +180,10 @@ export const archiveScannerProfile = (id: string, revision: number, password: st
 export const restoreScannerProfile = (id: string, revision: number, password: string) => api<void>(`/scanner-profiles/${encodeURIComponent(id)}/restore`, { method: 'POST', body: JSON.stringify({ revision, password }) })
 export const validateScannerProfile = (value: ScannerProfilePayload) => api<{ valid: boolean; preview: { executable: string; args: string[] }[] }>('/scanner-profiles/validate', { method: 'POST', body: JSON.stringify(value) })
 
-export type UserSummary = { id: string; username: string; display_name: string; role: Role; enabled: boolean; pending?: boolean; totp_enabled: boolean; created_at: string; updated_at: string; last_login_at?: string }
+export type UserSummary = { id: string; username: string; display_name: string; role: Role; enabled: boolean; pending?: boolean; totp_enabled: boolean; created_at: string; updated_at: string; last_login_at?: string; revision: number }
 export const listUsers = () => api<{ users: UserSummary[] }>('/users')
 export const createUser = (username: string, display_name: string, role: Role) => api<{ user: UserSummary; activation_token: string; activation_path: string }>('/users', { method: 'POST', body: JSON.stringify({ username, display_name, role }) })
-export const updateUser = (id: string, value: { display_name?: string; role?: Role; enabled?: boolean }) => api<UserSummary>(`/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(value) })
+export const updateUser = (id: string, value: { display_name?: string; role?: Role; enabled?: boolean; revision?: number }) => api<UserSummary>(`/users/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(value) })
 export const issueUserActivation = (id: string) => api<{ activation_token: string; activation_path: string; expires_at: string }>(`/users/${encodeURIComponent(id)}/activation`, { method: 'POST' })
 export const revokeUserActivation = (id: string) => api<void>(`/users/${encodeURIComponent(id)}/activation`, { method: 'DELETE' })
 export const revokeUserSessions = (id: string) => api<void>(`/users/${encodeURIComponent(id)}/sessions`, { method: 'DELETE' })

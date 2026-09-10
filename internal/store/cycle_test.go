@@ -53,6 +53,33 @@ func TestScanCycleCheckpointsAndCompletes(t *testing.T) {
 	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("completed cycle restart error = %v", err)
 	}
+	var checkpoint []byte
+	if err := s.DB.QueryRowContext(ctx, `SELECT snapshot_json FROM scan_cycle_units WHERE cycle_id=? AND sequence=0`, cycle.ID).Scan(&checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if string(checkpoint) == "{}" {
+		t.Fatal("completed cycle checkpoint was reclaimed before scan promotion")
+	}
+	if err := s.SaveScan(ctx, model.Scan{
+		ID: "cycle-promoted", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name,
+		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "success",
+		ConfigHash: job.Job.SecurityHash(), CycleID: cycle.ID, CycleStatus: "completed", Snapshot: model.Snapshot{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT snapshot_json FROM scan_cycle_units WHERE cycle_id=? AND sequence=0`, cycle.ID).Scan(&checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if string(checkpoint) != "{}" {
+		t.Fatalf("promoted cycle checkpoint = %q, want reclaimed payload", checkpoint)
+	}
+	var status string
+	if err := s.DB.QueryRowContext(ctx, `SELECT status FROM scan_cycle_units WHERE cycle_id=? AND sequence=0`, cycle.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "completed" {
+		t.Fatalf("promoted cycle unit status = %q, want completed", status)
+	}
 }
 
 func TestScanCycleCompletionRequiresAllUnits(t *testing.T) {

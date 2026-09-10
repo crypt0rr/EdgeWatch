@@ -226,7 +226,11 @@ attempts without any completed work mark a cycle stalled and generate a failure
 notification. If the resume window expires, EdgeWatch records one terminal
 failure notification before the next trigger starts from a fresh plan. A
 completed cycle emits a recovery notification when it follows earlier timeout
-pauses.
+pauses. Once a completed cycle's merged scan and host indexes are committed,
+the per-unit snapshot payloads are reclaimed while unit status, timing, and
+attempt metadata remain for operational history. The payloads are deliberately
+kept between cycle completion and scan promotion so a restart can recover that
+short transaction window safely.
 
 When creating a job, the editor compares its next scheduled run with active
 jobs and offers a non-blocking 30-minute offset when another run is too close.

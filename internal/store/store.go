@@ -1815,6 +1815,9 @@ func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID
 		if err := saveScanExec(ctx, tx, *scan); err != nil {
 			return nil, err
 		}
+		if err := clearCompletedScanCycleCheckpointsTx(ctx, tx, scan.CycleID); err != nil {
+			return nil, err
+		}
 		if err := tx.Commit(); err != nil {
 			return nil, err
 		}
@@ -1833,6 +1836,9 @@ func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID
 		return nil, err
 	}
 	if _, err := persistRuntimeTxWithOutbox(ctx, tx, jobID, state, events, destinations); err != nil {
+		return nil, err
+	}
+	if err := clearCompletedScanCycleCheckpointsTx(ctx, tx, scan.CycleID); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -2116,7 +2122,22 @@ func (s *Store) SaveScan(ctx context.Context, scan model.Scan) error {
 	if err := saveScanExec(ctx, tx, scan); err != nil {
 		return err
 	}
+	if err := clearCompletedScanCycleCheckpointsTx(ctx, tx, scan.CycleID); err != nil {
+		return err
+	}
 	return tx.Commit()
+}
+
+// clearCompletedScanCycleCheckpointsTx reclaims the large per-unit payloads
+// only after the merged scan has been persisted. CompleteScanCycle and scan
+// promotion are intentionally separate transactions so a process crash in
+// between can still recover the merged result from its checkpoints.
+func clearCompletedScanCycleCheckpointsTx(ctx context.Context, tx *sql.Tx, cycleID string) error {
+	if strings.TrimSpace(cycleID) == "" {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE scan_cycle_units SET snapshot_json='{}' WHERE cycle_id=? AND EXISTS (SELECT 1 FROM scan_cycles WHERE id=? AND status='completed')`, cycleID, cycleID)
+	return err
 }
 
 func saveScanExec(ctx context.Context, execer contextExecer, scan model.Scan) error {
@@ -3384,6 +3405,14 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 		return stats, err
 	}
 	stats.FailedOutbox, _ = result.RowsAffected()
+
+	// Older releases kept completed cycle payloads until the cycle itself was
+	// pruned. Once a merged scan already references a completed cycle, those
+	// per-unit snapshots are no longer needed for crash recovery; reclaim them
+	// during the regular retention pass while preserving unit metadata.
+	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET snapshot_json='{}' WHERE cycle_id IN (SELECT cycle.id FROM scan_cycles AS cycle WHERE cycle.status='completed' AND EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id=cycle.id)) AND snapshot_json <> '{}'`); err != nil {
+		return stats, err
+	}
 
 	// Keep the newest revision for every job regardless of age. Older revisions
 	// contain immutable historical definitions and may be discarded after their

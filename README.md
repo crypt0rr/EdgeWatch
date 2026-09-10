@@ -354,15 +354,21 @@ volume, if one exists, is not read or migrated automatically.
 Go 1.27.1 or newer and Node.js 24.8.0 are required. The repository checks are:
 
 ```console
-go test -race ./...
-go vet ./...
 npm ci
-npm run lint
+make check
 npm run build
 npm test
 npm run test:e2e
 docker compose config --quiet
 ```
+
+`make check` runs formatting, vetting, race-enabled tests, frontend type
+checks, a pinned Go lint configuration, `govulncheck`, and `npm audit` at the
+high-severity threshold. Go lint findings are limited to the change under
+review so existing legacy findings can be addressed incrementally; dependency
+vulnerability checks always cover the complete module and package trees. The
+individual build, browser-test, and Compose commands can still be run when
+iterating on a specific layer.
 
 The browser acceptance tests use deterministic API fixtures; integration
 scans should only target controlled listeners. The production image embeds the

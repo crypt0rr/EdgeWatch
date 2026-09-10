@@ -1,0 +1,20 @@
+version: "2"
+
+# Keep the initial CI gate focused on high-signal correctness checks. Existing
+# findings are introduced incrementally: pull requests and local checks only
+# report findings on the changes being reviewed.
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - contextcheck
+    - errcheck
+    - rowserrcheck
+    - sqlclosecheck
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling

@@ -359,9 +359,45 @@ docker compose exec edgewatch edgewatch history --config /etc/edgewatch/config.y
 docker compose exec edgewatch edgewatch notify test --config /etc/edgewatch/config.yaml
 ```
 
-Back up `./data` while EdgeWatch is stopped, together with `config.yaml` and
-any notification URL or encryption-key files. Keep notification secrets out of
-source control.
+### Backup and restore
+
+EdgeWatch can create a consistent SQLite snapshot while the daemon is running.
+Create the destination directory first; existing files are never overwritten:
+
+```console
+mkdir -p ./data/backups
+docker compose exec edgewatch edgewatch backup \
+  --config /etc/edgewatch/config.yaml \
+  --out /var/lib/edgewatch/backups/edgewatch-$(date -u +%Y%m%dT%H%M%SZ).db \
+  --output json
+docker compose exec edgewatch edgewatch verify \
+  --config /etc/edgewatch/config.yaml --output json
+docker compose exec edgewatch edgewatch baseline export \
+  --config /etc/edgewatch/config.yaml \
+  --out /var/lib/edgewatch/backups/baselines.json
+```
+
+`backup` uses SQLite's online `VACUUM INTO` snapshot, so WAL contents and
+committed writes are captured consistently without stopping scans. `verify`
+runs both `PRAGMA integrity_check` and `PRAGMA foreign_key_check`; it returns a
+non-zero exit status when either check finds a problem. `baseline export` writes
+a portable JSON document for every managed and legacy baseline, or one job when
+`--job NAME` (or its managed ID) is supplied. Jobs without a ready baseline are
+included with `status: "not_ready"`.
+
+Keep the resulting database or JSON file together with `config.yaml`,
+`notification.key` (when web-managed destinations are configured), and any
+separately mounted notification URL or encryption-key files. Keep notification
+secrets out of source control. The export intentionally contains baseline
+observations and scan metadata only; it never contains notification URLs,
+passwords, sessions, or encryption keys.
+
+For a full deployment backup, retain the complete `./data` directory as well as
+the deployment configuration and key files. SQLite uses WAL mode, so a raw
+directory copy should be made while EdgeWatch is stopped; the `backup` command
+is the supported live alternative. To restore, stop the service, replace the
+database and its companion key files together, run `verify` against the
+restored database, and start the matching EdgeWatch image.
 
 For an upgrade, stop the current service and make a complete backup before
 starting the new image. SQLite uses WAL mode, so copy the database only while

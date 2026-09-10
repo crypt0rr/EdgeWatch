@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -200,6 +201,44 @@ func TestRunStatusHistoryAndBaselineForManagedJob(t *testing.T) {
 	}
 	if audits != 2 {
 		t.Fatalf("CLI baseline audit rows = %d, want two", audits)
+	}
+}
+
+func TestRunBackupVerifyAndBaselineExport(t *testing.T) {
+	dir := t.TempDir()
+	database := filepath.Join(dir, "edgewatch.db")
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("database: "+database+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"verify", "--config", configPath, "--output", "json"}); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	outputDir := filepath.Join(dir, "backups")
+	if err := os.Mkdir(outputDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	backupPath := filepath.Join(outputDir, "edgewatch.db")
+	if err := run([]string{"backup", "--config", configPath, "--out", backupPath, "--output", "json"}); err != nil {
+		t.Fatalf("backup: %v", err)
+	}
+	if info, err := os.Stat(backupPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("backup file = %v, %v", info, err)
+	}
+	exportPath := filepath.Join(outputDir, "baseline.json")
+	if err := run([]string{"baseline", "export", "--config", configPath, "--out", exportPath, "--output", "json"}); err != nil {
+		t.Fatalf("baseline export: %v", err)
+	}
+	contents, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exported map[string]any
+	if err := json.Unmarshal(contents, &exported); err != nil {
+		t.Fatalf("decode baseline export: %v", err)
+	}
+	if exported["format_version"] != float64(store.BaselineExportVersion) {
+		t.Fatalf("baseline export = %#v", exported)
 	}
 }
 

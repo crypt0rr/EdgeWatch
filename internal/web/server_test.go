@@ -775,7 +775,10 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 	if baseline["status"] != "complete" {
 		t.Fatalf("baseline not complete: %#v", baseline)
 	}
+	// The first complete zero-port result is treated as a scan-level anomaly.
+	// A matching confirmation is required before the per-port incident opens.
 	run(2)
+	run(3)
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		resp = request(http.MethodGet, "/api/v1/incidents", "", "")

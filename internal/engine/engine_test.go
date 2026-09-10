@@ -21,6 +21,17 @@ func snapshot(state string) model.Snapshot {
 	s.Normalize()
 	return s
 }
+
+func snapshotWithOpenPorts(ports ...int) model.Snapshot {
+	s := model.Snapshot{Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}}}
+	unit := model.Unit{Target: "192.0.2.1", Protocol: "tcp"}
+	for _, port := range ports {
+		unit.Ports = append(unit.Ports, model.PortState{Port: port, State: "open"})
+	}
+	s.Units = []model.Unit{unit}
+	s.Normalize()
+	return s
+}
 func scan(id string, s model.Snapshot) model.Scan {
 	return model.Scan{ID: id, Job: "test", Status: "success", ConfigHash: "hash", Snapshot: s, FinishedAt: time.Now().UTC()}
 }
@@ -53,6 +64,77 @@ func TestBaselineChangeAndRecoveryConfirmations(t *testing.T) {
 	events, _ = e.Success(ctx, job, scan("6", snapshot("")))
 	if len(events) != 1 || events[0].Type != "changes-recovered" {
 		t.Fatalf("recovery %v", events)
+	}
+}
+
+func TestTotalLossScanRequiresConfirmationBeforeOpeningIncidents(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := Engine{Store: db}
+	job := config.Job{Name: "total-loss", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	ports := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}
+	if events, err := e.Success(ctx, job, scan("baseline", snapshotWithOpenPorts(ports...))); err != nil || len(events) != 1 || events[0].Type != "baseline-complete" {
+		t.Fatalf("baseline setup: %#v, %v", events, err)
+	}
+
+	firstEmpty := scan("empty-1", snapshot(""))
+	events, err := e.Success(ctx, job, firstEmpty)
+	if err != nil || len(events) != 1 || events[0].Type != "scan-anomaly" {
+		t.Fatalf("first total-loss scan: %#v, %v", events, err)
+	}
+	if !strings.Contains(FormatEvent(events[0]), "awaiting confirmation") {
+		t.Fatalf("anomaly notification: %q", FormatEvent(events[0]))
+	}
+	state, err := db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Incidents) != 0 || state.TotalLossCandidateCount != 1 || state.Baseline == nil || len(state.Baseline.Units[0].Ports) != len(ports) {
+		t.Fatalf("first total-loss state: %#v", state)
+	}
+
+	// A second identical complete result confirms the loss and hands control
+	// back to the normal diff engine. The finding is never suppressed forever;
+	// it is merely protected from a single anomalous pass.
+	events, err = e.Success(ctx, job, scan("empty-2", snapshot("")))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" {
+		t.Fatalf("confirmed total-loss scan: %#v, %v", events, err)
+	}
+	state, err = db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Incidents) != len(ports) || state.TotalLossCandidateCount != 0 || state.TotalLossCandidateHash != "" {
+		t.Fatalf("confirmed total-loss state: %#v", state)
+	}
+}
+
+func TestGradualPortReductionBypassesTotalLossGuard(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := Engine{Store: db}
+	job := config.Job{Name: "gradual-loss", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	if _, err := e.Success(ctx, job, scan("baseline", snapshotWithOpenPorts(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12))); err != nil {
+		t.Fatal(err)
+	}
+	events, err := e.Success(ctx, job, scan("reduction", snapshotWithOpenPorts(1, 2, 3, 4, 5, 6, 7, 8, 9, 10)))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" {
+		t.Fatalf("gradual reduction: %#v, %v", events, err)
+	}
+	state, err := db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Incidents) != 2 {
+		t.Fatalf("gradual reduction incidents: %d (%#v)", len(state.Incidents), state.Incidents)
 	}
 }
 
@@ -135,6 +217,10 @@ func TestFormatEventUsesOutcomeIndicators(t *testing.T) {
 	warning := FormatEvent(model.Event{Type: "changes-detected", Message: "one change", Job: "test", Changes: []model.Change{{Severity: "warning"}}})
 	if strings.HasPrefix(warning, "🔴 ") || strings.HasPrefix(warning, "🟢 ") {
 		t.Fatalf("warning notification has an outcome indicator = %q", warning)
+	}
+	anomaly := FormatEvent(model.Event{Type: "scan-anomaly", Message: "awaiting confirmation", Job: "test"})
+	if !strings.HasPrefix(anomaly, "⚠️ EdgeWatch: ") {
+		t.Fatalf("anomaly notification = %q", anomaly)
 	}
 }
 

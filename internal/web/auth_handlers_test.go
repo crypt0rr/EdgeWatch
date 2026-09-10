@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -107,6 +108,62 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 	server.totpDisable(disableRecorder, disable, admin)
 	if disableRecorder.Code != http.StatusNoContent {
 		t.Fatalf("TOTP disable status = %d: %s", disableRecorder.Code, disableRecorder.Body.String())
+	}
+}
+
+func TestPendingTOTPEnrolmentsExpireAndRemainBounded(t *testing.T) {
+	server, _, admin := newUsersTestServer(t)
+	base := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	server.now = func() time.Time { return base }
+	server.storePendingTOTP("expired", "expired-secret", base.Add(-11*time.Minute))
+	server.storePendingTOTP("fresh", "fresh-secret", base)
+	server.storePendingTOTP("replacement", "replacement-secret", base)
+
+	server.mu.Lock()
+	if _, ok := server.pendingTOTP["expired"]; ok {
+		server.mu.Unlock()
+		t.Fatal("expired TOTP enrolment was retained")
+	}
+	server.mu.Unlock()
+
+	server.storePendingTOTP(digest("expired-session"), "expired-secret", base.Add(-11*time.Minute))
+	enable := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/enable", strings.NewReader(`{"code":"000000"}`))
+	enable.Header.Set("Content-Type", "application/json")
+	enable.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "expired-session"})
+	enableResponse := httptest.NewRecorder()
+	server.totpEnable(enableResponse, enable, admin)
+	if enableResponse.Code != http.StatusBadRequest {
+		t.Fatalf("expired TOTP enable status = %d: %s", enableResponse.Code, enableResponse.Body.String())
+	}
+
+	for i := 0; i < pendingTOTPMaxEntries+32; i++ {
+		server.storePendingTOTP("bounded-"+strconv.Itoa(i), "secret", base)
+	}
+	server.mu.Lock()
+	count := len(server.pendingTOTP)
+	server.mu.Unlock()
+	if count != pendingTOTPMaxEntries {
+		t.Fatalf("pending TOTP map size = %d, want %d", count, pendingTOTPMaxEntries)
+	}
+
+	// A setup request also performs the expiry sweep used by the production
+	// handler, so an abandoned entry cannot survive indefinitely while new
+	// enrolments continue to arrive.
+	setup := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/setup", strings.NewReader(`{"password":"administrator password"}`))
+	setup.Header.Set("Content-Type", "application/json")
+	setup.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "handler-totp-session"})
+	response := httptest.NewRecorder()
+	server.totpSetup(response, setup, admin)
+	if response.Code != http.StatusOK {
+		t.Fatalf("TOTP setup status = %d: %s", response.Code, response.Body.String())
+	}
+	server.now = func() time.Time { return base.Add(11 * time.Minute) }
+	server.mu.Lock()
+	server.prunePendingTOTPLocked(server.currentTime())
+	_, freshOK := server.pendingTOTP["fresh"]
+	server.mu.Unlock()
+	if freshOK {
+		t.Fatal("expired pending TOTP enrolment survived the expiry sweep")
 	}
 }
 

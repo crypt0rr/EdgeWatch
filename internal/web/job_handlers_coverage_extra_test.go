@@ -94,17 +94,23 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 		call func(*httptest.ResponseRecorder)
 	}{
 		{"archive missing revision", func(w *httptest.ResponseRecorder) {
-			server.archiveJob(w, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`)), admin, record.ID, true)
+			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+			request.Header.Set("Content-Type", "application/json")
+			server.archiveJob(w, request, admin, record.ID, true)
 		}},
 		{"restore stale revision", func(w *httptest.ResponseRecorder) {
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"revision":1}`))
+			req.Header.Set("Content-Type", "application/json")
 			server.archiveJob(w, req, admin, record.ID, false)
 		}},
 		{"pause missing revision", func(w *httptest.ResponseRecorder) {
-			server.enableJob(w, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`)), admin, record.ID, false)
+			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
+			request.Header.Set("Content-Type", "application/json")
+			server.enableJob(w, request, admin, record.ID, false)
 		}},
 		{"resume unknown job", func(w *httptest.ResponseRecorder) {
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"revision":1}`))
+			req.Header.Set("Content-Type", "application/json")
 			server.enableJob(w, req, admin, "missing", true)
 		}},
 	} {

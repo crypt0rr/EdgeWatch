@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -48,6 +49,7 @@ type Server struct {
 	nextEventID   uint64
 	dropped       uint64
 	pendingTOTP   map[string]pendingTOTP
+	now           func() time.Time
 	testMu        sync.Mutex
 	testLast      map[string]time.Time
 	publicMu      sync.Mutex
@@ -71,6 +73,12 @@ type pendingTOTP struct {
 	Expires time.Time
 }
 
+// pendingTOTPMaxEntries bounds secrets held for enrolments that were started
+// but never completed. The enrolment window is short, so a large ceiling keeps
+// normal administration unaffected while preventing an unbounded map under
+// deliberate or accidental repeated setup requests.
+const pendingTOTPMaxEntries = 4096
+
 func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
@@ -87,7 +95,7 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	rdapClient.OnCacheWriteError = func(err error) {
 		logger.Warn("rdap cache write failed", "error", err)
 	}
-	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
+	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
 	if a != nil && a.Config != nil {
 		if err := v.Auth.SetTrustedProxies(a.Config.Web.TrustedProxies); err != nil {
 			logger.Error("trusted proxy configuration rejected", "error", err)
@@ -530,10 +538,6 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		"max_naabu_probe_count":     s.App.Config.Scheduler.MaxNaabuProbeCount,
 		"rdap_enabled":              s.App.Config.RDAPEnabled(),
 	}
-	if user.Role == store.RoleViewer {
-		delete(status, "notification_destinations")
-		delete(status, "notifications")
-	}
 	if user.Role != store.RoleViewer && len(s.App.Config.Jobs) > 0 {
 		legacy := make([]string, 0, len(s.App.Config.Jobs))
 		for _, job := range s.App.Config.Jobs {
@@ -896,9 +900,7 @@ func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	key := digest(cookie.Value)
-	s.mu.Lock()
-	s.pendingTOTP[key] = pendingTOTP{Secret: secret, Expires: time.Now().UTC().Add(10 * time.Minute)}
-	s.mu.Unlock()
+	s.storePendingTOTP(key, secret, s.currentTime())
 	writeJSON(w, http.StatusOK, map[string]any{"secret": secret, "otpauth": "otpauth://totp/EdgeWatch:" + url.QueryEscape(user.Username) + "?secret=" + secret + "&issuer=EdgeWatch"})
 }
 
@@ -915,11 +917,13 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 		return
 	}
 	key := digest(cookie.Value)
+	now := s.currentTime()
 	s.mu.Lock()
+	s.prunePendingTOTPLocked(now)
 	pending, ok := s.pendingTOTP[key]
 	delete(s.pendingTOTP, key)
 	s.mu.Unlock()
-	if !ok || time.Now().UTC().After(pending.Expires) || !auth.VerifyTOTP(pending.Secret, input.Code) {
+	if !ok || !now.Before(pending.Expires) || !auth.VerifyTOTP(pending.Secret, input.Code) {
 		writeError(w, http.StatusBadRequest, "totp_failed", "invalid or expired TOTP setup", nil)
 		return
 	}
@@ -2829,6 +2833,12 @@ func pageSlice[T any](items []T, offset, limit int) ([]T, map[string]any) {
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	contentType := strings.TrimSpace(r.Header.Get("Content-Type"))
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil || !strings.EqualFold(mediaType, "application/json") {
+		writeError(w, http.StatusUnsupportedMediaType, "unsupported_media_type", "request content type must be application/json", nil)
+		return false
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -2845,6 +2855,51 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 		return false
 	}
 	return true
+}
+
+func (s *Server) currentTime() time.Time {
+	if s.now != nil {
+		return s.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (s *Server) storePendingTOTP(key, secret string, now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pendingTOTP == nil {
+		s.pendingTOTP = make(map[string]pendingTOTP)
+	}
+	// Replacing an enrolment for the same session should not evict an
+	// unrelated enrolment merely because the map is at capacity.
+	delete(s.pendingTOTP, key)
+	s.prunePendingTOTPLocked(now)
+	for len(s.pendingTOTP) >= pendingTOTPMaxEntries {
+		oldestKey := ""
+		var oldestExpiry time.Time
+		for candidate, pending := range s.pendingTOTP {
+			if oldestKey == "" || pending.Expires.Before(oldestExpiry) {
+				oldestKey, oldestExpiry = candidate, pending.Expires
+			}
+		}
+		if oldestKey == "" {
+			break
+		}
+		delete(s.pendingTOTP, oldestKey)
+	}
+	s.pendingTOTP[key] = pendingTOTP{Secret: secret, Expires: now.Add(10 * time.Minute)}
+}
+
+func (s *Server) prunePendingTOTPLocked(now time.Time) {
+	if s.pendingTOTP == nil {
+		s.pendingTOTP = make(map[string]pendingTOTP)
+		return
+	}
+	for key, pending := range s.pendingTOTP {
+		if !now.Before(pending.Expires) {
+			delete(s.pendingTOTP, key)
+		}
+	}
 }
 func writeValidationError(w http.ResponseWriter, err error) {
 	message := err.Error()

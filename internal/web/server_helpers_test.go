@@ -117,6 +117,29 @@ func TestServerHelpersValidateJSONPaginationAndHeaders(t *testing.T) {
 	if code, _ := decode(strings.Repeat("x", 1<<20+10)); code != http.StatusBadRequest {
 		t.Fatalf("oversized JSON status = %d", code)
 	}
+	for _, contentType := range []string{"", "text/plain", "application/json-patch+json", "application/json; charset=invalid\""} {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"value":1}`))
+		if contentType != "" {
+			req.Header.Set("Content-Type", contentType)
+		}
+		rec := httptest.NewRecorder()
+		var value map[string]any
+		if decodeJSON(rec, req, &value) {
+			t.Fatalf("content type %q was accepted", contentType)
+		}
+		if rec.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("content type %q status = %d, want %d", contentType, rec.Code, http.StatusUnsupportedMediaType)
+		}
+	}
+	for _, contentType := range []string{"application/json", "Application/JSON; charset=utf-8"} {
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"value":1}`))
+		req.Header.Set("Content-Type", contentType)
+		rec := httptest.NewRecorder()
+		var value map[string]any
+		if !decodeJSON(rec, req, &value) || rec.Code != http.StatusOK {
+			t.Fatalf("content type %q was rejected with status %d", contentType, rec.Code)
+		}
+	}
 
 	rec := httptest.NewRecorder()
 	writeValidationError(rec, errors.New("target is invalid"))

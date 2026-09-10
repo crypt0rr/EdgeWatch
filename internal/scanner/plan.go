@@ -67,6 +67,19 @@ const (
 	minRetryPortChunk       = 256
 )
 
+// NmapAddressBatchLimit returns the maximum number of effective addresses a
+// planned Nmap invocation may carry for the supplied validated profile
+// template. A singular {address} placeholder can only render one address;
+// profiles using the plural {addresses} placeholder retain the normal bounded
+// batch size. Keeping this rule in the scanner package lets both the initial
+// plan and the resumable Naabu enrichment planner use identical arithmetic.
+func NmapAddressBatchLimit(template []string) int {
+	if templateContains(template, config.PlaceholderAddress) {
+		return 1
+	}
+	return nmapBatchSize
+}
+
 // ResumableScanner is implemented by scanners that can create and execute
 // deterministic checkpointable work units. The ordinary Scanner interface is
 // intentionally left unchanged for deterministic test and plugin scanners.
@@ -128,14 +141,20 @@ func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 				addressesByFamily[family] = append(addressesByFamily[family], address)
 			}
 		}
+		// A singular address placeholder is an explicit profile contract: the
+		// rendered command can carry only one target, so the immutable plan must
+		// use the same one-address batch size as the scanner executor. Without
+		// this, persisted probe and invocation totals describe work that cannot be
+		// executed by the selected template.
+		addressBatchSize := NmapAddressBatchLimit(item.NmapArgs)
 		for _, family := range []int{4, 6} {
 			if err := ctx.Err(); err != nil {
 				return WorkPlan{}, err
 			}
 			addresses := addressesByFamily[family]
 			sort.Strings(addresses)
-			for addressStart := 0; addressStart < len(addresses); addressStart += nmapBatchSize {
-				addressEnd := min(addressStart+nmapBatchSize, len(addresses))
+			for addressStart := 0; addressStart < len(addresses); addressStart += addressBatchSize {
+				addressEnd := min(addressStart+addressBatchSize, len(addresses))
 				addressBatch := append([]string(nil), addresses[addressStart:addressEnd]...)
 				unitTargets := subsetResolvedTargets(targets, addressBatch)
 				factor := int64(1)

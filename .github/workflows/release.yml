@@ -200,7 +200,8 @@ jobs:
         run: |
           archive_dir="$(mktemp -d)"
           gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern '*.tar.gz' --dir "$archive_dir"
-          expected="EdgeWatch ${GITHUB_REF_NAME#v}"
+          version="${GITHUB_REF_NAME#v}"
+          expected="EdgeWatch $version"
           archives=("$archive_dir"/*.tar.gz)
           test -e "${archives[0]}"
           for archive in "${archives[@]}"; do
@@ -214,7 +215,9 @@ jobs:
             if file -b "$binary" | grep -q 'x86-64'; then
               test "$("$binary" version)" = "$expected"
             else
-              strings "$binary" | grep -Fq "$expected"
+              # Go stores the program name and version as separate constants,
+              # so look for the exact version string in non-native binaries.
+              strings "$binary" | grep -Fq "$version"
             fi
           done
       - name: Check out source for runtime verification

@@ -31,19 +31,53 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 		{"/scans/active", http.MethodGet, "scans.read"},
 		{"/hosts", http.MethodGet, "hosts.read"},
 		{"/incidents", http.MethodGet, "incidents.read"},
-		{"/incidents", http.MethodPost, "incidents.manage"},
+		{"/incidents", http.MethodPost, auth.PermissionDenied},
 		{"/events", http.MethodGet, "scans.read"},
 		{"/jobs", http.MethodGet, "jobs.read"},
 		{"/jobs", http.MethodPost, "jobs.write"},
 		{"/jobs/id/baseline", http.MethodGet, "baselines.read"},
 		{"/jobs/id/scans", http.MethodGet, "scans.read"},
-		{"/jobs/id/hosts", http.MethodGet, "hosts.read"},
+		{"/jobs/id/hosts", http.MethodGet, auth.PermissionDenied},
 		{"/jobs/id/incidents", http.MethodGet, "incidents.read"},
 		{"/jobs/id/baseline/reset", http.MethodPost, "baselines.manage"},
 		{"/jobs/id/incidents/accept", http.MethodPost, "incidents.manage"},
 		{"/jobs/id/run", http.MethodPost, "jobs.run"},
 		{"/jobs/id", http.MethodPut, "jobs.write"},
-		{"/unknown", http.MethodGet, ""},
+		{"/jobs/id/scans/scan/results", http.MethodGet, "scans.read"},
+		{"/jobs/id/scans/scan/hosts", http.MethodGet, "hosts.read"},
+		{"/jobs/id/scans/scan/hosts/2001:db8::1/rdap", http.MethodGet, "hosts.read"},
+		{"/jobs/id/baseline/hosts/198.51.100.1", http.MethodGet, "baselines.read"},
+		{"/jobs/id/baseline/hosts/198.51.100.1/rdap", http.MethodGet, "baselines.read"},
+		{"/scanner-profiles", http.MethodGet, "scanner_profiles.read"},
+		{"/scanner-profiles", http.MethodPost, "scanner_profiles.manage"},
+		{"/scanner-profiles/validate", http.MethodPost, "scanner_profiles.manage"},
+		{"/scanner-profiles/id/revisions", http.MethodGet, "scanner_profiles.read"},
+		{"/scanner/profiles/id/preview", http.MethodPost, "scanner_profiles.manage"},
+		{"/users/id/activation", http.MethodDelete, "users.manage"},
+		{"/users/id/password-reset", http.MethodPost, "users.manage"},
+		{"/notifications/destinations/id/test", http.MethodPost, "notifications.manage"},
+		{"/scans/id/hosts/198.51.100.1", http.MethodGet, "hosts.read"},
+		{"/scans/id/hosts/198.51.100.1/rdap", http.MethodGet, "hosts.read"},
+		{"/scans/id/cancel", http.MethodPost, "jobs.run"},
+		{"/setup/status", http.MethodGet, ""},
+		{"/setup", http.MethodPost, ""},
+		{"/auth/login", http.MethodPost, ""},
+		{"/auth/activate", http.MethodPost, ""},
+		{"/auth/session", http.MethodGet, ""},
+		{"/auth/logout", http.MethodPost, ""},
+		{"/auth/display-name", http.MethodPut, ""},
+		{"/auth/password", http.MethodPut, ""},
+		{"/auth/totp/setup", http.MethodPost, ""},
+		{"/auth/totp/enable", http.MethodPost, ""},
+		{"/auth/totp", http.MethodDelete, ""},
+		{"/auth/sessions", http.MethodDelete, ""},
+		{"/unknown", http.MethodGet, auth.PermissionDenied},
+		{"/auth/not-a-route", http.MethodGet, auth.PermissionDenied},
+		{"/scanner-profiles/id/not-a-route", http.MethodGet, auth.PermissionDenied},
+		{"/users/id/not-a-route", http.MethodGet, auth.PermissionDenied},
+		{"/notifications/destinations/id/not-a-route", http.MethodGet, auth.PermissionDenied},
+		{"/scans/id/not-a-route", http.MethodGet, auth.PermissionDenied},
+		{"/jobs/id/scans/scan/not-a-route", http.MethodGet, auth.PermissionDenied},
 	}
 	for _, test := range cases {
 		if got := requiredPermission(test.path, test.method); got != test.want {
@@ -67,6 +101,22 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 	archive := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/id", nil)
 	if got := requestPermission("/jobs/id", archive); got != auth.PermissionJobsWrite {
 		t.Fatalf("job archive permission = %q, want %q", got, auth.PermissionJobsWrite)
+	}
+	nestedPermanent := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/id/not-a-route?permanent=true", nil)
+	if got := requestPermission("/jobs/id/not-a-route", nestedPermanent); got != auth.PermissionDenied {
+		t.Fatalf("unknown nested job permission = %q, want %q", got, auth.PermissionDenied)
+	}
+	for _, route := range []struct {
+		path   string
+		method string
+	}{
+		{path: "/unknown", method: http.MethodGet},
+		{path: "/auth/not-a-route", method: http.MethodGet},
+		{path: "/jobs/id/not-a-route", method: http.MethodGet},
+	} {
+		if got := requiredPermission(route.path, route.method); got != auth.PermissionDenied {
+			t.Errorf("unmatched route %s %s returned %q, want %q", route.method, route.path, got, auth.PermissionDenied)
+		}
 	}
 	for _, test := range []struct {
 		role       string

@@ -259,6 +259,25 @@ func TestValidationHelpersAndEstimateOverflow(t *testing.T) {
 	}
 }
 
+func TestTargetExclusionParsingAndCIDROverlap(t *testing.T) {
+	parsed, err := ParseTargetExclusions([]string{"127.0.0.1", "2001:db8::/32"})
+	if err != nil || len(parsed) != 2 || parsed[0].String() != "127.0.0.1/32" {
+		t.Fatalf("parsed exclusions = %#v, error = %v", parsed, err)
+	}
+	if _, err := ParseTargetExclusions([]string{"127.0.0.1/32", "127.0.0.1"}); err == nil {
+		t.Fatal("equivalent duplicate exclusions were accepted")
+	}
+	job := validCoverageJob()
+	job.Targets = []string{"127.0.0.0/24"}
+	if err := ValidateJobWithTargetExclusions(job, []string{"127.0.0.0/8"}); err == nil || !strings.Contains(err.Error(), "overlaps") {
+		t.Fatalf("overlapping target was accepted: %v", err)
+	}
+	job.Targets = []string{"safe.example"}
+	if err := ValidateJobWithTargetExclusions(job, []string{"127.0.0.0/8"}); err != nil {
+		t.Fatalf("DNS target was rejected before runtime resolution: %v", err)
+	}
+}
+
 func TestLoadForAdminRejectsMalformedVersionAndDatabase(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")

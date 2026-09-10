@@ -46,11 +46,34 @@ type Config struct {
 	Database      string        `yaml:"database"`
 	Retention     Duration      `yaml:"retention"`
 	Scheduler     Scheduler     `yaml:"scheduler"`
+	Scanner       ScannerConfig `yaml:"scanner"`
 	Web           Web           `yaml:"web"`
 	Enrichment    Enrichment    `yaml:"enrichment"`
 	Updates       Updates       `yaml:"updates"`
 	Notifications Notifications `yaml:"notifications"`
 	Jobs          []Job         `yaml:"jobs"`
+}
+
+// ScannerConfig contains deployment-wide safeguards for scanner execution.
+// TargetExclusions is intentionally a list of CIDRs (or single IPs) rather
+// than an allow-list: the default protects the host-network namespace from
+// loopback and link-local destinations, while an explicit empty list is a
+// deliberate administrator override for installations that need those
+// targets.
+type ScannerConfig struct {
+	TargetExclusions []string `yaml:"target_exclusions"`
+}
+
+var defaultTargetExclusions = []string{
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"::1/128",
+	"fe80::/10",
+}
+
+// DefaultTargetExclusions returns a copy of the safe host-network defaults.
+func DefaultTargetExclusions() []string {
+	return append([]string(nil), defaultTargetExclusions...)
 }
 
 // Updates controls the optional outbound GitHub release check. The pointer
@@ -475,6 +498,9 @@ func applyDefaults(c *Config) {
 	if c.Scheduler.MaxNaabuProbeCount == 0 && !c.Scheduler.maxNaabuProbeCountSet {
 		c.Scheduler.MaxNaabuProbeCount = DefaultNaabuMaxProbeCount
 	}
+	if c.Scanner.TargetExclusions == nil {
+		c.Scanner.TargetExclusions = DefaultTargetExclusions()
+	}
 	if c.Web.Listen == "" {
 		c.Web.Listen = "127.0.0.1:8080"
 	}
@@ -656,8 +682,14 @@ func (c Config) Validate() error {
 		}
 		targets := map[string]bool{}
 		for _, target := range j.Targets {
-			if err := validateTarget(target); err != nil {
-				return fmt.Errorf("job %s: %w", j.Name, err)
+			var targetErr error
+			if c.Scanner.TargetExclusions != nil {
+				targetErr = validateTargetWithExclusions(target, c.Scanner.TargetExclusions)
+			} else {
+				targetErr = validateTarget(target)
+			}
+			if targetErr != nil {
+				return fmt.Errorf("job %s: %w", j.Name, targetErr)
 			}
 			canonical := CanonicalTarget(target)
 			if targets[canonical] {
@@ -773,6 +805,9 @@ func (c Config) ValidateDeployment() error {
 	if err := validateWebListen(c.Web.Listen); err != nil {
 		return err
 	}
+	if _, err := ParseTargetExclusions(c.Scanner.TargetExclusions); err != nil {
+		return fmt.Errorf("scanner.target_exclusions: %w", err)
+	}
 	for index, raw := range c.Web.TrustedProxies {
 		value := strings.TrimSpace(raw)
 		if value == "" {
@@ -790,16 +825,50 @@ func (c Config) ValidateDeployment() error {
 // ValidateJob validates a job using the same rules as a complete configuration.
 // It is used by the web API before a job is persisted.
 func ValidateJob(j Job) error {
+	return validateJobWithPolicy(j, nil, false)
+}
+
+func validateJobWithPolicy(j Job, exclusions []string, policyConfigured bool) error {
 	c := Config{
 		Version:   1,
 		Database:  "web-managed",
 		Retention: Duration(24 * time.Hour),
 		Scheduler: Scheduler{MaxConcurrent: 1},
 		Web:       Web{Listen: "127.0.0.1:8080"},
+		Scanner:   ScannerConfig{TargetExclusions: exclusions},
 		Jobs:      []Job{j},
 	}
 	applyDefaults(&c)
+	if !policyConfigured {
+		// Standalone callers and existing fixtures do not have deployment
+		// policy. Keep ValidateJob focused on job syntax and semantics; the
+		// daemon installs the loaded deployment policy in the store and scanner.
+		c.Scanner.TargetExclusions = nil
+	}
 	return c.Validate()
+}
+
+// ValidateJobWithTargetExclusions applies the deployment scanner policy in
+// addition to the normal job validation. A nil policy means the caller did
+// not provide deployment settings (as is common for embedded library users);
+// a non-nil empty policy is an explicit administrator override that permits
+// every syntactically valid target.
+func ValidateJobWithTargetExclusions(j Job, exclusions []string) error {
+	if exclusions == nil {
+		return ValidateJob(j)
+	}
+	if exclusions != nil {
+		if _, err := ParseTargetExclusions(exclusions); err != nil {
+			return fmt.Errorf("scanner.target_exclusions: %w", err)
+		}
+		j = NormalizeJob(j)
+		for _, target := range j.Targets {
+			if err := validateTargetWithExclusions(target, exclusions); err != nil {
+				return err
+			}
+		}
+	}
+	return validateJobWithPolicy(j, exclusions, true)
 }
 
 // NormalizeJob applies the same defaults used when loading YAML.
@@ -1059,6 +1128,92 @@ func validateTarget(target string) error {
 		}
 	}
 	return nil
+}
+
+// ParseTargetExclusions validates and parses deployment target exclusions.
+// Single IPs are converted to host networks so matching is consistent across
+// IPv4, IPv6, and CIDR inputs. Duplicate entries are rejected to keep the
+// policy unambiguous and deterministic.
+func ParseTargetExclusions(raw []string) ([]*net.IPNet, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	parsed := make([]*net.IPNet, 0, len(raw))
+	seen := make(map[string]struct{}, len(raw))
+	for index, value := range raw {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return nil, fmt.Errorf("entry %d must not be empty", index)
+		}
+		var network *net.IPNet
+		if ip := net.ParseIP(value); ip != nil {
+			bits := 128
+			if ip4 := ip.To4(); ip4 != nil {
+				ip = ip4
+				bits = 32
+			}
+			mask := net.CIDRMask(bits, bits)
+			network = &net.IPNet{IP: ip.Mask(mask), Mask: mask}
+		} else {
+			_, parsedNetwork, err := net.ParseCIDR(value)
+			if err != nil {
+				return nil, fmt.Errorf("entry %d %q must be an IP address or CIDR", index, value)
+			}
+			network = parsedNetwork
+		}
+		canonical := network.String()
+		if _, exists := seen[canonical]; exists {
+			return nil, fmt.Errorf("entry %d duplicates %q", index, value)
+		}
+		seen[canonical] = struct{}{}
+		parsed = append(parsed, network)
+	}
+	return parsed, nil
+}
+
+func validateTargetWithExclusions(target string, exclusions []string) error {
+	if err := validateTarget(target); err != nil {
+		return err
+	}
+	parsed, err := ParseTargetExclusions(exclusions)
+	if err != nil {
+		return fmt.Errorf("scanner.target_exclusions: %w", err)
+	}
+	if len(parsed) == 0 {
+		return nil
+	}
+	if ip := net.ParseIP(target); ip != nil {
+		if exclusion := matchingTargetExclusion(ip, parsed); exclusion != "" {
+			return fmt.Errorf("target %q is excluded by scanner.target_exclusions (%s)", target, exclusion)
+		}
+		return nil
+	}
+	if _, network, parseErr := net.ParseCIDR(target); parseErr == nil {
+		for _, exclusionNetwork := range parsed {
+			if networksOverlap(network, exclusionNetwork) {
+				return fmt.Errorf("target %q overlaps excluded network %s", target, exclusionNetwork.String())
+			}
+		}
+	}
+	// DNS names cannot be resolved safely during configuration validation. The
+	// scanner applies the same policy to every address returned at run time.
+	return nil
+}
+
+func matchingTargetExclusion(ip net.IP, exclusions []*net.IPNet) string {
+	for _, network := range exclusions {
+		if network != nil && network.Contains(ip) {
+			return network.String()
+		}
+	}
+	return ""
+}
+
+func networksOverlap(left, right *net.IPNet) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	return left.Contains(right.IP) || right.Contains(left.IP)
 }
 
 func ParsePorts(raw string) ([]int, error) {

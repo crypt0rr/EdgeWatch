@@ -238,6 +238,12 @@ func NewWithScannerPaths(cfg *config.Config, s *store.Store, nmapPath, naabuPath
 		logger.Warn("legacy YAML jobs are inactive; recreate them in the web console", "jobs", legacyNames)
 	}
 	sc := scanner.NewWithNaabu(nmapPath, naabuPath)
+	if err := sc.SetTargetExclusions(cfg.Scanner.TargetExclusions); err != nil {
+		return nil, fmt.Errorf("configure scanner target exclusions: %w", err)
+	}
+	if err := s.SetTargetExclusions(cfg.Scanner.TargetExclusions); err != nil {
+		return nil, fmt.Errorf("configure store target exclusions: %w", err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second}, nil

@@ -74,6 +74,14 @@ the replacement is issued.
   over the applicable budget are rejected before scanning unless an
   administrator explicitly enables `allow_high_cost`. That override is still
   bounded by the 100,000,000-probe per-run safety ceiling.
+- `scanner.target_exclusions` is a deployment-wide CIDR/IP denylist applied
+  before managed jobs are saved and again when targets are resolved. The safe
+  default refuses IPv4/IPv6 loopback and link-local networks, including
+  `169.254.169.254` on cloud hosts. Set it explicitly to `[]` only after
+  accepting the host-networking implications and intentionally monitoring a
+  local surface. DNS names are checked after resolution as well, so a name
+  resolving to an excluded address fails the scan rather than silently
+  scanning only the remaining addresses.
 - `web.listen` must be a loopback address; the default is
   `127.0.0.1:8080`.
 - Forwarding headers are ignored by default. If a local reverse proxy is used,

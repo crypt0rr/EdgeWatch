@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestParsePorts(t *testing.T) {
@@ -98,6 +100,28 @@ jobs:
 	}
 	if _, err := Load(path); err == nil {
 		t.Fatal("unknown field accepted")
+	}
+	zeroLimits := strings.Replace(yaml, "retention: 90d", "retention: 90d\nscheduler:\n  max_concurrent_scans: 0\n  max_probe_count: 0\n  max_naabu_probe_count: 0", 1)
+	if err := os.WriteFile(path, []byte(zeroLimits), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "max_concurrent_scans") {
+		t.Fatalf("explicit zero scheduler limit was silently defaulted: %v", err)
+	}
+}
+
+func TestSchedulerOmissionDefaultsRemainCompatible(t *testing.T) {
+	var scheduler Scheduler
+	if err := yaml.Unmarshal([]byte("max_probe_count: 0\n"), &scheduler); err != nil {
+		t.Fatal(err)
+	}
+	if scheduler.maxProbeCountSet != true || scheduler.MaxProbeCount != 0 {
+		t.Fatalf("scheduler presence marker = %#v, want explicit zero", scheduler)
+	}
+	cfg := Config{Version: 1, Database: "db", Retention: Duration(24 * time.Hour), Scheduler: Scheduler{MaxConcurrent: 1}}
+	applyDefaults(&cfg)
+	if cfg.Scheduler.MaxProbeCount != DefaultMaxProbeCount || cfg.Scheduler.MaxNaabuProbeCount != DefaultNaabuMaxProbeCount {
+		t.Fatalf("omitted scheduler limits did not default: %#v", cfg.Scheduler)
 	}
 }
 

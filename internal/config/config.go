@@ -82,7 +82,52 @@ type Scheduler struct {
 	MaxConcurrent      int   `yaml:"max_concurrent_scans"`
 	MaxProbeCount      int64 `yaml:"max_probe_count"`
 	MaxNaabuProbeCount int64 `yaml:"max_naabu_probe_count"`
+
+	// Presence markers distinguish an omitted deployment limit (which keeps
+	// the omission-compatible default) from an explicit zero. Explicit zero is
+	// rejected by ValidateDeployment instead of being silently rewritten.
+	maxConcurrentSet      bool
+	maxProbeCountSet      bool
+	maxNaabuProbeCountSet bool
 }
+
+// UnmarshalYAML records which scheduler limits were actually present. YAML's
+// zero value is otherwise indistinguishable from omission when applyDefaults
+// runs, allowing an explicit unsafe zero to turn into a different setting.
+func (s *Scheduler) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("scheduler must be a mapping")
+	}
+	allowed := map[string]bool{
+		"max_concurrent_scans":  true,
+		"max_probe_count":       true,
+		"max_naabu_probe_count": true,
+	}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		key := node.Content[index].Value
+		if !allowed[key] {
+			return fmt.Errorf("scheduler: field %q not found", key)
+		}
+	}
+	type plain Scheduler
+	var value plain
+	if err := node.Decode(&value); err != nil {
+		return err
+	}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		switch node.Content[index].Value {
+		case "max_concurrent_scans":
+			value.maxConcurrentSet = true
+		case "max_probe_count":
+			value.maxProbeCountSet = true
+		case "max_naabu_probe_count":
+			value.maxNaabuProbeCountSet = true
+		}
+	}
+	*s = Scheduler(value)
+	return nil
+}
+
 type Notifications struct {
 	URLs              []string `yaml:"urls"`
 	URLsFile          string   `yaml:"urls_file"`
@@ -421,13 +466,13 @@ func applyDefaults(c *Config) {
 	if c.Retention == 0 {
 		c.Retention = Duration(90 * 24 * time.Hour)
 	}
-	if c.Scheduler.MaxConcurrent == 0 {
+	if c.Scheduler.MaxConcurrent == 0 && !c.Scheduler.maxConcurrentSet {
 		c.Scheduler.MaxConcurrent = 1
 	}
-	if c.Scheduler.MaxProbeCount == 0 {
+	if c.Scheduler.MaxProbeCount == 0 && !c.Scheduler.maxProbeCountSet {
 		c.Scheduler.MaxProbeCount = DefaultMaxProbeCount
 	}
-	if c.Scheduler.MaxNaabuProbeCount == 0 {
+	if c.Scheduler.MaxNaabuProbeCount == 0 && !c.Scheduler.maxNaabuProbeCountSet {
 		c.Scheduler.MaxNaabuProbeCount = DefaultNaabuMaxProbeCount
 	}
 	if c.Web.Listen == "" {
@@ -712,14 +757,14 @@ func (c Config) ValidateDeployment() error {
 		return fmt.Errorf("max_concurrent_scans must be between 1 and 64")
 	}
 	probeBudget := c.Scheduler.MaxProbeCount
-	if probeBudget == 0 {
+	if probeBudget == 0 && !c.Scheduler.maxProbeCountSet {
 		probeBudget = DefaultMaxProbeCount
 	}
 	if probeBudget < 1 || probeBudget > MaxProbeCountLimit {
 		return fmt.Errorf("max_probe_count must be between 1 and %d", MaxProbeCountLimit)
 	}
 	naabuProbeBudget := c.Scheduler.MaxNaabuProbeCount
-	if naabuProbeBudget == 0 {
+	if naabuProbeBudget == 0 && !c.Scheduler.maxNaabuProbeCountSet {
 		naabuProbeBudget = DefaultNaabuMaxProbeCount
 	}
 	if naabuProbeBudget < 1 || naabuProbeBudget > MaxProbeCountLimit {

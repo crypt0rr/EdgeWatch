@@ -86,7 +86,6 @@ type Notifier struct {
 	fileURLs      map[string]string
 	managed       map[string]managedDestination
 	keyPath       string
-	key           []byte
 	keyErr        error
 	autoCreateKey bool
 }
@@ -183,7 +182,6 @@ func (n *Notifier) Reload(ctx context.Context) error {
 	}
 	n.mu.Lock()
 	n.managed = managed
-	n.key = append([]byte(nil), key...)
 	n.keyErr = keyErr
 	n.mu.Unlock()
 	return nil
@@ -230,7 +228,6 @@ func (n *Notifier) ensureKey(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	n.mu.Lock()
-	n.key = append([]byte(nil), key...)
 	n.keyErr = nil
 	n.mu.Unlock()
 	return key, nil

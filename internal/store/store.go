@@ -22,7 +22,12 @@ import (
 )
 
 type Store struct {
-	DB          *sql.DB
+	DB *sql.DB
+	// ReadDB is a separate read-only pool for history-heavy console queries.
+	// Mutations and migration work stay on DB, while WAL lets these reads make
+	// progress during a scan commit or pruning transaction. It is nil for
+	// in-memory databases, where a second connection would not share state.
+	ReadDB      *sql.DB
 	Path        string
 	authKeyPath string
 	authAutoKey bool
@@ -78,6 +83,7 @@ const schemaVersion = 23
 // to SQLite's defaults.
 type sqlitePragmaConnector struct {
 	driver.Connector
+	queryOnly bool
 }
 
 func (c sqlitePragmaConnector) Connect(ctx context.Context) (driver.Conn, error) {
@@ -90,7 +96,11 @@ func (c sqlitePragmaConnector) Connect(ctx context.Context) (driver.Conn, error)
 		_ = conn.Close()
 		return nil, errors.New("SQLite driver does not support connection setup")
 	}
-	for _, statement := range []string{"PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"} {
+	statements := []string{"PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"}
+	if c.queryOnly {
+		statements = append(statements, "PRAGMA query_only=ON")
+	}
+	for _, statement := range statements {
 		if _, err := execer.ExecContext(ctx, statement, nil); err != nil {
 			_ = conn.Close()
 			return nil, err
@@ -148,13 +158,31 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	var readDB *sql.DB
+	if !memoryDatabase {
+		readConnector, connectorErr := sqlite.NewConnector(dsn)
+		if connectorErr != nil {
+			db.Close()
+			return nil, connectorErr
+		}
+		readDB = sql.OpenDB(sqlitePragmaConnector{Connector: readConnector, queryOnly: true})
+		readDB.SetMaxOpenConns(4)
+		readDB.SetMaxIdleConns(4)
+		// Opening one connection here validates the path and query-only pragma;
+		// the connector reapplies it whenever database/sql creates another one.
+		if _, err := readDB.Exec("PRAGMA query_only=ON"); err != nil {
+			readDB.Close()
+			db.Close()
+			return nil, err
+		}
+	}
 	if !memoryDatabase {
 		if err := enforcePrivateSQLiteArtifacts(artifactPath); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
-	return &Store{DB: db, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true}, nil
+	return &Store{DB: db, ReadDB: readDB, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true}, nil
 }
 
 // SetTargetExclusions installs the deployment-wide scanner target policy. It
@@ -986,7 +1014,19 @@ func migrationColumnExists(tx *sql.Tx, table, column string) (bool, error) {
 	return count > 0, nil
 }
 
-func (s *Store) Close() error { return s.DB.Close() }
+func (s *Store) Close() error {
+	if s.ReadDB == nil || s.ReadDB == s.DB {
+		return s.DB.Close()
+	}
+	return errors.Join(s.ReadDB.Close(), s.DB.Close())
+}
+
+func (s *Store) reader() *sql.DB {
+	if s.ReadDB != nil {
+		return s.ReadDB
+	}
+	return s.DB
+}
 
 func nullString(v string) any {
 	if v == "" {
@@ -2522,12 +2562,13 @@ func (s *Store) ListScanHostsPage(ctx context.Context, scanID, query, protocol s
 	}
 	var page Page[ScanHost]
 	countQuery := `SELECT COUNT(*) FROM scan_hosts h` + join + ` WHERE ` + strings.Join(where, " AND ")
-	if err := s.DB.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
+	reader := s.reader()
+	if err := reader.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
 		return page, err
 	}
 	querySQL := `SELECT h.address,h.data_quality,h.host_json FROM scan_hosts h` + join + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY h.address LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
-	rows, err := s.DB.QueryContext(ctx, querySQL, args...)
+	rows, err := reader.QueryContext(ctx, querySQL, args...)
 	if err != nil {
 		return page, err
 	}
@@ -2554,7 +2595,7 @@ func (s *Store) ListScanHostsPage(ctx context.Context, scanID, query, protocol s
 // complete snapshot.
 func (s *Store) ScanHostIndexExists(ctx context.Context, scanID string) (bool, error) {
 	var exists bool
-	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_hosts WHERE scan_id=?)`, scanID).Scan(&exists)
+	err := s.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_hosts WHERE scan_id=?)`, scanID).Scan(&exists)
 	return exists, err
 }
 
@@ -2563,7 +2604,7 @@ func (s *Store) ScanHostIndexExists(ctx context.Context, scanID string) (bool, e
 // from a wholly legacy database.
 func (s *Store) SuccessfulScanHostIndexExists(ctx context.Context) (bool, error) {
 	var exists bool
-	err := s.DB.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_hosts h JOIN scans s ON s.id=h.scan_id WHERE s.status='success')`).Scan(&exists)
+	err := s.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_hosts h JOIN scans s ON s.id=h.scan_id WHERE s.status='success')`).Scan(&exists)
 	return exists, err
 }
 
@@ -2576,7 +2617,7 @@ func (s *Store) GetScanHost(ctx context.Context, scanID, address string) (ScanHo
 	}
 	var dataQuality string
 	var raw []byte
-	err = s.DB.QueryRowContext(ctx, `SELECT data_quality,host_json FROM scan_hosts WHERE scan_id=? AND address=?`, scanID, normalized).Scan(&dataQuality, &raw)
+	err = s.reader().QueryRowContext(ctx, `SELECT data_quality,host_json FROM scan_hosts WHERE scan_id=? AND address=?`, scanID, normalized).Scan(&dataQuality, &raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ScanHost{}, fmt.Errorf("%w: host %s", ErrNotFound, normalized)
 	}
@@ -2609,12 +2650,13 @@ func (s *Store) ListLatestScanHostsPage(ctx context.Context, query, protocol str
 	}
 	var page Page[LatestScanHost]
 	countQuery := `SELECT COUNT(*) FROM latest_scan_hosts h` + join + ` WHERE ` + strings.Join(where, " AND ")
-	if err := s.DB.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
+	reader := s.reader()
+	if err := reader.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
 		return page, err
 	}
 	querySQL := `SELECT h.scan_id,h.address,h.data_quality,h.host_json,h.job_id,h.job,h.finished_at FROM latest_scan_hosts h` + join + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY h.address LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
-	rows, err := s.DB.QueryContext(ctx, querySQL, args...)
+	rows, err := reader.QueryContext(ctx, querySQL, args...)
 	if err != nil {
 		return page, err
 	}

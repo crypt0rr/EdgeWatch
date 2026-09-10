@@ -30,6 +30,7 @@ type LatestScanHost struct {
 	ScanHost
 	JobID     string
 	Job       string
+	Archived  bool
 	ScannedAt time.Time
 }
 

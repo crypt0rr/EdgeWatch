@@ -1,4 +1,4 @@
-import { FormEvent, useState } from 'react'
+import { FormEvent, useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Bell, Check, KeyRound, LockKeyhole, Pencil, Plug, RefreshCw, Send, ShieldCheck, Trash2 } from 'lucide-react'
 import {
@@ -9,6 +9,7 @@ import {
   NotificationDestination,
   testNotificationDestination,
   updateNotificationDestination,
+  updateNotificationRouting,
   getSession,
 } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
@@ -41,6 +42,22 @@ export function Notifications() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
+  const [updateSelection, setUpdateSelection] = useState<string[] | undefined>(undefined)
+
+  const updateRouting = destinations.data?.update_routing
+  useEffect(() => {
+    if (!destinations.data) return
+    const fallback = updateRouting?.configured
+      ? updateRouting.destinations
+      : destinations.data.destinations.filter(destination => destination.enabled).map(destination => destination.id)
+    const available = new Set(destinations.data.destinations.map(destination => destination.id))
+    setUpdateSelection(current => {
+      if (current === undefined) return [...fallback]
+      const next = current.filter(id => available.has(id))
+      if (next.length === current.length && next.every((id, index) => id === current[index])) return current
+      return next
+    })
+  }, [destinations.data, updateRouting?.configured, updateRouting?.destinations])
 
   function resetFeedback() {
     setMessage('')
@@ -173,12 +190,43 @@ export function Notifications() {
     }
   }
 
+  async function saveUpdateRouting() {
+    if (!destinations.data) return
+    resetFeedback()
+    const selected = updateSelection ?? (updateRouting?.configured
+      ? updateRouting.destinations
+      : destinations.data.destinations.filter(destination => destination.enabled).map(destination => destination.id))
+    const confirmation = await askPassword('Confirm update notification routing', 'Enter your account password to choose which destinations receive release and upgrade alerts.', 'Save routing')
+    if (confirmation === null) return
+    setBusy('update-routing')
+    try {
+      const result = await updateNotificationRouting(selected, confirmation)
+      setUpdateSelection([...result.destinations])
+      setMessage('Application update notification routing saved.')
+      await client.invalidateQueries({ queryKey: ['notifications'] })
+    } catch (err) {
+      reportError(err, 'Could not save application update notification routing.')
+    } finally {
+      setBusy('')
+    }
+  }
+
   const status = destinations.data?.status
+  const selectedUpdateDestinations = updateSelection ?? (updateRouting?.configured
+    ? updateRouting.destinations
+    : destinations.data?.destinations.filter(destination => destination.enabled).map(destination => destination.id) ?? [])
   return <section className="page narrow notifications-page">
     <div className="page-heading"><div><p className="eyebrow">Delivery</p><h1>Notifications</h1><p className="muted">Manage named Shoutrrr destinations without exposing their credentials.</p></div><Bell className="muted-icon" size={24} /></div>
     {message && <div className="success-banner" role="status"><Check size={17} />{message}</div>}
     {error && <div className="form-error banner" role="alert"><AlertTriangle size={17} />{error}</div>}
     {status && <div className={status.key_state === 'ready' || status.key_state === 'not_required' ? 'notice notification-status' : 'notice warning notification-status'}><KeyRound size={17} /><span><strong>{status.key_state === 'ready' ? 'Encrypted destinations are available.' : status.key_state === 'not_required' ? 'No web-managed destinations yet.' : 'Managed destination key needs attention.'}</strong> {status.locked ? `${status.locked} destination${status.locked === 1 ? '' : 's'} locked; deployment URLs continue independently.` : 'Credentials are write-only and encrypted at rest.'}</span><button className="icon-button" type="button" onClick={() => destinations.refetch()} aria-label="Refresh notification status"><RefreshCw size={15} /></button></div>}
+
+    {canManage && <div className="panel update-routing-panel">
+      <div className="panel-heading"><div><h2>Application update alerts</h2><p className="muted">Choose one or more destinations for release and upgrade alerts. Update checks still run when every destination is unchecked.</p></div><RefreshCw className="muted-icon" size={20} /></div>
+      {destinations.isLoading ? <div className="loading"><span className="spinner" />Loading update routing…</div> : destinations.data?.destinations.length ? <div className="job-notification-list">{destinations.data.destinations.map(destination => <label className="job-notification-option" key={`update-${destination.id}`}><input type="checkbox" checked={selectedUpdateDestinations.includes(destination.id)} onChange={event => setUpdateSelection(current => { const base = current ?? selectedUpdateDestinations; return event.target.checked ? [...new Set([...base, destination.id])] : base.filter(id => id !== destination.id) })} /><span><strong>{destination.name}</strong><small>{destination.provider || 'unknown provider'} · {destination.enabled ? 'enabled' : 'paused'}{destination.locked ? ' · credentials unavailable' : ''}</small></span>{destination.locked && <span className="pill amber">Locked</span>}</label>)}</div> : <div className="inline-empty">No notification destinations are configured yet.</div>}
+      <p className="helper">Until you save a selection, release and upgrade alerts use all globally enabled destinations. Saving zero destinations keeps those alerts silent.</p>
+      <button type="button" className="button secondary" onClick={saveUpdateRouting} disabled={!destinations.data || busy === 'update-routing'}>{busy === 'update-routing' ? 'Saving…' : 'Save update routing'}</button>
+    </div>}
 
     {canManage && <div className="panel notification-create">
       <div className="panel-heading"><div><h2>Add destination</h2><p className="muted">Paste one complete Shoutrrr URL. It is never returned by the API.</p></div><ShieldCheck className="green-icon" size={20} /></div>

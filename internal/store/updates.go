@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,11 +27,18 @@ type ApplicationUpdateState struct {
 	LastError                 string
 	AnnouncedAvailableVersion string
 	AnnouncedUpgradeVersion   string
+	// UpdateNotificationDestinations is nil when the administrator has not
+	// configured update routing yet, preserving the legacy "all enabled"
+	// behavior. An explicitly configured empty slice intentionally silences
+	// update notifications while retaining the update state and UI indicator.
+	UpdateNotificationDestinations           []string
+	UpdateNotificationDestinationsConfigured bool
 }
 
 func scanApplicationUpdateState(scanner interface{ Scan(...any) error }) (ApplicationUpdateState, error) {
 	var state ApplicationUpdateState
 	var checked, successful string
+	var destinationsJSON string
 	if err := scanner.Scan(
 		&state.InstalledVersion,
 		&state.LatestVersion,
@@ -43,23 +52,81 @@ func scanApplicationUpdateState(scanner interface{ Scan(...any) error }) (Applic
 		&state.LastError,
 		&state.AnnouncedAvailableVersion,
 		&state.AnnouncedUpgradeVersion,
+		&destinationsJSON,
 	); err != nil {
 		return state, err
 	}
 	state.LastCheckedAt = scanTime(checked)
 	state.LastSuccessfulCheckAt = scanTime(successful)
+	if strings.TrimSpace(destinationsJSON) != "" {
+		var destinations []string
+		if err := json.Unmarshal([]byte(destinationsJSON), &destinations); err != nil {
+			return state, err
+		}
+		state.UpdateNotificationDestinations = normalizeUpdateDestinations(destinations)
+		state.UpdateNotificationDestinationsConfigured = true
+	}
 	return state, nil
 }
 
+const applicationUpdateStateColumns = `installed_version,latest_version,release_url,release_name,published_at,etag,last_checked_at,last_successful_check_at,check_status,last_error,announced_available_version,announced_upgrade_version,notification_destinations_json`
+
+func applicationUpdateStateQuery() string {
+	return `SELECT ` + applicationUpdateStateColumns + ` FROM application_update_state WHERE id=1`
+}
+
+func normalizeUpdateDestinations(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result
+}
+
 func (s *Store) GetApplicationUpdateState(ctx context.Context) (ApplicationUpdateState, error) {
-	state, err := scanApplicationUpdateState(s.DB.QueryRowContext(ctx, `SELECT installed_version,latest_version,release_url,release_name,published_at,etag,last_checked_at,last_successful_check_at,check_status,last_error,announced_available_version,announced_upgrade_version FROM application_update_state WHERE id=1`))
+	state, err := scanApplicationUpdateState(s.DB.QueryRowContext(ctx, applicationUpdateStateQuery()))
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, insertErr := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO application_update_state(id,check_status) VALUES(1,'unknown')`); insertErr != nil {
 			return state, insertErr
 		}
-		return scanApplicationUpdateState(s.DB.QueryRowContext(ctx, `SELECT installed_version,latest_version,release_url,release_name,published_at,etag,last_checked_at,last_successful_check_at,check_status,last_error,announced_available_version,announced_upgrade_version FROM application_update_state WHERE id=1`))
+		return scanApplicationUpdateState(s.DB.QueryRowContext(ctx, applicationUpdateStateQuery()))
 	}
 	return state, err
+}
+
+// SetApplicationUpdateDestinations stores the administrator's explicit update
+// notification routing. The destination identifiers are stable opaque
+// selectors; URLs and credentials never enter this record.
+func (s *Store) SetApplicationUpdateDestinations(ctx context.Context, destinations []string, audit AuditEntry) error {
+	destinations = normalizeUpdateDestinations(destinations)
+	raw, err := json.Marshal(destinations)
+	if err != nil {
+		return err
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO application_update_state(id,notification_destinations_json,check_status) VALUES(1,?,'unknown') ON CONFLICT(id) DO UPDATE SET notification_destinations_json=excluded.notification_destinations_json`, string(raw)); err != nil {
+		return err
+	}
+	if audit.Action != "" {
+		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // RecordInstalledVersion persists the running build version. When notify is

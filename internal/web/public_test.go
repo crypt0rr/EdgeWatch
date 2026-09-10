@@ -259,6 +259,23 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	if err != nil || len(publicResponse.Hosts) != 1 || len(publicResponse.Hosts[0].OpenPorts) != 1 {
 		t.Fatalf("public response = %#v, %v", publicResponse, err)
 	}
+	if err := db.SetJobArchived(ctx, record.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	// Retained archived selections remain valid for the admin configuration
+	// and can be removed without making an unrelated save fail, but they stay
+	// absent from the unauthenticated response.
+	archiveSave := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status updated","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.10"}]}`))
+	archiveSave.Header.Set("Content-Type", "application/json")
+	archiveRecorder := httptest.NewRecorder()
+	server.publicDashboardRoute(archiveRecorder, archiveSave, admin)
+	if archiveRecorder.Code != http.StatusOK {
+		t.Fatalf("archived selection save = %d: %s", archiveRecorder.Code, archiveRecorder.Body.String())
+	}
+	archivedResponse, err := server.publicDashboardResponse(ctx, store.PublicDashboard{Title: "Status updated", Hosts: []store.PublicDashboardHost{{JobID: record.ID, Address: "198.51.100.10"}}})
+	if err != nil || len(archivedResponse.Hosts) != 0 {
+		t.Fatalf("archived public response = %#v, %v", archivedResponse, err)
+	}
 }
 
 func TestLatestLegacyPublicHostsLimitsEachJobIndependently(t *testing.T) {

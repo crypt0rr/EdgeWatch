@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   Archive,
@@ -34,10 +34,10 @@ import { PortScopeDetails } from '../components/PortScopeDetails'
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 
 export function JobDetail() {
-  const { id = '' } = useParams()
+  const { id = '', scanId: routeScanID } = useParams()
   const navigate = useNavigate()
   const client = useQueryClient()
-  const [selectedScan, setSelectedScan] = useState('')
+  const [selectedScan, setSelectedScan] = useState(routeScanID ?? '')
   const [scanOffset, setScanOffset] = useState(0)
   const [changeOffset, setChangeOffset] = useState(0)
   const [resultsOffset, setResultsOffset] = useState(0)
@@ -67,6 +67,13 @@ export function JobDetail() {
     enabled: !!selectedScan && showResults && canReadScans,
   })
 
+  useEffect(() => {
+    setSelectedScan(routeScanID ?? '')
+    setShowResults(false)
+    setChangeOffset(0)
+    setResultsOffset(0)
+  }, [routeScanID])
+
   if (job.isLoading) {
     return <div className="loading"><span className="spinner" />Loading job…</div>
   }
@@ -75,6 +82,12 @@ export function JobDetail() {
   }
 
   const value = job.data
+  function openScan(scanID: string) {
+    setSelectedScan(scanID)
+    setChangeOffset(0)
+    setResultsOffset(0)
+    setShowResults(false)
+  }
   function reportActionError(err: unknown, fallback: string) {
     setActionError(err instanceof Error ? err.message : fallback)
   }
@@ -257,7 +270,7 @@ export function JobDetail() {
                 <button
                   className={selectedScan === scan.id ? 'scan-row selected' : 'scan-row'}
                   key={scan.id}
-                  onClick={() => { setSelectedScan(scan.id); setChangeOffset(0); setResultsOffset(0); setShowResults(false) }}
+                  onClick={() => openScan(scan.id)}
                 >
                   <span className={scan.status === 'success' ? 'activity-dot success' : 'activity-dot fail'} />
                   <div>
@@ -286,7 +299,7 @@ export function JobDetail() {
                 </div>
                 <div className="heading-actions">
                   {detail.data.scan.status === 'success' && <button className="button ghost" onClick={() => { setShowResults((shown) => !shown); setResultsOffset(0) }}>{showResults ? 'Hide results' : 'View results'}</button>}
-                  <button className="icon-button" onClick={() => setSelectedScan('')} aria-label="Close scan detail">×</button>
+                  <button className="icon-button" onClick={() => routeScanID ? navigate(`/jobs/${encodeURIComponent(id)}`) : setSelectedScan('')} aria-label="Close scan detail">×</button>
                 </div>
               </div>
               {selectedScanCanBeBaseline && (

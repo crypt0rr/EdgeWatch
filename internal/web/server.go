@@ -326,6 +326,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.listNotificationDestinations(w, r)
 	case path == "/notifications/options" && r.Method == http.MethodGet:
 		s.listNotificationDestinations(w, r)
+	case path == "/notifications/update-routing" && r.Method == http.MethodPut:
+		s.updateNotificationRouting(w, r, session)
 	case path == "/notifications/destinations" && r.Method == http.MethodPost:
 		s.createNotificationDestination(w, r, session)
 	case strings.HasPrefix(path, "/notifications/destinations/"):

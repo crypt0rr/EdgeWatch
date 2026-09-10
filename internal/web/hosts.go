@@ -37,6 +37,7 @@ type allHostSummary struct {
 	hostSummary
 	JobID       string    `json:"job_id,omitempty"`
 	Job         string    `json:"job"`
+	Archived    bool      `json:"archived,omitempty"`
 	ScanID      string    `json:"scan_id"`
 	ScannedAt   time.Time `json:"scanned_at"`
 	DataQuality string    `json:"data_quality"`
@@ -66,6 +67,7 @@ func allSummaryFromIndexedHost(item store.LatestScanHost) allHostSummary {
 		hostSummary: summaryFromIndexedHost(item.ScanHost),
 		JobID:       item.JobID,
 		Job:         item.Job,
+		Archived:    item.Archived,
 		ScanID:      item.ScanID,
 		ScannedAt:   item.ScannedAt,
 		DataQuality: item.DataQuality,
@@ -529,6 +531,12 @@ func summaryForHost(host model.HostObservation, legacy bool) hostSummary {
 
 func (s *Server) latestScannedHosts(ctx context.Context) ([]allHostSummary, error) {
 	latest := make(map[string]allHostSummary)
+	archivedJobs := make(map[string]bool)
+	if jobs, err := s.Store.ListJobs(ctx, true); err == nil {
+		for _, job := range jobs {
+			archivedJobs[job.ID] = job.Archived
+		}
+	}
 	// Legacy snapshots have no host index. Keep this compatibility walk bounded
 	// so an old database cannot defeat the indexed path with an unbounded scan.
 	const pageSize = 100
@@ -561,6 +569,7 @@ func (s *Server) latestScannedHosts(ctx context.Context) ([]allHostSummary, erro
 					hostSummary: summaryForHost(host, hostPage.DataQuality == "legacy"),
 					JobID:       scan.JobID,
 					Job:         scan.Job,
+					Archived:    archivedJobs[scan.JobID],
 					ScanID:      scan.ID,
 					ScannedAt:   scan.FinishedAt,
 					DataQuality: hostPage.DataQuality,
@@ -576,6 +585,9 @@ func (s *Server) latestScannedHosts(ctx context.Context) ([]allHostSummary, erro
 		result = append(result, host)
 	}
 	sort.Slice(result, func(i, j int) bool {
+		if result[i].Archived != result[j].Archived {
+			return !result[i].Archived
+		}
 		return result[i].Address < result[j].Address
 	})
 	return result, nil

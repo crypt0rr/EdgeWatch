@@ -203,6 +203,60 @@ func TestAllHostsReturnsLatestSuccessfulResultPerAddress(t *testing.T) {
 	}
 }
 
+func TestAllHostsSeparatesArchivedJobsAfterActiveHosts(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := app.New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	archivedJob, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "archived-host", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.40"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	activeJob, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "active-host", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.41"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, item := range []struct {
+		job store.JobRecord
+		id  string
+		ip  string
+	}{
+		{job: archivedJob, id: "archived-host-scan", ip: "198.51.100.40"},
+		{job: activeJob, id: "active-host-scan", ip: "198.51.100.41"},
+	} {
+		scan := model.Scan{ID: item.id, JobID: item.job.ID, JobRevision: item.job.Revision, Job: item.job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: item.ip, Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22", ScannedPortCount: 1}}}}}}
+		if err := db.SaveScan(ctx, scan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.SetJobArchived(ctx, archivedJob.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.listHosts(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("host list status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Hosts []allHostSummary `json:"hosts"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Hosts) != 2 || response.Hosts[0].Address != "198.51.100.41" || response.Hosts[0].Archived || response.Hosts[1].Address != "198.51.100.40" || !response.Hosts[1].Archived {
+		t.Fatalf("host archive ordering = %#v", response.Hosts)
+	}
+}
+
 func TestSummaryForHostCollapsesChunkedProtocolObservations(t *testing.T) {
 	host := model.HostObservation{
 		Address: "198.51.100.10",

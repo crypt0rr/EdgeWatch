@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 23
+const schemaVersion = 24
 
 func migrate(db *sql.DB) error {
 	var version int
@@ -635,6 +635,13 @@ END;`,
 );`,
 			"ALTER TABLE users ADD COLUMN revision INTEGER NOT NULL DEFAULT 1",
 			"UPDATE users SET revision=1 WHERE revision IS NULL OR revision < 1",
+		},
+		24: {
+			// Update notifications may be routed to an explicit subset of the
+			// configured destinations. An empty string preserves the legacy
+			// behavior (all globally enabled destinations); a JSON array, including
+			// [], is an administrator-owned explicit selection.
+			"ALTER TABLE application_update_state ADD COLUMN notification_destinations_json TEXT NOT NULL DEFAULT ''",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {

@@ -1,5 +1,14 @@
 import { expect, test } from '@playwright/test'
 
+const adminPermissions = [
+  'overview.read', 'jobs.read', 'jobs.write', 'jobs.run', 'jobs.delete',
+  'hosts.read', 'scans.read', 'baselines.read', 'baselines.manage',
+  'incidents.read', 'incidents.manage', 'notification_options.read',
+  'notifications.read', 'notifications.manage', 'users.manage', 'audit.read',
+  'public_dashboard.manage', 'stream.read', 'scanner_profiles.read',
+  'scanner_profiles.manage',
+]
+
 test('mobile navigation is modal and incident cards fit the viewport', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === 'desktop', 'The responsive smoke runs in the mobile projects.')
   await page.emulateMedia({ reducedMotion: 'reduce' })
@@ -17,7 +26,7 @@ test('mobile navigation is modal and incident cards fit the viewport', async ({ 
       return
     }
     if (path === '/auth/session') {
-      await json({ username: 'admin', role: 'administrator', permissions: [], csrf_token: 'mobile-csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+      await json({ username: 'admin', role: 'administrator', permissions: adminPermissions, csrf_token: 'mobile-csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } })
       return
     }
     if (path === '/incidents') {

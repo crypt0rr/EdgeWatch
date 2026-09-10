@@ -78,6 +78,10 @@ EOF
 retention: 1d
 scheduler:
   max_concurrent_scans: 1
+scanner:
+  # The deterministic fixture intentionally scans the local fake Nmap target.
+  # Production configurations retain the safe loopback/link-local denylist.
+  target_exclusions: []
 web:
   listen: 127.0.0.1:${port}
 notifications:

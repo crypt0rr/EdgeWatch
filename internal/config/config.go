@@ -47,6 +47,7 @@ type Config struct {
 	Retention     Duration      `yaml:"retention"`
 	Scheduler     Scheduler     `yaml:"scheduler"`
 	Scanner       ScannerConfig `yaml:"scanner"`
+	Log           LogConfig     `yaml:"log"`
 	Web           Web           `yaml:"web"`
 	Enrichment    Enrichment    `yaml:"enrichment"`
 	Updates       Updates       `yaml:"updates"`
@@ -62,6 +63,13 @@ type Config struct {
 // targets.
 type ScannerConfig struct {
 	TargetExclusions []string `yaml:"target_exclusions"`
+}
+
+// LogConfig controls the minimum level emitted by the daemon's structured
+// JSON logger. The default is info; debug is useful while diagnosing a
+// request or scan, while warn/error keep routine appliance output quiet.
+type LogConfig struct {
+	Level string `yaml:"level"`
 }
 
 var defaultTargetExclusions = []string{
@@ -501,6 +509,9 @@ func applyDefaults(c *Config) {
 	if c.Scanner.TargetExclusions == nil {
 		c.Scanner.TargetExclusions = DefaultTargetExclusions()
 	}
+	if strings.TrimSpace(c.Log.Level) == "" {
+		c.Log.Level = "info"
+	}
 	if c.Web.Listen == "" {
 		c.Web.Listen = "127.0.0.1:8080"
 	}
@@ -624,6 +635,15 @@ func (c Config) RDAPEnabled() bool {
 // UpdatesEnabled resolves the omission-defaulted deployment setting.
 func (c Config) UpdatesEnabled() bool {
 	return c.Updates.Enabled == nil || *c.Updates.Enabled
+}
+
+// LogLevel resolves the omission-defaulted structured logging level.
+func (c Config) LogLevel() string {
+	level := strings.ToLower(strings.TrimSpace(c.Log.Level))
+	if level == "" {
+		return "info"
+	}
+	return level
 }
 
 func (c Config) Validate() error {
@@ -807,6 +827,9 @@ func (c Config) ValidateDeployment() error {
 	}
 	if _, err := ParseTargetExclusions(c.Scanner.TargetExclusions); err != nil {
 		return fmt.Errorf("scanner.target_exclusions: %w", err)
+	}
+	if level := strings.ToLower(strings.TrimSpace(c.Log.Level)); level != "" && level != "debug" && level != "info" && level != "warn" && level != "error" {
+		return fmt.Errorf("log.level must be one of debug, info, warn, or error")
 	}
 	for index, raw := range c.Web.TrustedProxies {
 		value := strings.TrimSpace(raw)

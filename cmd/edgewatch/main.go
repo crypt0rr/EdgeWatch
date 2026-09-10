@@ -97,7 +97,7 @@ func run(args []string) error {
 	if cmd == "admin" {
 		return adminActionForUser(context.Background(), action, s, *passwordFile, *username, *force)
 	}
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := newLogger(cfg.LogLevel())
 	var application *app.App
 	switch cmd {
 	case "daemon", "scan", "baseline", "notify":
@@ -156,6 +156,21 @@ func usage() error {
 	Commands: daemon, config validate, scan, status, history, baseline approve|reset, notify test, admin setup-token|reset-password|disable-totp, health, version
 	Admin recovery actions accept --username (default admin) and require host access.`)
 	return errors.New("invalid or missing command")
+}
+
+func newLogger(level string) *slog.Logger {
+	var minimum slog.Level
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "debug":
+		minimum = slog.LevelDebug
+	case "warn":
+		minimum = slog.LevelWarn
+	case "error":
+		minimum = slog.LevelError
+	default:
+		minimum = slog.LevelInfo
+	}
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: minimum}))
 }
 
 func adminAction(ctx context.Context, action string, s *store.Store, passwordFile string, confirmations ...bool) error {
@@ -336,7 +351,7 @@ func normalizedConfig(cfg *config.Config) map[string]any {
 	for _, j := range cfg.Jobs {
 		jobs = append(jobs, map[string]any{"name": j.Name, "schedule": j.Schedule, "timezone": j.Timezone, "targets": j.Targets, "security_hash": j.SecurityHash()})
 	}
-	return map[string]any{"valid": true, "version": cfg.Version, "database": cfg.Database, "web_listen": cfg.Web.Listen, "max_probe_count": cfg.Scheduler.MaxProbeCount, "max_naabu_probe_count": cfg.Scheduler.MaxNaabuProbeCount, "target_exclusions": append([]string(nil), cfg.Scanner.TargetExclusions...), "rdap_enabled": cfg.RDAPEnabled(), "updates_enabled": cfg.UpdatesEnabled(), "jobs": jobs, "legacy_jobs_inactive": len(jobs) > 0, "notification_destinations": len(cfg.Notifications.URLs)}
+	return map[string]any{"valid": true, "version": cfg.Version, "database": cfg.Database, "web_listen": cfg.Web.Listen, "log_level": cfg.LogLevel(), "max_probe_count": cfg.Scheduler.MaxProbeCount, "max_naabu_probe_count": cfg.Scheduler.MaxNaabuProbeCount, "target_exclusions": append([]string(nil), cfg.Scanner.TargetExclusions...), "rdap_enabled": cfg.RDAPEnabled(), "updates_enabled": cfg.UpdatesEnabled(), "jobs": jobs, "legacy_jobs_inactive": len(jobs) > 0, "notification_destinations": len(cfg.Notifications.URLs)}
 }
 
 func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, output string) error {

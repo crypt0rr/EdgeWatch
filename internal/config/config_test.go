@@ -68,6 +68,9 @@ jobs:
 	if cfg.Scheduler.MaxNaabuProbeCount != DefaultNaabuMaxProbeCount {
 		t.Fatalf("Naabu probe budget default %d", cfg.Scheduler.MaxNaabuProbeCount)
 	}
+	if cfg.LogLevel() != "info" || cfg.Log.Level != "info" {
+		t.Fatalf("log level default = %q", cfg.Log.Level)
+	}
 	if !reflect.DeepEqual(cfg.Scanner.TargetExclusions, DefaultTargetExclusions()) {
 		t.Fatalf("scanner target exclusions default %#v", cfg.Scanner.TargetExclusions)
 	}
@@ -91,6 +94,17 @@ jobs:
 	}
 	if cfg.Jobs[0].AssumesAlive() {
 		t.Fatal("explicit assume_alive=false was not applied")
+	}
+	logDebug := strings.Replace(yaml, "retention: 90d", "retention: 90d\nlog:\n  level: debug", 1)
+	if err := os.WriteFile(path, []byte(logDebug), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("explicit debug log level was rejected: %v", err)
+	}
+	if cfg.LogLevel() != "debug" {
+		t.Fatalf("explicit debug log level = %q", cfg.Log.Level)
 	}
 	if err := os.WriteFile(path, []byte(strings.Replace(yaml, "retention: 90d", "retention: 90d\nupdates:\n  enabled: false", 1)), 0o600); err != nil {
 		t.Fatal(err)
@@ -134,6 +148,20 @@ func TestTargetExclusionsRejectUnsafeTargetsByDefaultAndAllowExplicitOverride(t 
 	}
 	if err := ValidateJobWithTargetExclusions(allowed, []string{"not-a-network"}); err == nil {
 		t.Fatal("invalid exclusion was accepted")
+	}
+}
+
+func TestLogLevelValidation(t *testing.T) {
+	base := Config{Version: 1, Database: "db", Retention: Duration(24 * time.Hour), Scheduler: Scheduler{MaxConcurrent: 1}, Web: Web{Listen: "127.0.0.1:8080"}}
+	for _, level := range []string{"", "debug", "info", "warn", "error", "DEBUG"} {
+		base.Log.Level = level
+		if err := base.ValidateDeployment(); err != nil {
+			t.Fatalf("log level %q rejected: %v", level, err)
+		}
+	}
+	base.Log.Level = "trace"
+	if err := base.ValidateDeployment(); err == nil || !strings.Contains(err.Error(), "log.level") {
+		t.Fatalf("invalid log level was accepted: %v", err)
 	}
 }
 

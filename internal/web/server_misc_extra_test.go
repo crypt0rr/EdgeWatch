@@ -10,12 +10,135 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/webui"
 )
+
+type pipeAddr string
+
+func (a pipeAddr) Network() string { return "pipe" }
+func (a pipeAddr) String() string  { return string(a) }
+
+type pipeListener struct {
+	conns  chan net.Conn
+	closed chan struct{}
+	once   sync.Once
+	addr   net.Addr
+}
+
+func newPipeListener() *pipeListener {
+	return &pipeListener{conns: make(chan net.Conn, 1), closed: make(chan struct{}), addr: pipeAddr("edgewatch-test")}
+}
+
+func (l *pipeListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.conns:
+		return conn, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *pipeListener) Close() error {
+	l.once.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *pipeListener) Addr() net.Addr { return l.addr }
+
+type deadlineTrackingWriter struct {
+	header   http.Header
+	body     bytes.Buffer
+	deadline time.Time
+	status   int
+}
+
+func (w *deadlineTrackingWriter) Header() http.Header { return w.header }
+
+func (w *deadlineTrackingWriter) Write(data []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	return w.body.Write(data)
+}
+
+func (w *deadlineTrackingWriter) WriteHeader(status int) { w.status = status }
+func (w *deadlineTrackingWriter) Flush()                 {}
+
+func (w *deadlineTrackingWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadline = deadline
+	return nil
+}
+
+func TestServeListenerWriteDeadlineReleasesStalledReader(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	server.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	server.writeTimeout = 30 * time.Millisecond
+	listener := newPipeListener()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	released := make(chan struct{})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(started)
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 1<<20))
+		close(released)
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- server.serveListener(ctx, listener, listener.Addr().String(), handler) }()
+
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+	listener.conns <- serverConn
+	requestDone := make(chan struct{})
+	go func() {
+		_, _ = clientConn.Write([]byte("GET / HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"))
+		close(requestDone)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not start")
+	}
+	select {
+	case <-released:
+	case <-time.After(time.Second):
+		t.Fatal("stalled response did not honor the write deadline")
+	}
+	select {
+	case <-requestDone:
+	case <-time.After(time.Second):
+		t.Fatal("request writer did not finish")
+	}
+	_ = clientConn.Close()
+	_ = serverConn.Close()
+	cancel()
+	select {
+	case err := <-serveDone:
+		if err != nil {
+			t.Fatalf("server returned error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("server did not shut down after stalled response")
+	}
+}
+
+func TestStreamClearsServerWriteDeadline(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	writer := &deadlineTrackingWriter{header: make(http.Header)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(ctx)
+	server.stream(writer, request)
+	if !writer.deadline.IsZero() {
+		t.Fatalf("SSE write deadline = %v, want cleared", writer.deadline)
+	}
+}
 
 func TestServeListenerWaitsForGracefulShutdown(t *testing.T) {
 	server, _, _ := newUsersTestServer(t)

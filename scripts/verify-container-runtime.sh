@@ -55,6 +55,12 @@ scheduler:
 notifications:
   urls: []
 EOF
+# Read-only diagnostic commands intentionally refuse to create or migrate a
+# database. Bootstrap the disposable fixture through the host-authorized
+# setup-token command before checking status and the persisted SQLite file.
+docker run --rm $runtime_args \
+  -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
+  -v "$workdir/data:/var/lib/edgewatch:rw" "$image" admin setup-token --force --config /etc/edgewatch/config.yaml >/dev/null
 docker run --rm $runtime_args \
   -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
   -v "$workdir/data:/var/lib/edgewatch:rw" "$image" status --config /etc/edgewatch/config.yaml

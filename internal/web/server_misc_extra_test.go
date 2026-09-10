@@ -129,14 +129,119 @@ func TestServeListenerWriteDeadlineReleasesStalledReader(t *testing.T) {
 }
 
 func TestStreamClearsServerWriteDeadline(t *testing.T) {
-	server, _, _ := newUsersTestServer(t)
+	server, _, session := newUsersTestServer(t)
 	writer := &deadlineTrackingWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(ctx)
-	server.stream(writer, request)
+	server.stream(writer, request, session)
 	if !writer.deadline.IsZero() {
 		t.Fatalf("SSE write deadline = %v, want cleared", writer.deadline)
+	}
+}
+
+func waitForSSESubscribers(t *testing.T, server *Server, want int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		server.mu.Lock()
+		got := len(server.subscribers)
+		server.mu.Unlock()
+		if got == want {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	server.mu.Lock()
+	got := len(server.subscribers)
+	server.mu.Unlock()
+	t.Fatalf("SSE subscriber count = %d, want %d", got, want)
+}
+
+func startTestSSEStream(server *Server, session store.Session) (context.CancelFunc, <-chan struct{}) {
+	ctx, cancel := context.WithCancel(context.Background())
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(ctx)
+	response := &deadlineTrackingWriter{header: make(http.Header)}
+	done := make(chan struct{})
+	go func() {
+		server.stream(response, request, session)
+		close(done)
+	}()
+	return cancel, done
+}
+
+func TestSSESubscriberLimits(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	server.sseMaxSubscribers = 2
+	server.sseMaxSubscribersPerUser = 10
+	cancelA, doneA := startTestSSEStream(server, store.Session{IDHash: "session-a", UserID: "user-a"})
+	cancelB, doneB := startTestSSEStream(server, store.Session{IDHash: "session-b", UserID: "user-b"})
+	waitForSSESubscribers(t, server, 2)
+	limited := &deadlineTrackingWriter{header: make(http.Header)}
+	limitedCtx, limitedCancel := context.WithCancel(context.Background())
+	limitedRequest := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(limitedCtx)
+	limitedDone := make(chan struct{})
+	go func() {
+		server.stream(limited, limitedRequest, store.Session{IDHash: "session-c", UserID: "user-c"})
+		close(limitedDone)
+	}()
+	select {
+	case <-limitedDone:
+	case <-time.After(time.Second):
+		limitedCancel()
+		t.Fatal("global SSE limit did not refuse a new stream")
+	}
+	limitedCancel()
+	if limited.status != http.StatusServiceUnavailable || limited.header.Get("Retry-After") != "5" {
+		t.Fatalf("global SSE limit response = status %d retry-after %q", limited.status, limited.header.Get("Retry-After"))
+	}
+	cancelA()
+	cancelB()
+	select {
+	case <-doneA:
+	case <-time.After(time.Second):
+		t.Fatal("first SSE stream did not close")
+	}
+	select {
+	case <-doneB:
+	case <-time.After(time.Second):
+		t.Fatal("second SSE stream did not close")
+	}
+
+	server.sseMaxSubscribers = 10
+	server.sseMaxSubscribersPerUser = 2
+	cancelOne, doneOne := startTestSSEStream(server, store.Session{IDHash: "same-session", UserID: "user"})
+	cancelTwo, doneTwo := startTestSSEStream(server, store.Session{IDHash: "same-session", UserID: "user"})
+	waitForSSESubscribers(t, server, 2)
+	perSession := &deadlineTrackingWriter{header: make(http.Header)}
+	perSessionCtx, perSessionCancel := context.WithCancel(context.Background())
+	perSessionRequest := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(perSessionCtx)
+	perSessionDone := make(chan struct{})
+	go func() {
+		server.stream(perSession, perSessionRequest, store.Session{IDHash: "same-session", UserID: "user"})
+		close(perSessionDone)
+	}()
+	select {
+	case <-perSessionDone:
+	case <-time.After(time.Second):
+		perSessionCancel()
+		t.Fatal("per-session SSE limit did not refuse a new stream")
+	}
+	perSessionCancel()
+	if perSession.status != http.StatusServiceUnavailable || perSession.header.Get("Retry-After") != "5" {
+		t.Fatalf("per-session SSE limit response = status %d retry-after %q", perSession.status, perSession.header.Get("Retry-After"))
+	}
+	cancelOne()
+	cancelTwo()
+	select {
+	case <-doneOne:
+	case <-time.After(time.Second):
+		t.Fatal("per-session first stream did not close")
+	}
+	select {
+	case <-doneTwo:
+	case <-time.After(time.Second):
+		t.Fatal("per-session second stream did not close")
 	}
 }
 
@@ -201,7 +306,7 @@ func TestServeListenerWaitsForGracefulShutdown(t *testing.T) {
 }
 
 func TestServerStaticSSEAndAuditHelpers(t *testing.T) {
-	server, _, _ := newUsersTestServer(t)
+	server, _, session := newUsersTestServer(t)
 	server.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	if err := server.ListenAndServe(context.Background(), "not-a-listener"); err == nil {
 		t.Fatal("invalid listener address was accepted")
@@ -214,7 +319,7 @@ func TestServerStaticSSEAndAuditHelpers(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(ctx)
 	request.Header.Set("Last-Event-ID", "1")
 	streamResponse := httptest.NewRecorder()
-	server.stream(streamResponse, request)
+	server.stream(streamResponse, request, session)
 	if streamResponse.Code != http.StatusOK || streamResponse.Header().Get("Content-Type") != "text/event-stream" || !bytes.Contains(streamResponse.Body.Bytes(), []byte("second")) {
 		t.Fatalf("stream response = %d %s %q", streamResponse.Code, streamResponse.Header().Get("Content-Type"), streamResponse.Body.String())
 	}

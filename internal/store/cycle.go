@@ -360,11 +360,12 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 
 	var added []scanner.WorkUnit
 	factor := boolFactor(plan.Job.TCP.ServiceDetection)
+	addressBatchSize := scanner.NmapAddressBatchLimit(plan.Job.TCP.EnrichmentArgs)
 	for _, key := range groupKeys {
 		group := groups[key]
 		sort.Strings(group.addresses)
-		for addressStart := 0; addressStart < len(group.addresses); addressStart += 128 {
-			addressEnd := addressStart + 128
+		for addressStart := 0; addressStart < len(group.addresses); addressStart += addressBatchSize {
+			addressEnd := addressStart + addressBatchSize
 			if addressEnd > len(group.addresses) {
 				addressEnd = len(group.addresses)
 			}

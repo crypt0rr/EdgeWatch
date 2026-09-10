@@ -144,6 +144,31 @@ func TestPlanNaabuSeparatesAddressFamilies(t *testing.T) {
 	}
 }
 
+func TestPlanUsesSingleAddressBatchesForSingularProfilePlaceholder(t *testing.T) {
+	n := New("nmap")
+	n.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("192.0.2.1"), net.ParseIP("192.0.2.2")}}
+	job := config.NormalizeJob(config.Job{
+		Name: "singular-profile", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"profile.example"}, MaxExpandedHosts: 2,
+		TCP: &config.Protocol{Ports: "1-2", Mode: "connect", NmapArgs: []string{config.PlaceholderAddress, config.PlaceholderPorts, config.PlaceholderStructuredOutput}},
+	})
+	plan, err := n.Plan(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Units) != 2 {
+		t.Fatalf("planned units = %d, want one per address: %#v", len(plan.Units), plan.Units)
+	}
+	for _, unit := range plan.Units {
+		if len(unit.Addresses) != 1 || unit.Probes != 2 {
+			t.Fatalf("singular profile unit = %#v", unit)
+		}
+	}
+	if plan.TotalProbes != 4 || plan.TotalUnits != 2 {
+		t.Fatalf("plan totals = probes %d units %d, want 4/2", plan.TotalProbes, plan.TotalUnits)
+	}
+}
+
 func TestSplitNaabuUnitNeverSplitsFullPortScope(t *testing.T) {
 	unit := WorkUnit{Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535}
 	if first, second, ok := SplitWorkUnit(unit); ok || first.Sequence != 0 || second.Sequence != 0 {

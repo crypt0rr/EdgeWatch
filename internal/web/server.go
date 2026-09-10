@@ -61,6 +61,11 @@ type Server struct {
 	telemetryAt   time.Time
 	telemetryRun  bool
 	telemetryDone chan struct{}
+	// writeTimeout bounds ordinary HTTP responses. SSE clears this deadline
+	// explicitly in stream because that endpoint is intentionally long-lived.
+	// It is configurable only for deterministic server tests; production uses
+	// the default below.
+	writeTimeout time.Duration
 }
 
 type sseMessage struct {
@@ -72,6 +77,8 @@ type pendingTOTP struct {
 	Secret  string
 	Expires time.Time
 }
+
+const defaultHTTPWriteTimeout = 60 * time.Second
 
 // pendingTOTPMaxEntries bounds secrets held for enrolments that were started
 // but never completed. The enrolment window is short, so a large ceiling keeps
@@ -157,9 +164,14 @@ func (s *Server) ListenAndServe(ctx context.Context, address string) error {
 // database owner from closing while handlers or SSE subscribers are still
 // draining.
 func (s *Server) serveListener(ctx context.Context, listener net.Listener, address string, handler http.Handler) error {
-	// WriteTimeout must stay disabled for the SSE endpoint; its heartbeat keeps
-	// the connection alive and individual API writes are small and bounded.
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10}
+	writeTimeout := s.writeTimeout
+	if writeTimeout <= 0 {
+		writeTimeout = defaultHTTPWriteTimeout
+	}
+	// Ordinary handlers get a generous write deadline so a peer that stops
+	// reading cannot pin a goroutine indefinitely. The SSE handler clears this
+	// deadline with ResponseController before it starts its long-lived stream.
+	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: writeTimeout, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10}
 	serveDone := make(chan struct{})
 	shutdownDone := make(chan struct{})
 	var shutdownOnce sync.Once
@@ -2584,6 +2596,11 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, "stream_unsupported", "streaming is unavailable", nil)
 		return
 	}
+	// http.Server.WriteTimeout protects every ordinary response. SSE is the
+	// one intentional exception: it stays open and sends periodic heartbeats,
+	// so remove the per-request deadline only after the handler has established
+	// that the writer supports streaming.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")

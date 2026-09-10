@@ -158,7 +158,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/", s.api)
 	mux.HandleFunc("/assets/", s.asset)
 	mux.HandleFunc("/", s.spa)
-	return securityHeaders(mux)
+	return s.requestLogging(securityHeaders(mux))
 }
 
 func (s *Server) ListenAndServe(ctx context.Context, address string) error {
@@ -187,7 +187,7 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener, addre
 	// Ordinary handlers get a generous write deadline so a peer that stops
 	// reading cannot pin a goroutine indefinitely. The SSE handler clears this
 	// deadline with ResponseController before it starts its long-lived stream.
-	server := &http.Server{Handler: handler, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: writeTimeout, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10}
+	server := &http.Server{Handler: handler, ErrorLog: slog.NewLogLogger(s.Log.Handler(), slog.LevelError), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: writeTimeout, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10}
 	serveDone := make(chan struct{})
 	shutdownDone := make(chan struct{})
 	var shutdownOnce sync.Once

@@ -23,6 +23,11 @@ scheduler:
   # expansion limit (about 16.8M probes) with headroom.
   max_naabu_probe_count: 20000000
 
+# Structured daemon logs are emitted as JSON. Use debug while diagnosing a
+# request, or warn/error to reduce routine output. The default is info.
+log:
+  level: info
+
 # EdgeWatch uses host networking for scanner reachability. By default it
 # refuses loopback and link-local targets, including cloud metadata addresses.
 # Set target_exclusions: [] only when an administrator has deliberately

@@ -32,6 +32,13 @@ const (
 	SessionTTL    = 30 * 24 * time.Hour
 	IdleTTL       = 24 * time.Hour
 
+	// Argon2id parameters are kept in one place so newly-created passwords
+	// and the login-time upgrade path always agree on the current work factor.
+	argon2Memory     uint32 = 19 * 1024
+	argon2Iterations uint32 = 2
+	argon2Threads    uint32 = 1
+	argon2KeyLength  uint32 = 32
+
 	authFailureWindow    = 5 * time.Minute
 	authFailureThreshold = 5
 	// Account and token buckets remain deliberately strict. The source bucket
@@ -298,28 +305,45 @@ func PasswordHash(password string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	const memory, iterations, threads, keyLen = 19 * 1024, 2, 1, 32
-	key := argon2.IDKey([]byte(password), salt, iterations, memory, threads, keyLen)
+	key := argon2.IDKey([]byte(password), salt, argon2Iterations, argon2Memory, uint8(argon2Threads), argon2KeyLength)
 	b64 := base64.RawStdEncoding
-	return fmt.Sprintf("$ew$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", memory, iterations, threads, b64.EncodeToString(salt), b64.EncodeToString(key)), nil
+	return fmt.Sprintf("$ew$argon2id$v=19$m=%d,t=%d,p=%d$%s$%s", argon2Memory, argon2Iterations, argon2Threads, b64.EncodeToString(salt), b64.EncodeToString(key)), nil
 }
 
-func VerifyPassword(encoded, password string) bool {
+func passwordHashParameters(encoded string) (memory, iterations, threads uint32, salt, expected []byte, ok bool) {
 	parts := strings.Split(encoded, "$")
 	if len(parts) != 7 || parts[1] != "ew" || parts[2] != "argon2id" || parts[3] != "v=19" {
-		return false
+		return 0, 0, 0, nil, nil, false
 	}
-	var memory, iterations, threads uint32
 	if _, err := fmt.Sscanf(parts[4], "m=%d,t=%d,p=%d", &memory, &iterations, &threads); err != nil || memory < 8*threads || memory > 1024*1024 || iterations == 0 || iterations > 10 || threads == 0 || threads > 32 {
-		return false
+		return 0, 0, 0, nil, nil, false
 	}
 	salt, err1 := base64.RawStdEncoding.DecodeString(parts[5])
 	expected, err2 := base64.RawStdEncoding.DecodeString(parts[6])
 	if err1 != nil || err2 != nil || len(salt) < 8 || len(expected) == 0 {
+		return 0, 0, 0, nil, nil, false
+	}
+	return memory, iterations, threads, salt, expected, true
+}
+
+func VerifyPassword(encoded, password string) bool {
+	memory, iterations, threads, salt, expected, ok := passwordHashParameters(encoded)
+	if !ok {
 		return false
 	}
 	actual := argon2.IDKey([]byte(password), salt, iterations, memory, uint8(threads), uint32(len(expected)))
 	return hmac.Equal(actual, expected)
+}
+
+// passwordHashNeedsRehash reports whether a valid hash uses a weaker Argon2id
+// work factor than the current policy. A malformed hash is not considered an
+// upgrade candidate because VerifyPassword will reject it first.
+func passwordHashNeedsRehash(encoded string) bool {
+	memory, iterations, threads, _, expected, ok := passwordHashParameters(encoded)
+	if !ok {
+		return false
+	}
+	return memory < argon2Memory || iterations < argon2Iterations || threads < argon2Threads || uint32(len(expected)) < argon2KeyLength
 }
 
 func (m *Manager) Setup(ctx context.Context, token, password string) error {
@@ -453,6 +477,16 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			return "", user, errors.New("one-time code is required")
 		}
 	}
+	// Successful logins are an opportunity to move hashes created with an
+	// older, weaker Argon2id policy to the current parameters. Keep the login
+	// successful if a legacy password does not meet today's minimum length; the
+	// account can still be changed through the normal password-management flow.
+	upgradedHash := ""
+	if passwordHashNeedsRehash(user.PasswordHash) {
+		if candidate, hashErr := PasswordHash(password); hashErr == nil {
+			upgradedHash = candidate
+		}
+	}
 	sessionRaw, err := randomBytes(32)
 	if err != nil {
 		return "", user, err
@@ -468,10 +502,18 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	if user.Role == store.RoleAdministrator {
 		action = "admin.login"
 	}
-	if err := m.Store.CreateSessionForUserWithAuditEntry(ctx, user.ID, digest(session), csrf, now, now.Add(SessionTTL), store.AuditEntry{Action: action, Detail: "successful login", ActorUserID: user.ID, ActorUsername: user.Username, SourceIP: m.ClientIP(request)}); err != nil {
+	audit := store.AuditEntry{Action: action, Detail: "successful login", ActorUserID: user.ID, ActorUsername: user.Username, SourceIP: m.ClientIP(request)}
+	if upgradedHash != "" {
+		if err := m.Store.CreateSessionForUserWithPasswordUpgrade(ctx, user.ID, user.PasswordHash, upgradedHash, digest(session), csrf, now, now.Add(SessionTTL), audit); err != nil {
+			return "", user, err
+		}
+		user.PasswordHash = upgradedHash
+	} else if err := m.Store.CreateSessionForUserWithAuditEntry(ctx, user.ID, digest(session), csrf, now, now.Add(SessionTTL), audit); err != nil {
 		return "", user, err
 	}
-	_ = m.Store.SetUserLastLogin(ctx, user.ID, now)
+	if upgradedHash == "" {
+		_ = m.Store.SetUserLastLogin(ctx, user.ID, now)
+	}
 	m.clearScoped(source, account, "")
 	return session, user, nil
 }

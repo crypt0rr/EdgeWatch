@@ -4,7 +4,7 @@ const adminPermissions = [
   'overview.read', 'jobs.read', 'jobs.write', 'jobs.run', 'jobs.delete',
   'hosts.read', 'scans.read', 'baselines.read', 'baselines.manage',
   'incidents.read', 'incidents.manage', 'notification_options.read',
-  'notifications.read', 'notifications.manage', 'users.manage', 'audit.read',
+  'notifications.manage', 'users.manage',
   'public_dashboard.manage', 'stream.read', 'scanner_profiles.read',
   'scanner_profiles.manage',
 ]

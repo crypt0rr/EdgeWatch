@@ -59,6 +59,7 @@ func run(args []string) error {
 	fs := flag.NewFlagSet(cmd, flag.ContinueOnError)
 	configPath := fs.String("config", "/etc/edgewatch/config.yaml", "configuration file")
 	output := fs.String("output", "text", "text or json")
+	outPath := fs.String("out", "", "output file for backup or baseline export")
 	jobName := fs.String("job", "", "job name")
 	scanID := fs.String("scan-id", "", "scan ID")
 	limit := fs.Int("limit", 50, "history limit")
@@ -73,7 +74,7 @@ func run(args []string) error {
 		return usage()
 	}
 	loadConfig := config.Load
-	if cmd == "admin" {
+	if cmd == "admin" || cmd == "backup" || cmd == "verify" || (cmd == "baseline" && action == "export") {
 		// Host recovery must not depend on monitor-only configuration such as
 		// Shoutrrr destinations, encryption keys, listener settings, or legacy
 		// YAML job semantics.
@@ -99,8 +100,8 @@ func run(args []string) error {
 	}
 	logger := newLogger(cfg.LogLevel())
 	var application *app.App
-	switch cmd {
-	case "daemon", "scan", "baseline", "notify":
+	needApplication := cmd == "daemon" || cmd == "scan" || cmd == "notify" || (cmd == "baseline" && action != "export")
+	if needApplication {
 		application, err = app.New(cfg, s, *nmapPath, logger)
 		if err != nil {
 			return err
@@ -138,12 +139,22 @@ func run(args []string) error {
 		}
 		return printValue(*output, map[string]any{"scans": scans, "events": events})
 	case "baseline":
+		if action == "export" {
+			return exportBaseline(ctx, s, *jobName, *outPath, *output)
+		}
 		return baseline(ctx, action, s, application, *jobName, *scanID, *output)
 	case "notify":
 		if action != "test" {
 			return errors.New("expected: notify test")
 		}
 		return application.Notifier.Test()
+	case "backup":
+		if *outPath == "" {
+			return errors.New("--out is required")
+		}
+		return backup(ctx, s, *outPath, *output)
+	case "verify":
+		return verify(ctx, s, *output)
 	case "health":
 		return s.Healthy(ctx)
 	default:
@@ -153,7 +164,7 @@ func run(args []string) error {
 
 func usage() error {
 	fmt.Fprintln(os.Stderr, `Usage: edgewatch <command> [options]
-	Commands: daemon, config validate, scan, status, history, baseline approve|reset, notify test, admin setup-token|reset-password|disable-totp, health, version
+	Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, backup, verify, notify test, admin setup-token|reset-password|disable-totp, health, version
 	Admin recovery actions accept --username (default admin) and require host access.`)
 	return errors.New("invalid or missing command")
 }

@@ -463,9 +463,19 @@ func baseline(ctx context.Context, action string, s *store.Store, a *app.App, jo
 			if scan.JobID != record.ID || scan.ConfigHash != record.Job.SecurityHash() {
 				return errors.New("scan does not match the current managed job")
 			}
-			events, err = s.ApproveRuntimeWithOutbox(ctx, record.ID, record.Job.Name, scan, destinations)
+			events, err = s.ApproveRuntimeWithOutboxAndAudit(ctx, record.ID, record.Job.Name, scan, destinations, store.AuditEntry{
+				Action:        "baseline.approved",
+				Detail:        record.ID + ":" + scan.ID,
+				ActorUserID:   store.LegacyAdminUserID,
+				ActorUsername: "host-cli",
+			})
 		case "reset":
-			events, err = s.ResetRuntimeWithOutbox(ctx, record.ID, record.Job.Name, destinations)
+			events, err = s.ResetRuntimeWithOutboxAndAudit(ctx, record.ID, record.Job.Name, destinations, store.AuditEntry{
+				Action:        "baseline.reset",
+				Detail:        record.ID,
+				ActorUserID:   store.LegacyAdminUserID,
+				ActorUsername: "host-cli",
+			})
 		default:
 			return errors.New("expected: baseline approve|reset")
 		}

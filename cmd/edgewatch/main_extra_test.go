@@ -189,6 +189,18 @@ func TestRunStatusHistoryAndBaselineForManagedJob(t *testing.T) {
 	if err := run([]string{"baseline", "approve", "--config", configPath, "--job", "managed", "--scan-id", scan.ID}); err != nil {
 		t.Fatalf("baseline approval: %v", err)
 	}
+	s, err = store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var audits int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE action IN ('baseline.reset','baseline.approved') AND actor_username='host-cli'`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 2 {
+		t.Fatalf("CLI baseline audit rows = %d, want two", audits)
+	}
 }
 
 func TestAdminActionRequiresExplicitSetupTokenConfirmation(t *testing.T) {

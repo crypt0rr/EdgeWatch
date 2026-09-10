@@ -8,7 +8,9 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"os"
 	"os/exec"
 	"sort"
 	"strconv"
@@ -51,9 +53,10 @@ type Progress struct {
 	CompletedInvocations int64
 	TotalInvocations     int64
 	Phase                string
-	// The remaining fields describe liveness inside one Nmap process. They are
-	// intentionally advisory: Nmap may not emit a percentage for every scan,
-	// but the heartbeat and last output still prove that the process is alive.
+	// The remaining fields describe liveness inside one Nmap process. Nmap's
+	// taskprogress records are parsed from its XML output when available; the
+	// heartbeat and last output still prove that the process is alive when a
+	// scanner version does not emit progress records.
 	Protocol               string
 	CurrentInvocation      int64
 	TotalBatches           int64
@@ -841,12 +844,22 @@ func sanitizeStderr(v string) string {
 	return v
 }
 
-// runNmapInvocation keeps XML on stdout while consuming Nmap's human status
-// channel concurrently. A ticker is intentionally part of this helper: some
-// Nmap versions only print --stats-every output for interactive terminals, but
-// the process heartbeat still gives the console truthful liveness information.
+// runNmapInvocation keeps XML available to the parser while consuming Nmap's
+// human status channel and XML taskprogress records concurrently. Nmap flushes
+// periodic taskprogress records when XML is written to a file, but some
+// versions buffer the same records when XML is sent to a pipe. Rewrite the
+// internal stdout destination to a private temporary file so progress is
+// observable without sacrificing the existing stdout fallback used by test
+// scanners and older integrations.
 func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string, float64), onHeartbeat func()) ([]byte, string, error) {
 	stdout := &cappedBuffer{limit: maxNmapOutput}
+	xmlPath, err := prepareNmapXMLOutput(cmd)
+	if err != nil {
+		return nil, "", err
+	}
+	if xmlPath != "" {
+		defer func() { _ = os.Remove(xmlPath) }()
+	}
 	var callbackMu sync.Mutex
 	emitOutput := func(line string, fraction float64) {
 		if onOutput == nil {
@@ -878,31 +891,52 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 		return nil, "", err
 	}
 
-	heartbeatStop := make(chan struct{})
-	heartbeatDone := make(chan struct{})
+	progressStop := make(chan struct{})
+	progressDone := make(chan struct{})
+	progressParser := &nmapXMLProgressParser{}
 	go func() {
-		defer close(heartbeatDone)
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
+		defer close(progressDone)
+		heartbeatTicker := time.NewTicker(time.Second)
+		defer heartbeatTicker.Stop()
+		progressTicker := time.NewTicker(200 * time.Millisecond)
+		defer progressTicker.Stop()
+		poll := func() {
+			if xmlPath == "" {
+				return
+			}
+			_ = pollNmapXMLProgress(xmlPath, progressParser, emitOutput)
+		}
+		poll()
 		for {
 			select {
-			case <-ticker.C:
+			case <-progressTicker.C:
+				poll()
+			case <-heartbeatTicker.C:
 				emitHeartbeat()
 			case <-ctx.Done():
 				return
-			case <-heartbeatStop:
+			case <-progressStop:
 				return
 			}
 		}
 	}()
 
 	waitErr := cmd.Wait()
-	close(heartbeatStop)
+	close(progressStop)
 	stderr.Flush()
-	// The heartbeat goroutine may have observed the stop signal just before the
+	// The progress goroutine may have observed the stop signal just before the
 	// command exited. Waiting for its completion prevents callbacks after the
-	// invocation's terminal update.
-	<-heartbeatDone
+	// invocation's terminal update, then one final poll captures records flushed
+	// as the child exited.
+	<-progressDone
+	if xmlPath != "" {
+		_ = pollNmapXMLProgress(xmlPath, progressParser, emitOutput)
+		if data, exceeded, readErr := readCappedFile(xmlPath, maxNmapOutput); readErr == nil && len(data) > 0 {
+			stdout.Reset()
+			_, _ = stdout.Write(data)
+			stdout.exceeded = exceeded
+		}
+	}
 	if stderr.exceeded {
 		if waitErr != nil {
 			return stdout.Bytes(), stderr.String(), fmt.Errorf("%w; nmap diagnostic output exceeded %d bytes", waitErr, maxProgressOutput)
@@ -916,6 +950,152 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 		return stdout.Bytes(), stderr.String(), fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput)
 	}
 	return stdout.Bytes(), stderr.String(), waitErrWithContext(ctx, waitErr)
+}
+
+// prepareNmapXMLOutput redirects the internal "-oX -" destination emitted by
+// EdgeWatch's validated templates to a private file. User-defined argument
+// arrays cannot provide alternate output destinations, so rewriting this
+// exact pair cannot broaden the scanner's command surface.
+func prepareNmapXMLOutput(cmd *exec.Cmd) (string, error) {
+	for index := 0; index+1 < len(cmd.Args); index++ {
+		if cmd.Args[index] != "-oX" || cmd.Args[index+1] != "-" {
+			continue
+		}
+		file, err := os.CreateTemp("", "edgewatch-nmap-*.xml")
+		if err != nil {
+			return "", fmt.Errorf("create nmap progress file: %w", err)
+		}
+		path := file.Name()
+		if err := file.Close(); err != nil {
+			_ = os.Remove(path)
+			return "", fmt.Errorf("prepare nmap progress file: %w", err)
+		}
+		cmd.Args[index+1] = path
+		return path, nil
+	}
+	return "", nil
+}
+
+// readCappedFile reads a scanner result without allowing a malformed child to
+// bypass the same XML memory bound used for stdout results.
+func readCappedFile(path string, limit int) ([]byte, bool, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	buffer := &cappedBuffer{limit: limit}
+	chunk := make([]byte, 32*1024)
+	for {
+		count, readErr := file.Read(chunk)
+		if count > 0 {
+			_, _ = buffer.Write(chunk[:count])
+			if buffer.exceeded {
+				return buffer.Bytes(), true, nil
+			}
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				break
+			}
+			return nil, false, readErr
+		}
+	}
+	return buffer.Bytes(), false, nil
+}
+
+type nmapTaskProgress struct {
+	Task    string  `xml:"task,attr"`
+	Percent float64 `xml:"percent,attr"`
+}
+
+// nmapXMLProgressParser extracts self-closing taskprogress elements from an
+// XML document that is still being written. It deliberately does not attempt
+// to unmarshal the incomplete document; the complete document is parsed only
+// after the child exits.
+type nmapXMLProgressParser struct {
+	pending string
+	offset  int64
+}
+
+func (p *nmapXMLProgressParser) feed(data []byte, emit func(string, float64)) {
+	if len(data) == 0 {
+		return
+	}
+	p.pending += string(data)
+	for {
+		start := strings.Index(p.pending, "<taskprogress")
+		if start < 0 {
+			// Keep a short suffix in case the next read completes a split tag.
+			if len(p.pending) > 64 {
+				p.pending = p.pending[len(p.pending)-64:]
+			}
+			return
+		}
+		if start > 0 {
+			p.pending = p.pending[start:]
+		}
+		end := strings.Index(p.pending, "/>")
+		endLength := 2
+		if end < 0 {
+			end = strings.IndexByte(p.pending, '>')
+			endLength = 1
+		}
+		if end < 0 {
+			if len(p.pending) > 4096 {
+				p.pending = p.pending[len(p.pending)-4096:]
+			}
+			return
+		}
+		fragment := p.pending[:end+endLength]
+		p.pending = p.pending[end+endLength:]
+		var progress nmapTaskProgress
+		if err := xml.Unmarshal([]byte(fragment), &progress); err != nil {
+			continue
+		}
+		if progress.Percent < 0 {
+			progress.Percent = 0
+		}
+		if progress.Percent > 100 {
+			progress.Percent = 100
+		}
+		if emit != nil {
+			task := strings.TrimSpace(progress.Task)
+			line := fmt.Sprintf("Nmap %s: %.2f%% complete", task, progress.Percent)
+			if task == "" {
+				line = fmt.Sprintf("Nmap progress: %.2f%% complete", progress.Percent)
+			}
+			emit(line, progress.Percent/100)
+		}
+	}
+}
+
+func pollNmapXMLProgress(path string, parser *nmapXMLProgressParser, emit func(string, float64)) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() < parser.offset {
+		// The child may have reopened/truncated its output. Start parsing the
+		// new document rather than carrying fragments across scan generations.
+		parser.offset = 0
+		parser.pending = ""
+	}
+	if _, err := file.Seek(parser.offset, io.SeekStart); err != nil {
+		return err
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return err
+	}
+	parser.offset += int64(len(data))
+	parser.feed(data, emit)
+	return nil
 }
 
 // progressOutputWriter lets os/exec own the pipe-copy lifecycle while still

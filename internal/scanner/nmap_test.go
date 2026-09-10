@@ -333,3 +333,54 @@ func TestScanWithProgressReportsLiveProcessHeartbeatAndNmapOutput(t *testing.T) 
 		t.Fatalf("live progress updates missing: live=%v output=%v fraction=%v complete=%v updates=%#v", foundLive, foundOutput, foundFraction, foundComplete, updates)
 	}
 }
+
+func TestScanWithProgressReportsXMLTaskProgress(t *testing.T) {
+	dir := t.TempDir()
+	nmapPath := filepath.Join(dir, "nmap")
+	prefix := `<?xml version="1.0"?><nmaprun><taskprogress task="Connect Scan" percent="37.50"/>`
+	suffix := `<host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/></host><runstats><finished exit="success"/></runstats></nmaprun>`
+	script := "#!/bin/sh\nout=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-oX\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\nprintf '%s' '" + prefix + "' > \"$out\"\nsleep 1\nprintf '%s' '" + suffix + "' >> \"$out\"\n"
+	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := New(nmapPath)
+	job := config.NormalizeJob(config.Job{
+		Name: "xml-progress", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		TCP: &config.Protocol{Ports: "22", Mode: "connect"}, Timing: "balanced",
+	})
+	var updates []Progress
+	if _, err := n.ScanWithProgress(context.Background(), job, func(progress Progress) { updates = append(updates, progress) }); err != nil {
+		t.Fatal(err)
+	}
+	foundFraction, foundOutput := false, false
+	for _, update := range updates {
+		if update.ProcessAlive && update.ProcessProgressPercent == 37 {
+			foundFraction = true
+		}
+		if strings.Contains(update.LastOutput, "Nmap Connect Scan: 37.50% complete") {
+			foundOutput = true
+		}
+	}
+	if !foundFraction || !foundOutput {
+		t.Fatalf("XML task progress missing: fraction=%v output=%v updates=%#v", foundFraction, foundOutput, updates)
+	}
+}
+
+func TestNmapXMLProgressParserHandlesSplitRecords(t *testing.T) {
+	parser := &nmapXMLProgressParser{}
+	var got []struct {
+		line     string
+		fraction float64
+	}
+	emit := func(line string, fraction float64) {
+		got = append(got, struct {
+			line     string
+			fraction float64
+		}{line: line, fraction: fraction})
+	}
+	parser.feed([]byte(`<nmaprun><taskprogress task="Connect`), emit)
+	parser.feed([]byte(` Scan" percent="125.0"/></nmaprun>`), emit)
+	if len(got) != 1 || got[0].fraction != 1 || !strings.Contains(got[0].line, "100.00%") {
+		t.Fatalf("split XML progress = %#v", got)
+	}
+}

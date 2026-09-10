@@ -21,6 +21,7 @@ type userUpdatePayload struct {
 	DisplayName *string `json:"display_name"`
 	Role        *string `json:"role"`
 	Enabled     *bool   `json:"enabled"`
+	Revision    *int64  `json:"revision"`
 }
 
 func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session store.Session, rest string) {
@@ -172,6 +173,16 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 	if !decodeJSON(w, r, &input) {
 		return
 	}
+	if input.Revision != nil {
+		if *input.Revision < 1 {
+			writeError(w, http.StatusBadRequest, "validation_failed", "revision must be positive", map[string]string{"revision": "revision must be positive"})
+			return
+		}
+		if *input.Revision != user.Revision {
+			writeError(w, http.StatusConflict, "conflict", "user was modified; reload and try again", nil)
+			return
+		}
+	}
 	if input.DisplayName != nil {
 		name, validationErr := validateDisplayName(*input.DisplayName)
 		if validationErr != nil {
@@ -208,6 +219,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 			writeError(w, http.StatusBadRequest, "last_admin", "EdgeWatch must keep one enabled administrator", nil)
 			return
 		}
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "conflict", "user was modified; reload and try again", nil)
+			return
+		}
 		if isUnique(err) {
 			writeError(w, http.StatusConflict, "conflict", "username is already in use", nil)
 			return
@@ -215,6 +230,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 		writeError(w, http.StatusBadRequest, "save_failed", err.Error(), nil)
 		return
 	}
+	user.Revision++
 	writeJSON(w, http.StatusOK, user.Summary())
 }
 

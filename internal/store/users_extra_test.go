@@ -33,6 +33,9 @@ func TestUserStoreProfilesSecurityAndSessions(t *testing.T) {
 	if err != nil || loaded.ID != operator.ID {
 		t.Fatalf("case-insensitive user lookup = %#v, %v", loaded, err)
 	}
+	if loaded.Revision != 1 {
+		t.Fatalf("new user revision = %d, want 1", loaded.Revision)
+	}
 	if _, err := s.GetUser(ctx, "missing-user"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing user error = %v", err)
 	}
@@ -75,6 +78,10 @@ func TestUserStoreProfilesSecurityAndSessions(t *testing.T) {
 		t.Fatalf("enabled administrator count = %d, %v", count, err)
 	}
 	if err := s.DeleteUserSessionsWithAudit(ctx, operator.ID, AuditEntry{Action: "user.sessions_revoked"}); err != nil {
+		t.Fatal(err)
+	}
+	operator, err = s.GetUser(ctx, operator.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SaveUserSecurity(ctx, operator, nil, true, false, AuditEntry{}); err != nil {

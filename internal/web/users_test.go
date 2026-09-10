@@ -110,6 +110,10 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), `"role":"viewer"`) {
 		t.Fatalf("update response = %d: %s", updated.Code, updated.Body.String())
 	}
+	stale := request(http.MethodPatch, "/"+operatorID, `{"display_name":"Stale update","revision":1}`)
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), "modified") {
+		t.Fatalf("stale update response = %d: %s", stale.Code, stale.Body.String())
+	}
 	reset := request(http.MethodPost, "/"+operatorID+"/password-reset", "{}")
 	if reset.Code != http.StatusOK {
 		t.Fatalf("password reset issue status = %d: %s", reset.Code, reset.Body.String())

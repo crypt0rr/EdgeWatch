@@ -45,6 +45,10 @@ type Admin struct {
 	// unavailable, so unrelated admin updates do not overwrite it.
 	TOTPSecretStored string
 	TOTPSecretError  error
+	// Revision mirrors the authoritative users row for the legacy administrator
+	// identity. It lets compatibility admin writers participate in the same
+	// optimistic-concurrency guard as multi-user updates.
+	Revision int64
 }
 
 type Session struct {
@@ -85,6 +89,9 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	a.TOTPEnabled = totp != 0
 	a.CreatedAt, a.UpdatedAt = scanTime(created), scanTime(updated)
 	a.TOTPSecretStored = stored
+	// The legacy admins table predates optimistic concurrency. The users row is
+	// authoritative after migration 12, so mirror its revision when available.
+	_ = s.DB.QueryRowContext(ctx, `SELECT revision FROM users WHERE id=?`, LegacyAdminUserID).Scan(&a.Revision)
 	secret, migrate, secretErr := s.openTOTPSecretForOwner(LegacyAdminUserID, stored)
 	if secretErr != nil {
 		a.TOTPSecretError = secretErr
@@ -157,7 +164,21 @@ func saveAdminExec(ctx context.Context, execer contextExecer, a Admin, stored st
 	if _, err = execer.ExecContext(ctx, `INSERT OR IGNORE INTO users(id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, LegacyAdminUserID, a.Username, adminDisplayName(a), RoleAdministrator, a.PasswordHash, stored, boolInt(a.TOTPEnabled), 1, a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano), ""); err != nil {
 		return err
 	}
-	_, err = execer.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,password_hash=?,totp_secret=?,totp_enabled=?,updated_at=? WHERE id=?`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.UpdatedAt.UTC().Format(time.RFC3339Nano), LegacyAdminUserID)
+	expectedRevision := a.Revision
+	if expectedRevision > 0 {
+		result, updateErr := execer.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,password_hash=?,totp_secret=?,totp_enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND revision=?`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.UpdatedAt.UTC().Format(time.RFC3339Nano), LegacyAdminUserID, expectedRevision)
+		if updateErr != nil {
+			return updateErr
+		}
+		if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
+			if affectedErr != nil {
+				return affectedErr
+			}
+			return ErrConflict
+		}
+		return nil
+	}
+	_, err = execer.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,password_hash=?,totp_secret=?,totp_enabled=?,updated_at=?,revision=revision+1 WHERE id=?`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.UpdatedAt.UTC().Format(time.RFC3339Nano), LegacyAdminUserID)
 	return err
 }
 
@@ -435,7 +456,7 @@ func (s *Store) CreateSessionForUserWithPasswordUpgrade(ctx context.Context, use
 	defer tx.Rollback()
 
 	stamp := created.UTC().Format(time.RFC3339Nano)
-	result, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,last_login_at=?,updated_at=? WHERE id=? AND password_hash=?`, upgradedHash, stamp, stamp, userID, previousHash)
+	result, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,last_login_at=?,updated_at=?,revision=revision+1 WHERE id=? AND password_hash=?`, upgradedHash, stamp, stamp, userID, previousHash)
 	if err != nil {
 		return err
 	}

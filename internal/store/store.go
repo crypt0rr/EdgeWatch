@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 22
+const schemaVersion = 23
 
 // sqlitePragmaConnector applies connection-scoped SQLite settings whenever
 // database/sql opens a physical connection. database/sql can discard a
@@ -839,6 +839,28 @@ END;`,
  updated_at TEXT NOT NULL
 );`,
 			"CREATE INDEX IF NOT EXISTS fts_backfill_state_complete ON fts_backfill_state(complete,table_name)",
+		},
+		23: {
+			// User mutations are optimistic-concurrency guarded just like jobs,
+			// notifications, and scanner profiles. Keep the additive migration
+			// restart-safe for recovery fixtures that may have a schema marker but
+			// not yet have the users table.
+			`CREATE TABLE IF NOT EXISTS users (
+ id TEXT PRIMARY KEY,
+ username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+ display_name TEXT NOT NULL,
+ role TEXT NOT NULL CHECK(role IN ('administrator','operator','viewer')),
+ password_hash TEXT NOT NULL,
+ totp_secret TEXT NOT NULL DEFAULT '',
+ totp_enabled INTEGER NOT NULL DEFAULT 0,
+ enabled INTEGER NOT NULL DEFAULT 1,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ last_login_at TEXT NOT NULL DEFAULT '',
+ revision INTEGER NOT NULL DEFAULT 1
+);`,
+			"ALTER TABLE users ADD COLUMN revision INTEGER NOT NULL DEFAULT 1",
+			"UPDATE users SET revision=1 WHERE revision IS NULL OR revision < 1",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {

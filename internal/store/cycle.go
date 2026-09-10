@@ -993,6 +993,11 @@ func (s *Store) CompleteScanCycle(ctx context.Context, cycleID string) (ScanCycl
 	if completed != total {
 		return ScanCycleRecord{}, fmt.Errorf("%w: %d of %d units completed", ErrCycleIncomplete, completed, total)
 	}
+	// Keep the completed unit payloads until the merged scan is promoted. The
+	// promotion is a separate transaction, and retaining this short-lived
+	// recovery source means a process crash between these operations cannot lose
+	// a completed cycle. SaveScan/FinalizeManagedScan reclaim the payloads after
+	// the immutable scan and its indexes are committed.
 	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET status='completed',updated_at=?,finished_at=?,last_error='' WHERE id=? AND status='running'`, now, now, cycleID); err != nil {
 		return ScanCycleRecord{}, err
 	}

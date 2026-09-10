@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -28,7 +29,7 @@ const (
 	// set can still produce a large response, so cap one invocation before it
 	// can exhaust the daemon's memory. The scan fails safely when the cap is
 	// reached and can be resumed from the previous completed unit.
-	maxNaabuOutput = 64 << 20
+	maxNaabuOutput = 16 << 20
 )
 
 type naabuResult struct {
@@ -201,7 +202,7 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 		}
 	}
 	if job.TCP == nil {
-		return n.scanUDPAfterNaabu(ctx, job, targets, snapshot, started, report)
+		return n.scanUDPAfterNaabu(ctx, job, targets, snapshot, started, 0, 0, report)
 	}
 	for _, target := range targets {
 		snapshot.Scopes = append(snapshot.Scopes, model.Scope{Target: target.Name, Protocol: "tcp", Ports: naabuFullPortExpression, ServiceDetection: job.TCP.ServiceDetection})
@@ -225,7 +226,8 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 	// Discovery is the expensive full-range phase. Its progress is reported in
 	// exact probe units, while Naabu's stderr remains sanitized and advisory.
 	discoveryTotal := int64(len(addresses)) * 65535
-	progress := Progress{StartedAt: started, Phase: "tcp discovery", Protocol: "tcp", TotalProbes: discoveryTotal, TotalInvocations: int64((len(addresses) + batchSize - 1) / batchSize)}
+	discoveryInvocations := int64((len(addresses) + batchSize - 1) / batchSize)
+	progress := Progress{StartedAt: started, Phase: "tcp discovery", Protocol: "tcp", TotalProbes: discoveryTotal, TotalInvocations: discoveryInvocations}
 	reportProgress(report, progress)
 	discovered := map[string]map[int]bool{}
 	discoveryHosts := map[string]model.HostObservation{}
@@ -459,7 +461,7 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 	}
 	snapshot.Hosts = mapHosts(discoveryHosts)
 	if job.UDP != nil {
-		return n.scanUDPAfterNaabu(ctx, job, targets, snapshot, started, report)
+		return n.scanUDPAfterNaabu(ctx, job, targets, snapshot, started, discoveryTotal, discoveryInvocations, report)
 	}
 	snapshot.Normalize()
 	if report != nil {
@@ -522,7 +524,7 @@ func materializeNaabuDiscoveryHosts(targets []resolvedTarget, addresses []string
 	return hosts
 }
 
-func (n *Nmap) scanUDPAfterNaabu(ctx context.Context, job config.Job, targets []resolvedTarget, snapshot model.Snapshot, started time.Time, report ProgressReporter) (model.Snapshot, error) {
+func (n *Nmap) scanUDPAfterNaabu(ctx context.Context, job config.Job, targets []resolvedTarget, snapshot model.Snapshot, started time.Time, priorProbes, priorInvocations int64, report ProgressReporter) (model.Snapshot, error) {
 	if job.UDP == nil {
 		snapshot.Normalize()
 		return snapshot, nil
@@ -530,11 +532,24 @@ func (n *Nmap) scanUDPAfterNaabu(ctx context.Context, job config.Job, targets []
 	for _, target := range targets {
 		snapshot.Scopes = append(snapshot.Scopes, model.Scope{Target: target.Name, Protocol: "udp", Ports: job.UDP.Ports, ServiceDetection: job.UDP.ServiceDetection})
 	}
+	udpProbes, udpInvocations := progressTotals(targets, config.Job{UDP: job.UDP})
+	totalProbes := priorProbes + udpProbes
+	totalInvocations := priorInvocations + udpInvocations
+	completedUDP := int64(0)
 	result, err := n.scanProtocolBatchDetailedProgress(ctx, targets, "udp", *job.UDP, job.Timing, job.AssumesAlive(), nil, func(update invocationProgress) {
 		if report == nil {
 			return
 		}
-		reportProgress(report, Progress{StartedAt: started, Phase: "udp scanning", Protocol: "udp", LastOutput: update.Output, ProcessAlive: update.Alive, ProcessProgressPercent: int(update.Fraction * 100), UnitPorts: job.UDP.Ports})
+		if update.BatchProbes > 0 {
+			candidate := (update.Invocation-1)*update.BatchProbes + int64(float64(update.BatchProbes)*update.Fraction)
+			if candidate > completedUDP {
+				completedUDP = candidate
+			}
+		}
+		if completedUDP > udpProbes {
+			completedUDP = udpProbes
+		}
+		reportProgress(report, Progress{StartedAt: started, Phase: "udp scanning", Protocol: "udp", TotalProbes: totalProbes, CompletedProbes: priorProbes + completedUDP, TotalInvocations: totalInvocations, CompletedInvocations: priorInvocations, CurrentInvocation: priorInvocations + update.Invocation, LastOutput: update.Output, ProcessAlive: update.Alive, ProcessProgressPercent: int(update.Fraction * 100), UnitPorts: job.UDP.Ports})
 	})
 	if err != nil {
 		// Keep a successful TCP phase (and any partial UDP host evidence) in the
@@ -548,7 +563,7 @@ func (n *Nmap) scanUDPAfterNaabu(ctx context.Context, job config.Job, targets []
 	mergeHostObservations(&snapshot.Hosts, result.Hosts)
 	snapshot.Normalize()
 	if report != nil {
-		reportProgress(report, Progress{StartedAt: started, Phase: "complete", CompletedProbes: 1, TotalProbes: 1})
+		reportProgress(report, Progress{StartedAt: started, Phase: "complete", Protocol: "udp", TotalProbes: totalProbes, CompletedProbes: totalProbes, TotalInvocations: totalInvocations, CompletedInvocations: totalInvocations, UnitPorts: job.UDP.Ports})
 	}
 	return snapshot, nil
 }
@@ -592,8 +607,16 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	// execution deterministic and prevents an image or host-local config from
 	// enabling cloud, proxy, resolver, or output behavior behind the UI's back.
 	cmd.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent"}
-	var stdout cappedBuffer
-	stdout.limit = maxNaabuOutput
+	var outputExceeded atomic.Bool
+	killOnOutputLimit := func() {
+		if outputExceeded.CompareAndSwap(false, true) && cmd.Process != nil {
+			// Stop the child as soon as either output channel reaches its cap.
+			// Returning an error only after Wait would leave a malformed scanner
+			// free to consume CPU and fill the container's temporary filesystem.
+			_ = cmd.Process.Kill()
+		}
+	}
+	stdout := cappedBuffer{limit: maxNaabuOutput, onExceeded: killOnOutputLimit}
 	var status func(invocationProgress)
 	if len(statusReports) > 0 {
 		status = statusReports[0]
@@ -615,7 +638,7 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 		statusMu.Unlock()
 		status(update)
 	}
-	stderr := &progressOutputWriter{limit: maxProgressOutput, emit: func(line string) {
+	stderr := &progressOutputWriter{limit: maxProgressOutput, onExceeded: killOnOutputLimit, emit: func(line string) {
 		emitStatus(invocationProgress{Output: line, Alive: true})
 	}}
 	cmd.Stdout = &stdout
@@ -658,7 +681,7 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 		return nil, stderr.String(), fmt.Errorf("naabu diagnostic output exceeded %d bytes", maxProgressOutput)
 	}
 	if stdout.exceeded {
-		return nil, stderr.String(), errors.New("naabu output exceeded 64 MiB")
+		return nil, stderr.String(), fmt.Errorf("naabu JSON output exceeded %d bytes", maxNaabuOutput)
 	}
 	if waitErr != nil {
 		return nil, stderr.String(), waitErrWithContext(ctx, waitErr)
@@ -783,17 +806,26 @@ func parseNaabuJSON(data []byte) ([]naabuResult, error) {
 
 type cappedBuffer struct {
 	bytes.Buffer
-	limit    int
-	exceeded bool
+	limit      int
+	exceeded   bool
+	onExceeded func()
+	exceedOnce sync.Once
 }
 
 func (b *cappedBuffer) Write(data []byte) (int, error) {
+	trigger := false
 	if b.limit > 0 && b.Len()+len(data) > b.limit {
 		remaining := b.limit - b.Len()
 		if remaining > 0 {
 			_, _ = b.Buffer.Write(data[:remaining])
 		}
+		if !b.exceeded {
+			trigger = true
+		}
 		b.exceeded = true
+		if trigger && b.onExceeded != nil {
+			b.exceedOnce.Do(b.onExceeded)
+		}
 		return len(data), errors.New("output limit exceeded")
 	}
 	return b.Buffer.Write(data)

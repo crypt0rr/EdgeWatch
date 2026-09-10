@@ -949,6 +949,20 @@ func netSplitHostPort(v string) (string, string, error) {
 }
 
 func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (store.Session, bool) {
+	return m.authenticate(ctx, r, true)
+}
+
+// AuthenticateReadOnly validates a session without refreshing its idle
+// timestamp. Long-lived SSE connections use this path for heartbeats and
+// event delivery so a quiet stream does not turn every update into a SQLite
+// writer operation. The initial HTTP request still authenticates normally;
+// an active stream therefore expires with the same idle policy as any other
+// session when there is no ordinary browser activity.
+func (m *Manager) AuthenticateReadOnly(ctx context.Context, r *http.Request) (store.Session, bool) {
+	return m.authenticate(ctx, r, false)
+}
+
+func (m *Manager) authenticate(ctx context.Context, r *http.Request, touch bool) (store.Session, bool) {
 	cookie, err := r.Cookie(SessionCookie)
 	if err != nil || cookie.Value == "" {
 		return store.Session{}, false
@@ -972,7 +986,9 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (store.Sess
 	// Keep the trusted-browser lifetime absolute from the original login. The
 	// idle timestamp is refreshed on activity, but an active browser cannot
 	// extend a session beyond its 30-day expiry.
-	_ = m.Store.TouchSession(ctx, session.IDHash, now, session.ExpiresAt)
+	if touch {
+		_ = m.Store.TouchSession(ctx, session.IDHash, now, session.ExpiresAt)
+	}
 	session.Username, session.DisplayName, session.Role = user.Username, user.DisplayName, user.Role
 	session.SourceIP = m.ClientIP(r)
 	return session, true

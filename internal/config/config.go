@@ -1284,32 +1284,72 @@ func PortContains(raw string, port int) bool {
 	if raw == "" {
 		return false
 	}
+	if port < 1 || port > 65535 {
+		return false
+	}
+	// Scan the expression in place. Unlike ParsePorts this hot-path helper does
+	// not split or expand a range, so checking a broad expression remains
+	// allocation-free even when called once per positive port. Delimiters are
+	// validated strictly so malformed expressions (for example a trailing
+	// comma) cannot accidentally match a port.
+	const whitespace = " \t\r\n"
+	index := 0
 	matched := false
-	for _, item := range strings.Split(raw, ",") {
-		item = strings.TrimSpace(item)
-		parts := strings.Split(item, "-")
-		if len(parts) > 2 || len(parts) == 0 {
+	for {
+		for index < len(raw) && strings.ContainsRune(whitespace, rune(raw[index])) {
+			index++
+		}
+		if index >= len(raw) || raw[index] == ',' {
 			return false
 		}
-		start, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-		if err != nil {
+		parse := func() (int, bool) {
+			for index < len(raw) && strings.ContainsRune(whitespace, rune(raw[index])) {
+				index++
+			}
+			value := 0
+			digits := 0
+			for index < len(raw) && raw[index] >= '0' && raw[index] <= '9' {
+				value = value*10 + int(raw[index]-'0')
+				if value > 65535 {
+					return 0, false
+				}
+				index++
+				digits++
+			}
+			return value, digits > 0
+		}
+		from, ok := parse()
+		if !ok {
 			return false
 		}
-		end := start
-		if len(parts) == 2 {
-			end, err = strconv.Atoi(strings.TrimSpace(parts[1]))
-			if err != nil {
+		for index < len(raw) && strings.ContainsRune(whitespace, rune(raw[index])) {
+			index++
+		}
+		to := from
+		if index < len(raw) && raw[index] == '-' {
+			index++
+			to, ok = parse()
+			if !ok {
 				return false
 			}
 		}
-		if start < 1 || end > 65535 || end < start {
+		for index < len(raw) && strings.ContainsRune(whitespace, rune(raw[index])) {
+			index++
+		}
+		if from < 1 || to < from {
 			return false
 		}
-		if port >= start && port <= end {
+		if port >= from && port <= to {
 			matched = true
 		}
+		if index >= len(raw) {
+			return matched
+		}
+		if raw[index] != ',' {
+			return false
+		}
+		index++
 	}
-	return matched
 }
 
 func (j Job) RunsOnStart() bool { return j.RunOnStart != nil && *j.RunOnStart }

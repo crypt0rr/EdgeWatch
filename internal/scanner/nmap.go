@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -42,7 +43,10 @@ const maxProgressOutput = 4 << 20
 // Nmap output is normally compact even for a 65,535-port scope because only
 // positive ports are emitted individually; extraports state summaries cover
 // the remainder. A pathological or compromised child is failed safely.
-const maxNmapOutput = 64 << 20
+// Compose gives the container a 32 MiB /tmp tmpfs. Keep the XML cap below
+// that limit and terminate a child while it is writing, rather than waiting
+// for a full tmpfs or allocating an oversized result in memory.
+const maxNmapOutput = 16 << 20
 
 // Progress describes the bounded, operator-facing work completed by a scan.
 // Counts are based on resolved addresses and ports, and are deliberately
@@ -369,29 +373,41 @@ func progressTotals(targets []resolvedTarget, job config.Job) (probes, invocatio
 		if item.Protocol.Ports == "" {
 			continue
 		}
-		ports, err := config.ParsePorts(item.Protocol.Ports)
-		if err != nil {
-			continue
+		var template []string
+		if item.protocol == "tcp" {
+			template = item.NmapArgs
 		}
-		factor := int64(1)
-		if item.ServiceDetection {
-			factor = 2
-		}
-		byFamily := map[int]map[string]struct{}{4: {}, 6: {}}
-		for _, target := range targets {
-			for _, address := range target.Addresses {
-				family := 4
-				if strings.Contains(address, ":") {
-					family = 6
-				}
-				byFamily[family][address] = struct{}{}
+		protocolProbes, protocolInvocations := protocolProgressTotals(targets, item.Protocol, template)
+		probes += protocolProbes
+		invocations += protocolInvocations
+	}
+	return probes, invocations
+}
+
+func protocolProgressTotals(targets []resolvedTarget, protocol config.Protocol, template []string) (probes, invocations int64) {
+	ports, err := config.ParsePorts(protocol.Ports)
+	if err != nil {
+		return 0, 0
+	}
+	factor := int64(1)
+	if protocol.ServiceDetection {
+		factor = 2
+	}
+	byFamily := map[int]map[string]struct{}{4: {}, 6: {}}
+	for _, target := range targets {
+		for _, address := range target.Addresses {
+			family := 4
+			if strings.Contains(address, ":") {
+				family = 6
 			}
+			byFamily[family][address] = struct{}{}
 		}
-		for _, addresses := range byFamily {
-			count := int64(len(addresses))
-			invocations += int64((len(addresses) + nmapBatchSize - 1) / nmapBatchSize)
-			probes += count * int64(len(ports)) * factor
-		}
+	}
+	batchLimit := NmapAddressBatchLimit(template)
+	for _, addresses := range byFamily {
+		count := int64(len(addresses))
+		invocations += int64((len(addresses) + batchLimit - 1) / batchLimit)
+		probes += count * int64(len(ports)) * factor
 	}
 	return probes, invocations
 }
@@ -964,7 +980,6 @@ func sanitizeStderr(v string) string {
 // observable without sacrificing the existing stdout fallback used by test
 // scanners and older integrations.
 func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string, float64), onHeartbeat func()) ([]byte, string, error) {
-	stdout := &cappedBuffer{limit: maxNmapOutput}
 	xmlPath, err := prepareNmapXMLOutput(cmd)
 	if err != nil {
 		return nil, "", err
@@ -993,7 +1008,14 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 		defer callbackMu.Unlock()
 		onHeartbeat()
 	}
-	stderr := &progressOutputWriter{limit: maxProgressOutput, emit: func(line string) {
+	var outputExceeded atomic.Bool
+	killOnOutputLimit := func() {
+		if outputExceeded.CompareAndSwap(false, true) && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}
+	stdout := &cappedBuffer{limit: maxNmapOutput, onExceeded: killOnOutputLimit}
+	stderr := &progressOutputWriter{limit: maxProgressOutput, onExceeded: killOnOutputLimit, emit: func(line string) {
 		fraction, _ := parseNmapProgress(line)
 		emitOutput(line, fraction)
 	}}
@@ -1014,6 +1036,15 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 		defer progressTicker.Stop()
 		poll := func() {
 			if xmlPath == "" {
+				return
+			}
+			if exceeded, err := nmapXMLOutputExceeded(xmlPath, maxNmapOutput); err == nil && exceeded {
+				if outputExceeded.CompareAndSwap(false, true) && cmd.Process != nil {
+					// Stop the child before it can fill the container's tmpfs. The
+					// terminal path below reports a stable size-limit error rather
+					// than exposing a platform-specific ENOSPC message.
+					_ = cmd.Process.Kill()
+				}
 				return
 			}
 			_ = pollNmapXMLProgress(xmlPath, progressParser, emitOutput)
@@ -1042,12 +1073,18 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 	// as the child exited.
 	<-progressDone
 	if xmlPath != "" {
+		if exceeded, err := nmapXMLOutputExceeded(xmlPath, maxNmapOutput); err == nil && exceeded {
+			outputExceeded.Store(true)
+		}
 		_ = pollNmapXMLProgress(xmlPath, progressParser, emitOutput)
 		if data, exceeded, readErr := readCappedFile(xmlPath, maxNmapOutput); readErr == nil && len(data) > 0 {
 			stdout.Reset()
 			_, _ = stdout.Write(data)
 			stdout.exceeded = exceeded
 		}
+	}
+	if outputExceeded.Load() {
+		stdout.exceeded = true
 	}
 	if stderr.exceeded {
 		if waitErr != nil {
@@ -1062,6 +1099,17 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 		return stdout.Bytes(), stderr.String(), fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput)
 	}
 	return stdout.Bytes(), stderr.String(), waitErrWithContext(ctx, waitErr)
+}
+
+func nmapXMLOutputExceeded(path string, limit int) (bool, error) {
+	if limit <= 0 {
+		return false, nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false, err
+	}
+	return info.Size() > int64(limit), nil
 }
 
 // prepareNmapXMLOutput redirects the internal "-oX -" destination emitted by
@@ -1215,24 +1263,33 @@ func pollNmapXMLProgress(path string, parser *nmapXMLProgressParser, emit func(s
 // Stderr writers instead of StdoutPipe/StderrPipe avoids a race where Wait
 // closes a pipe at the same moment a reader goroutine observes its EOF.
 type progressOutputWriter struct {
-	mu       sync.Mutex
-	all      strings.Builder
-	pending  strings.Builder
-	limit    int
-	exceeded bool
-	emit     func(string)
+	mu         sync.Mutex
+	all        strings.Builder
+	pending    strings.Builder
+	limit      int
+	exceeded   bool
+	onExceeded func()
+	exceedOnce sync.Once
+	emit       func(string)
 }
 
 func (w *progressOutputWriter) Write(data []byte) (int, error) {
+	trigger := false
 	w.mu.Lock()
 	accepted := data
 	if w.limit > 0 {
 		remaining := w.limit - w.all.Len()
 		if remaining <= 0 {
 			accepted = nil
+			if !w.exceeded {
+				trigger = true
+			}
 			w.exceeded = true
 		} else if len(accepted) > remaining {
 			accepted = accepted[:remaining]
+			if !w.exceeded {
+				trigger = true
+			}
 			w.exceeded = true
 		}
 	}
@@ -1250,6 +1307,9 @@ func (w *progressOutputWriter) Write(data []byte) (int, error) {
 		lines = lines[:len(lines)-1]
 	}
 	w.mu.Unlock()
+	if trigger && w.onExceeded != nil {
+		w.exceedOnce.Do(w.onExceeded)
+	}
 	for _, line := range lines {
 		if w.emit != nil {
 			w.emit(line)
@@ -1918,6 +1978,15 @@ func verificationRank(value string) int {
 
 func aggregate(target resolvedTarget, units map[string]model.Unit, protocol string) model.Unit {
 	out := model.Unit{Target: target.Name, Protocol: protocol, Addresses: append([]string(nil), target.Addresses...)}
+	// A resolved target can share addresses with another logical target. Keep
+	// aggregation scoped to this target's effective address set so a unit
+	// produced for a sibling DNS/CIDR target cannot leak a port into this
+	// logical baseline. The map is intentionally built once per aggregation,
+	// not once per port.
+	allowed := make(map[string]struct{}, len(target.Addresses))
+	for _, address := range target.Addresses {
+		allowed[address] = struct{}{}
+	}
 	type combined struct {
 		state    string
 		evidence map[string]bool
@@ -1925,6 +1994,9 @@ func aggregate(target resolvedTarget, units map[string]model.Unit, protocol stri
 	}
 	ports := map[int]*combined{}
 	for address, unit := range units {
+		if _, ok := allowed[address]; !ok {
+			continue
+		}
 		for _, p := range unit.Ports {
 			c := ports[p.Port]
 			if c == nil {

@@ -84,6 +84,16 @@ func OpenExisting(path string) (*Store, error) {
 	return openWithOptions(path, openOptions{requireExisting: true})
 }
 
+// OpenExistingContext is the context-aware variant used by long-running data
+// commands. The regular OpenExisting helper is retained for library callers
+// that do not have a request context.
+func OpenExistingContext(ctx context.Context, path string) (*Store, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return openWithOptionsContext(ctx, path, openOptions{requireExisting: true})
+}
+
 // OpenReadOnlyExisting opens an existing database using SQLite's query-only
 // mode. It never creates files, changes journal mode, repairs permissions, or
 // runs migrations, making it safe for health, verification, and export reads.
@@ -100,6 +110,10 @@ type openOptions struct {
 }
 
 func openWithOptions(path string, options openOptions) (*Store, error) {
+	return openWithOptionsContext(context.Background(), path, options)
+}
+
+func openWithOptionsContext(ctx context.Context, path string, options openOptions) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("database path is empty")
 	}
@@ -143,6 +157,13 @@ func openWithOptions(path string, options openOptions) (*Store, error) {
 				return nil, err
 			}
 		}
+		// Query-only commands must open SQLite in read-only mode before any
+		// connection setup runs. PRAGMA query_only is still applied by the
+		// connector as a defence in depth, but it cannot prevent SQLite from
+		// creating a journal or sidecar while opening a writable DSN.
+		if options.queryOnly {
+			dsn = readOnlySQLiteDSN(artifactPath)
+		}
 	}
 	connector, err := sqlite.NewConnector(dsn)
 	if err != nil {
@@ -168,7 +189,7 @@ func openWithOptions(path string, options openOptions) (*Store, error) {
 		}
 	}
 	if options.migrate {
-		if err := migrate(db); err != nil {
+		if err := migrateContext(ctx, db); err != nil {
 			db.Close()
 			return nil, err
 		}
@@ -210,6 +231,14 @@ func openWithOptions(path string, options openOptions) (*Store, error) {
 		}
 	}
 	return &Store{DB: db, ReadDB: readDB, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true}, nil
+}
+
+// readOnlySQLiteDSN builds a file URI with SQLite's mode=ro flag from the
+// already validated artifact path. Reconstructing the URI avoids inheriting
+// a caller-supplied mode=rwc (or other write-oriented options) while still
+// escaping spaces and other URI-sensitive path characters correctly.
+func readOnlySQLiteDSN(artifactPath string) string {
+	return (&url.URL{Scheme: "file", Path: artifactPath, RawQuery: "mode=ro"}).String()
 }
 
 // SetTargetExclusions installs the deployment-wide scanner target policy. It

@@ -115,7 +115,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 			if s.Auth == nil {
 				return
 			}
-			current, authorized := s.Auth.Authenticate(r.Context(), r)
+			current, authorized := s.Auth.AuthenticateReadOnly(r.Context(), r)
 			if !authorized || !auth.HasPermission(current, auth.PermissionStreamRead) {
 				return
 			}
@@ -127,7 +127,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 			if s.Auth == nil {
 				return
 			}
-			current, authorized := s.Auth.Authenticate(r.Context(), r)
+			current, authorized := s.Auth.AuthenticateReadOnly(r.Context(), r)
 			if !authorized || !auth.HasPermission(current, auth.PermissionStreamRead) {
 				return
 			}
@@ -198,9 +198,29 @@ func boundedSSEPayload(value map[string]any) []byte {
 func (s *Server) replayLocked(lastID uint64) []sseMessage {
 	if lastID > s.nextEventID {
 		payload, _ := json.Marshal(map[string]any{"type": "refresh_required", "after": lastID, "reason": "event_history_restarted"})
-		return []sseMessage{{id: s.nextEventID, payload: payload}}
+		// Keep the retry marker strictly newer than the client's cursor. This
+		// matters when a client reconnects with an ID from a previous process
+		// lifetime or from a non-durable invalidation event.
+		markerID := lastID
+		if markerID < ^uint64(0) {
+			markerID++
+		}
+		if markerID > s.nextEventID {
+			s.nextEventID = markerID
+		}
+		return []sseMessage{{id: markerID, payload: payload}}
 	}
-	if lastID == 0 || len(s.history) == 0 {
+	if lastID == 0 {
+		return nil
+	}
+	if len(s.history) == 0 {
+		// There is no in-memory replay window after a restart. If durable event
+		// IDs show that the browser is behind, force a cache refresh instead of
+		// silently leaving it on stale data.
+		if lastID < s.nextEventID {
+			payload, _ := json.Marshal(map[string]any{"type": "refresh_required", "after": lastID, "reason": "event_history_restarted"})
+			return []sseMessage{{id: s.nextEventID, payload: payload}}
+		}
 		return nil
 	}
 	oldest := s.history[0].id

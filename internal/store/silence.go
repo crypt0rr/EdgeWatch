@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -61,6 +62,20 @@ func (s *Store) RecordJobSilenceAlert(ctx context.Context, jobID, job string, cr
 	if err := queueEventsTx(ctx, tx, []model.Event{bounded}, destinations); err != nil {
 		return model.Event{}, false, err
 	}
+	// Advance the durable watchdog state together with the event/outbox. The
+	// next alert is exponentially backed off so a permanently broken schedule
+	// cannot generate a notification on every heartbeat while still recovering
+	// automatically after a successful scan.
+	level := decision.backoffLevel + 1
+	if level > maxSilenceBackoffLevel {
+		level = maxSilenceBackoffLevel
+	}
+	nextAlert := now.Add(silenceRepeatDelay(threshold, level)).Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO job_silence_state(job_id,eligible_at,backoff_level,next_alert_at,last_success_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET backoff_level=excluded.backoff_level,next_alert_at=excluded.next_alert_at,updated_at=excluded.updated_at`, jobID, createdAt.Format(time.RFC3339Nano), level, nextAlert, "", now.Format(time.RFC3339Nano)); err != nil {
+		if !isMissingSilenceState(err) {
+			return model.Event{}, false, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return model.Event{}, false, err
 	}
@@ -82,6 +97,11 @@ func (s *Store) JobSilenceDue(ctx context.Context, jobID string, createdAt, now 
 type jobSilenceDecision struct {
 	due           bool
 	lastReference time.Time
+	backoffLevel  int
+}
+
+func isMissingSilenceState(err error) bool {
+	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no such table")
 }
 
 func jobSilenceDecisionTx(ctx context.Context, tx *sql.Tx, jobID string, createdAt, now time.Time, threshold time.Duration) (jobSilenceDecision, error) {
@@ -95,6 +115,15 @@ func jobSilenceDecisionQuery(ctx context.Context, queryer rowQueryer, jobID stri
 	now = now.UTC()
 	createdAt = createdAt.UTC()
 	lastReference := createdAt
+	var eligible, nextAlert, lastSuccess string
+	var backoff int
+	stateErr := queryer.QueryRowContext(ctx, `SELECT eligible_at,next_alert_at,last_success_at,backoff_level FROM job_silence_state WHERE job_id=?`, jobID).Scan(&eligible, &nextAlert, &lastSuccess, &backoff)
+	if stateErr != nil && !errors.Is(stateErr, sql.ErrNoRows) && !strings.Contains(strings.ToLower(stateErr.Error()), "no such table") {
+		return jobSilenceDecision{}, stateErr
+	}
+	if parsed := scanTime(eligible); !parsed.IsZero() && !parsed.After(now) && parsed.After(lastReference) {
+		lastReference = parsed
+	}
 	var finished string
 	err := queryer.QueryRowContext(ctx, `SELECT finished_at FROM scans WHERE job_id=? AND status='success' ORDER BY finished_at DESC,id DESC LIMIT 1`, jobID).Scan(&finished)
 	if err == nil {
@@ -104,7 +133,13 @@ func jobSilenceDecisionQuery(ctx context.Context, queryer rowQueryer, jobID stri
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return jobSilenceDecision{}, err
 	}
+	if parsed := scanTime(lastSuccess); !parsed.IsZero() && parsed.After(lastReference) {
+		lastReference = parsed
+	}
 	if lastReference.IsZero() || now.Sub(lastReference) < threshold {
+		return jobSilenceDecision{}, nil
+	}
+	if parsed := scanTime(nextAlert); !parsed.IsZero() && now.Before(parsed) {
 		return jobSilenceDecision{}, nil
 	}
 
@@ -118,9 +153,11 @@ func jobSilenceDecisionQuery(ctx context.Context, queryer rowQueryer, jobID stri
 		return jobSilenceDecision{}, nil
 	}
 
-	// Use the schedule interval as the deduplication window. If the daemon is
-	// restarted or its heartbeat fires repeatedly, one warning is retained per
-	// window while the job remains silent.
+	if stateErr == nil {
+		return jobSilenceDecision{due: true, lastReference: lastReference, backoffLevel: backoff}, nil
+	}
+	// Databases from before migration 27 retain event-based deduplication until
+	// a lifecycle write materializes the state row.
 	var alerted string
 	err = queryer.QueryRowContext(ctx, `SELECT created_at FROM events WHERE type='job-silent' AND job_id=? ORDER BY created_at DESC,id DESC LIMIT 1`, jobID).Scan(&alerted)
 	if err == nil {
@@ -130,7 +167,32 @@ func jobSilenceDecisionQuery(ctx context.Context, queryer rowQueryer, jobID stri
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return jobSilenceDecision{}, err
 	}
-	return jobSilenceDecision{due: true, lastReference: lastReference}, nil
+	return jobSilenceDecision{due: true, lastReference: lastReference, backoffLevel: backoff}, nil
+}
+
+const maxSilenceBackoffLevel = 8
+
+func silenceRepeatDelay(threshold time.Duration, level int) time.Duration {
+	if threshold <= 0 {
+		return time.Hour
+	}
+	if level < 0 {
+		level = 0
+	}
+	if level > maxSilenceBackoffLevel {
+		level = maxSilenceBackoffLevel
+	}
+	delay := threshold
+	for i := 0; i < level; i++ {
+		if delay >= 15*24*time.Hour {
+			return 30 * 24 * time.Hour
+		}
+		delay *= 2
+	}
+	if delay > 30*24*time.Hour {
+		return 30 * 24 * time.Hour
+	}
+	return delay
 }
 
 func humanSilenceDuration(value time.Duration) string {

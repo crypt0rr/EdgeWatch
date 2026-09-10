@@ -679,6 +679,43 @@ func (s *Store) ListScanCycleUnitSummaries(ctx context.Context, cycleID string) 
 	return out, rows.Err()
 }
 
+// ListScanCycleUnitSummariesPage returns a bounded progress page. Cycle plans
+// can contain one unit per address/port batch, so exposing the entire list in
+// one response lets a broad scan turn a status request into an unbounded read.
+// Keep the legacy unpaged method above for internal callers and compatibility,
+// while the HTTP endpoint uses this bounded projection.
+func (s *Store) ListScanCycleUnitSummariesPage(ctx context.Context, cycleID string, limit, offset int) (Page[ScanCycleUnitSummary], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[ScanCycleUnitSummary]
+	readDB := s.reader()
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycle_units WHERE cycle_id=?`, cycleID).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	rows, err := readDB.QueryContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? ORDER BY sequence LIMIT ? OFFSET ?`, cycleID, limit, offset)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item ScanCycleUnitSummary
+		var raw []byte
+		var started, finished string
+		if err := rows.Scan(&item.CycleID, &item.Sequence, &raw, &item.Status, &item.Attempts, &started, &finished, &item.LastError); err != nil {
+			return page, err
+		}
+		var unit scanner.WorkUnit
+		if err := json.Unmarshal(raw, &unit); err != nil {
+			return page, err
+		}
+		item.Engine, item.Phase = unit.Engine, unit.Phase
+		item.Protocol, item.Family, item.Ports, item.PortCount, item.Addresses, item.Probes = unit.Protocol, unit.Family, unit.Ports, unit.PortCount, len(unit.Addresses), unit.Probes
+		item.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
+		item.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)
+		page.Items = append(page.Items, item)
+	}
+	return page, rows.Err()
+}
+
 // StartScanCycleAttempt resets a unit left running by a process crash and
 // atomically marks the cycle running for this attempt.
 func (s *Store) StartScanCycleAttempt(ctx context.Context, id string) (ScanCycleRecord, error) {

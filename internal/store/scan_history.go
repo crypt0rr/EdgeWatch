@@ -191,60 +191,6 @@ func hostSearchContent(job string, host model.HostObservation) string {
 	return strings.TrimSpace(builder.String())
 }
 
-func backfillHostSearchTextTx(tx *sql.Tx) error {
-	type hostRow struct {
-		rowID int64
-		job   string
-		addr  string
-		raw   []byte
-	}
-	load := func(query string) ([]hostRow, error) {
-		rows, err := tx.Query(query)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		var out []hostRow
-		for rows.Next() {
-			var row hostRow
-			if err := rows.Scan(&row.rowID, &row.job, &row.addr, &row.raw); err != nil {
-				return nil, err
-			}
-			out = append(out, row)
-		}
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
-		return out, nil
-	}
-	backfill := func(table string, rows []hostRow) error {
-		for _, row := range rows {
-			var host model.HostObservation
-			if len(row.raw) > 0 {
-				_ = json.Unmarshal(row.raw, &host)
-			}
-			host.Address = row.addr
-			searchText := hostSearchContent(row.job, host)
-			if _, err := tx.Exec(`UPDATE `+table+` SET search_text=? WHERE rowid=?`, searchText, row.rowID); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	scanRows, err := load(`SELECT rowid,job,address,host_json FROM scan_hosts`)
-	if err != nil {
-		return err
-	}
-	if err := backfill("scan_hosts", scanRows); err != nil {
-		return err
-	}
-	latestRows, err := load(`SELECT rowid,job,address,host_json FROM latest_scan_hosts`)
-	if err != nil {
-		return err
-	}
-	return backfill("latest_scan_hosts", latestRows)
-}
-
 // upsertLatestScanHostExec maintains the exact latest successful observation
 // for one effective address. The finished-at/id ordering mirrors the historical
 // ranking query, including deterministic ties between scans with equal times.
@@ -428,6 +374,39 @@ func (s *Store) ListLatestScanHostsPage(ctx context.Context, query, protocol str
 		page.Items = append(page.Items, LatestScanHost{ScanHost: ScanHost{ScanID: scanID, DataQuality: dataQuality, Host: item.Host}, JobID: jobID.String, Job: job, Archived: archived != 0, ScannedAt: parsed})
 	}
 	return page, rows.Err()
+}
+
+// ListLatestScanHosts returns the complete maintained projection. It is used
+// only when a database still contains legacy successful snapshots that cannot
+// be represented by latest_scan_hosts; the normal Hosts endpoint stays on the
+// filtered, paginated query above.
+func (s *Store) ListLatestScanHosts(ctx context.Context) ([]LatestScanHost, error) {
+	const pageSize = 1000
+	var result []LatestScanHost
+	for offset := 0; ; offset += pageSize {
+		page, err := s.ListLatestScanHostsPage(ctx, "", "", nil, pageSize, offset)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, page.Items...)
+		if len(page.Items) == 0 || offset+len(page.Items) >= page.Total {
+			return result, nil
+		}
+	}
+}
+
+// LegacySuccessfulScanExists reports whether at least one successful scan has
+// no derived host index. Such rows are expected in databases upgraded from a
+// release predating scan_hosts and require the bounded compatibility merge in
+// the global Hosts endpoint.
+func (s *Store) LegacySuccessfulScanExists(ctx context.Context) (bool, error) {
+	var exists bool
+	err := s.reader().QueryRowContext(ctx, `SELECT EXISTS(
+SELECT 1 FROM scans s
+WHERE s.status='success'
+  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
+)`).Scan(&exists)
+	return exists, err
 }
 
 func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {

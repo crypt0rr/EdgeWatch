@@ -465,7 +465,8 @@ func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, id string) {
 	// The plan contains the immutable job and target expansion needed to
 	// explain progress, but it is intentionally returned without raw scanner
 	// arguments or completed snapshot fragments.
-	units, unitsErr := s.Store.ListScanCycleUnitSummaries(r.Context(), cycle.ID)
+	limit, offset := queryLimit(r), queryOffset(r)
+	unitsPage, unitsErr := s.Store.ListScanCycleUnitSummariesPage(r.Context(), cycle.ID, limit, offset)
 	if unitsErr != nil {
 		writeError(w, http.StatusInternalServerError, "store", unitsErr.Error(), nil)
 		return
@@ -477,7 +478,8 @@ func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, id string) {
 		"completed_units": cycle.CompletedUnits, "total_probes": cycle.TotalProbes,
 		"completed_probes": cycle.CompletedProbes, "started_at": cycle.StartedAt,
 		"updated_at": cycle.UpdatedAt, "expires_at": cycle.ExpiresAt,
-		"finished_at": cycle.FinishedAt, "last_error": cycle.LastError, "units": units,
+		"finished_at": cycle.FinishedAt, "last_error": cycle.LastError,
+		"units": unitsPage.Items, "units_pagination": paginationJSON(offset, limit, unitsPage.Total),
 	}})
 }
 

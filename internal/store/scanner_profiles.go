@@ -63,7 +63,10 @@ type ScannerProfileList struct {
 }
 
 func ensureBuiltinScannerProfiles(db *sql.DB) error {
-	ctx := context.Background()
+	return ensureBuiltinScannerProfilesContext(context.Background(), db)
+}
+
+func ensureBuiltinScannerProfilesContext(ctx context.Context, db *sql.DB) error {
 	definitions := []struct {
 		id, name string
 		value    config.ScannerProfile

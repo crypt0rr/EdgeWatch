@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -35,9 +36,13 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 26
+const schemaVersion = 28
 
 func migrate(db *sql.DB) error {
+	return migrateContext(context.Background(), db)
+}
+
+func migrateContext(ctx context.Context, db *sql.DB) error {
 	var version int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
@@ -608,6 +613,7 @@ END;`,
 			`CREATE TABLE IF NOT EXISTS fts_backfill_state (
  table_name TEXT PRIMARY KEY,
  last_rowid INTEGER NOT NULL DEFAULT 0,
+	 processed_rows INTEGER NOT NULL DEFAULT 0,
  initialized INTEGER NOT NULL DEFAULT 0,
  complete INTEGER NOT NULL DEFAULT 0,
  updated_at TEXT NOT NULL
@@ -657,6 +663,9 @@ END;`,
 			"DROP TRIGGER IF EXISTS latest_scan_hosts_search_ad",
 			"DELETE FROM scan_host_search",
 			"DELETE FROM latest_host_search",
+			// Keep this migration compatible with databases whose schema 22
+			// backfill state predates the cumulative counter. Migration 28 adds
+			// processed_rows and resets it after every migration has run.
 			"UPDATE fts_backfill_state SET last_rowid=0,initialized=0,complete=0,updated_at=datetime('now')",
 		},
 		26: {
@@ -678,6 +687,36 @@ END;`,
 			"ALTER TABLE events ADD COLUMN job_id TEXT NOT NULL DEFAULT ''",
 			"CREATE INDEX IF NOT EXISTS events_type_job_time ON events(type,job_id,created_at DESC,id DESC)",
 		},
+		27: {
+			// Silence watchdog state is separate from the append-only event log so
+			// lifecycle grace and repeat backoff remain bounded and restart-safe.
+			// A row is created for each managed job as it is created; the index keeps
+			// due-state reads independent of the retained event history.
+			`CREATE TABLE IF NOT EXISTS job_silence_state (
+ job_id TEXT PRIMARY KEY,
+ eligible_at TEXT NOT NULL,
+ backoff_level INTEGER NOT NULL DEFAULT 0,
+ next_alert_at TEXT NOT NULL DEFAULT '',
+ last_success_at TEXT NOT NULL DEFAULT '',
+ updated_at TEXT NOT NULL,
+ FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);`,
+			"CREATE INDEX IF NOT EXISTS job_silence_state_due ON job_silence_state(next_alert_at,eligible_at)",
+		},
+		28: {
+			// Keep the cumulative FTS backfill counter beside its rowid checkpoint.
+			// Counting source rows up to the checkpoint on every batch made progress
+			// reporting increasingly expensive for large retained histories.
+			`CREATE TABLE IF NOT EXISTS fts_backfill_state (
+ table_name TEXT PRIMARY KEY,
+ last_rowid INTEGER NOT NULL DEFAULT 0,
+ processed_rows INTEGER NOT NULL DEFAULT 0,
+ initialized INTEGER NOT NULL DEFAULT 0,
+ complete INTEGER NOT NULL DEFAULT 0,
+ updated_at TEXT NOT NULL DEFAULT ''
+);`,
+			"ALTER TABLE fts_backfill_state ADD COLUMN processed_rows INTEGER NOT NULL DEFAULT 0",
+		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
 		statements, ok := migrations[next]
@@ -695,7 +734,7 @@ END;`,
 	if err := backfillHostSearchIndexes(db); err != nil {
 		return err
 	}
-	return ensureBuiltinScannerProfiles(db)
+	return ensureBuiltinScannerProfilesContext(ctx, db)
 }
 
 // applyMigration scopes the transaction rollback to one migration. Keeping

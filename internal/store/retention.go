@@ -20,6 +20,12 @@ type PruneStats struct {
 	RDAPCache    int64
 }
 
+// retentionBatchSize bounds both lock duration and rollback cost. Retention
+// is maintenance work and may be resumed safely after cancellation or a
+// process restart; one very large transaction must not monopolize SQLite's
+// writer connection for the lifetime of the deployment.
+const retentionBatchSize = 500
+
 func (p PruneStats) Total() int64 {
 	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.Revisions + p.Cycles + p.RDAPCache
 }
@@ -27,75 +33,68 @@ func (p PruneStats) Total() int64 {
 // Prune removes rows outside the configured retention window while preserving
 // every active baseline scan and the current revision of each job. Delivery
 // rows that are still pending (or have retry attempts remaining) are never
-// removed; only sent rows and terminal failures are eligible. The operation is
-// transactional so a crash cannot leave a partially pruned history set.
+// removed; only sent rows and terminal failures are eligible. Each bounded
+// batch is committed independently, making the operation resumable and
+// allowing cancellation between batches without holding the writer lock for
+// the whole retained history.
 func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStats, error) {
 	var stats PruneStats
 	cutoff := before.UTC().Format(time.RFC3339Nano)
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return stats, err
-	}
-	defer func() { _ = tx.Rollback() }()
-
 	// NOT EXISTS avoids SQL's NULL semantics: most state rows do not yet have a
 	// baseline_scan_id, and a NOT IN subquery containing NULL would protect every
 	// old scan from pruning.
-	result, err := tx.ExecContext(ctx, `DELETE FROM scans AS scan WHERE scan.finished_at < ?
+	deletedScans, err := s.deleteRetentionBatches(ctx, `DELETE FROM scans AS scan WHERE scan.id IN (SELECT candidate.id FROM scans AS candidate WHERE candidate.finished_at < ?
 		AND NOT EXISTS (SELECT 1 FROM job_states AS legacy WHERE json_extract(legacy.state_json,'$.baseline_scan_id') = scan.id)
 		AND NOT EXISTS (SELECT 1 FROM job_runtime AS managed WHERE json_extract(managed.state_json,'$.baseline_scan_id') = scan.id)
-		AND NOT EXISTS (SELECT 1 FROM job_runtime AS active, json_each(active.state_json,'$.incidents') AS incident WHERE json_extract(incident.value,'$.scan_id') = scan.id)`, cutoff)
+		AND NOT EXISTS (SELECT 1 FROM job_runtime AS active, json_each(active.state_json,'$.incidents') AS incident WHERE json_extract(incident.value,'$.scan_id') = scan.id) ORDER BY candidate.finished_at,candidate.id LIMIT ?)`, cutoff)
 	if err != nil {
 		return stats, err
 	}
-	stats.Scans, _ = result.RowsAffected()
-	if stats.Scans > 0 {
+	stats.Scans = deletedScans
+	if deletedScans > 0 {
 		// A projection row is a copy rather than a foreign-key child of its
-		// source scan. Rebuild it after cascaded scan deletion so an older
-		// retained observation becomes visible when the previous latest row
-		// expires.
-		if err := rebuildLatestScanHostsTx(ctx, tx); err != nil {
+		// source scan. Remove dangling copies between batches, then rebuild once
+		// after all source deletions so an older retained observation becomes
+		// visible when the previous latest row expires.
+		if _, err := s.deleteRetentionBatches(ctx, `DELETE FROM latest_scan_hosts WHERE address IN (SELECT candidate.address FROM latest_scan_hosts AS candidate WHERE NOT EXISTS (SELECT 1 FROM scans WHERE scans.id=candidate.scan_id) ORDER BY candidate.address LIMIT ?)`); err != nil {
+			return stats, err
+		}
+		if err := s.rebuildLatestScanHosts(ctx); err != nil {
 			return stats, err
 		}
 	}
 
-	result, err = tx.ExecContext(ctx, `DELETE FROM events WHERE created_at < ?`, cutoff)
+	stats.Events, err = s.deleteRetentionBatches(ctx, `DELETE FROM events WHERE rowid IN (SELECT rowid FROM events WHERE created_at < ? ORDER BY created_at,rowid LIMIT ?)`, cutoff)
 	if err != nil {
 		return stats, err
 	}
-	stats.Events, _ = result.RowsAffected()
-
-	result, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE sent_at IS NOT NULL AND sent_at < ?`, cutoff)
+	stats.SentOutbox, err = s.deleteRetentionBatches(ctx, `DELETE FROM outbox WHERE rowid IN (SELECT rowid FROM outbox WHERE sent_at IS NOT NULL AND sent_at < ? ORDER BY sent_at,rowid LIMIT ?)`, cutoff)
 	if err != nil {
 		return stats, err
 	}
-	stats.SentOutbox, _ = result.RowsAffected()
-
-	result, err = tx.ExecContext(ctx, `DELETE FROM outbox WHERE sent_at IS NULL AND attempts >= ? AND next_at < ?`, deliveryMaxAttempts, cutoff)
+	stats.FailedOutbox, err = s.deleteRetentionBatches(ctx, `DELETE FROM outbox WHERE rowid IN (SELECT rowid FROM outbox WHERE sent_at IS NULL AND attempts >= ? AND next_at < ? ORDER BY next_at,rowid LIMIT ?)`, deliveryMaxAttempts, cutoff)
 	if err != nil {
 		return stats, err
 	}
-	stats.FailedOutbox, _ = result.RowsAffected()
 
 	// Older releases kept completed cycle payloads until the cycle itself was
 	// pruned. Once a merged scan already references a completed cycle, those
 	// per-unit snapshots are no longer needed for crash recovery; reclaim them
 	// during the regular retention pass while preserving unit metadata.
-	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET snapshot_json='{}' WHERE cycle_id IN (SELECT cycle.id FROM scan_cycles AS cycle WHERE cycle.status='completed' AND EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id=cycle.id)) AND snapshot_json <> '{}'`); err != nil {
+	if err := s.clearCompletedCyclePayloads(ctx); err != nil {
 		return stats, err
 	}
 
 	// Keep the newest revision for every job regardless of age. Older revisions
 	// contain immutable historical definitions and may be discarded after their
 	// retention window because scans retain their own snapshots.
-	result, err = tx.ExecContext(ctx, `DELETE FROM job_revisions
+	stats.Revisions, err = s.deleteRetentionBatches(ctx, `DELETE FROM job_revisions WHERE rowid IN (SELECT revision.rowid FROM job_revisions AS revision
 			WHERE created_at < ?
-			AND revision < COALESCE((SELECT MAX(current.revision) FROM jobs AS current WHERE current.id = job_revisions.job_id), revision)
-			AND NOT EXISTS (SELECT 1 FROM scans WHERE scans.job_id = job_revisions.job_id AND scans.job_revision = job_revisions.revision)`, cutoff)
+			AND revision < COALESCE((SELECT MAX(current.revision) FROM jobs AS current WHERE current.id = revision.job_id), revision)
+			AND NOT EXISTS (SELECT 1 FROM scans WHERE scans.job_id = revision.job_id AND scans.job_revision = revision.revision) ORDER BY revision.created_at,revision.rowid LIMIT ?)`, cutoff)
 	if err != nil {
 		return stats, err
 	}
-	stats.Revisions, _ = result.RowsAffected()
 
 	// Cycle metadata is part of the resumable execution history. Keep active
 	// cycles indefinitely (their finished_at is empty) and keep terminal cycles
@@ -103,29 +102,78 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	// referencing scan fall outside retention, the unit checkpoints can be
 	// removed through the foreign-key cascade without leaving unbounded plan
 	// metadata behind.
-	result, err = tx.ExecContext(ctx, `DELETE FROM scan_cycles AS cycle
-		WHERE cycle.finished_at <> '' AND cycle.finished_at < ?
-		AND cycle.status IN ('completed','discarded','expired')
-		AND NOT EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id = cycle.id)`, cutoff)
+	stats.Cycles, err = s.deleteRetentionBatches(ctx, `DELETE FROM scan_cycles AS cycle WHERE cycle.rowid IN (SELECT candidate.rowid FROM scan_cycles AS candidate
+		WHERE candidate.finished_at <> '' AND candidate.finished_at < ?
+		AND candidate.status IN ('completed','discarded','expired')
+		AND NOT EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id = candidate.id) ORDER BY candidate.finished_at,candidate.rowid LIMIT ?)`, cutoff)
 	if err != nil {
 		return stats, err
 	}
-	stats.Cycles, _ = result.RowsAffected()
 
 	// RDAP registration data is a short-lived enrichment cache rather than
 	// retained scan history. Remove rows once their seven-day stale window has
 	// elapsed, even when the deployment retains scans for much longer.
 	rdapCutoff := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err = tx.ExecContext(ctx, `DELETE FROM rdap_cache WHERE stale_until < ?`, rdapCutoff)
+	stats.RDAPCache, err = s.deleteRetentionBatches(ctx, `DELETE FROM rdap_cache WHERE rowid IN (SELECT rowid FROM rdap_cache WHERE stale_until < ? ORDER BY stale_until,rowid LIMIT ?)`, rdapCutoff)
 	if err != nil {
 		return stats, err
 	}
-	stats.RDAPCache, _ = result.RowsAffected()
-
-	if err := tx.Commit(); err != nil {
-		return stats, err
-	}
 	return stats, nil
+}
+
+// deleteRetentionBatches repeatedly executes one bounded DELETE transaction.
+// The caller supplies only static SQL; the helper appends the batch limit to
+// each statement and therefore never interpolates data values into SQL.
+func (s *Store) deleteRetentionBatches(ctx context.Context, statement string, args ...any) (int64, error) {
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		tx, err := s.DB.BeginTx(ctx, nil)
+		if err != nil {
+			return total, err
+		}
+		batchArgs := append(append([]any(nil), args...), retentionBatchSize)
+		result, execErr := tx.ExecContext(ctx, statement, batchArgs...)
+		if execErr != nil {
+			_ = tx.Rollback()
+			// Do not echo SQL text into logs or API errors: retention statements
+			// contain implementation details and may include deployment-specific
+			// expressions. Keep the wrapped database error useful without leaking
+			// the query itself.
+			return total, fmt.Errorf("retention batch: %w", execErr)
+		}
+		count, countErr := result.RowsAffected()
+		if countErr != nil {
+			_ = tx.Rollback()
+			return total, countErr
+		}
+		if err := tx.Commit(); err != nil {
+			return total, err
+		}
+		total += count
+		if count == 0 {
+			return total, nil
+		}
+	}
+}
+
+func (s *Store) rebuildLatestScanHosts(ctx context.Context) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := rebuildLatestScanHostsTx(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (s *Store) clearCompletedCyclePayloads(ctx context.Context) error {
+	_, err := s.deleteRetentionBatches(ctx, `UPDATE scan_cycle_units SET snapshot_json='{}' WHERE rowid IN (SELECT unit.rowid FROM scan_cycle_units AS unit WHERE unit.snapshot_json <> '{}' AND unit.cycle_id IN (SELECT cycle.id FROM scan_cycles AS cycle WHERE cycle.status='completed' AND EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id=cycle.id)) ORDER BY unit.rowid LIMIT ?)`)
+	return err
 }
 
 func rebuildLatestScanHostsTx(ctx context.Context, tx *sql.Tx) error {
@@ -191,7 +239,7 @@ func (s *Store) ReleaseLease(ctx context.Context, owner string) error {
 }
 func (s *Store) Healthy(ctx context.Context) error {
 	var raw string
-	if err := s.DB.QueryRowContext(ctx, `SELECT heartbeat FROM daemon_lease WHERE id=1`).Scan(&raw); err != nil {
+	if err := s.reader().QueryRowContext(ctx, `SELECT heartbeat FROM daemon_lease WHERE id=1`).Scan(&raw); err != nil {
 		return err
 	}
 	v, err := time.Parse(time.RFC3339Nano, raw)

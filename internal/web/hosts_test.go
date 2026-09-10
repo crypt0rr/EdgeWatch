@@ -257,6 +257,77 @@ func TestAllHostsSeparatesArchivedJobsAfterActiveHosts(t *testing.T) {
 	}
 }
 
+func TestAllHostsMergesIndexedAndLegacySuccessfulScans(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := app.New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	job, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "indexed-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.10"}, TCP: &config.Protocol{Ports: "22", Mode: "connect"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	when := time.Unix(500, 0).UTC()
+	indexed := model.Scan{ID: "indexed-mixed", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.10", SourceTargets: []string{"198.51.100.10"}, Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 22, State: "open"}}}}}}}}
+	if err := db.SaveScan(ctx, indexed); err != nil {
+		t.Fatal(err)
+	}
+	legacy := model.Scan{ID: "legacy-mixed", Job: "legacy-job", StartedAt: when.Add(-time.Minute), FinishedAt: when.Add(-time.Minute), Status: "success", Snapshot: model.Snapshot{Scopes: []model.Scope{{Target: "legacy.example", Protocol: "tcp", Ports: "80"}}, Units: []model.Unit{{Target: "legacy.example", Protocol: "tcp", Addresses: []string{"198.51.100.11"}, Ports: []model.PortState{{Port: 80, State: "open", Service: "legacy-http"}}}}}}
+	if err := db.SaveScan(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	server.listHosts(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("host list status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Hosts []allHostSummary `json:"hosts"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Hosts) != 2 || response.Hosts[0].Address != "198.51.100.10" || response.Hosts[1].Address != "198.51.100.11" || !response.Hosts[1].Legacy {
+		t.Fatalf("mixed host projection = %#v", response.Hosts)
+	}
+	queryRecorder := httptest.NewRecorder()
+	server.listHosts(queryRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts?q=legacy.example", nil))
+	if queryRecorder.Code != http.StatusOK {
+		t.Fatalf("legacy query status = %d: %s", queryRecorder.Code, queryRecorder.Body.String())
+	}
+	response = struct {
+		Hosts []allHostSummary `json:"hosts"`
+	}{}
+	if err := json.Unmarshal(queryRecorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Hosts) != 1 || response.Hosts[0].Address != "198.51.100.11" {
+		t.Fatalf("legacy query result = %#v", response.Hosts)
+	}
+	serviceRecorder := httptest.NewRecorder()
+	server.listHosts(serviceRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts?q=legacy-http", nil))
+	if serviceRecorder.Code != http.StatusOK {
+		t.Fatalf("legacy service query status = %d: %s", serviceRecorder.Code, serviceRecorder.Body.String())
+	}
+	response = struct {
+		Hosts []allHostSummary `json:"hosts"`
+	}{}
+	if err := json.Unmarshal(serviceRecorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Hosts) != 1 || response.Hosts[0].Address != "198.51.100.11" {
+		t.Fatalf("legacy service query result = %#v", response.Hosts)
+	}
+}
+
 func TestSummaryForHostCollapsesChunkedProtocolObservations(t *testing.T) {
 	host := model.HostObservation{
 		Address: "198.51.100.10",

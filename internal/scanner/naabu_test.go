@@ -98,6 +98,23 @@ func TestParseNaabuJSONRejectsMalformedAndOversizedLines(t *testing.T) {
 	}
 }
 
+func TestCappedBufferInvokesOnExceededOnce(t *testing.T) {
+	calls := 0
+	buffer := cappedBuffer{limit: 4, onExceeded: func() { calls++ }}
+	if written, err := buffer.Write([]byte("12345")); written != 5 || err == nil {
+		t.Fatalf("first capped write = (%d, %v), want all bytes and an error", written, err)
+	}
+	if buffer.String() != "1234" {
+		t.Fatalf("buffer retained %q, want the bounded prefix", buffer.String())
+	}
+	if _, err := buffer.Write([]byte("6")); err == nil {
+		t.Fatal("second capped write unexpectedly succeeded")
+	}
+	if calls != 1 {
+		t.Fatalf("onExceeded called %d times, want once", calls)
+	}
+}
+
 func TestNaabuPipelineKeepsDiscoveryEvidenceOutOfUnits(t *testing.T) {
 	dir := t.TempDir()
 	naabuPath := filepath.Join(dir, "naabu")

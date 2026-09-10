@@ -2104,7 +2104,19 @@ func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string
 }
 
 func (s *Store) SaveScan(ctx context.Context, scan model.Scan) error {
-	return saveScanExec(ctx, s.DB, scan)
+	// Keep the scan row and its derived host indexes in one transaction. The
+	// host index is consumed as an authoritative projection by the web API, so
+	// exposing a scan with only a prefix of its hosts would be worse than
+	// rejecting the write and retrying it later.
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := saveScanExec(ctx, tx, scan); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func saveScanExec(ctx context.Context, execer contextExecer, scan model.Scan) error {

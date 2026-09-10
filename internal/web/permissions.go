@@ -57,6 +57,10 @@ func requiredPermission(path, method string) string {
 		if method == http.MethodGet {
 			return auth.PermissionNotificationOptions
 		}
+	case path == "/notifications/update-routing":
+		if method == http.MethodPut {
+			return auth.PermissionNotificationsManage
+		}
 	case isUsersPath(path):
 		return requiredUsersPermission(path, method)
 	case path == "/public-dashboard":

@@ -58,7 +58,7 @@ export type HostSummary = {
   open_ports: number; open_filtered_ports: number; has_open_ports: boolean; legacy?: boolean
 }
 export type GlobalHostSummary = HostSummary & {
-  job_id?: string; job: string; scan_id: string; scanned_at: string; data_quality: string
+  job_id?: string; job: string; scan_id: string; scanned_at: string; data_quality: string; archived?: boolean
 }
 export type GlobalHostsResponse = { hosts: GlobalHostSummary[]; pagination: Pagination }
 export type BaselineHostsResponse = {

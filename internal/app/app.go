@@ -914,7 +914,24 @@ func (a *App) updateDestinations(ctx context.Context) []string {
 	if a.Notifier == nil {
 		return nil
 	}
-	destinations, err := a.Notifier.QueueDestinations(ctx)
+	state, err := a.Store.GetApplicationUpdateState(ctx)
+	if err != nil {
+		logger := a.Logger
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.Warn("application update notification routing unavailable", "error", err)
+		return nil
+	}
+	var destinations []string
+	if state.UpdateNotificationDestinationsConfigured {
+		destinations, err = a.Notifier.QueueDestinationsForSelection(ctx, state.UpdateNotificationDestinations)
+	} else {
+		// Existing installations have no explicit routing row yet. Preserve the
+		// original behavior of sending update events to every globally enabled
+		// destination until an administrator saves a selection.
+		destinations, err = a.Notifier.QueueDestinations(ctx)
+	}
 	if err != nil {
 		logger := a.Logger
 		if logger == nil {

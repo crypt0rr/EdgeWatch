@@ -31,6 +31,15 @@ export type NotificationStatus = {
   delivery_retrying?: number
   delivery_terminal_failures?: number
 }
+export type NotificationUpdateRouting = {
+  configured: boolean
+  destinations: string[]
+}
+export type NotificationDestinationsResponse = {
+  destinations: NotificationDestination[]
+  status: NotificationStatus
+  update_routing?: NotificationUpdateRouting
+}
 export type ApplicationUpdateStatus = {
   enabled: boolean
   status: 'up_to_date' | 'update_available' | 'ahead' | 'check_failed' | 'disabled' | 'development_build' | string
@@ -147,6 +156,8 @@ export const scanHost = (jobId: string, scanId: string, address: string) => api<
 export const scanHostRDAP = (jobId: string, scanId: string, address: string) => api<{ rdap: RdapResult }>(`/jobs/${jobId}/scans/${encodeURIComponent(scanId)}/hosts/${encodeURIComponent(address)}/rdap`)
 export const historicalScanHost = (scanId: string, address: string) => api<HostDetailResponse>(`/scans/${encodeURIComponent(scanId)}/hosts/${encodeURIComponent(address)}`)
 export const historicalScanHostRDAP = (scanId: string, address: string) => api<{ rdap: RdapResult }>(`/scans/${encodeURIComponent(scanId)}/hosts/${encodeURIComponent(address)}/rdap`)
+export const getScan = (scanId: string) => api<Scan>(`/scans/${encodeURIComponent(scanId)}`)
+export const historicalScanHosts = (scanId: string, filters: HostFilters = {}) => api<{ job_id?: string; job: string; scan: ScanSummary; data_quality: string; hosts: import('./types').HostSummary[]; pagination: Pagination }>(`/scans/${encodeURIComponent(scanId)}/hosts?${hostQuery(filters)}`)
 export const scanDetail = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ scan: Scan; changes: Change[]; changes_pagination: Pagination; current_security_hash: string; comparison_source?: string; baseline_scan_id?: string }>(`/jobs/${jobId}/scans/${scanId}?limit=${limit}&offset=${offset}`)
 export const scanResults = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ results: Unit[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/results?limit=${limit}&offset=${offset}`)
 export const scanChanges = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ changes: Change[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/changes?limit=${limit}&offset=${offset}`)
@@ -158,7 +169,8 @@ export const acceptIncident = (jobId: string, key: string) => api<void>(`/jobs/$
 export const suppressIncident = (jobId: string, key: string) => api<void>(`/jobs/${encodeURIComponent(jobId)}/incidents/suppress`, { method: 'POST', body: JSON.stringify({ key }) })
 export const listEvents = (offset = 0, limit = 20, jobId?: string) => api<{ events: unknown[]; pagination: Pagination }>(`/events?limit=${limit}&offset=${offset}${jobId ? `&job_id=${encodeURIComponent(jobId)}` : ''}`)
 export const notificationTest = () => api<{ sent: number }>('/notifications/test', { method: 'POST' })
-export const listNotificationDestinations = () => api<{ destinations: NotificationDestination[]; status: NotificationStatus }>('/notifications/destinations')
+export const listNotificationDestinations = () => api<NotificationDestinationsResponse>('/notifications/destinations')
+export const updateNotificationRouting = (destinations: string[], password: string) => api<NotificationUpdateRouting>('/notifications/update-routing', { method: 'PUT', body: JSON.stringify({ destinations, password }) })
 export const getNotificationDestination = (id: string) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`)
 export const createNotificationDestination = (name: string, url: string, password: string, enabled = true) => api<NotificationDestination>('/notifications/destinations', { method: 'POST', body: JSON.stringify({ name, url, password, enabled }) })
 export const updateNotificationDestination = (id: string, revision: number, name: string, password: string, options: { url?: string; enabled?: boolean } = {}) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ name, revision, password, ...options }) })

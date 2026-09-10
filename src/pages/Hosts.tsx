@@ -35,6 +35,14 @@ function HostRow({ host }: { host: GlobalHostSummary }) {
   </Link>
 }
 
+function HostGroup({ title, description, hosts }: { title: string; description: string; hosts: GlobalHostSummary[] }) {
+  if (!hosts.length) return null
+  return <section className="host-group" aria-labelledby={`host-group-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`}>
+    <div className="host-group-heading"><div><h3 id={`host-group-${title.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`}>{title}</h3><p className="muted">{description}</p></div></div>
+    <div className="host-list">{hosts.map(host => <HostRow key={`${host.scan_id}-${host.address}`} host={host} />)}</div>
+  </section>
+}
+
 export function Hosts() {
   const [q, setQ] = useState('')
   const [protocol, setProtocol] = useState('')
@@ -49,7 +57,7 @@ export function Hosts() {
   return <section className="page host-explorer-page">
     <div className="page-heading"><div><p className="eyebrow">Discovered assets</p><h1>Hosts</h1><p className="muted">Every effective IP found by completed scans. Select a host to open its latest historical evidence.</p></div></div>
     <div className="host-toolbar"><label className="search-field"><Search size={16} /><span className="sr-only">Search hosts</span><input value={q} onChange={event => updateSearch(event.target.value)} placeholder="Search IP, DNS name, target, or job" /></label><label><SlidersHorizontal size={14} /><span className="sr-only">Protocol</span><select value={protocol} onChange={event => updateProtocol(event.target.value)}><option value="">All protocols</option><option value="tcp">TCP</option><option value="udp">UDP</option></select></label><label><span className="sr-only">Open ports filter</span><select value={open} onChange={event => updateOpen(event.target.value)}><option value="">Any result</option><option value="true">Has positive ports</option><option value="false">No positive ports</option></select></label></div>
-    {data.isLoading && !data.data ? <div className="loading"><span className="spinner" />Loading hosts…</div> : data.error ? <div className="error-card" role="alert">Could not load scanned hosts.</div> : <div className="panel host-list-panel" aria-busy={data.isFetching}><div className="panel-heading"><div><h2>Scanned hosts</h2><p className="muted">{data.data?.pagination.total ?? 0} effective address{data.data?.pagination.total === 1 ? '' : 'es'} · latest successful result per IP</p></div><Server className="muted-icon" size={18} /></div>{data.data?.hosts.length ? <div className="host-list">{data.data.hosts.map(host => <HostRow key={host.address} host={host} />)}</div> : <div className="inline-empty">No completed scans have produced effective hosts yet.</div>}<Pagination page={data.data?.pagination} onChange={setOffset} /></div>}
+    {data.isLoading && !data.data ? <div className="loading"><span className="spinner" />Loading hosts…</div> : data.error ? <div className="error-card" role="alert">Could not load scanned hosts.</div> : <div className="panel host-list-panel" aria-busy={data.isFetching}><div className="panel-heading"><div><h2>Scanned hosts</h2><p className="muted">{data.data?.pagination.total ?? 0} effective address{data.data?.pagination.total === 1 ? '' : 'es'} · latest successful result per IP</p></div><Server className="muted-icon" size={18} /></div>{data.data?.hosts.length ? <><HostGroup title="Active jobs" description="Hosts from scheduled, paused, or newly configured jobs." hosts={data.data.hosts.filter(host => !host.archived)} /><HostGroup title="Archived jobs" description="Historical host results retained from archived jobs." hosts={data.data.hosts.filter(host => host.archived)} /></> : <div className="inline-empty">No completed scans have produced effective hosts yet.</div>}<Pagination page={data.data?.pagination} onChange={setOffset} /></div>}
   </section>
 }
 

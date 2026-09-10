@@ -202,7 +202,11 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 		}
 		selections = append(selections, store.PublicDashboardHost{JobID: strings.TrimSpace(selection.JobID), Address: canonicalHostAddress(selection.Address)})
 	}
-	published, err := s.loadPublishedHosts(r.Context(), selections)
+	// Validate against retained history even when a job is archived. Archived
+	// selections remain visible in the admin picker so they can be removed (or
+	// become publishable again if the job is restored), while the public
+	// response below deliberately omits them.
+	published, err := s.loadPublishedHosts(r.Context(), selections, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", "published hosts could not be checked", nil)
 		return
@@ -234,7 +238,7 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 }
 
 func (s *Server) latestPublishedHost(ctx context.Context, jobID, address string) (store.ScanHost, error) {
-	lookup, err := s.loadPublishedHosts(ctx, []store.PublicDashboardHost{{JobID: jobID, Address: address}})
+	lookup, err := s.loadPublishedHosts(ctx, []store.PublicDashboardHost{{JobID: jobID, Address: address}}, false)
 	if err != nil {
 		return store.ScanHost{}, err
 	}
@@ -257,7 +261,7 @@ func publicSelectionKey(jobID, address string) string {
 // loadPublishedHosts resolves all selected addresses through bounded set-based
 // reads. Indexed observations are loaded in one query; only selections absent
 // from that projection use the bounded legacy fallback.
-func (s *Server) loadPublishedHosts(ctx context.Context, selections []store.PublicDashboardHost) (map[string]publicHostLookup, error) {
+func (s *Server) loadPublishedHosts(ctx context.Context, selections []store.PublicDashboardHost, includeArchived bool) (map[string]publicHostLookup, error) {
 	lookup := map[string]publicHostLookup{}
 	if len(selections) == 0 {
 		return lookup, nil
@@ -291,7 +295,7 @@ func (s *Server) loadPublishedHosts(ctx context.Context, selections []store.Publ
 	}
 	for _, item := range indexed {
 		job, ok := byID[item.Selection.JobID]
-		if !ok || job.Archived {
+		if !ok || (!includeArchived && job.Archived) {
 			continue
 		}
 		lookup[publicSelectionKey(item.Selection.JobID, item.Selection.Address)] = publicHostLookup{Job: job, Host: item.Host, Summary: item.Summary}
@@ -302,7 +306,7 @@ func (s *Server) loadPublishedHosts(ctx context.Context, selections []store.Publ
 			continue
 		}
 		job, ok := byID[selection.JobID]
-		if ok && !job.Archived {
+		if ok && (includeArchived || !job.Archived) {
 			missing = append(missing, selection)
 		}
 	}
@@ -312,7 +316,7 @@ func (s *Server) loadPublishedHosts(ctx context.Context, selections []store.Publ
 	}
 	for _, item := range legacy {
 		job, ok := byID[item.Selection.JobID]
-		if !ok || job.Archived {
+		if !ok || (!includeArchived && job.Archived) {
 			continue
 		}
 		lookup[publicSelectionKey(item.Selection.JobID, item.Selection.Address)] = publicHostLookup{Job: job, Host: item.Host, Summary: item.Summary}
@@ -360,7 +364,7 @@ type publicRdapResponse struct {
 
 func (s *Server) publicDashboardResponse(ctx context.Context, dashboard store.PublicDashboard) (publicDashboardResponse, error) {
 	response := publicDashboardResponse{Title: dashboard.Title, Introduction: dashboard.Introduction, UpdatedAt: dashboard.UpdatedAt, Hosts: []publicHostResponse{}}
-	lookup, err := s.loadPublishedHosts(ctx, dashboard.Hosts)
+	lookup, err := s.loadPublishedHosts(ctx, dashboard.Hosts, false)
 	if err != nil {
 		return response, err
 	}

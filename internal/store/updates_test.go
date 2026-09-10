@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -54,5 +55,42 @@ func TestApplicationUpdateStateAndNotificationDeduplication(t *testing.T) {
 	state, err = s.GetApplicationUpdateState(ctx)
 	if err != nil || state.LatestVersion != "v1.1.0" || state.CheckStatus != "failed" || state.LastError != "temporary upstream failure" {
 		t.Fatalf("failure state=%#v err=%v", state, err)
+	}
+}
+
+func TestApplicationUpdateNotificationDestinationsAreExplicitAndNormalized(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	ctx := context.Background()
+	state, err := s.GetApplicationUpdateState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.UpdateNotificationDestinationsConfigured || state.UpdateNotificationDestinations != nil {
+		t.Fatalf("new state unexpectedly has explicit routing: %#v", state)
+	}
+	if err := s.SetApplicationUpdateDestinations(ctx, []string{" managed:b ", "managed:a", "managed:b", ""}, AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	state, err = s.GetApplicationUpdateState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"managed:a", "managed:b"}
+	if !state.UpdateNotificationDestinationsConfigured || !reflect.DeepEqual(state.UpdateNotificationDestinations, want) {
+		t.Fatalf("normalized routing = %#v, want %#v (configured=%t)", state.UpdateNotificationDestinations, want, state.UpdateNotificationDestinationsConfigured)
+	}
+	if err := s.SetApplicationUpdateDestinations(ctx, []string{}, AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	state, err = s.GetApplicationUpdateState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.UpdateNotificationDestinationsConfigured || state.UpdateNotificationDestinations == nil || len(state.UpdateNotificationDestinations) != 0 {
+		t.Fatalf("explicit empty routing = %#v (configured=%t)", state.UpdateNotificationDestinations, state.UpdateNotificationDestinationsConfigured)
 	}
 }

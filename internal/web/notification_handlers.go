@@ -25,7 +25,72 @@ func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"destinations": s.App.Notifier.DestinationsContext(r.Context()), "status": s.App.Notifier.StatusContext(r.Context())})
+	routing := map[string]any{"configured": false, "destinations": []string{}}
+	if state, err := s.Store.GetApplicationUpdateState(r.Context()); err == nil {
+		destinations := state.UpdateNotificationDestinations
+		if destinations == nil {
+			destinations = []string{}
+		}
+		routing = map[string]any{"configured": state.UpdateNotificationDestinationsConfigured, "destinations": destinations}
+	} else {
+		if s.Log != nil {
+			s.Log.Warn("application update routing state unavailable", "error", err)
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"destinations": s.App.Notifier.DestinationsContext(r.Context()), "status": s.App.Notifier.StatusContext(r.Context()), "update_routing": routing})
+}
+
+type updateNotificationRoutingPayload struct {
+	Destinations []string `json:"destinations"`
+	Password     string   `json:"password"`
+}
+
+// updateNotificationRouting lets an administrator explicitly choose the
+// configured destinations that receive application release/upgrade events.
+// A present empty array intentionally disables those notifications; omitting
+// the field is rejected so a browser cannot accidentally reset routing.
+func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Request, session store.Session) {
+	w.Header().Set("Cache-Control", "no-store")
+	var input updateNotificationRoutingPayload
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if strings.TrimSpace(input.Password) == "" {
+		writeError(w, http.StatusBadRequest, "password_required", "account password confirmation is required", map[string]string{"password": "password confirmation is required"})
+		return
+	}
+	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, input.Password); err != nil {
+		s.writeNotificationAuthError(w, err)
+		return
+	}
+	if input.Destinations == nil {
+		writeError(w, http.StatusBadRequest, "validation_failed", "destinations must be an array", map[string]string{"destinations": "select zero or more configured destinations"})
+		return
+	}
+	if err := s.App.Notifier.ValidateDestinationSelection(r.Context(), input.Destinations); err != nil {
+		if errors.Is(err, notify.ErrInvalidDestinationSelection) {
+			writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]string{"destinations": err.Error()})
+		} else {
+			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
+		}
+		return
+	}
+	if err := s.Store.SetApplicationUpdateDestinations(r.Context(), input.Destinations, store.AuditEntry{Action: "notifications.update_routing", Detail: "application update notification routing changed", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+		if s.writeAuditUnavailable(w, err, "notifications.update_routing") {
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "notification", "application update notification routing could not be saved", nil)
+		return
+	}
+	s.broadcast(map[string]any{"type": "notification.changed"})
+	// Return the normalized, deterministic selector order persisted by the
+	// store so the client and any other administrator sessions converge on the
+	// same representation.
+	destinations := input.Destinations
+	if state, err := s.Store.GetApplicationUpdateState(r.Context()); err == nil {
+		destinations = state.UpdateNotificationDestinations
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "destinations": destinations})
 }
 
 func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session) {

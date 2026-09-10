@@ -405,7 +405,7 @@ func (s *Store) ListLatestScanHostsPage(ctx context.Context, query, protocol str
 	if err := reader.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	querySQL := `SELECT h.scan_id,h.address,h.data_quality,h.host_json,h.job_id,h.job,h.finished_at FROM latest_scan_hosts h` + join + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY h.address LIMIT ? OFFSET ?`
+	querySQL := `SELECT h.scan_id,h.address,h.data_quality,h.host_json,h.job_id,h.job,h.finished_at,COALESCE(j.archived,0) FROM latest_scan_hosts h LEFT JOIN jobs j ON j.id=h.job_id` + join + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY COALESCE(j.archived,0) ASC,h.address LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 	rows, err := reader.QueryContext(ctx, querySQL, args...)
 	if err != nil {
@@ -415,8 +415,9 @@ func (s *Store) ListLatestScanHostsPage(ctx context.Context, query, protocol str
 	for rows.Next() {
 		var scanID, address, dataQuality, job, finished string
 		var jobID sql.NullString
+		var archived int
 		var raw []byte
-		if err := rows.Scan(&scanID, &address, &dataQuality, &raw, &jobID, &job, &finished); err != nil {
+		if err := rows.Scan(&scanID, &address, &dataQuality, &raw, &jobID, &job, &finished, &archived); err != nil {
 			return page, err
 		}
 		item, err := decodeScanHost(address, dataQuality, raw)
@@ -424,7 +425,7 @@ func (s *Store) ListLatestScanHostsPage(ctx context.Context, query, protocol str
 			return page, err
 		}
 		parsed := scanTime(finished)
-		page.Items = append(page.Items, LatestScanHost{ScanHost: ScanHost{ScanID: scanID, DataQuality: dataQuality, Host: item.Host}, JobID: jobID.String, Job: job, ScannedAt: parsed})
+		page.Items = append(page.Items, LatestScanHost{ScanHost: ScanHost{ScanID: scanID, DataQuality: dataQuality, Host: item.Host}, JobID: jobID.String, Job: job, Archived: archived != 0, ScannedAt: parsed})
 	}
 	return page, rows.Err()
 }

@@ -331,6 +331,12 @@ introduced are frozen to the destinations that exist when EdgeWatch starts (or
 when the next destination is added), so a newly added endpoint is never silently
 enabled for an existing job. An explicitly empty selection keeps a job silent.
 
+Administrators can choose one or more destinations for EdgeWatch release and
+upgrade alerts in the **Application update notifications** panel on the
+Notifications page. Until a selection is saved, update alerts use all globally
+enabled destinations; saving an empty selection keeps update alerts silent
+without disabling the release check or its in-console indicator.
+
 To supply the key separately, set `notifications.encryption_key_file` to a
 `0600` file containing 32 raw bytes or 64 hexadecimal characters and mount it
 into the container. An explicitly supplied key path is never generated
@@ -405,7 +411,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 23), but it is forward-only: an older binary refuses a newer schema.
+version 24), but it is forward-only: an older binary refuses a newer schema.
 To roll back, stop the new service, restore the entire pre-upgrade `./data`
 directory and deployment configuration, then start the previous image. Do not
 point an older image at the upgraded database. The previous named Docker

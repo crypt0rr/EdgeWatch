@@ -167,6 +167,17 @@ func TestNotificationRoutesAndRateLimit(t *testing.T) {
 	if updateResponse.Code != http.StatusOK || !strings.Contains(updateResponse.Body.String(), "Ops updated") {
 		t.Fatalf("notification update = %d: %s", updateResponse.Code, updateResponse.Body.String())
 	}
+	routingRequest := httptest.NewRequest(http.MethodPut, "/api/v1/notifications/update-routing", strings.NewReader(`{"destinations":["`+createdView.ID+`"],"password":"administrator password"}`))
+	routingRequest.Header.Set("Content-Type", "application/json")
+	routingResponse := httptest.NewRecorder()
+	server.updateNotificationRouting(routingResponse, routingRequest, admin)
+	if routingResponse.Code != http.StatusOK || !strings.Contains(routingResponse.Body.String(), createdView.ID) {
+		t.Fatalf("update notification routing = %d: %s", routingResponse.Code, routingResponse.Body.String())
+	}
+	routingState, err := server.Store.GetApplicationUpdateState(context.Background())
+	if err != nil || !routingState.UpdateNotificationDestinationsConfigured || len(routingState.UpdateNotificationDestinations) != 1 || routingState.UpdateNotificationDestinations[0] != createdView.ID {
+		t.Fatalf("stored update routing = %#v, %v", routingState, err)
+	}
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/notifications/destinations/"+createdView.ID, strings.NewReader(`{"password":"administrator password","revision":2}`))
 	deleteRequest.Header.Set("Content-Type", "application/json")
 	deleteResponse := httptest.NewRecorder()

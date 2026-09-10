@@ -257,6 +257,15 @@ while a time in the repeated fall-back hour may run twice. When an exact
 once-per-day cadence matters, choose a time outside the local transition hours
 and keep the timezone's daylight-saving rules in mind.
 
+The daemon also watches for jobs that go silent. For each enabled job, a
+heartbeat compares the last successful scan (or the job creation time when it
+has never run) with two of that job's own cron intervals. A running scan is not
+considered silent, and at most one `job-silent` notification is emitted in each
+interval window. This catches a scheduler or lease that has stopped producing
+scans without repeatedly alerting for a legitimately slow weekly job. Silence
+events are retained in the event history and use the job's normal notification
+selection.
+
 `assume_alive` defaults to `true` and passes host-discovery skip flags to the
 selected scanner. Set it to `false` when host discovery is required. If Nmap
 discovery reports an expected target as down or omits it, EdgeWatch records an

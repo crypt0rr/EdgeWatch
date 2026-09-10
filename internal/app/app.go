@@ -55,6 +55,7 @@ type App struct {
 	heartbeatInterval time.Duration
 	ReleaseChecker    ReleaseChecker
 	UpdateInterval    time.Duration
+	clock             func() time.Time
 }
 
 type activeRun struct {
@@ -246,7 +247,7 @@ func NewWithScannerPaths(cfg *config.Config, s *store.Store, nmapPath, naabuPath
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second}, nil
+	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second, clock: time.Now}, nil
 }
 
 func (a *App) Job(name string) (config.Job, error) {
@@ -852,6 +853,10 @@ func (a *App) Daemon(ctx context.Context) error {
 	} else if expired > 0 {
 		a.Logger.Info("expired scan cycles", "cycles", expired)
 	}
+	// Check managed jobs once during startup as well as on each heartbeat. This
+	// surfaces a daemon that came back after a missed schedule without waiting
+	// for the next cron tick.
+	a.checkJobSilence(ctx, a.nowUTC())
 	// Run the update check once at startup, then on the fixed three-hour
 	// cadence. Version tracking remains active even when outbound checks are
 	// disabled so a later deployment can still report a real upgrade.
@@ -874,6 +879,7 @@ func (a *App) Daemon(ctx context.Context) error {
 				continue
 			}
 			missedHeartbeats = 0
+			a.checkJobSilence(ctx, a.nowUTC())
 		case <-prune.C:
 			if removed, err := a.Store.DeleteExpiredSessions(ctx, time.Now().UTC()); err != nil {
 				a.Logger.Error("expired-session cleanup failed", "error", err)

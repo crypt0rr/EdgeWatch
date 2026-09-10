@@ -242,8 +242,11 @@ and keep the timezone's daylight-saving rules in mind.
 
 `assume_alive` defaults to `true` and passes host-discovery skip flags to the
 selected scanner. Set it to `false` when host discovery is required. If Nmap
-discovery reports an expected target as down or omits it, the scan fails safely
-instead of treating the target as closed.
+discovery reports an expected target as down or omits it, EdgeWatch records an
+explicit `unreachable` host observation while committing the other addresses.
+That partial result never treats the target as closed or changes a baseline;
+the next complete scan can resume comparison. A completely empty Nmap result
+still fails the scan as a scanner error.
 
 When a baseline is ready, use **Explore baseline** on the job page to inspect
 every effective address produced by the configured targets. Host detail pages

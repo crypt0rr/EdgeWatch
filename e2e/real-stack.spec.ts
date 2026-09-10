@@ -285,3 +285,79 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
     await harness.stop()
   }
 })
+
+test('real public status page is unauthenticated and follows publication state', async ({ page, browser }) => {
+  test.setTimeout(150_000)
+  const harness = await createHarness()
+  const guestContext = await browser.newContext()
+  const guest = await guestContext.newPage()
+  try {
+    // Confirm the anonymous surface is unavailable before an administrator
+    // publishes anything. This exercises the real SPA special case and the
+    // public API's disabled response, rather than a mocked route.
+    await guest.goto(`${harness.url}/public`)
+    await expect(guest.getByRole('heading', { name: 'Public status unavailable' })).toBeVisible()
+
+    await page.goto(harness.url)
+    await expect(page.getByRole('heading', { name: 'Create your administrator' })).toBeVisible()
+    await page.getByLabel('Setup token').fill(harness.setupToken())
+    await page.locator('input[autocomplete="new-password"]').first().fill(password)
+    await page.locator('input[autocomplete="new-password"]').nth(1).fill(password)
+    await page.getByRole('button', { name: 'Create administrator' }).click()
+    await expect(page.getByRole('heading', { name: 'Sign in to EdgeWatch' })).toBeVisible()
+    await page.locator('input[autocomplete="current-password"]').fill(password)
+    await page.getByRole('button', { name: 'Sign in' }).click()
+    await expect(page.getByRole('heading', { name: /Good afternoon, admin/ })).toBeVisible()
+
+    const session = await callAPI(page, '/auth/session', 'GET')
+    expect(session.status).toBe(200)
+    const csrf = session.body.csrf_token as string
+    const created = await callAPI(page, '/jobs', 'POST', csrf, {
+      name: 'public-real-stack',
+      schedule: '0 0 * * *',
+      timezone: 'UTC',
+      targets: ['127.0.0.1'],
+      tcp: { ports: '22', mode: 'connect', engine: 'nmap' },
+      timeout: '1m',
+      timing: 'balanced',
+      baseline_samples: 1,
+      change_confirmations: 1,
+      max_expanded_hosts: 256,
+    })
+    expect(created.status).toBe(201)
+    const jobID = created.body.id ?? created.body.job?.id
+    expect(jobID).toBeTruthy()
+    const run = await callAPI(page, `/jobs/${jobID}/run`, 'POST', csrf, {})
+    expect(run.status).toBe(202)
+    await waitForScan(page, jobID, csrf, 1)
+
+    const publish = await callAPI(page, '/public-dashboard', 'PUT', csrf, {
+      enabled: true,
+      title: 'Public fixture',
+      introduction: 'Selected real-stack host',
+      hosts: [{ job_id: jobID, address: '127.0.0.1' }],
+    })
+    expect(publish.status).toBe(200)
+
+    // The guest context has no administrator cookies and can see only the
+    // selected host projection. A host that was not selected must not appear.
+    await guest.goto(`${harness.url}/public`)
+    await expect(guest.getByRole('heading', { name: 'Public fixture' })).toBeVisible()
+    await expect(guest.getByRole('heading', { name: '127.0.0.1' })).toBeVisible()
+    await expect(guest.getByText('192.0.2.99')).not.toBeVisible()
+    expect(await guest.context().cookies()).toEqual([])
+
+    const disable = await callAPI(page, '/public-dashboard', 'PUT', csrf, {
+      enabled: false,
+      title: 'Public fixture',
+      introduction: 'Selected real-stack host',
+      hosts: [{ job_id: jobID, address: '127.0.0.1' }],
+    })
+    expect(disable.status).toBe(200)
+    await guest.reload()
+    await expect(guest.getByRole('heading', { name: 'Public status unavailable' })).toBeVisible()
+  } finally {
+    await guestContext.close()
+    await harness.stop()
+  }
+})

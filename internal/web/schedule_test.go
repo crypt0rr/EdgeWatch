@@ -55,3 +55,29 @@ func TestShiftCronMinuteLeavesCompositeMinuteExpressionsUntouched(t *testing.T) 
 		t.Fatalf("unexpected wrapped shift: %q, %v", shifted, ok)
 	}
 }
+
+func TestParseNextRunFollowsDaylightSavingCronSemantics(t *testing.T) {
+	parser := cronParserForCoverage()
+	// 02:30 does not exist on the 2027 spring-forward date in New York. The
+	// cron scheduler advances to the following day rather than inventing a run
+	// at a different local time.
+	springForward, err := parseNextRun(parser, "30 2 * * *", "America/New_York", time.Date(2027, 3, 13, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSpring := time.Date(2027, 3, 15, 6, 30, 0, 0, time.UTC)
+	if !springForward.Equal(wantSpring) {
+		t.Fatalf("spring-forward next run = %s, want %s", springForward, wantSpring)
+	}
+
+	// 01:30 is in the repeated fall-back hour. The first occurrence remains a
+	// valid next run under standard cron semantics.
+	fallBack, err := parseNextRun(parser, "30 1 * * *", "America/New_York", time.Date(2027, 11, 6, 12, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFall := time.Date(2027, 11, 7, 5, 30, 0, 0, time.UTC)
+	if !fallBack.Equal(wantFall) {
+		t.Fatalf("fall-back next run = %s, want %s", fallBack, wantFall)
+	}
+}

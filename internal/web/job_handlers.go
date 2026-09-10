@@ -32,26 +32,29 @@ type protocolPayload struct {
 	ProfileLatestRevision  int64                `json:"profile_latest_revision,omitempty"`
 }
 type jobPayload struct {
-	Name                     string           `json:"name"`
-	Schedule                 string           `json:"schedule"`
-	Timezone                 string           `json:"timezone"`
-	RunOnStart               *bool            `json:"run_on_start"`
-	AssumeAlive              *bool            `json:"assume_alive"`
-	Targets                  []string         `json:"targets"`
-	MaxExpandedHosts         int              `json:"max_expanded_hosts"`
-	TCP                      *protocolPayload `json:"tcp"`
-	UDP                      *protocolPayload `json:"udp"`
-	Timing                   string           `json:"timing"`
-	Timeout                  string           `json:"timeout"`
-	ResumeWindow             string           `json:"resume_window,omitempty"`
-	BaselineSamples          int              `json:"baseline_samples"`
-	ChangeConfirmations      int              `json:"change_confirmations"`
-	Enabled                  *bool            `json:"enabled,omitempty"`
-	Archived                 bool             `json:"archived,omitempty"`
-	Revision                 int64            `json:"revision,omitempty"`
-	ConfirmRebaseline        bool             `json:"confirm_rebaseline,omitempty"`
-	AllowHighCost            bool             `json:"allow_high_cost,omitempty"`
-	NotificationDestinations *[]string        `json:"notification_destinations,omitempty"`
+	Name                string           `json:"name"`
+	Schedule            string           `json:"schedule"`
+	Timezone            string           `json:"timezone"`
+	RunOnStart          *bool            `json:"run_on_start"`
+	AssumeAlive         *bool            `json:"assume_alive"`
+	Targets             []string         `json:"targets"`
+	MaxExpandedHosts    int              `json:"max_expanded_hosts"`
+	TCP                 *protocolPayload `json:"tcp"`
+	UDP                 *protocolPayload `json:"udp"`
+	Timing              string           `json:"timing"`
+	Timeout             string           `json:"timeout"`
+	ResumeWindow        string           `json:"resume_window,omitempty"`
+	BaselineSamples     int              `json:"baseline_samples"`
+	ChangeConfirmations int              `json:"change_confirmations"`
+	Enabled             *bool            `json:"enabled,omitempty"`
+	Archived            bool             `json:"archived,omitempty"`
+	Revision            int64            `json:"revision,omitempty"`
+	ConfirmRebaseline   bool             `json:"confirm_rebaseline,omitempty"`
+	// A pointer preserves whether an update actually supplied this field. An
+	// operator must not be able to clear an administrator's high-cost approval
+	// simply by sending an older payload that predates the field.
+	AllowHighCost            *bool     `json:"allow_high_cost,omitempty"`
+	NotificationDestinations *[]string `json:"notification_destinations,omitempty"`
 }
 
 type lifecyclePayload struct {
@@ -88,7 +91,11 @@ func validateManagedScannerInput(protocol *protocolPayload, label string) error 
 }
 
 func (p jobPayload) config() (config.Job, error) {
-	job := config.Job{Name: strings.TrimSpace(p.Name), Schedule: strings.TrimSpace(p.Schedule), Timezone: strings.TrimSpace(p.Timezone), RunOnStart: p.RunOnStart, AssumeAlive: p.AssumeAlive, Targets: p.Targets, MaxExpandedHosts: p.MaxExpandedHosts, Timing: p.Timing, AllowHighCost: p.AllowHighCost}
+	allowHighCost := false
+	if p.AllowHighCost != nil {
+		allowHighCost = *p.AllowHighCost
+	}
+	job := config.Job{Name: strings.TrimSpace(p.Name), Schedule: strings.TrimSpace(p.Schedule), Timezone: strings.TrimSpace(p.Timezone), RunOnStart: p.RunOnStart, AssumeAlive: p.AssumeAlive, Targets: p.Targets, MaxExpandedHosts: p.MaxExpandedHosts, Timing: p.Timing, AllowHighCost: allowHighCost}
 	if p.NotificationDestinations != nil {
 		job.NotificationDestinations = cloneStrings(*p.NotificationDestinations)
 	}
@@ -168,7 +175,8 @@ func cycleJSON(cycle store.ScanCycleRecord) map[string]any {
 }
 
 func fromConfig(j config.Job) jobPayload {
-	p := jobPayload{Name: j.Name, Schedule: j.Schedule, Timezone: j.Timezone, RunOnStart: j.RunOnStart, AssumeAlive: j.AssumeAlive, Targets: j.Targets, MaxExpandedHosts: j.MaxExpandedHosts, Timing: j.Timing, Timeout: j.Timeout.Value().String(), ResumeWindow: j.ResumeWindowValue().String(), BaselineSamples: j.Baseline.Samples, ChangeConfirmations: j.Change.Confirmations, AllowHighCost: j.AllowHighCost}
+	allowHighCost := j.AllowHighCost
+	p := jobPayload{Name: j.Name, Schedule: j.Schedule, Timezone: j.Timezone, RunOnStart: j.RunOnStart, AssumeAlive: j.AssumeAlive, Targets: j.Targets, MaxExpandedHosts: j.MaxExpandedHosts, Timing: j.Timing, Timeout: j.Timeout.Value().String(), ResumeWindow: j.ResumeWindowValue().String(), BaselineSamples: j.Baseline.Samples, ChangeConfirmations: j.Change.Confirmations, AllowHighCost: &allowHighCost}
 	if j.NotificationDestinations != nil {
 		selection := make([]string, len(j.NotificationDestinations))
 		copy(selection, j.NotificationDestinations)

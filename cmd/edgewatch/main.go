@@ -90,7 +90,21 @@ func run(args []string) error {
 		}
 		return printValue(*output, normalizedConfig(cfg))
 	}
-	s, err := store.Open(cfg.Database)
+	// Keep the daemon as the sole migration/repair owner. Read-only health and
+	// diagnostic commands must never create a database or mutate schema state,
+	// while backup needs a writable connection for VACUUM INTO without running
+	// migrations in parallel with the daemon.
+	readOnlyCommand := cmd == "health" || cmd == "status" || cmd == "history" || cmd == "verify" || (cmd == "baseline" && action == "export")
+	var openStore func(string) (*store.Store, error)
+	switch {
+	case readOnlyCommand:
+		openStore = store.OpenReadOnlyExisting
+	case cmd == "backup":
+		openStore = store.OpenExisting
+	default:
+		openStore = store.Open
+	}
+	s, err := openStore(cfg.Database)
 	if err != nil {
 		return err
 	}

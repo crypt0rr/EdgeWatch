@@ -54,6 +54,7 @@ func (s *Store) ListScans(ctx context.Context, job string, limit int) ([]model.S
 func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int) (Page[model.Scan], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Scan]
+	readDB := s.reader()
 	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans`
 	countQuery := `SELECT COUNT(*) FROM scans`
 	args := []any{}
@@ -64,12 +65,12 @@ func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int
 		countQuery += ` WHERE job=?`
 		countArgs = append(countArgs, job)
 	}
-	if err := s.DB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
+	if err := readDB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
 		return page, err
 	}
 	query += ` ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
-	rows, err := s.DB.QueryContext(ctx, query, args...)
+	rows, err := readDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return page, err
 	}
@@ -113,6 +114,7 @@ func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int
 func (s *Store) ListScanSummariesPage(ctx context.Context, job string, limit, offset int) (Page[model.ScanSummary], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.ScanSummary]
+	readDB := s.reader()
 	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans`
 	countQuery := `SELECT COUNT(*) FROM scans`
 	args := []any{}
@@ -123,12 +125,12 @@ func (s *Store) ListScanSummariesPage(ctx context.Context, job string, limit, of
 		countQuery += ` WHERE job=?`
 		countArgs = append(countArgs, job)
 	}
-	if err := s.DB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
+	if err := readDB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
 		return page, err
 	}
 	query += ` ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
-	rows, err := s.DB.QueryContext(ctx, query, args...)
+	rows, err := readDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return page, err
 	}
@@ -163,6 +165,7 @@ func (s *Store) ListEvents(ctx context.Context, job string, limit int) ([]model.
 func (s *Store) ListEventsPage(ctx context.Context, job string, limit, offset int) (Page[model.Event], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Event]
+	readDB := s.reader()
 	query := `SELECT payload_json FROM events`
 	countQuery := `SELECT COUNT(*) FROM events`
 	args := []any{}
@@ -173,12 +176,12 @@ func (s *Store) ListEventsPage(ctx context.Context, job string, limit, offset in
 		countQuery += ` WHERE job=?`
 		countArgs = append(countArgs, job)
 	}
-	if err := s.DB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
+	if err := readDB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
 		return page, err
 	}
 	query += ` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
-	rows, err := s.DB.QueryContext(ctx, query, args...)
+	rows, err := readDB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return page, err
 	}
@@ -207,10 +210,11 @@ func (s *Store) ListJobEvents(ctx context.Context, jobID string, limit int) ([]m
 func (s *Store) ListJobEventsPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Event], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Event]
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
+	readDB := s.reader()
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT payload_json FROM events WHERE job_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT payload_json FROM events WHERE job_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -231,13 +235,13 @@ func (s *Store) ListJobEventsPage(ctx context.Context, jobID string, limit, offs
 
 func (s *Store) FailedDeliveries(ctx context.Context) (int, error) {
 	var count int
-	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND attempts >= ?`, deliveryMaxAttempts).Scan(&count)
+	err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND attempts >= ?`, deliveryMaxAttempts).Scan(&count)
 	return count, err
 }
 
 func (s *Store) State(ctx context.Context, job string) (model.JobState, error) {
 	var b []byte
-	err := s.DB.QueryRowContext(ctx, `SELECT state_json FROM job_states WHERE job=?`, job).Scan(&b)
+	err := s.reader().QueryRowContext(ctx, `SELECT state_json FROM job_states WHERE job=?`, job).Scan(&b)
 	if errors.Is(err, sql.ErrNoRows) {
 		return emptyState(), nil
 	}
@@ -265,10 +269,11 @@ type JobIncident struct {
 func (s *Store) ListJobIncidentsPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Incident], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Incident]
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_runtime, json_each(job_runtime.state_json, '$.incidents') WHERE job_runtime.job_id=?`, jobID).Scan(&page.Total); err != nil {
+	readDB := s.reader()
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_runtime, json_each(job_runtime.state_json, '$.incidents') WHERE job_runtime.job_id=?`, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT json_each.value FROM job_runtime, json_each(job_runtime.state_json, '$.incidents') WHERE job_runtime.job_id=? ORDER BY json_each.key LIMIT ? OFFSET ?`, jobID, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT json_each.value FROM job_runtime, json_each(job_runtime.state_json, '$.incidents') WHERE job_runtime.job_id=? ORDER BY json_each.key LIMIT ? OFFSET ?`, jobID, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -290,10 +295,11 @@ func (s *Store) ListJobIncidentsPage(ctx context.Context, jobID string, limit, o
 func (s *Store) ListIncidentsPage(ctx context.Context, limit, offset int) (Page[JobIncident], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[JobIncident]
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_runtime JOIN jobs ON jobs.id=job_runtime.job_id, json_each(job_runtime.state_json, '$.incidents')`).Scan(&page.Total); err != nil {
+	readDB := s.reader()
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_runtime JOIN jobs ON jobs.id=job_runtime.job_id, json_each(job_runtime.state_json, '$.incidents')`).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT jobs.id,jobs.name,json_each.value FROM job_runtime JOIN jobs ON jobs.id=job_runtime.job_id, json_each(job_runtime.state_json, '$.incidents') ORDER BY jobs.name,json_each.key LIMIT ? OFFSET ?`, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT jobs.id,jobs.name,json_each.value FROM job_runtime JOIN jobs ON jobs.id=job_runtime.job_id, json_each(job_runtime.state_json, '$.incidents') ORDER BY jobs.name,json_each.key LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return page, err
 	}

@@ -2,7 +2,6 @@ package web
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,7 +38,7 @@ func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "endpoint not found", nil)
 		return
 	}
-	if !s.allowPublicRequest(r) {
+	if !s.allowAnonymousRequest(r, "public-dashboard") {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "public status requests are temporarily rate limited", nil)
 		return
@@ -87,37 +86,71 @@ func publicDashboardCacheKey(dashboard store.PublicDashboard) string {
 
 func (s *Server) cachedPublicDashboardPayload(ctx context.Context, dashboard store.PublicDashboard) ([]byte, error) {
 	key := publicDashboardCacheKey(dashboard)
-	now := time.Now().UTC()
-	s.publicCacheMu.Lock()
-	if cached := s.publicCache; cached != nil && cached.key == key && now.Before(cached.expiresAt) {
-		payload := append([]byte(nil), cached.payload...)
+	for {
+		now := time.Now().UTC()
+		s.publicCacheMu.Lock()
+		if cached := s.publicCache; cached != nil && cached.key == key && now.Before(cached.expiresAt) {
+			payload := append([]byte(nil), cached.payload...)
+			s.publicCacheMu.Unlock()
+			return payload, nil
+		}
+		if building := s.publicBuild; building != nil {
+			s.publicCacheMu.Unlock()
+			select {
+			case <-building:
+				// The builder either populated a matching cache or failed. Recheck
+				// under the lock so a concurrent dashboard update cannot return an
+				// obsolete payload.
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		building := make(chan struct{})
+		generation := s.publicGen
+		s.publicBuild = building
 		s.publicCacheMu.Unlock()
-		return payload, nil
-	}
-	s.publicCacheMu.Unlock()
+		defer func() {
+			s.publicCacheMu.Lock()
+			if s.publicBuild == building {
+				s.publicBuild = nil
+				close(building)
+			}
+			s.publicCacheMu.Unlock()
+		}()
 
-	response, err := s.publicDashboardResponse(ctx, dashboard)
-	if err != nil {
-		return nil, err
+		response, err := s.publicDashboardResponse(ctx, dashboard)
+		var payload []byte
+		if err == nil {
+			payload, err = json.Marshal(response)
+		}
+
+		s.publicCacheMu.Lock()
+		if err == nil && generation == s.publicGen {
+			s.publicCache = &publicDashboardCache{key: key, expiresAt: time.Now().UTC().Add(publicDashboardCacheTTL), payload: append([]byte(nil), payload...)}
+		}
+		s.publicCacheMu.Unlock()
+		return payload, err
 	}
-	payload, err := json.Marshal(response)
-	if err != nil {
-		return nil, err
-	}
-	s.publicCacheMu.Lock()
-	s.publicCache = &publicDashboardCache{key: key, expiresAt: time.Now().UTC().Add(publicDashboardCacheTTL), payload: append([]byte(nil), payload...)}
-	s.publicCacheMu.Unlock()
-	return payload, nil
 }
 
 func (s *Server) invalidatePublicDashboardCache() {
 	s.publicCacheMu.Lock()
+	s.publicGen++
 	s.publicCache = nil
 	s.publicCacheMu.Unlock()
 }
 
 func (s *Server) allowPublicRequest(r *http.Request) bool {
-	key := s.clientIP(r)
+	return s.allowAnonymousRequest(r, "public-dashboard")
+}
+
+func (s *Server) allowAnonymousRequest(r *http.Request, namespace string) bool {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		namespace = "anonymous"
+	}
+	key := namespace + ":" + s.clientIP(r)
 	now := time.Now().UTC()
 	cutoff := now.Add(-time.Minute)
 	s.publicMu.Lock()
@@ -416,32 +449,24 @@ func (s *Server) latestLegacyPublicHosts(ctx context.Context, selections []store
 	// high-volume job consume the entire window and starve a low-volume job's
 	// published host.
 	for _, requestedJobID := range jobIDs {
-		rows, err := s.Store.DB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json
-FROM scans WHERE status='success' AND job_id=?
-ORDER BY finished_at DESC,id DESC LIMIT ?`, requestedJobID, legacyPublicScanLimit)
+		scans, err := s.Store.ListLegacyPublicScans(ctx, requestedJobID, legacyPublicScanLimit)
 		if err != nil {
 			return nil, err
 		}
-		for rows.Next() {
-			var id, job string
-			var jobID sql.NullString
-			var revision sql.NullInt64
-			var started, finished, status, scanError, nmapVersion, configHash string
-			var raw []byte
-			if err := rows.Scan(&id, &jobID, &revision, &job, &started, &finished, &status, &scanError, &nmapVersion, &configHash, &raw); err != nil {
-				_ = rows.Close()
-				return nil, err
-			}
-			if !jobID.Valid || len(raw) > 8<<20 {
+		for _, legacyScan := range scans {
+			raw := legacyScan.Snapshot
+			if len(raw) > 8<<20 {
 				continue
 			}
 			page, err := observationsForSnapshotBytes(raw)
 			if err != nil {
-				_ = rows.Close()
-				return nil, err
+				// A malformed historical payload must not make an otherwise
+				// healthy public dashboard unavailable. It cannot produce a
+				// trustworthy host result, so skip it and continue to older rows.
+				continue
 			}
 			for _, host := range page.Items {
-				key := publicSelectionKey(jobID.String, host.Address)
+				key := publicSelectionKey(legacyScan.JobID, host.Address)
 				selection, ok := wanted[key]
 				if !ok {
 					continue
@@ -449,19 +474,9 @@ ORDER BY finished_at DESC,id DESC LIMIT ?`, requestedJobID, legacyPublicScanLimi
 				if _, already := results[key]; already {
 					continue
 				}
-				summary := model.ScanSummary{ID: id, JobID: jobID.String, Job: job, Status: status, Error: scanError, NmapVersion: nmapVersion, ConfigHash: configHash, StartedAt: parsePublicTime(started), FinishedAt: parsePublicTime(finished)}
-				if revision.Valid {
-					summary.JobRevision = revision.Int64
-				}
-				results[key] = store.PublicDashboardHostResult{Selection: selection, Host: store.ScanHost{ScanID: id, DataQuality: page.DataQuality, Host: host}, Summary: summary}
+				summary := model.ScanSummary{ID: legacyScan.ID, JobID: legacyScan.JobID, Job: legacyScan.Job, Status: legacyScan.Status, Error: legacyScan.Error, NmapVersion: legacyScan.NmapVersion, ConfigHash: legacyScan.ConfigHash, StartedAt: parsePublicTime(legacyScan.StartedAt), FinishedAt: parsePublicTime(legacyScan.FinishedAt), JobRevision: legacyScan.JobRevision}
+				results[key] = store.PublicDashboardHostResult{Selection: selection, Host: store.ScanHost{ScanID: legacyScan.ID, DataQuality: page.DataQuality, Host: host}, Summary: summary}
 			}
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
 		}
 		if len(results) == len(wanted) {
 			break

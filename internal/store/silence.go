@@ -75,12 +75,7 @@ func (s *Store) JobSilenceDue(ctx context.Context, jobID string, createdAt, now 
 	if jobID == "" || threshold <= 0 {
 		return false, nil
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = tx.Rollback() }()
-	decision, err := jobSilenceDecisionTx(ctx, tx, jobID, createdAt, now, threshold)
+	decision, err := jobSilenceDecisionQuery(ctx, s.reader(), jobID, createdAt, now, threshold)
 	return decision.due, err
 }
 
@@ -90,6 +85,10 @@ type jobSilenceDecision struct {
 }
 
 func jobSilenceDecisionTx(ctx context.Context, tx *sql.Tx, jobID string, createdAt, now time.Time, threshold time.Duration) (jobSilenceDecision, error) {
+	return jobSilenceDecisionQuery(ctx, tx, jobID, createdAt, now, threshold)
+}
+
+func jobSilenceDecisionQuery(ctx context.Context, queryer rowQueryer, jobID string, createdAt, now time.Time, threshold time.Duration) (jobSilenceDecision, error) {
 	if jobID == "" || threshold <= 0 {
 		return jobSilenceDecision{}, nil
 	}
@@ -97,7 +96,7 @@ func jobSilenceDecisionTx(ctx context.Context, tx *sql.Tx, jobID string, created
 	createdAt = createdAt.UTC()
 	lastReference := createdAt
 	var finished string
-	err := tx.QueryRowContext(ctx, `SELECT finished_at FROM scans WHERE job_id=? AND status='success' ORDER BY finished_at DESC,id DESC LIMIT 1`, jobID).Scan(&finished)
+	err := queryer.QueryRowContext(ctx, `SELECT finished_at FROM scans WHERE job_id=? AND status='success' ORDER BY finished_at DESC,id DESC LIMIT 1`, jobID).Scan(&finished)
 	if err == nil {
 		if parsed := scanTime(finished); !parsed.IsZero() {
 			lastReference = parsed
@@ -112,7 +111,7 @@ func jobSilenceDecisionTx(ctx context.Context, tx *sql.Tx, jobID string, created
 	// A scan that is currently running is still making progress. Do not alert
 	// while it owns a live lease, even if the previous successful result is old.
 	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_leases WHERE job=? AND expires_at>?`, jobID, now.Format(time.RFC3339Nano)).Scan(&active); err != nil {
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_leases WHERE job=? AND expires_at>?`, jobID, now.Format(time.RFC3339Nano)).Scan(&active); err != nil {
 		return jobSilenceDecision{}, err
 	}
 	if active > 0 {
@@ -123,7 +122,7 @@ func jobSilenceDecisionTx(ctx context.Context, tx *sql.Tx, jobID string, created
 	// restarted or its heartbeat fires repeatedly, one warning is retained per
 	// window while the job remains silent.
 	var alerted string
-	err = tx.QueryRowContext(ctx, `SELECT created_at FROM events WHERE type='job-silent' AND job_id=? ORDER BY created_at DESC,id DESC LIMIT 1`, jobID).Scan(&alerted)
+	err = queryer.QueryRowContext(ctx, `SELECT created_at FROM events WHERE type='job-silent' AND job_id=? ORDER BY created_at DESC,id DESC LIMIT 1`, jobID).Scan(&alerted)
 	if err == nil {
 		if parsed := scanTime(alerted); !parsed.IsZero() && now.Sub(parsed) < threshold {
 			return jobSilenceDecision{}, nil

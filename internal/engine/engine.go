@@ -46,6 +46,12 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 	}
 	return e.Store.FinalizeManagedScan(ctx, scan, jobID, scan.ConfigHash, destinations, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
 		if current.Status == "success" {
+			if snapshotHasUnreachableHost(current.Snapshot) {
+				current.Status = "failed"
+				current.Error = incompleteScanError(current.Snapshot)
+			}
+		}
+		if current.Status == "success" {
 			if state.Baseline != nil {
 				current.BaselineScanID = state.BaselineScanID
 				current.BaselineConfigHash = state.BaselineConfigHash
@@ -100,7 +106,12 @@ func processSuccessWithChanges(state *model.JobState, job config.Job, scan model
 	// observation on a later scan instead.
 	if snapshotHasUnreachableHost(scan.Snapshot) {
 		clearTotalLossCandidate(state)
-		return nil, nil, nil
+		if scan.Status == "success" {
+			scan.Status = "failed"
+			scan.Error = incompleteScanError(scan.Snapshot)
+		}
+		events, err := processFailure(state, job.Name, scan)
+		return events, nil, err
 	}
 	now := scan.FinishedAt
 	if state.Baseline == nil {
@@ -198,6 +209,23 @@ func snapshotHasUnreachableHost(snapshot model.Snapshot) bool {
 		}
 	}
 	return false
+}
+
+func incompleteScanError(snapshot model.Snapshot) string {
+	addresses := make([]string, 0)
+	for _, host := range snapshot.Hosts {
+		switch strings.ToLower(strings.TrimSpace(host.Status)) {
+		case "unreachable", "down", "timedout", "timed-out", "timeout":
+			if address := strings.TrimSpace(host.Address); address != "" {
+				addresses = append(addresses, address)
+			}
+		}
+	}
+	sort.Strings(addresses)
+	if len(addresses) == 0 {
+		return "incomplete host discovery"
+	}
+	return "incomplete host discovery: " + strings.Join(addresses, ", ")
 }
 
 func advanceCandidate(state *model.JobState, scan model.Scan, required int, merge bool) []model.Event {

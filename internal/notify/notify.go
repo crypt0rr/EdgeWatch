@@ -906,7 +906,17 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 		return err
 	}
 	result := make(chan error, 1)
-	go func() { result <- send(rawURL, message) }()
+	go func() {
+		// Provider implementations are third-party code. A panic must be
+		// converted into the same redacted delivery failure path as any other
+		// provider error; it must never take down the daemon's delivery worker.
+		defer func() {
+			if recover() != nil {
+				result <- errors.New("notification provider panicked")
+			}
+		}()
+		result <- send(rawURL, message)
+	}()
 	select {
 	case err := <-result:
 		return err

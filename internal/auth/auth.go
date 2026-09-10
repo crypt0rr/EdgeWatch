@@ -80,6 +80,7 @@ type Manager struct {
 	accountBlocked       map[string]time.Time
 	unknownSourceFails   map[string][]time.Time
 	unknownSourceBlocked map[string]time.Time
+	rateAudit            map[string]time.Time
 	trustedProxies       []*net.IPNet
 }
 
@@ -89,6 +90,7 @@ func NewManager(s *store.Store) *Manager {
 		fails: map[string][]time.Time{}, blocked: map[string]time.Time{},
 		accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{},
 		unknownSourceFails: map[string][]time.Time{}, unknownSourceBlocked: map[string]time.Time{},
+		rateAudit: map[string]time.Time{},
 	}
 }
 
@@ -362,10 +364,10 @@ func (m *Manager) Setup(ctx context.Context, token, password string) error {
 // login. The non-HTTP Setup method remains available to trusted callers and
 // tests, while the web endpoint should use this wrapper.
 func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token, password string) error {
-	source := m.sourceScope(request)
+	source := m.sourceScopeFor(request, "setup")
 	account := "setup:" + digest(strings.TrimSpace(token))
 	if !m.allowScoped(source, account) {
-		m.auditAuthFailure(ctx, "auth.rate_limited", "setup", request)
+		m.auditRateLimit(ctx, "setup", request)
 		return ErrRateLimited
 	}
 	if err := m.Setup(ctx, token, password); err != nil {
@@ -382,10 +384,10 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 // Argon2id hash are handled inside the store transaction; a failed attempt
 // never consumes the invite.
 func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, token, password string) error {
-	source := m.sourceScope(request)
+	source := m.sourceScopeFor(request, "activation")
 	account := "activation:" + digest(strings.TrimSpace(token))
 	if !m.allowScoped(source, account) {
-		m.auditAuthFailure(ctx, "auth.rate_limited", "activation", request)
+		m.auditRateLimit(ctx, "activation", request)
 		return ErrRateLimited
 	}
 	hash, err := PasswordHash(password)
@@ -417,11 +419,11 @@ func (m *Manager) Login(ctx context.Context, request *http.Request, password, ot
 // that always sign in as the original administrator.
 func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, password, otp, recovery string) (string, store.User, error) {
 	identity := normalizeLoginIdentity(username)
-	source := m.sourceScope(request)
+	source := m.sourceScopeFor(request, "login")
 	account := "login:" + identity
 	unknownSource := "unknown-login:" + strings.TrimPrefix(source, "source:")
 	if !m.allowScoped(source, account) {
-		m.auditAuthFailure(ctx, "auth.rate_limited", identity, request)
+		m.auditRateLimit(ctx, "login:"+identity, request)
 		return "", store.User{}, ErrRateLimited
 	}
 	user, err := m.Store.GetUserByUsername(ctx, identity)
@@ -438,7 +440,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	}
 	if err != nil {
 		if !m.allowUnknownSource(unknownSource) {
-			m.auditAuthFailure(ctx, "auth.rate_limited", identity, request)
+			m.auditRateLimit(ctx, "unknown-login:"+identity, request)
 			return "", store.User{}, ErrRateLimited
 		}
 		// Unknown usernames still consume the failure budget. Otherwise an
@@ -505,9 +507,27 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	audit := store.AuditEntry{Action: action, Detail: "successful login", ActorUserID: user.ID, ActorUsername: user.Username, SourceIP: m.ClientIP(request)}
 	if upgradedHash != "" {
 		if err := m.Store.CreateSessionForUserWithPasswordUpgrade(ctx, user.ID, user.PasswordHash, upgradedHash, digest(session), csrf, now, now.Add(SessionTTL), audit); err != nil {
-			return "", user, err
+			if !errors.Is(err, store.ErrPasswordChangedDuringLogin) {
+				return "", user, err
+			}
+			// Another valid login may have upgraded the same legacy hash first.
+			// Re-read the authoritative row and verify the supplied password
+			// against it before creating a session. A real password change does
+			// not verify and therefore still fails closed.
+			current, readErr := m.Store.GetUser(ctx, user.ID)
+			if readErr != nil || !current.Enabled || !VerifyPassword(current.PasswordHash, password) {
+				if readErr != nil {
+					return "", user, readErr
+				}
+				return "", user, errors.New("password changed during login")
+			}
+			if sessionErr := m.Store.CreateSessionForUserWithAuditEntry(ctx, current.ID, digest(session), csrf, now, now.Add(SessionTTL), audit); sessionErr != nil {
+				return "", user, sessionErr
+			}
+			user = current
+		} else {
+			user.PasswordHash = upgradedHash
 		}
-		user.PasswordHash = upgradedHash
 	} else if err := m.Store.CreateSessionForUserWithAuditEntry(ctx, user.ID, digest(session), csrf, now, now.Add(SessionTTL), audit); err != nil {
 		return "", user, err
 	}
@@ -532,10 +552,10 @@ func (m *Manager) ConfirmPassword(ctx context.Context, request *http.Request, pa
 // web-managed administrators must be able to confirm with their own password
 // rather than the original admin account's credential.
 func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Request, userID, password string) error {
-	source := m.sourceScope(request)
+	source := m.sourceScopeFor(request, "confirmation")
 	account := "confirm:" + strings.TrimSpace(userID)
 	if !m.allowScoped(source, account) {
-		m.auditAuthFailure(ctx, "auth.rate_limited", "password-confirmation", request)
+		m.auditRateLimit(ctx, "password-confirmation", request)
 		return ErrRateLimited
 	}
 	user, err := m.Store.GetUser(ctx, userID)
@@ -564,6 +584,31 @@ func (m *Manager) auditAuthFailure(ctx context.Context, action, subject string, 
 	})
 }
 
+// auditRateLimit records only the transition into a rate-limited episode. A
+// blocked client can send an unbounded number of rejected requests; writing an
+// audit row for each one would turn the protection itself into a storage DoS.
+func (m *Manager) auditRateLimit(ctx context.Context, subject string, request *http.Request) {
+	key := strings.TrimSpace(subject) + "\x00" + m.sourceScopeFor(request, "rate")
+	now := m.now()
+	m.mu.Lock()
+	m.ensureScopedLimiterMapsLocked()
+	last, exists := m.rateAudit[key]
+	if exists && now.Sub(last) < authFailureWindow {
+		m.mu.Unlock()
+		return
+	}
+	m.rateAudit[key] = now
+	if len(m.rateAudit) > authLimiterMaxEntries {
+		for candidate, timestamp := range m.rateAudit {
+			if now.Sub(timestamp) >= authFailureWindow {
+				delete(m.rateAudit, candidate)
+			}
+		}
+	}
+	m.mu.Unlock()
+	m.auditAuthFailure(ctx, "auth.rate_limited", subject, request)
+}
+
 func requestRemote(request *http.Request) string {
 	if request == nil {
 		return "unknown"
@@ -576,7 +621,15 @@ func sourceScope(request *http.Request) string {
 }
 
 func (m *Manager) sourceScope(request *http.Request) string {
-	return "source:" + limiterKey(m.ClientIP(request))
+	return m.sourceScopeFor(request, "auth")
+}
+
+func (m *Manager) sourceScopeFor(request *http.Request, namespace string) string {
+	namespace = strings.TrimSpace(namespace)
+	if namespace == "" {
+		namespace = "auth"
+	}
+	return "source:" + namespace + ":" + limiterKey(m.ClientIP(request))
 }
 
 func normalizeLoginIdentity(username string) string {
@@ -609,7 +662,7 @@ func (m *Manager) allowScoped(source, account string) bool {
 	now := m.now()
 	m.ensureScopedLimiterMapsLocked()
 	m.sweepLimiterLocked(now)
-	if legacy := strings.TrimPrefix(source, "source:"); legacy != source {
+	if legacy := legacySourceScope(source); legacy != "" {
 		if until, ok := m.blocked[legacy]; ok && now.Before(until) {
 			return false
 		}
@@ -702,9 +755,26 @@ func (m *Manager) clearScoped(source, account, unknownSource string) {
 	// Clear a legacy bucket as well when a compatibility caller and a normal
 	// request share a source. This avoids a successful login being followed by
 	// a stale test/old-client lockout.
-	legacy := strings.TrimPrefix(source, "source:")
+	legacy := legacySourceScope(source)
 	delete(m.fails, legacy)
 	delete(m.blocked, legacy)
+}
+
+func legacySourceScope(source string) string {
+	if !strings.HasPrefix(source, "source:") {
+		return ""
+	}
+	value := strings.TrimPrefix(source, "source:")
+	// Scoped source keys are encoded as source:<namespace>:<client>. Split
+	// only at the namespace delimiter so IPv6 literals keep all of their
+	// colons. The legacy form source:<client> is returned unchanged.
+	if index := strings.IndexByte(value, ':'); index >= 0 {
+		if address := value[index+1:]; address != "" {
+			return address
+		}
+		return ""
+	}
+	return value
 }
 
 func limiterKey(remote string) string {
@@ -732,6 +802,9 @@ func (m *Manager) ensureScopedLimiterMapsLocked() {
 	}
 	if m.unknownSourceBlocked == nil {
 		m.unknownSourceBlocked = map[string]time.Time{}
+	}
+	if m.rateAudit == nil {
+		m.rateAudit = map[string]time.Time{}
 	}
 }
 
@@ -928,7 +1001,14 @@ func (m *Manager) LogoutSession(ctx context.Context, r *http.Request, session st
 }
 
 func (m *Manager) CheckCSRF(r *http.Request, session store.Session) bool {
-	return hmac.Equal([]byte(session.CSRFToken), []byte(r.Header.Get("X-CSRF-Token")))
+	if r == nil || session.CSRFToken == "" {
+		return false
+	}
+	token := strings.TrimSpace(r.Header.Get("X-CSRF-Token"))
+	if token == "" {
+		return false
+	}
+	return hmac.Equal([]byte(session.CSRFToken), []byte(token))
 }
 
 func SetSessionCookie(w http.ResponseWriter, raw string) {

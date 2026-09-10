@@ -125,7 +125,7 @@ func TestParseNextRunAndShiftCronMinuteBoundaries(t *testing.T) {
 		{"bad * * * *", 30, false},
 		{"60 * * * *", 30, false},
 		{"0 * * * *", 0, false},
-		{"0 * * * *", -30, true},
+		{"0 * * * *", -30, false},
 	} {
 		if _, ok := shiftCronMinute(test.schedule, test.offset); ok != test.ok {
 			t.Errorf("shiftCronMinute(%q,%d) ok mismatch", test.schedule, test.offset)

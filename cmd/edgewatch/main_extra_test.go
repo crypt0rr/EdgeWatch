@@ -120,12 +120,20 @@ func TestHealthDoesNotConstructScannerApplication(t *testing.T) {
 
 func TestRunStatusReportsUnknownManagedJob(t *testing.T) {
 	dir := t.TempDir()
+	database := filepath.Join(dir, "edgewatch.db")
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
 	configPath := filepath.Join(dir, "config.yaml")
-	contents := "database: " + filepath.Join(dir, "edgewatch.db") + "\n"
+	contents := "database: " + database + "\n"
 	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := run([]string{"status", "--config", configPath, "--job", "missing"})
+	err = run([]string{"status", "--config", configPath, "--job", "missing"})
 	if err == nil || !strings.Contains(err.Error(), `unknown job "missing"`) {
 		t.Fatalf("status error = %v", err)
 	}
@@ -209,6 +217,13 @@ func TestRunBackupVerifyAndBaselineExport(t *testing.T) {
 	database := filepath.Join(dir, "edgewatch.db")
 	configPath := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(configPath, []byte("database: "+database+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := run([]string{"verify", "--config", configPath, "--output", "json"}); err != nil {

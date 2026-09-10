@@ -103,7 +103,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 		raw  []byte
 	}
 	legacyRows, err := func() ([]legacyRow, error) {
-		rows, err := s.DB.QueryContext(ctx, `SELECT job,state_json FROM job_states ORDER BY job`)
+		rows, err := s.reader().QueryContext(ctx, `SELECT job,state_json FROM job_states ORDER BY job`)
 		if err != nil {
 			return nil, err
 		}
@@ -147,7 +147,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 
 func (s *Store) exportLegacyBaseline(ctx context.Context, name string) (BaselineExportEntry, error) {
 	var raw []byte
-	if err := s.DB.QueryRowContext(ctx, `SELECT state_json FROM job_states WHERE job=?`, name).Scan(&raw); err != nil {
+	if err := s.reader().QueryRowContext(ctx, `SELECT state_json FROM job_states WHERE job=?`, name).Scan(&raw); err != nil {
 		return BaselineExportEntry{}, err
 	}
 	return s.exportLegacyBaselineJSON(ctx, name, raw)

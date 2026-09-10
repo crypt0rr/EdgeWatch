@@ -100,16 +100,28 @@ func jobSilenceThreshold(parser cron.Parser, job config.Job, now time.Time) (tim
 	if parsed.Next(now.UTC()).IsZero() {
 		return 0, fmt.Errorf("schedule never fires")
 	}
-	interval, ok := cronInterval(parsed, now.UTC())
+	last, next, interval, ok := cronWindow(parsed, now.UTC())
 	if !ok || interval <= 0 {
 		return 0, fmt.Errorf("schedule interval unavailable")
 	}
-	// Two expected intervals give a slow but healthy scan one full interval of
-	// grace while still surfacing an hourly job that has stopped for two hours.
-	if interval > (time.Duration(1<<63-1) / 2) {
+	// Keep one complete interval of grace after the next expected occurrence.
+	// The gap from last to next can be much larger than the preceding interval
+	// (for example Friday -> Monday on a weekday schedule), so use that actual
+	// calendar gap rather than assuming schedules are evenly spaced.
+	threshold := interval * 2
+	if !last.IsZero() && !next.IsZero() && next.After(last) {
+		gap := next.Sub(last)
+		if gap > interval {
+			if gap > (time.Duration(1<<63-1) - interval) {
+				return 0, fmt.Errorf("schedule interval overflows watchdog window")
+			}
+			threshold = gap + interval
+		}
+	}
+	if interval > (time.Duration(1<<63-1)/2) || threshold <= 0 {
 		return 0, fmt.Errorf("schedule interval overflows watchdog window")
 	}
-	return interval * 2, nil
+	return threshold, nil
 }
 
 // cronInterval derives the interval between the two most recent occurrences
@@ -117,26 +129,44 @@ func jobSilenceThreshold(parser cron.Parser, job config.Job, now time.Time) (tim
 // lookback finds a window containing an occurrence, then cron.Next walks only
 // that bounded window to obtain the preceding pair.
 func cronInterval(schedule cron.Schedule, now time.Time) (time.Duration, bool) {
+	_, _, interval, ok := cronWindow(schedule, now)
+	return interval, ok
+}
+
+// cronWindow returns the last schedule occurrence, the next occurrence, and
+// the interval immediately preceding the last one. Using the upcoming
+// occurrence as well as the previous pair is important for calendars with
+// uneven gaps (for example a weekday schedule across a weekend): a fixed
+// weekday interval would otherwise report a healthy weekend gap as silent.
+func cronWindow(schedule cron.Schedule, now time.Time) (last, next time.Time, interval time.Duration, ok bool) {
 	if now.IsZero() {
-		return 0, false
+		return time.Time{}, time.Time{}, 0, false
 	}
 	for delta := jobSilenceMinimumInterval; delta <= jobSilenceLookback; {
 		probe := now.Add(-delta)
 		var previous, last time.Time
+		var upcoming time.Time
 		for attempts := 0; attempts < 4096; attempts++ {
 			occurrence := schedule.Next(probe)
-			if occurrence.IsZero() || !occurrence.Before(now) {
+			if occurrence.IsZero() {
+				break
+			}
+			if !occurrence.Before(now) {
+				upcoming = occurrence
 				break
 			}
 			previous, last = last, occurrence
 			probe = occurrence
 		}
 		if !previous.IsZero() && !last.IsZero() {
-			interval := last.Sub(previous)
+			interval = last.Sub(previous)
 			if interval < jobSilenceMinimumInterval {
-				return jobSilenceMinimumInterval, true
+				interval = jobSilenceMinimumInterval
 			}
-			return interval, true
+			if upcoming.IsZero() {
+				upcoming = schedule.Next(now)
+			}
+			return last, upcoming, interval, true
 		}
 		if delta >= jobSilenceLookback {
 			break
@@ -147,5 +177,5 @@ func cronInterval(schedule cron.Schedule, now time.Time) (time.Duration, bool) {
 			delta *= 2
 		}
 	}
-	return 0, false
+	return time.Time{}, time.Time{}, 0, false
 }

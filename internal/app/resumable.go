@@ -301,7 +301,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 							scan.CycleStatus = "stalled"
 						}
 					}
-					return true, model.Snapshot{}, splitErr
+					return true, fragment, splitErr
 				}
 			} else if retryErr := a.Store.RetryScanCycleUnit(stateCtx, cycle.ID, claimed.Sequence, lastError); retryErr != nil {
 				if errors.Is(retryErr, store.ErrCycleNotResumable) {
@@ -315,14 +315,14 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 						scan.CycleStatus = "stalled"
 					}
 				}
-				return true, model.Snapshot{}, retryErr
+				return true, fragment, retryErr
 			}
 			paused, pauseErr := a.Store.PauseScanCycle(stateCtx, cycle.ID, timedOut && completedThisAttempt == 0, lastError)
 			if pauseErr != nil {
 				// A persistence failure must not be reported as resumable progress.
 				scan.Status = "failed"
 				scan.Error = pauseErr.Error()
-				return true, model.Snapshot{}, pauseErr
+				return true, fragment, pauseErr
 			}
 			cycle = paused
 			if cycle.Status == "paused" && cycle.NoProgressAttempts >= 3 {
@@ -330,7 +330,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 				if stallErr != nil {
 					scan.Status = "failed"
 					scan.Error = stallErr.Error()
-					return true, model.Snapshot{}, stallErr
+					return true, fragment, stallErr
 				}
 				cycle = stalled
 				scan.Status = "failed"
@@ -344,7 +344,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 			}
 			scan.Resumable = true
 			setScanCycleMetadata(scan, cycle)
-			return true, model.Snapshot{}, scanErr
+			return true, fragment, scanErr
 		}
 
 		stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, scanErr.Error())
@@ -353,13 +353,13 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		} else {
 			scan.Status = "failed"
 			scan.Error = stallErr.Error()
-			return true, model.Snapshot{}, stallErr
+			return true, fragment, stallErr
 		}
 		scan.Resumable = true
 		scan.Status = "failed"
 		scan.Error = scanErr.Error()
 		setScanCycleMetadata(scan, cycle)
-		return true, model.Snapshot{}, scanErr
+		return true, fragment, scanErr
 	}
 }
 

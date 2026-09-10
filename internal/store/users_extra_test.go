@@ -105,3 +105,88 @@ func TestUserStoreProfilesSecurityAndSessions(t *testing.T) {
 		t.Fatal("consumed invite was reusable")
 	}
 }
+
+func TestSecuritySaveCanPreserveActingSessionWhileRevokingOthers(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	user, err := s.CreateUser(ctx, User{Username: "totp-user", DisplayName: "TOTP User", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSessionForUserWithAudit(ctx, user.ID, "current-session", "csrf", now, now.Add(time.Hour), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSessionForUserWithAudit(ctx, user.ID, "other-session", "csrf", now, now.Add(time.Hour), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	user.TOTPEnabled = false
+	user.UpdatedAt = now.Add(time.Minute)
+	if err := s.SaveUserSecurityPreservingSession(ctx, user, []string{"recovery"}, true, true, AuditEntry{}, "current-session"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetSession(ctx, "current-session"); err != nil {
+		t.Fatalf("acting session was revoked: %v", err)
+	}
+	if _, err := s.GetSession(ctx, "other-session"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("other session remains after security save: %v", err)
+	}
+}
+
+func TestGetAdminUsesAuthoritativeUserCredentials(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	if err := s.SaveAdmin(ctx, Admin{Username: "admin", PasswordHash: "legacy-hash", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET password_hash=?,display_name=?,updated_at=?,revision=revision+1 WHERE id=?`, "authoritative-hash", "Authoritative Admin", now.Add(time.Minute).Format(time.RFC3339Nano), LegacyAdminUserID); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := s.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if admin.PasswordHash != "authoritative-hash" || admin.DisplayName != "Authoritative Admin" {
+		t.Fatalf("GetAdmin returned stale compatibility credentials: %#v", admin)
+	}
+	if admin.Revision < 2 {
+		t.Fatalf("authoritative revision was not returned: %d", admin.Revision)
+	}
+}
+
+func TestGetAdminFallsBackToAuthoritativeUserWhenCompatibilityRowMissing(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	if err := s.SaveAdmin(ctx, Admin{Username: "admin", DisplayName: "Administrator", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM admins WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := s.GetAdmin(ctx)
+	if err != nil {
+		t.Fatalf("GetAdmin failed without compatibility row: %v", err)
+	}
+	if admin.Username != "admin" || admin.PasswordHash != "hash" || admin.Revision == 0 {
+		t.Fatalf("unexpected authoritative administrator: %#v", admin)
+	}
+}
+
+func TestPasswordUpgradeRaceReturnsTypedConflict(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	user, err := s.CreateUser(ctx, User{Username: "race-user", Role: RoleViewer, PasswordHash: "current-hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s.CreateSessionForUserWithPasswordUpgrade(ctx, user.ID, "stale-hash", "upgraded-hash", "race-session", "csrf", now, now.Add(time.Hour), AuditEntry{})
+	if !errors.Is(err, ErrPasswordChangedDuringLogin) {
+		t.Fatalf("password upgrade mismatch error = %v", err)
+	}
+	if _, err := s.GetSession(ctx, "race-session"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("failed upgrade created a session: %v", err)
+	}
+}

@@ -94,12 +94,13 @@ func normalizeUpdateDestinations(values []string) []string {
 }
 
 func (s *Store) GetApplicationUpdateState(ctx context.Context) (ApplicationUpdateState, error) {
-	state, err := scanApplicationUpdateState(s.DB.QueryRowContext(ctx, applicationUpdateStateQuery()))
+	readDB := s.reader()
+	state, err := scanApplicationUpdateState(readDB.QueryRowContext(ctx, applicationUpdateStateQuery()))
 	if errors.Is(err, sql.ErrNoRows) {
 		if _, insertErr := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO application_update_state(id,check_status) VALUES(1,'unknown')`); insertErr != nil {
 			return state, insertErr
 		}
-		return scanApplicationUpdateState(s.DB.QueryRowContext(ctx, applicationUpdateStateQuery()))
+		return scanApplicationUpdateState(readDB.QueryRowContext(ctx, applicationUpdateStateQuery()))
 	}
 	return state, err
 }

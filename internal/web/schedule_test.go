@@ -51,8 +51,8 @@ func TestShiftCronMinuteLeavesCompositeMinuteExpressionsUntouched(t *testing.T) 
 	if shifted, ok := shiftCronMinute("*/15 * * * *", 30); ok || shifted != "" {
 		t.Fatalf("step expression should not be rewritten: %q, %v", shifted, ok)
 	}
-	if shifted, ok := shiftCronMinute("45 3 * * *", 30); !ok || shifted != "15 3 * * *" {
-		t.Fatalf("unexpected wrapped shift: %q, %v", shifted, ok)
+	if shifted, ok := shiftCronMinute("45 3 * * *", 30); !ok || shifted != "15 4 * * *" {
+		t.Fatalf("unexpected carried shift: %q, %v", shifted, ok)
 	}
 }
 

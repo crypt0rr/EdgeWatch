@@ -327,7 +327,11 @@ func (n *Nmap) ScanWorkUnit(ctx context.Context, job config.Job, unit WorkUnit, 
 		}
 		if err != nil {
 			emit(Progress{StartedAt: started, Phase: "failed", Protocol: "tcp", TotalProbes: unit.Probes, CurrentUnit: unit.Sequence + 1, TotalUnits: 1, UnitAddresses: len(unit.Addresses), ProcessAlive: false})
-			return model.Snapshot{}, err
+			// Keep partial discovery/enrichment evidence alongside the error. The
+			// caller marks the scan or cycle incomplete, so this data cannot enter
+			// a baseline, but it gives operators a useful checkpoint and allows a
+			// resumed cycle to explain where the child stopped.
+			return result, err
 		}
 		emit(Progress{StartedAt: started, Phase: phase + " complete", Protocol: "tcp", TotalProbes: unit.Probes, CompletedProbes: unit.Probes, CompletedInvocations: 1, TotalInvocations: 1, CurrentUnit: unit.Sequence + 1, TotalUnits: 1, UnitPorts: naabuFullPortExpression, UnitAddresses: len(unit.Addresses), ProcessAlive: false})
 		return result, nil

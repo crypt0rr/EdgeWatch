@@ -207,7 +207,7 @@ func (s *Store) ReleaseDeliveryClaims(ctx context.Context) (int64, error) {
 // original API used by CLI/tests by looking up the row's active claim token.
 func (s *Store) DeliveryResult(ctx context.Context, id int64, sendErr error) error {
 	var claim string
-	if err := s.DB.QueryRowContext(ctx, `SELECT claim_token FROM outbox WHERE id=?`, id).Scan(&claim); err != nil {
+	if err := s.reader().QueryRowContext(ctx, `SELECT claim_token FROM outbox WHERE id=?`, id).Scan(&claim); err != nil {
 		return err
 	}
 	return s.DeliveryResultClaim(ctx, id, claim, sendErr)

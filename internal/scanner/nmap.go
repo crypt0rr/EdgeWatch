@@ -271,7 +271,10 @@ func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report Prog
 			emit(live)
 		})
 		if err != nil {
-			return model.Snapshot{}, fmt.Errorf("tcp scan: %w", err)
+			snap.Units = append(snap.Units, result.Units...)
+			mergeHostObservations(&snap.Hosts, result.Hosts)
+			snap.Normalize()
+			return snap, fmt.Errorf("tcp scan: %w", err)
 		}
 		snap.Units = append(snap.Units, result.Units...)
 		mergeHostObservations(&snap.Hosts, result.Hosts)
@@ -300,12 +303,18 @@ func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report Prog
 			emit(live)
 		})
 		if err != nil {
-			return model.Snapshot{}, fmt.Errorf("udp scan: %w", err)
+			snap.Units = append(snap.Units, result.Units...)
+			mergeHostObservations(&snap.Hosts, result.Hosts)
+			snap.Normalize()
+			return snap, fmt.Errorf("udp scan: %w", err)
 		}
 		snap.Units = append(snap.Units, result.Units...)
 		mergeHostObservations(&snap.Hosts, result.Hosts)
 	}
 	snap.Normalize()
+	if incomplete := incompleteHostAddresses(snap); len(incomplete) > 0 {
+		return snap, fmt.Errorf("incomplete host discovery: %s", strings.Join(incomplete, ", "))
+	}
 	progress.CompletedInvocations = progress.TotalInvocations
 	progress.CompletedProbes = progress.TotalProbes
 	progress.Phase = "complete"
@@ -314,6 +323,33 @@ func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report Prog
 	progress.ElapsedSeconds = int64(time.Since(started).Seconds())
 	emit(progress)
 	return snap, nil
+}
+
+func incompleteHostAddresses(snapshot model.Snapshot) []string {
+	addresses := make([]string, 0)
+	for _, host := range snapshot.Hosts {
+		switch strings.ToLower(strings.TrimSpace(host.Status)) {
+		case "unreachable", "down", "timedout", "timed-out", "timeout":
+			if address := normalizeAddress(host.Address); address != "" {
+				addresses = append(addresses, address)
+			}
+		}
+	}
+	sort.Strings(addresses)
+	return dedupeStrings(addresses)
+}
+
+func dedupeStrings(values []string) []string {
+	if len(values) < 2 {
+		return values
+	}
+	out := values[:0]
+	for _, value := range values {
+		if len(out) == 0 || out[len(out)-1] != value {
+			out = append(out, value)
+		}
+	}
+	return out
 }
 
 func reportProgress(report ProgressReporter, progress Progress) {
@@ -553,23 +589,23 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 				if status != nil {
 					status(invocationProgress{Protocol: protocol, Invocation: localInvocation, BatchProbes: batchProbes, Output: lastOutput, Fraction: lastFraction, Alive: false})
 				}
-				return protocolScanResult{}, fmt.Errorf("scan timed out or cancelled: %w", ctx.Err())
+				return protocolScanResult{Units: unitsFromMap(all), Hosts: allHosts}, fmt.Errorf("scan timed out or cancelled: %w", ctx.Err())
 			}
 			if err != nil {
 				if status != nil {
 					status(invocationProgress{Protocol: protocol, Invocation: localInvocation, BatchProbes: batchProbes, Output: lastOutput, Fraction: lastFraction, Alive: false})
 				}
-				return protocolScanResult{}, fmt.Errorf("nmap failed: %v: %s", err, sanitizeStderr(stderr))
+				return protocolScanResult{Units: unitsFromMap(all), Hosts: allHosts}, fmt.Errorf("nmap failed: %v: %s", err, sanitizeStderr(stderr))
 			}
 			if status != nil {
 				status(invocationProgress{Protocol: protocol, Invocation: localInvocation, BatchProbes: batchProbes, Fraction: 1, Output: lastOutput, Alive: false})
 			}
 			parsed, err := parseXMLWithConfig(stdout, protocol, pc)
 			if err != nil {
-				return protocolScanResult{}, err
+				return protocolScanResult{Units: unitsFromMap(all), Hosts: allHosts}, err
 			}
 			if parsed.Exit != "success" {
-				return protocolScanResult{}, fmt.Errorf("nmap run incomplete: %s", parsed.Exit)
+				return protocolScanResult{Units: unitsFromMap(all), Hosts: allHosts}, fmt.Errorf("nmap run incomplete: %s", parsed.Exit)
 			}
 			// A successful XML response with no host records is not a usable
 			// result. Keep this hard failure for a completely empty invocation,
@@ -587,7 +623,12 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 				}
 			}
 			if !hasExpectedHost {
-				return protocolScanResult{}, fmt.Errorf("nmap output omitted expected address(s): %s", strings.Join(batch, ", "))
+				// Preserve an explicit observation for every omitted address and
+				// continue remaining batches. The caller rejects the overall scan
+				// after all available evidence has been collected.
+				for _, address := range batch {
+					mergeHostObservationMap(allHosts, address, unreachableHostObservation(address, protocol, pc, "nmap-omitted"))
+				}
 			}
 			for _, address := range batch {
 				unit, ok := parsed.Units[address]
@@ -663,7 +704,33 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 		dedupeHostObservation(&host)
 		allHosts[address] = host
 	}
-	return protocolScanResult{Units: units, Hosts: allHosts}, nil
+	result := protocolScanResult{Units: units, Hosts: allHosts}
+	if incomplete := incompleteHostAddresses(model.Snapshot{Hosts: mapsToHosts(allHosts)}); len(incomplete) > 0 {
+		return result, fmt.Errorf("nmap output omitted expected address(s): %s", strings.Join(incomplete, ", "))
+	}
+	return result, nil
+}
+
+func mapsToHosts(values map[string]model.HostObservation) []model.HostObservation {
+	hosts := make([]model.HostObservation, 0, len(values))
+	for _, host := range values {
+		hosts = append(hosts, host)
+	}
+	return hosts
+}
+
+func unitsFromMap(units map[string]model.Unit) []model.Unit {
+	out := make([]model.Unit, 0, len(units))
+	for _, unit := range units {
+		out = append(out, unit)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Target != out[j].Target {
+			return out[i].Target < out[j].Target
+		}
+		return out[i].Protocol < out[j].Protocol
+	})
+	return out
 }
 
 func nmapArgs(family int, protocol string, pc config.Protocol, timing string, assumeAlive bool, addresses []string) []string {
@@ -1336,7 +1403,27 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 			if address == "" {
 				return parsedRun{}, errors.New("nmap host timed out")
 			}
-			return parsedRun{}, fmt.Errorf("nmap host %s timed out", address)
+			// A timed-out host must not discard healthy hosts from the same XML
+			// document. Retain an explicit incomplete observation and let the
+			// scan-level caller reject baseline processing after parsing finishes.
+			reason := strings.TrimSpace(host.Status.Reason)
+			if reason == "" {
+				reason = "nmap-timeout"
+			}
+			observation := unreachableHostObservation(address, protocol, pc, reason)
+			observation.ReasonTTL = host.Status.TTL
+			observation.StatusReason = reason
+			for _, hostname := range host.Hostnames {
+				observation.Hostnames = append(observation.Hostnames, model.Hostname{Name: strings.TrimSpace(hostname.Name), Type: strings.TrimSpace(hostname.Type)})
+			}
+			for _, candidate := range host.Addresses {
+				if candidate.Type == "mac" {
+					observation.LinkAddresses = append(observation.LinkAddresses, model.LinkAddress{Address: strings.TrimSpace(candidate.Addr), Type: candidate.Type, Vendor: strings.TrimSpace(candidate.Vendor)})
+				}
+			}
+			dedupeHostObservation(&observation)
+			result.Hosts[address] = observation
+			continue
 		}
 		var address string
 		var family string

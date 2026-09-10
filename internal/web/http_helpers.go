@@ -84,7 +84,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(target); err != nil {
-		writeError(w, 400, "invalid_json", "request body is invalid", map[string]any{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, "invalid_json", "request body is invalid", map[string]any{"reason": jsonDecodeReason(err)})
 		return false
 	}
 	var trailing any
@@ -92,10 +92,26 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, target any) bool {
 		if err == nil {
 			err = errors.New("request body must contain one JSON value")
 		}
-		writeError(w, http.StatusBadRequest, "invalid_json", "request body is invalid", map[string]any{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, "invalid_json", "request body is invalid", map[string]any{"reason": jsonDecodeReason(err)})
 		return false
 	}
 	return true
+}
+
+// jsonDecodeReason intentionally exposes only a small stable category. The
+// decoder's raw error may echo unknown field names or fragments of a request
+// body, which can disclose secrets submitted to a write-only endpoint.
+func jsonDecodeReason(err error) string {
+	if err == nil {
+		return "invalid JSON"
+	}
+	if errors.As(err, new(*http.MaxBytesError)) {
+		return "request body is too large"
+	}
+	if errors.Is(err, io.EOF) {
+		return "request body is empty"
+	}
+	return "malformed or unsupported JSON"
 }
 
 func (s *Server) currentTime() time.Time {

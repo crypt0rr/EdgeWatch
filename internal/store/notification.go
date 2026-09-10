@@ -40,7 +40,7 @@ func scanManagedNotification(scanner interface{ Scan(...any) error }) (ManagedNo
 }
 
 func (s *Store) ListManagedNotifications(ctx context.Context) ([]ManagedNotification, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,name,provider,ciphertext,nonce,enabled,revision,created_at,updated_at FROM managed_notifications ORDER BY name`)
+	rows, err := s.reader().QueryContext(ctx, `SELECT id,name,provider,ciphertext,nonce,enabled,revision,created_at,updated_at FROM managed_notifications ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -57,7 +57,7 @@ func (s *Store) ListManagedNotifications(ctx context.Context) ([]ManagedNotifica
 }
 
 func (s *Store) GetManagedNotification(ctx context.Context, id string) (ManagedNotification, error) {
-	row := s.DB.QueryRowContext(ctx, `SELECT id,name,provider,ciphertext,nonce,enabled,revision,created_at,updated_at FROM managed_notifications WHERE id=?`, id)
+	row := s.reader().QueryRowContext(ctx, `SELECT id,name,provider,ciphertext,nonce,enabled,revision,created_at,updated_at FROM managed_notifications WHERE id=?`, id)
 	destination, err := scanManagedNotification(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return destination, fmt.Errorf("%w: notification %s", ErrNotFound, id)

@@ -74,24 +74,42 @@ type SetupToken struct {
 
 func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	var a Admin
-	var totp int
 	var stored string
+	var totp int
 	var created, updated string
-	err := s.DB.QueryRowContext(ctx, `SELECT username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at FROM admins WHERE id=1`).
-		Scan(&a.Username, &a.DisplayName, &a.PasswordHash, &stored, &totp, &created, &updated)
-	if errors.Is(err, sql.ErrNoRows) {
-		return a, ErrNotFound
+	// The users row is authoritative after migration 12. Read it first so a
+	// database restored from a newer backup that no longer contains the legacy
+	// admins compatibility row remains fully usable. Older/pre-migration
+	// fixtures may not have users yet, in which case we fall back to admins.
+	var userTotp int
+	var userCreated, userUpdated string
+	var userRevision int64
+	reader := s.reader()
+	userErr := reader.QueryRowContext(ctx, `SELECT username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at,revision FROM users WHERE id=?`, LegacyAdminUserID).
+		Scan(&a.Username, &a.DisplayName, &a.PasswordHash, &stored, &userTotp, &userCreated, &userUpdated, &userRevision)
+	authoritative := userErr == nil
+	if authoritative {
+		a.DisplayName = adminDisplayName(a)
+		a.TOTPEnabled = userTotp != 0
+		a.CreatedAt, a.UpdatedAt = scanTime(userCreated), scanTime(userUpdated)
+		a.TOTPSecretStored = stored
+		a.Revision = userRevision
+	} else if errors.Is(userErr, sql.ErrNoRows) || strings.Contains(strings.ToLower(userErr.Error()), "no such table") {
+		legacyErr := reader.QueryRowContext(ctx, `SELECT username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at FROM admins WHERE id=1`).
+			Scan(&a.Username, &a.DisplayName, &a.PasswordHash, &stored, &totp, &created, &updated)
+		if errors.Is(legacyErr, sql.ErrNoRows) {
+			return a, ErrNotFound
+		}
+		if legacyErr != nil {
+			return a, legacyErr
+		}
+		a.DisplayName = adminDisplayName(a)
+		a.TOTPEnabled = totp != 0
+		a.CreatedAt, a.UpdatedAt = scanTime(created), scanTime(updated)
+		a.TOTPSecretStored = stored
+	} else {
+		return a, userErr
 	}
-	if err != nil {
-		return a, err
-	}
-	a.DisplayName = adminDisplayName(a)
-	a.TOTPEnabled = totp != 0
-	a.CreatedAt, a.UpdatedAt = scanTime(created), scanTime(updated)
-	a.TOTPSecretStored = stored
-	// The legacy admins table predates optimistic concurrency. The users row is
-	// authoritative after migration 12, so mirror its revision when available.
-	_ = s.DB.QueryRowContext(ctx, `SELECT revision FROM users WHERE id=?`, LegacyAdminUserID).Scan(&a.Revision)
 	secret, migrate, secretErr := s.openTOTPSecretForOwner(LegacyAdminUserID, stored)
 	if secretErr != nil {
 		a.TOTPSecretError = secretErr
@@ -99,10 +117,20 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 		a.TOTPSecret = secret
 		if a.TOTPEnabled && secret != "" && migrate {
 			if encrypted, encryptErr := s.sealTOTPSecretForOwner(LegacyAdminUserID, secret); encryptErr == nil {
-				_, _ = s.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=?,updated_at=? WHERE id=1 AND totp_secret=?`, encrypted, time.Now().UTC().Format(time.RFC3339Nano), stored)
+				if authoritative {
+					_, _ = s.DB.ExecContext(ctx, `UPDATE users SET totp_secret=?,updated_at=? WHERE id=? AND totp_secret=?`, encrypted, time.Now().UTC().Format(time.RFC3339Nano), LegacyAdminUserID, stored)
+				} else {
+					_, _ = s.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=?,updated_at=? WHERE id=1 AND totp_secret=?`, encrypted, time.Now().UTC().Format(time.RFC3339Nano), stored)
+				}
 				a.TOTPSecretStored = encrypted
 			}
 		}
+	}
+	if authoritative {
+		// Keep the compatibility row synchronized with the authoritative users
+		// record. This also upgrades a stale legacy/plaintext TOTP value on a
+		// normal administrator read without allowing it to overwrite users.
+		_, _ = s.DB.ExecContext(ctx, `UPDATE admins SET username=?,display_name=?,password_hash=?,totp_secret=?,totp_enabled=?,created_at=?,updated_at=? WHERE id=1`, a.Username, a.DisplayName, a.PasswordHash, a.TOTPSecretStored, boolInt(a.TOTPEnabled), a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano))
 	}
 	return a, nil
 }
@@ -113,7 +141,7 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 // opened by an older binary or a partially completed migration.
 func (s *Store) HasAdministrator(ctx context.Context) (bool, error) {
 	var present int
-	err := s.DB.QueryRowContext(ctx, `SELECT 1 FROM users WHERE role=? LIMIT 1`, RoleAdministrator).Scan(&present)
+	err := s.reader().QueryRowContext(ctx, `SELECT 1 FROM users WHERE role=? LIMIT 1`, RoleAdministrator).Scan(&present)
 	if err == nil {
 		return true, nil
 	}
@@ -205,6 +233,15 @@ func (s *Store) SaveAdminSecurity(ctx context.Context, a Admin, recoveryCodes []
 // SaveAdminSecurityWithAudit is the actor-aware form used by the web console.
 // The legacy string-argument wrapper above remains for CLI and older callers.
 func (s *Store) SaveAdminSecurityWithAudit(ctx context.Context, a Admin, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry) error {
+	return s.SaveAdminSecurityWithAuditPreservingSession(ctx, a, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, "")
+}
+
+// SaveAdminSecurityWithAuditPreservingSession applies an administrator security
+// mutation while revoking every other session for that account. The optional
+// preserved hash is used by TOTP enrollment so the browser can keep displaying
+// the one-time recovery codes returned by the same request. An empty hash keeps
+// the historical behavior and revokes all administrator sessions.
+func (s *Store) SaveAdminSecurityWithAuditPreservingSession(ctx context.Context, a Admin, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string) error {
 	stored, err := s.adminTOTPForSave(a)
 	if err != nil {
 		return err
@@ -232,7 +269,11 @@ func (s *Store) SaveAdminSecurityWithAudit(ctx context.Context, a Admin, recover
 		// sign out unrelated operator/viewer accounts now that sessions are
 		// user-scoped. Older databases have their sessions attributed to the
 		// stable legacy administrator ID by migration 12.
-		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=? OR user_id=''`, LegacyAdminUserID); err != nil {
+		if preserveSessionHash = strings.TrimSpace(preserveSessionHash); preserveSessionHash == "" {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=? OR user_id=''`, LegacyAdminUserID); err != nil {
+				return err
+			}
+		} else if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE (user_id=? OR user_id='') AND id_hash<>?`, LegacyAdminUserID, preserveSessionHash); err != nil {
 			return err
 		}
 	}
@@ -273,7 +314,7 @@ func (s *Store) GetSetupToken(ctx context.Context) (SetupToken, error) {
 	var expires string
 	var issued string
 	var used sql.NullString
-	err := s.DB.QueryRowContext(ctx, `SELECT expires_at,used_at,issued_at FROM setup_tokens WHERE id=1`).Scan(&expires, &used, &issued)
+	err := s.reader().QueryRowContext(ctx, `SELECT expires_at,used_at,issued_at FROM setup_tokens WHERE id=1`).Scan(&expires, &used, &issued)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SetupToken{}, ErrNotFound
 	}
@@ -461,7 +502,7 @@ func (s *Store) CreateSessionForUserWithPasswordUpgrade(ctx context.Context, use
 		return err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
-		return errors.New("password changed during login")
+		return ErrPasswordChangedDuringLogin
 	}
 	if userID == LegacyAdminUserID {
 		if _, err := tx.ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at=? WHERE id=1 AND password_hash=?`, upgradedHash, stamp, previousHash); err != nil {
@@ -482,7 +523,7 @@ func (s *Store) CreateSessionForUserWithPasswordUpgrade(ctx context.Context, use
 func (s *Store) GetSession(ctx context.Context, idHash string) (Session, error) {
 	var v Session
 	var created, lastSeen, expires string
-	err := s.DB.QueryRowContext(ctx, `SELECT id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token FROM sessions WHERE id_hash=?`, idHash).Scan(&v.IDHash, &v.UserID, &created, &lastSeen, &expires, &v.CSRFToken)
+	err := s.reader().QueryRowContext(ctx, `SELECT id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token FROM sessions WHERE id_hash=?`, idHash).Scan(&v.IDHash, &v.UserID, &created, &lastSeen, &expires, &v.CSRFToken)
 	if errors.Is(err, sql.ErrNoRows) {
 		return v, ErrNotFound
 	}
@@ -603,7 +644,7 @@ func (s *Store) ConsumeRecoveryCodeTextForUser(ctx context.Context, userID, code
 	if code == "" {
 		return false, nil
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT id_hash FROM recovery_codes WHERE user_id=? AND used_at IS NULL`, userID)
+	rows, err := s.reader().QueryContext(ctx, `SELECT id_hash FROM recovery_codes WHERE user_id=? AND used_at IS NULL`, userID)
 	if err != nil {
 		return false, err
 	}
@@ -692,6 +733,6 @@ func insertAuditEntries(ctx context.Context, execer contextExecer, entries []Aud
 
 func (s *Store) RecoveryCodeCount(ctx context.Context) (int, error) {
 	var n int
-	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM recovery_codes WHERE used_at IS NULL`).Scan(&n)
+	err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM recovery_codes WHERE used_at IS NULL`).Scan(&n)
 	return n, err
 }

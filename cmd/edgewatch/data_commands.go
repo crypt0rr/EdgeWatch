@@ -116,5 +116,21 @@ func writeJSONFile(output string, value any) (string, error) {
 	if err := os.Chmod(path, 0o600); err != nil {
 		return "", err
 	}
+	if err := syncOutputDirectory(parent); err != nil {
+		return "", fmt.Errorf("sync output directory: %w", err)
+	}
 	return path, nil
+}
+
+func syncOutputDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	closeErr := dir.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }

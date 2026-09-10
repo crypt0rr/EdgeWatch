@@ -15,7 +15,7 @@ import (
 
 func (s *Store) RuntimeState(ctx context.Context, jobID string) (model.JobState, error) {
 	var raw []byte
-	err := s.DB.QueryRowContext(ctx, `SELECT state_json FROM job_runtime WHERE job_id=?`, jobID).Scan(&raw)
+	err := s.reader().QueryRowContext(ctx, `SELECT state_json FROM job_runtime WHERE job_id=?`, jobID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return emptyState(), nil
 	}
@@ -35,7 +35,7 @@ func (s *Store) RuntimeState(ctx context.Context, jobID string) (model.JobState,
 // legacy state snapshot.
 func (s *Store) RuntimeBaselineMeta(ctx context.Context, jobID string) (scanID, configHash string, err error) {
 	var scan, hash sql.NullString
-	err = s.DB.QueryRowContext(ctx, `SELECT json_extract(state_json,'$.baseline_scan_id'), json_extract(state_json,'$.baseline_config_hash') FROM job_runtime WHERE job_id=?`, jobID).Scan(&scan, &hash)
+	err = s.reader().QueryRowContext(ctx, `SELECT json_extract(state_json,'$.baseline_scan_id'), json_extract(state_json,'$.baseline_config_hash') FROM job_runtime WHERE job_id=?`, jobID).Scan(&scan, &hash)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", nil
 	}
@@ -52,7 +52,7 @@ func (s *Store) RuntimeBaselineMeta(ctx context.Context, jobID string) (scanID, 
 // administrator acceptance.
 func (s *Store) RuntimeBaselineModified(ctx context.Context, jobID string) (bool, error) {
 	var marker sql.NullInt64
-	err := s.DB.QueryRowContext(ctx, `SELECT json_extract(state_json,'$.baseline_modified') FROM job_runtime WHERE job_id=?`, jobID).Scan(&marker)
+	err := s.reader().QueryRowContext(ctx, `SELECT json_extract(state_json,'$.baseline_modified') FROM job_runtime WHERE job_id=?`, jobID).Scan(&marker)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}

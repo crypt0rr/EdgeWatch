@@ -42,6 +42,8 @@ type Server struct {
 	publicHits    map[string][]time.Time
 	publicCacheMu sync.Mutex
 	publicCache   *publicDashboardCache
+	publicBuild   chan struct{}
+	publicGen     uint64
 	telemetryMu   sync.Mutex
 	telemetry     *store.DeploymentTelemetry
 	telemetryAt   time.Time

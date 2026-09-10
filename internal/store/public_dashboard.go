@@ -34,6 +34,59 @@ type PublicDashboardHostResult struct {
 	Summary   model.ScanSummary
 }
 
+// LegacyPublicScan is the bounded metadata projection used when a retained
+// scan predates the indexed scan_hosts table. Keeping this query in the store
+// ensures the read-only pool is used and prevents the public handler from
+// reaching into the writer connection.
+type LegacyPublicScan struct {
+	ID          string
+	JobID       string
+	JobRevision int64
+	Job         string
+	StartedAt   string
+	FinishedAt  string
+	Status      string
+	Error       string
+	NmapVersion string
+	ConfigHash  string
+	Snapshot    []byte
+}
+
+func (s *Store) ListLegacyPublicScans(ctx context.Context, jobID string, limit int) ([]LegacyPublicScan, error) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return []LegacyPublicScan{}, nil
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	rows, err := s.reader().QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json
+FROM scans WHERE status='success' AND job_id=?
+ORDER BY finished_at DESC,id DESC LIMIT ?`, jobID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]LegacyPublicScan, 0)
+	for rows.Next() {
+		var scan LegacyPublicScan
+		var storedJobID sql.NullString
+		var revision sql.NullInt64
+		if err := rows.Scan(&scan.ID, &storedJobID, &revision, &scan.Job, &scan.StartedAt, &scan.FinishedAt, &scan.Status, &scan.Error, &scan.NmapVersion, &scan.ConfigHash, &scan.Snapshot); err != nil {
+			return nil, err
+		}
+		if !storedJobID.Valid {
+			continue
+		}
+		scan.JobID = storedJobID.String
+		if revision.Valid {
+			scan.JobRevision = revision.Int64
+		}
+		result = append(result, scan)
+	}
+	return result, rows.Err()
+}
+
 func normalizePublicAddress(address string) (string, error) {
 	ip := net.ParseIP(strings.TrimSpace(address))
 	if ip == nil {

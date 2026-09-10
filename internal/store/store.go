@@ -73,6 +73,33 @@ func (c sqlitePragmaConnector) Connect(ctx context.Context) (driver.Conn, error)
 }
 
 func Open(path string) (*Store, error) {
+	return openWithOptions(path, openOptions{create: true, migrate: true, configureWAL: true})
+}
+
+// OpenExisting opens an existing database without running migrations or
+// repair/backfill work. It is intended for host-side data commands such as
+// backup, where opening the source must not mutate schema state or compete
+// with the daemon's migration path.
+func OpenExisting(path string) (*Store, error) {
+	return openWithOptions(path, openOptions{requireExisting: true})
+}
+
+// OpenReadOnlyExisting opens an existing database using SQLite's query-only
+// mode. It never creates files, changes journal mode, repairs permissions, or
+// runs migrations, making it safe for health, verification, and export reads.
+func OpenReadOnlyExisting(path string) (*Store, error) {
+	return openWithOptions(path, openOptions{requireExisting: true, queryOnly: true})
+}
+
+type openOptions struct {
+	create          bool
+	requireExisting bool
+	migrate         bool
+	configureWAL    bool
+	queryOnly       bool
+}
+
+func openWithOptions(path string, options openOptions) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("database path is empty")
 	}
@@ -85,41 +112,75 @@ func Open(path string) (*Store, error) {
 		if err != nil {
 			return nil, err
 		}
-		if err := os.MkdirAll(filepath.Dir(artifactPath), 0o750); err != nil {
-			return nil, err
-		}
-		if err := ensurePrivateSQLiteFile(artifactPath); err != nil {
-			return nil, err
-		}
-		// Refuse unsafe pre-existing sidecars before SQLite can open or update
-		// them. SQLite may follow a WAL/SHM symlink during connection setup, so
-		// checking only after the first pragma would leave a small write window.
-		if err := enforcePrivateSQLiteArtifacts(artifactPath); err != nil {
-			return nil, err
+		if options.requireExisting {
+			info, statErr := os.Stat(artifactPath)
+			if errors.Is(statErr, os.ErrNotExist) {
+				return nil, fmt.Errorf("database not found: %s", artifactPath)
+			}
+			if statErr != nil {
+				return nil, statErr
+			}
+			if !info.Mode().IsRegular() {
+				return nil, fmt.Errorf("database path is not a regular file: %s", artifactPath)
+			}
+			if err := validatePrivateSQLiteArtifacts(artifactPath); err != nil {
+				return nil, err
+			}
+		} else {
+			if !options.create {
+				return nil, fmt.Errorf("database not found: %s", artifactPath)
+			}
+			if err := os.MkdirAll(filepath.Dir(artifactPath), 0o750); err != nil {
+				return nil, err
+			}
+			if err := ensurePrivateSQLiteFile(artifactPath); err != nil {
+				return nil, err
+			}
+			// Refuse unsafe pre-existing sidecars before SQLite can open or update
+			// them. SQLite may follow a WAL/SHM symlink during connection setup, so
+			// checking only after the first pragma would leave a small write window.
+			if err := enforcePrivateSQLiteArtifacts(artifactPath); err != nil {
+				return nil, err
+			}
 		}
 	}
 	connector, err := sqlite.NewConnector(dsn)
 	if err != nil {
 		return nil, err
 	}
-	db := sql.OpenDB(sqlitePragmaConnector{Connector: connector})
+	db := sql.OpenDB(sqlitePragmaConnector{Connector: connector, queryOnly: options.queryOnly})
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"} {
+	pragmas := []string{"PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"}
+	if options.configureWAL && !options.queryOnly {
+		pragmas = append([]string{"PRAGMA journal_mode=WAL"}, pragmas...)
+	}
+	for _, pragma := range pragmas {
 		if _, err := db.Exec(pragma); err != nil {
 			db.Close()
 			return nil, err
 		}
-		if !memoryDatabase {
+		if !memoryDatabase && !options.queryOnly {
 			if err := enforcePrivateSQLiteArtifacts(artifactPath); err != nil {
 				db.Close()
 				return nil, err
 			}
 		}
 	}
-	if err := migrate(db); err != nil {
-		db.Close()
-		return nil, err
+	if options.migrate {
+		if err := migrate(db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if options.queryOnly {
+		if !memoryDatabase {
+			if err := validatePrivateSQLiteArtifacts(artifactPath); err != nil {
+				db.Close()
+				return nil, err
+			}
+		}
+		return &Store{DB: db, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true}, nil
 	}
 	var readDB *sql.DB
 	if !memoryDatabase {
@@ -141,6 +202,9 @@ func Open(path string) (*Store, error) {
 	}
 	if !memoryDatabase {
 		if err := enforcePrivateSQLiteArtifacts(artifactPath); err != nil {
+			if readDB != nil {
+				readDB.Close()
+			}
 			db.Close()
 			return nil, err
 		}
@@ -270,6 +334,29 @@ func enforcePrivateSQLiteArtifacts(path string) error {
 		}
 		if err := os.Chmod(candidate, 0o600); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validatePrivateSQLiteArtifacts verifies that the database and any existing
+// SQLite sidecars are regular, non-symlink files. Unlike
+// enforcePrivateSQLiteArtifacts it never changes permissions, which keeps
+// read-only commands genuinely read-only.
+func validatePrivateSQLiteArtifacts(path string) error {
+	for _, candidate := range []string{path, path + "-wal", path + "-shm", path + "-journal"} {
+		info, err := os.Lstat(candidate)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("database artifact must not be a symbolic link: %s", candidate)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("database artifact is not a regular file: %s", candidate)
 		}
 	}
 	return nil

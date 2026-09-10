@@ -43,6 +43,25 @@ type ScannerProfileRevision struct {
 	CreatedAt  time.Time
 }
 
+// InvalidScannerProfile describes a stored profile that could not be decoded
+// or validated. List operations report these rows separately so one malformed
+// definition cannot hide otherwise usable profiles from the console.
+type InvalidScannerProfile struct {
+	ID       string `json:"id"`
+	Name     string `json:"name,omitempty"`
+	Archived bool   `json:"archived"`
+	Error    string `json:"error"`
+}
+
+// ScannerProfileList is the result of a profile inventory read. Profiles that
+// fail definition decoding are omitted from Profiles and surfaced in Invalid.
+// The invalid metadata is deliberately bounded to row identity and a safe
+// validation error; raw argument templates are never returned.
+type ScannerProfileList struct {
+	Profiles []ScannerProfileRecord
+	Invalid  []InvalidScannerProfile
+}
+
 func ensureBuiltinScannerProfiles(db *sql.DB) error {
 	ctx := context.Background()
 	definitions := []struct {
@@ -178,6 +197,18 @@ func profileTime(raw string) time.Time {
 }
 
 func (s *Store) ListScannerProfiles(ctx context.Context, includeArchived bool) ([]ScannerProfileRecord, error) {
+	result, err := s.ListScannerProfilesReport(ctx, includeArchived)
+	if err != nil {
+		return nil, err
+	}
+	return result.Profiles, nil
+}
+
+// ListScannerProfilesReport reads all requested profiles while isolating a
+// malformed definition to that row. SQL/read failures still abort the call;
+// only decode or semantic validation errors are represented in Invalid.
+func (s *Store) ListScannerProfilesReport(ctx context.Context, includeArchived bool) (ScannerProfileList, error) {
+	var result ScannerProfileList
 	query := `SELECT id,name,description,definition_json,built_in,archived,revision,created_by,updated_by,created_at,updated_at FROM scanner_profiles`
 	if !includeArchived {
 		query += ` WHERE archived=0`
@@ -185,18 +216,44 @@ func (s *Store) ListScannerProfiles(ctx context.Context, includeArchived bool) (
 	query += ` ORDER BY built_in DESC,name`
 	rows, err := s.DB.QueryContext(ctx, query)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	defer rows.Close()
-	var profiles []ScannerProfileRecord
 	for rows.Next() {
 		profile, err := scanProfileRow(rows)
 		if err != nil {
-			return nil, err
+			// scanProfileRow fills the identity fields before decoding the
+			// definition. A blank identity means the row itself could not be
+			// read and must remain a hard error; otherwise isolate bad JSON or
+			// validation data to this profile.
+			if profile.ID == "" {
+				return result, err
+			}
+			result.Invalid = append(result.Invalid, InvalidScannerProfile{ID: profile.ID, Name: profile.Name, Archived: profile.Archived, Error: safeProfileError(err)})
+			continue
 		}
-		profiles = append(profiles, profile)
+		result.Profiles = append(result.Profiles, profile)
 	}
-	return profiles, rows.Err()
+	if err := rows.Err(); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func safeProfileError(err error) string {
+	if err == nil {
+		return "invalid scanner profile definition"
+	}
+	message := strings.TrimSpace(err.Error())
+	if message == "" {
+		return "invalid scanner profile definition"
+	}
+	// Keep a corrupt row from turning into an unbounded API response if a
+	// future decoder includes user-controlled data in an error string.
+	if len(message) > 256 {
+		message = message[:256]
+	}
+	return message
 }
 
 func (s *Store) GetScannerProfile(ctx context.Context, id string) (ScannerProfileRecord, error) {

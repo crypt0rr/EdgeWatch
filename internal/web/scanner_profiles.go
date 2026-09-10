@@ -230,16 +230,20 @@ func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, se
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) == 1 && parts[0] == "" {
 		if r.Method == http.MethodGet {
-			profiles, err := s.Store.ListScannerProfiles(r.Context(), r.URL.Query().Get("include_archived") == "true")
+			result, err := s.Store.ListScannerProfilesReport(r.Context(), r.URL.Query().Get("include_archived") == "true")
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 				return
 			}
-			items := make([]map[string]any, 0, len(profiles))
-			for _, profile := range profiles {
+			items := make([]map[string]any, 0, len(result.Profiles))
+			for _, profile := range result.Profiles {
 				items = append(items, scannerProfileJSON(profile, true))
 			}
-			writeJSON(w, http.StatusOK, map[string]any{"profiles": items})
+			invalid := result.Invalid
+			if invalid == nil {
+				invalid = []store.InvalidScannerProfile{}
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"profiles": items, "invalid_profiles": invalid})
 			return
 		}
 		if r.Method == http.MethodPost {

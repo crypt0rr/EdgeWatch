@@ -88,6 +88,39 @@ func TestPublicRdapProjectionAndCachedPayloadValidation(t *testing.T) {
 	}
 }
 
+func TestPublicHostProjectionDoesNotServeRDAPBeyondStaleWindow(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	clock := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
+	server := &Server{App: &app.App{Config: cfg}, Store: db, now: func() time.Time { return clock }}
+	if err := db.PutRDAPCache(ctx, store.RDAPCacheEntry{
+		Address:    "198.51.100.44",
+		Payload:    []byte(`{"status":"success","network_name":"Example"}`),
+		FetchedAt:  clock.Add(-2 * 24 * time.Hour),
+		ExpiresAt:  clock.Add(-time.Hour),
+		StaleUntil: clock.Add(24 * time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	host := model.HostObservation{Address: "198.51.100.44"}
+	within := server.publicHostFromObservation(ctx, "job", host, model.ScanSummary{})
+	if within.Rdap == nil || within.Rdap.Status != "stale" || !within.Rdap.Stale {
+		t.Fatalf("bounded stale RDAP was not projected: %#v", within.Rdap)
+	}
+
+	clock = clock.Add(48 * time.Hour)
+	beyond := server.publicHostFromObservation(ctx, "job", host, model.ScanSummary{})
+	if beyond.Rdap != nil {
+		t.Fatalf("expired RDAP was served publicly: %#v", beyond.Rdap)
+	}
+}
+
 func TestPublicAPIDisabledEnabledAndRateLimited(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

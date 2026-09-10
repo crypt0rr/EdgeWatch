@@ -179,7 +179,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 			return
 		}
 		if *input.Revision != user.Revision {
-			writeError(w, http.StatusConflict, "conflict", "user was modified; reload and try again", nil)
+			writeError(w, http.StatusConflict, "conflict", "user was modified; reload and try again", map[string]any{"current": user.Summary()})
 			return
 		}
 	}
@@ -211,7 +211,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 		return
 	}
 	user.UpdatedAt = time.Now().UTC()
-	if err := s.Store.UpdateUser(r.Context(), user, true, store.AuditEntry{Action: "user.updated", Detail: fmt.Sprintf("user %s updated by %s", user.Username, actor.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
+	// Display-name-only edits are presentation changes and should not sign the
+	// account out. Role/enabled transitions are security changes and continue to
+	// revoke sessions atomically in the store.
+	revokeSessions := input.Role != nil || input.Enabled != nil
+	if err := s.Store.UpdateUser(r.Context(), user, revokeSessions, store.AuditEntry{Action: "user.updated", Detail: fmt.Sprintf("user %s updated by %s", user.Username, actor.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
 		if s.writeAuditUnavailable(w, err, "user.updated") {
 			return
 		}
@@ -220,7 +224,12 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 			return
 		}
 		if errors.Is(err, store.ErrConflict) {
-			writeError(w, http.StatusConflict, "conflict", "user was modified; reload and try again", nil)
+			current, readErr := s.Store.GetUser(r.Context(), id)
+			if readErr == nil {
+				writeError(w, http.StatusConflict, "conflict", "user was modified; reload and try again", map[string]any{"current": current.Summary()})
+			} else {
+				writeError(w, http.StatusConflict, "conflict", "user was modified; reload and try again", nil)
+			}
 			return
 		}
 		if isUnique(err) {
@@ -243,6 +252,14 @@ func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor s
 	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", "user could not be loaded", nil)
+		return
+	}
+	// A password-reset link for an explicitly disabled account can never be
+	// redeemed and should not be issued. Pending invitees are the one
+	// intentional exception: they start disabled with the !pending sentinel
+	// and use the activation endpoint to set their first password.
+	if action == "user.password_reset_issued" && !user.Enabled && !strings.HasPrefix(user.PasswordHash, "!pending") {
+		writeError(w, http.StatusConflict, "user_disabled", "disabled users cannot receive password-reset links", map[string]string{"enabled": "enable the account before issuing a password reset"})
 		return
 	}
 	plain, digest, err := auth.NewOpaqueToken()

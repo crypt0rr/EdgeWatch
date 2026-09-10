@@ -89,10 +89,15 @@ func TestParseXMLRejectsMalformed(t *testing.T) {
 	}
 }
 
-func TestParseXMLRejectsTimedOutHost(t *testing.T) {
+func TestParseXMLRetainsTimedOutHost(t *testing.T) {
 	data := []byte(`<?xml version="1.0"?><nmaprun><host timedout="true"><status state="up"/><address addr="192.0.2.10" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
-	if _, err := parseXMLWithConfig(data, "tcp", config.Protocol{Ports: "443", Mode: "connect"}); err == nil || !strings.Contains(err.Error(), "192.0.2.10") || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("timed-out host was accepted or error was unhelpful: %v", err)
+	run, err := parseXMLWithConfig(data, "tcp", config.Protocol{Ports: "443", Mode: "connect"})
+	if err != nil {
+		t.Fatalf("timed-out host discarded healthy evidence: %v", err)
+	}
+	host, ok := run.Hosts["192.0.2.10"]
+	if !ok || host.Status != "unreachable" || host.StatusReason != "nmap-timeout" {
+		t.Fatalf("timed-out host observation = %#v", host)
 	}
 }
 
@@ -210,8 +215,8 @@ func TestScanProtocolRecordsOmittedHostWithoutDroppingBatch(t *testing.T) {
 	n := New(nmapPath)
 	target := resolvedTarget{Name: "batch", Addresses: []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"}}
 	result, err := n.scanProtocolBatchDetailedProgress(context.Background(), []resolvedTarget{target}, "tcp", config.Protocol{Ports: "22,80", Mode: "syn"}, "balanced", false, nil)
-	if err != nil {
-		t.Fatalf("partial host response failed the batch: %v", err)
+	if err == nil || !strings.Contains(err.Error(), "192.0.2.3") {
+		t.Fatalf("partial host response did not report incomplete coverage: %v", err)
 	}
 	if len(result.Units) != 2 {
 		t.Fatalf("units = %#v, want the two reported hosts only", result.Units)

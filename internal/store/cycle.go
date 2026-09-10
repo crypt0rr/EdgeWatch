@@ -187,31 +187,15 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 	}
 	discoveryComplete := completedDiscoveryCount == discoveryCount
 
-	// Existing dynamic units are the only rows needed for duplicate detection.
-	// Discovery work units themselves are deliberately not unmarshaled again.
+	// The durable plan already contains every dynamic unit created by an
+	// earlier reconciliation. Build duplicate identities from that one JSON
+	// decode instead of rereading and decoding all completed enrichment rows on
+	// every discovery batch. Recovery still repairs rows appended after the
+	// plan's highest sequence below.
 	existing := map[string]struct{}{}
-	dynamicRows, err := tx.QueryContext(ctx, `SELECT work_unit_json FROM scan_cycle_units WHERE cycle_id=? AND json_extract(work_unit_json,'$.phase')<>'discovery'`, cycleID)
-	if err != nil {
-		return err
-	}
-	for dynamicRows.Next() {
-		var raw []byte
-		var unit scanner.WorkUnit
-		if err := dynamicRows.Scan(&raw); err != nil {
-			dynamicRows.Close()
-			return err
-		}
-		if err := json.Unmarshal(raw, &unit); err != nil {
-			dynamicRows.Close()
-			return err
-		}
+	for _, unit := range plan.Units {
 		existing[scanCycleUnitIdentity(unit)] = struct{}{}
 	}
-	if err := dynamicRows.Err(); err != nil {
-		dynamicRows.Close()
-		return err
-	}
-	dynamicRows.Close()
 
 	// A running unit can be split after the plan was persisted. The split adds
 	// a new row and increments the durable counter, but older plan JSON does
@@ -230,6 +214,7 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 	if err != nil {
 		return err
 	}
+	missingPlanUnits := false
 	for missingRows.Next() {
 		var sequence int
 		var raw []byte
@@ -247,6 +232,8 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 		}
 		plan.Units = append(plan.Units, unit)
 		planSequences[sequence] = struct{}{}
+		existing[scanCycleUnitIdentity(unit)] = struct{}{}
+		missingPlanUnits = true
 	}
 	if err := missingRows.Err(); err != nil {
 		missingRows.Close()
@@ -420,6 +407,7 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 			return err
 		}
 	}
+	planChanged := len(added) > 0 || missingPlanUnits
 	plan.Units = append(plan.Units, added...)
 	sort.Slice(plan.Units, func(i, j int) bool { return plan.Units[i].Sequence < plan.Units[j].Sequence })
 	for _, unit := range added {
@@ -435,23 +423,28 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 	// retry split may have added rows without updating plan_json; deriving the
 	// counters here prevents a stale plan from making a complete cycle appear
 	// finished before its replacement units have run.
-	var totalUnits int
-	var totalProbes int64
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CAST(json_extract(work_unit_json,'$.probes') AS INTEGER)),0) FROM scan_cycle_units WHERE cycle_id=?`, cycleID).Scan(&totalUnits, &totalProbes); err != nil {
-		return err
-	}
-	plan.TotalUnits = totalUnits
-	plan.TotalProbes = totalProbes
-	updatedPlan, err := json.Marshal(plan)
-	if err != nil {
-		return err
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET plan_json=?,total_units=?,total_probes=?,updated_at=? WHERE id=? AND status IN ('running','paused','stalled')`, updatedPlan, plan.TotalUnits, plan.TotalProbes, stamp, cycleID)
-	if err != nil {
-		return err
-	}
-	if count, _ := result.RowsAffected(); count != 1 {
-		return ErrCycleNotResumable
+	// Avoid rewriting the (potentially large) plan blob when this pass only
+	// marked already-generated discovery rows as processed. Counters and plan
+	// JSON are updated together whenever new or repaired work was added.
+	if planChanged {
+		var totalUnits int
+		var totalProbes int64
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CAST(json_extract(work_unit_json,'$.probes') AS INTEGER)),0) FROM scan_cycle_units WHERE cycle_id=?`, cycleID).Scan(&totalUnits, &totalProbes); err != nil {
+			return err
+		}
+		plan.TotalUnits = totalUnits
+		plan.TotalProbes = totalProbes
+		updatedPlan, err := json.Marshal(plan)
+		if err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET plan_json=?,total_units=?,total_probes=?,updated_at=? WHERE id=? AND status IN ('running','paused','stalled')`, updatedPlan, plan.TotalUnits, plan.TotalProbes, stamp, cycleID)
+		if err != nil {
+			return err
+		}
+		if count, _ := result.RowsAffected(); count != 1 {
+			return ErrCycleNotResumable
+		}
 	}
 	return tx.Commit()
 }
@@ -591,7 +584,7 @@ func (s *Store) GetScanCycle(ctx context.Context, id string) (ScanCycleRecord, e
 	var cycle ScanCycleRecord
 	var planJSON []byte
 	var started, updated, expires, finished string
-	err := s.DB.QueryRowContext(ctx, `SELECT id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,no_progress_attempts,total_units,completed_units,total_probes,completed_probes,started_at,updated_at,expires_at,finished_at,last_error FROM scan_cycles WHERE id=?`, id).
+	err := s.reader().QueryRowContext(ctx, `SELECT id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,no_progress_attempts,total_units,completed_units,total_probes,completed_probes,started_at,updated_at,expires_at,finished_at,last_error FROM scan_cycles WHERE id=?`, id).
 		Scan(&cycle.ID, &cycle.JobID, &cycle.Job, &cycle.JobRevision, &cycle.ConfigHash, &cycle.ExecutionHash, &planJSON, &cycle.Status, &cycle.AttemptCount, &cycle.NoProgressAttempts, &cycle.TotalUnits, &cycle.CompletedUnits, &cycle.TotalProbes, &cycle.CompletedProbes, &started, &updated, &expires, &finished, &cycle.LastError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return cycle, fmt.Errorf("%w: %s", ErrNoScanCycle, id)
@@ -611,7 +604,7 @@ func (s *Store) GetScanCycle(ctx context.Context, id string) (ScanCycleRecord, e
 
 func (s *Store) GetActiveScanCycle(ctx context.Context, jobID string) (ScanCycleRecord, error) {
 	var id string
-	err := s.DB.QueryRowContext(ctx, `SELECT id FROM scan_cycles WHERE job_id=? AND status IN ('running','paused','stalled') ORDER BY started_at DESC LIMIT 1`, jobID).Scan(&id)
+	err := s.reader().QueryRowContext(ctx, `SELECT id FROM scan_cycles WHERE job_id=? AND status IN ('running','paused','stalled') ORDER BY started_at DESC LIMIT 1`, jobID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ScanCycleRecord{}, ErrNoScanCycle
 	}
@@ -627,7 +620,7 @@ func (s *Store) GetActiveScanCycle(ctx context.Context, jobID string) (ScanCycle
 // must never block creation of a fresh cycle.
 func (s *Store) GetLatestScanCycle(ctx context.Context, jobID string) (ScanCycleRecord, error) {
 	var id string
-	err := s.DB.QueryRowContext(ctx, `SELECT id FROM scan_cycles WHERE job_id=? ORDER BY started_at DESC,id DESC LIMIT 1`, jobID).Scan(&id)
+	err := s.reader().QueryRowContext(ctx, `SELECT id FROM scan_cycles WHERE job_id=? ORDER BY started_at DESC,id DESC LIMIT 1`, jobID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ScanCycleRecord{}, ErrNoScanCycle
 	}
@@ -643,7 +636,7 @@ func (s *Store) GetLatestScanCycle(ctx context.Context, jobID string) (ScanCycle
 // failure notification before a subsequent trigger starts a fresh cycle.
 func (s *Store) ScanCycleExpiryNotified(ctx context.Context, cycleID string) (bool, error) {
 	var count int
-	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE cycle_id=? AND cycle_status='expired' AND status='timed_out'`, cycleID).Scan(&count)
+	err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE cycle_id=? AND cycle_status='expired' AND status='timed_out'`, cycleID).Scan(&count)
 	return count > 0, err
 }
 
@@ -653,14 +646,14 @@ func (s *Store) ScanCycleExpiryNotified(ctx context.Context, cycleID string) (bo
 // the next trigger rather than silently starting a brand-new cycle.
 func (s *Store) ScanCycleHasScan(ctx context.Context, cycleID string) (bool, error) {
 	var count int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE cycle_id=?`, cycleID).Scan(&count); err != nil {
+	if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE cycle_id=?`, cycleID).Scan(&count); err != nil {
 		return false, err
 	}
 	return count > 0, nil
 }
 
 func (s *Store) ListScanCycleUnitSummaries(ctx context.Context, cycleID string) ([]ScanCycleUnitSummary, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? ORDER BY sequence`, cycleID)
+	rows, err := s.reader().QueryContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? ORDER BY sequence`, cycleID)
 	if err != nil {
 		return nil, err
 	}
@@ -759,7 +752,7 @@ func (s *Store) NextScanCycleUnit(ctx context.Context, cycleID string) (ScanCycl
 		}
 		return unit, ErrCycleNotResumable
 	}
-	err := s.DB.QueryRowContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,snapshot_json,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? AND status='pending' ORDER BY sequence LIMIT 1`, cycleID).
+	err := s.reader().QueryRowContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,snapshot_json,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? AND status='pending' ORDER BY sequence LIMIT 1`, cycleID).
 		Scan(&unit.CycleID, &unit.Sequence, &raw, &unit.Status, &unit.Attempts, &snapshot, &started, &finished, &unit.LastError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return unit, ErrNoPendingUnit
@@ -799,7 +792,7 @@ func (s *Store) ClaimScanCycleUnit(ctx context.Context, cycleID string, sequence
 
 func (s *Store) scanCycleStatus(ctx context.Context, cycleID string) (string, error) {
 	var status string
-	err := s.DB.QueryRowContext(ctx, `SELECT status FROM scan_cycles WHERE id=?`, cycleID).Scan(&status)
+	err := s.reader().QueryRowContext(ctx, `SELECT status FROM scan_cycles WHERE id=?`, cycleID).Scan(&status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", fmt.Errorf("%w: %s", ErrNoScanCycle, cycleID)
 	}
@@ -810,7 +803,7 @@ func (s *Store) getScanCycleUnit(ctx context.Context, cycleID string, sequence i
 	var unit ScanCycleUnit
 	var raw, snapshot []byte
 	var started, finished string
-	err := s.DB.QueryRowContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,snapshot_json,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? AND sequence=?`, cycleID, sequence).
+	err := s.reader().QueryRowContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,snapshot_json,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? AND sequence=?`, cycleID, sequence).
 		Scan(&unit.CycleID, &unit.Sequence, &raw, &unit.Status, &unit.Attempts, &snapshot, &started, &finished, &unit.LastError)
 	if err != nil {
 		return unit, err
@@ -1061,7 +1054,7 @@ func (s *Store) LoadScanCycleFragments(ctx context.Context, cycleID string) (sca
 	if err != nil {
 		return scanner.WorkPlan{}, nil, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT snapshot_json FROM scan_cycle_units WHERE cycle_id=? AND status='completed' ORDER BY sequence`, cycleID)
+	rows, err := s.reader().QueryContext(ctx, `SELECT snapshot_json FROM scan_cycle_units WHERE cycle_id=? AND status='completed' ORDER BY sequence`, cycleID)
 	if err != nil {
 		return scanner.WorkPlan{}, nil, err
 	}

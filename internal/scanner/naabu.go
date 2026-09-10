@@ -98,6 +98,16 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 	discoveryHosts := map[string]model.HostObservation{}
 	portsFound, addressesFound := 0, 0
 	discoveryStarted := time.Now()
+	// Keep a diagnostic snapshot available even when a child exits halfway
+	// through discovery. The application persists failed scans for operators,
+	// but an empty return here would discard the useful JSONL records collected
+	// before the failure.
+	partialSnapshot := func() model.Snapshot {
+		copyHosts := materializeNaabuDiscoveryHosts(targets, addresses, discovered, discoveryHosts, options, job)
+		snapshot.Hosts = mapHosts(copyHosts)
+		snapshot.Normalize()
+		return snapshot
+	}
 	for start := 0; start < len(addresses); start += batchSize {
 		end := min(start+batchSize, len(addresses))
 		batch := addresses[start:end]
@@ -113,9 +123,9 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 		})
 		if err != nil {
 			if ctx.Err() != nil {
-				return model.Snapshot{}, fmt.Errorf("naabu discovery canceled or timed out: %w", ctx.Err())
+				return partialSnapshot(), fmt.Errorf("naabu discovery canceled or timed out: %w", ctx.Err())
 			}
-			return model.Snapshot{}, fmt.Errorf("naabu discovery failed: %v: %s", err, sanitizeStderr(stderr))
+			return partialSnapshot(), fmt.Errorf("naabu discovery failed: %v: %s", err, sanitizeStderr(stderr))
 		}
 		for _, result := range results {
 			address := normalizeAddress(result.IP)
@@ -123,16 +133,16 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 				address = normalizeAddress(result.Host)
 			}
 			if net.ParseIP(address) == nil {
-				return model.Snapshot{}, fmt.Errorf("naabu returned invalid address %q", address)
+				return partialSnapshot(), fmt.Errorf("naabu returned invalid address %q", address)
 			}
 			if !containsString(batch, address) {
-				return model.Snapshot{}, fmt.Errorf("naabu returned unexpected address %s", address)
+				return partialSnapshot(), fmt.Errorf("naabu returned unexpected address %s", address)
 			}
 			if result.Port < 1 || result.Port > 65535 {
-				return model.Snapshot{}, fmt.Errorf("naabu returned invalid port %d", result.Port)
+				return partialSnapshot(), fmt.Errorf("naabu returned invalid port %d", result.Port)
 			}
 			if result.Protocol != "" && !strings.EqualFold(result.Protocol, "tcp") {
-				return model.Snapshot{}, fmt.Errorf("naabu returned non-TCP protocol %q", result.Protocol)
+				return partialSnapshot(), fmt.Errorf("naabu returned non-TCP protocol %q", result.Protocol)
 			}
 			if discovered[address] == nil {
 				discovered[address] = map[int]bool{}
@@ -154,30 +164,7 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 		reportProgress(report, Progress{StartedAt: started, Phase: "tcp discovery", Protocol: "tcp", CurrentInvocation: localInvocation, TotalBatches: totalInvocations, TotalInvocations: totalInvocations, TotalProbes: discoveryTotal, CompletedProbes: int64(end) * 65535, CompletedInvocations: localInvocation, ProcessAlive: false, UnitAddresses: len(batch), UnitPorts: naabuFullPortExpression, DiscoveryPortsFound: portsFound, DiscoveryAddresses: addressesFound, DiscoveryDurationMS: time.Since(discoveryStarted).Milliseconds()})
 	}
 	discoveryDuration := time.Since(discoveryStarted).Milliseconds()
-	for _, address := range addresses {
-		host := discoveryHosts[address]
-		host.Address = address
-		if host.AddressFamily == "" {
-			host.AddressFamily = addressFamily(address)
-		}
-		if host.Status == "" {
-			host.Status = "unknown"
-			host.StatusReason = "no-response"
-		}
-		fingerprintArgs := naabuArgsWithTemplate(options, "<targets-file>", job.AssumesAlive(), job.TCP.NaabuArgs)
-		protocol := model.ProtocolObservation{Protocol: "tcp", ScanType: "naabu", ScannedPorts: naabuFullPortExpression, ScannedPortCount: 65535, ServiceDetection: job.TCP.ServiceDetection, DiscoveryEngine: "naabu", NSEProfile: job.TCP.NSEProfile, NSEArgs: cloneStringMap(job.TCP.NSEArgs), CommandFingerprint: commandFingerprint(fingerprintArgs)}
-		for port := range discovered[address] {
-			protocol.DiscoveredPorts = append(protocol.DiscoveredPorts, model.PortObservation{Port: port, State: "open", Reason: "naabu", Verification: "discovered"})
-		}
-		missing := protocol.ScannedPortCount - len(discovered[address])
-		if missing > 0 {
-			addStateSummary(&protocol, "not-discovered", "no-response", missing)
-		}
-		host.Protocols = append(host.Protocols, protocol)
-		attachConfiguredTargets(&host, targets, address)
-		dedupeHostObservation(&host)
-		discoveryHosts[address] = host
-	}
+	discoveryHosts = materializeNaabuDiscoveryHosts(targets, addresses, discovered, discoveryHosts, options, job)
 	// Discovery units carry no authoritative ports. They preserve logical DNS
 	// aggregation and give MergeWorkSnapshots a stable address inventory while
 	// the follow-up enrichment units are generated from DiscoveredPorts.
@@ -187,7 +174,7 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 	}
 	for _, target := range targets {
 		if target.Aggregate {
-			snapshot.Units = append(snapshot.Units, aggregate(target, emptyUnits, "tcp"))
+			snapshot.Units = append(snapshot.Units, aggregate(target, unitsForAddresses(emptyUnits, target.Addresses), "tcp"))
 			continue
 		}
 		for _, address := range target.Addresses {
@@ -245,6 +232,12 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 	portsFound := 0
 	addressesFound := 0
 	discoveryStarted := time.Now()
+	partialSnapshot := func() model.Snapshot {
+		copyHosts := materializeNaabuDiscoveryHosts(targets, addresses, discovered, discoveryHosts, options, job)
+		snapshot.Hosts = mapHosts(copyHosts)
+		snapshot.Normalize()
+		return snapshot
+	}
 	for start := 0; start < len(addresses); start += batchSize {
 		end := min(start+batchSize, len(addresses))
 		batch := addresses[start:end]
@@ -262,9 +255,9 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 		})
 		if err != nil {
 			if ctx.Err() != nil {
-				return model.Snapshot{}, fmt.Errorf("naabu discovery canceled or timed out: %w", ctx.Err())
+				return partialSnapshot(), fmt.Errorf("naabu discovery canceled or timed out: %w", ctx.Err())
 			}
-			return model.Snapshot{}, fmt.Errorf("naabu discovery failed: %v: %s", err, sanitizeStderr(stderr))
+			return partialSnapshot(), fmt.Errorf("naabu discovery failed: %v: %s", err, sanitizeStderr(stderr))
 		}
 		for _, result := range results {
 			address := normalizeAddress(result.IP)
@@ -272,16 +265,16 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 				address = normalizeAddress(result.Host)
 			}
 			if net.ParseIP(address) == nil {
-				return model.Snapshot{}, fmt.Errorf("naabu returned invalid address %q", address)
+				return partialSnapshot(), fmt.Errorf("naabu returned invalid address %q", address)
 			}
 			if !containsString(batch, address) {
-				return model.Snapshot{}, fmt.Errorf("naabu returned unexpected address %s", address)
+				return partialSnapshot(), fmt.Errorf("naabu returned unexpected address %s", address)
 			}
 			if result.Port < 1 || result.Port > 65535 {
-				return model.Snapshot{}, fmt.Errorf("naabu returned invalid port %d", result.Port)
+				return partialSnapshot(), fmt.Errorf("naabu returned invalid port %d", result.Port)
 			}
 			if result.Protocol != "" && !strings.EqualFold(result.Protocol, "tcp") {
-				return model.Snapshot{}, fmt.Errorf("naabu returned non-TCP protocol %q", result.Protocol)
+				return partialSnapshot(), fmt.Errorf("naabu returned non-TCP protocol %q", result.Protocol)
 			}
 			if discovered[address] == nil {
 				discovered[address] = map[int]bool{}
@@ -398,7 +391,32 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 			reportProgress(report, Progress{StartedAt: started, Phase: "nmap enrichment", Protocol: "tcp", TotalProbes: discoveryTotal, CompletedProbes: discoveryTotal, ProcessAlive: update.Alive, ProcessProgressPercent: int(update.Fraction * 100), LastOutput: update.Output, UnitAddresses: len(group), UnitPorts: pc.Ports, DiscoveryPortsFound: portsFound, DiscoveryAddresses: addressesFound, DiscoveryDurationMS: discoveryDuration, EnrichmentDurationMS: time.Since(enrichmentStarted).Milliseconds()})
 		})
 		if err != nil {
-			return model.Snapshot{}, fmt.Errorf("nmap enrichment for %s: %w", strings.Join(group, ","), err)
+			// Preserve all discovery and any partial Nmap host evidence. The
+			// enclosing scan is marked failed, so these Units cannot affect a
+			// baseline, while the persisted snapshot remains useful for diagnosis.
+			for address, unit := range confirmedUnits {
+				if unit.Target == "" {
+					unit.Target = address
+					confirmedUnits[address] = unit
+				}
+			}
+			if len(confirmedUnits) > 0 {
+				for _, target := range targets {
+					if target.Aggregate {
+						snapshot.Units = append(snapshot.Units, aggregate(target, unitsForAddresses(confirmedUnits, target.Addresses), "tcp"))
+						continue
+					}
+					for _, address := range target.Addresses {
+						if unit, ok := confirmedUnits[address]; ok {
+							unit.Target = address
+							snapshot.Units = append(snapshot.Units, unit)
+						}
+					}
+				}
+			}
+			snapshot.Hosts = mapHosts(materializeNaabuDiscoveryHosts(targets, addresses, discovered, discoveryHosts, options, job))
+			snapshot.Normalize()
+			return snapshot, fmt.Errorf("nmap enrichment for %s: %w", strings.Join(group, ","), err)
 		}
 		for _, unit := range result.Units {
 			address := normalizeAddress(unit.Target)
@@ -425,7 +443,7 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 	// effective address. Host observations above remain address-specific.
 	for _, target := range targets {
 		if target.Aggregate {
-			snapshot.Units = append(snapshot.Units, aggregate(target, confirmedUnits, "tcp"))
+			snapshot.Units = append(snapshot.Units, aggregate(target, unitsForAddresses(confirmedUnits, target.Addresses), "tcp"))
 			continue
 		}
 		for _, address := range target.Addresses {
@@ -450,6 +468,60 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 	return snapshot, nil
 }
 
+func unitsForAddresses(units map[string]model.Unit, addresses []string) map[string]model.Unit {
+	scoped := make(map[string]model.Unit, len(addresses))
+	for _, address := range addresses {
+		if unit, ok := units[address]; ok {
+			scoped[address] = unit
+		}
+	}
+	return scoped
+}
+
+// materializeNaabuDiscoveryHosts turns the positive JSONL records collected
+// so far into deterministic host observations. It is intentionally safe to
+// call repeatedly: an existing Naabu protocol is replaced rather than
+// appended, which keeps cancellation/error snapshots free of duplicate
+// protocol sections.
+func materializeNaabuDiscoveryHosts(targets []resolvedTarget, addresses []string, discovered map[string]map[int]bool, existing map[string]model.HostObservation, options config.NaabuOptions, job config.Job) map[string]model.HostObservation {
+	hosts := make(map[string]model.HostObservation, len(addresses))
+	for address, host := range existing {
+		hosts[address] = host
+	}
+	fingerprintArgs := naabuArgsWithTemplate(options, "<targets-file>", job.AssumesAlive(), job.TCP.NaabuArgs)
+	for _, address := range addresses {
+		host := hosts[address]
+		host.Address = address
+		if host.AddressFamily == "" {
+			host.AddressFamily = addressFamily(address)
+		}
+		if host.Status == "" {
+			host.Status = "unknown"
+			host.StatusReason = "no-response"
+		}
+		protocol := model.ProtocolObservation{Protocol: "tcp", ScanType: "naabu", ScannedPorts: naabuFullPortExpression, ScannedPortCount: 65535, ServiceDetection: job.TCP.ServiceDetection, DiscoveryEngine: "naabu", NSEProfile: job.TCP.NSEProfile, NSEArgs: cloneStringMap(job.TCP.NSEArgs), CommandFingerprint: commandFingerprint(fingerprintArgs)}
+		for port := range discovered[address] {
+			protocol.DiscoveredPorts = append(protocol.DiscoveredPorts, model.PortObservation{Port: port, State: "open", Reason: "naabu", Verification: "discovered"})
+		}
+		missing := protocol.ScannedPortCount - len(discovered[address])
+		if missing > 0 {
+			addStateSummary(&protocol, "not-discovered", "no-response", missing)
+		}
+		updated := make([]model.ProtocolObservation, 0, len(host.Protocols)+1)
+		for _, current := range host.Protocols {
+			if strings.EqualFold(current.Protocol, "tcp") && strings.EqualFold(current.ScanType, "naabu") {
+				continue
+			}
+			updated = append(updated, current)
+		}
+		host.Protocols = append(updated, protocol)
+		attachConfiguredTargets(&host, targets, address)
+		dedupeHostObservation(&host)
+		hosts[address] = host
+	}
+	return hosts
+}
+
 func (n *Nmap) scanUDPAfterNaabu(ctx context.Context, job config.Job, targets []resolvedTarget, snapshot model.Snapshot, started time.Time, report ProgressReporter) (model.Snapshot, error) {
 	if job.UDP == nil {
 		snapshot.Normalize()
@@ -465,7 +537,12 @@ func (n *Nmap) scanUDPAfterNaabu(ctx context.Context, job config.Job, targets []
 		reportProgress(report, Progress{StartedAt: started, Phase: "udp scanning", Protocol: "udp", LastOutput: update.Output, ProcessAlive: update.Alive, ProcessProgressPercent: int(update.Fraction * 100), UnitPorts: job.UDP.Ports})
 	})
 	if err != nil {
-		return model.Snapshot{}, fmt.Errorf("udp scan: %w", err)
+		// Keep a successful TCP phase (and any partial UDP host evidence) in the
+		// failed scan record for troubleshooting; the engine will reject the
+		// incomplete result before baseline comparison.
+		mergeHostObservations(&snapshot.Hosts, result.Hosts)
+		snapshot.Normalize()
+		return snapshot, fmt.Errorf("udp scan: %w", err)
 	}
 	snapshot.Units = append(snapshot.Units, result.Units...)
 	mergeHostObservations(&snapshot.Hosts, result.Hosts)

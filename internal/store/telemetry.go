@@ -28,7 +28,8 @@ type DeploymentTelemetry struct {
 // can become expensive on very large installations. No JSON snapshot is read.
 func (s *Store) DeploymentTelemetry(ctx context.Context) (DeploymentTelemetry, error) {
 	var telemetry DeploymentTelemetry
-	if err := s.DB.QueryRowContext(ctx, `SELECT
+	reader := s.reader()
+	if err := reader.QueryRowContext(ctx, `SELECT
 		COALESCE((SELECT COUNT(*) FROM jobs),0),
 		COALESCE((SELECT COUNT(*) FROM scans),0),
 		COALESCE((SELECT COUNT(*) FROM scan_hosts),0),
@@ -42,10 +43,10 @@ func (s *Store) DeploymentTelemetry(ctx context.Context) (DeploymentTelemetry, e
 		return DeploymentTelemetry{}, err
 	}
 	var pageCount, pageSize int64
-	if err := s.DB.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pageCount); err != nil {
+	if err := reader.QueryRowContext(ctx, `PRAGMA page_count`).Scan(&pageCount); err != nil {
 		return DeploymentTelemetry{}, err
 	}
-	if err := s.DB.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize); err != nil {
+	if err := reader.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize); err != nil {
 		return DeploymentTelemetry{}, err
 	}
 	if pageCount > 0 && pageSize > 0 {

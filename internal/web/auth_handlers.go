@@ -26,7 +26,7 @@ func (s *Server) withAuth(w http.ResponseWriter, r *http.Request, fn func(http.R
 }
 
 func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
-	if !s.allowPublicRequest(r) {
+	if !s.allowAnonymousRequest(r, "setup-status") {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "setup status requests are temporarily rate limited", nil)
 		return
@@ -283,7 +283,16 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	auth.SetSessionCookie(w, raw)
-	session, _ := s.Store.GetSession(r.Context(), digest(raw))
+	session, sessionErr := s.Store.GetSession(r.Context(), digest(raw))
+	if sessionErr != nil || strings.TrimSpace(session.CSRFToken) == "" {
+		// A successful password check without a readable session would leave the
+		// browser with a cookie that cannot pass CSRF validation. Clear it and
+		// return a generic server error rather than issuing a partially usable
+		// login response.
+		auth.ClearSessionCookie(w)
+		writeError(w, http.StatusInternalServerError, "session_unavailable", "login session could not be established", nil)
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "display_name": user.DisplayName, "role": user.Role, "permissions": auth.PermissionsForRole(user.Role), "csrf_token": session.CSRFToken, "totp_required": user.TOTPEnabled})
 }
 
@@ -489,14 +498,15 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 		return
 	}
 	user.TOTPSecret, user.TOTPEnabled, user.UpdatedAt = pending.Secret, true, time.Now().UTC()
+	preserveSessionHash := digest(cookie.Value)
 	auditAction := "user.totp_enabled"
 	var saveErr error
 	if user.ID == store.LegacyAdminUserID {
 		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Revision: user.Revision}
 		auditAction = "admin.totp_enabled"
-		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username})
+		saveErr = s.Store.SaveAdminSecurityWithAuditPreservingSession(r.Context(), admin, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username}, preserveSessionHash)
 	} else {
-		saveErr = s.Store.SaveUserSecurity(r.Context(), user, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username})
+		saveErr = s.Store.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username}, preserveSessionHash)
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {

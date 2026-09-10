@@ -182,7 +182,26 @@ func (s *Store) Backup(ctx context.Context, output string) (string, error) {
 	if err := enforcePrivateSQLiteArtifacts(path); err != nil {
 		return "", err
 	}
+	if err := syncDirectory(parent); err != nil {
+		return "", fmt.Errorf("sync backup directory: %w", err)
+	}
 	return path, nil
+}
+
+// syncDirectory makes an atomic rename durable. Without syncing the parent,
+// a host crash after Rename can leave the directory entry missing even though
+// the backup file itself was fully fsynced.
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	err = dir.Sync()
+	closeErr := dir.Close()
+	if err != nil {
+		return err
+	}
+	return closeErr
 }
 
 // BackupInfo is useful to callers that want a concise audit/CLI response

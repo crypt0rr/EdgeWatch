@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 24
+const schemaVersion = 26
 
 func migrate(db *sql.DB) error {
 	var version int
@@ -642,6 +642,41 @@ END;`,
 			// behavior (all globally enabled destinations); a JSON array, including
 			// [], is an administrator-owned explicit selection.
 			"ALTER TABLE application_update_state ADD COLUMN notification_destinations_json TEXT NOT NULL DEFAULT ''",
+		},
+		25: {
+			// FTS rows use the source table's rowid as their stable key. This makes
+			// trigger maintenance a direct indexed delete instead of repeatedly
+			// searching the entire virtual table by unindexed scan/address columns.
+			// Drop the old trigger set and clear the projections; the normal bounded
+			// backfill after migrations repopulates them with matching rowids.
+			"DROP TRIGGER IF EXISTS scan_hosts_search_ai",
+			"DROP TRIGGER IF EXISTS scan_hosts_search_au",
+			"DROP TRIGGER IF EXISTS scan_hosts_search_ad",
+			"DROP TRIGGER IF EXISTS latest_scan_hosts_search_ai",
+			"DROP TRIGGER IF EXISTS latest_scan_hosts_search_au",
+			"DROP TRIGGER IF EXISTS latest_scan_hosts_search_ad",
+			"DELETE FROM scan_host_search",
+			"DELETE FROM latest_host_search",
+			"UPDATE fts_backfill_state SET last_rowid=0,initialized=0,complete=0,updated_at=datetime('now')",
+		},
+		26: {
+			// The silence watchdog asks for the newest alert for one managed job
+			// on every heartbeat. Keep that bounded independently of the global
+			// event history so a large retained deployment does not turn the
+			// watchdog into a writer-bound query. Some supported recovery fixtures
+			// carry a newer schema marker with only authentication tables, so make
+			// the legacy event table available before creating the additive index.
+			`CREATE TABLE IF NOT EXISTS events (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ type TEXT NOT NULL,
+ job TEXT NOT NULL DEFAULT '',
+ scan_id TEXT NOT NULL DEFAULT '',
+ payload_json BLOB NOT NULL DEFAULT '{}',
+ created_at TEXT NOT NULL DEFAULT '',
+ job_id TEXT NOT NULL DEFAULT ''
+);`,
+			"ALTER TABLE events ADD COLUMN job_id TEXT NOT NULL DEFAULT ''",
+			"CREATE INDEX IF NOT EXISTS events_type_job_time ON events(type,job_id,created_at DESC,id DESC)",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {

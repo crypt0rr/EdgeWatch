@@ -401,9 +401,14 @@ passwords, sessions, or encryption keys.
 For a full deployment backup, retain the complete `./data` directory as well as
 the deployment configuration and key files. SQLite uses WAL mode, so a raw
 directory copy should be made while EdgeWatch is stopped; the `backup` command
-is the supported live alternative. To restore, stop the service, replace the
-database and its companion key files together, run `verify` against the
-restored database, and start the matching EdgeWatch image.
+is the supported live alternative. To restore a single database, stop the
+service first, remove any existing `edgewatch.db-wal`, `edgewatch.db-shm`, and
+`edgewatch.db-journal` sidecars, then replace the database and its companion key
+files together. Alternatively restore the complete `./data` directory as one
+consistent snapshot. Run `verify` against the restored database before starting
+the matching EdgeWatch image; never replace a live database while the daemon is
+running, because stale WAL frames can otherwise be replayed into the restored
+file.
 
 For an upgrade, stop the current service and make a complete backup before
 starting the new image. SQLite uses WAL mode, so copy the database only while
@@ -411,7 +416,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 24), but it is forward-only: an older binary refuses a newer schema.
+version 26), but it is forward-only: an older binary refuses a newer schema.
 To roll back, stop the new service, restore the entire pre-upgrade `./data`
 directory and deployment configuration, then start the previous image. Do not
 point an older image at the upgraded database. The previous named Docker

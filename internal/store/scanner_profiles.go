@@ -209,12 +209,13 @@ func (s *Store) ListScannerProfiles(ctx context.Context, includeArchived bool) (
 // only decode or semantic validation errors are represented in Invalid.
 func (s *Store) ListScannerProfilesReport(ctx context.Context, includeArchived bool) (ScannerProfileList, error) {
 	var result ScannerProfileList
+	readDB := s.reader()
 	query := `SELECT id,name,description,definition_json,built_in,archived,revision,created_by,updated_by,created_at,updated_at FROM scanner_profiles`
 	if !includeArchived {
 		query += ` WHERE archived=0`
 	}
 	query += ` ORDER BY built_in DESC,name`
-	rows, err := s.DB.QueryContext(ctx, query)
+	rows, err := readDB.QueryContext(ctx, query)
 	if err != nil {
 		return result, err
 	}
@@ -257,7 +258,7 @@ func safeProfileError(err error) string {
 }
 
 func (s *Store) GetScannerProfile(ctx context.Context, id string) (ScannerProfileRecord, error) {
-	row := s.DB.QueryRowContext(ctx, `SELECT id,name,description,definition_json,built_in,archived,revision,created_by,updated_by,created_at,updated_at FROM scanner_profiles WHERE id=?`, strings.TrimSpace(id))
+	row := s.reader().QueryRowContext(ctx, `SELECT id,name,description,definition_json,built_in,archived,revision,created_by,updated_by,created_at,updated_at FROM scanner_profiles WHERE id=?`, strings.TrimSpace(id))
 	profile, err := scanProfileRow(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ScannerProfileRecord{}, fmt.Errorf("%w: scanner profile %s", ErrNotFound, id)
@@ -276,14 +277,14 @@ func (s *Store) GetScannerProfileRevision(ctx context.Context, id string, revisi
 		return ScannerProfileRevision{}, fmt.Errorf("%w: scanner profile revision", ErrNotFound)
 	}
 	var exists int
-	if err := s.DB.QueryRowContext(ctx, `SELECT 1 FROM scanner_profiles WHERE id=?`, id).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+	if err := s.reader().QueryRowContext(ctx, `SELECT 1 FROM scanner_profiles WHERE id=?`, id).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
 		return ScannerProfileRevision{}, fmt.Errorf("%w: scanner profile %s", ErrNotFound, id)
 	} else if err != nil {
 		return ScannerProfileRevision{}, err
 	}
 	var result ScannerProfileRevision
 	var raw, created string
-	err := s.DB.QueryRowContext(ctx, `SELECT profile_id,revision,definition_json,created_by,created_at FROM scanner_profile_revisions WHERE profile_id=? AND revision=?`, id, revision).Scan(&result.ProfileID, &result.Revision, &raw, &result.CreatedBy, &created)
+	err := s.reader().QueryRowContext(ctx, `SELECT profile_id,revision,definition_json,created_by,created_at FROM scanner_profile_revisions WHERE profile_id=? AND revision=?`, id, revision).Scan(&result.ProfileID, &result.Revision, &raw, &result.CreatedBy, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ScannerProfileRevision{}, fmt.Errorf("%w: scanner profile %s revision %d", ErrNotFound, id, revision)
 	}
@@ -303,7 +304,7 @@ func (s *Store) ListScannerProfileRevisions(ctx context.Context, id string) ([]S
 	if _, err := s.GetScannerProfile(ctx, id); err != nil {
 		return nil, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT profile_id,revision,definition_json,created_by,created_at FROM scanner_profile_revisions WHERE profile_id=? ORDER BY revision DESC`, strings.TrimSpace(id))
+	rows, err := s.reader().QueryContext(ctx, `SELECT profile_id,revision,definition_json,created_by,created_at FROM scanner_profile_revisions WHERE profile_id=? ORDER BY revision DESC`, strings.TrimSpace(id))
 	if err != nil {
 		return nil, err
 	}

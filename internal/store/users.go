@@ -98,7 +98,7 @@ func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
 	var u User
 	var totp, enabled int
 	var created, updated, lastLogin string
-	err := s.DB.QueryRowContext(ctx, `SELECT id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision FROM users WHERE id=?`, id).
+	err := s.reader().QueryRowContext(ctx, `SELECT id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision FROM users WHERE id=?`, id).
 		Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PasswordHash, &u.TOTPSecretStored, &totp, &enabled, &created, &updated, &lastLogin, &u.Revision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return u, ErrNotFound
@@ -133,7 +133,7 @@ func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, e
 		return User{}, err
 	}
 	var id string
-	err = s.DB.QueryRowContext(ctx, `SELECT id FROM users WHERE username=? COLLATE NOCASE`, normalized).Scan(&id)
+	err = s.reader().QueryRowContext(ctx, `SELECT id FROM users WHERE username=? COLLATE NOCASE`, normalized).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return User{}, ErrNotFound
 	}
@@ -144,7 +144,7 @@ func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, e
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]UserSummary, error) {
-	rows, err := s.DB.QueryContext(ctx, `SELECT id,username,display_name,role,password_hash,enabled,totp_enabled,created_at,updated_at,last_login_at,revision FROM users ORDER BY username COLLATE NOCASE`)
+	rows, err := s.reader().QueryContext(ctx, `SELECT id,username,display_name,role,password_hash,enabled,totp_enabled,created_at,updated_at,last_login_at,revision FROM users ORDER BY username COLLATE NOCASE`)
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +308,7 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	if count, _ := result.RowsAffected(); count != 1 {
 		return ErrConflict
 	}
-	if revokeSessions {
+	if revokeSessions || (currentEnabled != 0 && !u.Enabled) {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, u.ID); err != nil {
 			return err
 		}
@@ -349,6 +349,14 @@ func (s *Store) SetUserPassword(ctx context.Context, id, hash string, revokeSess
 }
 
 func (s *Store) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry) error {
+	return s.SaveUserSecurityPreservingSession(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, "")
+}
+
+// SaveUserSecurityPreservingSession is the actor-aware security mutation used
+// by TOTP enrollment. It revokes every other session while optionally keeping
+// the browser that is receiving the one-time recovery-code response alive.
+// Passing an empty hash preserves the original revoke-all behavior.
+func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string) error {
 	if _, err := uuid.Parse(u.ID); err != nil {
 		return err
 	}
@@ -370,10 +378,10 @@ func (s *Store) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []st
 		return err
 	}
 	defer tx.Rollback()
-	var currentRole string
+	var currentRole, currentPasswordHash string
 	var currentEnabled int
 	var currentRevision int64
-	if err := tx.QueryRowContext(ctx, `SELECT role,enabled,revision FROM users WHERE id=?`, u.ID).Scan(&currentRole, &currentEnabled, &currentRevision); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT role,password_hash,enabled,revision FROM users WHERE id=?`, u.ID).Scan(&currentRole, &currentPasswordHash, &currentEnabled, &currentRevision); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
@@ -407,8 +415,21 @@ func (s *Store) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []st
 			}
 		}
 	}
-	if revokeSessions {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, u.ID); err != nil {
+	if revokeSessions || (currentEnabled != 0 && !u.Enabled) {
+		if preserveSessionHash = strings.TrimSpace(preserveSessionHash); preserveSessionHash == "" {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, u.ID); err != nil {
+				return err
+			}
+		} else if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=? AND id_hash<>?`, u.ID, preserveSessionHash); err != nil {
+			return err
+		}
+	}
+	// Disabling an already-configured account must invalidate every outstanding
+	// activation or password-reset link in the same transaction. Pending
+	// invitees intentionally remain eligible to redeem their first activation
+	// link even though their account starts disabled.
+	if currentEnabled != 0 && !u.Enabled && !strings.HasPrefix(currentPasswordHash, "!pending") {
+		if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL`, u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID); err != nil {
 			return err
 		}
 	}
@@ -453,7 +474,7 @@ func (s *Store) userTOTPForSave(u User) (string, error) {
 
 func (s *Store) CountEnabledAdministrators(ctx context.Context) (int, error) {
 	var count int
-	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=? AND enabled=1`, RoleAdministrator).Scan(&count)
+	err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=? AND enabled=1`, RoleAdministrator).Scan(&count)
 	return count, err
 }
 

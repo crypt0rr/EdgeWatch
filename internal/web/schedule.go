@@ -100,12 +100,31 @@ func (s *Server) scheduleSuggestion(w http.ResponseWriter, r *http.Request) {
 	}
 
 	response.Suggested = true
+	// Move away from the neighbor: a draft that is already later should move
+	// later still, while a draft before the neighbor should move earlier.
 	response.OffsetMinutes = 30
-	if draft.After(nearestRun) {
+	if draft.Before(nearestRun) {
 		response.OffsetMinutes = -30
 	}
 	if shifted, ok := shiftCronMinute(schedule, response.OffsetMinutes); ok {
-		response.SuggestedSchedule = shifted
+		if shiftedNext, nextErr := parseNextRun(parser, shifted, timezone, now); nextErr == nil {
+			shiftedDistance := shiftedNext.Sub(nearestRun)
+			if shiftedDistance < 0 {
+				shiftedDistance = -shiftedDistance
+			}
+			if shiftedDistance > nearestDistance {
+				response.SuggestedSchedule = shifted
+			} else {
+				response.Suggested = false
+				response.OffsetMinutes = 0
+			}
+		} else {
+			response.Suggested = false
+			response.OffsetMinutes = 0
+		}
+	} else {
+		response.Suggested = false
+		response.OffsetMinutes = 0
 	}
 	writeJSON(w, http.StatusOK, response)
 }
@@ -132,6 +151,9 @@ func parseNextRun(parser cron.Parser, schedule, timezone string, now time.Time) 
 // shiftCronMinute returns a safe five-field cron expression when its minute
 // field is a single integer. Expressions such as */15 or 0,30 are left alone
 // because rewriting them would change more than the requested 30-minute offset.
+// When the minute wraps, a numeric hour is carried as well. Day-boundary
+// carries are only allowed for an unrestricted daily expression; otherwise a
+// suggestion could silently move a run onto the wrong calendar day.
 func shiftCronMinute(schedule string, offset int) (string, bool) {
 	fields := strings.Fields(schedule)
 	if len(fields) != 5 || offset == 0 {
@@ -141,9 +163,27 @@ func shiftCronMinute(schedule string, offset int) (string, bool) {
 	if err != nil || minute < 0 || minute > 59 {
 		return "", false
 	}
-	minute = (minute + offset) % 60
-	if minute < 0 {
-		minute += 60
+	hour, hourErr := strconv.Atoi(fields[1])
+	if hourErr == nil && (hour < 0 || hour > 23) {
+		hourErr = errors.New("hour out of range")
+	}
+	if hourErr == nil {
+		total := hour*60 + minute + offset
+		dayDelta := total / (24 * 60)
+		if total < 0 && total%(24*60) != 0 {
+			dayDelta--
+		}
+		total = ((total % (24 * 60)) + (24 * 60)) % (24 * 60)
+		if dayDelta != 0 && (fields[2] != "*" || fields[3] != "*" || fields[4] != "*") {
+			return "", false
+		}
+		fields[0] = strconv.Itoa(total % 60)
+		fields[1] = strconv.Itoa(total / 60)
+		return strings.Join(fields, " "), true
+	}
+	minute += offset
+	if minute < 0 || minute > 59 {
+		return "", false
 	}
 	fields[0] = strconv.Itoa(minute)
 	return strings.Join(fields, " "), true

@@ -71,13 +71,18 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		writeValidationError(w, err)
 		return
 	}
-	if job.AllowHighCost && !canOverrideHighCost(session) {
-		writeError(w, http.StatusForbidden, "high_cost_admin_required", "only administrators may enable high-cost scans", nil)
-		return
-	}
 	current, err := s.Store.GetJob(r.Context(), id)
 	if err != nil {
 		writeError(w, 404, "not_found", "job not found", nil)
+		return
+	}
+	// High-cost approval is administrator-owned. Preserve it for older clients
+	// that omit the field, and only require administrator permission when an
+	// update actually attempts to change the approval state.
+	if p.AllowHighCost == nil {
+		job.AllowHighCost = current.Job.AllowHighCost
+	} else if job.AllowHighCost != current.Job.AllowHighCost && !canOverrideHighCost(session) {
+		writeError(w, http.StatusForbidden, "high_cost_admin_required", "only administrators may change high-cost scan approval", map[string]string{"allow_high_cost": "administrator permission is required"})
 		return
 	}
 	// Preserve the immutable profile revision when an older client sends the

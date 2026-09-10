@@ -114,7 +114,7 @@ func (s *Store) GetJob(ctx context.Context, id string) (JobRecord, error) {
 	var raw []byte
 	var created, updated string
 	var enabled, archived int
-	err := s.DB.QueryRowContext(ctx, `SELECT id,name,definition_json,enabled,archived,revision,created_at,updated_at FROM jobs WHERE id=?`, id).
+	err := s.reader().QueryRowContext(ctx, `SELECT id,name,definition_json,enabled,archived,revision,created_at,updated_at FROM jobs WHERE id=?`, id).
 		Scan(&r.ID, &r.Job.Name, &raw, &enabled, &archived, &r.Revision, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, fmt.Errorf("%w: job %s", ErrNotFound, id)
@@ -161,7 +161,7 @@ func getJobTx(ctx context.Context, tx *sql.Tx, id string) (JobRecord, error) {
 
 func (s *Store) GetJobByName(ctx context.Context, name string) (JobRecord, error) {
 	var id string
-	err := s.DB.QueryRowContext(ctx, `SELECT id FROM jobs WHERE name=?`, name).Scan(&id)
+	err := s.reader().QueryRowContext(ctx, `SELECT id FROM jobs WHERE name=?`, name).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return JobRecord{}, fmt.Errorf("%w: job %s", ErrNotFound, name)
 	}
@@ -180,7 +180,7 @@ func (s *Store) ListJobs(ctx context.Context, includeArchived bool) ([]JobRecord
 	// requests archived records so they can be restored, and ordering only by
 	// name otherwise lets an archived job appear between active entries.
 	query += ` ORDER BY archived ASC, name, id`
-	rows, err := s.DB.QueryContext(ctx, query)
+	rows, err := s.reader().QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -527,7 +527,7 @@ func (s *Store) deleteJobWithAudits(ctx context.Context, id string, audits []Aud
 
 func (s *Store) JobActive(ctx context.Context, id string) (bool, error) {
 	var n int
-	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_leases WHERE job=? AND expires_at>?`, id, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&n)
+	err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM job_leases WHERE job=? AND expires_at>?`, id, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&n)
 	return n > 0, err
 }
 

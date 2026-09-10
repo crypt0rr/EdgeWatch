@@ -306,8 +306,8 @@ func TestUnreachableHostObservationDoesNotChangeBaseline(t *testing.T) {
 		Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "closed"}}}},
 		Hosts:  []model.HostObservation{{Address: "192.0.2.2", Status: "unreachable", StatusReason: "nmap-omitted"}},
 	}
-	if events, err := e.Success(ctx, job, scan("partial", partial)); err != nil || len(events) != 0 {
-		t.Fatalf("partial scan generated state changes: %#v, %v", events, err)
+	if events, err := e.Success(ctx, job, scan("partial", partial)); err != nil || len(events) != 1 || events[0].Type != "scan-failure" {
+		t.Fatalf("partial scan did not emit an actionable failure: %#v, %v", events, err)
 	}
 	state, err := db.State(ctx, job.Name)
 	if err != nil {

@@ -98,7 +98,15 @@ func (s *Server) requestLogging(next http.Handler) http.Handler {
 		defer func(logCtx context.Context) {
 			recovered := recover()
 			if recovered != nil && !wrapped.wroteHeader {
+				// Never reflect a panic value to the client. Panic strings often
+				// contain request data or provider credentials; the response is
+				// deliberately generic and the structured log records only its type.
 				http.Error(wrapped, "internal server error", http.StatusInternalServerError)
+			} else if recovered != nil {
+				// Once headers have reached the peer net/http cannot change the
+				// status code. Ask it to close the connection so a partial response
+				// is not reused as a successful keep-alive response.
+				wrapped.Header().Set("Connection", "close")
 			}
 			attributes := []any{
 				"request_id", requestID,
@@ -109,7 +117,7 @@ func (s *Server) requestLogging(next http.Handler) http.Handler {
 				"duration_ms", time.Since(started).Seconds() * 1000,
 			}
 			if recovered != nil {
-				attributes = append(attributes, "panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
+				attributes = append(attributes, "panic_type", fmt.Sprintf("%T", recovered), "stack", string(debug.Stack()))
 				logger.ErrorContext(logCtx, "http request recovered panic", attributes...)
 				return
 			}

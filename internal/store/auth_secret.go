@@ -28,6 +28,11 @@ var (
 	ErrAuthKeyInvalid     = errors.New("authentication encryption key is invalid")
 	ErrAuthKeyPermissions = errors.New("authentication encryption key permissions are unsafe")
 	ErrTOTPSecretLocked   = errors.New("TOTP secret cannot be decrypted")
+	// ErrPasswordChangedDuringLogin tells the authentication layer that a
+	// concurrent login or password-management request won the conditional
+	// upgrade race. The caller may safely re-read and verify the current hash;
+	// it must not report a valid password as a generic storage failure.
+	ErrPasswordChangedDuringLogin = errors.New("password changed during login")
 )
 
 func defaultAuthKeyPath(database string) string {

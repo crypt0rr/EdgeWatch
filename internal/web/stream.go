@@ -85,10 +85,14 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 		close(ch)
 		s.mu.Unlock()
 	}()
-	_, _ = w.Write([]byte(": connected\n\n"))
+	if _, err := w.Write([]byte(": connected\nretry: 5000\n\n")); err != nil {
+		return
+	}
 	flusher.Flush()
 	for _, message := range replay {
-		writeSSEMessage(w, message)
+		if !writeSSEMessage(w, message) {
+			return
+		}
 	}
 	if len(replay) > 0 {
 		flusher.Flush()
@@ -115,7 +119,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 			if !authorized || !auth.HasPermission(current, auth.PermissionStreamRead) {
 				return
 			}
-			writeSSEMessage(w, message)
+			if !writeSSEMessage(w, message) {
+				return
+			}
 			flusher.Flush()
 		case <-heartbeat.C:
 			if s.Auth == nil {
@@ -125,7 +131,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 			if !authorized || !auth.HasPermission(current, auth.PermissionStreamRead) {
 				return
 			}
-			_, _ = w.Write([]byte(": heartbeat\n\n"))
+			if _, err := w.Write([]byte(": heartbeat\n\n")); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}
@@ -209,8 +217,11 @@ func (s *Server) replayLocked(lastID uint64) []sseMessage {
 	return replay
 }
 
-func writeSSEMessage(w io.Writer, message sseMessage) {
-	_, _ = fmt.Fprintf(w, "id: %d\ndata: %s\n\n", message.id, message.payload)
+func writeSSEMessage(w io.Writer, message sseMessage) bool {
+	if _, err := fmt.Fprintf(w, "id: %d\ndata: %s\n\n", message.id, message.payload); err != nil {
+		return false
+	}
+	return true
 }
 
 func (s *Server) asset(w http.ResponseWriter, r *http.Request) {

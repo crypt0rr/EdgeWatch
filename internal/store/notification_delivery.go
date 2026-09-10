@@ -120,7 +120,7 @@ ON CONFLICT(destination_identity) DO UPDATE SET
 // unsent outbox counts. It never reads notification payloads or credentials.
 func (s *Store) ListDeliveryHealth(ctx context.Context) (map[string]DeliveryHealth, error) {
 	out := map[string]DeliveryHealth{}
-	rows, err := s.DB.QueryContext(ctx, `SELECT destination_identity,terminal_failures,last_success_at,last_failure_at,last_terminal_at,last_error_code,last_error_fingerprint FROM notification_delivery_health`)
+	rows, err := s.reader().QueryContext(ctx, `SELECT destination_identity,terminal_failures,last_success_at,last_failure_at,last_terminal_at,last_error_code,last_error_fingerprint FROM notification_delivery_health`)
 	if err != nil {
 		return nil, err
 	}
@@ -144,7 +144,7 @@ func (s *Store) ListDeliveryHealth(ctx context.Context) (map[string]DeliveryHeal
 		return nil, err
 	}
 
-	rows, err = s.DB.QueryContext(ctx, `SELECT destination,COUNT(*),COALESCE(SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END),0)
+	rows, err = s.reader().QueryContext(ctx, `SELECT destination,COUNT(*),COALESCE(SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END),0)
 FROM outbox WHERE sent_at IS NULL AND attempts < ? GROUP BY destination`, deliveryMaxAttempts)
 	if err != nil {
 		return nil, err

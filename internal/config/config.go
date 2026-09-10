@@ -1277,12 +1277,39 @@ func ParsePorts(raw string) ([]int, error) {
 }
 
 func PortContains(raw string, port int) bool {
-	ports, err := ParsePorts(raw)
-	if err != nil {
+	// Membership checks are used in scope-aware comparisons and may run once
+	// per positive port. Validate each range in place instead of expanding a
+	// broad expression such as 1-65535 into a 65k-element slice.
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
 		return false
 	}
-	i := sort.SearchInts(ports, port)
-	return i < len(ports) && ports[i] == port
+	matched := false
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		parts := strings.Split(item, "-")
+		if len(parts) > 2 || len(parts) == 0 {
+			return false
+		}
+		start, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+		if err != nil {
+			return false
+		}
+		end := start
+		if len(parts) == 2 {
+			end, err = strconv.Atoi(strings.TrimSpace(parts[1]))
+			if err != nil {
+				return false
+			}
+		}
+		if start < 1 || end > 65535 || end < start {
+			return false
+		}
+		if port >= start && port <= end {
+			matched = true
+		}
+	}
+	return matched
 }
 
 func (j Job) RunsOnStart() bool { return j.RunOnStart != nil && *j.RunOnStart }

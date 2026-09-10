@@ -438,7 +438,8 @@ func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {
 	var jobID sql.NullString
 	var revision sql.NullInt64
 	var resumable int
-	err := s.DB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE id=?`, id).
+	readDB := s.reader()
+	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE id=?`, id).
 		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot)
 	if err != nil {
 		return v, err
@@ -461,7 +462,7 @@ func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {
 	if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
 		return v, err
 	}
-	if err := loadScanMetadata(ctx, s.DB, id, &v); err != nil {
+	if err := loadScanMetadata(ctx, readDB, id, &v); err != nil {
 		return v, err
 	}
 	return v, nil
@@ -476,7 +477,8 @@ func (s *Store) GetScanSummary(ctx context.Context, id string) (model.ScanSummar
 	var jobID sql.NullString
 	var revision sql.NullInt64
 	var resumable int
-	err := s.DB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE id=?`, id).
+	readDB := s.reader()
+	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE id=?`, id).
 		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash)
 	if err != nil {
 		return v, err
@@ -489,7 +491,7 @@ func (s *Store) GetScanSummary(ctx context.Context, id string) (model.ScanSummar
 	}
 	v.Resumable = resumable != 0
 	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
-	if err := loadScanSummaryMetadata(ctx, s.DB, id, &v); err != nil {
+	if err := loadScanSummaryMetadata(ctx, readDB, id, &v); err != nil {
 		return v, err
 	}
 	return v, nil
@@ -506,7 +508,8 @@ func (s *Store) GetScanComparison(ctx context.Context, id string) (model.ScanSum
 	var jobID sql.NullString
 	var revision sql.NullInt64
 	var resumable int
-	err := s.DB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json FROM scans WHERE id=?`, id).
+	readDB := s.reader()
+	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json FROM scans WHERE id=?`, id).
 		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash, &changesJSON)
 	if err != nil {
 		return v, nil, err
@@ -519,7 +522,7 @@ func (s *Store) GetScanComparison(ctx context.Context, id string) (model.ScanSum
 	}
 	v.Resumable = resumable != 0
 	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
-	if err := loadScanSummaryMetadata(ctx, s.DB, id, &v); err != nil {
+	if err := loadScanSummaryMetadata(ctx, readDB, id, &v); err != nil {
 		return v, nil, err
 	}
 	var changes []model.Change
@@ -540,10 +543,11 @@ func (s *Store) GetScanComparison(ctx context.Context, id string) (model.ScanSum
 func (s *Store) ListScanChangesPage(ctx context.Context, id string, limit, offset int) (Page[model.Change], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Change]
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans, json_each(scans.changes_json) WHERE scans.id=?`, id).Scan(&page.Total); err != nil {
+	readDB := s.reader()
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans, json_each(scans.changes_json) WHERE scans.id=?`, id).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.changes_json) WHERE scans.id=? ORDER BY json_each.key LIMIT ? OFFSET ?`, id, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.changes_json) WHERE scans.id=? ORDER BY json_each.key LIMIT ? OFFSET ?`, id, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -568,10 +572,11 @@ func (s *Store) ListScanChangesPage(ctx context.Context, id string, limit, offse
 func (s *Store) ListScanResultsPage(ctx context.Context, id string, limit, offset int) (Page[model.Unit], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Unit]
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=?`, id).Scan(&page.Total); err != nil {
+	readDB := s.reader()
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=?`, id).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := s.DB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=? ORDER BY json_each.key LIMIT ? OFFSET ?`, id, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=? ORDER BY json_each.key LIMIT ? OFFSET ?`, id, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -617,7 +622,7 @@ func (s *Store) GetRDAPCache(ctx context.Context, address string) (RDAPCacheEntr
 	var entry RDAPCacheEntry
 	var fetched, expires, stale string
 	var payload []byte
-	err = s.DB.QueryRowContext(ctx, `SELECT address,payload_json,fetched_at,expires_at,stale_until FROM rdap_cache WHERE address=?`, normalized).Scan(&entry.Address, &payload, &fetched, &expires, &stale)
+	err = s.reader().QueryRowContext(ctx, `SELECT address,payload_json,fetched_at,expires_at,stale_until FROM rdap_cache WHERE address=?`, normalized).Scan(&entry.Address, &payload, &fetched, &expires, &stale)
 	if errors.Is(err, sql.ErrNoRows) {
 		return RDAPCacheEntry{}, fmt.Errorf("%w: RDAP cache %s", ErrNotFound, address)
 	}

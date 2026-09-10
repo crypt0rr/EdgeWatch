@@ -176,6 +176,9 @@ func TestSessionAuthenticationAndCSRF(t *testing.T) {
 	if m.CheckCSRF(r, session) {
 		t.Fatal("empty CSRF token accepted")
 	}
+	if m.CheckCSRF(r, store.Session{}) {
+		t.Fatal("empty session and header tokens accepted")
+	}
 	r.Header.Set("X-CSRF-Token", session.CSRFToken)
 	if !m.CheckCSRF(r, session) {
 		t.Fatal("valid CSRF token rejected")
@@ -544,6 +547,19 @@ func TestLoginFailuresDoNotLockOutAnotherAccountBehindSameSource(t *testing.T) {
 	raw, loggedIn, err := m.LoginAs(ctx, request, operator.Username, "operator account password", "", "")
 	if err != nil || raw == "" || loggedIn.ID != operator.ID {
 		t.Fatalf("operator behind same source was blocked: session=%q user=%#v err=%v", raw, loggedIn, err)
+	}
+}
+
+func TestLegacySourceScopePreservesScopedIPv6Addresses(t *testing.T) {
+	tests := map[string]string{
+		"source:login:2001:db8::10":   "2001:db8::10",
+		"source:confirm:2001:db8::20": "2001:db8::20",
+		"source:192.0.2.10":           "192.0.2.10",
+	}
+	for source, want := range tests {
+		if got := legacySourceScope(source); got != want {
+			t.Errorf("legacySourceScope(%q) = %q, want %q", source, got, want)
+		}
 	}
 }
 

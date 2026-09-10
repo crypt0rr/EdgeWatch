@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -44,6 +45,23 @@ func TestCreateJobWithEnabledPersistsPausedStateAtomically(t *testing.T) {
 	}
 	if revisions != 1 {
 		t.Fatalf("revision count = %d, want 1", revisions)
+	}
+}
+
+func TestManagedJobsHonorConfiguredTargetExclusions(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if err := s.SetTargetExclusions(config.DefaultTargetExclusions()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateJob(ctx, testJob("blocked")); err == nil || !strings.Contains(err.Error(), "excluded") {
+		t.Fatalf("excluded managed target was accepted: %v", err)
+	}
+	if err := s.SetTargetExclusions([]string{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateJob(ctx, testJob("allowed")); err != nil {
+		t.Fatalf("explicit empty exclusion override rejected managed target: %v", err)
 	}
 }
 

@@ -26,9 +26,10 @@ type Resolver interface {
 	LookupIP(context.Context, string, string) ([]net.IP, error)
 }
 type Nmap struct {
-	Path      string
-	NaabuPath string
-	Resolver  Resolver
+	Path             string
+	NaabuPath        string
+	Resolver         Resolver
+	targetExclusions []*net.IPNet
 }
 
 // maxProgressOutput bounds diagnostic stderr retained from either scanner.
@@ -102,6 +103,41 @@ func NewWithNaabu(nmapPath, naabuPath string) *Nmap {
 		scanner.NaabuPath = naabuPath
 	}
 	return scanner
+}
+
+// SetTargetExclusions installs the deployment-wide target policy. A nil list
+// keeps embedded callers backwards-compatible; a non-nil empty list is an
+// explicit allow-all override. The parsed networks are copied before use.
+func (n *Nmap) SetTargetExclusions(exclusions []string) error {
+	if exclusions == nil {
+		n.targetExclusions = nil
+		return nil
+	}
+	parsed, err := config.ParseTargetExclusions(exclusions)
+	if err != nil {
+		return err
+	}
+	n.targetExclusions = make([]*net.IPNet, 0, len(parsed))
+	for _, network := range parsed {
+		if network == nil {
+			continue
+		}
+		copyNetwork := &net.IPNet{IP: append(net.IP(nil), network.IP...), Mask: append(net.IPMask(nil), network.Mask...)}
+		n.targetExclusions = append(n.targetExclusions, copyNetwork)
+	}
+	if len(exclusions) == 0 {
+		n.targetExclusions = []*net.IPNet{}
+	}
+	return nil
+}
+
+func (n *Nmap) excludedNetwork(ip net.IP) string {
+	for _, network := range n.targetExclusions {
+		if network != nil && network.Contains(ip) {
+			return network.String()
+		}
+	}
+	return ""
 }
 
 type resolvedTarget struct {
@@ -340,6 +376,9 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 		}
 		raw := config.CanonicalTarget(input)
 		if ip := net.ParseIP(raw); ip != nil {
+			if exclusion := n.excludedNetwork(ip); exclusion != "" {
+				return nil, fmt.Errorf("target %s is excluded by scanner.target_exclusions (%s)", raw, exclusion)
+			}
 			count++
 			if count > job.MaxExpandedHosts {
 				return nil, fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts)
@@ -351,6 +390,9 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 			for current := ip.Mask(network.Mask); network.Contains(current); incrementIP(current) {
 				if err := ctx.Err(); err != nil {
 					return nil, err
+				}
+				if exclusion := n.excludedNetwork(current); exclusion != "" {
+					return nil, fmt.Errorf("target %s includes excluded address %s (%s)", raw, current.String(), exclusion)
 				}
 				count++
 				if count > job.MaxExpandedHosts {
@@ -368,6 +410,9 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 		set := map[string]bool{}
 		var addresses []string
 		for _, ip := range ips {
+			if exclusion := n.excludedNetwork(ip); exclusion != "" {
+				return nil, fmt.Errorf("target %s resolved to excluded address %s (%s)", raw, ip.String(), exclusion)
+			}
 			value := ip.String()
 			if !set[value] {
 				set[value] = true

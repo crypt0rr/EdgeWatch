@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,5 +34,20 @@ func TestTrustedProxyConfigurationValidatesAddresses(t *testing.T) {
 	base.Web.TrustedProxies = []string{""}
 	if err := base.ValidateDeployment(); err == nil {
 		t.Fatal("empty trusted proxy was accepted")
+	}
+}
+
+func TestTargetExclusionConfigurationValidatesNetworks(t *testing.T) {
+	base := Config{Version: 1, Database: "db", Retention: Duration(24 * 60 * 60 * 1e9), Scheduler: Scheduler{MaxConcurrent: 1}, Scanner: ScannerConfig{TargetExclusions: []string{"127.0.0.0/8"}}, Web: Web{Listen: "127.0.0.1:8080"}}
+	if err := base.ValidateDeployment(); err != nil {
+		t.Fatal(err)
+	}
+	base.Scanner.TargetExclusions = []string{"*"}
+	if err := base.ValidateDeployment(); err == nil || !strings.Contains(err.Error(), "target_exclusions") {
+		t.Fatalf("invalid scanner exclusion was accepted: %v", err)
+	}
+	base.Scanner.TargetExclusions = []string{"127.0.0.0/8", "127.0.0.0/8"}
+	if err := base.ValidateDeployment(); err == nil || !strings.Contains(err.Error(), "duplicates") {
+		t.Fatalf("duplicate scanner exclusion was accepted: %v", err)
 	}
 }

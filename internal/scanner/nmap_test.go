@@ -116,6 +116,28 @@ func TestResolveHostnameAndCIDRLimit(t *testing.T) {
 	}
 }
 
+func TestResolveRejectsExcludedAddresses(t *testing.T) {
+	n := New("nmap")
+	if err := n.SetTargetExclusions(config.DefaultTargetExclusions()); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{"127.0.0.1", "169.254.169.254", "::1"} {
+		if _, err := n.resolve(context.Background(), config.Job{Targets: []string{target}, MaxExpandedHosts: 4}); err == nil || !strings.Contains(err.Error(), "excluded") {
+			t.Fatalf("excluded target %q resolved without error: %v", target, err)
+		}
+	}
+	n.Resolver = fakeResolver{[]net.IP{net.ParseIP("192.0.2.1"), net.ParseIP("127.0.0.1")}}
+	if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"edge.example"}, MaxExpandedHosts: 4}); err == nil || !strings.Contains(err.Error(), "resolved to excluded") {
+		t.Fatalf("DNS result containing excluded address was accepted: %v", err)
+	}
+	if err := n.SetTargetExclusions([]string{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"127.0.0.1"}, MaxExpandedHosts: 1}); err != nil {
+		t.Fatalf("explicit empty exclusion override rejected target: %v", err)
+	}
+}
+
 func TestAggregatePrefersConfirmedOpen(t *testing.T) {
 	target := resolvedTarget{Name: "example.com", Addresses: []string{"192.0.2.1", "192.0.2.2"}, Aggregate: true}
 	parsed := map[string]model.Unit{"192.0.2.1": {Ports: []model.PortState{{Port: 53, State: "open|filtered"}}}, "192.0.2.2": {Ports: []model.PortState{{Port: 53, State: "open"}}}}

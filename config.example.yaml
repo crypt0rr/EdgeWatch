@@ -23,6 +23,17 @@ scheduler:
   # expansion limit (about 16.8M probes) with headroom.
   max_naabu_probe_count: 20000000
 
+# EdgeWatch uses host networking for scanner reachability. By default it
+# refuses loopback and link-local targets, including cloud metadata addresses.
+# Set target_exclusions: [] only when an administrator has deliberately
+# accepted the risk and needs to monitor the host's own local surface.
+scanner:
+  target_exclusions:
+    - 127.0.0.0/8
+    - 169.254.0.0/16
+    - ::1/128
+    - fe80::/10
+
 # Check the latest stable GitHub release at startup and every three hours.
 # Set enabled: false for offline or privacy-sensitive deployments. A check
 # reveals the host's public IP and EdgeWatch user agent to GitHub.

@@ -26,6 +26,11 @@ type Store struct {
 	Path        string
 	authKeyPath string
 	authAutoKey bool
+	// targetExclusions is configured once during daemon startup. A nil slice
+	// means the caller did not provide deployment policy (kept for embedded
+	// library compatibility); a non-nil empty slice is an explicit allow-all
+	// override.
+	targetExclusions []string
 }
 
 type rowQueryer interface {
@@ -150,6 +155,33 @@ func Open(path string) (*Store, error) {
 		}
 	}
 	return &Store{DB: db, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true}, nil
+}
+
+// SetTargetExclusions installs the deployment-wide scanner target policy. It
+// must be called before jobs are created or updated. The values are copied so
+// later configuration mutations cannot weaken the policy in use.
+func (s *Store) SetTargetExclusions(exclusions []string) error {
+	if exclusions == nil {
+		s.targetExclusions = nil
+		return nil
+	}
+	if _, err := config.ParseTargetExclusions(exclusions); err != nil {
+		return err
+	}
+	s.targetExclusions = append([]string(nil), exclusions...)
+	if len(exclusions) == 0 {
+		// append to a nil slice preserves nil, which has a distinct meaning from
+		// an explicitly empty policy.
+		s.targetExclusions = []string{}
+	}
+	return nil
+}
+
+func (s *Store) validateManagedJob(job config.Job) error {
+	if s.targetExclusions == nil {
+		return config.ValidateJob(job)
+	}
+	return config.ValidateJobWithTargetExclusions(job, s.targetExclusions)
 }
 
 // sqliteArtifactPath resolves the on-disk filename represented by a SQLite
@@ -1049,7 +1081,7 @@ func (s *Store) CreateJobWithEnabledAndAudit(ctx context.Context, job config.Job
 
 func (s *Store) createJobWithAudits(ctx context.Context, job config.Job, enabled bool, audits []AuditEntry) (JobRecord, error) {
 	job = config.NormalizeJob(job)
-	if err := config.ValidateJob(job); err != nil {
+	if err := s.validateManagedJob(job); err != nil {
 		return JobRecord{}, err
 	}
 	raw, err := marshalJob(job)
@@ -1204,7 +1236,7 @@ func (s *Store) UpdateJobWithEventsWithOutbox(ctx context.Context, id string, ex
 // reset, event, and outbox intent all roll back together.
 func (s *Store) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool, destinations []string, audits ...AuditEntry) (JobRecord, bool, []model.Event, error) {
 	job = config.NormalizeJob(job)
-	if err := config.ValidateJob(job); err != nil {
+	if err := s.validateManagedJob(job); err != nil {
 		return JobRecord{}, false, nil, err
 	}
 	// Archived jobs are never schedulable, regardless of what a stale or

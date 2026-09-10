@@ -68,6 +68,17 @@ jobs:
 	if cfg.Scheduler.MaxNaabuProbeCount != DefaultNaabuMaxProbeCount {
 		t.Fatalf("Naabu probe budget default %d", cfg.Scheduler.MaxNaabuProbeCount)
 	}
+	if !reflect.DeepEqual(cfg.Scanner.TargetExclusions, DefaultTargetExclusions()) {
+		t.Fatalf("scanner target exclusions default %#v", cfg.Scanner.TargetExclusions)
+	}
+	allowLocal := strings.Replace(yaml, "retention: 90d", "retention: 90d\nscanner:\n  target_exclusions: []", 1)
+	if err := os.WriteFile(path, []byte(allowLocal), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil || cfg.Scanner.TargetExclusions == nil || len(cfg.Scanner.TargetExclusions) != 0 {
+		t.Fatalf("explicit empty scanner exclusion override = %#v, error = %v", cfg.Scanner.TargetExclusions, err)
+	}
 	if cfg.Jobs[0].Baseline.Samples != 1 || !cfg.Jobs[0].AssumesAlive() || cfg.Jobs[0].RunsOnStart() || cfg.Jobs[0].RunOnStart == nil || cfg.Jobs[0].AssumeAlive == nil {
 		t.Fatal("defaults not applied")
 	}
@@ -107,6 +118,22 @@ jobs:
 	}
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "max_concurrent_scans") {
 		t.Fatalf("explicit zero scheduler limit was silently defaulted: %v", err)
+	}
+}
+
+func TestTargetExclusionsRejectUnsafeTargetsByDefaultAndAllowExplicitOverride(t *testing.T) {
+	for _, target := range []string{"127.0.0.1", "169.254.169.254", "::1", "fe80::1", "127.0.0.0/24"} {
+		job := NormalizeJob(Job{Name: "blocked", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{target}, TCP: &Protocol{Ports: "1", Mode: "connect"}})
+		if err := ValidateJobWithTargetExclusions(job, DefaultTargetExclusions()); err == nil || !strings.Contains(err.Error(), "excluded") && !strings.Contains(err.Error(), "overlaps") {
+			t.Fatalf("unsafe target %q was accepted: %v", target, err)
+		}
+	}
+	allowed := NormalizeJob(Job{Name: "allowed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &Protocol{Ports: "1", Mode: "connect"}})
+	if err := ValidateJobWithTargetExclusions(allowed, []string{}); err != nil {
+		t.Fatalf("explicit empty target exclusion override rejected host target: %v", err)
+	}
+	if err := ValidateJobWithTargetExclusions(allowed, []string{"not-a-network"}); err == nil {
+		t.Fatal("invalid exclusion was accepted")
 	}
 }
 

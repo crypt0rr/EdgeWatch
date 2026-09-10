@@ -115,6 +115,11 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	}
 	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
 	if a != nil && a.Config != nil {
+		if s != nil {
+			if err := s.SetTargetExclusions(a.Config.Scanner.TargetExclusions); err != nil {
+				logger.Error("scanner target exclusion configuration rejected", "error", err)
+			}
+		}
 		if err := v.Auth.SetTrustedProxies(a.Config.Web.TrustedProxies); err != nil {
 			logger.Error("trusted proxy configuration rejected", "error", err)
 		}

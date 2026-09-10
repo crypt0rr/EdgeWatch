@@ -868,20 +868,7 @@ END;`,
 		if !ok {
 			return fmt.Errorf("missing migration for schema version %d", next)
 		}
-		tx, err := db.Begin()
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback()
-		for _, statement := range statements {
-			if _, err := tx.Exec(statement); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-				return err
-			}
-		}
-		if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", next)); err != nil {
-			return err
-		}
-		if err := tx.Commit(); err != nil {
+		if err := applyMigration(db, next, statements); err != nil {
 			return err
 		}
 		version = next
@@ -894,6 +881,79 @@ END;`,
 	}
 	return ensureBuiltinScannerProfiles(db)
 }
+
+// applyMigration scopes the transaction rollback to one migration. Keeping
+// this in a helper avoids accumulating deferred rollbacks while a database is
+// upgraded through many versions.
+func applyMigration(db *sql.DB, version int, statements []string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, statement := range statements {
+		if err := execMigrationStatement(tx, statement); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// execMigrationStatement handles the only intentionally repeatable DDL in
+// the migration set (ALTER TABLE ... ADD COLUMN) by inspecting SQLite's
+// schema first. Suppressing arbitrary errors based on driver error text would
+// hide real migration failures and is not stable across SQLite versions.
+func execMigrationStatement(tx *sql.Tx, statement string) error {
+	if table, column, ok := parseAddColumnStatement(statement); ok {
+		exists, err := migrationColumnExists(tx, table, column)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return nil
+		}
+	}
+	_, err := tx.Exec(statement)
+	return err
+}
+
+func parseAddColumnStatement(statement string) (table, column string, ok bool) {
+	fields := strings.Fields(statement)
+	if len(fields) < 6 || !strings.EqualFold(fields[0], "ALTER") || !strings.EqualFold(fields[1], "TABLE") || !strings.EqualFold(fields[3], "ADD") || !strings.EqualFold(fields[4], "COLUMN") {
+		return "", "", false
+	}
+	table = strings.Trim(fields[2], "`\"")
+	column = strings.Trim(fields[5], "`\"")
+	if !validMigrationIdentifier(table) || !validMigrationIdentifier(column) {
+		return "", "", false
+	}
+	return table, column, true
+}
+
+func validMigrationIdentifier(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') && character != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func migrationColumnExists(tx *sql.Tx, table, column string) (bool, error) {
+	var count int
+	query := "SELECT COUNT(*) FROM pragma_table_info('" + table + "') WHERE name='" + column + "'"
+	if err := tx.QueryRow(query).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func (s *Store) Close() error { return s.DB.Close() }
 
 func nullString(v string) any {

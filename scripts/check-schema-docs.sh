@@ -6,7 +6,7 @@
 # the documentation.
 set -eu
 
-schema=$(sed -nE 's/^const schemaVersion = ([0-9]+)$/\1/p' internal/store/store.go | head -n 1)
+schema=$(sed -nE 's/^const schemaVersion = ([0-9]+)$/\1/p' internal/store/migrations.go | head -n 1)
 if [ -z "$schema" ]; then
   echo "schema version constant not found" >&2
   exit 1

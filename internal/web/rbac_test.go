@@ -128,7 +128,7 @@ func TestRBACSeparatesViewerReadsAndOperatorNotificationManagement(t *testing.T)
 		t.Fatalf("viewer status endpoint = %d", resp.StatusCode)
 	}
 	resp.Body.Close()
-	for _, path := range []string{"/api/v1/jobs/unknown/scans", "/api/v1/jobs/unknown/scans/scan-id", "/api/v1/jobs/unknown/events", "/api/v1/jobs/unknown/scan-cycle"} {
+	for _, path := range []string{"/api/v1/jobs/unknown/scans", "/api/v1/jobs/unknown/scans/scan-id", "/api/v1/jobs/unknown/events", "/api/v1/jobs/unknown/scan-cycle", "/api/v1/jobs/unknown/not-a-route", "/api/v1/auth/not-a-route"} {
 		resp = request(viewerRaw, viewerSession, http.MethodGet, path, "")
 		if resp.StatusCode != http.StatusForbidden {
 			resp.Body.Close()

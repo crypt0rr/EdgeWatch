@@ -3,6 +3,11 @@ package auth
 import "github.com/crypt0rr/edgewatch/internal/store"
 
 const (
+	// PermissionDenied is returned by the web route matrix for paths that are
+	// not explicitly known. It is deliberately not granted to any role; the
+	// API treats it as a hard authorization failure instead of falling through
+	// to an unauthenticated/empty permission result.
+	PermissionDenied              = "__edgewatch_permission_denied__"
 	PermissionOverviewRead        = "overview.read"
 	PermissionJobsRead            = "jobs.read"
 	PermissionJobsWrite           = "jobs.write"

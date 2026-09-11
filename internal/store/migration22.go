@@ -267,14 +267,6 @@ END;`,
 END;`,
 }
 
-// backfillHostSearchIndexes rebuilds both FTS projections in resumable batches.
-// It intentionally updates search_text through the normal source-table
-// triggers instead of issuing a second direct FTS insert, avoiding duplicates
-// if a batch is retried.
-func backfillHostSearchIndexes(db *sql.DB) error {
-	return backfillHostSearchIndexesContext(context.Background(), db)
-}
-
 // backfillHostSearchIndexesContext rebuilds both FTS projections without
 // making database-open work uncancellable. Each batch commits its checkpoint
 // before returning, so a cancelled migration can be restarted without
@@ -347,10 +339,6 @@ func logFTSProgress(progress ftsBatchProgress) {
 	slog.Default().Info("rebuilt host search index", "table", progress.table, "batch_rows", progress.batchRows, "processed_rows", progress.processedRows, "last_rowid", progress.lastRowID, "complete", progress.complete)
 }
 
-func ensureHostSearchTriggers(db *sql.DB) error {
-	return ensureHostSearchTriggersContext(context.Background(), db)
-}
-
 func ensureHostSearchTriggersContext(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -381,10 +369,6 @@ func ensureHostSearchTriggersContext(ctx context.Context, db *sql.DB) error {
 	return tx.Commit()
 }
 
-func ensureFTSBackfillState(db *sql.DB) error {
-	return ensureFTSBackfillStateContext(context.Background(), db)
-}
-
 func ensureFTSBackfillStateContext(ctx context.Context, db *sql.DB) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -408,10 +392,6 @@ func ensureFTSBackfillStateContext(ctx context.Context, db *sql.DB) error {
 		}
 	}
 	return tx.Commit()
-}
-
-func initializeFTSBackfill(db *sql.DB) error {
-	return initializeFTSBackfillContext(context.Background(), db)
 }
 
 func initializeFTSBackfillContext(ctx context.Context, db *sql.DB) error {
@@ -444,10 +424,6 @@ type ftsHostRow struct {
 	job   string
 	addr  string
 	raw   []byte
-}
-
-func backfillFTSTableBatch(db *sql.DB, sourceTable string) (ftsBatchProgress, error) {
-	return backfillFTSTableBatchContext(context.Background(), db, sourceTable)
 }
 
 func backfillFTSTableBatchContext(ctx context.Context, db *sql.DB, sourceTable string) (ftsBatchProgress, error) {

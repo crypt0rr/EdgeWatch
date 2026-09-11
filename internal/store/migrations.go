@@ -607,7 +607,7 @@ END;`,
 		},
 		22: {
 			// Large FTS rebuilds are resumable and run in bounded transactions. The
-			// state rows are initialized by backfillHostSearchIndexes after the
+			// state rows are initialized by the resumable host-search backfill after the
 			// migration commits, so a restart can continue from the last rowid.
 			// The additive column guards also make supported recovery fixtures with a
 			// schema marker but an older host-table shape safe to upgrade.

@@ -483,6 +483,14 @@ directory and deployment configuration, then start the previous image. Do not
 point an older image at the upgraded database. The previous named Docker
 volume, if one exists, is not read or migrated automatically.
 
+Migration recovery fixtures are supported only when their schema marker matches
+the tables and source columns required by that migration. Additive table and
+column repairs are structural and safe to retry; a fixture that advertises a
+newer marker while omitting a required source table (for example `scan_hosts`)
+is rejected with the underlying missing-table diagnostic. Host-search
+backfills use one resumable, bounded path with persistent row checkpoints;
+there is no separate whole-table backfill entrypoint.
+
 ## Development
 
 Go 1.27.1 or newer and Node.js 24.8.0 are required. The repository checks are:

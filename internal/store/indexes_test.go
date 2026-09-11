@@ -53,9 +53,9 @@ PRAGMA user_version = 20;`); err != nil {
 		}
 	}
 
-	assertPlanUses := func(label, query, expected string) {
+	assertPlanUses := func(label, query, expected string, args ...any) {
 		t.Helper()
-		planRows, err := s.DB.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, "job-id")
+		planRows, err := s.DB.QueryContext(ctx, "EXPLAIN QUERY PLAN "+query, args...)
 		if err != nil {
 			t.Fatalf("%s explain: %v", label, err)
 		}
@@ -77,7 +77,8 @@ PRAGMA user_version = 20;`); err != nil {
 		}
 	}
 
-	assertPlanUses("job count", `SELECT COUNT(*) FROM scans WHERE job_id=?`, "scans_job_id_")
-	assertPlanUses("job history", `SELECT id FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT 50 OFFSET 0`, "scans_job_id_time")
-	assertPlanUses("cycle lookup", `SELECT COUNT(*) FROM scans WHERE cycle_id=?`, "scans_cycle_id")
+	jobQueries := jobScansPageQueries("job-id", 50, 0)
+	assertPlanUses("job count", jobQueries.countSQL, "scans_job_id_", jobQueries.countArg...)
+	assertPlanUses("job history", jobQueries.pageSQL, "scans_job_id_time", jobQueries.pageArg...)
+	assertPlanUses("cycle lookup", scanCycleHasScanQuery, "scans_cycle_id", "job-id")
 }

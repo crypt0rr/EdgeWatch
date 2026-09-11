@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,69 +14,101 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
-func TestBackupCreatesVerifiableSnapshotWhileWritesContinue(t *testing.T) {
-	ctx := context.Background()
+func TestBackupCreatesVerifiableSnapshotsWithIndependentConnections(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")
-	s, err := Open(database)
+	writer, err := Open(database)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
-	job, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{
+	defer writer.Close()
+	backupStore, err := OpenExistingContext(ctx, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backupStore.Close()
+	job, err := writer.CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name: "backup-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.10"},
 		TCP: &config.Protocol{Ports: "443", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced",
 	}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeDone := make(chan error, 1)
-	go func() {
-		for index := 0; index < 8; index++ {
-			when := time.Unix(int64(index+1), 0).UTC()
-			scan := model.Scan{ID: "backup-scan-" + string(rune('a'+index)), JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{Units: []model.Unit{{Target: "198.51.100.10", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}}}}}}
-			if saveErr := s.SaveScan(ctx, scan); saveErr != nil {
-				writeDone <- saveErr
-				return
-			}
-		}
-		writeDone <- nil
-	}()
-	backupPath, err := s.Backup(ctx, filepath.Join(dir, "backups", "snapshot.db"))
-	if err == nil {
-		// The destination directory is intentionally required to exist; create it
-		// above would hide deployment mistakes. This first call documents that
-		// behavior and the retry below exercises the normal path.
-		t.Fatalf("backup unexpectedly succeeded without output directory: %s", backupPath)
-	}
 	if err := os.Mkdir(filepath.Join(dir, "backups"), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	backupPath, err = s.Backup(ctx, filepath.Join(dir, "backups", "snapshot.db"))
-	if err != nil {
-		t.Fatalf("backup: %v", err)
+	started := make(chan struct{})
+	stop := make(chan struct{})
+	writeDone := make(chan error, 1)
+	var writes atomic.Int64
+	go func() {
+		defer close(writeDone)
+		for index := 0; ; index++ {
+			select {
+			case <-stop:
+				writeDone <- nil
+				return
+			default:
+			}
+			when := time.Unix(int64(index+1), 0).UTC()
+			scan := model.Scan{ID: "backup-scan-" + string(rune('a'+index)), JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{Units: []model.Unit{{Target: "198.51.100.10", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}}}}}}
+			if saveErr := writer.SaveScan(ctx, scan); saveErr != nil {
+				writeDone <- saveErr
+				return
+			}
+			if writes.Add(1) == 1 {
+				close(started)
+			}
+		}
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("writer did not commit before the backup pass")
 	}
+	backupPaths := make([]string, 0, 3)
+	for index := 0; index < 3; index++ {
+		backupPath := filepath.Join(dir, "backups", fmt.Sprintf("snapshot-%d.db", index))
+		backupPath, err = backupStore.Backup(ctx, backupPath)
+		if err != nil {
+			close(stop)
+			<-writeDone
+			t.Fatalf("backup %d: %v", index, err)
+		}
+		backupPaths = append(backupPaths, backupPath)
+	}
+	close(stop)
 	if err := <-writeDone; err != nil {
 		t.Fatalf("concurrent write: %v", err)
 	}
-	info, err := os.Stat(backupPath)
-	if err != nil {
-		t.Fatal(err)
+	if writes.Load() < 1 {
+		t.Fatal("writer did not commit representative scan data")
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("backup mode = %04o, want 0600", info.Mode().Perm())
-	}
-	copyStore, err := Open(backupPath)
-	if err != nil {
-		t.Fatalf("open backup: %v", err)
-	}
-	defer copyStore.Close()
-	verification, err := copyStore.Verify(ctx)
-	if err != nil {
-		t.Fatalf("verify backup: %v (%#v)", err, verification)
-	}
-	if verification.IntegrityCheck != "ok" || len(verification.ForeignKeyViolations) != 0 {
-		t.Fatalf("verification = %#v", verification)
+	for index, backupPath := range backupPaths {
+		info, err := os.Stat(backupPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("backup %d mode = %04o, want 0600", index, info.Mode().Perm())
+		}
+		copyStore, err := OpenReadOnlyExisting(backupPath)
+		if err != nil {
+			t.Fatalf("open backup %d: %v", index, err)
+		}
+		verification, verifyErr := copyStore.Verify(ctx)
+		closeErr := copyStore.Close()
+		if verifyErr != nil {
+			t.Fatalf("verify backup %d: %v (%#v)", index, verifyErr, verification)
+		}
+		if closeErr != nil {
+			t.Fatalf("close backup %d: %v", index, closeErr)
+		}
+		if verification.IntegrityCheck != "ok" || len(verification.ForeignKeyViolations) != 0 {
+			t.Fatalf("verification %d = %#v", index, verification)
+		}
 	}
 }
 

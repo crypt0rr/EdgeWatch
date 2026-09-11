@@ -232,28 +232,9 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 	}
 	if !*existingLoaded {
 		if checkpointCount == 0 {
-			rows, queryErr := tx.QueryContext(ctx, `SELECT work_unit_json FROM scan_cycle_units WHERE cycle_id=? AND json_extract(work_unit_json,'$.phase')<>'discovery'`, cycleID)
-			if queryErr != nil {
-				return false, queryErr
+			if err := loadScanCycleUnitIdentities(ctx, tx, cycleID, existing); err != nil {
+				return false, err
 			}
-			for rows.Next() {
-				var raw []byte
-				var unit scanner.WorkUnit
-				if scanErr := rows.Scan(&raw); scanErr != nil {
-					rows.Close()
-					return false, scanErr
-				}
-				if unmarshalErr := json.Unmarshal(raw, &unit); unmarshalErr != nil {
-					rows.Close()
-					return false, unmarshalErr
-				}
-				existing[scanCycleUnitIdentity(unit)] = struct{}{}
-			}
-			if rowsErr := rows.Err(); rowsErr != nil {
-				rows.Close()
-				return false, rowsErr
-			}
-			rows.Close()
 		}
 		*existingLoaded = true
 	}
@@ -457,6 +438,26 @@ func scanCycleUnitIdentity(unit scanner.WorkUnit) string {
 	addresses := append([]string(nil), unit.Addresses...)
 	sort.Strings(addresses)
 	return unit.Engine + "\x00" + unit.Phase + "\x00" + unit.Protocol + "\x00" + fmt.Sprint(unit.Family) + "\x00" + unit.Ports + "\x00" + strings.Join(addresses, ",")
+}
+
+func loadScanCycleUnitIdentities(ctx context.Context, tx *sql.Tx, cycleID string, existing map[string]struct{}) error {
+	rows, err := tx.QueryContext(ctx, `SELECT work_unit_json FROM scan_cycle_units WHERE cycle_id=? AND json_extract(work_unit_json,'$.phase')<>'discovery'`, cycleID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		var unit scanner.WorkUnit
+		if err := rows.Scan(&raw); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(raw, &unit); err != nil {
+			return err
+		}
+		existing[scanCycleUnitIdentity(unit)] = struct{}{}
+	}
+	return rows.Err()
 }
 
 func normalizeCycleAddress(raw string) string {
@@ -1090,27 +1091,11 @@ func (s *Store) ExpireScanCycles(ctx context.Context, now time.Time) (int64, err
 		if err != nil {
 			return total, err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT id FROM scan_cycles WHERE status IN ('running','paused','stalled') AND expires_at<=? ORDER BY expires_at,id LIMIT ?`, stamp, scanCycleReconcileBatchSize)
+		ids, err := expiredScanCycleIDs(ctx, tx, stamp)
 		if err != nil {
 			_ = tx.Rollback()
 			return total, err
 		}
-		ids := make([]string, 0, scanCycleReconcileBatchSize)
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				_ = tx.Rollback()
-				return total, err
-			}
-			ids = append(ids, id)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			_ = tx.Rollback()
-			return total, err
-		}
-		rows.Close()
 		if len(ids) == 0 {
 			if err := tx.Commit(); err != nil {
 				return total, err
@@ -1138,6 +1123,23 @@ func (s *Store) ExpireScanCycles(ctx context.Context, now time.Time) (int64, err
 			return total, err
 		}
 	}
+}
+
+func expiredScanCycleIDs(ctx context.Context, tx *sql.Tx, stamp string) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM scan_cycles WHERE status IN ('running','paused','stalled') AND expires_at<=? ORDER BY expires_at,id LIMIT ?`, stamp, scanCycleReconcileBatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0, scanCycleReconcileBatchSize)
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // clearExpiredCyclePayloads reclaims potentially large checkpoint documents

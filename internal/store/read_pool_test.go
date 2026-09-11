@@ -91,7 +91,7 @@ func TestHistoryReadsRemainAvailableWhileWriterTransactionIsHeld(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `UPDATE jobs SET updated_at=updated_at WHERE id=?`, job.ID); err != nil {
 		t.Fatal(err)
 	}

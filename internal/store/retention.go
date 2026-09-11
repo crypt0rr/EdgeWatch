@@ -184,27 +184,11 @@ func (s *Store) repairLatestScanHosts(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT address FROM latest_scan_hosts AS current WHERE NOT EXISTS (SELECT 1 FROM scans WHERE scans.id=current.scan_id) ORDER BY address LIMIT ?`, retentionBatchSize)
+		addresses, err := danglingLatestScanHostAddresses(ctx, tx)
 		if err != nil {
 			_ = tx.Rollback()
 			return err
 		}
-		addresses := make([]string, 0, retentionBatchSize)
-		for rows.Next() {
-			var address string
-			if err := rows.Scan(&address); err != nil {
-				rows.Close()
-				_ = tx.Rollback()
-				return err
-			}
-			addresses = append(addresses, address)
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			_ = tx.Rollback()
-			return err
-		}
-		rows.Close()
 		if len(addresses) == 0 {
 			if err := tx.Commit(); err != nil {
 				return err
@@ -241,6 +225,23 @@ FROM (
 			return err
 		}
 	}
+}
+
+func danglingLatestScanHostAddresses(ctx context.Context, tx *sql.Tx) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT address FROM latest_scan_hosts AS current WHERE NOT EXISTS (SELECT 1 FROM scans WHERE scans.id=current.scan_id) ORDER BY address LIMIT ?`, retentionBatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	addresses := make([]string, 0, retentionBatchSize)
+	for rows.Next() {
+		var address string
+		if err := rows.Scan(&address); err != nil {
+			return nil, err
+		}
+		addresses = append(addresses, address)
+	}
+	return addresses, rows.Err()
 }
 
 func (s *Store) clearCompletedCyclePayloads(ctx context.Context) error {

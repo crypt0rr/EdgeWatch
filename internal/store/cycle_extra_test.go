@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -249,6 +250,10 @@ func TestReconcileNaabuDiscoveryIsIncremental(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var planBefore []byte
+	if err := s.DB.QueryRowContext(ctx, `SELECT plan_json FROM scan_cycles WHERE id=?`, cycle.ID).Scan(&planBefore); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -276,6 +281,13 @@ func TestReconcileNaabuDiscoveryIsIncremental(t *testing.T) {
 	}
 	if checkpoints != 1 {
 		t.Fatalf("checkpoint count after first batch = %d, want 1", checkpoints)
+	}
+	var planAfter []byte
+	if err := s.DB.QueryRowContext(ctx, `SELECT plan_json FROM scan_cycles WHERE id=?`, cycle.ID).Scan(&planAfter); err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(planBefore, planAfter) {
+		t.Fatal("incremental reconciliation rewrote the persisted plan blob")
 	}
 	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil || len(summaries) != 3 {
@@ -366,7 +378,7 @@ func TestReconcileNaabuDiscoveryRepairsSplitPlanCounters(t *testing.T) {
 	}
 
 	// The split leaves plan_json with one unit while the durable table has two.
-	// Reconciliation must repair the plan and totals before adding enrichment.
+	// Reconciliation must preserve the durable counters before adding enrichment.
 	complete(0, "192.0.2.1", 22)
 	updated, err := s.GetScanCycle(ctx, cycle.ID)
 	if err != nil {

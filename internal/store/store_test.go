@@ -1246,6 +1246,43 @@ func TestPrunePreservesScansReferencedByOpenIncidents(t *testing.T) {
 	}
 }
 
+func TestPruneRepairsLatestHostProjectionForProtectedOlderScan(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	job, err := s.CreateJob(ctx, testJob("projection-repair"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	newer := old.Add(12 * time.Hour)
+	host := model.HostObservation{Address: "198.51.100.77", AddressFamily: "IPv4", Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}
+	if err := s.SaveScan(ctx, model.Scan{ID: "projection-baseline", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: old, FinishedAt: old, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{host}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.BaselineScanID = "projection-baseline"
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	host.Protocols[0].Ports[0].State = "closed"
+	if err := s.SaveScan(ctx, model.Scan{ID: "projection-newer", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: newer, FinishedAt: newer, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{host}}}); err != nil {
+		t.Fatal(err)
+	}
+	if stats, err := s.PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour)); err != nil {
+		t.Fatal(err)
+	} else if stats.Scans != 1 {
+		t.Fatalf("pruned scans = %d, want newer projection source only", stats.Scans)
+	}
+	page, err := s.ListLatestScanHostsPage(ctx, "198.51.100.77", "", nil, 50, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].ScanID != "projection-baseline" {
+		t.Fatalf("repaired projection = %#v (total %d)", page.Items, page.Total)
+	}
+}
+
 func TestPruneRetentionClassesAndAuditPolicy(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

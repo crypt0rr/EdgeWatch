@@ -54,13 +54,11 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	stats.Scans = deletedScans
 	if deletedScans > 0 {
 		// A projection row is a copy rather than a foreign-key child of its
-		// source scan. Remove dangling copies between batches, then rebuild once
-		// after all source deletions so an older retained observation becomes
-		// visible when the previous latest row expires.
-		if _, err := s.deleteRetentionBatches(ctx, `DELETE FROM latest_scan_hosts WHERE address IN (SELECT candidate.address FROM latest_scan_hosts AS candidate WHERE NOT EXISTS (SELECT 1 FROM scans WHERE scans.id=candidate.scan_id) ORDER BY candidate.address LIMIT ?)`); err != nil {
-			return stats, err
-		}
-		if err := s.rebuildLatestScanHosts(ctx); err != nil {
+		// source scan. Repair only addresses whose current row became dangling;
+		// rebuilding the complete retained history would hold the writer for the
+		// size of the deployment and make every retention pass increasingly
+		// expensive. Each repair transaction is bounded by retentionBatchSize.
+		if err := s.repairLatestScanHosts(ctx); err != nil {
 			return stats, err
 		}
 	}
@@ -170,6 +168,79 @@ func (s *Store) rebuildLatestScanHosts(ctx context.Context) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// repairLatestScanHosts restores only projection addresses whose source scan
+// was removed by retention. The address list is selected and repaired in one
+// bounded transaction at a time, so the writer lock and rollback cost stay
+// independent of total retained history. Addresses with no retained
+// successful observation are intentionally left absent.
+func (s *Store) repairLatestScanHosts(ctx context.Context) error {
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		tx, err := s.DB.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT address FROM latest_scan_hosts AS current WHERE NOT EXISTS (SELECT 1 FROM scans WHERE scans.id=current.scan_id) ORDER BY address LIMIT ?`, retentionBatchSize)
+		if err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		addresses := make([]string, 0, retentionBatchSize)
+		for rows.Next() {
+			var address string
+			if err := rows.Scan(&address); err != nil {
+				rows.Close()
+				_ = tx.Rollback()
+				return err
+			}
+			addresses = append(addresses, address)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			_ = tx.Rollback()
+			return err
+		}
+		rows.Close()
+		if len(addresses) == 0 {
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+			return nil
+		}
+
+		placeholders := make([]string, len(addresses))
+		args := make([]any, len(addresses))
+		for i, address := range addresses {
+			placeholders[i] = "?"
+			args[i] = address
+		}
+		inClause := strings.Join(placeholders, ",")
+		if _, err := tx.ExecContext(ctx, `DELETE FROM latest_scan_hosts WHERE address IN (`+inClause+`)`, args...); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		// The projection columns intentionally mirror saveScanHostsExec. The
+		// window rank preserves the same finished-at/id tie-breaker as the
+		// original full rebuild while restricting work to the affected addresses.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
+SELECT address,scan_id,COALESCE(job_id,''),job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports
+FROM (
+ SELECT h.address,h.scan_id,s.job_id,s.job,s.finished_at,h.data_quality,h.address_family,h.source_targets_json,h.dns_names_json,h.host_json,h.search_text,h.open_ports,h.open_filtered_ports,h.tcp_present,h.udp_present,h.tcp_open_ports,h.tcp_open_filtered_ports,h.udp_open_ports,h.udp_open_filtered_ports,
+        ROW_NUMBER() OVER (PARTITION BY h.address ORDER BY s.finished_at DESC,s.id DESC) AS rn
+ FROM scan_hosts h JOIN scans s ON s.id=h.scan_id
+ WHERE s.status='success' AND h.address IN (`+inClause+`)
+) ranked WHERE rn=1`, args...); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
 }
 
 func (s *Store) clearCompletedCyclePayloads(ctx context.Context) error {

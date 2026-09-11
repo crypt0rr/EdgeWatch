@@ -27,6 +27,10 @@ networking for scan routing, and persists all runtime state in `./data`.
 Run `docker compose pull` explicitly before starting when you want the latest
 image.
 
+The supported Compose service rotates its Docker `json-file` logs at 10 MiB
+per file with three retained files. This bounds local log growth; forward
+container logs to an external collector if longer retention is required.
+
 The final image keeps the daemon at UID 0 for scanner compatibility. All
 capabilities are dropped before adding only the raw-packet capability needed
 by the default Nmap modes; an explicit `compose.syn.yaml` override adds
@@ -473,7 +477,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 32), but it is forward-only: an older binary refuses a newer schema.
+version 33), but it is forward-only: an older binary refuses a newer schema.
 To roll back, stop the new service, restore the entire pre-upgrade `./data`
 directory and deployment configuration, then start the previous image. Do not
 point an older image at the upgraded database. The previous named Docker

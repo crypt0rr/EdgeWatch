@@ -3,6 +3,14 @@ services:
     image: ghcr.io/crypt0rr/edgewatch:latest
     container_name: edgewatch
     restart: unless-stopped
+    # Bound the Docker json-file log so a noisy scanner or proxy cannot fill
+    # the host filesystem. Increase these values only with an external log
+    # retention plan.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     # Keep this above the daemon's six-minute graceful-shutdown join deadline;
     # large detailed snapshots may need the full persistence budget to commit.
     stop_grace_period: 7m

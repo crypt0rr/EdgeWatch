@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 32
+const schemaVersion = 33
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -811,6 +811,13 @@ END;`,
 );`,
 			"ALTER TABLE scan_cycle_units ADD COLUMN identity TEXT NOT NULL DEFAULT ''",
 			"CREATE INDEX IF NOT EXISTS scan_cycle_units_identity ON scan_cycle_units(cycle_id,identity)",
+		},
+		33: {
+			// Request correlation is additive and optional for non-HTTP callers.
+			// Keep the resolved source address separate from the opaque request ID
+			// so audit consumers can investigate a request without parsing detail.
+			"ALTER TABLE security_audit ADD COLUMN request_id TEXT NOT NULL DEFAULT ''",
+			"CREATE INDEX IF NOT EXISTS security_audit_request_id ON security_audit(request_id,created_at)",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {

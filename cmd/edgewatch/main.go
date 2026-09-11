@@ -30,7 +30,10 @@ var version = "dev"
 // path without terminating the test binary.
 var exitProcess = os.Exit
 
-const daemonShutdownTimeout = 30 * time.Second
+// Final scan persistence is allowed up to five minutes for a large host
+// inventory. Keep the component join deadline above that bound so a graceful
+// container stop can finish the transaction before Docker sends SIGKILL.
+const daemonShutdownTimeout = 6 * time.Minute
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {

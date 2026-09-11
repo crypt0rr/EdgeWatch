@@ -87,6 +87,11 @@ the replacement is issued.
   local surface. DNS names are checked after resolution as well, so a name
   resolving to an excluded address fails the scan rather than silently
   scanning only the remaining addresses.
+- Broad scans use a bounded shutdown sequence: active scanner work receives
+  cancellation, resumable progress is checkpointed, and large host snapshots
+  get up to five minutes to persist before the daemon's six-minute graceful
+  shutdown deadline. Compose keeps a seven-minute stop grace period so Docker
+  does not kill a healthy persistence transaction prematurely.
 - `web.listen` must be a loopback address; the default is
   `127.0.0.1:8080`.
 - Forwarding headers are ignored by default. If a local reverse proxy is used,
@@ -468,7 +473,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 31), but it is forward-only: an older binary refuses a newer schema.
+version 32), but it is forward-only: an older binary refuses a newer schema.
 To roll back, stop the new service, restore the entire pre-upgrade `./data`
 directory and deployment configuration, then start the previous image. Do not
 point an older image at the upgraded database. The previous named Docker

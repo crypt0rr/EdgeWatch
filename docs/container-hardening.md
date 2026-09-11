@@ -18,6 +18,9 @@ The image and Compose deployment still apply the following controls:
 - the root filesystem is read-only and only `/tmp` is writable through a
   bounded tmpfs;
 - SQLite state is limited to the explicit `./data` bind mount;
+- Compose grants a seven-minute stop grace period so the daemon can cancel
+  scanner processes and persist large snapshots within its six-minute
+  graceful-shutdown deadline;
 - scanner executables and their argument surface are fixed by EdgeWatch, and
   the web listener remains loopback-only.
 

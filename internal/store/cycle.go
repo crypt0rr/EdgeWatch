@@ -141,7 +141,7 @@ func (s *Store) CreateScanCycle(ctx context.Context, cycle ScanCycleRecord) (Sca
 		if marshalErr != nil {
 			return ScanCycleRecord{}, marshalErr
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?)`, cycle.ID, unit.Sequence, raw, "pending", 0, []byte(`{}`), "", "", ""); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?)`, cycle.ID, unit.Sequence, raw, scanCycleUnitIdentity(unit), "pending", 0, []byte(`{}`), "", "", ""); err != nil {
 			return ScanCycleRecord{}, err
 		}
 	}
@@ -174,17 +174,11 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 		return nil
 	}
 
-	// A cycle created by an older release may have dynamic units in plan_json
-	// but no discovery markers yet. The first pass loads those identities once
-	// so recovery remains idempotent; normal incremental passes rely on the
-	// atomic checkpoint marker and never rescan prior dynamic rows.
-	existing := map[string]struct{}{}
-	existingLoaded := false
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		worked, batchErr := s.reconcileScanCycleEnrichmentBatch(ctx, cycleID, cycle.Plan, existing, &existingLoaded)
+		worked, batchErr := s.reconcileScanCycleEnrichmentBatch(ctx, cycleID, cycle.Plan)
 		if batchErr != nil {
 			return batchErr
 		}
@@ -198,7 +192,7 @@ func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string
 // transaction. The bool reports whether more checkpoint or dynamic work was
 // committed and lets the caller drain additional batches without making the
 // writer transaction itself unbounded.
-func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID string, plan scanner.WorkPlan, existing map[string]struct{}, existingLoaded *bool) (bool, error) {
+func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID string, plan scanner.WorkPlan) (bool, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -225,19 +219,6 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 		return false, tx.Commit()
 	}
 	discoveryComplete := completedDiscoveryCount == discoveryCount
-
-	var checkpointCount int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycle_discovery_checkpoints WHERE cycle_id=?`, cycleID).Scan(&checkpointCount); err != nil {
-		return false, err
-	}
-	if !*existingLoaded {
-		if checkpointCount == 0 {
-			if err := loadScanCycleUnitIdentities(ctx, tx, cycleID, existing); err != nil {
-				return false, err
-			}
-		}
-		*existingLoaded = true
-	}
 
 	type discoveryRow struct {
 		sequence int
@@ -340,6 +321,7 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 		return false, err
 	}
 	var added []scanner.WorkUnit
+	newIdentities := make(map[string]struct{})
 	factor := boolFactor(plan.Job.TCP.ServiceDetection)
 	addressBatchSize := scanner.NmapAddressBatchLimit(plan.Job.TCP.EnrichmentArgs)
 	for _, key := range groupKeys {
@@ -366,11 +348,19 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 				portChunk := group.ports[portStart:portEnd]
 				unit := scanner.WorkUnit{Sequence: nextSequence, Engine: config.EngineNmap, Phase: "enrichment", Protocol: "tcp", Family: group.family, Targets: subsetCycleTargets(plan.Targets, addresses), Addresses: addresses, Ports: formatCyclePorts(portChunk), PortCount: len(portChunk), Probes: int64(len(addresses)) * int64(len(portChunk)) * factor}
 				nextSequence++
-				if _, exists := existing[scanCycleUnitIdentity(unit)]; exists {
+				identity := scanCycleUnitIdentity(unit)
+				if _, exists := newIdentities[identity]; exists {
+					continue
+				}
+				exists, err := scanCycleUnitIdentityExists(ctx, tx, cycleID, identity)
+				if err != nil {
+					return false, err
+				}
+				if exists {
 					continue
 				}
 				added = append(added, unit)
-				existing[scanCycleUnitIdentity(unit)] = struct{}{}
+				newIdentities[identity] = struct{}{}
 			}
 		}
 	}
@@ -392,11 +382,19 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 		}
 		if udpCount == 0 {
 			for _, unit := range buildCycleUDPUnits(plan, nextSequence) {
-				if _, exists := existing[scanCycleUnitIdentity(unit)]; exists {
+				identity := scanCycleUnitIdentity(unit)
+				if _, exists := newIdentities[identity]; exists {
+					continue
+				}
+				exists, err := scanCycleUnitIdentityExists(ctx, tx, cycleID, identity)
+				if err != nil {
+					return false, err
+				}
+				if exists {
 					continue
 				}
 				added = append(added, unit)
-				existing[scanCycleUnitIdentity(unit)] = struct{}{}
+				newIdentities[identity] = struct{}{}
 			}
 		}
 	}
@@ -413,7 +411,7 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 		if err != nil {
 			return false, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?)`, cycleID, unit.Sequence, raw, "pending", 0, []byte(`{}`), "", "", ""); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?)`, cycleID, unit.Sequence, raw, scanCycleUnitIdentity(unit), "pending", 0, []byte(`{}`), "", "", ""); err != nil {
 			return false, err
 		}
 		addedProbes += unit.Probes
@@ -440,24 +438,10 @@ func scanCycleUnitIdentity(unit scanner.WorkUnit) string {
 	return unit.Engine + "\x00" + unit.Phase + "\x00" + unit.Protocol + "\x00" + fmt.Sprint(unit.Family) + "\x00" + unit.Ports + "\x00" + strings.Join(addresses, ",")
 }
 
-func loadScanCycleUnitIdentities(ctx context.Context, tx *sql.Tx, cycleID string, existing map[string]struct{}) error {
-	rows, err := tx.QueryContext(ctx, `SELECT work_unit_json FROM scan_cycle_units WHERE cycle_id=? AND json_extract(work_unit_json,'$.phase')<>'discovery'`, cycleID)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var raw []byte
-		var unit scanner.WorkUnit
-		if err := rows.Scan(&raw); err != nil {
-			return err
-		}
-		if err := json.Unmarshal(raw, &unit); err != nil {
-			return err
-		}
-		existing[scanCycleUnitIdentity(unit)] = struct{}{}
-	}
-	return rows.Err()
+func scanCycleUnitIdentityExists(ctx context.Context, tx *sql.Tx, cycleID, identity string) (bool, error) {
+	var exists int
+	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_cycle_units WHERE cycle_id=? AND identity=?)`, cycleID, identity).Scan(&exists)
+	return exists != 0, err
 }
 
 func normalizeCycleAddress(raw string) string {
@@ -611,6 +595,20 @@ func (s *Store) GetScanCycle(ctx context.Context, id string) (ScanCycleRecord, e
 	cycle.ExpiresAt, _ = time.Parse(time.RFC3339Nano, expires)
 	cycle.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)
 	return cycle, nil
+}
+
+// ScanCycleProbeTotals reports the durable execution categories for a
+// resumable cycle without decoding checkpoint payloads. Naabu discovery and
+// Nmap enrichment/UDP work use separate deployment budgets; keeping this
+// aggregate query set-based lets the application reject an expansion before
+// starting another scanner process.
+func (s *Store) ScanCycleProbeTotals(ctx context.Context, cycleID string) (discovery, nmap int64, err error) {
+	err = s.reader().QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(CASE WHEN json_extract(work_unit_json,'$.phase')='discovery' THEN CAST(json_extract(work_unit_json,'$.probes') AS INTEGER) ELSE 0 END),0),
+			COALESCE(SUM(CASE WHEN json_extract(work_unit_json,'$.phase')<>'discovery' THEN CAST(json_extract(work_unit_json,'$.probes') AS INTEGER) ELSE 0 END),0)
+		FROM scan_cycle_units WHERE cycle_id=?`, cycleID).Scan(&discovery, &nmap)
+	return discovery, nmap, err
 }
 
 func (s *Store) GetActiveScanCycle(ctx context.Context, jobID string) (ScanCycleRecord, error) {
@@ -980,10 +978,10 @@ func (s *Store) SplitScanCycleUnit(ctx context.Context, cycleID string, sequence
 	if err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=?,status='pending',last_error=? WHERE cycle_id=? AND sequence=?`, firstRaw, trimCycleError(lastError), cycleID, sequence); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=?,identity=?,status='pending',last_error=? WHERE cycle_id=? AND sequence=?`, firstRaw, scanCycleUnitIdentity(first), trimCycleError(lastError), cycleID, sequence); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?)`, cycleID, next, secondRaw, "pending", 0, []byte(`{}`), "", "", ""); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?)`, cycleID, next, secondRaw, scanCycleUnitIdentity(second), "pending", 0, []byte(`{}`), "", "", ""); err != nil {
 		return err
 	}
 	probeDelta := first.Probes + second.Probes - original.Probes

@@ -23,7 +23,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 	// needs to checkpoint its result and cycle state. SQLite's busy timeout
 	// bounds each operation, while the caller's daemon context remains free to
 	// stop future work.
-	stateCtx := context.Background()
+	stateCtx := context.WithoutCancel(ctx)
 	// Capture the active cycle before expiry housekeeping. If this trigger is
 	// the first one to notice an expired resume window, retain that fact as a
 	// terminal failed scan so the operator receives the promised failure
@@ -169,6 +169,14 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		scan.Error = err.Error()
 		return true, model.Snapshot{}, err
 	}
+	if budgetErr := a.CheckScanCycleProbeBudget(stateCtx, cycle, job); budgetErr != nil {
+		scan.Status = "failed"
+		scan.Error = budgetErr.Error()
+		if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, budgetErr.Error()); stallErr == nil {
+			setScanCycleMetadata(scan, stalled)
+		}
+		return true, model.Snapshot{}, budgetErr
+	}
 
 	cycle, err = a.Store.StartScanCycleAttempt(stateCtx, cycle.ID)
 	if err != nil {
@@ -272,6 +280,14 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 				scan.Status = "failed"
 				scan.Error = err.Error()
 				return true, model.Snapshot{}, err
+			}
+			if budgetErr := a.CheckScanCycleProbeBudget(stateCtx, cycle, job); budgetErr != nil {
+				scan.Status = "failed"
+				scan.Error = budgetErr.Error()
+				if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, budgetErr.Error()); stallErr == nil {
+					setScanCycleMetadata(scan, stalled)
+				}
+				return true, model.Snapshot{}, budgetErr
 			}
 			setScanCycleMetadata(scan, cycle)
 			setActiveCycle(run, cycle, "checkpointed", claimed.Sequence)
@@ -479,14 +495,28 @@ func setActiveCycle(run *activeRun, cycle store.ScanCycleRecord, phase string, u
 	run.scan.CycleID = cycle.ID
 	run.scan.CycleAttempt = cycle.AttemptCount
 	run.scan.CycleStatus = cycle.Status
-	run.scan.CycleCompletedProbes = cycle.CompletedProbes
-	run.scan.CycleTotalProbes = cycle.TotalProbes
-	run.scan.CycleCompletedUnits = cycle.CompletedUnits
-	run.scan.CycleTotalUnits = cycle.TotalUnits
+	if cycle.CompletedProbes > run.scan.CycleCompletedProbes {
+		run.scan.CycleCompletedProbes = cycle.CompletedProbes
+	}
+	if cycle.TotalProbes > run.scan.CycleTotalProbes {
+		run.scan.CycleTotalProbes = cycle.TotalProbes
+	}
+	if cycle.CompletedUnits > run.scan.CycleCompletedUnits {
+		run.scan.CycleCompletedUnits = cycle.CompletedUnits
+	}
+	if cycle.TotalUnits > run.scan.CycleTotalUnits {
+		run.scan.CycleTotalUnits = cycle.TotalUnits
+	}
 	run.scan.CycleNoProgressAttempts = cycle.NoProgressAttempts
-	run.scan.CompletedProbes = cycle.CompletedProbes
-	run.scan.TotalProbes = cycle.TotalProbes
-	run.scan.ProgressPercent = progressPercent(scanner.Progress{CompletedProbes: cycle.CompletedProbes, TotalProbes: cycle.TotalProbes})
+	if cycle.CompletedProbes > run.scan.CompletedProbes {
+		run.scan.CompletedProbes = cycle.CompletedProbes
+	}
+	if cycle.TotalProbes > run.scan.TotalProbes {
+		run.scan.TotalProbes = cycle.TotalProbes
+	}
+	if percent := progressPercent(scanner.Progress{CompletedProbes: run.scan.CompletedProbes, TotalProbes: run.scan.TotalProbes}); percent > run.scan.ProgressPercent {
+		run.scan.ProgressPercent = percent
+	}
 	if phase != "" {
 		run.scan.Phase = phase
 	}
@@ -504,13 +534,31 @@ func setActiveCycleProgress(run *activeRun, cycle store.ScanCycleRecord, progres
 	run.scan.CycleID = cycle.ID
 	run.scan.CycleAttempt = cycle.AttemptCount
 	run.scan.CycleStatus = "running"
-	run.scan.CycleCompletedProbes = cycle.CompletedProbes + progress.CompletedProbes
-	run.scan.CycleTotalProbes = cycle.TotalProbes
-	run.scan.CycleCompletedUnits = cycle.CompletedUnits
-	run.scan.CycleTotalUnits = cycle.TotalUnits
+	cycleCompletedProbes := cycle.CompletedProbes + progress.CompletedProbes
+	if cycleCompletedProbes < run.scan.CycleCompletedProbes {
+		cycleCompletedProbes = run.scan.CycleCompletedProbes
+	}
+	cycleTotalProbes := cycle.TotalProbes
+	if cycleTotalProbes < run.scan.CycleTotalProbes {
+		cycleTotalProbes = run.scan.CycleTotalProbes
+	}
+	cycleCompletedUnits := cycle.CompletedUnits
+	if cycleCompletedUnits < run.scan.CycleCompletedUnits {
+		cycleCompletedUnits = run.scan.CycleCompletedUnits
+	}
+	cycleTotalUnits := cycle.TotalUnits
+	if cycleTotalUnits < run.scan.CycleTotalUnits {
+		cycleTotalUnits = run.scan.CycleTotalUnits
+	}
+	run.scan.CycleCompletedProbes = cycleCompletedProbes
+	run.scan.CycleTotalProbes = cycleTotalProbes
+	run.scan.CycleCompletedUnits = cycleCompletedUnits
+	run.scan.CycleTotalUnits = cycleTotalUnits
 	run.scan.CurrentUnitPorts = unit.Ports
 	run.scan.CurrentUnitAddresses = len(unit.Addresses)
 	run.scan.CompletedProbes = run.scan.CycleCompletedProbes
-	run.scan.TotalProbes = cycle.TotalProbes
-	run.scan.ProgressPercent = progressPercent(scanner.Progress{CompletedProbes: run.scan.CompletedProbes, TotalProbes: cycle.TotalProbes})
+	run.scan.TotalProbes = run.scan.CycleTotalProbes
+	if percent := progressPercent(scanner.Progress{CompletedProbes: run.scan.CompletedProbes, TotalProbes: run.scan.TotalProbes}); percent > run.scan.ProgressPercent {
+		run.scan.ProgressPercent = percent
+	}
 }

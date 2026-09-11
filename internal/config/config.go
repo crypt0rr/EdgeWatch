@@ -146,6 +146,11 @@ func (s *Scheduler) UnmarshalYAML(node *yaml.Node) error {
 		return err
 	}
 	for index := 0; index+1 < len(node.Content); index += 2 {
+		// YAML decodes an explicit null into the zero value. Treat null exactly
+		// like omission for omission-defaulted scheduler limits.
+		if node.Content[index+1].Tag == "!!null" {
+			continue
+		}
 		switch node.Content[index].Value {
 		case "max_concurrent_scans":
 			value.maxConcurrentSet = true
@@ -265,6 +270,13 @@ func (o *NaabuOptions) UnmarshalYAML(node *yaml.Node) error {
 		return err
 	}
 	for index := 0; index+1 < len(node.Content); index += 2 {
+		// YAML decodes an explicit null into the zero value. Treat null exactly
+		// like omission for omission-defaulted Naabu options; otherwise a
+		// configuration such as `rate: null` would mark the field as present and
+		// suppress the safe runtime default.
+		if node.Content[index+1].Tag == "!!null" {
+			continue
+		}
 		switch node.Content[index].Value {
 		case "rate":
 			value.RateSet = true
@@ -300,13 +312,17 @@ func (o *NaabuOptions) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &fields); err != nil {
 		return err
 	}
-	value.RetriesSet = fields["retries"] != nil
-	value.RateSet = fields["rate"] != nil
-	value.WorkersSet = fields["workers"] != nil
-	value.TimeoutMSSet = fields["timeout_ms"] != nil
-	value.WarmUpSecondsSet = fields["warm_up_seconds"] != nil
-	value.VerifySet = fields["verify"] != nil
-	value.AddressBatchSizeSet = fields["address_batch_size"] != nil
+	isPresent := func(name string) bool {
+		raw, ok := fields[name]
+		return ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null"))
+	}
+	value.RetriesSet = isPresent("retries")
+	value.RateSet = isPresent("rate")
+	value.WorkersSet = isPresent("workers")
+	value.TimeoutMSSet = isPresent("timeout_ms")
+	value.WarmUpSecondsSet = isPresent("warm_up_seconds")
+	value.VerifySet = isPresent("verify")
+	value.AddressBatchSizeSet = isPresent("address_batch_size")
 	*o = NaabuOptions(value)
 	return nil
 }
@@ -971,11 +987,18 @@ const (
 // the estimate is deterministic and useful in the editor without performing
 // network I/O. Service detection uses a two-probe multiplier.
 type WorkEstimate struct {
-	Hosts            int64 `json:"hosts"`
-	TCPPorts         int   `json:"tcp_ports"`
-	UDPPorts         int   `json:"udp_ports"`
-	Probes           int64 `json:"probes"`
+	Hosts    int64 `json:"hosts"`
+	TCPPorts int   `json:"tcp_ports"`
+	UDPPorts int   `json:"udp_ports"`
+	Probes   int64 `json:"probes"`
+	// NaabuProbes is the known full-range TCP discovery work. NmapProbes is
+	// the configured Nmap work (including UDP); Naabu TCP enrichment is
+	// data-dependent and therefore intentionally not included until discovery
+	// produces a concrete port set.
+	NaabuProbes      int64 `json:"naabu_probes"`
+	NmapProbes       int64 `json:"nmap_probes"`
 	NmapInvocations  int64 `json:"nmap_invocations"`
+	NaabuInvocations int64 `json:"naabu_invocations"`
 	EstimatedSeconds int64 `json:"estimated_seconds"`
 	UnknownDNS       int   `json:"unknown_dns"`
 }
@@ -1014,18 +1037,20 @@ func EstimateJobWork(j Job) (WorkEstimate, error) {
 	}
 	estimate.UnknownDNS = int(minInt64(unknown, int64(^uint(0)>>1)))
 	if j.TCP != nil {
-		ports, err := ParsePorts(j.TCP.Ports)
-		if err != nil {
-			return estimate, fmt.Errorf("tcp: %w", err)
-		}
 		if j.TCP.Engine == EngineNaabuNmap {
 			// Naabu owns a fixed full-range discovery pass regardless of the
 			// configured Nmap enrichment expression. Keep the estimate honest so
-			// operators see the cost before a lease is acquired.
+			// operators see the known discovery cost before a lease is acquired.
+			// Nmap confirmation is data-dependent (it only runs for discovered
+			// ports), so it is reported separately as an unknown/zero preflight
+			// cost rather than pretending every 65,535 ports receives service
+			// detection.
 			estimate.TCPPorts = 65535
-			_ = ports
-		}
-		if j.TCP.Engine != EngineNaabuNmap {
+		} else {
+			ports, err := ParsePorts(j.TCP.Ports)
+			if err != nil {
+				return estimate, fmt.Errorf("tcp: %w", err)
+			}
 			estimate.TCPPorts = len(ports)
 		}
 	}
@@ -1037,31 +1062,63 @@ func EstimateJobWork(j Job) (WorkEstimate, error) {
 		estimate.UDPPorts = len(ports)
 	}
 	var probes int64
-	if j.TCP != nil {
+	if j.TCP != nil && j.TCP.Engine == EngineNaabuNmap {
+		// Naabu probes the complete range once. Service detection belongs to
+		// the later Nmap enrichment phase and cannot be known before discovery.
+		estimate.NaabuProbes = saturatingMul(estimate.Hosts, int64(estimate.TCPPorts))
+		probes = saturatingAdd(probes, estimate.NaabuProbes)
+	} else if j.TCP != nil {
 		factor := int64(1)
 		if j.TCP.ServiceDetection {
 			factor = 2
 		}
-		probes = saturatingAdd(probes, saturatingMul(saturatingMul(estimate.Hosts, int64(estimate.TCPPorts)), factor))
+		estimate.NmapProbes = saturatingAdd(estimate.NmapProbes, saturatingMul(saturatingMul(estimate.Hosts, int64(estimate.TCPPorts)), factor))
+		probes = saturatingAdd(probes, estimate.NmapProbes)
 	}
 	if j.UDP != nil {
 		factor := int64(1)
 		if j.UDP.ServiceDetection {
 			factor = 2
 		}
+		estimate.NmapProbes = saturatingAdd(estimate.NmapProbes, saturatingMul(saturatingMul(estimate.Hosts, int64(estimate.UDPPorts)), factor))
 		probes = saturatingAdd(probes, saturatingMul(saturatingMul(estimate.Hosts, int64(estimate.UDPPorts)), factor))
 	}
 	estimate.Probes = probes
-	for _, addresses := range []int64{ipv4, ipv6} {
-		estimate.NmapInvocations = saturatingAdd(estimate.NmapInvocations, ceilDiv(addresses, workBatchSize))
+	if j.TCP != nil && j.TCP.Engine == EngineNaabuNmap {
+		batchSize := int64(16)
+		if j.TCP.Naabu != nil && j.TCP.Naabu.AddressBatchSize > 0 {
+			batchSize = int64(j.TCP.Naabu.AddressBatchSize)
+		}
+		estimate.NaabuInvocations = saturatingAdd(estimate.NaabuInvocations, ceilDiv(ipv4, batchSize))
+		estimate.NaabuInvocations = saturatingAdd(estimate.NaabuInvocations, ceilDiv(ipv6, batchSize))
+		if unknown > 0 {
+			estimate.NaabuInvocations = saturatingAdd(estimate.NaabuInvocations, ceilDiv(unknown, batchSize))
+		}
+	}
+	if j.TCP == nil || j.TCP.Engine != EngineNaabuNmap || j.UDP != nil {
+		for _, addresses := range []int64{ipv4, ipv6} {
+			estimate.NmapInvocations = saturatingAdd(estimate.NmapInvocations, ceilDiv(addresses, workBatchSize))
+		}
 	}
 	if unknown > 0 {
-		estimate.NmapInvocations = saturatingAdd(estimate.NmapInvocations, saturatingMul(ceilDiv(unknown, workBatchSize), 2))
+		factor := int64(2)
+		if j.TCP != nil && j.TCP.Engine == EngineNaabuNmap {
+			// A Naabu-only DNS job has no Nmap process. With UDP enabled the
+			// unknown address still contributes one Nmap invocation; the Naabu
+			// discovery invocation is accounted for separately above.
+			if j.UDP == nil {
+				factor = 0
+			} else {
+				factor = 1
+			}
+		}
+		estimate.NmapInvocations = saturatingAdd(estimate.NmapInvocations, saturatingMul(ceilDiv(unknown, workBatchSize), factor))
 	}
 	// This is intentionally a rough operator-facing estimate, not an SLA. It
 	// scales with probes and process launches while remaining stable across
 	// machines and provider timing.
-	estimate.EstimatedSeconds = maxInt64(1, saturatingAdd(ceilDiv(probes, 20_000), estimate.NmapInvocations))
+	totalInvocations := saturatingAdd(estimate.NmapInvocations, estimate.NaabuInvocations)
+	estimate.EstimatedSeconds = maxInt64(1, saturatingAdd(ceilDiv(probes, 20_000), totalInvocations))
 	return estimate, nil
 }
 
@@ -1131,10 +1188,19 @@ func validateWebListen(listen string) error {
 }
 
 func validateTarget(target string) error {
-	if net.ParseIP(target) != nil {
+	if ip := net.ParseIP(target); ip != nil {
+		if ip.IsUnspecified() {
+			return fmt.Errorf("unspecified target %q is not allowed", target)
+		}
 		return nil
 	}
-	if _, _, err := net.ParseCIDR(target); err == nil {
+	if _, network, err := net.ParseCIDR(target); err == nil {
+		// A wildcard or unspecified network can expand to the entire address
+		// space (or an otherwise unsafe range) before the scanner has a chance
+		// to enforce its host limit. Reject it at the configuration boundary.
+		if network.IP.IsUnspecified() {
+			return fmt.Errorf("unspecified target %q is not allowed", target)
+		}
 		return nil
 	}
 	if len(target) > 253 || strings.ContainsAny(target, " /\\\t\n\r") {

@@ -302,3 +302,42 @@ func TestNaabuDiscoveryWorkUnitDoesNotRunNmap(t *testing.T) {
 		t.Fatalf("discovery checkpoint affected authoritative units: %#v", snapshot.Units)
 	}
 }
+
+func TestNaabuPipelineWithUDPReportsCumulativeProgress(t *testing.T) {
+	dir := t.TempDir()
+	naabuPath := filepath.Join(dir, "naabu")
+	if err := os.WriteFile(naabuPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nmapPath := filepath.Join(dir, "nmap")
+	// The same valid XML is sufficient for both phases; the UDP parser simply
+	// ignores the TCP port while still recording a successful host response.
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+sampleXML+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := NewWithNaabu(nmapPath, naabuPath)
+	job := config.NormalizeJob(config.Job{
+		Name: "pipeline-udp", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Mode: "connect", Naabu: &config.NaabuOptions{ScanType: "connect"}},
+		UDP: &config.Protocol{Ports: "53"},
+	})
+	var updates []Progress
+	if _, err := n.ScanWithProgress(context.Background(), job, func(progress Progress) { updates = append(updates, progress) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(updates) == 0 {
+		t.Fatal("pipeline emitted no progress")
+	}
+	last := updates[len(updates)-1]
+	if last.TotalProbes != 65536 || last.CompletedProbes != 65536 || last.TotalInvocations != 2 || last.CompletedInvocations != 2 || last.Phase != "complete" {
+		t.Fatalf("cumulative Naabu/UDP progress = %#v", last)
+	}
+	previousCompleted, previousTotal := int64(0), int64(0)
+	for _, update := range updates {
+		if update.CompletedProbes < previousCompleted || update.TotalProbes < previousTotal {
+			t.Fatalf("progress regressed across phases: previous probes=%d/%d update=%#v", previousCompleted, previousTotal, update)
+		}
+		previousCompleted = update.CompletedProbes
+		previousTotal = update.TotalProbes
+	}
+}

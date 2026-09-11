@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -409,5 +410,23 @@ func TestNmapXMLProgressParserHandlesSplitRecords(t *testing.T) {
 	parser.feed([]byte(` Scan" percent="125.0"/></nmaprun>`), emit)
 	if len(got) != 1 || got[0].fraction != 1 || !strings.Contains(got[0].line, "100.00%") {
 		t.Fatalf("split XML progress = %#v", got)
+	}
+}
+
+func TestPollNmapXMLProgressHonorsOutputLimit(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "progress.xml")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(int64(maxNmapOutput) + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := pollNmapXMLProgress(path, &nmapXMLProgressParser{}, nil); !errors.Is(err, errNmapProgressOutputExceeded) {
+		t.Fatalf("oversized progress file error = %v", err)
 	}
 }

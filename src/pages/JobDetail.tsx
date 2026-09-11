@@ -30,6 +30,7 @@ import {
 import { Pagination } from '../components/Pagination'
 import { ActionDialog } from '../components/ActionDialog'
 import { PortScopeDetails } from '../components/PortScopeDetails'
+import type { WorkEstimate } from '../types'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 
@@ -252,7 +253,7 @@ export function JobDetail() {
           ].filter((item): item is { protocol: string; ports: string } => Boolean(item))} />
         </div>
       </div>
-      {value.scan_estimate && <div className="notice" role="status">Estimated per run: {value.scan_estimate.probes.toLocaleString()} probes across {value.scan_estimate.hosts.toLocaleString()} hosts ({value.scan_estimate.nmap_invocations.toLocaleString()} Nmap process{value.scan_estimate.nmap_invocations === 1 ? '' : 'es'}, roughly {formatEstimateDuration(value.scan_estimate.estimated_seconds)}).{value.scan_estimate.unknown_dns ? ` DNS expansion may increase this estimate for ${value.scan_estimate.unknown_dns} name${value.scan_estimate.unknown_dns === 1 ? '' : 's'}.` : ''}</div>}
+      {value.scan_estimate && <div className="notice" role="status">Estimated per run: {value.scan_estimate.probes.toLocaleString()} probes across {value.scan_estimate.hosts.toLocaleString()} hosts ({formatEstimateProcesses(value.scan_estimate)}, roughly {formatEstimateDuration(value.scan_estimate.estimated_seconds)}).{value.scan_estimate.unknown_dns ? ` DNS expansion may increase this estimate for ${value.scan_estimate.unknown_dns} name${value.scan_estimate.unknown_dns === 1 ? '' : 's'}.` : ''}</div>}
       {activeCycle && <div className={activeCycle.status === 'stalled' ? 'form-error banner' : 'notice'} role="status"><strong>{activeCycle.status === 'paused' ? 'Broad scan paused safely.' : activeCycle.status === 'stalled' ? 'Broad scan stalled.' : 'Broad scan cycle active.'}</strong> {activeCycle.completed_units} of {activeCycle.total_units} work units and {activeCycle.completed_probes.toLocaleString()} of {activeCycle.total_probes.toLocaleString()} probes complete. {activeCycle.last_error && <span>{activeCycle.last_error}</span>} {canOperate && (activeCycle.status === 'paused' || activeCycle.status === 'stalled') && <button className="button ghost" onClick={() => { setActionError(''); setDialog('discard-cycle') }} disabled={!!actionBusy}>Discard saved progress</button>}</div>}
 
       <div className="detail-columns">
@@ -387,6 +388,18 @@ function formatEstimateDuration(seconds: number) {
   const minutes = Math.ceil(seconds / 60)
   if (minutes < 60) return `${minutes}m`
   return `${Math.ceil(minutes / 60)}h`
+}
+
+function formatEstimateProcesses(estimate: WorkEstimate) {
+  const naabu = estimate.naabu_invocations ?? 0
+  const nmap = estimate.nmap_invocations ?? 0
+  if (naabu > 0 && nmap > 0) {
+    return `${naabu.toLocaleString()} Naabu + ${nmap.toLocaleString()} Nmap processes`
+  }
+  if (naabu > 0) {
+    return `${naabu.toLocaleString()} Naabu process${naabu === 1 ? '' : 'es'}`
+  }
+  return `${nmap.toLocaleString()} Nmap process${nmap === 1 ? '' : 'es'}`
 }
 
 function formatRunDuration(ms?: number) {

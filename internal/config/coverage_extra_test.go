@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -275,6 +276,37 @@ func TestTargetExclusionParsingAndCIDROverlap(t *testing.T) {
 	job.Targets = []string{"safe.example"}
 	if err := ValidateJobWithTargetExclusions(job, []string{"127.0.0.0/8"}); err != nil {
 		t.Fatalf("DNS target was rejected before runtime resolution: %v", err)
+	}
+}
+
+func TestNaabuNullOptionsUseSafeDefaults(t *testing.T) {
+	var yamlOptions NaabuOptions
+	node := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		{Kind: yaml.ScalarNode, Value: "rate"}, {Kind: yaml.ScalarNode, Tag: "!!null", Value: "null"},
+		{Kind: yaml.ScalarNode, Value: "verify"}, {Kind: yaml.ScalarNode, Tag: "!!null", Value: "null"},
+	}}
+	if err := yamlOptions.UnmarshalYAML(node); err != nil {
+		t.Fatal(err)
+	}
+	ApplyNaabuDefaultsForScanner(&yamlOptions)
+	if yamlOptions.Rate != 1000 || !yamlOptions.Verify || yamlOptions.RateSet || yamlOptions.VerifySet {
+		t.Fatalf("YAML null options = %#v", yamlOptions)
+	}
+	var jsonOptions NaabuOptions
+	if err := json.Unmarshal([]byte(`{"rate":null,"verify":null}`), &jsonOptions); err != nil {
+		t.Fatal(err)
+	}
+	ApplyNaabuDefaultsForScanner(&jsonOptions)
+	if jsonOptions.Rate != 1000 || !jsonOptions.Verify || jsonOptions.RateSet || jsonOptions.VerifySet {
+		t.Fatalf("JSON null options = %#v", jsonOptions)
+	}
+}
+
+func TestUnspecifiedTargetsAreRejected(t *testing.T) {
+	for _, target := range []string{"0.0.0.0", "::", "0.0.0.0/0", "::/0"} {
+		if err := validateTarget(target); err == nil {
+			t.Fatalf("unspecified target %q was accepted", target)
+		}
 	}
 }
 

@@ -26,22 +26,105 @@ func (s *Store) AcceptIncidentWithAudit(ctx context.Context, jobID, jobName, key
 		if change.Key == "" {
 			change.Key = key
 		}
-		if err := applyAcceptedChange(state.Baseline, change); err != nil {
-			return nil, err
+
+		// A single scan can remove both a positive port and its service
+		// fingerprint. Treat the pair as one operator decision so accepting the
+		// first row cannot leave the other row (or the old positive port) behind.
+		// Keep service-only changes independent: a port that is still open may
+		// legitimately lose only its fingerprint.
+		accepted := []model.Change{change}
+		acceptedKeys := []string{key}
+		relatedKey, related, hasRelated := relatedIncident(state, key, change)
+		if hasRelated {
+			// Apply the port first so a paired service removal cannot leave a
+			// positive port behind. The order is deterministic regardless of
+			// which incident row the administrator selected.
+			if change.Kind == "port" {
+				accepted = []model.Change{change, related.Change}
+				acceptedKeys = []string{key, relatedKey}
+			} else {
+				accepted = []model.Change{related.Change, change}
+				acceptedKeys = []string{relatedKey, key}
+			}
+		}
+		for index := range accepted {
+			if accepted[index].Key == "" {
+				accepted[index].Key = acceptedKeys[index]
+			}
+		}
+		for _, acceptedChange := range accepted {
+			if err := applyAcceptedChange(state.Baseline, acceptedChange); err != nil {
+				return nil, err
+			}
 		}
 		// The accepted comparison state is now a deliberate runtime overlay on
 		// the immutable source scan. Host explorer endpoints use this marker to
 		// avoid serving the source scan's stale expected ports or services.
 		state.BaselineModified = true
-		delete(state.Incidents, key)
-		delete(state.Pending, key)
-		delete(state.Suppressed, key)
-		delete(state.SuppressedChanges, key)
-		if change.Kind == "service" || change.Kind == "port" {
-			delete(state.FingerprintCandidates, fingerprintCandidateKey(change))
+		for index, acceptedChange := range accepted {
+			acceptedKey := acceptedChange.Key
+			if acceptedKey == "" {
+				acceptedKey = acceptedKeys[index]
+			}
+			delete(state.Incidents, acceptedKey)
+			delete(state.Pending, acceptedKey)
+			delete(state.Suppressed, acceptedKey)
+			delete(state.SuppressedChanges, acceptedKey)
+			if acceptedChange.Kind == "service" || acceptedChange.Kind == "port" {
+				delete(state.FingerprintCandidates, fingerprintCandidateKey(acceptedChange))
+			}
 		}
-		return []model.Event{{Type: "incident-accepted", Job: jobName, ScanID: incident.ScanID, Message: "Incident accepted into baseline", Changes: []model.Change{change}, CreatedAt: time.Now().UTC()}}, nil
+		return []model.Event{{Type: "incident-accepted", Job: jobName, ScanID: incident.ScanID, Message: acceptedIncidentMessage(len(accepted)), Changes: accepted, CreatedAt: time.Now().UTC()}}, nil
 	})
+}
+
+// relatedIncident finds the sibling port/service change for the same scan and
+// effective logical target. An empty scan ID is retained for legacy runtime
+// state, but non-empty IDs must match so unrelated incidents are never folded
+// into one administrator decision.
+func relatedIncident(state *model.JobState, key string, change model.Change) (string, model.Incident, bool) {
+	if change.Kind != "port" && change.Kind != "service" {
+		return "", model.Incident{}, false
+	}
+	primary := state.Incidents[key]
+	primaryScanID := strings.TrimSpace(primary.ScanID)
+	for candidateKey, candidate := range state.Incidents {
+		if candidateKey == key {
+			continue
+		}
+		if change.Kind == candidate.Change.Kind || (candidate.Change.Kind != "port" && candidate.Change.Kind != "service") {
+			continue
+		}
+		if strings.TrimSpace(candidate.Change.Target) != strings.TrimSpace(change.Target) ||
+			!strings.EqualFold(strings.TrimSpace(candidate.Change.Protocol), strings.TrimSpace(change.Protocol)) ||
+			candidate.Change.Port != change.Port {
+			continue
+		}
+		// Pair only the disappearance of a port and its fingerprint. A newly
+		// opened port can legitimately have a separate service change, and an
+		// administrator accepting the port alone must not silently approve that
+		// fingerprint too.
+		if change.New != "not-open" || candidate.Change.New != "not-open" {
+			continue
+		}
+		candidateScanID := strings.TrimSpace(candidate.ScanID)
+		if primaryScanID != "" || candidateScanID != "" {
+			// Incident scan identity prevents two observations of the same
+			// target/port from being folded together when one is stale.
+			if primaryScanID == "" || candidateScanID == "" || primaryScanID != candidateScanID {
+				continue
+			}
+		}
+		return candidateKey, candidate, true
+	}
+	return "", model.Incident{}, false
+}
+
+func acceptedIncidentMessage(count int) string {
+	if count > 1 {
+		return fmt.Sprintf("%d related incidents accepted into baseline", count)
+	}
+	return "Incident accepted into baseline"
 }
 
 // SuppressIncidentWithAudit hides an active incident for exactly one future

@@ -213,7 +213,7 @@ jobs:
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.version=${{ github.ref_name }}
       - name: Build and push image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         id: push
@@ -302,7 +302,7 @@ jobs:
           grep -q 'linux/amd64' image-manifest.txt
           grep -q 'linux/arm64' image-manifest.txt
           test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')" = "$GITHUB_SHA"
-          test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "${GITHUB_REF_NAME#v}"
+          test "$(docker image inspect "$image" --format '{{index .Config.Labels "org.opencontainers.image.version"}}')" = "$GITHUB_REF_NAME"
       - name: Verify container runtime capability matrix
         run: ./scripts/verify-container-runtime.sh "$IMAGE"
       - name: Verify binary version and configuration

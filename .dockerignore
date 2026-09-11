@@ -2,7 +2,7 @@
 .github
 /dist
 data
-edgewatch
+/edgewatch
 config.yaml
 notification-urls.txt
 *.key

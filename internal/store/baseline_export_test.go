@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -48,19 +49,36 @@ func TestExportBaselinesRoundTripsManagedAndLegacyEntries(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_states(job,state_json,updated_at) VALUES(?,?,?)`, "legacy-export", legacyState, now.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
+	legacyCollision, err := json.Marshal(model.JobState{Baseline: &legacySnapshot, BaselineScanID: "legacy-collision-source", BaselineConfigHash: "legacy-collision-hash"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_states(job,state_json,updated_at) VALUES(?,?,?)`, job.Name, legacyCollision, now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
 
 	export, err := s.ExportBaselines(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if export.FormatVersion != BaselineExportVersion || len(export.Jobs) != 2 {
+	if export.FormatVersion != BaselineExportVersion || len(export.Jobs) != 3 {
 		t.Fatalf("export metadata = %#v", export)
 	}
-	if export.Jobs[0].Name != "legacy-export" || !export.Jobs[0].Legacy || export.Jobs[1].Name != "managed-export" || export.Jobs[1].Legacy {
-		t.Fatalf("export ordering/identity = %#v", export.Jobs)
+	var managedEntry, legacyEntry *BaselineExportEntry
+	for i := range export.Jobs {
+		entry := &export.Jobs[i]
+		if entry.Name == job.Name && entry.Legacy {
+			legacyEntry = entry
+		}
+		if entry.Name == job.Name && !entry.Legacy {
+			managedEntry = entry
+		}
 	}
-	if export.Jobs[1].Baseline == nil || len(export.Jobs[1].Baseline.Units) != 1 || export.Jobs[1].SourceScan == nil || export.Jobs[1].SourceScan.ID != scan.ID {
-		t.Fatalf("managed baseline export = %#v", export.Jobs[1])
+	if managedEntry == nil || legacyEntry == nil || legacyEntry.ShadowedByJobID != record.ID {
+		t.Fatalf("export collision identity = %#v", export.Jobs)
+	}
+	if managedEntry.Baseline == nil || len(managedEntry.Baseline.Units) != 1 || managedEntry.SourceScan == nil || managedEntry.SourceScan.ID != scan.ID {
+		t.Fatalf("managed baseline export = %#v", managedEntry)
 	}
 	encoded, err := json.Marshal(export)
 	if err != nil {
@@ -70,8 +88,32 @@ func TestExportBaselinesRoundTripsManagedAndLegacyEntries(t *testing.T) {
 	if err := json.Unmarshal(encoded, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded.Jobs) != len(export.Jobs) || decoded.Jobs[1].Baseline.Units[0].Ports[0].Port != 443 {
+	var decodedManaged, decodedLegacy *BaselineExportEntry
+	for i := range decoded.Jobs {
+		entry := &decoded.Jobs[i]
+		if entry.Name == job.Name && entry.Legacy {
+			decodedLegacy = entry
+		}
+		if entry.Name == job.Name && !entry.Legacy {
+			decodedManaged = entry
+		}
+	}
+	if len(decoded.Jobs) != len(export.Jobs) || decodedManaged == nil || decodedLegacy == nil || decodedManaged.Baseline == nil || len(decodedManaged.Baseline.Units) != 1 || decodedManaged.Baseline.Units[0].Ports[0].Port != 443 || decodedLegacy.ShadowedByJobID != record.ID {
 		t.Fatalf("round-trip export = %#v", decoded)
+	}
+	if bytes.Contains(encoded, []byte(`"exported_at"`)) || !bytes.Contains(encoded, []byte(`"shadowed_by_job_id":"`+record.ID+`"`)) {
+		t.Fatalf("canonical export metadata = %s", encoded)
+	}
+	second, err := s.ExportBaselines(ctx, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondEncoded, err := json.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(encoded, secondEncoded) {
+		t.Fatalf("equivalent exports differ:\n%s\n%s", encoded, secondEncoded)
 	}
 
 	one, err := s.ExportBaselines(ctx, record.ID)

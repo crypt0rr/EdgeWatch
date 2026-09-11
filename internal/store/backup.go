@@ -5,10 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // DatabaseVerification is the bounded result of the SQLite consistency checks
@@ -165,32 +163,6 @@ func (s *Store) Backup(ctx context.Context, output string) (string, error) {
 	if current != "" && (path == current || strings.HasPrefix(path, current+"-")) {
 		return "", errors.New("backup output must be different from the SQLite database and its sidecars")
 	}
-	parent := filepath.Dir(path)
-	info, err := os.Stat(parent)
-	if err != nil {
-		return "", fmt.Errorf("backup output directory: %w", err)
-	}
-	if !info.IsDir() {
-		return "", errors.New("backup output parent is not a directory")
-	}
-	if existing, err := os.Lstat(path); err == nil {
-		if existing.Mode()&os.ModeSymlink != 0 {
-			return "", errors.New("backup output must not be a symbolic link")
-		}
-		return "", errors.New("backup output already exists")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-
-	tempDir, err := os.MkdirTemp(parent, ".edgewatch-backup-")
-	if err != nil {
-		return "", err
-	}
-	defer os.RemoveAll(tempDir)
-	if err := os.Chmod(tempDir, 0o700); err != nil {
-		return "", err
-	}
-	tempPath := filepath.Join(tempDir, "edgewatch.db")
 	// VACUUM INTO obtains a consistent snapshot, but it still holds a read
 	// transaction for the duration of the copy. Run it through an independent
 	// connection for on-disk stores so the daemon's writer pool remains
@@ -206,63 +178,12 @@ func (s *Store) Backup(ctx context.Context, output string) (string, error) {
 		backupSource = sourceStore
 		defer sourceStore.Close()
 	}
-	if _, err := backupSource.DB.ExecContext(ctx, `VACUUM INTO ?`, tempPath); err != nil {
-		return "", fmt.Errorf("create SQLite backup: %w", err)
-	}
-	if err := enforcePrivateSQLiteArtifacts(tempPath); err != nil {
-		return "", err
-	}
-	file, err := os.OpenFile(tempPath, os.O_RDWR, 0o600)
-	if err != nil {
-		return "", err
-	}
-	syncErr := file.Sync()
-	closeErr := file.Close()
-	if syncErr != nil {
-		return "", syncErr
-	}
-	if closeErr != nil {
-		return "", closeErr
-	}
-	// Recheck immediately before the atomic rename. This still refuses a
-	// concurrent destination creation rather than replacing an operator file.
-	if _, err := os.Lstat(path); err == nil {
-		return "", errors.New("backup output was created concurrently")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", err
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		return "", err
-	}
-	if err := enforcePrivateSQLiteArtifacts(path); err != nil {
-		return "", err
-	}
-	if err := syncDirectory(parent); err != nil {
-		return "", fmt.Errorf("sync backup directory: %w", err)
-	}
-	return path, nil
-}
-
-// syncDirectory makes an atomic rename durable. Without syncing the parent,
-// a host crash after Rename can leave the directory entry missing even though
-// the backup file itself was fully fsynced.
-func syncDirectory(path string) error {
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	err = dir.Sync()
-	closeErr := dir.Close()
-	if err != nil {
-		return err
-	}
-	return closeErr
-}
-
-// BackupInfo is useful to callers that want a concise audit/CLI response
-// without opening and decoding the backup contents.
-type BackupInfo struct {
-	Path      string    `json:"path"`
-	Bytes     int64     `json:"bytes"`
-	CreatedAt time.Time `json:"created_at"`
+	return AtomicWriteFile(path, ".edgewatch-backup-", func(tempPath string) error {
+		if _, err := backupSource.DB.ExecContext(ctx, `VACUUM INTO ?`, tempPath); err != nil {
+			return fmt.Errorf("create SQLite backup: %w", err)
+		}
+		return enforcePrivateSQLiteArtifacts(tempPath)
+	}, func(finalPath string) error {
+		return enforcePrivateSQLiteArtifacts(finalPath)
+	})
 }

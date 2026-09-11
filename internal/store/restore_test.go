@@ -201,6 +201,18 @@ func TestPreflightRestoreAcceptsReadOnlySource(t *testing.T) {
 	}
 }
 
+func TestPreflightRestoreRejectsNonSQLiteSource(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "not-a-database.db")
+	destination := filepath.Join(dir, "destination.db")
+	if err := os.WriteFile(source, []byte("not SQLite"), 0o400); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PreflightRestore(context.Background(), source, destination); err == nil {
+		t.Fatal("non-SQLite source was accepted")
+	}
+}
+
 func createRestoreFixture(t *testing.T, path, value string) {
 	t.Helper()
 	s, err := Open(path)

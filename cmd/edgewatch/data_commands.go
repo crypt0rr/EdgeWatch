@@ -5,12 +5,83 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
+
+const hostCLIActor = "host-cli"
+
+// auditHostCommand records host-authorized data operations without making
+// their success depend on the audit store. Read-only commands use a short
+// independent writable connection solely for the audit insert; a read-only
+// filesystem therefore leaves the useful verify/export result intact.
+func auditHostCommand(ctx context.Context, database string, current *store.Store, currentWritable bool, entry store.AuditEntry) {
+	entry.ActorUsername = hostCLIActor
+	auditor := current
+	closeAuditor := false
+	if !currentWritable {
+		var err error
+		auditor, err = store.OpenExistingContext(ctx, database)
+		if err != nil {
+			logAuditFailure(entry.Action)
+			return
+		}
+		closeAuditor = true
+	}
+	if auditor == nil {
+		logAuditFailure(entry.Action)
+		return
+	}
+	if err := auditor.AuditEntry(ctx, entry); err != nil {
+		logAuditFailure(entry.Action)
+	}
+	if closeAuditor {
+		if err := auditor.Close(); err != nil {
+			logAuditFailure(entry.Action)
+		}
+	}
+}
+
+func logAuditFailure(action string) {
+	slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})).Warn("security audit write unavailable", "action", action)
+}
+
+// hostAuditDetail deliberately includes only bounded, non-secret metadata.
+// In particular it keeps the full database path, notification URLs, provider
+// errors, and command arguments out of the append-only audit table.
+func hostAuditDetail(label, path string, operationErr error) string {
+	status := "success"
+	if operationErr != nil {
+		status = "failed"
+	}
+	return fmt.Sprintf("%s=%s status=%s", label, auditPathName(path), status)
+}
+
+func auditPathName(path string) string {
+	name := filepath.Base(filepath.Clean(strings.TrimSpace(path)))
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		return "unnamed"
+	}
+	name = strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("._-", r) {
+			return r
+		}
+		return '_'
+	}, name)
+	runes := []rune(name)
+	if len(runes) > 96 {
+		runes = runes[:96]
+	}
+	if len(runes) == 0 {
+		return "unnamed"
+	}
+	return string(runes)
+}
 
 func backup(ctx context.Context, s *store.Store, output, format string) error {
 	path, err := s.Backup(ctx, output)

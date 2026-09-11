@@ -166,6 +166,21 @@ func TestNotificationDestinationDeliveryFailureUsesGatewayStatus(t *testing.T) {
 	}
 }
 
+func TestNotificationTestRateLimitIsScopedPerDestination(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/one/test", nil)
+	request.RemoteAddr = "127.0.0.8:4008"
+	if !server.allowNotificationTest(request, "one") {
+		t.Fatal("first destination test was unexpectedly limited")
+	}
+	if server.allowNotificationTest(request, "one") {
+		t.Fatal("repeated test for one destination was not limited")
+	}
+	if !server.allowNotificationTest(request, "two") {
+		t.Fatal("a different destination test was incorrectly limited")
+	}
+}
+
 func TestServerSetupStatusAndRouteGuards(t *testing.T) {
 	server, db, admin := newUsersTestServer(t)
 	ctx := context.Background()

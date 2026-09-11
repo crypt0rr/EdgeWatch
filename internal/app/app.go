@@ -1258,7 +1258,12 @@ func (a *App) startDeliveryWorker(ctx context.Context) <-chan struct{} {
 		defer ticker.Stop()
 		drain := func() {
 			defer a.recoverBackgroundPanic("notification-delivery")
-			passCtx, cancel := context.WithTimeout(ctx, 70*time.Second)
+			// Four batches of four-worker sends may each spend the provider's
+			// 15-second timeout plus the cancellation grace period. Keep the
+			// worker deadline above that bounded worst case so a healthy queue is
+			// not abandoned halfway through a pass; the next tick still provides
+			// a safety net for unusually slow stores/providers.
+			passCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 			defer cancel()
 			if err := a.Notifier.Drain(passCtx); err != nil && !errors.Is(err, context.Canceled) {
 				a.Logger.Warn("notification delivery deferred for retry", "error", err)

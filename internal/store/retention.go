@@ -71,7 +71,7 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	if err != nil {
 		return stats, err
 	}
-	stats.FailedOutbox, err = s.deleteRetentionBatches(ctx, `DELETE FROM outbox WHERE rowid IN (SELECT rowid FROM outbox WHERE sent_at IS NULL AND attempts >= ? AND next_at < ? ORDER BY next_at,rowid LIMIT ?)`, deliveryMaxAttempts, cutoff)
+	stats.FailedOutbox, err = s.deleteRetentionBatches(ctx, `DELETE FROM outbox WHERE rowid IN (SELECT rowid FROM outbox WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '') AND next_at < ? ORDER BY next_at,rowid LIMIT ?)`, deliveryMaxAttempts, cutoff)
 	if err != nil {
 		return stats, err
 	}

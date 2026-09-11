@@ -767,7 +767,15 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session 
 		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 		return
 	}
-	events, err := s.Store.AcceptIncidentWithAudit(r.Context(), id, record.Job.Name, key, actorAudit(session, "incident.accepted", id+":"+key))
+	var destinations []string
+	if s.App != nil && s.App.Notifier != nil {
+		destinations, err = s.App.Notifier.QueueDestinationsForJob(r.Context(), record.Job)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
+			return
+		}
+	}
+	events, err := s.Store.AcceptIncidentWithOutboxAndAudit(r.Context(), id, record.Job.Name, key, destinations, actorAudit(session, "incident.accepted", id+":"+key))
 	if err != nil {
 		s.writeIncidentActionError(w, err, "incident.accepted")
 		return
@@ -795,7 +803,15 @@ func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, sessio
 		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 		return
 	}
-	events, err := s.Store.SuppressIncidentWithAudit(r.Context(), id, record.Job.Name, key, actorAudit(session, "incident.suppressed", id+":"+key))
+	var destinations []string
+	if s.App != nil && s.App.Notifier != nil {
+		destinations, err = s.App.Notifier.QueueDestinationsForJob(r.Context(), record.Job)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
+			return
+		}
+	}
+	events, err := s.Store.SuppressIncidentWithOutboxAndAudit(r.Context(), id, record.Job.Name, key, destinations, actorAudit(session, "incident.suppressed", id+":"+key))
 	if err != nil {
 		s.writeIncidentActionError(w, err, "incident.suppressed")
 		return

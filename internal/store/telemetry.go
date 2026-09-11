@@ -37,8 +37,8 @@ func (s *Store) DeploymentTelemetry(ctx context.Context) (DeploymentTelemetry, e
 		COALESCE((SELECT COUNT(*) FROM events),0),
 		COALESCE((SELECT COUNT(*) FROM scan_cycles),0),
 		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL),0),
-		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND attempts > 0 AND attempts < ?),0),
-		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND attempts >= ?),0)`, deliveryMaxAttempts, deliveryMaxAttempts).
+		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND terminal_at='' AND attempts > 0 AND attempts < ?),0),
+		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '')),0)`, deliveryMaxAttempts, deliveryMaxAttempts).
 		Scan(&telemetry.Jobs, &telemetry.Scans, &telemetry.HostObservations, &telemetry.EffectiveHosts, &telemetry.Events, &telemetry.ScanCycles, &telemetry.OutboxPending, &telemetry.OutboxRetrying, &telemetry.OutboxFailed); err != nil {
 		return DeploymentTelemetry{}, err
 	}

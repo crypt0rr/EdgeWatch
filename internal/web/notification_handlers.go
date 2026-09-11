@@ -136,7 +136,7 @@ func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Req
 	id := parts[0]
 	if len(parts) == 2 && parts[1] == "test" && r.Method == http.MethodPost {
 		w.Header().Set("Cache-Control", "no-store")
-		if !s.allowNotificationTest(r) {
+		if !s.allowNotificationTest(r, id) {
 			w.Header().Set("Retry-After", "5")
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "notification tests are temporarily rate limited", nil)
 			return
@@ -262,7 +262,7 @@ func (s *Server) writeNotificationError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, "notification_key_unavailable", "managed notification credentials are unavailable; restore the encryption key before replacing or enabling this destination", nil)
 	case isUnique(err):
 		writeError(w, http.StatusConflict, "conflict", "notification name is already in use", map[string]string{"name": "notification name is already in use"})
-	case strings.Contains(lower, "notification delivery failed"):
+	case errors.Is(err, store.ErrDeliveryProvider), strings.Contains(lower, "notification delivery failed"):
 		// A managed destination test reached the provider, but the provider
 		// rejected or could not deliver the message. Report this as a bad
 		// gateway so clients can distinguish destination failures from an
@@ -279,11 +279,22 @@ func (s *Server) writeNotificationError(w http.ResponseWriter, err error) {
 	}
 }
 
-func (s *Server) allowNotificationTest(r *http.Request) bool {
+// allowNotificationTest rate-limits each destination independently. A failed
+// test for one provider must not temporarily block an operator from checking a
+// different configured channel. The optional scope is a stable destination ID
+// (or "all" for the aggregate endpoint), never a URL or credential-bearing
+// value; keeping it variadic preserves source compatibility for internal
+// callers that use the historical global bucket.
+func (s *Server) allowNotificationTest(r *http.Request, destination ...string) bool {
 	key := s.clientIP(r)
 	if cookie, err := r.Cookie(auth.SessionCookie); err == nil && cookie.Value != "" {
 		key = digest(cookie.Value)
 	}
+	scope := "all"
+	if len(destination) > 0 && strings.TrimSpace(destination[0]) != "" {
+		scope = strings.TrimSpace(destination[0])
+	}
+	key += "\x00" + scope
 	now := time.Now().UTC()
 	s.testMu.Lock()
 	defer s.testMu.Unlock()
@@ -310,7 +321,7 @@ func (s *Server) clientIP(r *http.Request) string {
 }
 
 func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request, session store.Session) {
-	if !s.allowNotificationTest(r) {
+	if !s.allowNotificationTest(r, "all") {
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "notification tests are temporarily rate limited", nil)
 		return

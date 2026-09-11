@@ -250,7 +250,7 @@ func (s *Store) ListJobEventsPage(ctx context.Context, jobID string, limit, offs
 
 func (s *Store) FailedDeliveries(ctx context.Context) (int, error) {
 	var count int
-	err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND attempts >= ?`, deliveryMaxAttempts).Scan(&count)
+	err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '')`, deliveryMaxAttempts).Scan(&count)
 	return count, err
 }
 

@@ -52,6 +52,37 @@ func TestAcceptIncidentUpdatesBaselineAndRecordsAudit(t *testing.T) {
 	}
 }
 
+func TestIncidentActionsQueueNotificationOutboxAtomically(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("incident-outbox"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "port|127.0.0.1|tcp|443"
+	_, err = s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &model.Snapshot{Scopes: []model.Scope{{Target: "127.0.0.1", Protocol: "tcp", Ports: "443"}}}
+		state.Incidents[key] = model.Incident{Change: model.Change{Key: key, Kind: "port", Target: "127.0.0.1", Protocol: "tcp", Port: 443, Old: "not-open", New: "open", Severity: "critical"}, ScanID: "scan-1"}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcceptIncidentWithOutboxAndAudit(ctx, record.ID, record.Job.Name, key, []string{"destination"}, AuditEntry{Action: "incident.accepted", Detail: "incident-outbox"}); err != nil {
+		t.Fatal(err)
+	}
+	var events, deliveries int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE type=?`, "incident-accepted").Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination=?`, "destination").Scan(&deliveries); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 || deliveries != 1 {
+		t.Fatalf("incident notification persistence = events %d, deliveries %d", events, deliveries)
+	}
+}
+
 func TestSuppressIncidentStoresOneScanWindow(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

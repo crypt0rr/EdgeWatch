@@ -115,6 +115,7 @@ type Delivery struct {
 	Destination string
 	Event       model.Event
 	Attempts    int
+	Deferrals   int
 	ClaimToken  string
 }
 
@@ -124,9 +125,23 @@ func (s *Store) DueDeliveries(ctx context.Context, limit int) ([]Delivery, error
 
 var ErrDeliveryClaimLost = errors.New("notification delivery claim was lost")
 
+// Delivery errors are stable, redacted categories shared by the notifier and
+// store. Keeping them in the store package avoids an import cycle while still
+// allowing health accounting and retry policy to use errors.Is rather than
+// matching provider error text.
+var (
+	ErrDeliveryDestinationLocked  = errors.New("notification destination is locked")
+	ErrDeliveryDestinationMissing = errors.New("notification destination is missing")
+	ErrDeliveryProvider           = errors.New("notification provider failed")
+	ErrDeliveryProviderPanic      = errors.New("notification provider panicked")
+	ErrDeliveryIndeterminate      = errors.New("notification send outcome is indeterminate")
+	ErrDeliveryWorkerPanic        = errors.New("notification delivery worker panicked")
+)
+
 const (
 	deliveryClaimLease   = 30 * time.Minute
 	deliveryMaxAttempts  = 8
+	deliveryMaxDeferrals = 8
 	deliveryInitialDelay = 2 * time.Minute
 	deliveryMaxDelay     = time.Hour
 )
@@ -154,7 +169,7 @@ func (s *Store) claimDueDeliveries(ctx context.Context, limit int, owner string,
 		owner = uuid.NewString()
 	}
 	now := time.Now().UTC()
-	query := `UPDATE outbox SET claim_token=?,claim_until=? WHERE id IN (SELECT id FROM outbox WHERE sent_at IS NULL AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?)`
+	query := `UPDATE outbox SET claim_token=?,claim_until=? WHERE id IN (SELECT id FROM outbox WHERE sent_at IS NULL AND terminal_at='' AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?)`
 	args := []any{owner, now.Add(deliveryClaimLease).Format(time.RFC3339Nano), deliveryMaxAttempts, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)}
 	if len(excluded) > 0 {
 		placeholders := make([]string, 0, len(excluded))
@@ -169,7 +184,7 @@ func (s *Store) claimDueDeliveries(ctx context.Context, limit int, owner string,
 			query += " AND destination NOT IN (" + strings.Join(placeholders, ",") + ")"
 		}
 	}
-	query += ` ORDER BY id LIMIT ?) RETURNING id,destination,payload_json,attempts,claim_token`
+	query += ` ORDER BY id LIMIT ?) RETURNING id,destination,payload_json,attempts,deferrals,claim_token`
 	args = append(args, limit)
 	rows, err := s.DB.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -180,7 +195,7 @@ func (s *Store) claimDueDeliveries(ctx context.Context, limit int, owner string,
 	for rows.Next() {
 		var d Delivery
 		var b []byte
-		if err := rows.Scan(&d.ID, &d.Destination, &b, &d.Attempts, &d.ClaimToken); err != nil {
+		if err := rows.Scan(&d.ID, &d.Destination, &b, &d.Attempts, &d.Deferrals, &d.ClaimToken); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(b, &d.Event); err != nil {
@@ -247,7 +262,11 @@ func (s *Store) DeliveryResultClaim(ctx context.Context, id int64, claim string,
 	attempts++
 	terminal := attempts >= deliveryMaxAttempts
 	delay := deliveryRetryDelay(attempts)
-	result, err := tx.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=?,last_error=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, attempts, now.Add(delay).Format(time.RFC3339Nano), deliveryErrorCode(sendErr), id, claim)
+	terminalAt := ""
+	if terminal {
+		terminalAt = now.Format(time.RFC3339Nano)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, attempts, now.Add(delay).Format(time.RFC3339Nano), deliveryErrorCode(sendErr), terminalAt, id, claim)
 	if err != nil {
 		return err
 	}
@@ -258,17 +277,22 @@ func (s *Store) DeliveryResultClaim(ctx context.Context, id int64, claim string,
 		return err
 	}
 	if terminal {
-		fingerprint := deliveryErrorFingerprint(sendErr)
-		event := model.Event{Type: "notification-delivery-terminal", Message: fmt.Sprintf("Notification delivery dropped after retry limit (destination fingerprint %s; error code %s; error fingerprint %s)", deliverySelectorFingerprint(destination), deliveryErrorCode(sendErr), fingerprint), CreatedAt: now}
-		bounded, payload, marshalErr := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
-		if marshalErr != nil {
-			return marshalErr
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at) VALUES(?,?,?,?,?)`, bounded.Type, "", "", payload, now.Format(time.RFC3339Nano)); err != nil {
+		if err := insertTerminalDeliveryEventTx(ctx, tx, destination, sendErr, "retry limit", now); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+func insertTerminalDeliveryEventTx(ctx context.Context, tx *sql.Tx, destination string, sendErr error, reason string, now time.Time) error {
+	fingerprint := deliveryErrorFingerprint(sendErr)
+	event := model.Event{Type: "notification-delivery-terminal", Message: fmt.Sprintf("Notification delivery dropped after %s (destination fingerprint %s; error code %s; error fingerprint %s)", reason, deliverySelectorFingerprint(destination), deliveryErrorCode(sendErr), fingerprint), CreatedAt: now}
+	bounded, payload, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at) VALUES(?,?,?,?,?)`, bounded.Type, "", "", payload, now.Format(time.RFC3339Nano))
+	return err
 }
 
 func deliveryRetryDelay(attempts int) time.Duration {
@@ -289,20 +313,77 @@ func deliveryRetryDelay(attempts int) time.Duration {
 // DeferDelivery releases a claim without consuming an attempt. This is used
 // when an encrypted managed destination is temporarily locked or unavailable.
 func (s *Store) DeferDelivery(ctx context.Context, id int64, claim, reason string, delay time.Duration) error {
+	return s.DeferDeliveryWithError(ctx, id, claim, legacyDeliveryError(reason), delay)
+}
+
+// legacyDeliveryError preserves the source-compatible string-based defer API
+// without making the durable classifier depend on arbitrary provider text.
+// New notifier paths pass the typed sentinels directly.
+func legacyDeliveryError(reason string) error {
+	lower := strings.ToLower(strings.TrimSpace(reason))
+	switch {
+	case strings.Contains(lower, "locked") || strings.Contains(lower, "key unavailable"):
+		return fmt.Errorf("%w: delivery deferred", ErrDeliveryDestinationLocked)
+	case strings.Contains(lower, "no longer configured") || strings.Contains(lower, "not configured"):
+		return fmt.Errorf("%w: delivery deferred", ErrDeliveryDestinationMissing)
+	case strings.Contains(lower, "indeterminate"):
+		return ErrDeliveryIndeterminate
+	default:
+		return errors.New("notification delivery deferred")
+	}
+}
+
+// DeferDeliveryWithError releases a claim without consuming an ordinary
+// provider attempt. Deferrals are nevertheless bounded: after repeated
+// deferrals the row becomes terminal, is reflected in destination health, and
+// receives one redacted event so a locked or indeterminate destination cannot
+// remain silently pending forever.
+func (s *Store) DeferDeliveryWithError(ctx context.Context, id int64, claim string, reason error, delay time.Duration) error {
 	if claim == "" {
 		return ErrDeliveryClaimLost
 	}
 	if delay < time.Minute {
 		delay = time.Minute
 	}
-	result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=?,last_error=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, time.Now().UTC().Add(delay).Format(time.RFC3339Nano), deliveryErrorCode(errors.New(reason)), id, claim)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var attempts, deferrals int
+	var destination, terminalAt string
+	if err := tx.QueryRowContext(ctx, `SELECT attempts,deferrals,destination,terminal_at FROM outbox WHERE id=? AND sent_at IS NULL AND claim_token=?`, id, claim).Scan(&attempts, &deferrals, &destination, &terminalAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrDeliveryClaimLost
+		}
+		return err
+	}
+	if terminalAt != "" {
+		return ErrDeliveryClaimLost
+	}
+	deferrals++
+	now := time.Now().UTC()
+	terminal := deferrals >= deliveryMaxDeferrals
+	terminalStamp := ""
+	if terminal {
+		terminalStamp = now.Format(time.RFC3339Nano)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE outbox SET deferrals=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, deferrals, now.Add(delay).Format(time.RFC3339Nano), deliveryErrorCode(reason), terminalStamp, id, claim)
 	if err != nil {
 		return err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrDeliveryClaimLost
 	}
-	return nil
+	if err := recordDeliveryFailureTx(ctx, tx, destination, reason, terminal, now); err != nil {
+		return err
+	}
+	if terminal {
+		if err := insertTerminalDeliveryEventTx(ctx, tx, destination, reason, "deferral limit", now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 func min(a, b int) int {
 	if a < b {

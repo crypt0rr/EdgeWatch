@@ -261,11 +261,12 @@ function DestinationRow({ destination, editing, busy, canManage, onEdit, onCance
 function DeliveryHealth({ destination }: { destination: NotificationDestination }) {
   const pending = destination.pending ?? 0
   const retrying = destination.retrying ?? 0
+  const deferrals = destination.deferrals ?? 0
   const terminal = destination.terminal_failures ?? 0
   const lastSuccess = destination.last_success_at ? formatDeliveryTime(destination.last_success_at) : ''
   const lastFailure = destination.last_failure_at ? formatDeliveryTime(destination.last_failure_at) : ''
-  if (!pending && !retrying && !terminal && !lastSuccess && !lastFailure) return null
-  return <div className="notification-health" role="status"><span className="notification-health-label">Delivery health</span>{pending > 0 && <span className="pill blue">{pending} pending</span>}{retrying > 0 && <span className="pill amber">{retrying} retrying</span>}{terminal > 0 && <span className="pill red">{terminal} terminal failure{terminal === 1 ? '' : 's'}</span>}{lastSuccess && <span className="notification-health-detail">Last success {lastSuccess}</span>}{lastFailure && !terminal && <span className="notification-health-detail">Last failure {lastFailure}{destination.last_error_code ? ` · ${destination.last_error_code}` : ''}</span>}</div>
+  if (!pending && !retrying && !deferrals && !terminal && !lastSuccess && !lastFailure) return null
+  return <div className="notification-health" role="status"><span className="notification-health-label">Delivery health</span>{pending > 0 && <span className="pill blue">{pending} pending</span>}{retrying > 0 && <span className="pill amber">{retrying} retrying</span>}{deferrals > 0 && <span className="pill amber">{deferrals} deferred</span>}{terminal > 0 && <span className="pill red">{terminal} terminal failure{terminal === 1 ? '' : 's'}</span>}{lastSuccess && <span className="notification-health-detail">Last success {lastSuccess}</span>}{lastFailure && !terminal && <span className="notification-health-detail">Last failure {lastFailure}{destination.last_error_code ? ` · ${destination.last_error_code}` : ''}</span>}</div>
 }
 
 function formatDeliveryTime(value: string) {

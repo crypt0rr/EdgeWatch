@@ -10,11 +10,11 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
-// AcceptIncidentWithAudit folds one active incident into the current baseline.
-// The mutation and its audit row share the same transaction, so a successful
-// response always means both durable records were committed.
-func (s *Store) AcceptIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
-	return s.updateIncidentAction(ctx, jobID, []AuditEntry{audit}, true, func(state *model.JobState) ([]model.Event, error) {
+// AcceptIncidentWithOutboxAndAudit folds one active incident into the current
+// baseline and queues the resulting event for the supplied job destinations in
+// the same transaction as the state and audit mutation.
+func (s *Store) AcceptIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return s.updateIncidentAction(ctx, jobID, destinations, []AuditEntry{audit}, true, func(state *model.JobState) ([]model.Event, error) {
 		if state.Baseline == nil {
 			return nil, ErrBaselineNotReady
 		}
@@ -78,6 +78,13 @@ func (s *Store) AcceptIncidentWithAudit(ctx context.Context, jobID, jobName, key
 	})
 }
 
+// AcceptIncidentWithAudit is retained for callers that only need the durable
+// state/audit mutation. Passing no destinations deliberately preserves the
+// historical silent behavior for those callers.
+func (s *Store) AcceptIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
+	return s.AcceptIncidentWithOutboxAndAudit(ctx, jobID, jobName, key, nil, audit)
+}
+
 // relatedIncident finds the sibling port/service change for the same scan and
 // effective logical target. An empty scan ID is retained for legacy runtime
 // state, but non-empty IDs must match so unrelated incidents are never folded
@@ -127,11 +134,11 @@ func acceptedIncidentMessage(count int) string {
 	return "Incident accepted into baseline"
 }
 
-// SuppressIncidentWithAudit hides an active incident for exactly one future
-// successful scan. The confirmed change is retained privately so the engine
-// can re-open it immediately if the next scan still observes the change.
-func (s *Store) SuppressIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
-	return s.updateIncidentAction(ctx, jobID, []AuditEntry{audit}, false, func(state *model.JobState) ([]model.Event, error) {
+// SuppressIncidentWithOutboxAndAudit hides an active incident for exactly one
+// future successful scan and queues the action event for the supplied job
+// destinations transactionally.
+func (s *Store) SuppressIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return s.updateIncidentAction(ctx, jobID, destinations, []AuditEntry{audit}, false, func(state *model.JobState) ([]model.Event, error) {
 		incident, ok := state.Incidents[key]
 		if !ok {
 			return nil, ErrIncidentNotFound
@@ -154,11 +161,17 @@ func (s *Store) SuppressIncidentWithAudit(ctx context.Context, jobID, jobName, k
 	})
 }
 
+// SuppressIncidentWithAudit is retained for source compatibility with callers
+// that do not provide notification destinations.
+func (s *Store) SuppressIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
+	return s.SuppressIncidentWithOutboxAndAudit(ctx, jobID, jobName, key, nil, audit)
+}
+
 // updateIncidentAction applies a baseline/incident mutation only when the job
 // is not actively scanning. Keeping the active-scan check, state transition,
 // event write, and audit insert in one transaction prevents a scan from
 // finishing against a half-applied operator decision.
-func (s *Store) updateIncidentAction(ctx context.Context, jobID string, audits []AuditEntry, syncBaseline bool, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+func (s *Store) updateIncidentAction(ctx context.Context, jobID string, destinations []string, audits []AuditEntry, syncBaseline bool, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -175,7 +188,7 @@ func (s *Store) updateIncidentAction(ctx context.Context, jobID string, audits [
 		return nil, ErrJobScanActive
 	}
 	var resultingState *model.JobState
-	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, nil, func(state *model.JobState) ([]model.Event, error) {
+	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, destinations, func(state *model.JobState) ([]model.Event, error) {
 		events, err := fn(state)
 		if err == nil && syncBaseline && state.Baseline != nil {
 			resultingState = state

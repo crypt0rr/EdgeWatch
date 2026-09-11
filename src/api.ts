@@ -14,6 +14,7 @@ export type NotificationDestination = {
   error_code?: string
   pending?: number
   retrying?: number
+  deferrals?: number
   terminal_failures?: number
   last_success_at?: string
   last_failure_at?: string
@@ -29,6 +30,7 @@ export type NotificationStatus = {
   key_state: string
   delivery_pending?: number
   delivery_retrying?: number
+  delivery_deferrals?: number
   delivery_terminal_failures?: number
 }
 export type NotificationUpdateRouting = {

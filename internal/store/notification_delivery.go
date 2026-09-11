@@ -16,6 +16,7 @@ type DeliveryHealth struct {
 	DestinationIdentity  string
 	Pending              int
 	Retrying             int
+	Deferrals            int
 	TerminalFailures     int
 	LastSuccessAt        time.Time
 	LastFailureAt        time.Time
@@ -47,15 +48,21 @@ func deliveryErrorCode(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "timeout"
 	}
-	lower := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(lower, "locked") || strings.Contains(lower, "key unavailable"):
+	case errors.Is(err, ErrDeliveryDestinationLocked):
 		return "destination_locked"
-	case strings.Contains(lower, "no longer configured") || strings.Contains(lower, "not configured"):
+	case errors.Is(err, ErrDeliveryDestinationMissing):
 		return "destination_missing"
-	default:
+	case errors.Is(err, ErrDeliveryProviderPanic):
+		return "provider_panic"
+	case errors.Is(err, ErrDeliveryWorkerPanic):
+		return "worker_panic"
+	case errors.Is(err, ErrDeliveryIndeterminate):
+		return "delivery_indeterminate"
+	case errors.Is(err, ErrDeliveryProvider):
 		return "delivery_failed"
 	}
+	return "delivery_failed"
 }
 
 func deliveryErrorFingerprint(err error) string {
@@ -144,15 +151,15 @@ func (s *Store) ListDeliveryHealth(ctx context.Context) (map[string]DeliveryHeal
 		return nil, err
 	}
 
-	rows, err = s.reader().QueryContext(ctx, `SELECT destination,COUNT(*),COALESCE(SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END),0)
-FROM outbox WHERE sent_at IS NULL AND attempts < ? GROUP BY destination`, deliveryMaxAttempts)
+	rows, err = s.reader().QueryContext(ctx, `SELECT destination,COUNT(*),COALESCE(SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END),0),COALESCE(SUM(deferrals),0)
+FROM outbox WHERE sent_at IS NULL AND terminal_at='' AND attempts < ? GROUP BY destination`, deliveryMaxAttempts)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var selector string
-		var pending, retrying int
-		if err := rows.Scan(&selector, &pending, &retrying); err != nil {
+		var pending, retrying, deferrals int
+		if err := rows.Scan(&selector, &pending, &retrying, &deferrals); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -161,6 +168,7 @@ FROM outbox WHERE sent_at IS NULL AND attempts < ? GROUP BY destination`, delive
 		item.DestinationIdentity = identity
 		item.Pending += pending
 		item.Retrying += retrying
+		item.Deferrals += deferrals
 		out[identity] = item
 	}
 	if err := rows.Err(); err != nil {

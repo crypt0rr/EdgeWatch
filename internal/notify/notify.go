@@ -29,7 +29,7 @@ var ErrInvalidDestinationSelection = errors.New("invalid notification destinatio
 // outcome before cancellation. The outbox claim is deferred for a full lease
 // rather than immediately retried, preventing a duplicate when the provider
 // accepted the request just as the daemon stopped waiting.
-var ErrNotificationSendIndeterminate = errors.New("notification send outcome is indeterminate")
+var ErrNotificationSendIndeterminate = store.ErrDeliveryIndeterminate
 
 const (
 	notificationWorkers   = 4
@@ -60,6 +60,7 @@ type DestinationView struct {
 	ErrorCode            string    `json:"error_code,omitempty"`
 	Pending              int       `json:"pending,omitempty"`
 	Retrying             int       `json:"retrying,omitempty"`
+	Deferrals            int       `json:"deferrals,omitempty"`
 	TerminalFailures     int       `json:"terminal_failures,omitempty"`
 	LastSuccessAt        string    `json:"last_success_at,omitempty"`
 	LastFailureAt        string    `json:"last_failure_at,omitempty"`
@@ -468,6 +469,7 @@ func applyDeliveryHealth(view *DestinationView, health store.DeliveryHealth) {
 	}
 	view.Pending = health.Pending
 	view.Retrying = health.Retrying
+	view.Deferrals = health.Deferrals
 	view.TerminalFailures = health.TerminalFailures
 	if !health.LastSuccessAt.IsZero() {
 		view.LastSuccessAt = health.LastSuccessAt.UTC().Format(time.RFC3339Nano)
@@ -546,14 +548,16 @@ func (n *Notifier) StatusContext(ctx context.Context) map[string]any {
 	status := map[string]any{"deployment": fileCount, "managed": managedCount, "active": fileCount + activeManaged, "locked": locked, "key_state": keyState}
 	if n.Store != nil {
 		if health, err := n.Store.ListDeliveryHealth(ctx); err == nil {
-			pending, retrying, terminal := 0, 0, 0
+			pending, retrying, deferrals, terminal := 0, 0, 0, 0
 			for _, item := range health {
 				pending += item.Pending
 				retrying += item.Retrying
+				deferrals += item.Deferrals
 				terminal += item.TerminalFailures
 			}
 			status["delivery_pending"] = pending
 			status["delivery_retrying"] = retrying
+			status["delivery_deferrals"] = deferrals
 			status["delivery_terminal_failures"] = terminal
 		}
 	}
@@ -781,7 +785,10 @@ func (n *Notifier) deliverBatch(ctx context.Context, deliveries []store.Delivery
 		go func() {
 			defer wg.Done()
 			for delivery := range jobs {
-				results <- n.deliverOne(ctx, delivery, destinations)
+				// A panic in notifier/store glue is just as capable of leaking a
+				// claim as a provider panic. Convert it into a redacted terminal
+				// delivery result so one bad row cannot kill the worker goroutine.
+				results <- n.deliverOneSafe(ctx, delivery, destinations)
 			}
 		}()
 	}
@@ -803,11 +810,24 @@ func (n *Notifier) deliverBatch(ctx context.Context, deliveries []store.Delivery
 		}
 	}
 	for _, delivery := range unsent {
-		if err := n.releaseClaim(delivery, "notification pass canceled before send", time.Minute); err != nil && !errors.Is(err, store.ErrDeliveryClaimLost) {
+		if err := n.releaseClaim(ctx, delivery, store.ErrDeliveryIndeterminate, time.Minute); err != nil && !errors.Is(err, store.ErrDeliveryClaimLost) {
 			all = append(all, err)
 		}
 	}
 	return all
+}
+
+func (n *Notifier) deliverOneSafe(ctx context.Context, delivery store.Delivery, destinations map[string]string) (err error) {
+	defer func() {
+		if recover() != nil {
+			panicErr := store.ErrDeliveryWorkerPanic
+			resultCtx, cancel := deliveryResultContext(ctx)
+			defer cancel()
+			resultErr := n.Store.DeliveryResultClaim(resultCtx, delivery.ID, delivery.ClaimToken, panicErr)
+			err = errors.Join(panicErr, resultErr)
+		}
+	}()
+	return n.deliverOne(ctx, delivery, destinations)
 }
 
 func lockContext(ctx context.Context, mu *sync.Mutex) error {
@@ -832,13 +852,13 @@ func lockContext(ctx context.Context, mu *sync.Mutex) error {
 
 func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, destinations map[string]string) error {
 	if err := ctx.Err(); err != nil {
-		return errors.Join(err, n.releaseClaim(delivery, "notification pass canceled before send", time.Minute))
+		return errors.Join(err, n.releaseClaim(ctx, delivery, store.ErrDeliveryIndeterminate, time.Minute))
 	}
 	// Refresh before each managed send so an update/delete after the batch was
 	// claimed cannot use the stale URL from the first snapshot.
 	if strings.HasPrefix(delivery.Destination, "managed:") {
 		if reloadErr := n.Reload(ctx); reloadErr != nil {
-			deferErr := n.releaseClaim(delivery, "managed notification state unavailable", time.Minute)
+			deferErr := n.releaseClaim(ctx, delivery, store.ErrDeliveryDestinationLocked, time.Minute)
 			return errors.Join(reloadErr, deferErr)
 		}
 		destinations = n.destinationSnapshot()
@@ -847,14 +867,14 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 	var sendErr error
 	if !ok {
 		if strings.HasPrefix(delivery.Destination, "managed:") {
-			return n.releaseClaim(delivery, "managed notification is locked or no longer configured", time.Minute)
+			return n.releaseClaim(ctx, delivery, store.ErrDeliveryDestinationMissing, time.Minute)
 		}
-		sendErr = errors.New("notification destination is no longer configured")
+		sendErr = store.ErrDeliveryDestinationMissing
 	} else {
 		sendErr = safeSendContext(ctx, raw, engine.FormatEvent(delivery.Event))
 	}
 	if errors.Is(sendErr, ErrNotificationSendIndeterminate) {
-		deferErr := n.releaseClaim(delivery, "notification send outcome is indeterminate", notificationIndeterminateDelay)
+		deferErr := n.releaseClaim(ctx, delivery, store.ErrDeliveryIndeterminate, notificationIndeterminateDelay)
 		return errors.Join(sendErr, deferErr)
 	}
 	resultCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -863,10 +883,19 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 	return errors.Join(sendErr, resultErr)
 }
 
-func (n *Notifier) releaseClaim(delivery store.Delivery, reason string, delay time.Duration) error {
-	releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func (n *Notifier) releaseClaim(ctx context.Context, delivery store.Delivery, reason error, delay time.Duration) error {
+	releaseCtx, cancel := deliveryResultContext(ctx)
 	defer cancel()
-	return n.Store.DeferDelivery(releaseCtx, delivery.ID, delivery.ClaimToken, reason, delay)
+	return n.Store.DeferDeliveryWithError(releaseCtx, delivery.ID, delivery.ClaimToken, reason, delay)
+}
+
+// deliveryResultContext keeps claim cleanup independent of a canceled parent
+// while still giving static context checks an explicit propagation path.
+func deliveryResultContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 }
 
 func send(rawURL, message string) error {
@@ -893,7 +922,10 @@ func safeSendContext(ctx context.Context, rawURL, message string) error {
 			return err
 		}
 		id := hashURL(rawURL)
-		return fmt.Errorf("notification delivery failed (%s)", id[:12])
+		if errors.Is(err, store.ErrDeliveryProviderPanic) {
+			return fmt.Errorf("%w: notification delivery failed (%s)", store.ErrDeliveryProviderPanic, id[:12])
+		}
+		return fmt.Errorf("%w: notification delivery failed (%s)", store.ErrDeliveryProvider, id[:12])
 	}
 	return nil
 }
@@ -912,7 +944,7 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 		// provider error; it must never take down the daemon's delivery worker.
 		defer func() {
 			if recover() != nil {
-				result <- errors.New("notification provider panicked")
+				result <- store.ErrDeliveryProviderPanic
 			}
 		}()
 		result <- send(rawURL, message)

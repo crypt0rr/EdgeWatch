@@ -253,3 +253,49 @@ func TestDeliveryHealthTracksRedactedOutcomesAndTerminalEvent(t *testing.T) {
 		t.Fatalf("success health = %#v, %v", health, err)
 	}
 }
+
+func TestDeliveryDeferralsAreBoundedAndVisible(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if err := s.QueueEvent(ctx, "deferred", model.Event{Type: "deferred", Message: "locked", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	for deferral := 0; deferral < deliveryMaxDeferrals; deferral++ {
+		if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE destination=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), "deferred"); err != nil {
+			t.Fatal(err)
+		}
+		due, err := s.ClaimDueDeliveries(ctx, 1, fmt.Sprintf("defer-owner-%d", deferral))
+		if err != nil || len(due) != 1 {
+			t.Fatalf("deferral claim %d = %#v, %v", deferral+1, due, err)
+		}
+		if err := s.DeferDeliveryWithError(ctx, due[0].ID, due[0].ClaimToken, ErrDeliveryDestinationLocked, time.Minute); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var attempts, deferrals int
+	var terminalAt, lastError string
+	if err := s.DB.QueryRowContext(ctx, `SELECT attempts,deferrals,terminal_at,last_error FROM outbox WHERE destination=?`, "deferred").Scan(&attempts, &deferrals, &terminalAt, &lastError); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 || deferrals != deliveryMaxDeferrals || terminalAt == "" || lastError != "destination_locked" {
+		t.Fatalf("bounded deferral state = attempts %d, deferrals %d, terminal %q, error %q", attempts, deferrals, terminalAt, lastError)
+	}
+	if due, err := s.ClaimDueDeliveries(ctx, 1, "after-deferral-limit"); err != nil || len(due) != 0 {
+		t.Fatalf("terminally deferred delivery was claimable: %#v, %v", due, err)
+	}
+	health, err := s.ListDeliveryHealth(ctx)
+	if err != nil || health["deferred"].TerminalFailures != 1 || health["deferred"].Pending != 0 {
+		t.Fatalf("bounded deferral health = %#v, %v", health["deferred"], err)
+	}
+	failed, err := s.FailedDeliveries(ctx)
+	if err != nil || failed != 1 {
+		t.Fatalf("bounded deferral failures = %d, %v", failed, err)
+	}
+	var payload []byte
+	if err := s.DB.QueryRowContext(ctx, `SELECT payload_json FROM events WHERE type=?`, "notification-delivery-terminal").Scan(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), "deferral limit") || !strings.Contains(string(payload), "destination_locked") {
+		t.Fatalf("bounded deferral terminal event = %s", payload)
+	}
+}

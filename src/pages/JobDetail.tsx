@@ -278,7 +278,9 @@ export function JobDetail() {
                     <span>
                       {scan.status === 'success'
                         ? 'Completed successfully · Open results to inspect the snapshot'
-                        : scan.error}
+                        : scan.status === 'incomplete'
+                          ? `${scan.error ?? 'Incomplete host discovery'} · Open results to inspect reachable hosts`
+                          : scan.error}
                     </span>
                   </div>
                   <code>{scan.id.slice(0, 8)}</code>
@@ -298,7 +300,7 @@ export function JobDetail() {
                   <p className="muted">{detail.data.changes_pagination?.total ?? detail.data.changes?.length ?? 0} {detail.data.comparison_source === 'scan_time' ? 'changes recorded at scan time.' : 'changes against the current baseline.'}</p>
                 </div>
                 <div className="heading-actions">
-                  {detail.data.scan.status === 'success' && <button className="button ghost" onClick={() => { setShowResults((shown) => !shown); setResultsOffset(0) }}>{showResults ? 'Hide results' : 'View results'}</button>}
+                  {(detail.data.scan.status === 'success' || detail.data.scan.status === 'incomplete') && <button className="button ghost" onClick={() => { setShowResults((shown) => !shown); setResultsOffset(0) }}>{showResults ? 'Hide results' : 'View results'}</button>}
                   <button className="icon-button" onClick={() => routeScanID ? navigate(`/jobs/${encodeURIComponent(id)}`) : setSelectedScan('')} aria-label="Close scan detail">×</button>
                 </div>
               </div>

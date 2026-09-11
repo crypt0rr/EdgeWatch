@@ -535,11 +535,12 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID stri
 	value := map[string]any{"scan": summary, "changes": []model.Change{}, "changes_pagination": paginationJSON(offset, limit, 0), "comparison_source": "none"}
 	var state model.JobState
 	var stateErr error
-	needsCurrentBaseline := summary.Status == "success" && summary.BaselineScanID == "" && summary.BaselineConfigHash == ""
+	comparable := summary.Status == "success" || summary.Status == "incomplete"
+	needsCurrentBaseline := comparable && summary.BaselineScanID == "" && summary.BaselineConfigHash == ""
 	if needsCurrentBaseline {
 		state, stateErr = s.Store.RuntimeState(r.Context(), id)
 	}
-	if summary.Status == "success" {
+	if comparable {
 		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
 			page, pageErr := s.Store.ListScanChangesPage(r.Context(), scanID, limit, offset)
 			if pageErr != nil {
@@ -609,7 +610,7 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scan
 	changes := []model.Change{}
 	var total int
 	comparisonSource := "none"
-	if summary.Status == "success" {
+	if summary.Status == "success" || summary.Status == "incomplete" {
 		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
 			page, pageErr := s.Store.ListScanChangesPage(r.Context(), scanID, limit, offset)
 			if pageErr != nil {

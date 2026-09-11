@@ -222,6 +222,10 @@ func TestFormatEventUsesOutcomeIndicators(t *testing.T) {
 	if !strings.HasPrefix(anomaly, "⚠️ EdgeWatch: ") {
 		t.Fatalf("anomaly notification = %q", anomaly)
 	}
+	incomplete := FormatEvent(model.Event{Type: "scan-incomplete", Message: "Scan incomplete: host discovery did not complete for 192.0.2.9", Job: "test"})
+	if !strings.HasPrefix(incomplete, "⚠️ EdgeWatch: ") || !strings.Contains(incomplete, "192.0.2.9") {
+		t.Fatalf("incomplete notification = %q", incomplete)
+	}
 }
 
 func TestFormatEventUsesApplicationUpdateMessages(t *testing.T) {
@@ -303,18 +307,32 @@ func TestUnreachableHostObservationDoesNotChangeBaseline(t *testing.T) {
 	}
 	partial := model.Snapshot{
 		Scopes: baseline.Scopes,
-		Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "closed"}}}},
+		Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}, {Port: 80, State: "open"}}}},
 		Hosts:  []model.HostObservation{{Address: "192.0.2.2", Status: "unreachable", StatusReason: "nmap-omitted"}},
 	}
-	if events, err := e.Success(ctx, job, scan("partial", partial)); err != nil || len(events) != 1 || events[0].Type != "scan-failure" {
-		t.Fatalf("partial scan did not emit an actionable failure: %#v, %v", events, err)
+	if events, err := e.Success(ctx, job, scan("partial", partial)); err != nil || len(events) != 2 || events[0].Type != "changes-detected" || events[1].Type != "scan-incomplete" {
+		t.Fatalf("partial scan did not compare reachable evidence and report incomplete coverage: %#v, %v", events, err)
 	}
 	state, err := db.State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if state.Baseline == nil || len(state.Baseline.Units) != 2 || len(state.Incidents) != 0 {
+	if state.Baseline == nil || len(state.Baseline.Units) != 2 || len(state.Incidents) != 1 {
 		t.Fatalf("partial scan changed baseline or incidents: %#v", state)
+	}
+	if _, ok := state.Incidents["port|192.0.2.2|tcp|443"]; ok {
+		t.Fatal("unreachable host removal created an incident before it was observed")
+	}
+	complete := model.Snapshot{
+		Scopes: baseline.Scopes,
+		Units: []model.Unit{
+			{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}, {Port: 80, State: "open"}}},
+			{Target: "192.0.2.2", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "closed"}}},
+		},
+	}
+	events, err := e.Success(ctx, job, scan("complete", complete))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Target != "192.0.2.2" {
+		t.Fatalf("complete scan did not report deferred unreachable-host removal: %#v, %v", events, err)
 	}
 }
 
@@ -398,6 +416,64 @@ func TestFinalizeManagedScanRecordsInitialBaselineScanMetadata(t *testing.T) {
 	}
 	if stored.BaselineScanID != current.ID || stored.BaselineConfigHash != current.ConfigHash {
 		t.Fatalf("initial baseline metadata = %#v, want scan=%s hash=%s", stored, current.ID, current.ConfigHash)
+	}
+}
+
+func TestFinalizeManagedScanMarksIncompleteAndKeepsReachableChanges(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	job := config.NormalizeJob(config.Job{
+		Name: "partial-managed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1", "192.0.2.2"},
+		TCP: &config.Protocol{Ports: "80,443", Mode: "connect"}, Timing: "balanced", Timeout: config.Duration(time.Minute),
+		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
+	})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseSnapshot := model.Snapshot{
+		Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "80,443"}, {Target: "192.0.2.2", Protocol: "tcp", Ports: "80,443"}},
+		Units: []model.Unit{
+			{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}}},
+			{Target: "192.0.2.2", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}}},
+		},
+	}
+	e := Engine{Store: db}
+	baseline := scan("partial-managed-baseline", baseSnapshot)
+	baseline.JobID, baseline.JobRevision, baseline.Job, baseline.ConfigHash = record.ID, record.Revision, record.Job.Name, record.Job.SecurityHash()
+	if _, err := e.FinalizeManagedScan(ctx, record.ID, record.Job, &baseline, nil); err != nil {
+		t.Fatal(err)
+	}
+	current := scan("partial-managed-current", model.Snapshot{
+		Scopes: baseSnapshot.Scopes,
+		Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}, {Port: 80, State: "open"}}}},
+		Hosts:  []model.HostObservation{{Address: "192.0.2.2", Status: "down", StatusReason: "no-response"}},
+	})
+	current.JobID, current.JobRevision, current.Job, current.ConfigHash = record.ID, record.Revision, record.Job.Name, record.Job.SecurityHash()
+	events, err := e.FinalizeManagedScan(ctx, record.ID, record.Job, &current, nil)
+	if err != nil || len(events) != 2 || events[0].Type != "changes-detected" || events[1].Type != "scan-incomplete" {
+		t.Fatalf("partial managed finalization = %#v, err=%v", events, err)
+	}
+	stored, err := db.GetScan(ctx, current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != "incomplete" || !strings.Contains(stored.Error, "192.0.2.2") {
+		t.Fatalf("stored partial status = %#v", stored)
+	}
+	if len(stored.Changes) != 1 || stored.Changes[0].Target != "192.0.2.1" || stored.Changes[0].Port != 80 {
+		t.Fatalf("stored reachable changes = %#v", stored.Changes)
+	}
+	state, err := db.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Baseline == nil || len(state.Baseline.Units) != 2 || state.Baseline.Units[0].Ports[0].State != "open" {
+		t.Fatalf("partial scan advanced baseline: %#v", state.Baseline)
 	}
 }
 

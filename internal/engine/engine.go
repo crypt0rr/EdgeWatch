@@ -46,12 +46,9 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 	}
 	return e.Store.FinalizeManagedScan(ctx, scan, jobID, scan.ConfigHash, destinations, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
 		if current.Status == "success" {
-			if snapshotHasUnreachableHost(current.Snapshot) {
-				current.Status = "failed"
-				current.Error = incompleteScanError(current.Snapshot)
-			}
+			MarkIncompleteScan(current)
 		}
-		if current.Status == "success" {
+		if current.Status == "success" || current.Status == "incomplete" {
 			if state.Baseline != nil {
 				current.BaselineScanID = state.BaselineScanID
 				current.BaselineConfigHash = state.BaselineConfigHash
@@ -70,7 +67,7 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 			// scan is still the immutable source of the newly established state.
 			// Recording its own ID prevents history from falling back to a later
 			// mutable runtime baseline after an administrator reset.
-			if current.BaselineScanID == "" && state.BaselineScanID == current.ID {
+			if current.Status == "success" && current.BaselineScanID == "" && state.BaselineScanID == current.ID {
 				current.BaselineScanID = state.BaselineScanID
 				current.BaselineConfigHash = state.BaselineConfigHash
 			}
@@ -96,23 +93,15 @@ func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]m
 // events prevents immutable scan history from diverging when service
 // fingerprints are learned as part of the same transaction.
 func processSuccessWithChanges(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, []model.Change, error) {
+	incomplete := snapshotHasUnreachableHost(scan.Snapshot)
+	if incomplete {
+		// The scanner has complete evidence for some targets, so compare those
+		// targets now, but keep missing-address removals and baseline learning
+		// deferred until a later scan observes every address again.
+		return processIncompleteSuccess(state, job, scan)
+	}
 	state.ConsecutiveFailures = 0
 	state.LastFailureAlert = 0
-	// A successful Nmap process can still omit individual hosts when host
-	// discovery receives no response. Those addresses are retained as explicit
-	// unreachable observations by the scanner, but the compact Unit view is
-	// necessarily incomplete. Do not let an incomplete scope turn missing
-	// ports into removals (or advance a new baseline); wait for a complete
-	// observation on a later scan instead.
-	if snapshotHasUnreachableHost(scan.Snapshot) {
-		clearTotalLossCandidate(state)
-		if scan.Status == "success" {
-			scan.Status = "failed"
-			scan.Error = incompleteScanError(scan.Snapshot)
-		}
-		events, err := processFailure(state, job.Name, scan)
-		return events, nil, err
-	}
 	now := scan.FinishedAt
 	if state.Baseline == nil {
 		clearTotalLossCandidate(state)
@@ -137,6 +126,33 @@ func processSuccessWithChanges(state *model.JobState, job config.Job, scan model
 		candidateEvents := advanceCandidate(state, scan, job.Baseline.Samples, true)
 		events = append(events, candidateEvents...)
 	}
+	return events, changes, nil
+}
+
+// processIncompleteSuccess compares only evidence that is complete for this
+// scan. It deliberately leaves baseline candidates, fingerprint learning, and
+// failure counters untouched: an incomplete result is useful for detecting a
+// reachable addition, but cannot establish expected state from missing data.
+func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, []model.Change, error) {
+	incompleteAddresses := incompleteHostAddresses(scan.Snapshot)
+	protectedTargets := incompleteTargets(state.Baseline, scan.Snapshot, incompleteAddresses)
+	var changes []model.Change
+	var events []model.Event
+	if state.Baseline != nil {
+		changes = Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+		filtered := changes[:0]
+		for _, change := range changes {
+			if _, protected := protectedTargets[change.Target]; protected {
+				continue
+			}
+			filtered = append(filtered, change)
+		}
+		changes = filtered
+		protectedKeys := protectedChangeKeys(state, *state.Baseline, scan.Snapshot, protectedTargets)
+		events = append(events, applyChangesWithIncomplete(state, job.Name, scan.ID, changes, job.Change.Confirmations, scan.FinishedAt, protectedKeys)...)
+	}
+	message := incompleteScanError(scan.Snapshot)
+	events = append(events, model.Event{Type: "scan-incomplete", Job: scan.Job, ScanID: scan.ID, Message: message, CreatedAt: scan.FinishedAt})
 	return events, changes, nil
 }
 
@@ -202,30 +218,105 @@ func positivePortCount(snapshot model.Snapshot) int {
 }
 
 func snapshotHasUnreachableHost(snapshot model.Snapshot) bool {
-	for _, host := range snapshot.Hosts {
-		switch strings.ToLower(strings.TrimSpace(host.Status)) {
-		case "unreachable", "down":
-			return true
-		}
-	}
-	return false
+	return len(incompleteHostAddresses(snapshot)) > 0
 }
 
 func incompleteScanError(snapshot model.Snapshot) string {
-	addresses := make([]string, 0)
+	addresses := incompleteHostAddresses(snapshot)
+	if len(addresses) == 0 {
+		return "Scan incomplete: host discovery did not complete"
+	}
+	return "Scan incomplete: host discovery did not complete for " + strings.Join(addresses, ", ")
+}
+
+func incompleteHostAddresses(snapshot model.Snapshot) []string {
+	seen := make(map[string]struct{})
 	for _, host := range snapshot.Hosts {
 		switch strings.ToLower(strings.TrimSpace(host.Status)) {
 		case "unreachable", "down", "timedout", "timed-out", "timeout":
 			if address := strings.TrimSpace(host.Address); address != "" {
-				addresses = append(addresses, address)
+				seen[address] = struct{}{}
 			}
 		}
 	}
-	sort.Strings(addresses)
-	if len(addresses) == 0 {
-		return "incomplete host discovery"
+	addresses := make([]string, 0, len(seen))
+	for address := range seen {
+		addresses = append(addresses, address)
 	}
-	return "incomplete host discovery: " + strings.Join(addresses, ", ")
+	sort.Strings(addresses)
+	return addresses
+}
+
+// MarkIncompleteScan turns an otherwise successful result into an explicit
+// partial outcome. The status is stored in history and deliberately excluded
+// from successful-host projections, while the engine still compares its
+// reachable evidence.
+func MarkIncompleteScan(scan *model.Scan) bool {
+	if scan == nil || scan.Status != "success" || !snapshotHasUnreachableHost(scan.Snapshot) {
+		return false
+	}
+	scan.Status = "incomplete"
+	scan.Error = incompleteScanError(scan.Snapshot)
+	return true
+}
+
+func incompleteTargets(baseline *model.Snapshot, current model.Snapshot, addresses []string) map[string]struct{} {
+	protected := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		protected[address] = struct{}{}
+	}
+	for _, snapshot := range []*model.Snapshot{baseline, &current} {
+		if snapshot == nil {
+			continue
+		}
+		for target, values := range snapshot.DNS {
+			for _, address := range values {
+				if _, ok := protected[address]; ok {
+					protected[target] = struct{}{}
+					break
+				}
+			}
+		}
+		for _, unit := range snapshot.Units {
+			for _, address := range unit.Addresses {
+				if _, ok := protected[address]; ok {
+					protected[unit.Target] = struct{}{}
+					break
+				}
+			}
+		}
+	}
+	return protected
+}
+
+func protectedChangeKeys(state *model.JobState, baseline, current model.Snapshot, targets map[string]struct{}) map[string]bool {
+	protected := make(map[string]bool)
+	for key, value := range items(baseline) {
+		if _, ok := targets[value.Target]; ok {
+			protected[key] = true
+		}
+	}
+	for key, value := range items(current) {
+		if _, ok := targets[value.Target]; ok {
+			protected[key] = true
+		}
+	}
+	for _, pending := range state.Pending {
+		if _, ok := targets[pending.Change.Target]; ok {
+			protected[pending.Change.Key] = true
+		}
+	}
+	for _, incident := range state.Incidents {
+		if _, ok := targets[incident.Change.Target]; ok {
+			protected[incident.Change.Key] = true
+		}
+	}
+	for key, change := range state.SuppressedChanges {
+		if _, ok := targets[change.Target]; ok {
+			protected[key] = true
+		}
+	}
+	return protected
 }
 
 func advanceCandidate(state *model.JobState, scan model.Scan, required int, merge bool) []model.Event {
@@ -544,6 +635,10 @@ func scopeAllows(s model.Snapshot, target, protocol string, port int, service bo
 }
 
 func applyChanges(state *model.JobState, job, scanID string, current []model.Change, required int, now time.Time) []model.Event {
+	return applyChangesWithIncomplete(state, job, scanID, current, required, now, nil)
+}
+
+func applyChangesWithIncomplete(state *model.JobState, job, scanID string, current []model.Change, required int, now time.Time, protected map[string]bool) []model.Event {
 	currentMap := map[string]model.Change{}
 	for _, c := range current {
 		currentMap[c.Key] = c
@@ -554,6 +649,9 @@ func applyChanges(state *model.JobState, job, scanID string, current []model.Cha
 	suppressedThisScan := map[string]bool{}
 	expiredSuppression := map[string]model.Change{}
 	for key, remaining := range state.Suppressed {
+		if protected[key] {
+			continue
+		}
 		if remaining <= 0 {
 			if change, ok := state.SuppressedChanges[key]; ok {
 				expiredSuppression[key] = change
@@ -619,11 +717,17 @@ func applyChanges(state *model.JobState, job, scanID string, current []model.Cha
 		opened = append(opened, currentChange)
 	}
 	for key := range state.Pending {
+		if protected[key] {
+			continue
+		}
 		if _, ok := currentMap[key]; !ok {
 			delete(state.Pending, key)
 		}
 	}
 	for key, incident := range state.Incidents {
+		if protected[key] {
+			continue
+		}
 		if _, ok := allCurrent[key]; ok {
 			continue
 		}
@@ -737,7 +841,7 @@ func FormatEvent(e model.Event) string {
 	switch {
 	case e.Type == "changes-recovered" || e.Type == "scan-recovered":
 		b.WriteString("🟢 ")
-	case e.Type == "scan-anomaly":
+	case e.Type == "scan-anomaly" || e.Type == "scan-incomplete":
 		b.WriteString("⚠️ ")
 	case e.Type == "changes-detected" && hasCriticalChange(e.Changes):
 		b.WriteString("🔴 ")

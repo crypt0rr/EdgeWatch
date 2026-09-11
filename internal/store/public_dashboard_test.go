@@ -161,3 +161,38 @@ func TestPublicDashboardDefaultsBlankTitle(t *testing.T) {
 		t.Fatalf("default dashboard = %#v", dashboard)
 	}
 }
+
+func TestListLegacyPublicScansExcludesIndexedSnapshots(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	job, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "legacy-public", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.1"}, TCP: &config.Protocol{Ports: "80", Mode: "connect"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	indexed := model.Scan{
+		ID: "public-indexed", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name,
+		StartedAt: now.Add(-time.Minute), FinishedAt: now.Add(-time.Minute), Status: "success",
+		Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 80, State: "open"}}}}}}},
+	}
+	legacy := model.Scan{
+		ID: "public-legacy", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name,
+		StartedAt: now, FinishedAt: now, Status: "success",
+		Snapshot: model.Snapshot{Units: []model.Unit{{Target: "198.51.100.1", Protocol: "tcp", Addresses: []string{"198.51.100.1"}, Ports: []model.PortState{{Port: 80, State: "open"}}}}},
+	}
+	if err := s.SaveScan(ctx, indexed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SaveScan(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.ListLegacyPublicScans(ctx, job.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].ID != legacy.ID {
+		t.Fatalf("legacy public rows = %#v", rows)
+	}
+}

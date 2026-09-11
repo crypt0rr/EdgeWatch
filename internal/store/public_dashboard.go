@@ -61,7 +61,9 @@ func (s *Store) ListLegacyPublicScans(ctx context.Context, jobID string, limit i
 		limit = 1000
 	}
 	rows, err := s.reader().QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json
-FROM scans WHERE status='success' AND job_id=?
+FROM scans
+WHERE status='success' AND job_id=?
+  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=scans.id)
 ORDER BY finished_at DESC,id DESC LIMIT ?`, jobID, limit)
 	if err != nil {
 		return nil, err

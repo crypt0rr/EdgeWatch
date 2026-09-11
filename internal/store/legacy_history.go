@@ -10,6 +10,55 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
+// LegacyScanSnapshot is the bounded metadata projection used by compatibility
+// readers for successful scans that predate the scan_hosts index. Keeping the
+// raw snapshot separate from model.Scan avoids decoding (and allocating) the
+// unrelated change list and scan metadata for every retained history row.
+type LegacyScanSnapshot struct {
+	ID         string
+	JobID      string
+	Job        string
+	FinishedAt time.Time
+	Snapshot   []byte
+}
+
+// ListLegacySuccessfulScanSnapshotsPage returns successful snapshots that do
+// not have a derived host index. Rows are ordered newest first so callers can
+// select the latest effective address without reading indexed scans. The
+// query remains paginated, but callers may walk every page when correctness
+// requires a complete legacy projection.
+func (s *Store) ListLegacySuccessfulScanSnapshotsPage(ctx context.Context, limit, offset int) (Page[LegacyScanSnapshot], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[LegacyScanSnapshot]
+	reader := s.reader()
+	const legacyPredicate = `status='success' AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=scans.id)`
+	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE `+legacyPredicate).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	rows, err := reader.QueryContext(ctx, `SELECT id,job_id,job,finished_at,snapshot_json
+FROM scans
+WHERE `+legacyPredicate+`
+ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var item LegacyScanSnapshot
+		var jobID sql.NullString
+		var finished string
+		if err := rows.Scan(&item.ID, &jobID, &item.Job, &finished, &item.Snapshot); err != nil {
+			return page, err
+		}
+		if jobID.Valid {
+			item.JobID = jobID.String
+		}
+		item.FinishedAt = scanTime(finished)
+		page.Items = append(page.Items, item)
+	}
+	return page, rows.Err()
+}
+
 func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {
 	var v model.Scan
 	var started, finished string

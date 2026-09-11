@@ -10,6 +10,8 @@ import (
 	"runtime/debug"
 	"sync/atomic"
 	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
 const requestIDHeader = "X-Request-ID"
@@ -91,10 +93,12 @@ func (s *Server) requestLogging(next http.Handler) http.Handler {
 		requestID := newRequestID()
 		w.Header().Set(requestIDHeader, requestID)
 		ctx := context.WithValue(r.Context(), requestIDContextKey{}, requestID)
+		clientIP := s.clientIP(r)
+		ctx = store.WithAuditContext(ctx, requestID, clientIP)
 		started := time.Now()
 		wrapped := &requestLoggingWriter{ResponseWriter: w, status: http.StatusOK}
 
-		logger.DebugContext(ctx, "http request started", "request_id", requestID, "method", r.Method, "path", r.URL.Path)
+		logger.DebugContext(ctx, "http request started", "request_id", requestID, "client_ip", clientIP, "method", r.Method, "path", r.URL.Path)
 		defer func(logCtx context.Context) {
 			recovered := recover()
 			if recovered != nil && !wrapped.wroteHeader {
@@ -110,6 +114,7 @@ func (s *Server) requestLogging(next http.Handler) http.Handler {
 			}
 			attributes := []any{
 				"request_id", requestID,
+				"client_ip", clientIP,
 				"method", r.Method,
 				"path", r.URL.Path,
 				"status", wrapped.status,

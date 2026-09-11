@@ -28,6 +28,7 @@ type AuditEntry struct {
 	ActorUserID   string
 	ActorUsername string
 	SourceIP      string
+	RequestID     string
 }
 
 type Admin struct {
@@ -713,7 +714,14 @@ func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry Audit
 	if strings.TrimSpace(entry.Action) == "" {
 		return nil
 	}
-	if _, err := execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,created_at) VALUES(?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, now.UTC().Format(time.RFC3339Nano)); err != nil {
+	requestContext := auditContextFromContext(ctx)
+	if strings.TrimSpace(entry.RequestID) == "" {
+		entry.RequestID = requestContext.RequestID
+	}
+	if strings.TrimSpace(entry.SourceIP) == "" {
+		entry.SourceIP = requestContext.SourceIP
+	}
+	if _, err := execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,created_at) VALUES(?,?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, now.UTC().Format(time.RFC3339Nano)); err != nil {
 		return fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
 	}
 	return nil

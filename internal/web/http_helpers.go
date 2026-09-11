@@ -248,6 +248,9 @@ func (s *Server) requireAuditEntry(ctx context.Context, w http.ResponseWriter, e
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string, details any) {
+	// The request middleware exposes X-Request-ID on every response, including
+	// errors, so clients can correlate this payload without changing the stable
+	// error JSON contract.
 	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message, "details": details}})
 }
 func writeJSON(w http.ResponseWriter, status int, value any) {

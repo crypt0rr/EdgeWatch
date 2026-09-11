@@ -22,7 +22,9 @@ func TestRequestLoggingRecordsCorrelationAndResponseMetrics(t *testing.T) {
 		_, _ = w.Write([]byte("ok"))
 	}))
 	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/jobs?secret=not-logged", nil))
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/jobs?secret=not-logged", nil)
+	request.RemoteAddr = "192.0.2.10:1234"
+	handler.ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("status = %d", recorder.Code)
 	}
@@ -41,8 +43,22 @@ func TestRequestLoggingRecordsCorrelationAndResponseMetrics(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[1]), &completion); err != nil {
 		t.Fatal(err)
 	}
-	if completion["request_id"] != requestID || completion["method"] != http.MethodPost || completion["path"] != "/api/v1/jobs" || completion["status"] != float64(http.StatusCreated) || completion["bytes"] != float64(2) {
+	if completion["request_id"] != requestID || completion["client_ip"] != "192.0.2.10" || completion["method"] != http.MethodPost || completion["path"] != "/api/v1/jobs" || completion["status"] != float64(http.StatusCreated) || completion["bytes"] != float64(2) {
 		t.Fatalf("completion record = %#v", completion)
+	}
+}
+
+func TestRequestLoggingAddsCorrelationToErrorResponses(t *testing.T) {
+	server := &Server{Log: slog.Default()}
+	handler := server.requestLogging(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusBadRequest, "invalid", "invalid request", nil)
+	}))
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/error", nil)
+	request.RemoteAddr = "192.0.2.10:1234"
+	handler.ServeHTTP(recorder, request)
+	if recorder.Header().Get(requestIDHeader) == "" {
+		t.Fatal("error response did not include request ID header")
 	}
 }
 

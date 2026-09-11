@@ -2,6 +2,7 @@ package web
 
 import (
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -317,7 +318,10 @@ func (s *Server) clientIP(r *http.Request) string {
 	if r == nil {
 		return "unknown"
 	}
-	return r.RemoteAddr
+	if host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr)); err == nil {
+		return strings.Trim(host, "[]")
+	}
+	return strings.TrimSpace(r.RemoteAddr)
 }
 
 func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request, session store.Session) {

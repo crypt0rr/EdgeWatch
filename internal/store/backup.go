@@ -17,6 +17,19 @@ import (
 type DatabaseVerification struct {
 	IntegrityCheck       string                `json:"integrity_check"`
 	ForeignKeyViolations []ForeignKeyViolation `json:"foreign_key_violations"`
+	FTSBackfill          []FTSBackfillProgress `json:"fts_backfill,omitempty"`
+}
+
+// FTSBackfillProgress is the durable, read-only diagnostic state for one
+// host-search projection. A non-complete row is expected while a cancelled
+// migration is waiting to resume; it is not itself an integrity failure.
+type FTSBackfillProgress struct {
+	TableName     string `json:"table_name"`
+	LastRowID     int64  `json:"last_rowid"`
+	ProcessedRows int64  `json:"processed_rows"`
+	Initialized   bool   `json:"initialized"`
+	Complete      bool   `json:"complete"`
+	UpdatedAt     string `json:"updated_at"`
 }
 
 // ForeignKeyViolation describes the four columns returned by
@@ -60,7 +73,7 @@ func (e *VerificationError) Error() string {
 // backup. Using the reader also prevents a diagnostic command from consuming
 // the single writer connection while a scan is committing.
 func (s *Store) Verify(ctx context.Context) (DatabaseVerification, error) {
-	result := DatabaseVerification{ForeignKeyViolations: []ForeignKeyViolation{}}
+	result := DatabaseVerification{ForeignKeyViolations: []ForeignKeyViolation{}, FTSBackfill: []FTSBackfillProgress{}}
 	if s == nil || s.DB == nil {
 		return result, errors.New("database is not open")
 	}
@@ -89,6 +102,30 @@ func (s *Store) Verify(ctx context.Context) (DatabaseVerification, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return result, err
+	}
+	var ftsTableCount int
+	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='fts_backfill_state'`).Scan(&ftsTableCount); err != nil {
+		return result, err
+	}
+	if ftsTableCount > 0 {
+		ftsRows, err := reader.QueryContext(ctx, `SELECT table_name,last_rowid,processed_rows,initialized,complete,updated_at FROM fts_backfill_state ORDER BY table_name`)
+		if err != nil {
+			return result, err
+		}
+		defer func() { _ = ftsRows.Close() }()
+		for ftsRows.Next() {
+			var progress FTSBackfillProgress
+			var initialized, complete int
+			if err := ftsRows.Scan(&progress.TableName, &progress.LastRowID, &progress.ProcessedRows, &initialized, &complete, &progress.UpdatedAt); err != nil {
+				return result, err
+			}
+			progress.Initialized = initialized != 0
+			progress.Complete = complete != 0
+			result.FTSBackfill = append(result.FTSBackfill, progress)
+		}
+		if err := ftsRows.Err(); err != nil {
+			return result, err
+		}
 	}
 	if result.IntegrityCheck != "ok" || len(result.ForeignKeyViolations) > 0 {
 		return result, &VerificationError{IntegrityCheck: result.IntegrityCheck, ForeignKeyViolations: len(result.ForeignKeyViolations)}

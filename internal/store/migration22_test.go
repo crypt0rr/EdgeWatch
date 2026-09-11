@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -146,6 +147,102 @@ PRAGMA user_version = 24;`); err != nil {
 	}
 	if present != 1 {
 		t.Fatal("migration 28 did not add processed_rows to legacy FTS state")
+	}
+}
+
+func TestFTSBackfillCancellationResumesFromCheckpoint(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx := context.Background()
+	if _, err := s.DB.ExecContext(ctx, `
+INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json)
+ VALUES('fts-cancel-source','edge','2026-09-09T00:00:00Z','2026-09-09T00:00:01Z','success','','','hash','{}')`); err != nil {
+		t.Fatal(err)
+	}
+	const hostCount = ftsBackfillBatchSize*2 + 17
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < hostCount; i++ {
+		address := fmt.Sprintf("198.18.%d.%d", i/256, i%256)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO scan_hosts(scan_id,address,job,host_json) VALUES(?,?,?,?)`, "fts-cancel-source", address, "edge", []byte(`{"address":"`+address+`"}`)); err != nil {
+			_ = tx.Rollback()
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`DELETE FROM scan_host_search`,
+		`DELETE FROM latest_host_search`,
+		`UPDATE fts_backfill_state SET last_rowid=0,processed_rows=0,initialized=1,complete=0`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	backfillCtx, cancel := context.WithCancel(ctx)
+	err = backfillHostSearchIndexesContextWithProgress(backfillCtx, s.DB, func(progress ftsBatchProgress) {
+		if progress.table == "scan_hosts" && progress.processedRows >= ftsBackfillBatchSize {
+			cancel()
+		}
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled backfill error = %v, want context.Canceled", err)
+	}
+	var lastRowID int64
+	var processedRows, complete int
+	if err := s.DB.QueryRowContext(ctx, `SELECT last_rowid,processed_rows,complete FROM fts_backfill_state WHERE table_name='scan_hosts'`).Scan(&lastRowID, &processedRows, &complete); err != nil {
+		t.Fatal(err)
+	}
+	if lastRowID == 0 || processedRows < ftsBackfillBatchSize || complete != 0 {
+		t.Fatalf("cancelled checkpoint = last_rowid %d, processed_rows %d, complete %d", lastRowID, processedRows, complete)
+	}
+	readOnly, err := OpenReadOnlyExisting(s.Path)
+	if err != nil {
+		t.Fatalf("open read-only store for cancelled backfill: %v", err)
+	}
+	verification, err := readOnly.Verify(ctx)
+	_ = readOnly.Close()
+	if err != nil {
+		t.Fatalf("verify cancelled backfill: %v", err)
+	}
+	var incomplete int
+	for _, progress := range verification.FTSBackfill {
+		if !progress.Complete {
+			incomplete++
+		}
+	}
+	if incomplete == 0 {
+		t.Fatalf("verification did not report incomplete FTS progress: %#v", verification.FTSBackfill)
+	}
+
+	if err := backfillHostSearchIndexesContext(ctx, s.DB); err != nil {
+		t.Fatalf("resume backfill: %v", err)
+	}
+	var indexed int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_host_search`).Scan(&indexed); err != nil {
+		t.Fatal(err)
+	}
+	if indexed != hostCount {
+		t.Fatalf("resumed scan host FTS rows = %d, want %d", indexed, hostCount)
+	}
+	readOnly, err = OpenReadOnlyExisting(s.Path)
+	if err != nil {
+		t.Fatalf("open read-only store for resumed backfill: %v", err)
+	}
+	verification, err = readOnly.Verify(ctx)
+	_ = readOnly.Close()
+	if err != nil {
+		t.Fatalf("verify resumed backfill: %v", err)
+	}
+	for _, progress := range verification.FTSBackfill {
+		if !progress.Complete {
+			t.Fatalf("resumed verification still incomplete: %#v", progress)
+		}
 	}
 }
 

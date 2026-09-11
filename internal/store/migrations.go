@@ -759,7 +759,7 @@ END;`,
 	if err := repairScanHostsForeignKey(db); err != nil {
 		return err
 	}
-	if err := backfillHostSearchIndexes(db); err != nil {
+	if err := backfillHostSearchIndexesContext(ctx, db); err != nil {
 		return err
 	}
 	return ensureBuiltinScannerProfilesContext(ctx, db)

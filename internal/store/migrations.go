@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 29
+const schemaVersion = 30
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -744,6 +744,18 @@ END;`,
 			"CREATE INDEX IF NOT EXISTS baseline_hosts_job_address ON baseline_hosts(job_id,address)",
 			"CREATE INDEX IF NOT EXISTS baseline_hosts_job_open ON baseline_hosts(job_id,open_ports,open_filtered_ports)",
 			"CREATE INDEX IF NOT EXISTS baseline_hosts_job_protocol_open ON baseline_hosts(job_id,tcp_present,udp_present,tcp_open_ports,udp_open_ports)",
+		},
+		30: {
+			// SSE cursors are reserved in durable blocks so a process restart
+			// cannot reuse an event identifier that a browser has already
+			// acknowledged. Gaps are intentional: they are safer than collisions
+			// and do not affect replay, which already handles history gaps with a
+			// refresh marker.
+			`CREATE TABLE IF NOT EXISTS sse_event_cursor (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ next_id INTEGER NOT NULL DEFAULT 0
+);`,
+			"INSERT OR IGNORE INTO sse_event_cursor(id,next_id) VALUES(1,0)",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {

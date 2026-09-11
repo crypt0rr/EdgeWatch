@@ -192,8 +192,8 @@ func TestSSESubscriberLimits(t *testing.T) {
 		t.Fatal("global SSE limit did not refuse a new stream")
 	}
 	limitedCancel()
-	if limited.status != http.StatusServiceUnavailable || limited.header.Get("Retry-After") != "5" {
-		t.Fatalf("global SSE limit response = status %d retry-after %q", limited.status, limited.header.Get("Retry-After"))
+	if limited.status != http.StatusOK || limited.header.Get("Content-Type") != "text/event-stream" || limited.header.Get("Retry-After") != "5" || !bytes.Contains(limited.body.Bytes(), []byte(`"type":"stream_limit"`)) {
+		t.Fatalf("global SSE limit response = status %d content-type %q retry-after %q body %q", limited.status, limited.header.Get("Content-Type"), limited.header.Get("Retry-After"), limited.body.String())
 	}
 	cancelA()
 	cancelB()
@@ -228,8 +228,8 @@ func TestSSESubscriberLimits(t *testing.T) {
 		t.Fatal("per-session SSE limit did not refuse a new stream")
 	}
 	perSessionCancel()
-	if perSession.status != http.StatusServiceUnavailable || perSession.header.Get("Retry-After") != "5" {
-		t.Fatalf("per-session SSE limit response = status %d retry-after %q", perSession.status, perSession.header.Get("Retry-After"))
+	if perSession.status != http.StatusOK || perSession.header.Get("Content-Type") != "text/event-stream" || perSession.header.Get("Retry-After") != "5" || !bytes.Contains(perSession.body.Bytes(), []byte(`"type":"stream_limit"`)) {
+		t.Fatalf("per-session SSE limit response = status %d content-type %q retry-after %q body %q", perSession.status, perSession.header.Get("Content-Type"), perSession.header.Get("Retry-After"), perSession.body.String())
 	}
 	cancelOne()
 	cancelTwo()
@@ -242,6 +242,25 @@ func TestSSESubscriberLimits(t *testing.T) {
 	case <-doneTwo:
 	case <-time.After(time.Second):
 		t.Fatal("per-session second stream did not close")
+	}
+}
+
+func TestSSEStreamsCloseOnShutdownSignal(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	cancel, done := startTestSSEStream(server, store.Session{IDHash: "shutdown-session", UserID: "user"})
+	defer cancel()
+	waitForSSESubscribers(t, server, 1)
+	server.signalShutdown()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SSE stream did not close after shutdown signal")
+	}
+	server.mu.Lock()
+	remaining := len(server.subscribers)
+	server.mu.Unlock()
+	if remaining != 0 {
+		t.Fatalf("SSE subscribers after shutdown = %d, want 0", remaining)
 	}
 }
 

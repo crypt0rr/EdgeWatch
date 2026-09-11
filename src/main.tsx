@@ -169,6 +169,12 @@ function Shell({ displayName, version, role, permissions, onLogout }: { displayN
           case 'application-update-available':
             void client.invalidateQueries({ queryKey: ['admin-status'] })
             break
+          case 'stream_limit':
+            // The server has sent an in-band backoff marker and will close
+            // this EventSource cleanly. EventSource automatically reconnects
+            // using the advertised retry delay; avoid invalidating every
+            // query while the subscriber limit is under pressure.
+            break
           case 'refresh_required':
           default:
             // Unknown events and a replay gap deliberately trigger a full

@@ -60,6 +60,9 @@ func run(args []string) error {
 	configPath := fs.String("config", "/etc/edgewatch/config.yaml", "configuration file")
 	output := fs.String("output", "text", "text or json")
 	outPath := fs.String("out", "", "output file for backup or baseline export")
+	fromPath := fs.String("from", "", "source database file for restore")
+	allowSidecarReplay := fs.Bool("allow-sidecar-replay", false, "allow existing SQLite sidecars during an intentional crash-recovery restore")
+	dryRun := fs.Bool("dry-run", false, "inspect a restore without replacing the destination")
 	jobName := fs.String("job", "", "job name")
 	scanID := fs.String("scan-id", "", "scan ID")
 	limit := fs.Int("limit", 50, "history limit")
@@ -74,7 +77,7 @@ func run(args []string) error {
 		return usage()
 	}
 	loadConfig := config.Load
-	if cmd == "admin" || cmd == "backup" || cmd == "verify" || cmd == "health" || cmd == "status" || cmd == "history" || (cmd == "baseline" && action == "export") {
+	if cmd == "admin" || cmd == "backup" || cmd == "verify" || cmd == "health" || cmd == "status" || cmd == "history" || cmd == "restore" || (cmd == "baseline" && action == "export") {
 		// Host recovery must not depend on monitor-only configuration such as
 		// Shoutrrr destinations, encryption keys, listener settings, or legacy
 		// YAML job semantics.
@@ -89,6 +92,26 @@ func run(args []string) error {
 			return errors.New("expected: config validate")
 		}
 		return printValue(*output, normalizedConfig(cfg))
+	}
+	if cmd == "restore" {
+		if *fromPath == "" {
+			return errors.New("--from is required")
+		}
+		if *dryRun && *allowSidecarReplay {
+			return errors.New("--allow-sidecar-replay cannot be combined with --dry-run")
+		}
+		preflight, err := store.PreflightRestore(context.Background(), *fromPath, cfg.Database)
+		if err != nil {
+			return err
+		}
+		if *dryRun {
+			return printValue(*output, preflight)
+		}
+		result, err := store.Restore(context.Background(), *fromPath, cfg.Database, store.RestoreOptions{AllowSidecarReplay: *allowSidecarReplay})
+		if err != nil {
+			return err
+		}
+		return printValue(*output, result)
 	}
 	// Keep the daemon as the sole migration/repair owner. Read-only health and
 	// diagnostic commands must never create a database or mutate schema state,
@@ -178,7 +201,7 @@ func run(args []string) error {
 
 func usage() error {
 	fmt.Fprintln(os.Stderr, `Usage: edgewatch <command> [options]
-	Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, backup, verify, notify test, admin setup-token|reset-password|disable-totp, health, version
+	Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, backup, restore, verify, notify test, admin setup-token|reset-password|disable-totp, health, version
 	Admin recovery actions accept --username (default admin) and require host access.`)
 	return errors.New("invalid or missing command")
 }

@@ -403,14 +403,37 @@ passwords, sessions, or encryption keys.
 For a full deployment backup, retain the complete `./data` directory as well as
 the deployment configuration and key files. SQLite uses WAL mode, so a raw
 directory copy should be made while EdgeWatch is stopped; the `backup` command
-is the supported live alternative. To restore a single database, stop the
-service first, remove any existing `edgewatch.db-wal`, `edgewatch.db-shm`, and
-`edgewatch.db-journal` sidecars, then replace the database and its companion key
-files together. Alternatively restore the complete `./data` directory as one
-consistent snapshot. Run `verify` against the restored database before starting
-the matching EdgeWatch image; never replace a live database while the daemon is
-running, because stale WAL frames can otherwise be replayed into the restored
-file.
+is the supported live alternative.
+
+For a normal single-file restore, stop EdgeWatch first and use the host-safe
+restore command. It performs a read-only preflight and refuses to replace the
+database when a WAL, SHM, or rollback-journal sidecar is present beside either
+file. This refusal is intentional: SQLite sidecars do not carry a portable
+database identity, so an older sidecar could be replayed into a replacement
+database. Remove or move the reported sidecars, then run the restore and verify
+the result before starting EdgeWatch again:
+
+```console
+docker compose stop edgewatch
+docker compose run --rm --no-deps -T edgewatch edgewatch restore \
+  --config /etc/edgewatch/config.yaml \
+  --from /var/lib/edgewatch/backups/edgewatch-20260911T120000Z.db \
+  --output json
+docker compose run --rm --no-deps -T edgewatch edgewatch verify \
+  --config /etc/edgewatch/config.yaml --output json
+docker compose up -d edgewatch
+```
+
+Use `--dry-run` to inspect the source, destination, and sidecars without
+changing any bytes. `--allow-sidecar-replay` is an explicit crash-recovery
+escape hatch only for an operator who has verified that the database and its
+companion files are one intentional SQLite recovery set; it preserves the
+sidecars and may replay their frames. It must not be used for an ordinary
+single-file backup. Alternatively restore the complete `./data` directory as
+one consistent snapshot, including all SQLite sidecars and companion key files.
+Never replace a live database while the daemon is running, and always run
+`verify` against the restored database before starting the matching EdgeWatch
+image.
 
 For an upgrade, stop the current service and make a complete backup before
 starting the new image. SQLite uses WAL mode, so copy the database only while

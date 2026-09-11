@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -254,6 +255,60 @@ func TestRunBackupVerifyAndBaselineExport(t *testing.T) {
 	}
 	if exported["format_version"] != float64(store.BaselineExportVersion) {
 		t.Fatalf("baseline export = %#v", exported)
+	}
+}
+
+func TestRunRestoreDryRunAndReplacement(t *testing.T) {
+	dir := t.TempDir()
+	database := filepath.Join(dir, "edgewatch.db")
+	source := filepath.Join(dir, "source.db")
+	createCLIStoreFixture(t, source, "source")
+	createCLIStoreFixture(t, database, "destination")
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("database: "+database+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"restore", "--config", configPath, "--from", source, "--dry-run", "--output", "json"}); err != nil {
+		t.Fatalf("restore dry-run: %v", err)
+	}
+	if err := os.WriteFile(database+"-wal", []byte("stale WAL"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"restore", "--config", configPath, "--from", source, "--output", "json"}); !errors.Is(err, store.ErrRestoreSidecars) {
+		t.Fatalf("restore with stale sidecar error = %v, want ErrRestoreSidecars", err)
+	}
+	if err := os.Remove(database + "-wal"); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"restore", "--config", configPath, "--from", source, "--output", "json"}); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	s, err := store.OpenReadOnlyExisting(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	var value string
+	if err := s.DB.QueryRowContext(context.Background(), `SELECT value FROM cli_restore_fixture`).Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	if value != "source" {
+		t.Fatalf("restored CLI value = %q, want source", value)
+	}
+}
+
+func createCLIStoreFixture(t *testing.T, path, value string) {
+	t.Helper()
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`CREATE TABLE cli_restore_fixture (value TEXT NOT NULL); INSERT INTO cli_restore_fixture(value) VALUES (?)`, value); err != nil {
+		s.Close()
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

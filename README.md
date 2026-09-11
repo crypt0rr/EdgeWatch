@@ -274,9 +274,11 @@ selection.
 selected scanner. Set it to `false` when host discovery is required. If Nmap
 discovery reports an expected target as down or omits it, EdgeWatch records an
 explicit `unreachable` host observation while committing the other addresses.
-That partial result never treats the target as closed or changes a baseline;
-the next complete scan can resume comparison. A completely empty Nmap result
-still fails the scan as a scanner error.
+The scan is marked `incomplete`, emits a warning naming only the affected
+addresses, and compares reachable targets immediately. It never treats a
+missing address as closed, advances a baseline, or clears an incident for that
+address; the next complete scan resumes comparison. A completely empty Nmap
+result still fails the scan as a scanner error.
 
 For an already established baseline, a complete scan that suddenly reports no
 positive ports is treated as a scan-level anomaly. EdgeWatch records one

@@ -521,6 +521,12 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	} else if !resumableRun {
 		scan.Status = "success"
 	}
+	if scanErr == nil {
+		// Preserve reachable evidence from a partial discovery pass while making
+		// the terminal result explicit. The engine will compare only complete
+		// target scopes and will not advance a baseline from this scan.
+		engine.MarkIncompleteScan(&scan)
+	}
 	a.updateActivePhase(scan.ID, "finalizing")
 	persistTimeout := scanPersistenceTimeout(len(scan.Snapshot.Hosts))
 	if a.Logger != nil {
@@ -555,7 +561,7 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		if err := a.Store.SaveScan(persistCtx, scan); err != nil {
 			return scan, nil, err
 		}
-		if scan.Status != "success" {
+		if scan.Status != "success" && scan.Status != "incomplete" {
 			events, finalizeErr = a.Engine.Failure(persistCtx, job.Name, scan)
 		} else {
 			events, finalizeErr = a.Engine.Success(persistCtx, job, scan)

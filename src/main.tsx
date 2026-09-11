@@ -128,6 +128,7 @@ function Shell({ displayName, version, role, permissions, onLogout }: { displayN
           case 'scan-paused':
           case 'scan-recovered':
           case 'scan-failure':
+          case 'scan-incomplete':
           case 'scan-canceled':
           case 'scan-anomaly':
             void client.invalidateQueries({ queryKey: ['active-scans'] })

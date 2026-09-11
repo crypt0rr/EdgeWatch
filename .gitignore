@@ -1,5 +1,6 @@
 /edgewatch
 /dist/
+/release-binaries/
 /data/
 /config.yaml
 /notification-urls.txt

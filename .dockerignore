@@ -1,7 +1,6 @@
 .git
 .github
-dist
-internal/webui/dist
+/dist
 data
 edgewatch
 config.yaml

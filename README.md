@@ -119,6 +119,12 @@ the replacement is issued.
   read-only SQLite pool alongside the single writer connection. WAL keeps those
   reads available during scan commits and pruning; in-memory test databases
   intentionally continue to use their shared writer connection.
+- The authenticated live-update stream uses a bounded replay window and
+  reconnects automatically when subscriber limits are reached. Stream
+  authorization is refreshed at most every two seconds, so a revoked account
+  can lose access within that bound without a database lookup for every event.
+  During a graceful shutdown, active streams are signalled and joined before
+  the HTTP server and database are closed.
 - TOTP is optional. Its seed is encrypted with a separate authentication key
   generated at `./data/auth.key` when TOTP is first enabled. Set
   `web.auth_key_file` to a mode-`0600` file containing 32 raw bytes or 64
@@ -455,7 +461,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 29), but it is forward-only: an older binary refuses a newer schema.
+version 30), but it is forward-only: an older binary refuses a newer schema.
 To roll back, stop the new service, restore the entire pre-upgrade `./data`
 directory and deployment configuration, then start the previous image. Do not
 point an older image at the upgraded database. The previous named Docker

@@ -33,7 +33,15 @@ type Server struct {
 	history       []sseMessage
 	historyBytes  int
 	nextEventID   uint64
+	eventIDLimit  uint64
 	dropped       uint64
+	shutdown      chan struct{}
+	shutdownOnce  sync.Once
+	sseWG         sync.WaitGroup
+	sseCancels    map[chan sseMessage]context.CancelFunc
+	sseAuthMu     sync.Mutex
+	sseAuthCache  map[string]sseAuthCacheEntry
+	sseAuthTTL    time.Duration
 	pendingTOTP   map[string]pendingTOTP
 	now           func() time.Time
 	testMu        sync.Mutex
@@ -65,6 +73,11 @@ type sseMessage struct {
 	payload []byte
 }
 
+type sseAuthCacheEntry struct {
+	session store.Session
+	checked time.Time
+}
+
 type pendingTOTP struct {
 	Secret  string
 	Expires time.Time
@@ -75,6 +88,8 @@ const defaultHTTPWriteTimeout = 60 * time.Second
 const (
 	defaultMaxSSESubscribers        = 256
 	defaultMaxSSESubscribersPerUser = 4
+	defaultSSEAuthCacheTTL          = 2 * time.Second
+	sseEventIDBlockSize             = uint64(1 << 20)
 )
 
 // pendingTOTPMaxEntries bounds secrets held for enrolments that were started
@@ -99,12 +114,23 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	rdapClient.OnCacheWriteError = func(err error) {
 		logger.Warn("rdap cache write failed", "error", err)
 	}
-	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
+	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, shutdown: make(chan struct{}), sseCancels: map[chan sseMessage]context.CancelFunc{}, sseAuthCache: map[string]sseAuthCacheEntry{}, sseAuthTTL: defaultSSEAuthCacheTTL, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
 	if s != nil {
-		if id, err := s.MaxEventID(context.Background()); err != nil {
-			logger.Warn("SSE event cursor could not be restored", "error", err)
+		if start, end, err := s.ReserveSSEEventIDs(context.Background(), sseEventIDBlockSize); err != nil {
+			logger.Warn("SSE event cursor could not be reserved", "error", err)
+			// A timestamp seed keeps a degraded/read-only fixture monotonic for
+			// the lifetime of this process even when the durable cursor cannot be
+			// updated. Normal daemon databases use the reserved durable range.
+			if id, maxErr := s.MaxEventID(context.Background()); maxErr == nil {
+				v.nextEventID = id
+			}
+			if seed := uint64(time.Now().UnixNano()); seed > v.nextEventID {
+				v.nextEventID = seed
+			}
+			v.eventIDLimit = ^uint64(0)
 		} else {
-			v.nextEventID = id
+			v.nextEventID = start - 1
+			v.eventIDLimit = end
 		}
 	}
 	if a != nil && a.Config != nil {
@@ -186,8 +212,14 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener, addre
 	var shutdownOnce sync.Once
 	shutdown := func() {
 		shutdownOnce.Do(func() {
+			// http.Server.Shutdown does not cancel active streaming request
+			// contexts. Signal and join SSE handlers first so the application
+			// cannot close SQLite while a stream is still re-authenticating or
+			// writing a final event.
+			s.signalShutdown()
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			s.waitForSSEShutdown(shutdownCtx)
 			_ = server.Shutdown(shutdownCtx)
 			close(shutdownDone)
 		})

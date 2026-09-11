@@ -530,6 +530,10 @@ func TestSSEStopsDeliveringAfterSessionRevocation(t *testing.T) {
 	if err := db.DeleteAllSessions(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// Stream authorization is cached briefly to avoid a storage lookup for
+	// every live event. Revocation is still bounded by the documented cache
+	// window rather than being assumed to be instantaneous.
+	time.Sleep(defaultSSEAuthCacheTTL + 50*time.Millisecond)
 	server.broadcast(map[string]any{"type": "should-not-deliver"})
 	select {
 	case body := <-done:

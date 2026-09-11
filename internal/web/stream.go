@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -21,6 +22,8 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 		writeError(w, 500, "stream_unsupported", "streaming is unavailable", nil)
 		return
 	}
+	streamCtx, streamCancel := context.WithCancel(r.Context())
+	defer streamCancel()
 	// http.Server.WriteTimeout protects every ordinary response. SSE is the
 	// one intentional exception: it stays open and sends periodic heartbeats,
 	// so remove the per-request deadline only after the handler has established
@@ -47,6 +50,10 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	lastID, _ := strconv.ParseUint(strings.TrimSpace(r.Header.Get("Last-Event-ID")), 10, 64)
 	ch := make(chan sseMessage, 64)
 	s.mu.Lock()
+	if s.shutdown == nil {
+		s.shutdown = make(chan struct{})
+	}
+	shutdown := s.shutdown
 	if s.subscribers == nil {
 		s.subscribers = map[chan sseMessage]struct{}{}
 	}
@@ -56,27 +63,41 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	if s.subscriberUse == nil {
 		s.subscriberUse = map[string]int{}
 	}
+	if s.sseCancels == nil {
+		s.sseCancels = map[chan sseMessage]context.CancelFunc{}
+	}
+	if channelClosed(shutdown) {
+		s.mu.Unlock()
+		return
+	}
 	if len(s.subscribers) >= maxSubscribers {
 		s.mu.Unlock()
-		w.Header().Set("Retry-After", "5")
-		writeError(w, http.StatusServiceUnavailable, "stream_limit", "too many live streams", nil)
+		writeSSELimit(w, flusher, "too many live streams")
 		return
 	}
 	if s.subscriberUse[subscriberKey] >= maxSubscribersPerUser {
 		s.mu.Unlock()
-		w.Header().Set("Retry-After", "5")
-		writeError(w, http.StatusServiceUnavailable, "stream_limit", "too many live streams for this session", nil)
+		writeSSELimit(w, flusher, "too many live streams for this session")
 		return
 	}
 	replay := s.replayLocked(lastID)
 	s.subscribers[ch] = struct{}{}
 	s.subscriberKey[ch] = subscriberKey
 	s.subscriberUse[subscriberKey]++
+	s.sseCancels[ch] = streamCancel
+	s.sseWG.Add(1)
 	s.mu.Unlock()
+	s.sseAuthMu.Lock()
+	if s.sseAuthCache == nil {
+		s.sseAuthCache = map[string]sseAuthCacheEntry{}
+	}
+	s.sseAuthCache[subscriberKey] = sseAuthCacheEntry{session: session, checked: s.streamNow()}
+	s.sseAuthMu.Unlock()
 	defer func() {
 		s.mu.Lock()
 		delete(s.subscribers, ch)
 		delete(s.subscriberKey, ch)
+		delete(s.sseCancels, ch)
 		if use := s.subscriberUse[subscriberKey]; use <= 1 {
 			delete(s.subscriberUse, subscriberKey)
 		} else {
@@ -84,6 +105,10 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 		}
 		close(ch)
 		s.mu.Unlock()
+		s.sseAuthMu.Lock()
+		delete(s.sseAuthCache, subscriberKey)
+		s.sseAuthMu.Unlock()
+		s.sseWG.Done()
 	}()
 	if _, err := w.Write([]byte(": connected\nretry: 5000\n\n")); err != nil {
 		return
@@ -101,22 +126,19 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	defer heartbeat.Stop()
 	for {
 		select {
-		case <-r.Context().Done():
+		case <-streamCtx.Done():
+			return
+		case <-shutdown:
 			return
 		case message, ok := <-ch:
 			if !ok {
 				return
 			}
 			// Sessions and roles can be revoked while a browser keeps its
-			// EventSource open. Re-check before delivering every event so a
-			// disabled or demoted principal cannot receive the next change, and
-			// the heartbeat below bounds exposure when the stream is otherwise
-			// quiet.
-			if s.Auth == nil {
-				return
-			}
-			current, authorized := s.Auth.AuthenticateReadOnly(r.Context(), r)
-			if !authorized || !auth.HasPermission(current, auth.PermissionStreamRead) {
+			// EventSource open. The short authorization cache bounds exposure for
+			// a disabled or demoted principal, and the heartbeat below refreshes
+			// that decision when the stream is otherwise quiet.
+			if !s.streamAuthorized(streamCtx, r, subscriberKey) {
 				return
 			}
 			if !writeSSEMessage(w, message) {
@@ -124,11 +146,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 			}
 			flusher.Flush()
 		case <-heartbeat.C:
-			if s.Auth == nil {
-				return
-			}
-			current, authorized := s.Auth.AuthenticateReadOnly(r.Context(), r)
-			if !authorized || !auth.HasPermission(current, auth.PermissionStreamRead) {
+			if !s.streamAuthorized(streamCtx, r, subscriberKey) {
 				return
 			}
 			if _, err := w.Write([]byte(": heartbeat\n\n")); err != nil {
@@ -139,12 +157,130 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	}
 }
 
+// writeSSELimit deliberately returns a successful event-stream response. A
+// browser EventSource retries a cleanly closed 200 stream, whereas a JSON 503
+// is treated as a permanent connection failure by many clients. The retry
+// hint and in-band marker let the console back off while subscriber pressure
+// remains high without requiring a page reload.
+func writeSSELimit(w http.ResponseWriter, flusher http.Flusher, reason string) {
+	w.Header().Set("Retry-After", "5")
+	_, _ = fmt.Fprintf(w, "retry: 5000\ndata: {\"type\":\"stream_limit\",\"reason\":%q,\"retry_after\":5}\n\n", reason)
+	flusher.Flush()
+}
+
+func channelClosed(ch <-chan struct{}) bool {
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
+}
+
+// signalShutdown closes the server-wide stream signal exactly once. The
+// mutex makes closing the signal and admitting a new subscriber atomic, so a
+// shutdown wait cannot race a late registration.
+func (s *Server) signalShutdown() {
+	var cancels []context.CancelFunc
+	s.mu.Lock()
+	if s.shutdown == nil {
+		s.shutdown = make(chan struct{})
+	}
+	s.shutdownOnce.Do(func() {
+		close(s.shutdown)
+		for _, cancel := range s.sseCancels {
+			cancels = append(cancels, cancel)
+		}
+	})
+	s.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (s *Server) waitForSSEShutdown(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		s.sseWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		if s.Log != nil {
+			s.Log.Warn("SSE handlers did not drain before shutdown deadline")
+		}
+	}
+}
+
+// streamAuthorized avoids a storage read for every event while bounding the
+// time a revoked or demoted account can continue receiving updates. The
+// initial authenticated request seeds the cache; subsequent checks refresh it
+// at most once per TTL (two seconds in production).
+func (s *Server) streamAuthorized(ctx context.Context, r *http.Request, key string) bool {
+	now := s.streamNow()
+	ttl := s.sseAuthTTL
+	if ttl <= 0 {
+		ttl = defaultSSEAuthCacheTTL
+	}
+	s.sseAuthMu.Lock()
+	if entry, ok := s.sseAuthCache[key]; ok && now.Sub(entry.checked) < ttl {
+		s.sseAuthMu.Unlock()
+		return auth.HasPermission(entry.session, auth.PermissionStreamRead)
+	}
+	s.sseAuthMu.Unlock()
+	if s.Auth == nil {
+		return false
+	}
+	current, authorized := s.Auth.AuthenticateReadOnly(ctx, r)
+	if !authorized || !auth.HasPermission(current, auth.PermissionStreamRead) {
+		s.sseAuthMu.Lock()
+		delete(s.sseAuthCache, key)
+		s.sseAuthMu.Unlock()
+		return false
+	}
+	s.sseAuthMu.Lock()
+	if s.sseAuthCache == nil {
+		s.sseAuthCache = map[string]sseAuthCacheEntry{}
+	}
+	s.sseAuthCache[key] = sseAuthCacheEntry{session: current, checked: now}
+	s.sseAuthMu.Unlock()
+	return true
+}
+
+func (s *Server) streamNow() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
 func (s *Server) broadcast(value map[string]any) {
 	payload := boundedSSEPayload(value)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.subscribers == nil {
 		s.subscribers = map[chan sseMessage]struct{}{}
+	}
+	if s.eventIDLimit == 0 && s.Store == nil {
+		// Servers assembled directly in tests or embedded callers do not have a
+		// migrated store. Keep their in-memory cursor useful without requiring
+		// database setup.
+		s.eventIDLimit = ^uint64(0)
+	}
+	if s.nextEventID >= s.eventIDLimit && s.Store != nil {
+		if start, end, err := s.Store.ReserveSSEEventIDsAfter(context.Background(), sseEventIDBlockSize, s.nextEventID); err == nil {
+			s.nextEventID = start - 1
+			s.eventIDLimit = end
+		} else if s.Log != nil {
+			s.Log.Warn("SSE event cursor reservation failed", "error", err)
+		}
+	}
+	if s.nextEventID == ^uint64(0) {
+		if s.Log != nil {
+			s.Log.Error("SSE event cursor exhausted")
+		}
+		return
 	}
 	s.nextEventID++
 	message := sseMessage{id: s.nextEventID, payload: payload}

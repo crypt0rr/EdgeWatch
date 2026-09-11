@@ -320,6 +320,10 @@ func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 		}
 		plan = append(plan, strings.ToLower(detail))
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatal(err)
+	}
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}

@@ -81,6 +81,10 @@ func TestSeededPerformanceRegressionInvariants(t *testing.T) {
 		}
 		plan = append(plan, detail)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		t.Fatal(err)
+	}
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)
 	}

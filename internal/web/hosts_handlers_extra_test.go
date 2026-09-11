@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -161,5 +162,56 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 	var decoded map[string]any
 	if err := json.Unmarshal(call("/api/v1", func(w http.ResponseWriter, r *http.Request) { server.scanHostsRoute(w, r, scan.ID) }).Body.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestLatestScannedHostsWalksAllLegacyPagesAndSkipsMalformedRows(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	server := &Server{Store: db, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	now := time.Now().UTC()
+	// A malformed retained snapshot must not make the inventory endpoint fail.
+	if _, err := db.DB.ExecContext(ctx, `INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?)`, "legacy-malformed", "legacy", now.Add(2*time.Minute).Format(time.RFC3339Nano), now.Add(2*time.Minute).Format(time.RFC3339Nano), "success", "", "Nmap", "legacy", []byte(`{"not valid"`)); err != nil {
+		t.Fatal(err)
+	}
+	// More than one compatibility page proves that the old arbitrary scan cap
+	// no longer drops hosts from the global projection.
+	for index := 0; index < 101; index++ {
+		address := fmt.Sprintf("198.18.0.%d", index+1)
+		scan := model.Scan{
+			ID:         fmt.Sprintf("legacy-%03d", index),
+			Job:        "legacy",
+			StartedAt:  now.Add(-time.Duration(index+1) * time.Minute),
+			FinishedAt: now.Add(-time.Duration(index+1) * time.Minute),
+			Status:     "success",
+			Snapshot: model.Snapshot{Units: []model.Unit{{
+				Target: address, Protocol: "tcp", Addresses: []string{address},
+				Ports: []model.PortState{{Port: 443, State: "open"}},
+			}}},
+		}
+		if err := db.SaveScan(ctx, scan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	latest, err := server.latestScannedHosts(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(latest) != 101 {
+		t.Fatalf("legacy host count = %d, want 101", len(latest))
+	}
+	seen := make(map[string]bool, len(latest))
+	for _, host := range latest {
+		seen[host.Address] = true
+		if !host.Legacy {
+			t.Fatalf("legacy host %s was not marked legacy", host.Address)
+		}
+	}
+	if !seen["198.18.0.101"] {
+		t.Fatal("host from second legacy page was omitted")
 	}
 }

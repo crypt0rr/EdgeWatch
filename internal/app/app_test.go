@@ -464,6 +464,59 @@ func TestDaemonReturnsWhenLeaseIsLost(t *testing.T) {
 	}
 }
 
+func TestDaemonStartupPreservesLiveJobLease(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	now := time.Now().UTC()
+	if err := s.AcquireJobLease(ctx, "job", "cli-scan", now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.heartbeatInterval = 10 * time.Millisecond
+	done := make(chan error, 1)
+	go func() { done <- a.Daemon(ctx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var owner string
+		if scanErr := s.DB.QueryRowContext(ctx, `SELECT owner FROM daemon_lease WHERE id=1`).Scan(&owner); scanErr == nil && owner != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("daemon did not acquire its lease")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	var owner string
+	var expiresAt string
+	if err := s.DB.QueryRowContext(ctx, `SELECT owner,expires_at FROM job_leases WHERE job=?`, "job").Scan(&owner, &expiresAt); err != nil {
+		t.Fatal(err)
+	}
+	if owner != "cli-scan" {
+		t.Fatalf("daemon startup replaced live job lease owner %q", owner)
+	}
+	if expiresAt == "" {
+		t.Fatal("daemon startup removed job lease expiry")
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("daemon returned unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon did not stop after cancellation")
+	}
+}
+
 func TestManagedScanLeaseBlocksScopeEditUntilScanCompletes(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

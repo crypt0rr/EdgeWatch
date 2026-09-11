@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -222,16 +223,30 @@ func (s *Store) Heartbeat(ctx context.Context, owner string) error {
 	return nil
 }
 
-// ReleaseAllJobLeases clears scan leases after the daemon has acquired the
-// exclusive daemon lease. A process that crashed cannot run its deferred
-// release, so without this reconciliation a job would remain blocked until
-// its full scan timeout. The daemon lease makes clearing all rows safe.
-func (s *Store) ReleaseAllJobLeases(ctx context.Context) (int64, error) {
-	result, err := s.DB.ExecContext(ctx, `DELETE FROM job_leases`)
+// ReclaimExpiredJobLeases removes only leases whose owner can no longer be
+// considered live. Every scan writes its opaque run identifier as owner and a
+// bounded expiry before it starts work. A daemon restart must not delete an
+// unexpired lease: that lease may belong to a scan started by the CLI (or to a
+// daemon process that is still draining), and clearing it would allow the same
+// job to run concurrently. Clean shutdowns release the exact owner through
+// ReleaseJobLease; crash recovery waits for expiry.
+func (s *Store) ReclaimExpiredJobLeases(ctx context.Context, now time.Time) (int64, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM job_leases WHERE expires_at<=?`, now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// ReleaseAllJobLeases is retained as a source-compatible wrapper for older
+// callers. Its historical delete-all behavior was unsafe across daemon and
+// CLI processes; it now performs the same expiry-only reconciliation as the
+// daemon startup path.
+func (s *Store) ReleaseAllJobLeases(ctx context.Context) (int64, error) {
+	return s.ReclaimExpiredJobLeases(ctx, time.Now().UTC())
 }
 func (s *Store) ReleaseLease(ctx context.Context, owner string) error {
 	_, err := s.DB.ExecContext(ctx, `DELETE FROM daemon_lease WHERE id=1 AND owner=?`, owner)
@@ -253,6 +268,15 @@ func (s *Store) Healthy(ctx context.Context) error {
 }
 
 func (s *Store) AcquireJobLease(ctx context.Context, job, owner string, expires time.Time) error {
+	if strings.TrimSpace(job) == "" {
+		return errors.New("job lease job is required")
+	}
+	if strings.TrimSpace(owner) == "" {
+		return errors.New("job lease owner is required")
+	}
+	if !expires.After(time.Now().UTC()) {
+		return errors.New("job lease expiry must be in the future")
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	result, err := s.DB.ExecContext(ctx, `INSERT INTO job_leases(job,owner,expires_at) VALUES(?,?,?) ON CONFLICT(job) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at WHERE job_leases.expires_at < ?`, job, owner, expires.UTC().Format(time.RFC3339Nano), now)
 	if err != nil {
@@ -271,6 +295,15 @@ func (s *Store) AcquireJobLease(ctx context.Context, job, owner string, expires 
 // the lease write: either the edit observes the lease, or the scan observes
 // the newer revision and is rejected before it can touch runtime state.
 func (s *Store) AcquireJobLeaseForRevision(ctx context.Context, job, owner string, revision int64, expires time.Time) error {
+	if strings.TrimSpace(job) == "" {
+		return errors.New("job lease job is required")
+	}
+	if strings.TrimSpace(owner) == "" {
+		return errors.New("job lease owner is required")
+	}
+	if !expires.After(time.Now().UTC()) {
+		return errors.New("job lease expiry must be in the future")
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -304,6 +337,9 @@ func (s *Store) AcquireJobLeaseForRevision(ctx context.Context, job, owner strin
 }
 
 func (s *Store) ReleaseJobLease(ctx context.Context, job, owner string) error {
+	if strings.TrimSpace(job) == "" || strings.TrimSpace(owner) == "" {
+		return errors.New("job lease job and owner are required")
+	}
 	_, err := s.DB.ExecContext(ctx, `DELETE FROM job_leases WHERE job=? AND owner=?`, job, owner)
 	return err
 }

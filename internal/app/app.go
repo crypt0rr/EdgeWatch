@@ -781,10 +781,10 @@ func (a *App) Daemon(ctx context.Context) error {
 	} else if released > 0 {
 		a.Logger.Info("startup notification claims released", "claims", released)
 	}
-	if released, err := a.Store.ReleaseAllJobLeases(ctx); err != nil {
+	if released, err := a.Store.ReclaimExpiredJobLeases(ctx, time.Now().UTC()); err != nil {
 		a.Logger.Error("startup job lease cleanup failed", "error", err)
 	} else if released > 0 {
-		a.Logger.Info("startup job leases released", "leases", released)
+		a.Logger.Info("startup expired job leases reclaimed", "leases", released)
 	}
 	defer func() {
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

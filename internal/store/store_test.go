@@ -993,17 +993,39 @@ func TestLeaseCanBeReleased(t *testing.T) {
 	}
 }
 
-func TestReleaseAllJobLeasesRecoversStaleScanLease(t *testing.T) {
+func TestReclaimExpiredJobLeasesRecoversStaleScanLease(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if err := s.AcquireJobLease(ctx, "job", "stale-scan", time.Now().UTC().Add(time.Hour)); err != nil {
+	now := time.Now().UTC()
+	if err := s.AcquireJobLease(ctx, "job", "stale-scan", now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if released, err := s.ReleaseAllJobLeases(ctx); err != nil || released != 1 {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE job_leases SET expires_at=? WHERE job=?`, now.Add(-time.Minute).Format(time.RFC3339Nano), "job"); err != nil {
+		t.Fatal(err)
+	}
+	if released, err := s.ReclaimExpiredJobLeases(ctx, now); err != nil || released != 1 {
 		t.Fatalf("released job leases = %d, error = %v", released, err)
 	}
 	if err := s.AcquireJobLease(ctx, "job", "new-scan", time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatalf("job lease was not recoverable after reconciliation: %v", err)
+	}
+}
+
+func TestReclaimExpiredJobLeasesLeavesLiveOwner(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	if err := s.AcquireJobLease(ctx, "job", "cli-scan", now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed, err := s.ReclaimExpiredJobLeases(ctx, now); err != nil || reclaimed != 0 {
+		t.Fatalf("reclaimed live job leases = %d, error = %v", reclaimed, err)
+	}
+	if err := s.AcquireJobLease(ctx, "job", "daemon-scan", now.Add(time.Hour)); !errors.Is(err, ErrJobBusy) {
+		t.Fatalf("live CLI-shaped lease was not preserved, acquire error = %v", err)
+	}
+	if err := s.ReleaseJobLease(ctx, "job", "cli-scan"); err != nil {
+		t.Fatal(err)
 	}
 }
 

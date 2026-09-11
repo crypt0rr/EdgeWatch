@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -142,6 +143,107 @@ func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testi
 	}
 	if len(detailResponse.Host.Protocols) != 1 || len(detailResponse.Host.Protocols[0].Ports) != 2 {
 		t.Fatalf("accepted baseline detail = %#v", detailResponse.Host)
+	}
+
+	// Historical host pages must expose the same current expectation as the
+	// baseline explorer. The source scan remains immutable, but accepted
+	// runtime overlays are authoritative for the expected field.
+	historicalRecorder := httptest.NewRecorder()
+	server.jobScanHost(historicalRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1", nil), record.ID, scan.ID, "198.51.100.1")
+	if historicalRecorder.Code != http.StatusOK {
+		t.Fatalf("historical host detail status %d: %s", historicalRecorder.Code, historicalRecorder.Body.String())
+	}
+	var historicalResponse struct {
+		Expected model.HostObservation `json:"expected"`
+	}
+	if err := json.Unmarshal(historicalRecorder.Body.Bytes(), &historicalResponse); err != nil {
+		t.Fatal(err)
+	}
+	if len(historicalResponse.Expected.Protocols) != 1 || len(historicalResponse.Expected.Protocols[0].Ports) != 2 {
+		t.Fatalf("historical accepted baseline = %#v", historicalResponse.Expected)
+	}
+}
+
+func TestHistoricalHostUsesAcceptedPortAndServiceRemovals(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := app.New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	job := config.NormalizeJob(config.Job{Name: "accepted-removal-host", Schedule: "0 * * * *", Targets: []string{"198.51.100.20"}, TCP: &config.Protocol{Ports: "25,80", Mode: "connect", ServiceDetection: true}})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	scan := model.Scan{
+		ID: "accepted-removal-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name,
+		StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(),
+		Snapshot: model.Snapshot{
+			Units: []model.Unit{{
+				Target: "198.51.100.20", Protocol: "tcp", Addresses: []string{"198.51.100.20"},
+				Ports: []model.PortState{{Port: 25, State: "open", Service: "smtp"}, {Port: 80, State: "open", Service: "http"}},
+			}},
+			Scopes: []model.Scope{{Target: "198.51.100.20", Protocol: "tcp", Ports: "25,80", ServiceDetection: true}},
+			Hosts: []model.HostObservation{{
+				Address: "198.51.100.20", SourceTargets: []string{"198.51.100.20"}, Status: "up",
+				Protocols: []model.ProtocolObservation{{
+					Protocol: "tcp", ScanType: "tcp connect", ScannedPorts: "25,80", ScannedPortCount: 2, ServiceDetection: true,
+					Ports: []model.PortObservation{{Port: 25, State: "open", Service: &model.ServiceObservation{Product: "smtp"}}, {Port: 80, State: "open", Service: &model.ServiceObservation{Product: "http"}}},
+				}},
+			}},
+		},
+	}
+	if err := db.SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ApproveRuntime(ctx, record.ID, record.Job.Name, scan); err != nil {
+		t.Fatal(err)
+	}
+	portKey := "port|198.51.100.20|tcp|25"
+	serviceKey := "service|198.51.100.20|tcp|25"
+	_, err = db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents[portKey] = model.Incident{Change: model.Change{Key: portKey, Kind: "port", Target: "198.51.100.20", Protocol: "tcp", Port: 25, Old: "open", New: "not-open", Severity: "info"}, ScanID: scan.ID}
+		state.Incidents[serviceKey] = model.Incident{Change: model.Change{Key: serviceKey, Kind: "service", Target: "198.51.100.20", Protocol: "tcp", Port: 25, Old: "smtp", New: "not-open", Severity: "info"}, ScanID: scan.ID}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A service/port pair from the same scan is one operator decision. The
+	// selected service row removes both related changes atomically, so the
+	// historical expected view cannot retain the old positive port.
+	events, err := db.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, serviceKey, store.AuditEntry{})
+	if err != nil {
+		t.Fatalf("accept service removal = %v", err)
+	}
+	if len(events) != 1 || len(events[0].Changes) != 2 {
+		t.Fatalf("grouped removal events = %#v", events)
+	}
+	if _, err := db.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, portKey, store.AuditEntry{}); !errors.Is(err, store.ErrIncidentNotFound) {
+		t.Fatalf("stale port removal error = %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	server.jobScanHost(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.20", nil), record.ID, scan.ID, "198.51.100.20")
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("historical removal detail status %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var response struct {
+		Expected model.HostObservation `json:"expected"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Expected.Protocols) != 1 || len(response.Expected.Protocols[0].Ports) != 1 || response.Expected.Protocols[0].Ports[0].Port != 80 {
+		t.Fatalf("historical removal expectation = %#v", response.Expected)
 	}
 }
 

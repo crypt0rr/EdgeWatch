@@ -825,6 +825,62 @@ func hostFromSnapshot(snapshot model.Snapshot, address string) (model.HostObserv
 	return model.HostObservation{}, page.DataQuality, false
 }
 
+// expectedHostForScan returns the current comparison baseline for a host shown
+// through a historical scan route. The immutable source scan is the normal
+// source, but accepting an incident deliberately creates a runtime overlay;
+// historical pages must use that overlay too or they will continue to display
+// ports that the administrator already accepted as removed.
+func (s *Server) expectedHostForScan(ctx context.Context, jobID, address string, job config.Job) (model.HostObservation, bool, error) {
+	baselineID, _, err := s.Store.RuntimeBaselineMeta(ctx, jobID)
+	if err != nil {
+		return model.HostObservation{}, false, err
+	}
+	if baselineID == "" {
+		return model.HostObservation{}, false, nil
+	}
+	modified, err := s.Store.RuntimeBaselineModified(ctx, jobID)
+	if err != nil {
+		return model.HostObservation{}, false, err
+	}
+	if modified {
+		// Accepted incident changes are stored in baseline_hosts alongside the
+		// runtime state. Prefer that indexed projection so the historical route
+		// remains bounded and reflects the exact current expectation.
+		if projected, projectionErr := s.Store.GetBaselineHost(ctx, jobID, address); projectionErr == nil {
+			hosts := []model.HostObservation{projected.Host}
+			restoreHostScopes(hosts, scopesForJob(job))
+			return hosts[0], true, nil
+		} else if !errors.Is(projectionErr, store.ErrNotFound) {
+			return model.HostObservation{}, false, projectionErr
+		}
+		// Databases from before the indexed overlay projection may still carry
+		// an accepted baseline in runtime JSON. Keep that legacy fallback rather
+		// than silently reverting to the immutable source scan.
+		state, stateErr := s.Store.RuntimeState(ctx, jobID)
+		if stateErr != nil {
+			return model.HostObservation{}, false, stateErr
+		}
+		if state.Baseline != nil {
+			if host, _, found := hostFromSnapshot(*state.Baseline, address); found {
+				hosts := []model.HostObservation{host}
+				restoreHostScopes(hosts, scopesForJob(job))
+				return hosts[0], true, nil
+			}
+		}
+		return model.HostObservation{}, false, nil
+	}
+	// With no runtime overlay, use the immutable source scan that established
+	// the active baseline. This preserves the historical context shown today.
+	if baselineHost, sourceErr := s.Store.GetScanHost(ctx, baselineID, address); sourceErr == nil {
+		hosts := []model.HostObservation{baselineHost.Host}
+		restoreHostScopes(hosts, scopesForJob(job))
+		return hosts[0], true, nil
+	} else if !errors.Is(sourceErr, store.ErrNotFound) {
+		return model.HostObservation{}, false, sourceErr
+	}
+	return model.HostObservation{}, false, nil
+}
+
 func parseHasOpen(raw string) (*bool, error) {
 	if raw == "" {
 		return nil, nil
@@ -1207,27 +1263,40 @@ func (s *Server) renderScanHost(w http.ResponseWriter, r *http.Request, id, jobN
 		writeError(w, http.StatusNotFound, "not_found", "host not found", nil)
 		return
 	}
+	expectedJobID := id
+	if expectedJobID == "" {
+		// The top-level /scans/:scanID route has already verified the scan's
+		// ownership and carries the owning job ID in its summary. Use it for
+		// the expected-state lookup so global host history also reflects an
+		// accepted runtime baseline overlay.
+		expectedJobID = summary.JobID
+	}
+	var expectedJob config.Job
+	haveExpectedJob := false
+	if expectedJobID != "" {
+		if record, recordErr := s.Store.GetJob(r.Context(), expectedJobID); recordErr == nil {
+			expectedJob = record.Job
+			haveExpectedJob = true
+		} else if id != "" || !errors.Is(recordErr, store.ErrNotFound) {
+			writeError(w, http.StatusInternalServerError, "store", recordErr.Error(), nil)
+			return
+		}
+	}
 	if indexed, indexErr := s.Store.GetScanHost(r.Context(), scanID, address); indexErr == nil {
 		dedupeHost(&indexed.Host)
-		if id != "" {
-			if record, recordErr := s.Store.GetJob(r.Context(), id); recordErr == nil {
-				hosts := []model.HostObservation{indexed.Host}
-				restoreHostScopes(hosts, scopesForJob(record.Job))
-				indexed.Host = hosts[0]
-			}
+		if haveExpectedJob {
+			hosts := []model.HostObservation{indexed.Host}
+			restoreHostScopes(hosts, scopesForJob(expectedJob))
+			indexed.Host = hosts[0]
 		}
 		var expected any
-		if id != "" {
-			if baselineID, _, metaErr := s.Store.RuntimeBaselineMeta(r.Context(), id); metaErr == nil && baselineID != "" {
-				if baselineHost, baselineErr := s.Store.GetScanHost(r.Context(), baselineID, address); baselineErr == nil {
-					dedupeHost(&baselineHost.Host)
-					if record, recordErr := s.Store.GetJob(r.Context(), id); recordErr == nil {
-						hosts := []model.HostObservation{baselineHost.Host}
-						restoreHostScopes(hosts, scopesForJob(record.Job))
-						baselineHost.Host = hosts[0]
-					}
-					expected = baselineHost.Host
-				}
+		if haveExpectedJob {
+			if baselineHost, found, expectedErr := s.expectedHostForScan(r.Context(), expectedJobID, address, expectedJob); expectedErr == nil && found {
+				dedupeHost(&baselineHost)
+				expected = baselineHost
+			} else if expectedErr != nil {
+				writeError(w, http.StatusInternalServerError, "store", expectedErr.Error(), nil)
+				return
 			}
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": jobName, "scan": summary, "data_quality": indexed.DataQuality, "host": indexed.Host, "expected": expected})
@@ -1253,9 +1322,11 @@ func (s *Server) renderScanHost(w http.ResponseWriter, r *http.Request, id, jobN
 		return
 	}
 	var expected any
-	if state, stateErr := s.Store.RuntimeState(r.Context(), id); stateErr == nil && state.Baseline != nil {
-		if baselineHost, _, found := hostFromSnapshot(*state.Baseline, address); found {
-			expected = baselineHost
+	if expectedJobID != "" {
+		if state, stateErr := s.Store.RuntimeState(r.Context(), expectedJobID); stateErr == nil && state.Baseline != nil {
+			if baselineHost, _, found := hostFromSnapshot(*state.Baseline, address); found {
+				expected = baselineHost
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": jobName, "scan": summary, "data_quality": quality, "host": host, "expected": expected})

@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -108,6 +109,50 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 	server.totpDisable(disableRecorder, disable, admin)
 	if disableRecorder.Code != http.StatusNoContent {
 		t.Fatalf("TOTP disable status = %d: %s", disableRecorder.Code, disableRecorder.Body.String())
+	}
+}
+
+func TestTOTPEnablePreservesActingSessionForRecoveryCodes(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	now := time.Now().UTC()
+	actingCookie := "totp-acting-session"
+	otherCookie := "totp-other-session"
+	if err := db.CreateSessionForUserWithAuditEntry(ctx, admin.UserID, digest(actingCookie), "acting-csrf", now, now.Add(time.Hour), store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CreateSessionForUserWithAuditEntry(ctx, admin.UserID, digest(otherCookie), "other-csrf", now, now.Add(time.Hour), store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+
+	setupRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/setup", strings.NewReader(`{"password":"administrator password"}`))
+	setupRequest.Header.Set("Content-Type", "application/json")
+	setupRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: actingCookie})
+	setupResponse := httptest.NewRecorder()
+	server.totpSetup(setupResponse, setupRequest, admin)
+	if setupResponse.Code != http.StatusOK {
+		t.Fatalf("TOTP setup status = %d: %s", setupResponse.Code, setupResponse.Body.String())
+	}
+	var setupPayload struct {
+		Secret string `json:"secret"`
+	}
+	if err := json.Unmarshal(setupResponse.Body.Bytes(), &setupPayload); err != nil || setupPayload.Secret == "" {
+		t.Fatalf("TOTP setup payload = %s (%v)", setupResponse.Body.String(), err)
+	}
+
+	enableRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/enable", strings.NewReader(`{"code":"`+coverageTOTPCode(setupPayload.Secret, time.Now().Unix()/30)+`"}`))
+	enableRequest.Header.Set("Content-Type", "application/json")
+	enableRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: actingCookie})
+	enableResponse := httptest.NewRecorder()
+	server.totpEnable(enableResponse, enableRequest, admin)
+	if enableResponse.Code != http.StatusOK || !strings.Contains(enableResponse.Body.String(), "recovery_codes") {
+		t.Fatalf("TOTP enable status = %d: %s", enableResponse.Code, enableResponse.Body.String())
+	}
+	if _, err := db.GetSession(ctx, digest(actingCookie)); err != nil {
+		t.Fatalf("acting session was revoked while recovery codes were displayed: %v", err)
+	}
+	if _, err := db.GetSession(ctx, digest(otherCookie)); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("unrelated session remained after TOTP enable: %v", err)
 	}
 }
 

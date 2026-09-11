@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -12,6 +13,36 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 )
+
+func TestScanCycleUnitIdentityBackfillIsBoundedAndDeterministic(t *testing.T) {
+	ctx, s, job, plan := cycleFixture(t)
+	defer s.Close()
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
+		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit := plan.Units[0]
+	raw, err := json.Marshal(unit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=?,identity='' WHERE cycle_id=? AND sequence=?`, raw, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillScanCycleUnitIdentitiesContext(ctx, s.DB); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := s.DB.QueryRowContext(ctx, `SELECT identity FROM scan_cycle_units WHERE cycle_id=? AND sequence=?`, cycle.ID, unit.Sequence).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if want := scanCycleUnitIdentity(unit); got != want {
+		t.Fatalf("backfilled identity = %q, want %q", got, want)
+	}
+}
 
 func TestScanCycleAuxiliaryLifecycleAndFragments(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
@@ -129,6 +160,10 @@ func TestReconcileNaabuDiscoveryAddsDeterministicEnrichmentAndUDP(t *testing.T) 
 	}
 	if updated.TotalUnits != 3 || updated.TotalProbes <= 65535 {
 		t.Fatalf("dynamic phase expansion = units %d probes %d", updated.TotalUnits, updated.TotalProbes)
+	}
+	discoveryProbes, nmapProbes, err := s.ScanCycleProbeTotals(ctx, cycle.ID)
+	if err != nil || discoveryProbes != 65535 || nmapProbes <= 0 {
+		t.Fatalf("probe categories = discovery %d nmap %d error %v", discoveryProbes, nmapProbes, err)
 	}
 	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil || len(summaries) != 3 {

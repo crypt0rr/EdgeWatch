@@ -48,6 +48,8 @@ const maxProgressOutput = 4 << 20
 // for a full tmpfs or allocating an oversized result in memory.
 const maxNmapOutput = 16 << 20
 
+var errNmapProgressOutputExceeded = fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput)
+
 // Progress describes the bounded, operator-facing work completed by a scan.
 // Counts are based on resolved addresses and ports, and are deliberately
 // estimates of Nmap probes rather than an SLA for network response time.
@@ -1047,7 +1049,11 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 				}
 				return
 			}
-			_ = pollNmapXMLProgress(xmlPath, progressParser, emitOutput)
+			if err := pollNmapXMLProgress(xmlPath, progressParser, emitOutput); errors.Is(err, errNmapProgressOutputExceeded) {
+				if outputExceeded.CompareAndSwap(false, true) && cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+			}
 		}
 		poll()
 		for {
@@ -1076,7 +1082,9 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 		if exceeded, err := nmapXMLOutputExceeded(xmlPath, maxNmapOutput); err == nil && exceeded {
 			outputExceeded.Store(true)
 		}
-		_ = pollNmapXMLProgress(xmlPath, progressParser, emitOutput)
+		if err := pollNmapXMLProgress(xmlPath, progressParser, emitOutput); errors.Is(err, errNmapProgressOutputExceeded) {
+			outputExceeded.Store(true)
+		}
 		if data, exceeded, readErr := readCappedFile(xmlPath, maxNmapOutput); readErr == nil && len(data) > 0 {
 			stdout.Reset()
 			_, _ = stdout.Write(data)
@@ -1246,12 +1254,25 @@ func pollNmapXMLProgress(path string, parser *nmapXMLProgressParser, emit func(s
 		parser.offset = 0
 		parser.pending = ""
 	}
+	if info.Size() > int64(maxNmapOutput) {
+		return errNmapProgressOutputExceeded
+	}
+	remaining := int64(maxNmapOutput) - parser.offset
+	if remaining < 0 {
+		return errNmapProgressOutputExceeded
+	}
 	if _, err := file.Seek(parser.offset, io.SeekStart); err != nil {
 		return err
 	}
-	data, err := io.ReadAll(file)
+	// The file can grow between Stat and Read. Read at most one byte beyond
+	// the remaining cap so a concurrent writer is detected without allocating
+	// an unbounded tail in the progress goroutine.
+	data, err := io.ReadAll(io.LimitReader(file, remaining+1))
 	if err != nil {
 		return err
+	}
+	if int64(len(data)) > remaining {
+		return errNmapProgressOutputExceeded
 	}
 	parser.offset += int64(len(data))
 	parser.feed(data, emit)

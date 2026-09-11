@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/crypt0rr/edgewatch/internal/scanner"
 )
 
 const legacySchema = `
@@ -36,7 +39,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 31
+const schemaVersion = 32
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -785,6 +788,30 @@ END;`,
 			"ALTER TABLE outbox ADD COLUMN terminal_at TEXT NOT NULL DEFAULT ''",
 			"CREATE INDEX IF NOT EXISTS outbox_terminal_due ON outbox(sent_at,terminal_at,next_at)",
 		},
+		32: {
+			// Dynamic Naabu enrichment is reconciled after every discovery
+			// checkpoint. Persist the deterministic work-unit identity as a scalar
+			// key so duplicate checks use the indexed cycle table instead of
+			// decoding every previously generated JSON unit on each pass.
+			// Some recovery fixtures carry a current schema marker while omitting
+			// resumable-scan tables; create the table shape before the additive
+			// column so those databases remain upgradeable.
+			`CREATE TABLE IF NOT EXISTS scan_cycle_units (
+ cycle_id TEXT NOT NULL,
+ sequence INTEGER NOT NULL,
+ work_unit_json BLOB NOT NULL,
+ status TEXT NOT NULL DEFAULT 'pending',
+ attempts INTEGER NOT NULL DEFAULT 0,
+ snapshot_json BLOB NOT NULL DEFAULT '{}',
+ started_at TEXT NOT NULL DEFAULT '',
+ finished_at TEXT NOT NULL DEFAULT '',
+ last_error TEXT NOT NULL DEFAULT '',
+ PRIMARY KEY(cycle_id,sequence),
+ FOREIGN KEY(cycle_id) REFERENCES scan_cycles(id) ON DELETE CASCADE
+);`,
+			"ALTER TABLE scan_cycle_units ADD COLUMN identity TEXT NOT NULL DEFAULT ''",
+			"CREATE INDEX IF NOT EXISTS scan_cycle_units_identity ON scan_cycle_units(cycle_id,identity)",
+		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
 		statements, ok := migrations[next]
@@ -797,6 +824,9 @@ END;`,
 		version = next
 	}
 	if err := repairScanHostsForeignKey(db); err != nil {
+		return err
+	}
+	if err := backfillScanCycleUnitIdentitiesContext(ctx, db); err != nil {
 		return err
 	}
 	if err := backfillHostSearchIndexesContext(ctx, db); err != nil {
@@ -875,4 +905,65 @@ func migrationColumnExists(tx *sql.Tx, table, column string) (bool, error) {
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// backfillScanCycleUnitIdentitiesContext upgrades rows created before schema
+// 32 in bounded writer transactions. It intentionally runs after the schema
+// marker is committed: if a process stops midway, the next open resumes from
+// the remaining empty identities without replaying any scanner work.
+func backfillScanCycleUnitIdentitiesContext(ctx context.Context, db *sql.DB) error {
+	for {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		rows, err := tx.QueryContext(ctx, `SELECT rowid,work_unit_json FROM scan_cycle_units WHERE identity='' ORDER BY rowid LIMIT 256`)
+		if err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		type row struct {
+			rowID int64
+			raw   []byte
+		}
+		batch, batchErr := func() ([]row, error) {
+			defer rows.Close()
+			batch := make([]row, 0, 256)
+			for rows.Next() {
+				var item row
+				if err := rows.Scan(&item.rowID, &item.raw); err != nil {
+					return nil, err
+				}
+				batch = append(batch, item)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, err
+			}
+			return batch, nil
+		}()
+		if batchErr != nil {
+			_ = tx.Rollback()
+			return batchErr
+		}
+		if len(batch) == 0 {
+			if err := tx.Commit(); err != nil {
+				return err
+			}
+			return nil
+		}
+		for _, item := range batch {
+			var unit scanner.WorkUnit
+			if err := json.Unmarshal(item.raw, &unit); err != nil {
+				_ = tx.Rollback()
+				return fmt.Errorf("backfill scan cycle unit identity: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `UPDATE scan_cycle_units SET identity=? WHERE rowid=? AND identity=''`, scanCycleUnitIdentity(unit), item.rowID); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+	}
 }

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type CommandPreview struct {
@@ -470,6 +471,9 @@ func validateArgTemplate(args []string, label string) error {
 			if strings.HasPrefix(arg, "-") || strings.Contains(arg, "{") || strings.Contains(arg, "}") || !safeScannerScalar(arg) {
 				return fmt.Errorf("%s flag %q requires a safe scalar operand", label, pendingOperand)
 			}
+			if err := validateScannerFlagOperand(label, pendingOperand, arg); err != nil {
+				return err
+			}
 			pendingOperand = ""
 			continue
 		}
@@ -484,6 +488,11 @@ func validateArgTemplate(args []string, label string) error {
 			}
 			if hasOperand && !safeScannerScalar(operand) {
 				return fmt.Errorf("%s flag %q has an unsafe operand", label, arg)
+			}
+			if hasOperand {
+				if err := validateScannerFlagOperand(label, flag, operand); err != nil {
+					return err
+				}
 			}
 			if scannerFlagNeedsOperand(label, flag) && !hasOperand {
 				pendingOperand = arg
@@ -525,6 +534,55 @@ func scannerFlagNeedsOperand(label, flag string) bool {
 	default:
 		return false
 	}
+}
+
+// validateScannerFlagOperand keeps the small set of approved Nmap tuning
+// flags within the same resource envelope as the typed job controls. The
+// profile editor accepts argv arrays, but an unbounded host timeout or rate
+// would otherwise defeat the scanner's cancellation and probe budgets.
+func validateScannerFlagOperand(label, flag, operand string) error {
+	if label == "naabu" {
+		return nil
+	}
+	flag = strings.ToLower(strings.TrimSpace(flag))
+	operand = strings.TrimSpace(operand)
+	if operand == "" {
+		return fmt.Errorf("%s flag %q requires a non-empty operand", label, flag)
+	}
+	numericBounds := map[string]NumericBound{
+		"--min-rate":        {Min: 1, Max: 100_000},
+		"--max-rate":        {Min: 1, Max: 100_000},
+		"--max-retries":     {Min: 0, Max: 10},
+		"--min-hostgroup":   {Min: 1, Max: 1024},
+		"--max-hostgroup":   {Min: 1, Max: 1024},
+		"--min-parallelism": {Min: 1, Max: 1024},
+		"--max-parallelism": {Min: 1, Max: 1024},
+	}
+	if bounds, ok := numericBounds[flag]; ok {
+		value, err := strconv.Atoi(operand)
+		if err != nil || value < bounds.Min || value > bounds.Max {
+			return fmt.Errorf("%s flag %q operand must be between %d and %d", label, flag, bounds.Min, bounds.Max)
+		}
+		return nil
+	}
+	durationBounds := map[string]struct {
+		min time.Duration
+		max time.Duration
+	}{
+		"--host-timeout":        {min: time.Second, max: 24 * time.Hour},
+		"--scan-delay":          {min: 0, max: time.Minute},
+		"--max-scan-delay":      {min: 0, max: time.Minute},
+		"--initial-rtt-timeout": {min: time.Millisecond, max: time.Minute},
+		"--min-rtt-timeout":     {min: time.Millisecond, max: time.Minute},
+		"--max-rtt-timeout":     {min: time.Millisecond, max: time.Minute},
+	}
+	if bounds, ok := durationBounds[flag]; ok {
+		value, err := time.ParseDuration(operand)
+		if err != nil || value < bounds.min || value > bounds.max {
+			return fmt.Errorf("%s flag %q operand must be a duration between %s and %s", label, flag, bounds.min, bounds.max)
+		}
+	}
+	return nil
 }
 
 // The profile editor is intentionally an allow-list rather than a general

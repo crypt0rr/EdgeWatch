@@ -77,6 +77,28 @@ func TestProgressPercentAndActiveRunUpdates(t *testing.T) {
 	}
 }
 
+func TestActiveProgressDoesNotRegressWhenPhasesExpandWork(t *testing.T) {
+	a := &App{}
+	run := &activeRun{scan: model.ActiveScan{StartedAt: time.Now().UTC()}}
+	a.running.Store("phased", run)
+	a.updateActiveProgress("phased", scanner.Progress{TotalProbes: 100, CompletedProbes: 100, TotalInvocations: 1, CompletedInvocations: 1, Phase: "tcp discovery"})
+	a.updateActiveProgress("phased", scanner.Progress{TotalProbes: 300, CompletedProbes: 110, TotalInvocations: 3, CompletedInvocations: 1, Phase: "nmap enrichment"})
+	got := run.snapshot()
+	if got.CompletedProbes != 110 || got.TotalProbes != 300 || got.ProgressPercent != 100 {
+		t.Fatalf("phase expansion regressed progress: %#v", got)
+	}
+	if got.CompletedInvocations != 1 || got.TotalInvocations != 3 {
+		t.Fatalf("invocation progress regressed: %#v", got)
+	}
+	// A stale callback from a previous process must not lower the durable
+	// counters or percentage either.
+	a.updateActiveProgress("phased", scanner.Progress{TotalProbes: 50, CompletedProbes: 2, TotalInvocations: 1, CompletedInvocations: 0, Phase: "udp scanning"})
+	got = run.snapshot()
+	if got.CompletedProbes != 110 || got.TotalProbes != 300 || got.ProgressPercent != 100 {
+		t.Fatalf("stale progress regressed state: %#v", got)
+	}
+}
+
 func TestCheckScanWorkBudgetAndBeginRunFallback(t *testing.T) {
 	a := &App{Config: &config.Config{Scheduler: config.Scheduler{MaxProbeCount: 1}}}
 	job := config.Job{Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}}
@@ -116,6 +138,9 @@ func TestNaabuUsesDedicatedBudgetAndHardCeiling(t *testing.T) {
 	if estimate.Probes != 256*65535 {
 		t.Fatalf("Naabu estimate = %d, want %d", estimate.Probes, 256*65535)
 	}
+	if estimate.NaabuProbes != 256*65535 || estimate.NmapProbes != 0 {
+		t.Fatalf("Naabu probe categories = %#v", estimate)
+	}
 
 	oversized := job
 	oversized.Targets = []string{"192.0.0.0/16"}
@@ -125,6 +150,25 @@ func TestNaabuUsesDedicatedBudgetAndHardCeiling(t *testing.T) {
 	oversized.AllowHighCost = true
 	if _, err := a.CheckScanWorkBudget(oversized); !errors.Is(err, ErrScanWorkBudget) {
 		t.Fatalf("hard ceiling override error = %v, want probe budget error", err)
+	}
+}
+
+func TestNaabuAndUDPUseSeparateProbeBudgets(t *testing.T) {
+	a := &App{Config: &config.Config{Scheduler: config.Scheduler{
+		MaxProbeCount:      5,
+		MaxNaabuProbeCount: config.DefaultNaabuMaxProbeCount,
+	}}}
+	job := config.NormalizeJob(config.Job{
+		Targets: []string{"192.0.2.1"},
+		TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{ScanType: "connect"}},
+		UDP:     &config.Protocol{Ports: "1-6"},
+	})
+	estimate, err := a.CheckScanWorkBudget(job)
+	if !errors.Is(err, ErrScanWorkBudget) {
+		t.Fatalf("Naabu+UDP budget error = %v (estimate %#v)", err, estimate)
+	}
+	if estimate.NaabuProbes != 65535 || estimate.NmapProbes != 6 || estimate.Probes != 65541 {
+		t.Fatalf("separate probe categories = %#v", estimate)
 	}
 }
 

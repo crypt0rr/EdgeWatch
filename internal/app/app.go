@@ -135,18 +135,17 @@ func (a *App) CheckScanWorkBudget(job config.Job) (config.WorkEstimate, error) {
 		return estimate, err
 	}
 	// A Naabu pipeline always performs a full-range discovery pass. Keep its
-	// budget separate from the Nmap budget so the default 256-host expansion
-	// remains usable without weakening the Nmap safety rail.
+	// discovery budget separate from Nmap work (including UDP) so selecting the
+	// faster discovery engine cannot weaken the Nmap safety rail for the same
+	// job.
 	effectiveJob := config.NormalizeJob(job)
-	budget := a.Config.Scheduler.MaxProbeCount
-	if budget <= 0 {
-		budget = config.DefaultMaxProbeCount
+	nmapBudget := a.Config.Scheduler.MaxProbeCount
+	if nmapBudget <= 0 {
+		nmapBudget = config.DefaultMaxProbeCount
 	}
-	if effectiveJob.TCP != nil && effectiveJob.TCP.Engine == config.EngineNaabuNmap {
-		budget = a.Config.Scheduler.MaxNaabuProbeCount
-		if budget <= 0 {
-			budget = config.DefaultNaabuMaxProbeCount
-		}
+	naabuBudget := a.Config.Scheduler.MaxNaabuProbeCount
+	if naabuBudget <= 0 {
+		naabuBudget = config.DefaultNaabuMaxProbeCount
 	}
 	// allow_high_cost is an explicit opt-in to the configured engine budget,
 	// never permission to schedule an unbounded scan. Keep this check before
@@ -157,10 +156,49 @@ func (a *App) CheckScanWorkBudget(job config.Job) (config.WorkEstimate, error) {
 	if job.AllowHighCost {
 		return estimate, nil
 	}
-	if estimate.Probes > budget {
-		return estimate, &ScanWorkBudgetError{Estimate: estimate, Budget: budget}
+	if effectiveJob.TCP != nil && effectiveJob.TCP.Engine == config.EngineNaabuNmap && estimate.NaabuProbes > naabuBudget {
+		return estimate, &ScanWorkBudgetError{Estimate: estimate, Budget: naabuBudget}
+	}
+	if estimate.NmapProbes > nmapBudget {
+		return estimate, &ScanWorkBudgetError{Estimate: estimate, Budget: nmapBudget}
 	}
 	return estimate, nil
+}
+
+// CheckScanCycleProbeBudget applies the same split safety rails after a
+// Naabu discovery checkpoint creates data-dependent Nmap enrichment work.
+// The preflight estimate cannot know how many ports Naabu will find, so this
+// durable check prevents a broad discovery result from silently growing past
+// either engine's configured budget before the next process starts.
+func (a *App) CheckScanCycleProbeBudget(ctx context.Context, cycle store.ScanCycleRecord, job config.Job) error {
+	if job.TCP == nil || job.TCP.Engine != config.EngineNaabuNmap {
+		return nil
+	}
+	discovery, nmapProbes, err := a.Store.ScanCycleProbeTotals(ctx, cycle.ID)
+	if err != nil {
+		return err
+	}
+	if discovery > config.MaxProbeCountLimit || nmapProbes > config.MaxProbeCountLimit || discovery > config.MaxProbeCountLimit-nmapProbes {
+		return &ScanWorkBudgetError{Estimate: config.WorkEstimate{Probes: config.MaxProbeCountLimit + 1, NaabuProbes: discovery, NmapProbes: nmapProbes}, Budget: config.MaxProbeCountLimit}
+	}
+	if job.AllowHighCost {
+		return nil
+	}
+	naabuBudget := a.Config.Scheduler.MaxNaabuProbeCount
+	if naabuBudget <= 0 {
+		naabuBudget = config.DefaultNaabuMaxProbeCount
+	}
+	nmapBudget := a.Config.Scheduler.MaxProbeCount
+	if nmapBudget <= 0 {
+		nmapBudget = config.DefaultMaxProbeCount
+	}
+	if discovery > naabuBudget {
+		return &ScanWorkBudgetError{Estimate: config.WorkEstimate{Probes: discovery + nmapProbes, NaabuProbes: discovery, NmapProbes: nmapProbes}, Budget: naabuBudget}
+	}
+	if nmapProbes > nmapBudget {
+		return &ScanWorkBudgetError{Estimate: config.WorkEstimate{Probes: discovery + nmapProbes, NaabuProbes: discovery, NmapProbes: nmapProbes}, Budget: nmapBudget}
+	}
+	return nil
 }
 
 // Scanner is the small boundary used by the application. Production uses
@@ -645,15 +683,33 @@ func (a *App) updateActiveProgress(id string, progress scanner.Progress) {
 	}
 	run.mu.Lock()
 	defer run.mu.Unlock()
-	if progress.TotalProbes > 0 {
+	if progress.TotalProbes > run.scan.TotalProbes {
 		run.scan.TotalProbes = progress.TotalProbes
 	}
-	if progress.TotalInvocations > 0 {
+	if progress.TotalInvocations > run.scan.TotalInvocations {
 		run.scan.TotalInvocations = progress.TotalInvocations
 	}
-	run.scan.CompletedProbes = progress.CompletedProbes
-	run.scan.CompletedInvocations = progress.CompletedInvocations
-	run.scan.ProgressPercent = progressPercent(progress)
+	// Discovery, enrichment, and UDP can publish different totals as work is
+	// discovered. Keep the persisted operator-facing counters monotonic even
+	// when a later phase reports a local (or newly-expanded) zero-based value.
+	// A scan may still increase its total after this point; the percentage is a
+	// high-water mark so the progress bar never jumps backwards on a phase
+	// transition.
+	if progress.CompletedProbes > run.scan.CompletedProbes {
+		run.scan.CompletedProbes = progress.CompletedProbes
+	}
+	if progress.CompletedInvocations > run.scan.CompletedInvocations {
+		run.scan.CompletedInvocations = progress.CompletedInvocations
+	}
+	percentProgress := scanner.Progress{
+		CompletedProbes:      run.scan.CompletedProbes,
+		TotalProbes:          run.scan.TotalProbes,
+		CompletedInvocations: run.scan.CompletedInvocations,
+		TotalInvocations:     run.scan.TotalInvocations,
+	}
+	if percent := progressPercent(percentProgress); percent > run.scan.ProgressPercent {
+		run.scan.ProgressPercent = percent
+	}
 	if progress.Protocol != "" {
 		run.scan.Protocol = progress.Protocol
 	}

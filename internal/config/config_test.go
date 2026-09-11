@@ -570,6 +570,16 @@ func TestScannerProfileValidationAllowsSafeScalarOperands(t *testing.T) {
 	}
 }
 
+func TestScannerProfileValidationBoundsResourceOperands(t *testing.T) {
+	base := []string{PlaceholderAddress, PlaceholderPorts, PlaceholderStructuredOutput}
+	for _, value := range []string{"--min-rate", "100001", "--max-rate=0", "--max-retries", "11", "--min-hostgroup", "0", "--host-timeout", "0s", "--initial-rtt-timeout=61s"} {
+		profile := ScannerProfile{Engine: EngineNmap, NmapArgs: append(append([]string(nil), base...), strings.Fields(value)...)}
+		if err := ValidateScannerProfile(profile); err == nil {
+			t.Errorf("out-of-range resource operand %q was accepted", value)
+		}
+	}
+}
+
 func TestScannerProfileValidationRejectsBareScalarTargets(t *testing.T) {
 	profile := ScannerProfile{Engine: EngineNmap, NmapArgs: []string{PlaceholderAddress, PlaceholderPorts, PlaceholderStructuredOutput, "123"}}
 	if err := ValidateScannerProfile(profile); err == nil {

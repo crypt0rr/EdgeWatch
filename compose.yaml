@@ -3,6 +3,9 @@ services:
     image: ghcr.io/crypt0rr/edgewatch:latest
     container_name: edgewatch
     restart: unless-stopped
+    # Keep this above the daemon's six-minute graceful-shutdown join deadline;
+    # large detailed snapshots may need the full persistence budget to commit.
+    stop_grace_period: 7m
     network_mode: host
     cap_drop:
       - ALL

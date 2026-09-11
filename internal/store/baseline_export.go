@@ -23,9 +23,12 @@ const BaselineExportVersion = 1
 // data, or audit secrets. A job with no active baseline is included with a
 // null baseline so an all-jobs export also describes readiness.
 type BaselineExport struct {
-	FormatVersion int                   `json:"format_version"`
-	ExportedAt    time.Time             `json:"exported_at"`
-	Jobs          []BaselineExportEntry `json:"jobs"`
+	FormatVersion int `json:"format_version"`
+	// ExportedAt is operational metadata for in-process callers. It is omitted
+	// from the serialized artifact so two exports of identical state have a
+	// byte-identical canonical body.
+	ExportedAt time.Time             `json:"-"`
+	Jobs       []BaselineExportEntry `json:"jobs"`
 }
 
 // BaselineExportEntry contains the identity and immutable source metadata
@@ -39,6 +42,7 @@ type BaselineExportEntry struct {
 	Revision           int64              `json:"revision,omitempty"`
 	Archived           bool               `json:"archived,omitempty"`
 	Legacy             bool               `json:"legacy,omitempty"`
+	ShadowedByJobID    string             `json:"shadowed_by_job_id,omitempty"`
 	Status             string             `json:"status"`
 	BaselineScanID     string             `json:"baseline_scan_id,omitempty"`
 	BaselineConfigHash string             `json:"baseline_config_hash,omitempty"`
@@ -57,7 +61,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 	if err != nil {
 		return result, err
 	}
-	seen := make(map[string]bool, len(managed))
+	seen := make(map[string]string, len(managed))
 	if name != "" {
 		var selected JobRecord
 		selectedFound := false
@@ -88,7 +92,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 	}
 
 	for _, record := range managed {
-		seen[record.Job.Name] = true
+		seen[record.Job.Name] = record.ID
 		entry, err := s.exportManagedBaseline(ctx, record)
 		if err != nil {
 			return result, err
@@ -127,18 +131,28 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 	}
 	for _, legacy := range legacyRows {
 		legacyName := legacy.name
-		if seen[legacyName] {
-			continue
-		}
 		entry, err := s.exportLegacyBaselineJSON(ctx, legacyName, legacy.raw)
 		if err != nil {
 			return result, err
+		}
+		if managedID := seen[legacyName]; managedID != "" {
+			// Keep both records in an all-jobs export. Name-based lookup still
+			// prefers managed jobs, but silently dropping a legacy baseline would
+			// make an archival artifact lose state. The explicit link lets
+			// consumers disambiguate the shadowed legacy entry.
+			entry.ShadowedByJobID = managedID
 		}
 		result.Jobs = append(result.Jobs, entry)
 	}
 	sort.SliceStable(result.Jobs, func(i, j int) bool {
 		if result.Jobs[i].Name != result.Jobs[j].Name {
 			return result.Jobs[i].Name < result.Jobs[j].Name
+		}
+		// Prefer the managed record when a legacy state has the same display
+		// name. Both records remain present, but consumers that render a
+		// name-grouped list should see the authoritative UUID-backed entry first.
+		if result.Jobs[i].Legacy != result.Jobs[j].Legacy {
+			return !result.Jobs[i].Legacy
 		}
 		return result.Jobs[i].JobID < result.Jobs[j].JobID
 	})

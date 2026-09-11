@@ -391,7 +391,13 @@ runs both `PRAGMA integrity_check` and `PRAGMA foreign_key_check`; it returns a
 non-zero exit status when either check finds a problem. `baseline export` writes
 a portable JSON document for every managed and legacy baseline, or one job when
 `--job NAME` (or its managed ID) is supplied. Jobs without a ready baseline are
-included with `status: "not_ready"`.
+included with `status: "not_ready"`. The serialized document is a canonical,
+diff-friendly representation: volatile export timestamps are kept out of the
+body, so repeating an unchanged export produces identical JSON. If a legacy
+state has the same display name as a managed job, both entries are retained;
+the legacy entry is marked with `legacy: true` and `shadowed_by_job_id` so
+archival tooling can disambiguate it while managed name lookups remain
+authoritative.
 
 The backup, verify, baseline-export, restore, and notification-test commands
 write bounded `host-cli` security-audit records. Audit details contain only the

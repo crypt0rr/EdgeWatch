@@ -8,6 +8,46 @@ import (
 	"testing"
 )
 
+func assertHostSearchSchemaContract(t *testing.T, s *Store) {
+	t.Helper()
+	for _, object := range []struct {
+		kind string
+		name string
+	}{
+		{kind: "table", name: "scan_hosts"},
+		{kind: "table", name: "latest_scan_hosts"},
+		{kind: "table", name: "scan_host_search"},
+		{kind: "table", name: "latest_host_search"},
+		{kind: "table", name: "fts_backfill_state"},
+	} {
+		var count int
+		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type=? AND name=?`, object.kind, object.name).Scan(&count); err != nil {
+			t.Fatalf("check %s %s: %v", object.kind, object.name, err)
+		}
+		if count != 1 {
+			t.Fatalf("missing %s %s", object.kind, object.name)
+		}
+	}
+	for _, index := range []string{"scan_hosts_address", "scan_hosts_scan_address", "scan_hosts_job_address", "scan_hosts_open", "latest_scan_hosts_open", "latest_scan_hosts_protocol_open"} {
+		var count int
+		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?`, index).Scan(&count); err != nil {
+			t.Fatalf("check index %s: %v", index, err)
+		}
+		if count != 1 {
+			t.Fatalf("missing index %s", index)
+		}
+	}
+	for _, trigger := range scanHostSearchTriggerNames {
+		var count int
+		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name=?`, trigger).Scan(&count); err != nil {
+			t.Fatalf("check trigger %s: %v", trigger, err)
+		}
+		if count != 1 {
+			t.Fatalf("missing trigger %s", trigger)
+		}
+	}
+}
+
 func TestMigration22RepairsScanHostsCascade(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -47,6 +87,14 @@ PRAGMA user_version = 21;`); err != nil {
 	if err := migrate(s.DB); err != nil {
 		t.Fatal(err)
 	}
+	assertHostSearchSchemaContract(t, s)
+	// The supported recovery fixture contract is structurally idempotent. A
+	// restart after the upgrade must not remove or duplicate any projection
+	// object while the resumable backfill sees an already-complete state.
+	if err := migrate(s.DB); err != nil {
+		t.Fatalf("repeat migration of recovery fixture: %v", err)
+	}
+	assertHostSearchSchemaContract(t, s)
 	var definition string
 	if err := s.DB.QueryRowContext(ctx, `SELECT sql FROM sqlite_master WHERE type='table' AND name='scan_hosts'`).Scan(&definition); err != nil {
 		t.Fatal(err)

@@ -248,24 +248,13 @@ func decodeScanHost(address, dataQuality string, raw []byte) (ScanHost, error) {
 // predicates run before LIMIT/OFFSET, so a page request never needs to load
 // unrelated host payloads into Go.
 func (s *Store) ListScanHostsPage(ctx context.Context, scanID, query, protocol string, hasOpen *bool, limit, offset int) (Page[ScanHost], error) {
-	limit, offset = normalizePage(limit, offset)
-	filter := buildHostFilter(query, protocol, hasOpen)
-	where := append([]string{"h.scan_id=?"}, filter.where...)
-	args := append([]any{scanID}, filter.args...)
-	join, predicate, searchArgs := hostSearchPredicate(filter, "scan_host_search", "hs.scan_id=h.scan_id AND hs.address=h.address")
-	if predicate != "" {
-		where = append(where, predicate)
-		args = append(args, searchArgs...)
-	}
+	queries := scanHostsPageQueries(scanID, query, protocol, hasOpen, limit, offset)
 	var page Page[ScanHost]
-	countQuery := `SELECT COUNT(*) FROM scan_hosts h` + join + ` WHERE ` + strings.Join(where, " AND ")
 	reader := s.reader()
-	if err := reader.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
+	if err := reader.QueryRowContext(ctx, queries.countSQL, queries.countArg...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	querySQL := `SELECT h.address,h.data_quality,h.host_json FROM scan_hosts h` + join + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY h.address LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-	rows, err := reader.QueryContext(ctx, querySQL, args...)
+	rows, err := reader.QueryContext(ctx, queries.pageSQL, queries.pageArg...)
 	if err != nil {
 		return page, err
 	}
@@ -333,27 +322,13 @@ func (s *Store) GetScanHost(ctx context.Context, scanID, address string) (ScanHo
 // for each effective address across all jobs. The projection is updated in the
 // same transaction as a successful scan and rebuilt after retention deletes.
 func (s *Store) ListLatestScanHostsPage(ctx context.Context, query, protocol string, hasOpen *bool, limit, offset int) (Page[LatestScanHost], error) {
-	limit, offset = normalizePage(limit, offset)
-	filter := buildHostFilter(query, protocol, hasOpen)
-	where := filter.where
-	if len(where) == 0 {
-		where = []string{"1=1"}
-	}
-	args := append([]any(nil), filter.args...)
-	join, predicate, searchArgs := hostSearchPredicate(filter, "latest_host_search", "hs.address=h.address")
-	if predicate != "" {
-		where = append(where, predicate)
-		args = append(args, searchArgs...)
-	}
+	queries := latestScanHostsPageQueries(query, protocol, hasOpen, limit, offset)
 	var page Page[LatestScanHost]
-	countQuery := `SELECT COUNT(*) FROM latest_scan_hosts h` + join + ` WHERE ` + strings.Join(where, " AND ")
 	reader := s.reader()
-	if err := reader.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
+	if err := reader.QueryRowContext(ctx, queries.countSQL, queries.countArg...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	querySQL := `SELECT h.scan_id,h.address,h.data_quality,h.host_json,h.job_id,h.job,h.finished_at,COALESCE(j.archived,0) FROM latest_scan_hosts h LEFT JOIN jobs j ON j.id=h.job_id` + join + ` WHERE ` + strings.Join(where, " AND ") + ` ORDER BY COALESCE(j.archived,0) ASC,h.address LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-	rows, err := reader.QueryContext(ctx, querySQL, args...)
+	rows, err := reader.QueryContext(ctx, queries.pageSQL, queries.pageArg...)
 	if err != nil {
 		return page, err
 	}

@@ -63,9 +63,11 @@ func TestSeededPerformanceRegressionInvariants(t *testing.T) {
 		t.Fatalf("seeded host inventory = total %d/items %d, want total %d/items 50", page.Total, len(page.Items), wantOpen)
 	}
 
-	// The maintained projection must answer inventory requests without joining
-	// or ranking the retained scans/host-history tables.
-	rows, err := s.DB.QueryContext(ctx, `EXPLAIN QUERY PLAN SELECT address FROM latest_scan_hosts WHERE tcp_present=1 AND (tcp_open_ports > 0 OR tcp_open_filtered_ports > 0) ORDER BY address LIMIT 50`)
+	// Explain the exact page statement used by ListLatestScanHostsPage. The
+	// maintained projection must answer inventory requests without joining or
+	// ranking the retained scans/host-history tables.
+	queries := latestScanHostsPageQueries("", "tcp", &hasOpen, 50, 0)
+	rows, err := s.DB.QueryContext(ctx, `EXPLAIN QUERY PLAN `+queries.pageSQL, queries.pageArg...)
 	if err != nil {
 		t.Fatal(err)
 	}

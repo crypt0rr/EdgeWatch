@@ -34,6 +34,27 @@ type LatestScanHost struct {
 	ScannedAt time.Time
 }
 
+// scanPageQueries keeps the SQL used by a production paging method in one
+// value that query-plan tests can explain verbatim. Tests should not duplicate
+// a hand-written approximation of a history query because that can continue to
+// pass after the live statement regresses.
+type scanPageQueries struct {
+	countSQL string
+	countArg []any
+	pageSQL  string
+	pageArg  []any
+}
+
+func jobScansPageQueries(jobID string, limit, offset int) scanPageQueries {
+	limit, offset = normalizePage(limit, offset)
+	return scanPageQueries{
+		countSQL: `SELECT COUNT(*) FROM scans WHERE job_id=?`,
+		countArg: []any{jobID},
+		pageSQL:  `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`,
+		pageArg:  []any{jobID, limit, offset},
+	}
+}
+
 type hostFilter struct {
 	where      []string
 	args       []any
@@ -141,19 +162,60 @@ func normalizePage(limit, offset int) (int, int) {
 	return limit, offset
 }
 
+func scanHostsPageQueries(scanID, query, protocol string, hasOpen *bool, limit, offset int) scanPageQueries {
+	limit, offset = normalizePage(limit, offset)
+	filter := buildHostFilter(query, protocol, hasOpen)
+	where := append([]string{"h.scan_id=?"}, filter.where...)
+	args := append([]any{scanID}, filter.args...)
+	join, predicate, searchArgs := hostSearchPredicate(filter, "scan_host_search", "hs.scan_id=h.scan_id AND hs.address=h.address")
+	if predicate != "" {
+		where = append(where, predicate)
+		args = append(args, searchArgs...)
+	}
+	whereSQL := strings.Join(where, " AND ")
+	return scanPageQueries{
+		countSQL: `SELECT COUNT(*) FROM scan_hosts h` + join + ` WHERE ` + whereSQL,
+		countArg: append([]any(nil), args...),
+		pageSQL:  `SELECT h.address,h.data_quality,h.host_json FROM scan_hosts h` + join + ` WHERE ` + whereSQL + ` ORDER BY h.address LIMIT ? OFFSET ?`,
+		pageArg:  append(append([]any(nil), args...), limit, offset),
+	}
+}
+
+func latestScanHostsPageQueries(query, protocol string, hasOpen *bool, limit, offset int) scanPageQueries {
+	limit, offset = normalizePage(limit, offset)
+	filter := buildHostFilter(query, protocol, hasOpen)
+	where := append([]string(nil), filter.where...)
+	if len(where) == 0 {
+		where = []string{"1=1"}
+	}
+	args := append([]any(nil), filter.args...)
+	join, predicate, searchArgs := hostSearchPredicate(filter, "latest_host_search", "hs.address=h.address")
+	if predicate != "" {
+		where = append(where, predicate)
+		args = append(args, searchArgs...)
+	}
+	whereSQL := strings.Join(where, " AND ")
+	return scanPageQueries{
+		countSQL: `SELECT COUNT(*) FROM latest_scan_hosts h` + join + ` WHERE ` + whereSQL,
+		countArg: append([]any(nil), args...),
+		pageSQL:  `SELECT h.scan_id,h.address,h.data_quality,h.host_json,h.job_id,h.job,h.finished_at,COALESCE(j.archived,0) FROM latest_scan_hosts h LEFT JOIN jobs j ON j.id=h.job_id` + join + ` WHERE ` + whereSQL + ` ORDER BY COALESCE(j.archived,0) ASC,h.address LIMIT ? OFFSET ?`,
+		pageArg:  append(append([]any(nil), args...), limit, offset),
+	}
+}
+
 func (s *Store) ListJobScans(ctx context.Context, jobID string, limit int) ([]model.Scan, error) {
 	page, err := s.ListJobScansPage(ctx, jobID, limit, 0)
 	return page.Items, err
 }
 
 func (s *Store) ListJobScansPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Scan], error) {
-	limit, offset = normalizePage(limit, offset)
+	queries := jobScansPageQueries(jobID, limit, offset)
 	var page Page[model.Scan]
 	readDB := s.reader()
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
+	if err := readDB.QueryRowContext(ctx, queries.countSQL, queries.countArg...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
+	rows, err := readDB.QueryContext(ctx, queries.pageSQL, queries.pageArg...)
 	if err != nil {
 		return page, err
 	}

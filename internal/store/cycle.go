@@ -649,13 +649,18 @@ func (s *Store) ScanCycleExpiryNotified(ctx context.Context, cycleID string) (bo
 	return count > 0, err
 }
 
+// scanCycleHasScanQuery is the production statement explained by the index
+// regression test. Keeping the SQL in one place prevents the test from
+// drifting away from the query used by the cycle guard.
+const scanCycleHasScanQuery = `SELECT COUNT(*) FROM scans WHERE cycle_id=?`
+
 // ScanCycleHasScan reports whether a terminal cycle has already been promoted
 // into scan history. The cycle is marked completed before the engine's final
 // transaction, so a process crash in that small window must be recoverable on
 // the next trigger rather than silently starting a brand-new cycle.
 func (s *Store) ScanCycleHasScan(ctx context.Context, cycleID string) (bool, error) {
 	var count int
-	if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE cycle_id=?`, cycleID).Scan(&count); err != nil {
+	if err := s.reader().QueryRowContext(ctx, scanCycleHasScanQuery, cycleID).Scan(&count); err != nil {
 		return false, err
 	}
 	return count > 0, nil

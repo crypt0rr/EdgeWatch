@@ -493,7 +493,7 @@ there is no separate whole-table backfill entrypoint.
 
 ## Development
 
-Go 1.27.1 or newer and Node.js 24.8.0 are required. The repository checks are:
+Go 1.27.1 or newer and Node.js 24.21.0 are required. The repository checks are:
 
 ```console
 npm ci
@@ -515,6 +515,24 @@ iterating on a specific layer.
 The browser acceptance tests use deterministic API fixtures; integration
 scans should only target controlled listeners. The production image embeds the
 frontend and does not include Node.js.
+
+### Release build contract
+
+Tagged releases use one immutable candidate build. The release workflow checks
+the tag, dependencies, frontend, Go sources, and tests, then runs GoReleaser
+once to produce the Linux archives and checksums. It records the source commit,
+Go/Node/GoReleaser versions, pinned Naabu release, embedded-frontend hash, and
+artifact hashes in `release-manifest.json`. The GitHub release publisher and
+the multi-architecture image both consume that uploaded candidate; neither
+rebuilds the frontend or EdgeWatch binary independently.
+
+The image is labelled with the tagged source commit and version, and the
+post-publication smoke gate verifies those labels, archive checksums, manifest,
+runtime configuration, and both supported architectures before promoting the
+image to `latest`. A rerun refuses to overwrite an existing release, which
+prevents mixed assets from being attached to the same tag. If a release run
+must be repeated, resolve the failed run or deliberately remove the incomplete
+release and rerun it from the same tag after checking the audit trail.
 
 ## License
 

@@ -1,12 +1,20 @@
 # syntax=docker/dockerfile:1.27@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
 FROM --platform=$BUILDPLATFORM node:24.16.0-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a AS frontend
 WORKDIR /src
+ARG PREBUILT_FRONTEND=0
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY index.html tsconfig.json tsconfig.node.json vite.config.ts ./
 COPY src ./src
 COPY scripts/build-frontend.mjs ./scripts/build-frontend.mjs
-RUN npm run build
+COPY internal/webui/dist ./prebuilt-dist
+# Release builds pass the candidate frontend artifact through the Docker
+# context. Local builds retain the self-contained Node build fallback.
+RUN if [ "$PREBUILT_FRONTEND" = "1" ] && [ -f ./prebuilt-dist/index.html ]; then \
+      rm -rf ./internal/webui/dist && mkdir -p ./internal/webui/dist && cp -a ./prebuilt-dist/. ./internal/webui/dist/; \
+    else \
+      npm run build; \
+    fi
 
 FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS naabu
 ARG NAABU_VERSION=v2.6.1
@@ -33,9 +41,16 @@ RUN go mod download
 COPY . .
 COPY --from=frontend /src/internal/webui/dist ./internal/webui/dist
 ARG VERSION=dev
+ARG PREBUILT_EDGEWATCH=0
 ARG TARGETOS
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/edgewatch ./cmd/edgewatch
+RUN if [ "$PREBUILT_EDGEWATCH" = "1" ]; then \
+      test -x "/src/release-binaries/linux_${TARGETARCH}/edgewatch" && \
+      mkdir -p /out && \
+      install -m 0755 "/src/release-binaries/linux_${TARGETARCH}/edgewatch" /out/edgewatch; \
+    else \
+      CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/edgewatch ./cmd/edgewatch; \
+    fi
 
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 RUN apk add --no-cache ca-certificates=20260611-r0 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026c-r0 \

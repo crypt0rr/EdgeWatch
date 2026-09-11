@@ -143,8 +143,23 @@ func jobJSON(record store.JobRecord, state model.JobState) map[string]any {
 	return map[string]any{"id": record.ID, "revision": record.Revision, "enabled": record.Enabled, "archived": record.Archived, "created_at": record.CreatedAt, "updated_at": record.UpdatedAt, "security_hash": record.Job.SecurityHash(), "job": p, "baseline": baselineJSON(state, record.Job.SecurityHash()), "scan_estimate": estimate}
 }
 
+func jobJSONFromStateSummary(record store.JobRecord, summary store.RuntimeStateSummary) map[string]any {
+	p := fromConfig(record.Job)
+	estimate, _ := config.EstimateJobWork(record.Job)
+	return map[string]any{"id": record.ID, "revision": record.Revision, "enabled": record.Enabled, "archived": record.Archived, "created_at": record.CreatedAt, "updated_at": record.UpdatedAt, "security_hash": record.Job.SecurityHash(), "job": p, "baseline": baselineJSONFromSummary(summary, record.Job.SecurityHash()), "scan_estimate": estimate}
+}
+
 func (s *Server) jobJSONWithCycle(ctx context.Context, record store.JobRecord, state model.JobState) map[string]any {
 	value := jobJSON(record, state)
+	return s.addJobCycleAndProfile(ctx, record, value)
+}
+
+func (s *Server) jobJSONWithCycleSummary(ctx context.Context, record store.JobRecord, summary store.RuntimeStateSummary) map[string]any {
+	value := jobJSONFromStateSummary(record, summary)
+	return s.addJobCycleAndProfile(ctx, record, value)
+}
+
+func (s *Server) addJobCycleAndProfile(ctx context.Context, record store.JobRecord, value map[string]any) map[string]any {
 	// A profile edit is intentionally non-breaking: jobs retain their pinned
 	// revision until an operator explicitly applies the newer one. Surface the
 	// availability on the job payload so the editor can offer that deliberate
@@ -192,18 +207,27 @@ func fromConfig(j config.Job) jobPayload {
 }
 
 func baselineJSON(state model.JobState, currentHash string) map[string]any {
-	if state.Baseline == nil {
-		return map[string]any{"status": "collecting", "samples": state.CandidateCount, "attempts": state.CandidateAttempts}
+	summary := store.RuntimeStateSummary{HasBaseline: state.Baseline != nil, BaselineScanID: state.BaselineScanID, BaselineConfigHash: state.BaselineConfigHash, BaselineModified: state.BaselineModified, CandidateCount: state.CandidateCount, CandidateAttempts: state.CandidateAttempts, IncidentCount: len(state.Incidents), PendingCount: len(state.Pending)}
+	if state.Baseline != nil {
+		summary.BaselineHostCount = len(state.Baseline.Hosts)
+		if summary.BaselineHostCount == 0 && len(state.Baseline.Units) > 0 {
+			if page, err := observationsForSnapshot(*state.Baseline); err == nil {
+				summary.BaselineHostCount = len(page.Items)
+			}
+		}
+	}
+	return baselineJSONFromSummary(summary, currentHash)
+}
+
+func baselineJSONFromSummary(summary store.RuntimeStateSummary, currentHash string) map[string]any {
+	if !summary.HasBaseline {
+		return map[string]any{"status": "collecting", "samples": summary.CandidateCount, "attempts": summary.CandidateAttempts}
 	}
 	status := "complete"
-	if currentHash != "" && state.BaselineConfigHash != "" && state.BaselineConfigHash != currentHash {
+	if currentHash != "" && summary.BaselineConfigHash != "" && summary.BaselineConfigHash != currentHash {
 		status = "updating"
 	}
-	hostCount := 0
-	if page, err := observationsForSnapshot(*state.Baseline); err == nil {
-		hostCount = len(page.Items)
-	}
-	return map[string]any{"status": status, "scan_id": state.BaselineScanID, "config_hash": state.BaselineConfigHash, "samples": state.CandidateCount, "attempts": state.CandidateAttempts, "incidents": len(state.Incidents), "pending": len(state.Pending), "host_count": hostCount}
+	return map[string]any{"status": status, "scan_id": summary.BaselineScanID, "config_hash": summary.BaselineConfigHash, "samples": summary.CandidateCount, "attempts": summary.CandidateAttempts, "incidents": summary.IncidentCount, "pending": summary.PendingCount, "host_count": summary.BaselineHostCount}
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
@@ -215,12 +239,12 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(jobs))
 	for _, j := range jobs {
-		state, stateErr := s.Store.RuntimeState(r.Context(), j.ID)
-		if stateErr != nil {
-			writeError(w, 500, "store", stateErr.Error(), nil)
+		summary, summaryErr := s.Store.RuntimeStateSummary(r.Context(), j.ID)
+		if summaryErr != nil {
+			writeError(w, 500, "store", summaryErr.Error(), nil)
 			return
 		}
-		out = append(out, s.jobJSONWithCycle(r.Context(), j, state))
+		out = append(out, s.jobJSONWithCycleSummary(r.Context(), j, summary))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": out})
 }

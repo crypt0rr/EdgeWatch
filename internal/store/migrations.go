@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 28
+const schemaVersion = 29
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -716,6 +716,34 @@ END;`,
  updated_at TEXT NOT NULL DEFAULT ''
 );`,
 			"ALTER TABLE fts_backfill_state ADD COLUMN processed_rows INTEGER NOT NULL DEFAULT 0",
+		},
+		29: {
+			// Accepted incidents are a deliberate overlay on the immutable source
+			// scan. Keep that effective baseline addressable and paginatable instead
+			// of forcing every host request to decode the complete runtime snapshot.
+			`CREATE TABLE IF NOT EXISTS baseline_hosts (
+ job_id TEXT NOT NULL,
+ address TEXT NOT NULL,
+ address_family TEXT NOT NULL DEFAULT '',
+ source_targets_json BLOB NOT NULL DEFAULT '[]',
+ dns_names_json BLOB NOT NULL DEFAULT '[]',
+ host_json BLOB NOT NULL,
+ data_quality TEXT NOT NULL DEFAULT 'detailed',
+ search_text TEXT NOT NULL DEFAULT '',
+ open_ports INTEGER NOT NULL DEFAULT 0,
+ open_filtered_ports INTEGER NOT NULL DEFAULT 0,
+ tcp_present INTEGER NOT NULL DEFAULT 0,
+ udp_present INTEGER NOT NULL DEFAULT 0,
+ tcp_open_ports INTEGER NOT NULL DEFAULT 0,
+ tcp_open_filtered_ports INTEGER NOT NULL DEFAULT 0,
+ udp_open_ports INTEGER NOT NULL DEFAULT 0,
+ udp_open_filtered_ports INTEGER NOT NULL DEFAULT 0,
+ PRIMARY KEY(job_id,address),
+ FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);`,
+			"CREATE INDEX IF NOT EXISTS baseline_hosts_job_address ON baseline_hosts(job_id,address)",
+			"CREATE INDEX IF NOT EXISTS baseline_hosts_job_open ON baseline_hosts(job_id,open_ports,open_filtered_ports)",
+			"CREATE INDEX IF NOT EXISTS baseline_hosts_job_protocol_open ON baseline_hosts(job_id,tcp_present,udp_present,tcp_open_ports,udp_open_ports)",
 		},
 	}
 	for next := version + 1; next <= schemaVersion; next++ {

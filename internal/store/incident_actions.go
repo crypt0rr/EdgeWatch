@@ -14,7 +14,7 @@ import (
 // The mutation and its audit row share the same transaction, so a successful
 // response always means both durable records were committed.
 func (s *Store) AcceptIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
-	return s.updateIncidentAction(ctx, jobID, []AuditEntry{audit}, func(state *model.JobState) ([]model.Event, error) {
+	return s.updateIncidentAction(ctx, jobID, []AuditEntry{audit}, true, func(state *model.JobState) ([]model.Event, error) {
 		if state.Baseline == nil {
 			return nil, ErrBaselineNotReady
 		}
@@ -48,7 +48,7 @@ func (s *Store) AcceptIncidentWithAudit(ctx context.Context, jobID, jobName, key
 // successful scan. The confirmed change is retained privately so the engine
 // can re-open it immediately if the next scan still observes the change.
 func (s *Store) SuppressIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
-	return s.updateIncidentAction(ctx, jobID, []AuditEntry{audit}, func(state *model.JobState) ([]model.Event, error) {
+	return s.updateIncidentAction(ctx, jobID, []AuditEntry{audit}, false, func(state *model.JobState) ([]model.Event, error) {
 		incident, ok := state.Incidents[key]
 		if !ok {
 			return nil, ErrIncidentNotFound
@@ -75,7 +75,7 @@ func (s *Store) SuppressIncidentWithAudit(ctx context.Context, jobID, jobName, k
 // is not actively scanning. Keeping the active-scan check, state transition,
 // event write, and audit insert in one transaction prevents a scan from
 // finishing against a half-applied operator decision.
-func (s *Store) updateIncidentAction(ctx context.Context, jobID string, audits []AuditEntry, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+func (s *Store) updateIncidentAction(ctx context.Context, jobID string, audits []AuditEntry, syncBaseline bool, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -91,9 +91,21 @@ func (s *Store) updateIncidentAction(ctx context.Context, jobID string, audits [
 	if active {
 		return nil, ErrJobScanActive
 	}
-	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, nil, fn)
+	var resultingState *model.JobState
+	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, nil, func(state *model.JobState) ([]model.Event, error) {
+		events, err := fn(state)
+		if err == nil && syncBaseline && state.Baseline != nil {
+			resultingState = state
+		}
+		return events, err
+	})
 	if err != nil {
 		return nil, err
+	}
+	if resultingState != nil {
+		if err := replaceBaselineHostProjectionTx(ctx, tx, jobID, *resultingState.Baseline); err != nil {
+			return nil, err
+		}
 	}
 	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 		return nil, err

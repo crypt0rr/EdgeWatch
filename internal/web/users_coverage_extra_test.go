@@ -95,6 +95,17 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := db.CreateSessionForUserWithAudit(context.Background(), operator.ID, "idempotent-user-update", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	// Supplying an unchanged role is not a security transition and must not
+	// revoke the account's active sessions.
+	if rec := call(http.MethodPatch, "/"+operator.ID, `{"role":"operator"}`); rec.Code != http.StatusOK {
+		t.Fatalf("idempotent role update = %d: %s", rec.Code, rec.Body.String())
+	}
+	if _, err := db.GetSession(context.Background(), "idempotent-user-update"); err != nil {
+		t.Fatalf("idempotent role update revoked session: %v", err)
+	}
 	if rec := call(http.MethodPost, "/"+operator.ID+"/activation", "{}"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "activation_token") {
 		t.Fatalf("activation issue = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -115,6 +126,29 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	server.activateUser(badToken, badTokenRequest)
 	if badToken.Code != http.StatusBadRequest {
 		t.Fatalf("invalid activation token = %d: %s", badToken.Code, badToken.Body.String())
+	}
+
+	disabled, err := db.CreateUser(context.Background(), store.User{Username: "disabled-user", DisplayName: "Disabled", Role: store.RoleViewer, PasswordHash: hash, Enabled: false}, store.AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"activation", "password-reset"} {
+		rec := call(http.MethodPost, "/"+disabled.ID+"/"+action, "{}")
+		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "user_disabled") {
+			t.Fatalf("disabled %s issue = %d: %s", action, rec.Code, rec.Body.String())
+		}
+	}
+
+	locked, err := db.CreateUser(context.Background(), store.User{Username: "locked-totp", DisplayName: "Locked TOTP", Role: store.RoleViewer, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(context.Background(), `UPDATE users SET totp_enabled=1,totp_secret='' WHERE id=?`, locked.ID); err != nil {
+		t.Fatal(err)
+	}
+	lockedUpdate := call(http.MethodPatch, "/"+locked.ID, `{"display_name":"still locked"}`)
+	if lockedUpdate.Code != http.StatusServiceUnavailable || !strings.Contains(lockedUpdate.Body.String(), "totp_locked") || strings.Contains(lockedUpdate.Body.String(), "cannot be decrypted") {
+		t.Fatalf("locked TOTP update = %d: %s", lockedUpdate.Code, lockedUpdate.Body.String())
 	}
 
 	closedServer, closedDB, closedAdmin := newUsersTestServer(t)

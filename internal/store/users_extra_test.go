@@ -133,6 +133,57 @@ func TestSecuritySaveCanPreserveActingSessionWhileRevokingOthers(t *testing.T) {
 	}
 }
 
+func TestSecuritySaveAppliesDisableTransitionsAtomically(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	user, err := s.CreateUser(ctx, User{Username: "disable-transition", DisplayName: "Disable transition", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateUserInvite(ctx, "disable-invite", user.ID, now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSessionForUserWithAudit(ctx, user.ID, "disable-session", "csrf", now, now.Add(time.Hour), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	user.Enabled = false
+	user.UpdatedAt = now.Add(time.Minute)
+	// The transition policy must not depend on callers remembering the
+	// revokeSessions hint. Security saves and profile updates share the same
+	// transactional behavior.
+	if err := s.SaveUserSecurity(ctx, user, nil, false, false, AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetSession(ctx, "disable-session"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("disable transition left session active: %v", err)
+	}
+	if _, err := s.ActivateUser(ctx, "disable-invite", "replacement-hash", now.Add(2*time.Minute), AuditEntry{}); err == nil {
+		t.Fatal("disable transition left activation invite usable")
+	}
+}
+
+func TestSecuritySaveRoleTransitionRevokesSessionsWithoutHint(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	user, err := s.CreateUser(ctx, User{Username: "role-transition", DisplayName: "Role transition", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSessionForUserWithAudit(ctx, user.ID, "role-session", "csrf", now, now.Add(time.Hour), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	user.Role = RoleOperator
+	user.UpdatedAt = now.Add(time.Minute)
+	if err := s.SaveUserSecurity(ctx, user, nil, false, false, AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GetSession(ctx, "role-session"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("role transition left session active: %v", err)
+	}
+}
+
 func TestGetAdminUsesAuthoritativeUserCredentials(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

@@ -207,6 +207,33 @@ func (s *Server) writeAuditUnavailable(w http.ResponseWriter, err error, action 
 	return true
 }
 
+// writeSecurityMutationError maps storage failures from account/security
+// mutations to stable API contracts. In particular, never echo SQLite,
+// encryption, or other implementation details back to a browser: those
+// messages can contain schema details and, for credential-bearing paths,
+// sensitive context. Callers should handle audit-unavailable errors before
+// using this helper.
+func writeSecurityMutationError(w http.ResponseWriter, err error, fallbackCode, fallbackMessage string) {
+	switch {
+	case errors.Is(err, store.ErrTOTPSecretLocked):
+		writeError(w, http.StatusServiceUnavailable, "totp_locked", "TOTP credentials are unavailable; restore the encryption key before changing account security settings", nil)
+	case errors.Is(err, store.ErrConflict):
+		writeError(w, http.StatusConflict, "conflict", "account was modified; reload and try again", nil)
+	case errors.Is(err, store.ErrLastAdministrator):
+		writeError(w, http.StatusBadRequest, "last_admin", "EdgeWatch must keep one enabled administrator", nil)
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", "account was not found", nil)
+	default:
+		if fallbackCode == "" {
+			fallbackCode = "save_failed"
+		}
+		if fallbackMessage == "" {
+			fallbackMessage = "account security could not be saved"
+		}
+		writeError(w, http.StatusInternalServerError, fallbackCode, fallbackMessage, nil)
+	}
+}
+
 func (s *Server) requireAudit(ctx context.Context, w http.ResponseWriter, action, detail string) bool {
 	return s.requireAuditEntry(ctx, w, store.AuditEntry{Action: action, Detail: detail})
 }

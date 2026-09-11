@@ -152,7 +152,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, session stor
 			s.writeAuditUnavailable(w, err, "user.created")
 			return
 		}
-		writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), nil)
+		writeError(w, http.StatusInternalServerError, "create_failed", "user could not be created", nil)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"user": created.Summary(), "activation_token": plain, "activation_path": "/activate?token=" + plain})
@@ -183,6 +183,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 			return
 		}
 	}
+	previousRole, previousEnabled := user.Role, user.Enabled
 	if input.DisplayName != nil {
 		name, validationErr := validateDisplayName(*input.DisplayName)
 		if validationErr != nil {
@@ -214,7 +215,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 	// Display-name-only edits are presentation changes and should not sign the
 	// account out. Role/enabled transitions are security changes and continue to
 	// revoke sessions atomically in the store.
-	revokeSessions := input.Role != nil || input.Enabled != nil
+	// Only actual security transitions invalidate sessions. This keeps a
+	// display-name-only (or idempotent role/state) update from signing users
+	// out while still protecting role and enabled-state changes. The store
+	// repeats this policy transactionally for non-HTTP callers.
+	revokeSessions := user.Role != previousRole || user.Enabled != previousEnabled
 	if err := s.Store.UpdateUser(r.Context(), user, revokeSessions, store.AuditEntry{Action: "user.updated", Detail: fmt.Sprintf("user %s updated by %s", user.Username, actor.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
 		if s.writeAuditUnavailable(w, err, "user.updated") {
 			return
@@ -236,7 +241,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 			writeError(w, http.StatusConflict, "conflict", "username is already in use", nil)
 			return
 		}
-		writeError(w, http.StatusBadRequest, "save_failed", err.Error(), nil)
+		if errors.Is(err, store.ErrTOTPSecretLocked) {
+			writeError(w, http.StatusServiceUnavailable, "totp_locked", "TOTP credentials are unavailable; restore the encryption key before changing account security settings", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "save_failed", "user could not be saved", nil)
 		return
 	}
 	user.Revision++
@@ -258,8 +267,8 @@ func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor s
 	// redeemed and should not be issued. Pending invitees are the one
 	// intentional exception: they start disabled with the !pending sentinel
 	// and use the activation endpoint to set their first password.
-	if action == "user.password_reset_issued" && !user.Enabled && !strings.HasPrefix(user.PasswordHash, "!pending") {
-		writeError(w, http.StatusConflict, "user_disabled", "disabled users cannot receive password-reset links", map[string]string{"enabled": "enable the account before issuing a password reset"})
+	if !user.Enabled && !strings.HasPrefix(user.PasswordHash, "!pending") {
+		writeError(w, http.StatusConflict, "user_disabled", "disabled users cannot receive activation or password-reset links", map[string]string{"enabled": "enable the account before issuing an activation or password-reset link"})
 		return
 	}
 	plain, digest, err := auth.NewOpaqueToken()
@@ -332,7 +341,13 @@ func (s *Server) activateUser(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "activation could not be completed because the security audit is unavailable", nil)
 			return
 		}
-		writeError(w, http.StatusBadRequest, "activation_failed", err.Error(), nil)
+		// Keep the activation contract useful for password-policy failures while
+		// avoiding raw store/SQL errors in a public token endpoint.
+		if strings.HasPrefix(err.Error(), "password must be at least ") {
+			writeError(w, http.StatusBadRequest, "activation_failed", err.Error(), nil)
+		} else {
+			writeError(w, http.StatusBadRequest, "activation_failed", "activation could not be completed; the token may be invalid or expired", nil)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"activated": true})

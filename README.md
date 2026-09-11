@@ -393,6 +393,14 @@ a portable JSON document for every managed and legacy baseline, or one job when
 `--job NAME` (or its managed ID) is supplied. Jobs without a ready baseline are
 included with `status: "not_ready"`.
 
+The backup, verify, baseline-export, restore, and notification-test commands
+write bounded `host-cli` security-audit records. Audit details contain only the
+operation status and (where useful) a sanitized filename; they never contain
+notification URLs, credentials, provider errors, or command arguments. A
+read-only or unavailable audit store does not hide a successful verify/export
+result; EdgeWatch returns the result and emits a warning that the audit row
+could not be written.
+
 Keep the resulting database or JSON file together with `config.yaml`,
 `notification.key` (when web-managed destinations are configured), and any
 separately mounted notification URL or encryption-key files. Keep notification

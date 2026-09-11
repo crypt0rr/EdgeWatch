@@ -100,6 +100,9 @@ func PreflightRestore(ctx context.Context, source, destination string) (RestoreP
 	if err != nil {
 		return result, fmt.Errorf("restore source: %w", err)
 	}
+	if err := validateSQLiteRestoreSource(sourcePath); err != nil {
+		return result, err
+	}
 	result.SourceExists = sourceInfo != nil
 	destinationInfo, err := regularFileInfo(destinationPath, false)
 	if err != nil {
@@ -276,6 +279,17 @@ func copyRestoreFile(ctx context.Context, source, destination string) (int64, er
 		return 0, fmt.Errorf("open restore source: %w", err)
 	}
 	defer in.Close()
+	pathInfo, err := os.Lstat(source)
+	if err != nil {
+		return 0, fmt.Errorf("stat restore source: %w", err)
+	}
+	inInfo, err := in.Stat()
+	if err != nil {
+		return 0, fmt.Errorf("stat opened restore source: %w", err)
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() || !os.SameFile(pathInfo, inInfo) {
+		return 0, errors.New("restore source changed while it was being opened")
+	}
 	out, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
 		return 0, fmt.Errorf("create restore staging file: %w", err)
@@ -293,6 +307,22 @@ func copyRestoreFile(ctx context.Context, source, destination string) (int64, er
 		return bytes, fmt.Errorf("close restore staging file: %w", closeErr)
 	}
 	return bytes, nil
+}
+
+func validateSQLiteRestoreSource(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("open restore source: %w", err)
+	}
+	defer file.Close()
+	var header [16]byte
+	if _, err := io.ReadFull(file, header[:]); err != nil {
+		return fmt.Errorf("read restore source header: %w", err)
+	}
+	if string(header[:]) != "SQLite format 3\x00" {
+		return errors.New("restore source is not a SQLite database")
+	}
+	return nil
 }
 
 func copyWithContext(ctx context.Context, destination io.Writer, source io.Reader) (int64, error) {

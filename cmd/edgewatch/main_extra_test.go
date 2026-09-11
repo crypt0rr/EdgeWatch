@@ -245,6 +245,9 @@ func TestRunBackupVerifyAndBaselineExport(t *testing.T) {
 	if err := run([]string{"baseline", "export", "--config", configPath, "--out", exportPath, "--output", "json"}); err != nil {
 		t.Fatalf("baseline export: %v", err)
 	}
+	if err := run([]string{"notify", "test", "--config", configPath, "--output", "json"}); err != nil {
+		t.Fatalf("notification test: %v", err)
+	}
 	contents, err := os.ReadFile(exportPath)
 	if err != nil {
 		t.Fatal(err)
@@ -255,6 +258,55 @@ func TestRunBackupVerifyAndBaselineExport(t *testing.T) {
 	}
 	if exported["format_version"] != float64(store.BaselineExportVersion) {
 		t.Fatalf("baseline export = %#v", exported)
+	}
+	s, err = store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	rows, err := s.DB.QueryContext(context.Background(), `SELECT action,actor_username,detail FROM security_audit WHERE action IN ('database.verify','database.backup','baseline.export','notifications.test') ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var auditRows int
+	for rows.Next() {
+		var action, actor, detail string
+		if err := rows.Scan(&action, &actor, &detail); err != nil {
+			t.Fatal(err)
+		}
+		auditRows++
+		if actor != "host-cli" || strings.Contains(detail, dir) || strings.Contains(detail, "generic://") {
+			t.Fatalf("unsafe CLI audit row: action=%q actor=%q detail=%q", action, actor, detail)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if auditRows != 4 {
+		t.Fatalf("CLI audit rows = %d, want four", auditRows)
+	}
+}
+
+func TestRunVerifyPreservesResultWhenAuditStoreIsReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	database := filepath.Join(dir, "edgewatch.db")
+	configPath := filepath.Join(dir, "config.yaml")
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// URI mode=ro keeps both the diagnostic store and its audit connection
+	// read-only. Verify must still return its healthy result when the audit
+	// insert cannot be committed.
+	if err := os.WriteFile(configPath, []byte("database: file:"+database+"?mode=ro\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"verify", "--config", configPath, "--output", "json"}); err != nil {
+		t.Fatalf("read-only verify: %v", err)
 	}
 }
 

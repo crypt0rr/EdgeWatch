@@ -109,8 +109,12 @@ func run(args []string) error {
 		}
 		result, err := store.Restore(context.Background(), *fromPath, cfg.Database, store.RestoreOptions{AllowSidecarReplay: *allowSidecarReplay})
 		if err != nil {
+			// Do not open the destination to audit a refused restore: doing so
+			// could itself cause SQLite to inspect, checkpoint, or remove the
+			// very sidecar that made the restore unsafe.
 			return err
 		}
+		auditHostCommand(context.Background(), cfg.Database, nil, false, store.AuditEntry{Action: "database.restore", Detail: hostAuditDetail("source", *fromPath, err)})
 		return printValue(*output, result)
 	}
 	// Keep the daemon as the sole migration/repair owner. Read-only health and
@@ -177,21 +181,29 @@ func run(args []string) error {
 		return printValue(*output, map[string]any{"scans": scans, "events": events})
 	case "baseline":
 		if action == "export" {
-			return exportBaseline(ctx, s, *jobName, *outPath, *output)
+			err := exportBaseline(ctx, s, *jobName, *outPath, *output)
+			auditHostCommand(ctx, cfg.Database, s, false, store.AuditEntry{Action: "baseline.export", Detail: hostAuditDetail("output", *outPath, err)})
+			return err
 		}
 		return baseline(ctx, action, s, application, *jobName, *scanID, *output)
 	case "notify":
 		if action != "test" {
 			return errors.New("expected: notify test")
 		}
-		return application.Notifier.Test()
+		err := application.Notifier.Test()
+		auditHostCommand(ctx, cfg.Database, s, true, store.AuditEntry{Action: "notifications.test", Detail: hostAuditDetail("operation", "global", err)})
+		return err
 	case "backup":
 		if *outPath == "" {
 			return errors.New("--out is required")
 		}
-		return backup(ctx, s, *outPath, *output)
+		err := backup(ctx, s, *outPath, *output)
+		auditHostCommand(ctx, cfg.Database, s, true, store.AuditEntry{Action: "database.backup", Detail: hostAuditDetail("output", *outPath, err)})
+		return err
 	case "verify":
-		return verify(ctx, s, *output)
+		err := verify(ctx, s, *output)
+		auditHostCommand(ctx, cfg.Database, s, false, store.AuditEntry{Action: "database.verify", Detail: hostAuditDetail("operation", "database", err)})
+		return err
 	case "health":
 		return s.Healthy(ctx)
 	default:

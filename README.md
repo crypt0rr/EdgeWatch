@@ -500,6 +500,7 @@ npm ci
 make check
 npm run build
 npm test
+npm run test:coverage
 npm run test:e2e
 docker compose config --quiet
 ```

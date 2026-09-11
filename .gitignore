@@ -9,6 +9,7 @@
 *.db-shm
 *.db-wal
 coverage.out
+/coverage/
 node_modules/
 *.tsbuildinfo
 vite.config.js

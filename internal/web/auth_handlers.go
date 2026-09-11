@@ -242,7 +242,14 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "setup could not be completed because the security audit is unavailable", nil)
 			return
 		}
-		writeError(w, http.StatusBadRequest, "setup_failed", err.Error(), nil)
+		// Password policy errors are safe and actionable; storage/authentication
+		// failures use a generic response so SQLite and encryption details never
+		// reach an unauthenticated caller.
+		if strings.HasPrefix(err.Error(), "password must be at least ") {
+			writeError(w, http.StatusBadRequest, "setup_failed", err.Error(), nil)
+		} else {
+			writeError(w, http.StatusBadRequest, "setup_failed", "administrator setup could not be completed", nil)
+		}
 		return
 	}
 	s.Log.Info("administrator configured")
@@ -279,7 +286,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "login could not be completed because the security audit is unavailable", nil)
 			return
 		}
-		writeError(w, http.StatusUnauthorized, "login_failed", err.Error(), nil)
+		writeError(w, http.StatusUnauthorized, "login_failed", "invalid credentials", nil)
 		return
 	}
 	auth.SetSessionCookie(w, raw)
@@ -309,7 +316,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, session store.Se
 			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "logout could not be recorded by the security audit", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		writeError(w, http.StatusInternalServerError, "store", "session could not be ended", nil)
 		return
 	}
 	writeJSON(w, http.StatusNoContent, nil)
@@ -318,7 +325,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, session store.Se
 func (s *Server) session(w http.ResponseWriter, r *http.Request, session store.Session) {
 	user, err := s.Store.GetUser(r.Context(), session.UserID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "user_missing", err.Error(), nil)
+		writeError(w, http.StatusInternalServerError, "user_missing", "account could not be loaded", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"user_id": user.ID, "username": user.Username, "display_name": user.DisplayName, "role": user.Role, "permissions": auth.PermissionsForRole(user.Role), "csrf_token": session.CSRFToken, "totp_enabled": user.TOTPEnabled, "password_requirements": auth.PasswordRequirements()})
@@ -427,7 +434,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 			writeError(w, http.StatusConflict, "conflict", "account was modified; reload and try again", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "save_failed", err.Error(), nil)
+		writeSecurityMutationError(w, err, "save_failed", "password could not be changed")
 		return
 	}
 	writeJSON(w, http.StatusNoContent, nil)
@@ -451,7 +458,7 @@ func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store
 	}
 	secret, err := auth.NewTOTPSecret()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
+		writeError(w, http.StatusInternalServerError, "totp_failed", "TOTP setup could not be initialized", nil)
 		return
 	}
 	cookie, cookieErr := r.Cookie(auth.SessionCookie)
@@ -489,12 +496,12 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 	}
 	plain, hashes, err := auth.RecoveryCodes()
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
+		writeError(w, http.StatusInternalServerError, "totp_failed", "recovery codes could not be generated", nil)
 		return
 	}
 	user, err := s.Store.GetUser(r.Context(), session.UserID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
+		writeError(w, http.StatusInternalServerError, "totp_failed", "account could not be loaded for TOTP setup", nil)
 		return
 	}
 	user.TOTPSecret, user.TOTPEnabled, user.UpdatedAt = pending.Secret, true, time.Now().UTC()
@@ -516,7 +523,7 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 			writeError(w, http.StatusConflict, "conflict", "account was modified; reload and try again", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
+		writeSecurityMutationError(w, err, "totp_failed", "TOTP could not be enabled")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": plain})
@@ -556,7 +563,7 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 			writeError(w, http.StatusConflict, "conflict", "account was modified; reload and try again", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "totp_failed", err.Error(), nil)
+		writeSecurityMutationError(w, err, "totp_failed", "TOTP could not be disabled")
 		return
 	}
 	writeJSON(w, http.StatusNoContent, nil)

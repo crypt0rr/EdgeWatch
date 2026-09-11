@@ -308,7 +308,12 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	if count, _ := result.RowsAffected(); count != 1 {
 		return ErrConflict
 	}
-	if revokeSessions || (currentEnabled != 0 && !u.Enabled) {
+	// Security transitions are session-invalidating even when a trusted caller
+	// forgets to set revokeSessions. Keeping this policy at the transactional
+	// store boundary makes API, CLI, and future callers behave consistently;
+	// display-name-only edits remain session preserving.
+	securityTransition := currentRole != u.Role || (currentEnabled != 0) != u.Enabled
+	if revokeSessions || securityTransition {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, u.ID); err != nil {
 			return err
 		}
@@ -320,10 +325,8 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	// Revocation is a transition, not a property of the resulting row. Pending
 	// invitees are intentionally disabled while their password hash carries a
 	// sentinel; editing their display name or role must not kill the invite.
-	if currentEnabled != 0 && !u.Enabled && !strings.HasPrefix(currentPasswordHash, "!pending") {
-		if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL`, u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID); err != nil {
-			return err
-		}
+	if err := revokeUserInvitesOnDisableTx(ctx, tx, u.ID, currentEnabled != 0, currentPasswordHash, u.Enabled, u.UpdatedAt); err != nil {
+		return err
 	}
 	if audit.Action != "" {
 		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
@@ -415,7 +418,8 @@ func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, r
 			}
 		}
 	}
-	if revokeSessions || (currentEnabled != 0 && !u.Enabled) {
+	securityTransition := currentRole != u.Role || (currentEnabled != 0) != u.Enabled
+	if revokeSessions || securityTransition {
 		if preserveSessionHash = strings.TrimSpace(preserveSessionHash); preserveSessionHash == "" {
 			if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, u.ID); err != nil {
 				return err
@@ -428,10 +432,8 @@ func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, r
 	// activation or password-reset link in the same transaction. Pending
 	// invitees intentionally remain eligible to redeem their first activation
 	// link even though their account starts disabled.
-	if currentEnabled != 0 && !u.Enabled && !strings.HasPrefix(currentPasswordHash, "!pending") {
-		if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL`, u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID); err != nil {
-			return err
-		}
+	if err := revokeUserInvitesOnDisableTx(ctx, tx, u.ID, currentEnabled != 0, currentPasswordHash, u.Enabled, u.UpdatedAt); err != nil {
+		return err
 	}
 	if audit.Action != "" {
 		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
@@ -457,6 +459,18 @@ func ensureLastAdministratorTx(ctx context.Context, tx *sql.Tx, userID, currentR
 		return ErrLastAdministrator
 	}
 	return nil
+}
+
+// revokeUserInvitesOnDisableTx is the single transactional rule for
+// invalidating outstanding activation and password-reset links. Pending
+// invitees intentionally remain eligible for their first activation while an
+// already configured account must lose every outstanding link when disabled.
+func revokeUserInvitesOnDisableTx(ctx context.Context, tx *sql.Tx, userID string, currentEnabled bool, currentPasswordHash string, nextEnabled bool, at time.Time) error {
+	if !currentEnabled || nextEnabled || strings.HasPrefix(currentPasswordHash, "!pending") {
+		return nil
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL`, at.UTC().Format(time.RFC3339Nano), userID)
+	return err
 }
 
 func (s *Store) userTOTPForSave(u User) (string, error) {

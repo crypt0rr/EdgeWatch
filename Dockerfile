@@ -45,7 +45,7 @@ ARG PREBUILT_EDGEWATCH=0
 ARG TARGETOS
 ARG TARGETARCH
 RUN if [ "$PREBUILT_EDGEWATCH" = "1" ]; then \
-      test -x "/src/release-binaries/linux_${TARGETARCH}/edgewatch" && \
+      test -f "/src/release-binaries/linux_${TARGETARCH}/edgewatch" && \
       mkdir -p /out && \
       install -m 0755 "/src/release-binaries/linux_${TARGETARCH}/edgewatch" /out/edgewatch; \
     else \

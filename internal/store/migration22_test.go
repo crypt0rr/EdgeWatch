@@ -148,3 +148,25 @@ PRAGMA user_version = 24;`); err != nil {
 		t.Fatal("migration 28 did not add processed_rows to legacy FTS state")
 	}
 }
+
+func TestMigration29AddsBaselineHostProjection(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if _, err := s.DB.ExecContext(ctx, `DROP TABLE baseline_hosts; PRAGMA user_version = 28;`); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrate(s.DB); err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err := s.DB.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
+	}
+	var table string
+	if err := s.DB.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name='baseline_hosts'`).Scan(&table); err != nil {
+		t.Fatal(err)
+	}
+}

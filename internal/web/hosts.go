@@ -900,6 +900,32 @@ func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, id str
 			return
 		}
 	}
+	if baselineModified {
+		projectionExists, projectionErr := s.Store.BaselineHostProjectionExists(r.Context(), id)
+		if projectionErr != nil {
+			writeError(w, http.StatusInternalServerError, "store", projectionErr.Error(), nil)
+			return
+		}
+		if projectionExists {
+			projected, listErr := s.Store.ListBaselineHostsPage(r.Context(), id, query, protocol, hasOpen, limit, offset)
+			if listErr != nil {
+				writeError(w, http.StatusInternalServerError, "store", listErr.Error(), nil)
+				return
+			}
+			items := make([]hostSummary, 0, len(projected.Items))
+			for _, item := range projected.Items {
+				items = append(items, summaryFromIndexedHost(item))
+			}
+			var source any
+			if baselineScanID != "" {
+				if summary, summaryErr := s.Store.GetScanSummary(r.Context(), baselineScanID); summaryErr == nil {
+					source = summary
+				}
+			}
+			writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": record.Job.Name, "source_scan": source, "data_quality": "detailed", "hosts": items, "pagination": paginationJSON(offset, limit, projected.Total)})
+			return
+		}
+	}
 	state, err := s.Store.RuntimeState(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
@@ -967,6 +993,29 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, raw
 		writeError(w, http.StatusInternalServerError, "store", metaErr.Error(), nil)
 		return
 	}
+	if baselineModified {
+		if projectionExists, projectionErr := s.Store.BaselineHostProjectionExists(r.Context(), id); projectionErr != nil {
+			writeError(w, http.StatusInternalServerError, "store", projectionErr.Error(), nil)
+			return
+		} else if projectionExists {
+			if projected, projectionErr := s.Store.GetBaselineHost(r.Context(), id, address); projectionErr == nil {
+				dedupeHost(&projected.Host)
+				var source any
+				if baselineScanID, _, _ := s.Store.RuntimeBaselineMeta(r.Context(), id); baselineScanID != "" {
+					if summary, summaryErr := s.Store.GetScanSummary(r.Context(), baselineScanID); summaryErr == nil {
+						source = summary
+					}
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": record.Job.Name, "data_quality": projected.DataQuality, "host": projected.Host, "expected": projected.Host, "source_scan": source})
+				return
+			} else if !errors.Is(projectionErr, store.ErrNotFound) {
+				writeError(w, http.StatusInternalServerError, "store", projectionErr.Error(), nil)
+				return
+			}
+			writeError(w, http.StatusNotFound, "not_found", "baseline host not found", nil)
+			return
+		}
+	}
 	state, err := s.Store.RuntimeState(r.Context(), id)
 	if err != nil || state.Baseline == nil {
 		writeError(w, http.StatusNotFound, "not_found", "baseline host not found", nil)
@@ -1019,6 +1068,27 @@ func (s *Server) jobBaselineHostRDAP(w http.ResponseWriter, r *http.Request, id,
 	} else if metaErr != nil {
 		writeError(w, http.StatusInternalServerError, "store", metaErr.Error(), nil)
 		return
+	}
+	if baselineModified {
+		if projectionExists, projectionErr := s.Store.BaselineHostProjectionExists(r.Context(), id); projectionErr != nil {
+			writeError(w, http.StatusInternalServerError, "store", projectionErr.Error(), nil)
+			return
+		} else if projectionExists {
+			if _, projectionErr := s.Store.GetBaselineHost(r.Context(), id, address); projectionErr == nil {
+				result := rdapUnavailable(address)
+				if s.RDAP != nil {
+					result, _ = s.RDAP.Lookup(r.Context(), address)
+				}
+				w.Header().Set("Cache-Control", "no-store")
+				writeJSON(w, http.StatusOK, map[string]any{"rdap": result})
+				return
+			} else if !errors.Is(projectionErr, store.ErrNotFound) {
+				writeError(w, http.StatusInternalServerError, "store", projectionErr.Error(), nil)
+				return
+			}
+			writeError(w, http.StatusNotFound, "not_found", "baseline host not found", nil)
+			return
+		}
 	}
 	state, err := s.Store.RuntimeState(r.Context(), id)
 	if err != nil || state.Baseline == nil {

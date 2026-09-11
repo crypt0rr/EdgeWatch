@@ -30,6 +30,81 @@ func (s *Store) RuntimeState(ctx context.Context, jobID string) (model.JobState,
 	return state, nil
 }
 
+// RuntimeStateSummary is the bounded state projection used by job-list
+// responses. It deliberately avoids unmarshalling the baseline/candidate
+// snapshots merely to render counters and host_count. Detailed state remains
+// available through RuntimeState for mutation and detail endpoints.
+type RuntimeStateSummary struct {
+	HasBaseline        bool
+	BaselineScanID     string
+	BaselineConfigHash string
+	BaselineModified   bool
+	CandidateCount     int
+	CandidateAttempts  int
+	IncidentCount      int
+	PendingCount       int
+	BaselineHostCount  int
+}
+
+func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeStateSummary, error) {
+	var summary RuntimeStateSummary
+	var baselineType sql.NullString
+	var scanID, configHash sql.NullString
+	var modified, candidateCount, candidateAttempts, incidentCount, pendingCount, hostArrayCount, unitAddressCount sql.NullInt64
+	err := s.reader().QueryRowContext(ctx, `SELECT
+ json_type(state_json,'$.baseline'),
+ json_extract(state_json,'$.baseline_scan_id'),
+ json_extract(state_json,'$.baseline_config_hash'),
+ COALESCE(json_extract(state_json,'$.baseline_modified'),0),
+ COALESCE(json_extract(state_json,'$.candidate_count'),0),
+ COALESCE(json_extract(state_json,'$.candidate_attempts'),0),
+ COALESCE((SELECT COUNT(*) FROM json_each(state_json,'$.incidents')),0),
+ COALESCE((SELECT COUNT(*) FROM json_each(state_json,'$.pending')),0),
+ COALESCE(json_array_length(state_json,'$.baseline.hosts'),-1),
+ COALESCE((SELECT COUNT(DISTINCT addresses.value)
+   FROM json_each(state_json,'$.baseline.units') AS units
+   JOIN json_each(units.value,'$.addresses') AS addresses),0)
+ FROM job_runtime WHERE job_id=?`, jobID).Scan(&baselineType, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incidentCount, &pendingCount, &hostArrayCount, &unitAddressCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return summary, nil
+	}
+	if err != nil {
+		return summary, err
+	}
+	summary.HasBaseline = baselineType.Valid && baselineType.String != "null" && baselineType.String != ""
+	summary.BaselineScanID, summary.BaselineConfigHash = scanID.String, configHash.String
+	summary.BaselineModified = modified.Int64 != 0
+	summary.CandidateCount = int(candidateCount.Int64)
+	summary.CandidateAttempts = int(candidateAttempts.Int64)
+	summary.IncidentCount = int(incidentCount.Int64)
+	summary.PendingCount = int(pendingCount.Int64)
+	// A detailed baseline may be represented by an indexed source scan. The
+	// count stays in SQLite and never requires decoding its JSON snapshot.
+	if summary.BaselineScanID != "" {
+		if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, summary.BaselineScanID).Scan(&summary.BaselineHostCount); err != nil {
+			return summary, err
+		}
+	}
+	// Accepted overlays and legacy baselines are copied to baseline_hosts when
+	// available. The JSON array fallback is only for old databases that predate
+	// migration 29 or contain a legacy snapshot without scan_hosts rows.
+	if summary.BaselineModified {
+		if countErr := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM baseline_hosts WHERE job_id=?`, jobID).Scan(&summary.BaselineHostCount); countErr != nil && !errors.Is(countErr, sql.ErrNoRows) {
+			return summary, countErr
+		}
+	}
+	if summary.BaselineHostCount == 0 {
+		if hostArrayCount.Valid && hostArrayCount.Int64 >= 0 {
+			summary.BaselineHostCount = int(hostArrayCount.Int64)
+		} else if unitAddressCount.Valid && unitAddressCount.Int64 >= 0 {
+			// Legacy baselines may only contain logical units. Count distinct
+			// effective addresses in SQLite rather than decoding the snapshot.
+			summary.BaselineHostCount = int(unitAddressCount.Int64)
+		}
+	}
+	return summary, nil
+}
+
 // RuntimeBaselineMeta reads only the baseline identifiers from runtime JSON.
 // Host pages use this fast path before deciding whether they need the full
 // legacy state snapshot.
@@ -87,6 +162,14 @@ func (s *Store) updateRuntimeWithOutboxAndAudits(ctx context.Context, jobID, sec
 // exclusion as incident actions. Scan finalization deliberately uses the
 // unguarded path so it can commit its own result while its lease is held.
 func (s *Store) updateRuntimeWithOutboxAndAuditsGuarded(ctx context.Context, jobID, securityHash string, destinations []string, audits []AuditEntry, rejectActive bool, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	return s.updateRuntimeWithOutboxAndAuditsGuardedPost(ctx, jobID, securityHash, destinations, audits, rejectActive, nil, fn)
+}
+
+// updateRuntimeWithOutboxAndAuditsGuardedPost is the same transactional path
+// with an optional post-transition hook. The hook runs before commit while the
+// final state is still protected by the writer transaction, which lets
+// baseline projections stay in lockstep with reset/accept operations.
+func (s *Store) updateRuntimeWithOutboxAndAuditsGuardedPost(ctx context.Context, jobID, securityHash string, destinations []string, audits []AuditEntry, rejectActive bool, post func(*sql.Tx, *model.JobState) error, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -120,9 +203,21 @@ func (s *Store) updateRuntimeWithOutboxAndAuditsGuarded(ctx context.Context, job
 			return nil, ErrJobRevisionChanged
 		}
 	}
-	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, destinations, fn)
+	var resultingState *model.JobState
+	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, destinations, func(state *model.JobState) ([]model.Event, error) {
+		events, err := fn(state)
+		if err == nil {
+			resultingState = state
+		}
+		return events, err
+	})
 	if err != nil {
 		return nil, err
+	}
+	if post != nil && resultingState != nil {
+		if err := post(tx, resultingState); err != nil {
+			return nil, err
+		}
 	}
 	if err = insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 		return nil, err
@@ -400,7 +495,9 @@ func (s *Store) ResetRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name 
 }
 
 func (s *Store) resetRuntimeWithAudits(ctx context.Context, jobID, name string, destinations []string, audits []AuditEntry) ([]model.Event, error) {
-	return s.updateRuntimeWithOutboxAndAuditsGuarded(ctx, jobID, "", destinations, audits, true, func(state *model.JobState) ([]model.Event, error) {
+	return s.updateRuntimeWithOutboxAndAuditsGuardedPost(ctx, jobID, "", destinations, audits, true, func(tx *sql.Tx, _ *model.JobState) error {
+		return clearBaselineHostProjectionTx(ctx, tx, jobID)
+	}, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = nil
 		state.BaselineScanID = ""
 		state.BaselineConfigHash = ""
@@ -481,6 +578,9 @@ func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string
 		return []model.Event{{Type: "baseline-approved", Job: name, ScanID: stored.ID, Message: "Baseline manually approved", CreatedAt: time.Now().UTC()}}, nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := replaceBaselineHostProjectionTx(ctx, tx, jobID, stored.Snapshot); err != nil {
 		return nil, err
 	}
 	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {

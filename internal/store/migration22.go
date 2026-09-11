@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -271,28 +272,58 @@ END;`,
 // triggers instead of issuing a second direct FTS insert, avoiding duplicates
 // if a batch is retried.
 func backfillHostSearchIndexes(db *sql.DB) error {
-	if err := ensureHostSearchTriggers(db); err != nil {
+	return backfillHostSearchIndexesContext(context.Background(), db)
+}
+
+// backfillHostSearchIndexesContext rebuilds both FTS projections without
+// making database-open work uncancellable. Each batch commits its checkpoint
+// before returning, so a cancelled migration can be restarted without
+// replaying already indexed rows.
+func backfillHostSearchIndexesContext(ctx context.Context, db *sql.DB) error {
+	return backfillHostSearchIndexesContextWithProgress(ctx, db, nil)
+}
+
+// backfillHostSearchIndexesContextWithProgress is the context-aware rebuild
+// implementation. The observer is intentionally internal and is used by
+// tests to cancel after a committed batch; production callers pass nil.
+func backfillHostSearchIndexesContextWithProgress(ctx context.Context, db *sql.DB, observer func(ftsBatchProgress)) error {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := ensureFTSBackfillState(db); err != nil {
+	if err := ensureHostSearchTriggersContext(ctx, db); err != nil {
 		return err
 	}
-	if err := initializeFTSBackfill(db); err != nil {
+	if err := ensureFTSBackfillStateContext(ctx, db); err != nil {
+		return err
+	}
+	if err := initializeFTSBackfillContext(ctx, db); err != nil {
 		return err
 	}
 	for {
-		scanProgress, err := backfillFTSTableBatch(db, "scan_hosts")
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		scanProgress, err := backfillFTSTableBatchContext(ctx, db, "scan_hosts")
 		if err != nil {
 			return err
 		}
-		latestProgress, err := backfillFTSTableBatch(db, "latest_scan_hosts")
+		if observer != nil && scanProgress.batchRows > 0 {
+			observer(scanProgress)
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		latestProgress, err := backfillFTSTableBatchContext(ctx, db, "latest_scan_hosts")
 		if err != nil {
 			return err
 		}
-		if scanProgress.batchRows > 0 {
+		if observer != nil && latestProgress.batchRows > 0 {
+			observer(latestProgress)
+		}
+		if scanProgress.batchRows > 0 || scanProgress.complete {
 			logFTSProgress(scanProgress)
 		}
-		if latestProgress.batchRows > 0 {
+		if latestProgress.batchRows > 0 || latestProgress.complete {
 			logFTSProgress(latestProgress)
 		}
 		if scanProgress.complete && latestProgress.complete {
@@ -317,7 +348,11 @@ func logFTSProgress(progress ftsBatchProgress) {
 }
 
 func ensureHostSearchTriggers(db *sql.DB) error {
-	tx, err := db.Begin()
+	return ensureHostSearchTriggersContext(context.Background(), db)
+}
+
+func ensureHostSearchTriggersContext(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -328,7 +363,7 @@ func ensureHostSearchTriggers(db *sql.DB) error {
 		args[i] = name
 	}
 	var triggerCount int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (`+placeholders+`)`, args...).Scan(&triggerCount); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN (`+placeholders+`)`, args...).Scan(&triggerCount); err != nil {
 		return err
 	}
 	if triggerCount < len(scanHostSearchTriggerNames) {
@@ -339,7 +374,7 @@ func ensureHostSearchTriggers(db *sql.DB) error {
 		// update only when this is the first startup before migration 22 creates
 		// the progress table; ensureFTSBackfillState will create it immediately
 		// afterwards.
-		if _, err := tx.Exec(`UPDATE fts_backfill_state SET last_rowid=0,processed_rows=0,initialized=0,complete=0,updated_at=?`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+		if _, err := tx.ExecContext(ctx, `UPDATE fts_backfill_state SET last_rowid=0,processed_rows=0,initialized=0,complete=0,updated_at=?`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
 			return err
 		}
 	}
@@ -347,12 +382,16 @@ func ensureHostSearchTriggers(db *sql.DB) error {
 }
 
 func ensureFTSBackfillState(db *sql.DB) error {
-	tx, err := db.Begin()
+	return ensureFTSBackfillStateContext(context.Background(), db)
+}
+
+func ensureFTSBackfillStateContext(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS fts_backfill_state (
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS fts_backfill_state (
  table_name TEXT PRIMARY KEY,
  last_rowid INTEGER NOT NULL DEFAULT 0,
  processed_rows INTEGER NOT NULL DEFAULT 0,
@@ -364,7 +403,7 @@ func ensureFTSBackfillState(db *sql.DB) error {
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, tableName := range []string{"scan_hosts", "latest_scan_hosts"} {
-		if _, err := tx.Exec(`INSERT OR IGNORE INTO fts_backfill_state(table_name,updated_at) VALUES(?,?)`, tableName, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO fts_backfill_state(table_name,updated_at) VALUES(?,?)`, tableName, now); err != nil {
 			return err
 		}
 	}
@@ -372,24 +411,28 @@ func ensureFTSBackfillState(db *sql.DB) error {
 }
 
 func initializeFTSBackfill(db *sql.DB) error {
-	tx, err := db.Begin()
+	return initializeFTSBackfillContext(context.Background(), db)
+}
+
+func initializeFTSBackfillContext(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
 	var initialized int
-	if err := tx.QueryRow(`SELECT COALESCE(MIN(initialized),0) FROM fts_backfill_state WHERE table_name IN ('scan_hosts','latest_scan_hosts')`).Scan(&initialized); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(initialized),0) FROM fts_backfill_state WHERE table_name IN ('scan_hosts','latest_scan_hosts')`).Scan(&initialized); err != nil {
 		return err
 	}
 	if initialized == 0 {
-		if _, err := tx.Exec(`DELETE FROM scan_host_search`); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM scan_host_search`); err != nil {
 			return err
 		}
-		if _, err := tx.Exec(`DELETE FROM latest_host_search`); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM latest_host_search`); err != nil {
 			return err
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		if _, err := tx.Exec(`UPDATE fts_backfill_state SET last_rowid=0, processed_rows=0, initialized=1, complete=0, updated_at=? WHERE table_name IN ('scan_hosts','latest_scan_hosts')`, now); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE fts_backfill_state SET last_rowid=0, processed_rows=0, initialized=1, complete=0, updated_at=? WHERE table_name IN ('scan_hosts','latest_scan_hosts')`, now); err != nil {
 			return err
 		}
 	}
@@ -404,15 +447,19 @@ type ftsHostRow struct {
 }
 
 func backfillFTSTableBatch(db *sql.DB, sourceTable string) (ftsBatchProgress, error) {
+	return backfillFTSTableBatchContext(context.Background(), db, sourceTable)
+}
+
+func backfillFTSTableBatchContext(ctx context.Context, db *sql.DB, sourceTable string) (ftsBatchProgress, error) {
 	progress := ftsBatchProgress{table: sourceTable}
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return progress, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	var lastRowID int64
 	var complete, processedRows int
-	if err := tx.QueryRow(`SELECT last_rowid,processed_rows,complete FROM fts_backfill_state WHERE table_name=?`, sourceTable).Scan(&lastRowID, &processedRows, &complete); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT last_rowid,processed_rows,complete FROM fts_backfill_state WHERE table_name=?`, sourceTable).Scan(&lastRowID, &processedRows, &complete); err != nil {
 		return progress, err
 	}
 	progress.lastRowID = lastRowID
@@ -425,29 +472,28 @@ func backfillFTSTableBatch(db *sql.DB, sourceTable string) (ftsBatchProgress, er
 		return progress, nil
 	}
 	query := `SELECT rowid,job,address,host_json FROM ` + sourceTable + ` WHERE rowid>? ORDER BY rowid LIMIT ?`
-	rows, err := tx.Query(query, lastRowID, ftsBackfillBatchSize)
+	rows, err := tx.QueryContext(ctx, query, lastRowID, ftsBackfillBatchSize)
 	if err != nil {
 		return progress, err
 	}
+	defer func() { _ = rows.Close() }()
 	var batch []ftsHostRow
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return progress, err
+		}
 		var row ftsHostRow
 		if err := rows.Scan(&row.rowID, &row.job, &row.addr, &row.raw); err != nil {
-			_ = rows.Close()
 			return progress, err
 		}
 		batch = append(batch, row)
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return progress, err
-	}
-	if err := rows.Close(); err != nil {
 		return progress, err
 	}
 	if len(batch) == 0 {
 		now := time.Now().UTC().Format(time.RFC3339Nano)
-		if _, err := tx.Exec(`UPDATE fts_backfill_state SET complete=1,updated_at=? WHERE table_name=?`, now, sourceTable); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE fts_backfill_state SET complete=1,updated_at=? WHERE table_name=?`, now, sourceTable); err != nil {
 			return progress, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -464,7 +510,7 @@ func backfillFTSTableBatch(db *sql.DB, sourceTable string) (ftsBatchProgress, er
 		}
 		host.Address = row.addr
 		searchText := hostSearchContent(row.job, host)
-		if _, err := tx.Exec(`UPDATE `+sourceTable+` SET search_text=? WHERE rowid=?`, searchText, row.rowID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE `+sourceTable+` SET search_text=? WHERE rowid=?`, searchText, row.rowID); err != nil {
 			return progress, err
 		}
 		if row.rowID > maxRowID {
@@ -473,7 +519,7 @@ func backfillFTSTableBatch(db *sql.DB, sourceTable string) (ftsBatchProgress, er
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	processedRows += len(batch)
-	if _, err := tx.Exec(`UPDATE fts_backfill_state SET last_rowid=?,processed_rows=?,updated_at=? WHERE table_name=?`, maxRowID, processedRows, now, sourceTable); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE fts_backfill_state SET last_rowid=?,processed_rows=?,updated_at=? WHERE table_name=?`, maxRowID, processedRows, now, sourceTable); err != nil {
 		return progress, err
 	}
 	if err := tx.Commit(); err != nil {

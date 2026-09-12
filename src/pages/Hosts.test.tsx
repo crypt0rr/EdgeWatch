@@ -51,7 +51,7 @@ describe('global hosts explorer', () => {
   function setInputValue(input: HTMLInputElement, value: string) {
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
     setter?.call(input, value)
-    input.dispatchEvent(new Event('input', { bubbles: true }))
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
   }
 
   it('renders active and archived hosts with searchable filter controls', async () => {
@@ -65,10 +65,15 @@ describe('global hosts explorer', () => {
     expect(container.querySelector('a[href="/scans/scan-2/hosts/fd00%3A%3A1"]')).toBeTruthy()
 
     const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
+    vi.mocked(listHosts).mockClear()
     await act(async () => {
+      setInputValue(search, 'r')
+      setInputValue(search, 'ro')
       setInputValue(search, 'router')
-      await vi.waitFor(() => expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'router', offset: 0 })), { timeout: 1000 })
+      await new Promise(resolve => setTimeout(resolve, 300))
     })
+    expect(listHosts).toHaveBeenCalledTimes(1)
+    expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: 'router', offset: 0 }))
     const selects = Array.from(container.querySelectorAll('select')) as HTMLSelectElement[]
     await act(async () => {
       selects[0].value = 'udp'
@@ -93,5 +98,49 @@ describe('global hosts explorer', () => {
     })
     await vi.waitFor(() => expect(container.querySelector('[role="alert"]')).toBeTruthy(), { timeout: 1000 })
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('Could not load scanned hosts.')
+  })
+
+  it('keeps newer search results when an aborted request resolves late', async () => {
+    const requests: Array<{ filters: Parameters<typeof listHosts>[0]; resolve: (value: GlobalHostsResponse) => void }> = []
+    vi.mocked(listHosts).mockImplementation((filters = {}) => new Promise(resolve => {
+      requests.push({ filters, resolve })
+    }))
+
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Hosts /></MemoryRouter></QueryClientProvider>)
+    })
+    await vi.waitFor(() => expect(requests).toHaveLength(1), { timeout: 1000 })
+    await act(async () => {
+      requests[0].resolve(response)
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.textContent).toContain('198.51.100.10'), { timeout: 1000 })
+
+    const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
+    await act(async () => {
+      setInputValue(search, 'old')
+      await new Promise(resolve => setTimeout(resolve, 300))
+    })
+    await vi.waitFor(() => expect(requests).toHaveLength(2), { timeout: 1000 })
+    await act(async () => {
+      setInputValue(search, 'new')
+      await new Promise(resolve => setTimeout(resolve, 300))
+    })
+    await vi.waitFor(() => expect(requests).toHaveLength(3), { timeout: 1000 })
+
+    const oldResponse = { ...response, hosts: [{ ...response.hosts[0], address: '198.51.100.20' }] }
+    const newResponse = { ...response, hosts: [{ ...response.hosts[0], address: '198.51.100.30' }] }
+    await act(async () => {
+      requests[2].resolve(newResponse)
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.textContent).toContain('198.51.100.30'), { timeout: 1000 })
+    await act(async () => {
+      requests[1].resolve(oldResponse)
+      await Promise.resolve()
+    })
+    expect(requests[1].filters.signal?.aborted).toBe(true)
+    expect(container.textContent).toContain('198.51.100.30')
+    expect(container.textContent).not.toContain('198.51.100.20')
   })
 })

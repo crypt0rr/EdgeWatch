@@ -145,7 +145,7 @@ export const resetBaseline = (id: string) => api(`/jobs/${id}/baseline/reset`, {
 export const approveBaseline = (jobId: string, scanId: string) => api(`/jobs/${jobId}/baseline/approve`, { method: 'POST', body: JSON.stringify({ scan_id: scanId }) })
 export const jobScans = (id: string, offset = 0, limit = 20) => api<{ scans: ScanSummary[]; pagination: Pagination }>(`/jobs/${id}/scans?limit=${limit}&offset=${offset}`)
 export const jobBaseline = (id: string, offset = 0, limit = 50) => api<{ job_id: string; job: string; revision: number; security_hash: string; baseline: Job['baseline']; snapshot: { units: Unit[]; scopes: { target: string; protocol: string; ports: string; service_detection: boolean }[]; dns?: Record<string, string[]> } | null; pagination: Pagination }>(`/jobs/${id}/baseline?limit=${limit}&offset=${offset}`)
-export type HostFilters = { q?: string; protocol?: string; has_open_ports?: boolean; limit?: number; offset?: number }
+export type HostFilters = { q?: string; protocol?: string; has_open_ports?: boolean; limit?: number; offset?: number; signal?: AbortSignal }
 function hostQuery(filters: HostFilters = {}) {
   const params = new URLSearchParams()
   params.set('limit', String(filters.limit ?? 50))
@@ -155,10 +155,10 @@ function hostQuery(filters: HostFilters = {}) {
   if (filters.has_open_ports !== undefined) params.set('has_open_ports', String(filters.has_open_ports))
   return params.toString()
 }
-export const baselineHosts = (id: string, filters: HostFilters = {}) => api<BaselineHostsResponse>(`/jobs/${id}/baseline/hosts?${hostQuery(filters)}`)
+export const baselineHosts = (id: string, filters: HostFilters = {}) => api<BaselineHostsResponse>(`/jobs/${id}/baseline/hosts?${hostQuery(filters)}`, filters.signal ? { signal: filters.signal } : undefined)
 export const baselineHost = (id: string, address: string) => api<HostDetailResponse>(`/jobs/${id}/baseline/hosts/${encodeURIComponent(address)}`)
 export const baselineHostRDAP = (id: string, address: string) => api<{ rdap: RdapResult }>(`/jobs/${id}/baseline/hosts/${encodeURIComponent(address)}/rdap`)
-export const scanHosts = (jobId: string, scanId: string, filters: HostFilters = {}) => api<{ job_id: string; job: string; scan: ScanSummary; data_quality: string; hosts: import('./types').HostSummary[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${encodeURIComponent(scanId)}/hosts?${hostQuery(filters)}`)
+export const scanHosts = (jobId: string, scanId: string, filters: HostFilters = {}) => api<{ job_id: string; job: string; scan: ScanSummary; data_quality: string; hosts: import('./types').HostSummary[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${encodeURIComponent(scanId)}/hosts?${hostQuery(filters)}`, filters.signal ? { signal: filters.signal } : undefined)
 export const scanHost = (jobId: string, scanId: string, address: string) => api<HostDetailResponse>(`/jobs/${jobId}/scans/${encodeURIComponent(scanId)}/hosts/${encodeURIComponent(address)}`)
 export const scanHostRDAP = (jobId: string, scanId: string, address: string) => api<{ rdap: RdapResult }>(`/jobs/${jobId}/scans/${encodeURIComponent(scanId)}/hosts/${encodeURIComponent(address)}/rdap`)
 export const historicalScanHost = (scanId: string, address: string) => api<HostDetailResponse>(`/scans/${encodeURIComponent(scanId)}/hosts/${encodeURIComponent(address)}`)
@@ -176,12 +176,12 @@ export async function getScan(scanId: string): Promise<Scan> {
   if (response && typeof response === 'object' && 'scan' in response && response.scan) return response.scan
   return response as Scan
 }
-export const historicalScanHosts = (scanId: string, filters: HostFilters = {}) => api<{ job_id?: string; job: string; scan: ScanSummary; data_quality: string; hosts: import('./types').HostSummary[]; pagination: Pagination }>(`/scans/${encodeURIComponent(scanId)}/hosts?${hostQuery(filters)}`)
+export const historicalScanHosts = (scanId: string, filters: HostFilters = {}) => api<{ job_id?: string; job: string; scan: ScanSummary; data_quality: string; hosts: import('./types').HostSummary[]; pagination: Pagination }>(`/scans/${encodeURIComponent(scanId)}/hosts?${hostQuery(filters)}`, filters.signal ? { signal: filters.signal } : undefined)
 export const scanDetail = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ scan: Scan; changes: Change[]; changes_pagination: Pagination; current_security_hash: string; comparison_source?: string; baseline_scan_id?: string }>(`/jobs/${jobId}/scans/${scanId}?limit=${limit}&offset=${offset}`)
 export const scanResults = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ results: Unit[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/results?limit=${limit}&offset=${offset}`)
 export const scanChanges = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ changes: Change[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/changes?limit=${limit}&offset=${offset}`)
 export const listScans = (offset = 0, limit = 20) => api<{ scans: ScanSummary[]; pagination: Pagination }>(`/scans?limit=${limit}&offset=${offset}`)
-export const listHosts = (filters: HostFilters = {}) => api<GlobalHostsResponse>(`/hosts?${hostQuery(filters)}`)
+export const listHosts = (filters: HostFilters = {}) => api<GlobalHostsResponse>(`/hosts?${hostQuery(filters)}`, filters.signal ? { signal: filters.signal } : undefined)
 export const activeScans = () => api<{ scans: ActiveScan[] }>('/scans/active')
 export const listIncidents = (offset = 0, limit = 20) => api<{ incidents: Incident[]; pagination: Pagination }>(`/incidents?limit=${limit}&offset=${offset}`)
 export const acceptIncident = (jobId: string, key: string) => api<void>(`/jobs/${encodeURIComponent(jobId)}/incidents/accept`, { method: 'POST', body: JSON.stringify({ key }) })

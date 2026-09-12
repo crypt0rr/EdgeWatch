@@ -108,6 +108,16 @@ describe('host explorer API contract', () => {
     await historicalScanHost('scan-1', '2001:db8::1')
     expect(String(fetchMock.mock.calls[1][0])).toBe('/api/v1/scans/scan-1/hosts/2001%3Adb8%3A%3A1')
   })
+
+  it('forwards query cancellation signals to host requests', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ hosts: [], pagination: { limit: 50, offset: 0, total: 0, has_more: false, next_offset: null } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+
+    await listHosts({ q: 'router', signal: controller.signal })
+
+    expect(fetchMock.mock.calls[0][1]?.signal).toBe(controller.signal)
+  })
 })
 
 describe('schedule suggestion API contract', () => {

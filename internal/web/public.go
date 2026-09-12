@@ -97,41 +97,62 @@ func (s *Server) cachedPublicDashboardPayload(ctx context.Context, dashboard sto
 		if building := s.publicBuild; building != nil {
 			s.publicCacheMu.Unlock()
 			select {
-			case <-building:
-				// The builder either populated a matching cache or failed. Recheck
-				// under the lock so a concurrent dashboard update cannot return an
-				// obsolete payload.
+			case <-building.done:
+				if building.err != nil {
+					return nil, building.err
+				}
+				// The builder either populated a matching cache or completed while
+				// a concurrent dashboard update invalidated its generation. Recheck
+				// under the lock so an obsolete payload is never returned.
 				continue
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
 		}
-		building := make(chan struct{})
+		building := &publicDashboardBuild{done: make(chan struct{})}
 		generation := s.publicGen
 		s.publicBuild = building
 		s.publicCacheMu.Unlock()
-		defer func() {
-			s.publicCacheMu.Lock()
-			if s.publicBuild == building {
-				s.publicBuild = nil
-				close(building)
+		// Strip cancellation and deadlines so this shared work outlives a
+		// disconnected requester. The helper applies its own bounded timeout.
+		go s.buildPublicDashboardPayload(context.WithoutCancel(ctx), building, generation, key, dashboard)
+		select {
+		case <-building.done:
+			if building.err != nil {
+				return nil, building.err
 			}
-			s.publicCacheMu.Unlock()
-		}()
-
-		response, err := s.publicDashboardResponse(ctx, dashboard)
-		var payload []byte
-		if err == nil {
-			payload, err = json.Marshal(response)
+			continue
+		case <-ctx.Done():
+			// The shared build intentionally continues with its own bounded
+			// service context. This requester may stop waiting independently.
+			return nil, ctx.Err()
 		}
-
-		s.publicCacheMu.Lock()
-		if err == nil && generation == s.publicGen {
-			s.publicCache = &publicDashboardCache{key: key, expiresAt: time.Now().UTC().Add(publicDashboardCacheTTL), payload: append([]byte(nil), payload...)}
-		}
-		s.publicCacheMu.Unlock()
-		return payload, err
 	}
+}
+
+func (s *Server) buildPublicDashboardPayload(parent context.Context, building *publicDashboardBuild, generation uint64, key string, dashboard store.PublicDashboard) {
+	buildCtx, cancel := context.WithTimeout(parent, publicDashboardBuildTimeout)
+	defer cancel()
+	builder := s.publicDashboardResponse
+	if s.publicDashboardBuildFunc != nil {
+		builder = s.publicDashboardBuildFunc
+	}
+	response, err := builder(buildCtx, dashboard)
+	var payload []byte
+	if err == nil {
+		payload, err = json.Marshal(response)
+	}
+
+	s.publicCacheMu.Lock()
+	building.err = err
+	if err == nil && generation == s.publicGen {
+		s.publicCache = &publicDashboardCache{key: key, expiresAt: time.Now().UTC().Add(publicDashboardCacheTTL), payload: append([]byte(nil), payload...)}
+	}
+	if s.publicBuild == building {
+		s.publicBuild = nil
+		close(building.done)
+	}
+	s.publicCacheMu.Unlock()
 }
 
 func (s *Server) invalidatePublicDashboardCache() {

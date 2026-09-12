@@ -278,7 +278,11 @@ func backfillHostSearchIndexesContext(ctx context.Context, db *sql.DB) error {
 // backfillHostSearchIndexesContextWithProgress is the context-aware rebuild
 // implementation. The observer is intentionally internal and is used by
 // tests to cancel after a committed batch; production callers pass nil.
-func backfillHostSearchIndexesContextWithProgress(ctx context.Context, db *sql.DB, observer func(ftsBatchProgress)) error {
+func backfillHostSearchIndexesContextWithProgress(ctx context.Context, db *sql.DB, observer func(ftsBatchProgress), loggers ...*slog.Logger) error {
+	var logger *slog.Logger
+	if len(loggers) > 0 {
+		logger = loggers[0]
+	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -313,10 +317,10 @@ func backfillHostSearchIndexesContextWithProgress(ctx context.Context, db *sql.D
 			observer(latestProgress)
 		}
 		if scanProgress.batchRows > 0 || scanProgress.complete {
-			logFTSProgress(scanProgress)
+			logFTSProgress(logger, scanProgress)
 		}
 		if latestProgress.batchRows > 0 || latestProgress.complete {
-			logFTSProgress(latestProgress)
+			logFTSProgress(logger, latestProgress)
 		}
 		if scanProgress.complete && latestProgress.complete {
 			return nil
@@ -332,11 +336,14 @@ type ftsBatchProgress struct {
 	complete      bool
 }
 
-func logFTSProgress(progress ftsBatchProgress) {
+func logFTSProgress(logger *slog.Logger, progress ftsBatchProgress) {
 	// Migration logging is intentionally structured and cumulative. Operators
 	// can distinguish a large, healthy rebuild from a migration that repeatedly
 	// restarts at the same marker.
-	slog.Default().Info("rebuilt host search index", "table", progress.table, "batch_rows", progress.batchRows, "processed_rows", progress.processedRows, "last_rowid", progress.lastRowID, "complete", progress.complete)
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Info("rebuilt host search index", "table", progress.table, "batch_rows", progress.batchRows, "processed_rows", progress.processedRows, "last_rowid", progress.lastRowID, "complete", progress.complete)
 }
 
 func ensureHostSearchTriggersContext(ctx context.Context, db *sql.DB) error {

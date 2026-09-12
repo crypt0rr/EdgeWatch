@@ -3,9 +3,12 @@ package web
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -370,5 +373,44 @@ func TestServerPaginationAndSSEBoundaryHelpers(t *testing.T) {
 	}
 	if !isMutation(http.MethodDelete) && isMutation(http.MethodGet) {
 		t.Fatal("mutation classifier failed")
+	}
+}
+
+func TestSSECursorReservationRecoversAfterStartupFailure(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.DB.ExecContext(context.Background(), `CREATE TRIGGER fail_sse_reservation BEFORE UPDATE ON sse_event_cursor BEGIN SELECT RAISE(ABORT, 'temporary cursor failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(nil, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.broadcast(map[string]any{"type": "during-cursor-outage"})
+	server.mu.Lock()
+	degradedID := server.nextEventID
+	degraded := !server.sseDurable
+	server.mu.Unlock()
+	if !degraded || degradedID == 0 {
+		t.Fatalf("startup cursor failure did not produce a fallback ID: durable=%v id=%d", !degraded, degradedID)
+	}
+	if _, err := db.DB.ExecContext(context.Background(), `DROP TRIGGER fail_sse_reservation`); err != nil {
+		t.Fatal(err)
+	}
+	server.now = func() time.Time { return time.Now().UTC().Add(2 * time.Second) }
+	server.broadcast(map[string]any{"type": "after-cursor-recovery"})
+	server.mu.Lock()
+	recoveredID := server.nextEventID
+	durable := server.sseDurable
+	server.mu.Unlock()
+	if !durable || recoveredID <= degradedID {
+		t.Fatalf("cursor did not recover monotonically: durable=%v degraded=%d recovered=%d", durable, degradedID, recoveredID)
+	}
+	var durableCursor int64
+	if err := db.DB.QueryRowContext(context.Background(), `SELECT next_id FROM sse_event_cursor WHERE id=1`).Scan(&durableCursor); err != nil {
+		t.Fatal(err)
+	}
+	if durableCursor < int64(recoveredID) {
+		t.Fatalf("durable cursor=%d is behind recovered event=%d", durableCursor, recoveredID)
 	}
 }

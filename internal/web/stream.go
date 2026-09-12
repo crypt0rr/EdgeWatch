@@ -255,8 +255,133 @@ func (s *Server) streamNow() time.Time {
 	return time.Now()
 }
 
+// seedSSEFallbackCursor keeps live updates useful while the durable cursor is
+// temporarily unavailable. It is only a fallback: every later reservation is
+// made with ReserveSSEEventIDsAfter(minimum=current) so durable IDs cannot
+// overlap IDs emitted during the outage.
+func (s *Server) seedSSEFallbackCursor(ctx context.Context) {
+	if s.Store != nil {
+		if id, err := s.Store.MaxEventID(ctx); err == nil && id > s.nextEventID {
+			s.nextEventID = id
+		}
+	}
+	if seed := uint64(s.streamNow().UnixNano()); seed > s.nextEventID {
+		s.nextEventID = seed
+	}
+	s.eventIDLimit = ^uint64(0)
+}
+
+// retrySSEReservation attempts to recover a durable range after a startup or
+// range-exhaustion failure using a background context. Broadcasts use this
+// wrapper so a caller cannot accidentally cancel a reservation after it has
+// started; the listener-owned retry loop passes its lifecycle context below.
+func (s *Server) retrySSEReservation() {
+	s.retrySSEReservationContext(context.Background())
+}
+
+// retrySSEReservationContext attempts to recover a durable range after a
+// startup or range-exhaustion failure. SQLite is contacted without holding mu,
+// so a slow or unavailable database cannot block subscriber registration,
+// replay, or delivery of an already-reserved range. The reservation mutex
+// prevents a concurrent broadcaster from emitting IDs while the minimum is
+// being advanced and the durable range is switched in.
+func (s *Server) retrySSEReservationContext(parent context.Context) {
+	if s.Store == nil {
+		return
+	}
+	s.sseReservationMu.Lock()
+	defer s.sseReservationMu.Unlock()
+	now := s.streamNow()
+	s.mu.Lock()
+	durable := s.sseDurable
+	needsRange := s.nextEventID >= s.eventIDLimit
+	retryAt := s.sseRetryAt
+	minimum := s.nextEventID
+	s.mu.Unlock()
+	if durable && !needsRange {
+		return
+	}
+	if !durable && !retryAt.IsZero() && now.Before(retryAt) {
+		return
+	}
+	reserveCtx, cancel := context.WithTimeout(parent, 2*time.Second)
+	start, end, err := s.Store.ReserveSSEEventIDsAfter(reserveCtx, sseEventIDBlockSize, minimum)
+	cancel()
+	if err != nil {
+		s.mu.Lock()
+		delay := s.sseRetryDelay
+		if delay <= 0 {
+			delay = defaultSSEReservationRetry
+		}
+		if delay < maxSSEReservationRetry {
+			delay *= 2
+			if delay > maxSSEReservationRetry {
+				delay = maxSSEReservationRetry
+			}
+		}
+		s.sseRetryDelay = delay
+		s.sseRetryAt = now.Add(delay)
+		// Keep fallback allocation available if a previously reserved range
+		// just ended while SQLite was unavailable.
+		if s.nextEventID >= s.eventIDLimit {
+			if seed := uint64(now.UnixNano()); seed > s.nextEventID {
+				s.nextEventID = seed
+			}
+			s.eventIDLimit = ^uint64(0)
+		}
+		s.sseDurable = false
+		s.mu.Unlock()
+		if s.Log != nil {
+			s.Log.Warn("SSE event cursor reservation failed", "error", err, "retry_at", now.Add(delay))
+		}
+		return
+	}
+	s.mu.Lock()
+	// All broadcasters take sseReservationMu before this point, so the
+	// minimum used above includes every emitted fallback ID. Keep the check
+	// defensive for embedded callers that mutate the fields directly.
+	if s.nextEventID >= start {
+		start = s.nextEventID + 1
+		if start > end {
+			s.mu.Unlock()
+			return
+		}
+	}
+	s.nextEventID = start - 1
+	s.eventIDLimit = end
+	s.sseDurable = true
+	s.sseRetryAt = time.Time{}
+	s.sseRetryDelay = 0
+	s.mu.Unlock()
+	if s.Log != nil {
+		s.Log.Info("SSE event cursor reservation recovered", "range_start", start, "range_end", end)
+	}
+}
+
+// runSSEReservationRetry keeps a startup outage recoverable even when no
+// browser is currently connected. Broadcasts also call retrySSEReservation so
+// a server assembled without a listener still heals on its next event.
+func (s *Server) runSSEReservationRetry(ctx context.Context) {
+	ticker := time.NewTicker(defaultSSEReservationRetry)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.retrySSEReservationContext(ctx)
+		}
+	}
+}
+
 func (s *Server) broadcast(value map[string]any) {
 	payload := boundedSSEPayload(value)
+	// Reserve/recover outside the subscriber mutex. The reservation mutex also
+	// serializes ID allocation, preventing fallback IDs from racing a durable
+	// range switch and making overlap impossible after an outage.
+	s.retrySSEReservation()
+	s.sseReservationMu.Lock()
+	defer s.sseReservationMu.Unlock()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.subscribers == nil {
@@ -269,11 +394,19 @@ func (s *Server) broadcast(value map[string]any) {
 		s.eventIDLimit = ^uint64(0)
 	}
 	if s.nextEventID >= s.eventIDLimit && s.Store != nil {
-		if start, end, err := s.Store.ReserveSSEEventIDsAfter(context.Background(), sseEventIDBlockSize, s.nextEventID); err == nil {
-			s.nextEventID = start - 1
-			s.eventIDLimit = end
-		} else if s.Log != nil {
-			s.Log.Warn("SSE event cursor reservation failed", "error", err)
+		// retrySSEReservation normally handles this before mu is acquired. If a
+		// caller constructed a server with a zero range, seed a temporary cursor
+		// rather than emitting duplicate zero IDs while the next retry is pending.
+		if seed := uint64(s.streamNow().UnixNano()); seed > s.nextEventID {
+			s.nextEventID = seed
+		}
+		s.eventIDLimit = ^uint64(0)
+		s.sseDurable = false
+		if s.sseRetryDelay <= 0 {
+			s.sseRetryDelay = defaultSSEReservationRetry
+		}
+		if s.sseRetryAt.IsZero() {
+			s.sseRetryAt = s.streamNow().Add(s.sseRetryDelay)
 		}
 	}
 	if s.nextEventID == ^uint64(0) {

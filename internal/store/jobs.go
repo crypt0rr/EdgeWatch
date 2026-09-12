@@ -262,7 +262,8 @@ func (s *Store) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context, id st
 		return JobRecord{}, false, nil, ErrConflict
 	}
 	scopeChanged := current.Job.SecurityHash() != job.SecurityHash()
-	if scopeChanged {
+	lifecycleChanged := current.Enabled != enabled || current.Archived != archived
+	if scopeChanged || lifecycleChanged {
 		active, activeErr := jobActiveTx(ctx, tx, id, time.Now().UTC())
 		if activeErr != nil {
 			return JobRecord{}, false, nil, activeErr
@@ -270,7 +271,7 @@ func (s *Store) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context, id st
 		if active {
 			return JobRecord{}, false, nil, ErrJobScanActive
 		}
-		if !confirmRebaseline {
+		if scopeChanged && !confirmRebaseline {
 			return current, true, nil, ErrRebaselineRequired
 		}
 	}
@@ -378,6 +379,19 @@ func (s *Store) setJobArchived(ctx context.Context, id string, archived bool, ex
 	if expectedRevision != nil && current.Revision != *expectedRevision {
 		return ErrConflict
 	}
+	// Lifecycle transitions are serialized with scans through the same durable
+	// job lease used by the scanner. Rejecting archive/restore while a scan is
+	// active prevents a running revision from finalizing after the UI says that
+	// the job is no longer active.
+	if current.Archived != archived {
+		active, activeErr := jobActiveTx(ctx, tx, id, time.Now().UTC())
+		if activeErr != nil {
+			return activeErr
+		}
+		if active {
+			return ErrJobScanActive
+		}
+	}
 	if current.Archived == archived {
 		if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 			return err
@@ -444,6 +458,18 @@ func (s *Store) setJobEnabled(ctx context.Context, id string, enabled bool, expe
 	}
 	if current.Archived {
 		return fmt.Errorf("%w: job %s", ErrNotFound, id)
+	}
+	// Pausing or resuming changes the lifecycle revision. Do not let a running
+	// scan finish against a state that has already been presented as paused;
+	// the caller can retry once the lease is released.
+	if current.Enabled != enabled {
+		active, activeErr := jobActiveTx(ctx, tx, id, time.Now().UTC())
+		if activeErr != nil {
+			return activeErr
+		}
+		if active {
+			return ErrJobScanActive
+		}
 	}
 	if current.Enabled == enabled {
 		if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {

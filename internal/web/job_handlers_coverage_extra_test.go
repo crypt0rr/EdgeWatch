@@ -87,6 +87,21 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 	}
 	_ = db.ReleaseJobLease(ctx, record.ID, "active-update")
 
+	// Pausing through the general job update endpoint must use the same lease
+	// guard as the dedicated lifecycle route. Otherwise a running scan could
+	// finalize after the UI says the job is paused.
+	if err := db.AcquireJobLease(ctx, record.ID, "active-pause", time.Now().UTC().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	paused := fromConfig(record.Job)
+	paused.Revision = record.Revision
+	enabled := false
+	paused.Enabled = &enabled
+	if rec := callUpdate(paused); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "active") {
+		t.Fatalf("active pause update = %d: %s", rec.Code, rec.Body.String())
+	}
+	_ = db.ReleaseJobLease(ctx, record.ID, "active-pause")
+
 	// Lifecycle endpoints reject missing revisions, stale revisions, and
 	// unknown jobs before changing any durable state.
 	for _, invoke := range []struct {

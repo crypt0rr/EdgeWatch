@@ -173,7 +173,23 @@ func TestJobActiveAndLeaseExpiry(t *testing.T) {
 	if err := s.DeleteJob(ctx, record.ID); err == nil || !strings.Contains(err.Error(), "archived") {
 		t.Fatalf("unarchived job deletion error = %v", err)
 	}
+	if err := s.SetJobArchived(ctx, record.ID, true); err == nil || !errors.Is(err, ErrJobScanActive) {
+		t.Fatalf("active archive error = %v", err)
+	}
+	if err := s.SetJobEnabled(ctx, record.ID, false); err == nil || !errors.Is(err, ErrJobScanActive) {
+		t.Fatalf("active pause error = %v", err)
+	}
+	unchanged, err := s.GetJob(ctx, record.ID)
+	if err != nil || unchanged.Archived || !unchanged.Enabled {
+		t.Fatalf("active lifecycle action changed job state: %#v", unchanged)
+	}
+	if err := s.ReleaseJobLease(ctx, record.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.SetJobArchived(ctx, record.ID, true); err != nil {
+		t.Fatalf("archive after lease release = %v", err)
+	}
+	if err := s.AcquireJobLease(ctx, record.ID, "owner", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DeleteJob(ctx, record.ID); err == nil || !errors.Is(err, ErrJobScanActive) {

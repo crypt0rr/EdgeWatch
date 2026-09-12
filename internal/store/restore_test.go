@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -142,6 +143,103 @@ func TestRestoreAllowsExplicitCrashRecoverySidecarReplay(t *testing.T) {
 	}
 }
 
+func TestRestoreQuarantinesPendingDeliveriesByDefault(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "destination.db")
+	createRestoreFixture(t, source, "source")
+	createRestoreFixture(t, destination, "destination")
+	addRestorePendingDelivery(t, source, "managed:alerts:1")
+
+	result, err := Restore(context.Background(), source, destination, RestoreOptions{})
+	if err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if result.PendingDeliveriesPolicy != PendingDeliveriesQuarantine || result.PendingDeliveriesAffected != 1 || result.RestoreEpoch == "" {
+		t.Fatalf("restore result = %#v", result)
+	}
+	reader, err := OpenReadOnlyExisting(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var pending, quarantined, epochs int
+	if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL`).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE restore_epoch=?`, result.RestoreEpoch).Scan(&quarantined); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM restore_epochs WHERE epoch=? AND pending_delivery_policy=? AND pending_delivery_count=1`, result.RestoreEpoch, PendingDeliveriesQuarantine).Scan(&epochs); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 || quarantined != 1 || epochs != 1 {
+		t.Fatalf("pending/quarantined/epoch rows = %d/%d/%d", pending, quarantined, epochs)
+	}
+	var detail, actor string
+	if err := reader.DB.QueryRow(`SELECT detail,actor_username FROM security_audit WHERE action='database.restore.pending_deliveries' ORDER BY id DESC LIMIT 1`).Scan(&detail, &actor); err != nil {
+		t.Fatal(err)
+	}
+	if actor != "host-cli" || !strings.Contains(detail, "pending_deliveries=quarantine") || strings.Contains(detail, source) || strings.Contains(detail, "stale") {
+		t.Fatalf("restore audit detail leaked data: actor=%q detail=%q", actor, detail)
+	}
+}
+
+func TestRestorePendingDeliveryPoliciesAreExplicit(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		policy PendingDeliveryPolicy
+		outbox int
+		stash  int
+	}{
+		{name: "discard", policy: PendingDeliveriesDiscard, outbox: 0, stash: 0},
+		{name: "preserve", policy: PendingDeliveriesPreserve, outbox: 1, stash: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			source := filepath.Join(dir, "source.db")
+			destination := filepath.Join(dir, "destination.db")
+			createRestoreFixture(t, source, "source")
+			createRestoreFixture(t, destination, "destination")
+			addRestorePendingDelivery(t, source, "managed:alerts:1")
+			result, err := Restore(context.Background(), source, destination, RestoreOptions{PendingDeliveries: test.policy})
+			if err != nil {
+				t.Fatalf("restore: %v", err)
+			}
+			if result.PendingDeliveriesPolicy != test.policy || result.PendingDeliveriesAffected != 1 {
+				t.Fatalf("restore result = %#v", result)
+			}
+			reader, err := OpenReadOnlyExisting(destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			var outbox, stash int
+			if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL`).Scan(&outbox); err != nil {
+				t.Fatal(err)
+			}
+			if err := reader.DB.QueryRow(`SELECT COUNT(*) FROM restore_quarantined_deliveries WHERE restore_epoch=?`, result.RestoreEpoch).Scan(&stash); err != nil {
+				t.Fatal(err)
+			}
+			if outbox != test.outbox || stash != test.stash {
+				t.Fatalf("outbox/quarantine rows = %d/%d, want %d/%d", outbox, stash, test.outbox, test.stash)
+			}
+		})
+	}
+}
+
+func TestParsePendingDeliveryPolicy(t *testing.T) {
+	if policy, err := ParsePendingDeliveryPolicy(""); err != nil || policy != PendingDeliveriesQuarantine {
+		t.Fatalf("empty policy = %q, %v", policy, err)
+	}
+	if policy, err := ParsePendingDeliveryPolicy(" PRESERVE "); err != nil || policy != PendingDeliveriesPreserve {
+		t.Fatalf("normalized policy = %q, %v", policy, err)
+	}
+	if _, err := ParsePendingDeliveryPolicy("replay"); err == nil {
+		t.Fatal("invalid policy unexpectedly accepted")
+	}
+}
+
 func TestRestoreRefusesLiveDaemonLeaseUnlessExplicitlyOverridden(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
@@ -268,6 +366,18 @@ func createRestoreFixture(t *testing.T, path, value string) {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func addRestorePendingDelivery(t *testing.T, path, destination string) {
+	t.Helper()
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.DB.Exec(`INSERT INTO outbox(destination,payload_json,attempts,next_at) VALUES(?,?,0,?)`, destination, []byte(`{"type":"stale","message":"stale"}`), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 }

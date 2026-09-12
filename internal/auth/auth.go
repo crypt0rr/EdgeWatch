@@ -41,10 +41,11 @@ const (
 
 	authFailureWindow    = 5 * time.Minute
 	authFailureThreshold = 5
-	// Account and token buckets remain deliberately strict. The source bucket
-	// is a backstop for high-volume abuse, not the primary login lockout: a
-	// reverse proxy or SSH tunnel may legitimately carry many administrators'
-	// requests and must not let one account lock out the others.
+	// The source bucket is a backstop for high-volume abuse, not the primary
+	// login lockout: a reverse proxy or SSH tunnel may legitimately carry many
+	// administrators' requests. Account and token buckets are retained as
+	// bounded response-shaping/audit state, but never impose a shared hard
+	// lockout on a known account.
 	authSourceFailureThreshold = 100
 	authBlockDuration          = 5 * time.Minute
 	// The limiter is process-local by design, but it must remain bounded when
@@ -764,10 +765,13 @@ func (m *Manager) allow(remote string) bool {
 	return true
 }
 
-// allowScoped checks the source backstop and the operation/account bucket.
-// Unknown-login probing has a separate source bucket, checked only after the
-// username lookup so a proxy that carried invalid traffic cannot lock out a
-// real account.
+// allowScoped checks the source backstop for an authentication operation.
+// Account and token failure state is scoped to the operation, account, and
+// resolved source. A single client behind a tunnel or reverse proxy can be
+// throttled without being able to block a valid login for the same account
+// from another client. Unknown-login probing has a separate source bucket,
+// checked only after the username lookup so a proxy that carried invalid
+// traffic cannot lock out a real account.
 func (m *Manager) allowScoped(source, account string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -783,7 +787,7 @@ func (m *Manager) allowScoped(source, account string) bool {
 		return false
 	}
 	if account != "" {
-		if until, ok := m.accountBlocked[account]; ok && now.Before(until) {
+		if until, ok := m.accountBlocked[scopedAccountKey(source, account)]; ok && now.Before(until) {
 			return false
 		}
 	}
@@ -839,7 +843,11 @@ func (m *Manager) failedScoped(source, account, unknownSource string, unknown bo
 		recordFailureLocked(now, source, authSourceFailureThreshold, m.fails, m.blocked)
 	}
 	if account != "" {
-		recordFailureLocked(now, account, authFailureThreshold, m.accountFails, m.accountBlocked)
+		// Keep the account response-shaping bucket source-scoped. A global
+		// account key would let one client behind a shared proxy deny service
+		// to every other client using that account.
+		accountKey := scopedAccountKey(source, account)
+		recordFailureLocked(now, accountKey, authFailureThreshold, m.accountFails, m.accountBlocked)
 	}
 	if unknown && unknownSource != "" {
 		recordFailureLocked(now, unknownSource, authFailureThreshold, m.unknownSourceFails, m.unknownSourceBlocked)
@@ -858,8 +866,9 @@ func (m *Manager) clearScoped(source, account, unknownSource string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureScopedLimiterMapsLocked()
-	delete(m.accountFails, account)
-	delete(m.accountBlocked, account)
+	accountKey := scopedAccountKey(source, account)
+	delete(m.accountFails, accountKey)
+	delete(m.accountBlocked, accountKey)
 	delete(m.unknownSourceFails, unknownSource)
 	delete(m.unknownSourceBlocked, unknownSource)
 	delete(m.fails, source)
@@ -870,6 +879,13 @@ func (m *Manager) clearScoped(source, account, unknownSource string) {
 	legacy := legacySourceScope(source)
 	delete(m.fails, legacy)
 	delete(m.blocked, legacy)
+}
+
+func scopedAccountKey(source, account string) string {
+	if strings.TrimSpace(account) == "" {
+		return ""
+	}
+	return strings.TrimSpace(source) + "\x00" + strings.TrimSpace(account)
 }
 
 func legacySourceScope(source string) string {

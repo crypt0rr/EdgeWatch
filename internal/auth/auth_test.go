@@ -590,6 +590,41 @@ func TestLoginFailuresDoNotLockOutAnotherAccountBehindSameSource(t *testing.T) {
 	}
 }
 
+func TestLoginFailuresDoNotLockOutSameAccountFromAnotherSource(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := NewManager(s)
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+
+	attacker := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	attacker.RemoteAddr = "10.0.0.20:443"
+	for attempt := 0; attempt < authFailureThreshold; attempt++ {
+		if _, _, err := m.LoginAs(ctx, attacker, "admin", "wrong administrator password", "", ""); err == nil {
+			t.Fatal("wrong administrator password was accepted")
+		}
+	}
+
+	// The account-scoped failure threshold has been reached, but a distinct
+	// client must still be able to authenticate. Only the source backstop is a
+	// hard admission limit shared by requests from that client.
+	legitimate := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	legitimate.RemoteAddr = "10.0.0.21:443"
+	raw, user, err := m.LoginAs(ctx, legitimate, "admin", "administrator password", "", "")
+	if err != nil || raw == "" || user.Username != "admin" {
+		t.Fatalf("valid login was blocked by another source's account failures: session=%q user=%#v err=%v", raw, user, err)
+	}
+}
+
 func TestLegacySourceScopePreservesScopedIPv6Addresses(t *testing.T) {
 	tests := map[string]string{
 		"source:login:2001:db8::10":   "2001:db8::10",

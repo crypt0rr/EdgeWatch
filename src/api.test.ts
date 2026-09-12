@@ -101,7 +101,7 @@ describe('host explorer API contract', () => {
   })
 
   it('lists global hosts and links historical detail requests by scan', async () => {
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ hosts: [], pagination: { limit: 50, offset: 0, total: 0, has_more: false, next_offset: null } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify({ hosts: [], pagination: { limit: 50, offset: 0, total: 0, has_more: false, next_offset: null } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)
     await listHosts({ q: 'router', protocol: 'udp', has_open_ports: false })
     expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/hosts?limit=50&offset=0&q=router&protocol=udp&has_open_ports=false')
@@ -110,7 +110,7 @@ describe('host explorer API contract', () => {
   })
 
   it('forwards query cancellation signals to host requests', async () => {
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ hosts: [], pagination: { limit: 50, offset: 0, total: 0, has_more: false, next_offset: null } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ hosts: [], pagination: { limit: 50, offset: 0, total: 0, has_more: false, next_offset: null } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)
     const controller = new AbortController()
 

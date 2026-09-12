@@ -101,7 +101,7 @@ describe('global hosts explorer', () => {
   })
 
   it('keeps newer search results when an aborted request resolves late', async () => {
-    const requests: Array<{ filters: Parameters<typeof listHosts>[0]; resolve: (value: GlobalHostsResponse) => void }> = []
+    const requests: Array<{ filters: NonNullable<Parameters<typeof listHosts>[0]>; resolve: (value: GlobalHostsResponse) => void }> = []
     vi.mocked(listHosts).mockImplementation((filters = {}) => new Promise(resolve => {
       requests.push({ filters, resolve })
     }))
@@ -136,10 +136,10 @@ describe('global hosts explorer', () => {
     })
     await vi.waitFor(() => expect(container.textContent).toContain('198.51.100.30'), { timeout: 1000 })
     await act(async () => {
-      requests[1].resolve(oldResponse)
+      requests[1]!.resolve(oldResponse)
       await Promise.resolve()
     })
-    expect(requests[1].filters.signal?.aborted).toBe(true)
+    expect(requests[1]!.filters.signal?.aborted).toBe(true)
     expect(container.textContent).toContain('198.51.100.30')
     expect(container.textContent).not.toContain('198.51.100.20')
   })

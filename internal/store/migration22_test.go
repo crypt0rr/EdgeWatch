@@ -2,10 +2,13 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func assertHostSearchSchemaContract(t *testing.T, s *Store) {
@@ -291,6 +294,65 @@ INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config
 		if !progress.Complete {
 			t.Fatalf("resumed verification still incomplete: %#v", progress)
 		}
+	}
+}
+
+func TestFTSBackfillBookkeepingWaitsForConcurrentWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fts-lock.db")
+	writer, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	reader, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	writer.SetMaxOpenConns(1)
+	reader.SetMaxOpenConns(1)
+	for _, db := range []*sql.DB{writer, reader} {
+		if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000`); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := writer.Exec(`CREATE TABLE fts_backfill_state (
+ table_name TEXT PRIMARY KEY,
+ last_rowid INTEGER NOT NULL DEFAULT 0,
+ processed_rows INTEGER NOT NULL DEFAULT 0,
+ initialized INTEGER NOT NULL DEFAULT 0,
+ complete INTEGER NOT NULL DEFAULT 0,
+ updated_at TEXT NOT NULL
+); INSERT INTO fts_backfill_state(table_name,updated_at) VALUES ('scan_hosts','now'),('latest_scan_hosts','now')`); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := writer.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lock.Exec(`UPDATE fts_backfill_state SET updated_at=updated_at WHERE table_name='scan_hosts'`); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- ensureFTSBackfillStateContext(context.Background(), reader)
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("bookkeeping returned while writer was held: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if err := lock.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("bookkeeping after writer release: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("bookkeeping did not resume after writer release")
 	}
 }
 

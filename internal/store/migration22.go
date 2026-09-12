@@ -370,12 +370,13 @@ func ensureHostSearchTriggersContext(ctx context.Context, db *sql.DB) error {
 }
 
 func ensureFTSBackfillStateContext(ctx context.Context, db *sql.DB) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS fts_backfill_state (
+	// Keep schema creation separate from bookkeeping writes. A CREATE TABLE
+	// IF NOT EXISTS inside a deferred transaction can be read-only when the
+	// table already exists, leaving the first real write vulnerable to SQLite's
+	// immediate deferred-transaction lock-upgrade failure. The autocommit DDL
+	// and the write-first transaction both honor busy_timeout before any
+	// checkpoint rows are touched.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS fts_backfill_state (
  table_name TEXT PRIMARY KEY,
  last_rowid INTEGER NOT NULL DEFAULT 0,
  processed_rows INTEGER NOT NULL DEFAULT 0,
@@ -385,8 +386,17 @@ func ensureFTSBackfillStateContext(ctx context.Context, db *sql.DB) error {
 )`); err != nil {
 		return err
 	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, tableName := range []string{"scan_hosts", "latest_scan_hosts"} {
+		// This is intentionally the first statement in the transaction. Even
+		// when the row already exists, INSERT OR IGNORE is a write attempt and
+		// therefore waits for an active writer instead of upgrading a read
+		// transaction after the busy handler has been bypassed.
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO fts_backfill_state(table_name,updated_at) VALUES(?,?)`, tableName, now); err != nil {
 			return err
 		}
@@ -400,6 +410,12 @@ func initializeFTSBackfillContext(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Acquire the write lock before reading the checkpoint. SQLite may reject
+	// a deferred read-to-write upgrade immediately when another writer is
+	// active, even with a busy timeout configured on the connection.
+	if _, err := tx.ExecContext(ctx, `UPDATE fts_backfill_state SET updated_at=updated_at WHERE table_name IN ('scan_hosts','latest_scan_hosts')`); err != nil {
+		return err
+	}
 	var initialized int
 	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MIN(initialized),0) FROM fts_backfill_state WHERE table_name IN ('scan_hosts','latest_scan_hosts')`).Scan(&initialized); err != nil {
 		return err
@@ -433,6 +449,12 @@ func backfillFTSTableBatchContext(ctx context.Context, db *sql.DB, sourceTable s
 		return progress, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Checkpoint reads are followed by FTS/source-table writes below. Make the
+	// lock acquisition explicit and write-first so a concurrent writer is
+	// handled by SQLite's busy timeout rather than an immediate upgrade error.
+	if _, err := tx.ExecContext(ctx, `UPDATE fts_backfill_state SET updated_at=updated_at WHERE table_name=?`, sourceTable); err != nil {
+		return progress, err
+	}
 	var lastRowID int64
 	var complete, processedRows int
 	if err := tx.QueryRowContext(ctx, `SELECT last_rowid,processed_rows,complete FROM fts_backfill_state WHERE table_name=?`, sourceTable).Scan(&lastRowID, &processedRows, &complete); err != nil {

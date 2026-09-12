@@ -9,8 +9,17 @@ linters:
     - bodyclose
     - contextcheck
     - errcheck
+    # High-signal correctness checks are enabled explicitly so the suite is
+    # deterministic across golangci-lint releases.  Keep the list narrow and
+    # fix findings as they are introduced rather than carrying a blanket
+    # repository-wide suppression backlog.
+    - ineffassign
+    - nilerr
+    - nilnesserr
     - rowserrcheck
     - sqlclosecheck
+    - staticcheck
+    - unused
   exclusions:
     generated: lax
     presets:

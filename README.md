@@ -568,6 +568,14 @@ vulnerability checks always cover the complete module and package trees. The
 individual build, browser-test, and Compose commands can still be run when
 iterating on a specific layer.
 
+The Go lint gate explicitly includes the high-signal correctness analyzers
+`bodyclose`, `contextcheck`, `errcheck`, `ineffassign`, `nilerr`,
+`nilnesserr`, `rowserrcheck`, `sqlclosecheck`, `staticcheck`, and `unused`.
+The linter version is pinned in `.golangci-lint-version`. New findings are
+reported against the pull request base revision, which keeps the gate
+actionable while the pre-existing backlog is retired as the affected code is
+changed. Run the same incremental check locally with `make lint-go`.
+
 The browser acceptance tests use deterministic API fixtures; integration
 scans should only target controlled listeners. The production image embeds the
 frontend and does not include Node.js.

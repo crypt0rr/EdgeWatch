@@ -142,6 +142,50 @@ func TestRestoreAllowsExplicitCrashRecoverySidecarReplay(t *testing.T) {
 	}
 }
 
+func TestRestoreRefusesLiveDaemonLeaseUnlessExplicitlyOverridden(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "destination.db")
+	createRestoreFixture(t, source, "source")
+	createRestoreFixture(t, destination, "destination")
+	ownerStore, err := Open(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ownerStore.AcquireDaemonLease(context.Background(), "live-daemon"); err != nil {
+		ownerStore.Close()
+		t.Fatal(err)
+	}
+	if err := ownerStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	before, err := fileDigest(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(context.Background(), source, destination, RestoreOptions{}); !errors.Is(err, ErrRestoreDaemonLive) {
+		t.Fatalf("live-daemon restore error = %v, want ErrRestoreDaemonLive", err)
+	}
+	after, err := fileDigest(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatalf("refused live-daemon restore changed destination digest from %s to %s", before, after)
+	}
+
+	// The read-only liveness probe may leave SQLite WAL/SHM companions on a
+	// WAL-mode database. Override both independent safety checks explicitly so
+	// this assertion exercises the daemon guard rather than sidecar handling.
+	if _, err := Restore(context.Background(), source, destination, RestoreOptions{AllowActiveDaemon: true, AllowSidecarReplay: true}); err != nil {
+		t.Fatalf("explicit live-daemon recovery override: %v", err)
+	}
+	if got, err := readRestoreValue(destination); err != nil || got != "source" {
+		t.Fatalf("overridden restore value = %q, %v; want source", got, err)
+	}
+}
+
 func TestVerifyDoesNotChangeReadOnlyDatabaseBytesOrMode(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "readonly.db")

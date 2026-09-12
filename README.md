@@ -450,10 +450,12 @@ is the supported live alternative.
 For a normal single-file restore, stop EdgeWatch first and use the host-safe
 restore command. It performs a read-only preflight and refuses to replace the
 database when a WAL, SHM, or rollback-journal sidecar is present beside either
-file. This refusal is intentional: SQLite sidecars do not carry a portable
-database identity, so an older sidecar could be replayed into a replacement
-database. Remove or move the reported sidecars, then run the restore and verify
-the result before starting EdgeWatch again:
+file, or when the destination still has a live daemon heartbeat. This refusal
+is intentional: SQLite sidecars do not carry a portable database identity, so
+an older sidecar could be replayed into a replacement database, and replacing
+an online database would split the running process from subsequent readers.
+Remove or move the reported sidecars, stop the daemon, then run the restore and
+verify the result before starting EdgeWatch again:
 
 ```console
 docker compose stop edgewatch
@@ -471,8 +473,12 @@ changing any bytes. `--allow-sidecar-replay` is an explicit crash-recovery
 escape hatch only for an operator who has verified that the database and its
 companion files are one intentional SQLite recovery set; it preserves the
 sidecars and may replay their frames. It must not be used for an ordinary
-single-file backup. Alternatively restore the complete `./data` directory as
-one consistent snapshot, including all SQLite sidecars and companion key files.
+single-file backup. If a daemon was stopped but its heartbeat has not yet
+expired, `--allow-active-daemon` is an emergency override for an operator who
+has independently verified that no process can write the destination; it does
+not stop or coordinate a daemon for you and must never be used while EdgeWatch
+is running. Alternatively restore the complete `./data` directory as one
+consistent snapshot, including all SQLite sidecars and companion key files.
 Never replace a live database while the daemon is running, and always run
 `verify` against the restored database before starting the matching EdgeWatch
 image.

@@ -18,6 +18,12 @@ import (
 // sidecar is treated as ambiguous rather than guessed to be safe.
 var ErrRestoreSidecars = errors.New("restore refused because SQLite sidecars are present")
 
+// ErrRestoreDaemonLive is returned when the destination database still has a
+// recently-heartbeating EdgeWatch daemon owner. Replacing the file in that
+// state would leave the running process attached to the old inode while new
+// commands open the replacement, splitting the installation's state.
+var ErrRestoreDaemonLive = errors.New("restore refused because an EdgeWatch daemon is active")
+
 // RestoreSidecar describes one SQLite companion file found during a restore
 // preflight. NewerThanDatabase is a useful diagnostic, but does not make an
 // artifact safe: a sidecar can be foreign even when its timestamp is older.
@@ -48,6 +54,10 @@ type RestorePreflight struct {
 // Normal single-file restores refuse sidecars instead.
 type RestoreOptions struct {
 	AllowSidecarReplay bool
+	// AllowActiveDaemon is an emergency escape hatch for an operator who has
+	// independently stopped or isolated the daemon but its heartbeat row has
+	// not yet gone stale. It is never inferred from sidecar state.
+	AllowActiveDaemon bool
 }
 
 // RestoreResult describes a successfully replaced database file.
@@ -144,6 +154,11 @@ func Restore(ctx context.Context, source, destination string, options RestoreOpt
 		sort.Strings(paths)
 		return result, &RestoreSidecarError{Paths: paths}
 	}
+	if preflight.DestinationExists && !options.AllowActiveDaemon {
+		if err := refuseActiveDaemon(ctx, preflight.DestinationPath); err != nil {
+			return result, err
+		}
+	}
 	if err := ctx.Err(); err != nil {
 		return result, err
 	}
@@ -169,6 +184,14 @@ func Restore(ctx context.Context, source, destination string, options RestoreOpt
 	if err != nil {
 		return result, err
 	}
+	// Re-check immediately before replacing the destination. This closes the
+	// normal window where a daemon could start while the source is being copied;
+	// the operator-facing escape hatch remains explicit for intentional recovery.
+	if preflight.DestinationExists && !options.AllowActiveDaemon {
+		if err := refuseActiveDaemon(ctx, preflight.DestinationPath); err != nil {
+			return result, err
+		}
+	}
 	if err := os.Rename(tempPath, preflight.DestinationPath); err != nil {
 		return result, fmt.Errorf("replace restored database: %w", err)
 	}
@@ -190,6 +213,22 @@ func Restore(ctx context.Context, source, destination string, options RestoreOpt
 		result.SidecarsWarning = "SQLite sidecars were explicitly allowed to remain; verify that replay is intentional"
 	}
 	return result, nil
+}
+
+func refuseActiveDaemon(ctx context.Context, destination string) error {
+	reader, err := OpenReadOnlyExistingContext(ctx, destination)
+	if err != nil {
+		return fmt.Errorf("check destination daemon lease: %w", err)
+	}
+	defer reader.Close()
+	status, err := reader.DaemonLeaseStatus(ctx)
+	if err != nil {
+		return fmt.Errorf("check destination daemon lease: %w", err)
+	}
+	if !status.Active {
+		return nil
+	}
+	return fmt.Errorf("%w (owner %s heartbeat %s)", ErrRestoreDaemonLive, status.Owner, status.Heartbeat.UTC().Format(time.RFC3339Nano))
 }
 
 func restorePath(path string) (string, error) {

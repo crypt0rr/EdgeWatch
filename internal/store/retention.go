@@ -286,6 +286,50 @@ func (s *Store) AcquireDaemonLease(ctx context.Context, owner string) (int64, er
 
 var ErrDaemonLeaseBusy = errors.New("another EdgeWatch daemon holds the database lease")
 
+// DaemonLeaseStatus is a read-only view used by host-side recovery commands.
+// Active is derived from the same two-minute heartbeat window used by daemon
+// takeover, so a restore can refuse to replace a database that a live process
+// may still have open.
+type DaemonLeaseStatus struct {
+	Owner     string
+	Heartbeat time.Time
+	Active    bool
+}
+
+// DaemonLeaseStatus reads the singleton daemon lease without running any
+// migrations or changing SQLite state. A missing table/row means that no
+// daemon has claimed this database. Malformed rows fail closed so callers do
+// not replace a database when liveness cannot be established reliably.
+func (s *Store) DaemonLeaseStatus(ctx context.Context) (DaemonLeaseStatus, error) {
+	var status DaemonLeaseStatus
+	if s == nil || s.DB == nil {
+		return status, errors.New("database is not open")
+	}
+	reader := s.reader()
+	var tableCount int
+	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daemon_lease'`).Scan(&tableCount); err != nil {
+		return status, err
+	}
+	if tableCount == 0 {
+		return status, nil
+	}
+	var owner, rawHeartbeat string
+	if err := reader.QueryRowContext(ctx, `SELECT owner,heartbeat FROM daemon_lease WHERE id=1`).Scan(&owner, &rawHeartbeat); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return status, nil
+		}
+		return status, err
+	}
+	heartbeat, err := time.Parse(time.RFC3339Nano, rawHeartbeat)
+	if err != nil || strings.TrimSpace(owner) == "" {
+		return status, errors.New("daemon lease record is malformed")
+	}
+	status.Owner = owner
+	status.Heartbeat = heartbeat
+	status.Active = !heartbeat.Before(time.Now().UTC().Add(-2 * time.Minute))
+	return status, nil
+}
+
 func (s *Store) acquireLease(ctx context.Context, owner string, reclaimPreviousDaemon bool) (int64, error) {
 	if strings.TrimSpace(owner) == "" {
 		return 0, errors.New("daemon lease owner is required")

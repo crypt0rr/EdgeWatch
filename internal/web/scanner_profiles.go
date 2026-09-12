@@ -31,10 +31,11 @@ type scannerProfilePayload struct {
 // applySelectedScannerProfile resolves a profile at write time and pins its
 // revision into the job definition. Operators may select a profile but cannot
 // smuggle a second command surface through the job payload; all argv and NSE
-// settings come from the validated administrator-owned definition. A job may
-// continue using an archived profile revision it already pinned; new jobs and
-// explicit selections must use an active profile.
-func (s *Server) applySelectedScannerProfile(ctx context.Context, job *config.Job, allowArchived bool) error {
+// settings come from the validated administrator-owned definition. Historical
+// revisions are readable for audit and may be selected only through an
+// administrator-controlled rollback; operator writes must use the profile's
+// current active revision.
+func (s *Server) applySelectedScannerProfile(ctx context.Context, job *config.Job, allowArchived, allowHistorical bool) error {
 	if job == nil || job.TCP == nil || strings.TrimSpace(job.TCP.ProfileID) == "" {
 		return nil
 	}
@@ -47,6 +48,9 @@ func (s *Server) applySelectedScannerProfile(ctx context.Context, job *config.Jo
 		requestedRevision = profile.Revision
 	}
 	if requestedRevision < 1 {
+		return store.ErrConflict
+	}
+	if requestedRevision != profile.Revision && !allowHistorical {
 		return store.ErrConflict
 	}
 	definition := profile.Definition

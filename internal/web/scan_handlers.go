@@ -96,7 +96,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		}
 		allowArchivedProfile = job.TCP.ProfileRevision > 0 && job.TCP.ProfileRevision == current.Job.TCP.ProfileRevision
 	}
-	if err := s.applySelectedScannerProfile(r.Context(), &job, allowArchivedProfile); err != nil {
+	if err := s.applySelectedScannerProfile(r.Context(), &job, allowArchivedProfile, auth.HasPermission(session, auth.PermissionScannerProfilesManage)); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, "profile_conflict", "scanner profile was modified; reload and select its current revision", nil)
 		} else {

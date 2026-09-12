@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/notify"
@@ -264,7 +265,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 		writeError(w, http.StatusForbidden, "high_cost_admin_required", "only administrators may enable high-cost scans", nil)
 		return
 	}
-	if err := s.applySelectedScannerProfile(r.Context(), &job, false); err != nil {
+	if err := s.applySelectedScannerProfile(r.Context(), &job, false, auth.HasPermission(session, auth.PermissionScannerProfilesManage)); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, "profile_conflict", "scanner profile was modified; reload and select its current revision", nil)
 		} else {

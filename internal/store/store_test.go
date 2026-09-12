@@ -330,6 +330,9 @@ func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 	if !strings.Contains(strings.Join(plan, " "), "virtual table") {
 		t.Fatalf("search query did not use FTS virtual table: %v", plan)
 	}
+	if !strings.Contains(strings.Join(plan, " "), "rowid") {
+		t.Fatalf("search query did not use rowid-scoped host join: %v", plan)
+	}
 
 	// Direct projection writes are covered by triggers as well, which keeps
 	// supported maintenance/test fixtures searchable without Go-side hooks.

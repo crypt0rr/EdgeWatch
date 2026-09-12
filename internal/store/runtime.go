@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -297,6 +298,11 @@ func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID
 	if err != nil {
 		return nil, err
 	}
+	baselineModifiedBefore := state.BaselineModified
+	baselineBefore, err := marshalBaselineForProjection(state.Baseline)
+	if err != nil {
+		return nil, err
+	}
 	events, err := fn(&state, scan)
 	if err != nil {
 		return nil, err
@@ -305,6 +311,9 @@ func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID
 		return nil, err
 	}
 	if _, err := persistRuntimeTxWithOutbox(ctx, tx, jobID, state, events, destinations); err != nil {
+		return nil, err
+	}
+	if err := refreshBaselineHostProjectionTx(ctx, tx, jobID, baselineModifiedBefore, baselineBefore, state); err != nil {
 		return nil, err
 	}
 	if scan.Status == "success" {
@@ -418,11 +427,69 @@ func updateRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, fn func(*mod
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
+	baselineModifiedBefore := state.BaselineModified
+	baselineBefore, err := marshalBaselineForProjection(state.Baseline)
+	if err != nil {
+		return nil, err
+	}
 	events, err := fn(&state)
 	if err != nil {
 		return nil, err
 	}
-	return persistRuntimeTx(ctx, tx, jobID, state, events)
+	events, err = persistRuntimeTx(ctx, tx, jobID, state, events)
+	if err != nil {
+		return nil, err
+	}
+	if err := refreshBaselineHostProjectionTx(ctx, tx, jobID, baselineModifiedBefore, baselineBefore, state); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+// marshalBaselineForProjection captures the effective baseline before a
+// runtime mutation. BaselineModified can remain true for the lifetime of a
+// baseline, so the marker alone is not enough to tell whether a learned
+// fingerprint changed the projection. JSON encoding is deterministic for the
+// model's maps and gives us a compact comparison without retaining another
+// in-memory snapshot copy.
+func marshalBaselineForProjection(baseline *model.Snapshot) ([]byte, error) {
+	if baseline == nil {
+		return nil, nil
+	}
+	return json.Marshal(baseline)
+}
+
+// refreshBaselineHostProjectionTx keeps the indexed baseline overlay a
+// derived invariant of the committed runtime state. It refreshes when the
+// effective baseline is established or changed, when it first becomes
+// modified, when its contents change again (for example, another service
+// fingerprint is learned), or when an older installation has the marker but
+// no projection yet. Stable modified baselines are left untouched so every
+// scan does not rewrite all host rows.
+func refreshBaselineHostProjectionTx(ctx context.Context, tx *sql.Tx, jobID string, modifiedBefore bool, baselineBefore []byte, state model.JobState) error {
+	if state.Baseline == nil {
+		return nil
+	}
+	baselineAfter, err := marshalBaselineForProjection(state.Baseline)
+	if err != nil {
+		return err
+	}
+	baselineChanged := !bytes.Equal(baselineBefore, baselineAfter)
+	if !state.BaselineModified && !baselineChanged {
+		return nil
+	}
+	refresh := baselineChanged || !modifiedBefore
+	if !refresh {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM baseline_hosts WHERE job_id=?)`, jobID).Scan(&exists); err != nil {
+			return err
+		}
+		refresh = !exists
+	}
+	if !refresh {
+		return nil
+	}
+	return replaceBaselineHostProjectionTx(ctx, tx, jobID, *state.Baseline)
 }
 
 func loadRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string) (model.JobState, error) {
@@ -578,9 +645,6 @@ func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string
 		return []model.Event{{Type: "baseline-approved", Job: name, ScanID: stored.ID, Message: "Baseline manually approved", CreatedAt: time.Now().UTC()}}, nil
 	})
 	if err != nil {
-		return nil, err
-	}
-	if err := replaceBaselineHostProjectionTx(ctx, tx, jobID, stored.Snapshot); err != nil {
 		return nil, err
 	}
 	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {

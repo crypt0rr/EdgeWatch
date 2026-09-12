@@ -14,7 +14,7 @@ import (
 // baseline and queues the resulting event for the supplied job destinations in
 // the same transaction as the state and audit mutation.
 func (s *Store) AcceptIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.updateIncidentAction(ctx, jobID, destinations, []AuditEntry{audit}, true, func(state *model.JobState) ([]model.Event, error) {
+	return s.updateIncidentAction(ctx, jobID, destinations, []AuditEntry{audit}, func(state *model.JobState) ([]model.Event, error) {
 		if state.Baseline == nil {
 			return nil, ErrBaselineNotReady
 		}
@@ -138,7 +138,7 @@ func acceptedIncidentMessage(count int) string {
 // future successful scan and queues the action event for the supplied job
 // destinations transactionally.
 func (s *Store) SuppressIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.updateIncidentAction(ctx, jobID, destinations, []AuditEntry{audit}, false, func(state *model.JobState) ([]model.Event, error) {
+	return s.updateIncidentAction(ctx, jobID, destinations, []AuditEntry{audit}, func(state *model.JobState) ([]model.Event, error) {
 		incident, ok := state.Incidents[key]
 		if !ok {
 			return nil, ErrIncidentNotFound
@@ -171,7 +171,7 @@ func (s *Store) SuppressIncidentWithAudit(ctx context.Context, jobID, jobName, k
 // is not actively scanning. Keeping the active-scan check, state transition,
 // event write, and audit insert in one transaction prevents a scan from
 // finishing against a half-applied operator decision.
-func (s *Store) updateIncidentAction(ctx context.Context, jobID string, destinations []string, audits []AuditEntry, syncBaseline bool, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+func (s *Store) updateIncidentAction(ctx context.Context, jobID string, destinations []string, audits []AuditEntry, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -187,21 +187,11 @@ func (s *Store) updateIncidentAction(ctx context.Context, jobID string, destinat
 	if active {
 		return nil, ErrJobScanActive
 	}
-	var resultingState *model.JobState
 	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, destinations, func(state *model.JobState) ([]model.Event, error) {
-		events, err := fn(state)
-		if err == nil && syncBaseline && state.Baseline != nil {
-			resultingState = state
-		}
-		return events, err
+		return fn(state)
 	})
 	if err != nil {
 		return nil, err
-	}
-	if resultingState != nil {
-		if err := replaceBaselineHostProjectionTx(ctx, tx, jobID, *resultingState.Baseline); err != nil {
-			return nil, err
-		}
 	}
 	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 		return nil, err

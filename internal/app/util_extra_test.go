@@ -83,6 +83,17 @@ func TestAppUtilityMethodsAndLifecycleBinding(t *testing.T) {
 	}
 }
 
+func TestDaemonProcessOwnerUsesUniqueInstanceToken(t *testing.T) {
+	first := daemonProcessOwner()
+	second := daemonProcessOwner()
+	if first == "" || second == "" || first == second {
+		t.Fatalf("daemon owners are not unique: %q/%q", first, second)
+	}
+	if !strings.Contains(first, "-") || !strings.Contains(second, "-") {
+		t.Fatalf("daemon owner lacks process context: %q/%q", first, second)
+	}
+}
+
 func TestAppRunJobAndScheduledWrappers(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

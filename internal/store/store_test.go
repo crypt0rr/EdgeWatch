@@ -1037,6 +1037,68 @@ func TestReclaimExpiredJobLeasesLeavesLiveOwner(t *testing.T) {
 	}
 }
 
+func TestAcquireDaemonLeaseReclaimsOnlyPreviousDaemonJobs(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	oldOwner := "old-host-123"
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO daemon_lease(id,owner,heartbeat) VALUES(1,?,?)`, oldOwner, now.Add(-3*time.Minute).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_leases(job,owner,expires_at) VALUES(?,?,?),(?,?,?)`, "managed", "daemon/"+oldOwner+"/scan-1", now.Add(time.Hour).Format(time.RFC3339Nano), "cli", "cli-scan", now.Add(time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := s.AcquireDaemonLease(ctx, "new-host-456")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed != 1 {
+		t.Fatalf("reclaimed daemon leases = %d, want 1", reclaimed)
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_leases WHERE job=?`, "managed").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("previous daemon lease remains after takeover")
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_leases WHERE job=?`, "cli").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("CLI lease was reclaimed with daemon leases")
+	}
+	var owner string
+	if err := s.DB.QueryRowContext(ctx, `SELECT owner FROM daemon_lease WHERE id=1`).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != "new-host-456" {
+		t.Fatalf("daemon owner = %q, want replacement owner", owner)
+	}
+}
+
+func TestAcquireDaemonLeaseDoesNotStealLiveDaemon(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO daemon_lease(id,owner,heartbeat) VALUES(1,?,?)`, "live-daemon", now.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_leases(job,owner,expires_at) VALUES(?,?,?)`, "managed", "daemon/live-daemon/scan-1", now.Add(time.Hour).Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcquireDaemonLease(ctx, "replacement"); !errors.Is(err, ErrDaemonLeaseBusy) {
+		t.Fatalf("live daemon takeover error = %v", err)
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_leases WHERE job=?`, "managed").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("live daemon job lease was altered")
+	}
+}
+
 func TestJobLeasePreventsConcurrentRunsAndExpires(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

@@ -12,13 +12,15 @@ import (
 )
 
 type PruneStats struct {
-	Scans        int64
-	Events       int64
-	SentOutbox   int64
-	FailedOutbox int64
-	Revisions    int64
-	Cycles       int64
-	RDAPCache    int64
+	Scans          int64
+	Events         int64
+	SentOutbox     int64
+	FailedOutbox   int64
+	Revisions      int64
+	Cycles         int64
+	RDAPCache      int64
+	FTSOptimized   bool
+	ReclaimedPages int64
 }
 
 // retentionBatchSize bounds both lock duration and rollback cost. Retention
@@ -26,6 +28,16 @@ type PruneStats struct {
 // process restart; one very large transaction must not monopolize SQLite's
 // writer connection for the lifetime of the deployment.
 const retentionBatchSize = 500
+
+// ftsMaintenanceBudget keeps maintenance from monopolizing the single
+// writable SQLite connection. A later retention pass can retry if a large FTS
+// index cannot be optimized within this bounded window.
+const ftsMaintenanceBudget = 10 * time.Second
+
+// incrementalVacuumPageLimit caps the amount of file reclamation performed by
+// one retention pass. Full VACUUM is intentionally not run by the daemon: it
+// requires an exclusive lock and can pause scans for the size of the database.
+const incrementalVacuumPageLimit = 1000
 
 func (p PruneStats) Total() int64 {
 	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.Revisions + p.Cycles + p.RDAPCache
@@ -116,6 +128,70 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	stats.RDAPCache, err = s.deleteRetentionBatches(ctx, `DELETE FROM rdap_cache WHERE rowid IN (SELECT rowid FROM rdap_cache WHERE stale_until < ? ORDER BY stale_until,rowid LIMIT ?)`, rdapCutoff)
 	if err != nil {
 		return stats, err
+	}
+	if stats.Scans > 0 {
+		maintenance, maintenanceErr := s.maintainSearchIndexes(ctx)
+		stats.FTSOptimized = maintenance.Optimized
+		stats.ReclaimedPages = maintenance.ReclaimedPages
+		if maintenanceErr != nil {
+			return stats, maintenanceErr
+		}
+	}
+	return stats, nil
+}
+
+type searchMaintenanceStats struct {
+	Optimized      bool
+	ReclaimedPages int64
+}
+
+// maintainSearchIndexes compacts FTS5 segments after retention deletes and
+// performs a bounded incremental page vacuum when the database was created
+// with incremental auto-vacuum enabled. The operation is deliberately
+// best-effort in scope but returns errors so callers can surface a retryable
+// maintenance failure; all history deletions have already committed in
+// bounded transactions by this point.
+func (s *Store) maintainSearchIndexes(ctx context.Context) (searchMaintenanceStats, error) {
+	var stats searchMaintenanceStats
+	maintenanceCtx, cancel := context.WithTimeout(ctx, ftsMaintenanceBudget)
+	defer cancel()
+	for _, table := range []string{"scan_host_search", "latest_host_search"} {
+		// FTS5's optimize command merges delete-marked segments without reading
+		// or rewriting the source host evidence table. Table names are static
+		// constants, never user input.
+		statement := "INSERT INTO " + table + "(" + table + ") VALUES('optimize')"
+		if _, err := s.DB.ExecContext(maintenanceCtx, statement); err != nil {
+			return stats, fmt.Errorf("fts optimize: %w", err)
+		}
+	}
+	if _, err := s.DB.ExecContext(maintenanceCtx, "PRAGMA optimize"); err != nil {
+		return stats, fmt.Errorf("sqlite optimize: %w", err)
+	}
+	stats.Optimized = true
+
+	var autoVacuum int64
+	if err := s.DB.QueryRowContext(maintenanceCtx, "PRAGMA auto_vacuum").Scan(&autoVacuum); err != nil {
+		return stats, fmt.Errorf("read auto-vacuum mode: %w", err)
+	}
+	if autoVacuum != 2 { // SQLITE_AUTO vacuum incremental
+		return stats, nil
+	}
+	var before int64
+	if err := s.DB.QueryRowContext(maintenanceCtx, "PRAGMA freelist_count").Scan(&before); err != nil {
+		return stats, fmt.Errorf("read freelist: %w", err)
+	}
+	if before == 0 {
+		return stats, nil
+	}
+	if _, err := s.DB.ExecContext(maintenanceCtx, fmt.Sprintf("PRAGMA incremental_vacuum(%d)", incrementalVacuumPageLimit)); err != nil {
+		return stats, fmt.Errorf("incremental vacuum: %w", err)
+	}
+	var after int64
+	if err := s.DB.QueryRowContext(maintenanceCtx, "PRAGMA freelist_count").Scan(&after); err != nil {
+		return stats, fmt.Errorf("read freelist after vacuum: %w", err)
+	}
+	if before > after {
+		stats.ReclaimedPages = before - after
 	}
 	return stats, nil
 }

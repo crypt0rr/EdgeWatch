@@ -947,8 +947,8 @@ func (a *App) Daemon(ctx context.Context) error {
 	}
 	if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
 		a.Logger.Error("startup history pruning failed", "error", err)
-	} else if stats.Total() > 0 {
-		a.Logger.Info("startup history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions, "cycles", stats.Cycles)
+	} else if stats.Total() > 0 || stats.FTSOptimized {
+		a.Logger.Info("startup history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions, "cycles", stats.Cycles, "fts_optimized", stats.FTSOptimized, "reclaimed_pages", stats.ReclaimedPages)
 	}
 	if expired, err := a.Store.ExpireScanCycles(ctx, time.Now().UTC()); err != nil {
 		a.Logger.Error("startup scan-cycle expiry failed", "error", err)
@@ -991,7 +991,7 @@ func (a *App) Daemon(ctx context.Context) error {
 			if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
 				a.Logger.Error("history pruning failed", "error", err)
 			} else {
-				a.Logger.Info("history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions, "cycles", stats.Cycles)
+				a.Logger.Info("history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions, "cycles", stats.Cycles, "fts_optimized", stats.FTSOptimized, "reclaimed_pages", stats.ReclaimedPages)
 			}
 			if expired, err := a.Store.ExpireScanCycles(ctx, time.Now().UTC()); err != nil {
 				a.Logger.Error("scan-cycle expiry failed", "error", err)

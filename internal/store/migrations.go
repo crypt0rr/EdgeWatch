@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 )
@@ -39,13 +40,16 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 33
+const schemaVersion = 34
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
 }
 
 func migrateContext(ctx context.Context, db *sql.DB) error {
+	if err := ensureStartupStateContext(ctx, db); err != nil {
+		return err
+	}
 	var version int
 	if err := db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
@@ -819,27 +823,77 @@ END;`,
 			"ALTER TABLE security_audit ADD COLUMN request_id TEXT NOT NULL DEFAULT ''",
 			"CREATE INDEX IF NOT EXISTS security_audit_request_id ON security_audit(request_id,created_at)",
 		},
+		34: {
+			// Startup state is created before the migration loop so health checks
+			// can observe progress even while an older schema is being upgraded.
+			// Keeping the DDL in the versioned migration still records the table as
+			// part of the supported on-disk schema.
+			startupStateSchema,
+			"INSERT OR IGNORE INTO startup_state(id,state) VALUES(1,'ready')",
+		},
+	}
+	// Mark the complete startup reconciliation as active, not only the DDL
+	// steps. FTS and other resumable backfills can be the longest part of an
+	// upgrade even when the schema marker is already current.
+	if err := markMigrationStarted(ctx, db, version, schemaVersion); err != nil {
+		return err
 	}
 	for next := version + 1; next <= schemaVersion; next++ {
 		statements, ok := migrations[next]
 		if !ok {
-			return fmt.Errorf("missing migration for schema version %d", next)
+			err := fmt.Errorf("missing migration for schema version %d", next)
+			markMigrationFailed(ctx, db, err)
+			return err
 		}
 		if err := applyMigration(db, next, statements); err != nil {
+			markMigrationFailed(ctx, db, err)
 			return err
 		}
 		version = next
+		if err := updateMigrationStatus(ctx, db, "schema", int64(version), int64(schemaVersion)); err != nil {
+			markMigrationFailed(ctx, db, err)
+			return err
+		}
 	}
 	if err := repairScanHostsForeignKey(db); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return err
+	}
+	if err := updateMigrationStatus(ctx, db, "scan-cycle-identities", int64(version), int64(schemaVersion)); err != nil {
+		markMigrationFailed(ctx, db, err)
 		return err
 	}
 	if err := backfillScanCycleUnitIdentitiesContext(ctx, db); err != nil {
+		markMigrationFailed(ctx, db, err)
 		return err
 	}
-	if err := backfillHostSearchIndexesContext(ctx, db); err != nil {
+	if err := updateMigrationStatus(ctx, db, "host-search", 0, 0); err != nil {
+		markMigrationFailed(ctx, db, err)
 		return err
 	}
-	return ensureBuiltinScannerProfilesContext(ctx, db)
+	if err := backfillHostSearchIndexesContextWithProgress(ctx, db, func(progress ftsBatchProgress) {
+		// Progress bookkeeping is diagnostic only. Never make an otherwise
+		// healthy migration fail because a status write was interrupted.
+		statusCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		_ = updateMigrationStatus(statusCtx, db, "host-search:"+progress.table, int64(progress.processedRows), 0)
+		cancel()
+	}); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return err
+	}
+	if err := updateMigrationStatus(ctx, db, "scanner-profiles", 0, 0); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return err
+	}
+	if err := ensureBuiltinScannerProfilesContext(ctx, db); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return err
+	}
+	if err := markMigrationReady(ctx, db); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return err
+	}
+	return nil
 }
 
 // applyMigration scopes the transaction rollback to one migration. Keeping

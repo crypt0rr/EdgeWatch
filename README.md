@@ -31,6 +31,12 @@ The supported Compose service rotates its Docker `json-file` logs at 10 MiB
 per file with three retained files. This bounds local log growth; forward
 container logs to an external collector if longer retention is required.
 
+Database migrations and resumable host-search rebuilds run before the daemon
+lease is acquired. Compose keeps a 20-minute startup health window while the
+image reports migration progress; `edgewatch health --output json` reports the
+current phase and counters. A migration that stops updating for 15 minutes is
+reported as unhealthy so a genuinely wedged process can still be recovered.
+
 The final image keeps the daemon at UID 0 for scanner compatibility. All
 capabilities are dropped before adding only the raw-packet capability needed
 by the default Nmap modes; an explicit `compose.syn.yaml` override adds
@@ -489,7 +495,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 33), but it is forward-only: an older binary refuses a newer schema.
+version 34), but it is forward-only: an older binary refuses a newer schema.
 To roll back, stop the new service, restore the entire pre-upgrade `./data`
 directory and deployment configuration, then start the previous image. Do not
 point an older image at the upgraded database. The previous named Docker

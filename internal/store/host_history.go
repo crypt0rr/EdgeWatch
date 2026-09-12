@@ -167,7 +167,10 @@ func scanHostsPageQueries(scanID, query, protocol string, hasOpen *bool, limit, 
 	filter := buildHostFilter(query, protocol, hasOpen)
 	where := append([]string{"h.scan_id=?"}, filter.where...)
 	args := append([]any{scanID}, filter.args...)
-	join, predicate, searchArgs := hostSearchPredicate(filter, "scan_host_search", "hs.scan_id=h.scan_id AND hs.address=h.address")
+	// The FTS projection deliberately mirrors scan_hosts.rowid. Joining on
+	// that stable row identifier lets SQLite constrain the host lookup to the
+	// MATCH result instead of re-resolving every scan/address pair globally.
+	join, predicate, searchArgs := hostSearchPredicate(filter, "scan_host_search", "hs.rowid=h.rowid")
 	if predicate != "" {
 		where = append(where, predicate)
 		args = append(args, searchArgs...)
@@ -189,7 +192,9 @@ func latestScanHostsPageQueries(query, protocol string, hasOpen *bool, limit, of
 		where = []string{"1=1"}
 	}
 	args := append([]any(nil), filter.args...)
-	join, predicate, searchArgs := hostSearchPredicate(filter, "latest_host_search", "hs.address=h.address")
+	// latest_host_search mirrors latest_scan_hosts.rowid for the same bounded
+	// rowid-scoped lookup used by the per-scan history query.
+	join, predicate, searchArgs := hostSearchPredicate(filter, "latest_host_search", "hs.rowid=h.rowid")
 	if predicate != "" {
 		where = append(where, predicate)
 		args = append(args, searchArgs...)

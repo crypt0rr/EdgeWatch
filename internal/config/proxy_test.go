@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,5 +50,29 @@ func TestTargetExclusionConfigurationValidatesNetworks(t *testing.T) {
 	base.Scanner.TargetExclusions = []string{"127.0.0.0/8", "127.0.0.0/8"}
 	if err := base.ValidateDeployment(); err == nil || !strings.Contains(err.Error(), "duplicates") {
 		t.Fatalf("duplicate scanner exclusion was accepted: %v", err)
+	}
+}
+
+func TestTargetExclusionNetworkMatchingAndOverlap(t *testing.T) {
+	_, left, err := net.ParseCIDR("192.0.2.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, contained, err := net.ParseCIDR("192.0.2.128/25")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, disjoint, err := net.ParseCIDR("198.51.100.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !networksOverlap(left, contained) || !networksOverlap(contained, left) || networksOverlap(left, disjoint) || networksOverlap(nil, left) {
+		t.Fatal("network overlap classification is incorrect")
+	}
+	if got := matchingTargetExclusion(net.ParseIP("192.0.2.42"), []*net.IPNet{disjoint, left}); got != left.String() {
+		t.Fatalf("matching exclusion = %q, want %q", got, left.String())
+	}
+	if got := matchingTargetExclusion(net.ParseIP("203.0.113.1"), []*net.IPNet{left}); got != "" {
+		t.Fatalf("non-matching exclusion = %q", got)
 	}
 }

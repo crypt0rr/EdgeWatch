@@ -29,6 +29,30 @@ func TestNormalizeAndCompareVersions(t *testing.T) {
 	}
 }
 
+func TestNewClientDefaultsAndURLValidation(t *testing.T) {
+	client := NewClient()
+	if client.Endpoint != LatestReleaseEndpoint || client.HTTPClient == nil || client.UserAgent == "" || client.MaxResponseBytes != MaxResponseBytes {
+		t.Fatalf("NewClient defaults = %#v", client)
+	}
+	if got := boundedString("  release  ", 20); got != "release" {
+		t.Fatalf("bounded string trim = %q", got)
+	}
+	if got := boundedString("0123456789", 4); got != "0123" {
+		t.Fatalf("bounded string limit = %q", got)
+	}
+	for _, raw := range []string{
+		"https://github.com/crypt0rr/EdgeWatch/releases/tag/v1.2.3",
+		"https://github.com/crypt0rr/EdgeWatch/releases/tag/v1.2.3?source=api",
+	} {
+		if err := validateHTMLURL(raw); err != nil {
+			t.Errorf("valid release URL %q rejected: %v", raw, err)
+		}
+	}
+	if err := validateHTMLURL(""); err != nil {
+		t.Fatalf("empty optional release URL rejected: %v", err)
+	}
+}
+
 func TestCheckSuccessAndNotModified(t *testing.T) {
 	var seenETag string
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

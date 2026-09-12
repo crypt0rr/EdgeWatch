@@ -42,7 +42,7 @@ jobs:
             test ! -e "$artifact"
           done
       - name: Frontend unit tests
-        run: npm test
+        run: npm run test:coverage
       - name: Set up Go for real-stack browser tests
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:

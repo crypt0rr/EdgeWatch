@@ -23,9 +23,10 @@ type BaselineHost struct {
 }
 
 // replaceBaselineHostProjectionTx replaces one job's effective baseline host
-// projection in the same transaction as a baseline approval or accepted
-// incident. The operation is intentionally explicit; ordinary scan updates do
-// not rewrite this table unless the baseline was deliberately changed.
+// projection in the same transaction as the runtime baseline mutation. The
+// runtime writer invokes it whenever a baseline is established, changed, or
+// receives an accepted/learned overlay so indexed host reads never fall back
+// to decoding the complete runtime snapshot.
 func replaceBaselineHostProjectionTx(ctx context.Context, tx *sql.Tx, jobID string, snapshot model.Snapshot) error {
 	if strings.TrimSpace(jobID) == "" {
 		return errors.New("baseline host projection job is required")

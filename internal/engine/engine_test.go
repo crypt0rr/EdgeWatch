@@ -405,6 +405,8 @@ func TestFinalizeManagedScanRecordsInitialBaselineScanMetadata(t *testing.T) {
 	}
 	e := Engine{Store: db}
 	current := scan("managed-baseline", snapshot("open"))
+	current.Snapshot.Hosts = []model.HostObservation{{Address: "192.0.2.1", Status: "up"}}
+	current.Snapshot.Normalize()
 	current.JobID, current.JobRevision, current.Job = record.ID, record.Revision, record.Job.Name
 	current.ConfigHash = record.Job.SecurityHash()
 	if _, err := e.FinalizeManagedScan(ctx, record.ID, record.Job, &current, nil); err != nil {
@@ -416,6 +418,9 @@ func TestFinalizeManagedScanRecordsInitialBaselineScanMetadata(t *testing.T) {
 	}
 	if stored.BaselineScanID != current.ID || stored.BaselineConfigHash != current.ConfigHash {
 		t.Fatalf("initial baseline metadata = %#v, want scan=%s hash=%s", stored, current.ID, current.ConfigHash)
+	}
+	if exists, err := db.BaselineHostProjectionExists(ctx, record.ID); err != nil || !exists {
+		t.Fatalf("automatic baseline did not maintain host projection: exists=%v err=%v", exists, err)
 	}
 }
 
@@ -493,9 +498,20 @@ func TestFinalizeManagedScanPersistsTheChangeSetAppliedByEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	withService := func(service string) model.Snapshot {
+		var hostService *model.ServiceObservation
+		if service != "" {
+			hostService = &model.ServiceObservation{Product: service, Method: "probed"}
+		}
 		snapshot := model.Snapshot{
 			Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "443", ServiceDetection: true}},
 			Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open", Service: service}}}},
+			Hosts: []model.HostObservation{{
+				Address: "192.0.2.1", Status: "up",
+				Protocols: []model.ProtocolObservation{{
+					Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, ServiceDetection: true,
+					Ports: []model.PortObservation{{Port: 443, State: "open", Service: hostService}},
+				}},
+			}},
 		}
 		snapshot.Normalize()
 		return snapshot
@@ -519,6 +535,20 @@ func TestFinalizeManagedScanPersistsTheChangeSetAppliedByEngine(t *testing.T) {
 	}
 	if len(stored.Changes) != 0 {
 		t.Fatalf("persisted changes = %#v, want the same empty set acted on by the engine", stored.Changes)
+	}
+	exists, err := db.BaselineHostProjectionExists(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exists {
+		t.Fatal("engine baseline mutation did not maintain the baseline host projection")
+	}
+	projected, err := db.GetBaselineHost(ctx, record.ID, "192.0.2.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if projected.Host.Address != "192.0.2.1" {
+		t.Fatalf("baseline projection host = %#v", projected.Host)
 	}
 }
 

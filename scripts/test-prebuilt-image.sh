@@ -19,8 +19,10 @@ actual_arch="$(docker image inspect --format '{{.Architecture}}' "$image")"
 test "$actual_arch" = "$arch"
 test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")" = '["edgewatch"]'
 
-docker run --rm --platform "$platform" --read-only --tmpfs /tmp:size=32m,mode=1777 "$image" version | grep -Fqx "EdgeWatch $version"
-docker run --rm --platform "$platform" --read-only --entrypoint /usr/bin/nmap "$image" --version | grep -Eq '^Nmap version '
+edgewatch_version_output="$(docker run --rm --platform "$platform" --read-only --tmpfs /tmp:size=32m,mode=1777 "$image" version)"
+grep -Fqx "EdgeWatch $version" <<<"$edgewatch_version_output"
+nmap_version_output="$(docker run --rm --platform "$platform" --read-only --entrypoint /usr/bin/nmap "$image" --version)"
+grep -Eq '^Nmap version ' <<<"$nmap_version_output"
 naabu_version_output="$(docker run --rm --platform "$platform" --read-only --entrypoint /usr/local/bin/naabu "$image" -version 2>&1)"
 grep -Eiq 'Naabu|current version' <<<"$naabu_version_output"
 

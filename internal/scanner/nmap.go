@@ -318,9 +318,10 @@ func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report Prog
 		mergeHostObservations(&snap.Hosts, result.Hosts)
 	}
 	snap.Normalize()
-	if incomplete := incompleteHostAddresses(snap); len(incomplete) > 0 {
-		return snap, fmt.Errorf("incomplete host discovery: %s", strings.Join(incomplete, ", "))
-	}
+	// A successful Nmap invocation can still omit individual addresses when
+	// host discovery receives no response. Keep the complete observations and
+	// let the application mark the snapshot as incomplete so the engine can
+	// compare reachable targets while protecting missing-host removals.
 	progress.CompletedInvocations = progress.TotalInvocations
 	progress.CompletedProbes = progress.TotalProbes
 	progress.Phase = "complete"
@@ -555,6 +556,7 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 	}
 	all := map[string]model.Unit{}
 	allHosts := map[string]model.HostObservation{}
+	observedAnyHost := false
 	batchLimit := nmapBatchSize
 	// {address} is deliberately singular. A custom profile that uses it is
 	// still safe for a multi-address target set, but each invocation must carry
@@ -625,6 +627,9 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			if parsed.Exit != "success" {
 				return protocolScanResult{Units: unitsFromMap(all), Hosts: allHosts}, fmt.Errorf("nmap run incomplete: %s", parsed.Exit)
 			}
+			if len(parsed.Units) > 0 || len(parsed.Hosts) > 0 {
+				observedAnyHost = true
+			}
 			// A successful XML response with no host records is not a usable
 			// result. Keep this hard failure for a completely empty invocation,
 			// while allowing mixed responses to commit the addresses Nmap did
@@ -642,8 +647,8 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			}
 			if !hasExpectedHost {
 				// Preserve an explicit observation for every omitted address and
-				// continue remaining batches. The caller rejects the overall scan
-				// after all available evidence has been collected.
+				// continue remaining batches. The final check below only rejects an
+				// invocation that produced no host records at all.
 				for _, address := range batch {
 					mergeHostObservationMap(allHosts, address, unreachableHostObservation(address, protocol, pc, "nmap-omitted"))
 				}
@@ -723,7 +728,8 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 		allHosts[address] = host
 	}
 	result := protocolScanResult{Units: units, Hosts: allHosts}
-	if incomplete := incompleteHostAddresses(model.Snapshot{Hosts: mapsToHosts(allHosts)}); len(incomplete) > 0 {
+	if !observedAnyHost {
+		incomplete := incompleteHostAddresses(model.Snapshot{Hosts: mapsToHosts(allHosts)})
 		return result, fmt.Errorf("nmap output omitted expected address(s): %s", strings.Join(incomplete, ", "))
 	}
 	return result, nil

@@ -216,8 +216,8 @@ func TestScanProtocolRecordsOmittedHostWithoutDroppingBatch(t *testing.T) {
 	n := New(nmapPath)
 	target := resolvedTarget{Name: "batch", Addresses: []string{"192.0.2.1", "192.0.2.2", "192.0.2.3"}}
 	result, err := n.scanProtocolBatchDetailedProgress(context.Background(), []resolvedTarget{target}, "tcp", config.Protocol{Ports: "22,80", Mode: "syn"}, "balanced", false, nil)
-	if err == nil || !strings.Contains(err.Error(), "192.0.2.3") {
-		t.Fatalf("partial host response did not report incomplete coverage: %v", err)
+	if err != nil {
+		t.Fatalf("partial host response was rejected instead of returned as evidence: %v", err)
 	}
 	if len(result.Units) != 2 {
 		t.Fatalf("units = %#v, want the two reported hosts only", result.Units)
@@ -228,6 +228,32 @@ func TestScanProtocolRecordsOmittedHostWithoutDroppingBatch(t *testing.T) {
 	}
 	if len(missing.Protocols) != 1 || missing.Protocols[0].StateSummaries[0].State != "unreachable" {
 		t.Fatalf("missing host scope evidence = %#v", missing.Protocols)
+	}
+}
+
+func TestScanReturnsPartialSnapshotForReachableAndOmittedHosts(t *testing.T) {
+	dir := t.TempDir()
+	nmapPath := filepath.Join(dir, "nmap")
+	output := `<?xml version="1.0"?><nmaprun><host><status state="up" reason="syn-ack"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="443"><state state="open" reason="syn-ack"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+output+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := New(nmapPath)
+	job := config.NormalizeJob(config.Job{
+		Name:             "partial",
+		Targets:          []string{"192.0.2.1", "192.0.2.2"},
+		MaxExpandedHosts: 2,
+		TCP:              &config.Protocol{Ports: "443", Mode: "connect"},
+	})
+	snapshot, err := n.Scan(context.Background(), job)
+	if err != nil {
+		t.Fatalf("partial scan was rejected: %v", err)
+	}
+	if len(snapshot.Units) != 1 || snapshot.Units[0].Target != "192.0.2.1" {
+		t.Fatalf("reachable unit was not retained: %#v", snapshot.Units)
+	}
+	if len(snapshot.Hosts) != 2 || snapshot.Hosts[1].Address != "192.0.2.2" || snapshot.Hosts[1].Status != "unreachable" {
+		t.Fatalf("partial host observations = %#v", snapshot.Hosts)
 	}
 }
 

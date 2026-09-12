@@ -129,6 +129,44 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	}
 }
 
+func TestLifecycleActionsRejectActiveScans(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	job := config.NormalizeJob(config.Job{Name: "active-lifecycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AcquireJobLease(ctx, record.ID, "running-scan", time.Now().UTC().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := db.ReleaseJobLease(ctx, record.ID, "running-scan"); err != nil {
+			t.Errorf("release test lease: %v", err)
+		}
+	}()
+
+	archiveRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/archive", strings.NewReader(`{"revision":1}`))
+	archiveRequest.Header.Set("Content-Type", "application/json")
+	archive := httptest.NewRecorder()
+	server.archiveJob(archive, archiveRequest, admin, record.ID, true)
+	if archive.Code != http.StatusConflict || !strings.Contains(archive.Body.String(), "job_active") || !strings.Contains(archive.Body.String(), "wait") {
+		t.Fatalf("active archive response = %d: %s", archive.Code, archive.Body.String())
+	}
+
+	pauseRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/pause", strings.NewReader(`{"revision":1}`))
+	pauseRequest.Header.Set("Content-Type", "application/json")
+	pause := httptest.NewRecorder()
+	server.enableJob(pause, pauseRequest, admin, record.ID, false)
+	if pause.Code != http.StatusConflict || !strings.Contains(pause.Body.String(), "job_active") || !strings.Contains(pause.Body.String(), "wait") {
+		t.Fatalf("active pause response = %d: %s", pause.Code, pause.Body.String())
+	}
+	unchanged, err := db.GetJob(ctx, record.ID)
+	if err != nil || unchanged.Archived || !unchanged.Enabled || unchanged.Revision != record.Revision {
+		t.Fatalf("active lifecycle actions changed job: %#v", unchanged)
+	}
+}
+
 func TestNotificationRoutesAndRateLimit(t *testing.T) {
 	server, _, admin := newUsersTestServer(t)
 	missingRequest := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations", strings.NewReader(`{"name":"Ops","url":"generic://localhost/ops"}`))

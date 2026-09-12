@@ -184,6 +184,12 @@ func TestManagedScopeEditIsBlockedWhileScanning(t *testing.T) {
 	if _, _, err := s.UpdateJob(ctx, record.ID, record.Revision, changed, true, false, true); !errors.Is(err, ErrJobScanActive) {
 		t.Fatalf("expected active scan guard, got %v", err)
 	}
+	if err := s.SetJobArchivedWithRevision(ctx, record.ID, true, record.Revision); !errors.Is(err, ErrJobScanActive) {
+		t.Fatalf("expected active archive guard, got %v", err)
+	}
+	if err := s.SetJobEnabledWithRevision(ctx, record.ID, false, record.Revision); !errors.Is(err, ErrJobScanActive) {
+		t.Fatalf("expected active pause guard, got %v", err)
+	}
 }
 
 func TestJobLifecycleChangesInvalidateStaleEditors(t *testing.T) {

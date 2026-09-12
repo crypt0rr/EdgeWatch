@@ -266,6 +266,12 @@ baseline or opening/recovering incidents. Every terminal non-success outcome
 sent to configured notification destinations; the message includes the scan
 and failure reason.
 
+Archive, pause, restore, and resume transitions are serialized with the scan
+lease. A lifecycle action that would change the job state is rejected with a
+clear conflict while that job has an active scan; it never cancels the process
+or leaves a running revision able to finalize after the UI reports the job as
+inactive. Wait for the scan to reach a terminal state and retry the action.
+
 For broad jobs (more than 4,096 configured ports or 65,536 estimated probes),
 EdgeWatch automatically breaks the scan into deterministic work units. Nmap
 units are split by addresses and then ports. Naabu discovery units checkpoint

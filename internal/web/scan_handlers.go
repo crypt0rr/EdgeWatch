@@ -148,7 +148,11 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	if errors.Is(err, store.ErrJobScanActive) {
-		writeError(w, http.StatusConflict, "job_active", "security-relevant settings cannot change during an active scan", nil)
+		message := "pause or resume is unavailable while a scan is running; wait for it to finish and try again"
+		if scopeChanged {
+			message = "security-relevant settings cannot change during an active scan; wait for it to finish and try again"
+		}
+		writeError(w, http.StatusConflict, "job_active", message, nil)
 		return
 	}
 	if err != nil {
@@ -306,6 +310,8 @@ func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, session stor
 			writeError(w, http.StatusConflict, "conflict", "job was modified; reload before changing its lifecycle", nil)
 		} else if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		} else if errors.Is(err, store.ErrJobScanActive) {
+			writeError(w, http.StatusConflict, "job_active", "archive or restore is unavailable while a scan is running; wait for it to finish and try again", nil)
 		} else {
 			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 		}
@@ -374,6 +380,8 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, session store
 			writeError(w, http.StatusConflict, "conflict", "job was modified; reload before changing its lifecycle", nil)
 		} else if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		} else if errors.Is(err, store.ErrJobScanActive) {
+			writeError(w, http.StatusConflict, "job_active", "pause or resume is unavailable while a scan is running; wait for it to finish and try again", nil)
 		} else {
 			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
 		}

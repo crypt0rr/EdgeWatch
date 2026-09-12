@@ -236,13 +236,11 @@ func restorePath(path string) (string, error) {
 	if path == "" {
 		return "", errors.New("path is required")
 	}
-	if strings.HasPrefix(path, "file:") {
-		decoded, err := sqliteArtifactPath(path)
-		if err != nil {
-			return "", err
-		}
-		path = decoded
+	decoded, err := sqliteArtifactPath(path)
+	if err != nil {
+		return "", err
 	}
+	path = decoded
 	absolute, err := filepath.Abs(filepath.Clean(path))
 	if err != nil {
 		return "", err

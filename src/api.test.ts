@@ -45,6 +45,16 @@ describe('API pagination contract', () => {
     expect(dispatchEvent).toHaveBeenCalledTimes(1)
     expect(dispatchEvent.mock.calls[0][0].type).toBe('edgewatch:unauthorized')
   })
+
+  it('keeps the session when step-up password confirmation is rejected', async () => {
+    const dispatchEvent = vi.fn()
+    vi.stubGlobal('window', { dispatchEvent })
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ error: { code: 'invalid_password', message: 'password confirmation failed' } }), { status: 401, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(api('/notifications/destinations/dest-1', { method: 'PUT', body: '{}' })).rejects.toMatchObject({ code: 'invalid_password' })
+    expect(dispatchEvent).not.toHaveBeenCalled()
+  })
 })
 
 describe('notification API contract', () => {

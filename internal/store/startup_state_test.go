@@ -1,7 +1,9 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -77,5 +79,21 @@ func TestHealthStatusFallsBackToDaemonLeaseWhenReady(t *testing.T) {
 	}
 	if err := s.Healthy(context.Background()); err != nil {
 		t.Fatalf("ready health unexpectedly failed: %v", err)
+	}
+}
+
+func TestOpenWithLoggerRoutesMigrationProgress(t *testing.T) {
+	var output bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&output, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	s, err := OpenWithLogger(filepath.Join(t.TempDir(), "edgewatch.db"), logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	logs := output.String()
+	if !strings.Contains(logs, "database migration started") || !strings.Contains(logs, "database migration completed") {
+		t.Fatalf("configured migration logger output = %q", logs)
 	}
 }

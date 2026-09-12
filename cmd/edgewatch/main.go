@@ -126,6 +126,10 @@ func run(args []string) error {
 	// while backup needs a writable connection for VACUUM INTO without running
 	// migrations in parallel with the daemon.
 	readOnlyCommand := cmd == "health" || cmd == "status" || cmd == "history" || cmd == "verify" || (cmd == "baseline" && action == "export")
+	// Initialize the configured logger before opening the writable store so
+	// migration and resumable-backfill progress uses the same structured output
+	// as the rest of the daemon.
+	logger := newLogger(cfg.LogLevel())
 	var openStore func(string) (*store.Store, error)
 	switch {
 	case readOnlyCommand:
@@ -133,7 +137,9 @@ func run(args []string) error {
 	case cmd == "backup":
 		openStore = store.OpenExisting
 	default:
-		openStore = store.Open
+		openStore = func(path string) (*store.Store, error) {
+			return store.OpenWithLogger(path, logger)
+		}
 	}
 	s, err := openStore(cfg.Database)
 	if err != nil {
@@ -143,7 +149,6 @@ func run(args []string) error {
 	if cmd == "admin" {
 		return adminActionForUser(context.Background(), action, s, *passwordFile, *username, *force)
 	}
-	logger := newLogger(cfg.LogLevel())
 	var application *app.App
 	needApplication := cmd == "daemon" || cmd == "scan" || cmd == "notify" || (cmd == "baseline" && action != "export")
 	if needApplication {

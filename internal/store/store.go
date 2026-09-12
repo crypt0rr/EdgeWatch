@@ -6,6 +6,7 @@ import (
 	"database/sql/driver"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -76,6 +77,13 @@ func Open(path string) (*Store, error) {
 	return openWithOptions(path, openOptions{create: true, migrate: true, configureWAL: true})
 }
 
+// OpenWithLogger opens a writable store and routes migration/startup progress
+// through the supplied logger. Open remains the compatibility helper for
+// library callers that do not have an application logger yet.
+func OpenWithLogger(path string, logger *slog.Logger) (*Store, error) {
+	return openWithOptions(path, openOptions{create: true, migrate: true, configureWAL: true, logger: logger})
+}
+
 // OpenExisting opens an existing database without running migrations or
 // repair/backfill work. It is intended for host-side data commands such as
 // backup, where opening the source must not mutate schema state or compete
@@ -117,6 +125,7 @@ type openOptions struct {
 	migrate         bool
 	configureWAL    bool
 	queryOnly       bool
+	logger          *slog.Logger
 }
 
 func openWithOptions(path string, options openOptions) (*Store, error) {
@@ -199,7 +208,7 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 		}
 	}
 	if options.migrate {
-		if err := migrateContext(ctx, db); err != nil {
+		if err := migrateContextWithLogger(ctx, db, options.logger); err != nil {
 			db.Close()
 			return nil, err
 		}

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -47,6 +48,13 @@ func migrate(db *sql.DB) error {
 }
 
 func migrateContext(ctx context.Context, db *sql.DB) error {
+	return migrateContextWithLogger(ctx, db, nil)
+}
+
+func migrateContextWithLogger(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	if err := ensureStartupStateContext(ctx, db); err != nil {
 		return err
 	}
@@ -838,6 +846,7 @@ END;`,
 	if err := markMigrationStarted(ctx, db, version, schemaVersion); err != nil {
 		return err
 	}
+	logger.Info("database migration started", "from_schema", version, "to_schema", schemaVersion)
 	for next := version + 1; next <= schemaVersion; next++ {
 		statements, ok := migrations[next]
 		if !ok {
@@ -854,6 +863,7 @@ END;`,
 			markMigrationFailed(ctx, db, err)
 			return err
 		}
+		logger.Info("database migration step completed", "schema", version, "target_schema", schemaVersion)
 	}
 	if err := repairScanHostsForeignKey(db); err != nil {
 		markMigrationFailed(ctx, db, err)
@@ -877,7 +887,7 @@ END;`,
 		statusCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 		_ = updateMigrationStatus(statusCtx, db, "host-search:"+progress.table, int64(progress.processedRows), 0)
 		cancel()
-	}); err != nil {
+	}, logger); err != nil {
 		markMigrationFailed(ctx, db, err)
 		return err
 	}
@@ -893,6 +903,7 @@ END;`,
 		markMigrationFailed(ctx, db, err)
 		return err
 	}
+	logger.Info("database migration completed", "schema", version)
 	return nil
 }
 

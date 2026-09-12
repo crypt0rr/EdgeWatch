@@ -208,10 +208,32 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 			}
 		}
 	}
-	pragmas := []string{"PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"}
-	if options.configureWAL && !options.queryOnly {
-		pragmas = append([]string{"PRAGMA journal_mode=WAL"}, pragmas...)
+	// Read the result of the journal-mode pragma instead of assuming that the
+	// requested mode was accepted. SQLite may silently retain a different mode
+	// on filesystems that do not support WAL. In that case the writer remains the
+	// sole reader as well; opening a separate pool would advertise concurrency
+	// guarantees that the storage backend cannot provide.
+	walEnabled := memoryDatabase
+	if !memoryDatabase && !options.queryOnly {
+		journalPragma := "PRAGMA journal_mode"
+		if options.configureWAL {
+			journalPragma = "PRAGMA journal_mode=WAL"
+		}
+		var journalMode string
+		if err := db.QueryRowContext(ctx, journalPragma).Scan(&journalMode); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("verify SQLite journal mode: %w", err)
+		}
+		walEnabled = strings.EqualFold(strings.TrimSpace(journalMode), "wal")
+		if !walEnabled {
+			logger := options.logger
+			if logger == nil {
+				logger = slog.Default()
+			}
+			logger.Warn("SQLite WAL is unavailable; using the writer connection for reads", "journal_mode", strings.TrimSpace(journalMode), "remediation", "move the database to a filesystem that supports SQLite WAL for concurrent history reads")
+		}
 	}
+	pragmas := []string{"PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"}
 	for _, pragma := range pragmas {
 		if _, err := db.Exec(pragma); err != nil {
 			db.Close()
@@ -240,7 +262,7 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 		return &Store{DB: db, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true}, nil
 	}
 	var readDB *sql.DB
-	if !memoryDatabase {
+	if !memoryDatabase && walEnabled {
 		readConnector, connectorErr := sqlite.NewConnector(dsn)
 		if connectorErr != nil {
 			db.Close()

@@ -491,6 +491,19 @@ docker compose run --rm --no-deps -T edgewatch edgewatch verify \
 docker compose up -d edgewatch
 ```
 
+Restores create a new notification epoch. By default, unsent notification
+deliveries from the backup are quarantined before the database is replaced, so
+stale incidents or lifecycle alerts cannot be replayed after startup. The
+restore result reports the epoch and number of affected rows; the quarantined
+delivery context remains local to the restored database and is never claimed by
+the delivery worker. Use `--pending-deliveries discard` to remove those rows
+entirely, or explicitly use `--pending-deliveries preserve` when replaying the
+backup's pending notifications is intentional. Preserve is deterministic and
+still obeys the normal outbox deduplication, retry, and claim recovery rules.
+The policy choice and bounded row count are recorded in a redacted
+`database.restore.pending_deliveries` audit event; notification payloads,
+credentials, and provider responses are not written to the audit record.
+
 Use `--dry-run` to inspect the source, destination, and sidecars without
 changing any bytes. `--allow-sidecar-replay` is an explicit crash-recovery
 escape hatch only for an operator who has verified that the database and its
@@ -512,7 +525,7 @@ EdgeWatch is stopped (or use SQLite's backup tooling). Keep the backup of
 `./data` and any separately mounted encryption-key file together.
 
 The schema migration from the v0.3 database is additive (the current schema is
-version 34), but it is forward-only: an older binary refuses a newer schema.
+version 35), but it is forward-only: an older binary refuses a newer schema.
 To roll back, stop the new service, restore the entire pre-upgrade `./data`
 directory and deployment configuration, then start the previous image. Do not
 point an older image at the upgraded database. The previous named Docker

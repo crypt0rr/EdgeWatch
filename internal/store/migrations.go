@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 34
+const schemaVersion = 35
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -838,6 +838,33 @@ END;`,
 			// part of the supported on-disk schema.
 			startupStateSchema,
 			"INSERT OR IGNORE INTO startup_state(id,state) VALUES(1,'ready')",
+		},
+		35: {
+			// A single-file restore is a new notification epoch. Pending rows
+			// copied from an older backup are quarantined by default before the
+			// daemon can claim them; operators may explicitly choose discard or
+			// preserve at restore time. Quarantine retains bounded, redacted
+			// delivery context without making those rows eligible for sending.
+			`CREATE TABLE IF NOT EXISTS restore_quarantined_deliveries (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ restore_epoch TEXT NOT NULL,
+ destination TEXT NOT NULL,
+ payload_json BLOB NOT NULL,
+ attempts INTEGER NOT NULL DEFAULT 0,
+ deferrals INTEGER NOT NULL DEFAULT 0,
+ next_at TEXT NOT NULL DEFAULT '',
+ last_error TEXT NOT NULL DEFAULT '',
+ quarantined_at TEXT NOT NULL
+);`,
+			"CREATE INDEX IF NOT EXISTS restore_quarantined_deliveries_epoch ON restore_quarantined_deliveries(restore_epoch,quarantined_at)",
+			`CREATE TABLE IF NOT EXISTS restore_epochs (
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ epoch TEXT NOT NULL UNIQUE,
+ restored_at TEXT NOT NULL,
+ pending_delivery_policy TEXT NOT NULL,
+ pending_delivery_count INTEGER NOT NULL DEFAULT 0
+);`,
+			"CREATE INDEX IF NOT EXISTS restore_epochs_restored_at ON restore_epochs(restored_at)",
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

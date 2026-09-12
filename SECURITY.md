@@ -51,8 +51,16 @@ If the key is lost or replaced, web-managed destinations become unavailable;
 they cannot be recovered from the database alone. Restore the original key and
 database together, or delete and recreate the affected destinations after
 confirming that the old credentials are revoked. A database upgraded to schema
-34 must not be opened by an older EdgeWatch binary; downgrade by restoring the
+35 must not be opened by an older EdgeWatch binary; downgrade by restoring the
 complete pre-upgrade `./data` backup before starting the old version.
+
+Single-file restores create a new notification epoch. Pending deliveries are
+quarantined by default so alerts from the backup cannot be replayed; operators
+may explicitly choose `--pending-deliveries discard` or
+`--pending-deliveries preserve` when running the host restore command. The
+choice and a bounded count are recorded in a redacted audit event. Quarantined
+payloads remain in the restored database but are never claimed by the delivery
+worker.
 
 By default, EdgeWatch checks the latest stable release on GitHub at startup and
 every three hours. This outbound request reveals the Docker host's public IP

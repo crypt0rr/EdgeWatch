@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -238,6 +239,45 @@ func TestSetupAndLoginRateLimitsReturnTypedError(t *testing.T) {
 	}
 	if _, _, err := m.LoginAs(context.Background(), request, "admin", "long enough password", "", ""); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("login rate-limit error = %v", err)
+	}
+}
+
+func TestArgon2WorkQueueBoundsConcurrentAdmission(t *testing.T) {
+	m := NewManager(nil)
+	started := make(chan struct{}, authArgon2MaxConcurrent)
+	release := make(chan struct{})
+	var workers sync.WaitGroup
+	for i := 0; i < authArgon2MaxConcurrent; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			if err := m.withArgon2(context.Background(), func() error {
+				started <- struct{}{}
+				<-release
+				return nil
+			}); err != nil {
+				t.Errorf("work callback returned %v", err)
+			}
+		}()
+	}
+	for i := 0; i < authArgon2MaxConcurrent; i++ {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("not all authentication workers entered the bounded pool")
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := m.withArgon2(ctx, func() error { return nil }); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("bounded admission error = %v, want ErrRateLimited", err)
+	}
+
+	close(release)
+	workers.Wait()
+	if err := m.withArgon2(context.Background(), func() error { return nil }); err != nil {
+		t.Fatalf("released authentication slot remained unavailable: %v", err)
 	}
 }
 

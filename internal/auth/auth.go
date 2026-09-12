@@ -51,6 +51,13 @@ const (
 	// an attacker rotates source addresses. Keys are evicted oldest-first once
 	// this ceiling is reached; expired entries are swept on every decision.
 	authLimiterMaxEntries = 4096
+	// Argon2id deliberately uses a meaningful memory cost. Keep the number of
+	// requests that may enter the work factor bounded so a burst of invalid
+	// credentials cannot exhaust the daemon's memory or CPU. A short queue
+	// timeout gives callers a deterministic 429 instead of admitting unbounded
+	// work while still allowing normal bursts to drain.
+	authArgon2MaxConcurrent = 4
+	authArgon2QueueTimeout  = 250 * time.Millisecond
 )
 
 var ErrRateLimited = errors.New("too many authentication attempts; try again later")
@@ -82,6 +89,7 @@ type Manager struct {
 	unknownSourceBlocked map[string]time.Time
 	rateAudit            map[string]time.Time
 	trustedProxies       []*net.IPNet
+	argon2Sem            chan struct{}
 }
 
 func NewManager(s *store.Store) *Manager {
@@ -90,7 +98,33 @@ func NewManager(s *store.Store) *Manager {
 		fails: map[string][]time.Time{}, blocked: map[string]time.Time{},
 		accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{},
 		unknownSourceFails: map[string][]time.Time{}, unknownSourceBlocked: map[string]time.Time{},
-		rateAudit: map[string]time.Time{},
+		rateAudit: map[string]time.Time{}, argon2Sem: make(chan struct{}, authArgon2MaxConcurrent),
+	}
+}
+
+// withArgon2 admits one password hash/verification operation to the bounded
+// authentication work pool. The callback runs while holding the slot and the
+// slot is always released before returning. A caller that cannot enter within
+// the short queue window receives the same typed rate-limit error used by the
+// request limiter, allowing HTTP handlers to return a bounded 429 response.
+func (m *Manager) withArgon2(ctx context.Context, fn func() error) error {
+	m.mu.Lock()
+	if m.argon2Sem == nil {
+		m.argon2Sem = make(chan struct{}, authArgon2MaxConcurrent)
+	}
+	sem := m.argon2Sem
+	m.mu.Unlock()
+
+	timer := time.NewTimer(authArgon2QueueTimeout)
+	defer timer.Stop()
+	select {
+	case sem <- struct{}{}:
+		defer func() { <-sem }()
+		return fn()
+	case <-ctx.Done():
+		return ErrRateLimited
+	case <-timer.C:
+		return ErrRateLimited
 	}
 }
 
@@ -370,10 +404,23 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 		m.auditRateLimit(ctx, "setup", request)
 		return ErrRateLimited
 	}
-	if err := m.Setup(ctx, token, password); err != nil {
+	var setupErr error
+	if err := m.withArgon2(ctx, func() error {
+		setupErr = m.Setup(ctx, token, password)
+		return setupErr
+	}); err != nil {
+		if errors.Is(err, ErrRateLimited) {
+			m.auditRateLimit(ctx, "setup", request)
+			return err
+		}
+		// withArgon2 only returns the callback error after releasing the
+		// semaphore, so preserve the existing setup failure accounting below.
+		setupErr = err
+	}
+	if setupErr != nil {
 		m.failedScoped(source, account, "", false)
 		m.auditAuthFailure(ctx, "auth.setup_failed", "setup", request)
-		return err
+		return setupErr
 	}
 	m.clearScoped(source, account, "")
 	return nil
@@ -390,8 +437,16 @@ func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, to
 		m.auditRateLimit(ctx, "activation", request)
 		return ErrRateLimited
 	}
-	hash, err := PasswordHash(password)
-	if err != nil {
+	var hash string
+	if err := m.withArgon2(ctx, func() error {
+		var hashErr error
+		hash, hashErr = PasswordHash(password)
+		return hashErr
+	}); err != nil {
+		if errors.Is(err, ErrRateLimited) {
+			m.auditRateLimit(ctx, "activation", request)
+			return err
+		}
 		m.failedScoped(source, account, "", false)
 		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
 		return err
@@ -447,7 +502,15 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		// attacker could bypass the login limiter by rotating arbitrary account
 		// names while probing the endpoint for a real administrator or invitee.
 		m.failedScoped(source, account, unknownSource, true)
-		_ = VerifyPassword(dummyPasswordHash, password)
+		if err := m.withArgon2(ctx, func() error {
+			_ = VerifyPassword(dummyPasswordHash, password)
+			return nil
+		}); err != nil {
+			if errors.Is(err, ErrRateLimited) {
+				m.auditRateLimit(ctx, "login:"+identity, request)
+			}
+			return "", store.User{}, err
+		}
 		m.auditAuthFailure(ctx, "auth.login_failed", identity, request)
 		return "", store.User{}, errors.New("invalid credentials")
 	}
@@ -456,11 +519,29 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		// Keep disabled accounts indistinguishable from unknown usernames. This
 		// prevents the login endpoint from becoming an account-enumeration oracle
 		// while the administration UI can still show the disabled state.
-		_ = VerifyPassword(dummyPasswordHash, password)
+		if err := m.withArgon2(ctx, func() error {
+			_ = VerifyPassword(dummyPasswordHash, password)
+			return nil
+		}); err != nil {
+			if errors.Is(err, ErrRateLimited) {
+				m.auditRateLimit(ctx, "login:"+identity, request)
+			}
+			return "", user, err
+		}
 		m.auditAuthFailure(ctx, "auth.login_failed", identity, request)
 		return "", user, errors.New("invalid credentials")
 	}
-	if !VerifyPassword(user.PasswordHash, password) {
+	var passwordValid bool
+	if err := m.withArgon2(ctx, func() error {
+		passwordValid = VerifyPassword(user.PasswordHash, password)
+		return nil
+	}); err != nil {
+		if errors.Is(err, ErrRateLimited) {
+			m.auditRateLimit(ctx, "login:"+identity, request)
+		}
+		return "", user, err
+	}
+	if !passwordValid {
 		m.failedScoped(source, account, "", false)
 		m.auditAuthFailure(ctx, "auth.login_failed", identity, request)
 		return "", user, errors.New("invalid credentials")
@@ -485,8 +566,15 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	// account can still be changed through the normal password-management flow.
 	upgradedHash := ""
 	if passwordHashNeedsRehash(user.PasswordHash) {
-		if candidate, hashErr := PasswordHash(password); hashErr == nil {
-			upgradedHash = candidate
+		if err := m.withArgon2(ctx, func() error {
+			candidate, hashErr := PasswordHash(password)
+			if hashErr == nil {
+				upgradedHash = candidate
+			}
+			return hashErr
+		}); err != nil && errors.Is(err, ErrRateLimited) {
+			m.auditRateLimit(ctx, "login:"+identity, request)
+			return "", user, err
 		}
 	}
 	sessionRaw, err := randomBytes(32)
@@ -515,7 +603,18 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			// against it before creating a session. A real password change does
 			// not verify and therefore still fails closed.
 			current, readErr := m.Store.GetUser(ctx, user.ID)
-			if readErr != nil || !current.Enabled || !VerifyPassword(current.PasswordHash, password) {
+			fallbackValid := false
+			if readErr == nil && current.Enabled {
+				verifyErr := m.withArgon2(ctx, func() error {
+					fallbackValid = VerifyPassword(current.PasswordHash, password)
+					return nil
+				})
+				if errors.Is(verifyErr, ErrRateLimited) {
+					m.auditRateLimit(ctx, "login:"+identity, request)
+					return "", user, verifyErr
+				}
+			}
+			if readErr != nil || !current.Enabled || !fallbackValid {
 				if readErr != nil {
 					return "", user, readErr
 				}
@@ -559,7 +658,20 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 		return ErrRateLimited
 	}
 	user, err := m.Store.GetUser(ctx, userID)
-	if err != nil || !user.Enabled || !VerifyPassword(user.PasswordHash, password) {
+	var passwordValid bool
+	if err == nil && user.Enabled {
+		if verifyErr := m.withArgon2(ctx, func() error {
+			passwordValid = VerifyPassword(user.PasswordHash, password)
+			return nil
+		}); verifyErr != nil {
+			if errors.Is(verifyErr, ErrRateLimited) {
+				m.auditRateLimit(ctx, "password-confirmation", request)
+				return verifyErr
+			}
+			err = verifyErr
+		}
+	}
+	if err != nil || !user.Enabled || !passwordValid {
 		m.failedScoped(source, account, "", false)
 		m.auditAuthFailure(ctx, "auth.password_confirmation_failed", userID, request)
 		return errors.New("password confirmation failed")

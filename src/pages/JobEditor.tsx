@@ -202,6 +202,27 @@ export function JobEditor() {
     return <div className="loading"><span className="spinner" />Loading job…</div>
   }
 
+  if (edit && existing.error && !existing.data) {
+    return <section className="page">
+      <div className="page-heading">
+        <div>
+          <Link className="back-link" to={`/jobs/${id}`}><ArrowLeft size={15} /> Back to job</Link>
+          <p className="eyebrow">Edit configuration</p>
+          <h1>Could not load this job</h1>
+          <p className="muted">The saved configuration could not be loaded, so no changes were applied.</p>
+        </div>
+      </div>
+      <div className="form-error error-card" role="alert">
+        <strong>Job details are unavailable.</strong>
+        <span>{existing.error instanceof Error ? existing.error.message : 'Try again or return to the job list.'}</span>
+      </div>
+      <div className="heading-actions">
+        <button type="button" className="button primary" onClick={() => { void existing.refetch() }}>Try again</button>
+        <button type="button" className="button secondary" onClick={() => navigate('/jobs')}>Back to jobs</button>
+      </div>
+    </section>
+  }
+
   return (
     <section className="page">
       <div className="page-heading">

@@ -47,7 +47,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	if subscriberKey == "user:" {
 		subscriberKey = "unknown"
 	}
-	lastID, _ := strconv.ParseUint(strings.TrimSpace(r.Header.Get("Last-Event-ID")), 10, 64)
+	lastID := parseSSELastEventID(r.Header.Get("Last-Event-ID"))
 	ch := make(chan sseMessage, 64)
 	s.mu.Lock()
 	if s.shutdown == nil {
@@ -333,18 +333,12 @@ func boundedSSEPayload(value map[string]any) []byte {
 
 func (s *Server) replayLocked(lastID uint64) []sseMessage {
 	if lastID > s.nextEventID {
-		payload, _ := json.Marshal(map[string]any{"type": "refresh_required", "after": lastID, "reason": "event_history_restarted"})
-		// Keep the retry marker strictly newer than the client's cursor. This
-		// matters when a client reconnects with an ID from a previous process
-		// lifetime or from a non-durable invalidation event.
-		markerID := lastID
-		if markerID < ^uint64(0) {
-			markerID++
-		}
-		if markerID > s.nextEventID {
-			s.nextEventID = markerID
-		}
-		return []sseMessage{{id: markerID, payload: payload}}
+		// Last-Event-ID is an untrusted replay request. A future marker can be
+		// stale, malformed, or deliberately fabricated; it must never advance
+		// the process cursor (or the next durable reservation). There is no
+		// replayable server event in this case, so let the next live event use the
+		// normal server-owned ID sequence.
+		return nil
 	}
 	if lastID == 0 {
 		return nil
@@ -361,7 +355,7 @@ func (s *Server) replayLocked(lastID uint64) []sseMessage {
 	}
 	oldest := s.history[0].id
 	var replay []sseMessage
-	if lastID+1 < oldest {
+	if oldest > 0 && lastID < oldest-1 {
 		payload, _ := json.Marshal(map[string]any{"type": "refresh_required", "after": lastID})
 		replay = append(replay, sseMessage{id: oldest - 1, payload: payload})
 	}
@@ -371,6 +365,25 @@ func (s *Server) replayLocked(lastID uint64) []sseMessage {
 		}
 	}
 	return replay
+}
+
+const maxSSELastEventIDLength = 20 // max decimal representation of uint64
+
+func parseSSELastEventID(value string) uint64 {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maxSSELastEventIDLength {
+		return 0
+	}
+	for _, char := range value {
+		if char < '0' || char > '9' {
+			return 0
+		}
+	}
+	id, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return id
 }
 
 func writeSSEMessage(w io.Writer, message sseMessage) bool {

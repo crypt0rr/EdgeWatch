@@ -316,7 +316,7 @@ func TestServerPaginationAndSSEBoundaryHelpers(t *testing.T) {
 	if got, _ := pageSlice([]string{"a", "b"}, -1, 0); len(got) != 2 {
 		t.Fatal("default page slice failed")
 	}
-	server, _, _ := newUsersTestServer(t)
+	server, db, _ := newUsersTestServer(t)
 	server.broadcast(map[string]any{"type": "first"})
 	server.broadcast(map[string]any{"type": "second"})
 	server.mu.Lock()
@@ -324,12 +324,14 @@ func TestServerPaginationAndSSEBoundaryHelpers(t *testing.T) {
 		server.mu.Unlock()
 		t.Fatalf("normal replay = %#v", got)
 	}
-	if got := server.replayLocked(99); len(got) != 1 || !strings.Contains(string(got[0].payload), "event_history_restarted") {
+	beforeFuture := server.nextEventID
+	futureID := sseEventIDBlockSize + 42
+	if got := server.replayLocked(futureID); len(got) != 0 || server.nextEventID != beforeFuture {
 		server.mu.Unlock()
-		t.Fatalf("future replay did not request refresh: %#v", got)
+		t.Fatalf("future replay changed server cursor: messages=%#v cursor=%d before=%d", got, server.nextEventID, beforeFuture)
 	}
 	restarted := &Server{subscribers: map[chan sseMessage]struct{}{}}
-	if got := restarted.replayLocked(999999); len(got) != 1 || !strings.Contains(string(got[0].payload), "refresh_required") {
+	if got := restarted.replayLocked(999999); len(got) != 0 || restarted.nextEventID != 0 {
 		t.Fatalf("restart replay did not request refresh: %#v", got)
 	}
 	server.history = []sseMessage{{id: 10, payload: []byte(`{"type":"old"}`)}}
@@ -338,11 +340,33 @@ func TestServerPaginationAndSSEBoundaryHelpers(t *testing.T) {
 		t.Fatalf("gap replay = %#v", got)
 	}
 	server.mu.Unlock()
+	server.broadcast(map[string]any{"type": "after-future-replay"})
+	var durableCursor int64
+	if err := db.DB.QueryRow(`SELECT next_id FROM sse_event_cursor WHERE id=1`).Scan(&durableCursor); err != nil {
+		t.Fatal(err)
+	}
+	if durableCursor != int64(sseEventIDBlockSize) {
+		t.Fatalf("future replay advanced durable cursor to %d, want reserved block end %d", durableCursor, sseEventIDBlockSize)
+	}
 	if len(boundedSSEPayload(map[string]any{"value": strings.Repeat("x", maxSSEPayloadBytes)})) > maxSSEPayloadBytes {
 		t.Fatal("oversized SSE payload was not bounded")
 	}
 	if len(boundedSSEPayload(map[string]any{"value": "ok"})) == 0 {
 		t.Fatal("normal SSE payload was empty")
+	}
+	for _, test := range []struct {
+		value string
+		want  uint64
+	}{
+		{value: "1", want: 1},
+		{value: " 42 ", want: 42},
+		{value: "", want: 0},
+		{value: "not-a-number", want: 0},
+		{value: strings.Repeat("9", maxSSELastEventIDLength+1), want: 0},
+	} {
+		if got := parseSSELastEventID(test.value); got != test.want {
+			t.Fatalf("parse Last-Event-ID %q = %d, want %d", test.value, got, test.want)
+		}
 	}
 	if !isMutation(http.MethodDelete) && isMutation(http.MethodGet) {
 		t.Fatal("mutation classifier failed")

@@ -89,7 +89,12 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(`/api/v1${path}`, { ...init, headers, credentials: 'same-origin' })
   if (response.status === 204) return undefined as T
   const body = await response.json().catch(() => ({}))
-  if (response.status === 401 && !/^\/(?:setup|auth\/(?:login|activate))(?:\/|\?|$)/.test(path)) {
+  // A 401 normally means that the session has expired, but step-up
+  // confirmation endpoints also use 401 for a rejected password.  The
+  // structured error code lets the shell distinguish those cases: a mistyped
+  // confirmation must stay on the current page so the form and session remain
+  // intact, while a genuinely unauthenticated request still returns to login.
+  if (response.status === 401 && body?.error?.code !== 'invalid_password' && !/^\/(?:setup|auth\/(?:login|activate))(?:\/|\?|$)/.test(path)) {
     // A session can expire while the console remains open. Let the shell
     // clear its cached principal and return to the login route instead of
     // leaving each page to render an authentication error independently.

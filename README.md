@@ -132,7 +132,10 @@ the replacement is issued.
   so status polling does not repeatedly decode retained history.
 - History-heavy host inventory and public-dashboard reads use a bounded
   read-only SQLite pool alongside the single writer connection. WAL keeps those
-  reads available during scan commits and pruning; in-memory test databases
+  reads available during scan commits and pruning. Startup verifies the
+  effective journal mode; if the filesystem rejects WAL, EdgeWatch logs an
+  actionable warning and uses the writer connection for reads so it does not
+  claim unsupported concurrency guarantees. In-memory test databases
   intentionally continue to use their shared writer connection.
 - The authenticated live-update stream uses a bounded replay window and
   reconnects automatically when subscriber limits are reached. Stream

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,28 @@ func TestMemoryStoreKeepsSharedWriterConnection(t *testing.T) {
 	defer s.Close()
 	if s.ReadDB != nil {
 		t.Fatal("memory store should not create an isolated read pool")
+	}
+}
+
+func TestStoreFallsBackToWriterWhenWALIsUnavailable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "edgewatch.db")
+	s, err := openWithOptions(path, openOptions{create: true, migrate: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if s.ReadDB != nil {
+		t.Fatal("store opened a separate read pool without verified WAL")
+	}
+	var journalMode string
+	if err := s.DB.QueryRowContext(context.Background(), `PRAGMA journal_mode`).Scan(&journalMode); err != nil {
+		t.Fatal(err)
+	}
+	if strings.EqualFold(strings.TrimSpace(journalMode), "wal") {
+		t.Fatalf("test fixture unexpectedly enabled WAL: %q", journalMode)
+	}
+	if _, err := s.DB.ExecContext(context.Background(), `SELECT COUNT(*) FROM sqlite_master`); err != nil {
+		t.Fatalf("writer fallback is not usable for reads: %v", err)
 	}
 }
 

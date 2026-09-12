@@ -278,13 +278,20 @@ func (s *Store) validateManagedJob(job config.Job) error {
 	return config.ValidateJobWithTargetExclusions(job, s.targetExclusions)
 }
 
-// sqliteArtifactPath resolves the on-disk filename represented by a SQLite
-// file: URI. The database driver receives the original URI (so query options
-// such as mode=rwc remain effective), while permission checks must operate on
-// the decoded filename rather than a literal string containing '?mode=…'.
+// sqliteArtifactPath resolves the on-disk filename represented by an accepted
+// SQLite DSN. modernc.org/sqlite treats everything after the first '?' as
+// connection options for both URI and plain-path DSNs, so artifact checks must
+// strip that query before touching the filesystem. The database driver still
+// receives the original DSN so its options remain effective.
 func sqliteArtifactPath(path string) (string, error) {
 	if !strings.HasPrefix(path, "file:") {
-		return path, nil
+		if index := strings.IndexByte(path, '?'); index >= 0 {
+			path = path[:index]
+		}
+		if path == "" {
+			return "", errors.New("database path is empty")
+		}
+		return filepath.Clean(path), nil
 	}
 	withoutScheme := strings.TrimPrefix(path, "file:")
 	if index := strings.IndexByte(withoutScheme, '?'); index >= 0 {
@@ -301,19 +308,25 @@ func sqliteArtifactPath(path string) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("invalid SQLite database URI: %w", err)
 		}
-		if u.Host != "" && u.Host != "localhost" {
+		if u.Host != "" && !strings.EqualFold(u.Host, "localhost") {
 			return "", errors.New("SQLite database URI must refer to the local host")
 		}
+		// url.Parse has already percent-decoded u.Path. Unescaping it again
+		// would turn a literal %2F in a filename into a path separator.
 		withoutScheme = u.Path
 	}
-	decoded, err := url.PathUnescape(withoutScheme)
-	if err != nil {
-		return "", fmt.Errorf("invalid SQLite database URI path: %w", err)
+	decoded := withoutScheme
+	if !strings.HasPrefix(withoutScheme, "//") {
+		var err error
+		decoded, err = url.PathUnescape(withoutScheme)
+		if err != nil {
+			return "", fmt.Errorf("invalid SQLite database URI path: %w", err)
+		}
 	}
 	if decoded == "" {
 		return "", errors.New("filesystem SQLite URI must include a database path")
 	}
-	return decoded, nil
+	return filepath.Clean(decoded), nil
 }
 
 func isSQLiteMemoryPath(path string) bool {
@@ -321,6 +334,11 @@ func isSQLiteMemoryPath(path string) bool {
 		return true
 	}
 	if !strings.HasPrefix(path, "file:") {
+		// The driver strips query options from plain paths before opening them,
+		// therefore :memory:?cache=shared is still an in-memory DSN.
+		if index := strings.IndexByte(path, '?'); index >= 0 {
+			return path[:index] == ":memory:"
+		}
 		return false
 	}
 	queryIndex := strings.IndexByte(path, '?')

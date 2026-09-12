@@ -91,6 +91,65 @@ func TestOpenEnforcesPrivateModeForSQLiteURI(t *testing.T) {
 	}
 }
 
+func TestSQLiteArtifactPathNormalizesPlainAndURIForms(t *testing.T) {
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "plain.db")
+	encoded := filepath.Join(dir, "literal%2F.db")
+	tests := []struct {
+		name string
+		dsn  string
+		want string
+	}{
+		{name: "plain path", dsn: plain, want: plain},
+		{name: "plain path query", dsn: plain + "?mode=rwc&_busy_timeout=5000", want: plain},
+		{name: "file uri query", dsn: "file:" + plain + "?mode=rwc", want: plain},
+		{name: "localhost uri query", dsn: "file://localhost" + plain + "?mode=rwc", want: plain},
+		{name: "encoded filename", dsn: "file:" + strings.ReplaceAll(encoded, "%", "%25") + "?mode=rwc", want: encoded},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := sqliteArtifactPath(test.dsn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("sqliteArtifactPath(%q) = %q, want %q", test.dsn, got, test.want)
+			}
+		})
+	}
+}
+
+func TestOpenPlainSQLiteDSNQueryEnforcesRealArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "plain-query.db")
+	dsn := path + "?mode=rwc&_busy_timeout=5000"
+	s, err := Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.DB.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	if err := assertPrivateMode(path); err != nil {
+		t.Fatalf("real database artifact: %v", err)
+	}
+	if _, err := os.Stat(dsn); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("plain SQLite DSN query was treated as a literal filename: stat=%v", err)
+	}
+	if _, err := os.Stat(path + "-wal"); err == nil {
+		if err := assertPrivateMode(path + "-wal"); err != nil {
+			t.Fatalf("real WAL artifact: %v", err)
+		}
+	}
+}
+
+func TestSQLiteMemoryPathDetectionSupportsPlainQuery(t *testing.T) {
+	if !isSQLiteMemoryPath(":memory:?cache=shared") {
+		t.Fatal("plain in-memory SQLite DSN with query was not recognized")
+	}
+}
+
 func TestOpenSupportsLocalhostSQLiteURI(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "localhost.db")

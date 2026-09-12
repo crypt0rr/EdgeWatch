@@ -120,6 +120,9 @@ func TestManagedJobRevisionAndScopeConfirmation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := s.ReplaceBaselineHostProjection(ctx, record.ID, model.Snapshot{Hosts: []model.HostObservation{{Address: "127.0.0.1", Status: "up"}}}); err != nil {
+		t.Fatal(err)
+	}
 	changed := record.Job
 	changed.Targets = []string{"127.0.0.2"}
 	if _, _, err := s.UpdateJob(ctx, record.ID, record.Revision, changed, true, false, false); !errors.Is(err, ErrRebaselineRequired) {
@@ -138,6 +141,9 @@ func TestManagedJobRevisionAndScopeConfirmation(t *testing.T) {
 	}
 	if state.Baseline != nil || state.BaselineScanID != "" {
 		t.Fatalf("scope update did not clear runtime state: %#v", state)
+	}
+	if exists, err := s.BaselineHostProjectionExists(ctx, record.ID); err != nil || exists {
+		t.Fatalf("scope update left the old baseline host projection: exists=%v err=%v", exists, err)
 	}
 	events, err := s.ListJobEvents(ctx, record.ID, 10)
 	if err != nil {

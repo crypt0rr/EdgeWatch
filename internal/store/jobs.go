@@ -295,6 +295,13 @@ func (s *Store) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context, id st
 		if _, err = tx.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?) ON CONFLICT(job_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at`, id, stateRaw, now.Format(time.RFC3339Nano)); err != nil {
 			return JobRecord{}, false, nil, err
 		}
+		// The indexed baseline overlay belongs to the previous security scope.
+		// Clear it in the same transaction as the runtime reset so a concurrent
+		// host request cannot observe old expected hosts after the new revision
+		// has been committed.
+		if err = clearBaselineHostProjectionTx(ctx, tx, id); err != nil {
+			return JobRecord{}, false, nil, err
+		}
 		event := model.Event{Type: "baseline-reset", JobID: id, Job: job.Name, Message: "Baseline collection reset", CreatedAt: now}
 		boundedEvent, eventRaw, marshalErr := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
 		if marshalErr != nil {

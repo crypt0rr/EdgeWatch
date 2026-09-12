@@ -50,13 +50,16 @@ type Server struct {
 	publicHits    map[string][]time.Time
 	publicCacheMu sync.Mutex
 	publicCache   *publicDashboardCache
-	publicBuild   chan struct{}
-	publicGen     uint64
-	telemetryMu   sync.Mutex
-	telemetry     *store.DeploymentTelemetry
-	telemetryAt   time.Time
-	telemetryRun  bool
-	telemetryDone chan struct{}
+	publicBuild   *publicDashboardBuild
+	// publicDashboardBuildFunc is used by deterministic tests to control the
+	// cache-fill workload. Production requests use publicDashboardResponse.
+	publicDashboardBuildFunc func(context.Context, store.PublicDashboard) (publicDashboardResponse, error)
+	publicGen                uint64
+	telemetryMu              sync.Mutex
+	telemetry                *store.DeploymentTelemetry
+	telemetryAt              time.Time
+	telemetryRun             bool
+	telemetryDone            chan struct{}
 	// writeTimeout bounds ordinary HTTP responses. SSE clears this deadline
 	// explicitly in stream because that endpoint is intentionally long-lived.
 	// It is configurable only for deterministic server tests; production uses
@@ -71,6 +74,13 @@ type Server struct {
 type sseMessage struct {
 	id      uint64
 	payload []byte
+}
+
+// publicDashboardBuild represents one shared cache fill. The result is
+// published before done is closed so every waiter observes the same outcome.
+type publicDashboardBuild struct {
+	done chan struct{}
+	err  error
 }
 
 type sseAuthCacheEntry struct {

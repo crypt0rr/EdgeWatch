@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -368,6 +369,49 @@ func TestCachedPublicDashboardPayloadReusesShortLivedProjection(t *testing.T) {
 	server.publicCacheMu.Unlock()
 	if cleared != nil {
 		t.Fatal("public dashboard cache was not invalidated")
+	}
+}
+
+func TestCachedPublicDashboardBuildOutlivesCanceledRequester(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	server := &Server{publicDashboardBuildFunc: func(ctx context.Context, _ store.PublicDashboard) (publicDashboardResponse, error) {
+		close(started)
+		select {
+		case <-release:
+			return publicDashboardResponse{Title: "Status", Hosts: []publicHostResponse{}}, nil
+		case <-ctx.Done():
+			return publicDashboardResponse{}, ctx.Err()
+		}
+	}}
+	dashboard := store.PublicDashboard{Enabled: true, Title: "Status"}
+	requestContext, cancel := context.WithCancel(context.Background())
+	first := make(chan error, 1)
+	go func() {
+		_, err := server.cachedPublicDashboardPayload(requestContext, dashboard)
+		first <- err
+	}()
+	<-started
+	cancel()
+	if err := <-first; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled requester error = %v, want context.Canceled", err)
+	}
+
+	second := make(chan struct {
+		payload []byte
+		err     error
+	}, 1)
+	go func() {
+		payload, err := server.cachedPublicDashboardPayload(context.Background(), dashboard)
+		second <- struct {
+			payload []byte
+			err     error
+		}{payload: payload, err: err}
+	}()
+	close(release)
+	result := <-second
+	if result.err != nil || string(result.payload) == "" {
+		t.Fatalf("second requester did not receive shared build: payload=%s err=%v", result.payload, result.err)
 	}
 }
 

@@ -68,6 +68,29 @@ func TestBaselineHostExplorerReturnsDetailedAndFilteredHosts(t *testing.T) {
 	if detailRecorder.Code != http.StatusOK || !bytes.Contains(detailRecorder.Body.Bytes(), []byte(`"open"`)) {
 		t.Fatalf("unexpected detail response %d: %s", detailRecorder.Code, detailRecorder.Body.String())
 	}
+
+	// Widen the live job scope after the scan. Historical evidence must retain
+	// the expression and detection settings captured by that scan rather than
+	// being rewritten from the current job revision.
+	changed := record.Job
+	changed.TCP = &config.Protocol{Ports: "1-65535", Mode: record.Job.TCP.Mode, ServiceDetection: record.Job.TCP.ServiceDetection}
+	if _, _, err := db.UpdateJob(ctx, record.ID, record.Revision, changed, true, false, true); err != nil {
+		t.Fatal(err)
+	}
+	historicalRecorder := httptest.NewRecorder()
+	server.jobScanHost(historicalRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1", nil), record.ID, scan.ID, "198.51.100.1")
+	if historicalRecorder.Code != http.StatusOK {
+		t.Fatalf("historical detail after scope edit status %d: %s", historicalRecorder.Code, historicalRecorder.Body.String())
+	}
+	var historical struct {
+		Host model.HostObservation `json:"host"`
+	}
+	if err := json.Unmarshal(historicalRecorder.Body.Bytes(), &historical); err != nil {
+		t.Fatal(err)
+	}
+	if len(historical.Host.Protocols) != 1 || historical.Host.Protocols[0].ScannedPorts != "22,443" || historical.Host.Protocols[0].ScannedPortCount != 2 {
+		t.Fatalf("historical scope was overwritten: %#v", historical.Host.Protocols)
+	}
 }
 
 func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testing.T) {

@@ -1321,11 +1321,6 @@ func (s *Server) renderScanHost(w http.ResponseWriter, r *http.Request, id, jobN
 	if indexedExists {
 		if indexed, indexErr := s.Store.GetScanHost(r.Context(), scanID, address); indexErr == nil {
 			dedupeHost(&indexed.Host)
-			if haveExpectedJob {
-				hosts := []model.HostObservation{indexed.Host}
-				restoreHostScopes(hosts, scopesForJob(expectedJob))
-				indexed.Host = hosts[0]
-			}
 			var expected any
 			if haveExpectedJob {
 				if baselineHost, found, expectedErr := s.expectedHostForScan(r.Context(), expectedJobID, address, expectedJob); expectedErr == nil && found {

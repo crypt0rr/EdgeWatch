@@ -163,7 +163,19 @@ export const scanHost = (jobId: string, scanId: string, address: string) => api<
 export const scanHostRDAP = (jobId: string, scanId: string, address: string) => api<{ rdap: RdapResult }>(`/jobs/${jobId}/scans/${encodeURIComponent(scanId)}/hosts/${encodeURIComponent(address)}/rdap`)
 export const historicalScanHost = (scanId: string, address: string) => api<HostDetailResponse>(`/scans/${encodeURIComponent(scanId)}/hosts/${encodeURIComponent(address)}`)
 export const historicalScanHostRDAP = (scanId: string, address: string) => api<{ rdap: RdapResult }>(`/scans/${encodeURIComponent(scanId)}/hosts/${encodeURIComponent(address)}/rdap`)
-export const getScan = (scanId: string) => api<Scan>(`/scans/${encodeURIComponent(scanId)}`)
+/**
+ * Fetch a top-level historical scan.
+ *
+ * The server wraps this compatibility response in a `scan` envelope while
+ * older clients treated it as a bare Scan. Decode the envelope at the API
+ * boundary and continue accepting a bare payload so managed/legacy callers
+ * remain compatible during rolling upgrades.
+ */
+export async function getScan(scanId: string): Promise<Scan> {
+  const response = await api<Scan | { scan: Scan }>(`/scans/${encodeURIComponent(scanId)}`)
+  if (response && typeof response === 'object' && 'scan' in response && response.scan) return response.scan
+  return response as Scan
+}
 export const historicalScanHosts = (scanId: string, filters: HostFilters = {}) => api<{ job_id?: string; job: string; scan: ScanSummary; data_quality: string; hosts: import('./types').HostSummary[]; pagination: Pagination }>(`/scans/${encodeURIComponent(scanId)}/hosts?${hostQuery(filters)}`)
 export const scanDetail = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ scan: Scan; changes: Change[]; changes_pagination: Pagination; current_security_hash: string; comparison_source?: string; baseline_scan_id?: string }>(`/jobs/${jobId}/scans/${scanId}?limit=${limit}&offset=${offset}`)
 export const scanResults = (jobId: string, scanId: string, offset = 0, limit = 50) => api<{ results: Unit[]; pagination: Pagination }>(`/jobs/${jobId}/scans/${scanId}/results?limit=${limit}&offset=${offset}`)

@@ -293,9 +293,15 @@ events are retained in the event history and use the job's normal notification
 selection.
 
 `assume_alive` defaults to `true` and passes host-discovery skip flags to the
-selected scanner. Set it to `false` when host discovery is required. If Nmap
-discovery reports an expected target as down or omits it, EdgeWatch records an
-explicit `unreachable` host observation while committing the other addresses.
+selected scanner. Set it to `false` when host discovery is required for an
+Nmap job. Naabu's host-discovery switch is only supported with its SYN engine:
+Naabu itself changes a connect scan to raw SYN when `-with-host-discovery` is
+present. EdgeWatch therefore rejects a Naabu connect job with
+`assume_alive: false` instead of silently changing its scan type; choose
+`assume_alive: true` for connect mode or explicitly select SYN and grant both
+raw-packet capabilities. If Nmap discovery reports an expected target as down
+or omits it, EdgeWatch records an explicit `unreachable` host observation while
+committing the other addresses.
 The scan is marked `incomplete`, emits a warning naming only the affected
 addresses, and compares reachable targets immediately. It never treats a
 missing address as closed, advances a baseline, or clears an incident for that

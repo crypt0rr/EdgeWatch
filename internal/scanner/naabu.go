@@ -82,8 +82,8 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 	if err := config.ValidateNaabuOptions(options); err != nil {
 		return model.Snapshot{}, fmt.Errorf("tcp naabu: %w", err)
 	}
-	if options.ScanType == "syn" && !hasRawScannerPrivileges() {
-		return model.Snapshot{}, errors.New("naabu SYN scanning requires NET_RAW and NET_ADMIN capabilities; choose connect mode or grant the capabilities explicitly")
+	if err := validateNaabuInvocation(options, job.AssumesAlive(), hasRawScannerPrivileges()); err != nil {
+		return model.Snapshot{}, err
 	}
 	if len(addresses) == 0 {
 		return model.Snapshot{}, errors.New("no effective targets")
@@ -213,8 +213,8 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 	if err := config.ValidateNaabuOptions(options); err != nil {
 		return model.Snapshot{}, fmt.Errorf("tcp naabu: %w", err)
 	}
-	if options.ScanType == "syn" && !hasRawScannerPrivileges() {
-		return model.Snapshot{}, errors.New("naabu SYN scanning requires NET_RAW and NET_ADMIN capabilities; choose connect mode or grant the capabilities explicitly")
+	if err := validateNaabuInvocation(options, job.AssumesAlive(), hasRawScannerPrivileges()); err != nil {
+		return model.Snapshot{}, err
 	}
 	if len(addresses) == 0 {
 		return model.Snapshot{}, errors.New("no effective targets")
@@ -709,11 +709,7 @@ func naabuArgsWithTemplate(options config.NaabuOptions, targetsFile string, assu
 		if options.Verify {
 			args = append(args, "-verify")
 		}
-		if assumeAlive {
-			args = append(args, "-skip-host-discovery")
-		} else {
-			args = append(args, "-with-host-discovery")
-		}
+		args = append(args, naabuHostDiscoveryFlag(options, assumeAlive))
 		return args
 	}
 
@@ -733,11 +729,7 @@ func naabuArgsWithTemplate(options config.NaabuOptions, targetsFile string, assu
 		args = append(args, "-verify")
 	}
 	if !templateContains(template, config.PlaceholderHostDiscovery) {
-		if assumeAlive {
-			args = append(args, "-skip-host-discovery")
-		} else {
-			args = append(args, "-with-host-discovery")
-		}
+		args = append(args, naabuHostDiscoveryFlag(options, assumeAlive))
 	}
 	args = append(args, renderNaabuTemplate(template, targetsFile, options, assumeAlive)...)
 	return args
@@ -759,11 +751,7 @@ func renderNaabuTemplate(template []string, targetsFile string, options config.N
 			// extra argument when the fixed target resolver already supplies both
 			// families.
 		case config.PlaceholderHostDiscovery:
-			if assumeAlive {
-				out = append(out, "-skip-host-discovery")
-			} else {
-				out = append(out, "-with-host-discovery")
-			}
+			out = append(out, naabuHostDiscoveryFlag(options, assumeAlive))
 		case config.PlaceholderScanType:
 			scanType := "c"
 			if options.ScanType == "syn" {
@@ -779,6 +767,32 @@ func renderNaabuTemplate(template []string, targetsFile string, options config.N
 		}
 	}
 	return out
+}
+
+// Naabu v2.6.1 validates -with-host-discovery by changing any non-SYN
+// scan-type to a raw SYN scan. That behavior is unsafe for EdgeWatch because
+// the job's scan type, capability check, and evidence would no longer match
+// the process that actually ran. Connect mode therefore cannot be combined
+// with assume_alive=false; operators must either keep the default assumed-live
+// policy or explicitly select SYN with both raw-packet capabilities.
+func validateNaabuInvocation(options config.NaabuOptions, assumeAlive, rawPrivileges bool) error {
+	if options.ScanType == "connect" && !assumeAlive {
+		return errors.New("Naabu connect mode cannot use host discovery; keep assume_alive enabled or select SYN mode with NET_RAW and NET_ADMIN")
+	}
+	if options.ScanType == "syn" && !rawPrivileges {
+		return errors.New("Naabu SYN scanning requires NET_RAW and NET_ADMIN capabilities; choose connect mode or grant the capabilities explicitly")
+	}
+	return nil
+}
+
+// naabuHostDiscoveryFlag is defensive for previews and any future caller that
+// renders arguments before runtime validation. Never emit the upstream switch
+// that converts connect scans into SYN scans.
+func naabuHostDiscoveryFlag(options config.NaabuOptions, assumeAlive bool) string {
+	if assumeAlive || options.ScanType == "connect" {
+		return "-skip-host-discovery"
+	}
+	return "-with-host-discovery"
 }
 
 func parseNaabuJSON(data []byte) ([]naabuResult, error) {

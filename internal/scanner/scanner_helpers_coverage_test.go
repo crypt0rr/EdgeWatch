@@ -173,7 +173,7 @@ func TestNaabuTemplateAndSmallNormalizationHelpers(t *testing.T) {
 			t.Fatalf("Naabu template rendering = %v", args)
 		}
 		wantDiscovery := "-with-host-discovery"
-		if assumeAlive {
+		if assumeAlive || options.ScanType == "connect" {
 			wantDiscovery = "-skip-host-discovery"
 		}
 		if !strings.Contains(joined, wantDiscovery) {
@@ -183,8 +183,8 @@ func TestNaabuTemplateAndSmallNormalizationHelpers(t *testing.T) {
 	if got := naabuArgsWithTemplate(config.NaabuOptions{ScanType: "connect", Rate: 10, Workers: 2, Retries: 1, TimeoutMS: 100, Verify: true}, "/tmp/targets", true, []string{config.PlaceholderTargetsFile, config.PlaceholderPorts, config.PlaceholderStructuredOutput}); !strings.Contains(strings.Join(got, " "), "-skip-host-discovery") {
 		t.Fatalf("Naabu template default discovery flag missing: %v", got)
 	}
-	if got := naabuArgsWithTemplate(config.NaabuOptions{ScanType: "connect", Rate: 10, Workers: 2, Retries: 1, TimeoutMS: 100}, "/tmp/targets", false, nil); !strings.Contains(strings.Join(got, " "), "-with-host-discovery") {
-		t.Fatalf("Naabu default discovery flag missing: %v", got)
+	if got := naabuArgsWithTemplate(config.NaabuOptions{ScanType: "connect", Rate: 10, Workers: 2, Retries: 1, TimeoutMS: 100}, "/tmp/targets", false, nil); !strings.Contains(strings.Join(got, " "), "-skip-host-discovery") || strings.Contains(strings.Join(got, " "), "-with-host-discovery") {
+		t.Fatalf("Naabu connect mode must not request host discovery: %v", got)
 	}
 
 	if got := dedupeStrings([]string{"a", "a", "b", "b", "c"}); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {

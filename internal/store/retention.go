@@ -45,9 +45,9 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	// baseline_scan_id, and a NOT IN subquery containing NULL would protect every
 	// old scan from pruning.
 	deletedScans, err := s.deleteRetentionBatches(ctx, `DELETE FROM scans AS scan WHERE scan.id IN (SELECT candidate.id FROM scans AS candidate WHERE candidate.finished_at < ?
-		AND NOT EXISTS (SELECT 1 FROM job_states AS legacy WHERE json_extract(legacy.state_json,'$.baseline_scan_id') = scan.id)
-		AND NOT EXISTS (SELECT 1 FROM job_runtime AS managed WHERE json_extract(managed.state_json,'$.baseline_scan_id') = scan.id)
-		AND NOT EXISTS (SELECT 1 FROM job_runtime AS active, json_each(active.state_json,'$.incidents') AS incident WHERE json_extract(incident.value,'$.scan_id') = scan.id) ORDER BY candidate.finished_at,candidate.id LIMIT ?)`, cutoff)
+		AND NOT EXISTS (SELECT 1 FROM job_states AS legacy WHERE json_extract(legacy.state_json,'$.baseline_scan_id') = candidate.id)
+		AND NOT EXISTS (SELECT 1 FROM job_runtime AS managed WHERE json_extract(managed.state_json,'$.baseline_scan_id') = candidate.id)
+		AND NOT EXISTS (SELECT 1 FROM job_runtime AS active, json_each(active.state_json,'$.incidents') AS incident WHERE json_extract(incident.value,'$.scan_id') = candidate.id) ORDER BY candidate.finished_at,candidate.id LIMIT ?)`, cutoff)
 	if err != nil {
 		return stats, err
 	}

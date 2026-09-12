@@ -1205,6 +1205,43 @@ func TestPrunePreservesLegacyAndManagedBaselines(t *testing.T) {
 	}
 }
 
+func TestPruneSkipsProtectedBatchEntriesAndContinuesToEligibleHistory(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	old := time.Now().UTC().Add(-48 * time.Hour)
+	oldText := old.Format(time.RFC3339Nano)
+	const protectedCount = retentionBatchSize + 1
+	for i := 0; i < protectedCount; i++ {
+		id := fmt.Sprintf("protected-%04d", i)
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?)`, id, "retention-protected", oldText, oldText, "success", "", "", "hash", []byte(`{}`)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_states(job,state_json,updated_at) VALUES(?,?,?)`, "protected-"+fmt.Sprintf("%04d", i), []byte(`{"baseline_scan_id":"`+id+`"}`), oldText); err != nil {
+			t.Fatal(err)
+		}
+	}
+	eligibleID := "zz-eligible-after-protected-batch"
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?)`, eligibleID, "retention-eligible", oldText, oldText, "success", "", "", "hash", []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.PruneWithStats(ctx, old.Add(24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Scans != 1 {
+		t.Fatalf("pruned scans = %d, want one eligible scan: %#v", stats.Scans, stats)
+	}
+	if _, err := s.GetScan(ctx, eligibleID); err == nil {
+		t.Fatal("eligible scan after protected batch was not pruned")
+	}
+	for i := 0; i < protectedCount; i++ {
+		id := fmt.Sprintf("protected-%04d", i)
+		if _, err := s.GetScan(ctx, id); err != nil {
+			t.Fatalf("protected scan %s was pruned: %v", id, err)
+		}
+	}
+}
+
 func TestPrunePreservesScansReferencedByOpenIncidents(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

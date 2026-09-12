@@ -107,6 +107,16 @@ jobs:
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up Go for release-style inputs
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Set up Node for release-style inputs
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24.21.0
+          cache: npm
       - name: Validate Compose deployment
         run: |
           docker compose config --quiet
@@ -123,6 +133,17 @@ jobs:
         run: ./scripts/verify-naabu-pin.sh
       - name: Verify release artifact contract
         run: ./scripts/test-release-artifacts.sh
+      - name: Build release-style prebuilt inputs
+        run: |
+          npm ci
+          npm run build
+          go mod download
+          mkdir -p release-binaries/linux_amd64 release-binaries/linux_arm64
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
+              go build -trimpath -ldflags='-s -w -X main.version=v0.0.0-ci' \
+              -o "release-binaries/linux_${arch}/edgewatch" ./cmd/edgewatch
+          done
       - name: Set up QEMU
         uses: docker/setup-qemu-action@1f40c72289eff860ee54a304f1438e3cff362e0a # v4.3.0
       - name: Set up Docker Buildx
@@ -136,3 +157,33 @@ jobs:
           tags: edgewatch:test
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Build prebuilt AMD64 image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          platforms: linux/amd64
+          tags: edgewatch:prebuilt-amd64
+          build-args: |
+            VERSION=v0.0.0-ci
+            PREBUILT_FRONTEND=1
+            PREBUILT_EDGEWATCH=1
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify prebuilt AMD64 image
+        run: bash ./scripts/test-prebuilt-image.sh edgewatch:prebuilt-amd64 linux/amd64 v0.0.0-ci
+      - name: Build prebuilt ARM64 image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          platforms: linux/arm64
+          tags: edgewatch:prebuilt-arm64
+          build-args: |
+            VERSION=v0.0.0-ci
+            PREBUILT_FRONTEND=1
+            PREBUILT_EDGEWATCH=1
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Verify prebuilt ARM64 image
+        run: bash ./scripts/test-prebuilt-image.sh edgewatch:prebuilt-arm64 linux/arm64 v0.0.0-ci

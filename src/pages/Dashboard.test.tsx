@@ -197,4 +197,27 @@ describe('dashboard', () => {
     await vi.waitFor(() => expect(container.textContent).toContain('Could not load jobs.'), { timeout: 1000 })
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('Could not load jobs.')
   })
+
+  it('keeps failed metric queries unavailable instead of showing zero', async () => {
+    vi.mocked(listJobs).mockRejectedValue(new Error('jobs unavailable'))
+    vi.mocked(listScans).mockRejectedValue(new Error('scans unavailable'))
+    vi.mocked(activeScans).mockRejectedValue(new Error('active scans unavailable'))
+    vi.mocked(listIncidents).mockRejectedValue(new Error('incidents unavailable'))
+
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Dashboard /></MemoryRouter></QueryClientProvider>)
+    })
+    await vi.waitFor(() => expect(container.querySelectorAll('.stat-unavailable')).toHaveLength(4), { timeout: 1000 })
+
+    expect(container.querySelectorAll('.stat-unavailable .stat-value')).toHaveLength(4)
+    expect(container.textContent).toContain('Unavailable')
+    expect(container.textContent).not.toContain('No scans running')
+    expect(container.querySelectorAll('.stat-retry')).toHaveLength(4)
+
+    await act(async () => {
+      ;(container.querySelector('.stat-retry') as HTMLButtonElement).click()
+      await Promise.resolve()
+    })
+    expect(listJobs).toHaveBeenCalledTimes(2)
+  })
 })

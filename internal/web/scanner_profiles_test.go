@@ -2,13 +2,50 @@ package web
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/store"
 )
+
+func TestOperatorCannotSelectSupersededScannerProfileRevision(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	profile, err := db.CreateScannerProfile(ctx, "Revision guard", "", config.ScannerProfile{Engine: config.EngineNmap}, admin.Username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UpdateScannerProfile(ctx, profile.ID, profile.Revision, profile.Name, "current", config.ScannerProfile{Engine: config.EngineNmap, Description: "current"}, admin.Username); err != nil {
+		t.Fatal(err)
+	}
+
+	operator := admin
+	operator.Role = store.RoleOperator
+	historical := &config.Job{TCP: &config.Protocol{ProfileID: profile.ID, ProfileRevision: 1}}
+	if err := server.applySelectedScannerProfile(ctx, historical, false, auth.HasPermission(operator, auth.PermissionScannerProfilesManage)); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("operator historical profile selection error = %v, want conflict", err)
+	}
+
+	current := &config.Job{TCP: &config.Protocol{ProfileID: profile.ID, ProfileRevision: 2}}
+	if err := server.applySelectedScannerProfile(ctx, current, false, true); err != nil {
+		t.Fatalf("administrator current profile selection: %v", err)
+	}
+	if current.TCP.ProfileRevision != 2 || current.TCP.Engine != config.EngineNmap {
+		t.Fatalf("current profile selection = %#v", current.TCP)
+	}
+
+	// The administrator-only capability is what allows an intentional rollback;
+	// the operator session above must not be able to use the same revision.
+	rollback := &config.Job{TCP: &config.Protocol{ProfileID: profile.ID, ProfileRevision: 1}}
+	if err := server.applySelectedScannerProfile(ctx, rollback, false, auth.HasPermission(admin, auth.PermissionScannerProfilesManage)); err != nil {
+		t.Fatalf("administrator rollback selection: %v", err)
+	}
+}
 
 func TestScannerProfileMutationsMapAuditUnavailableToServiceUnavailable(t *testing.T) {
 	ctx := context.Background()

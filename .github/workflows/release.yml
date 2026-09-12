@@ -60,9 +60,23 @@ jobs:
         run: npm ci && npm run lint
       - name: Build frontend assets
         run: npm run build
+      - name: Resolve release lint comparison base
+        id: release-lint-base
+        run: |
+          set -euo pipefail
+          # Compare the whole release range with the previous verified tag.
+          # Tag pushes do not provide a reliable github.event.before value;
+          # resolving the parent tag locally covers every commit since the
+          # last release without inheriting the repository's known baseline.
+          base="$(git describe --tags --abbrev=0 "${GITHUB_SHA}^" 2>/dev/null || true)"
+          if [[ -z "$base" ]]; then
+            base="$(git rev-list --max-parents=0 "$GITHUB_SHA")"
+          fi
+          base_commit="$(git rev-parse --verify "${base}^{commit}")"
+          echo "base=$base_commit" >> "$GITHUB_OUTPUT"
       - name: Dependency and static-analysis checks
         env:
-          GOLANGCI_LINT_BASE: ${{ github.event.before }}
+          GOLANGCI_LINT_BASE: ${{ steps.release-lint-base.outputs.base }}
         run: make security
       - name: Ensure frontend build leaves no TypeScript artifacts
         run: |

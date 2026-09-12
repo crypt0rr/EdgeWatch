@@ -838,3 +838,11 @@
   outline-offset: 3px;
   box-shadow: 0 0 0 2px #07111f, 0 0 0 5px #8fc8ff;
 }
+
+.stat-unavailable { border-color: #71353f; }
+.stat-unavailable .stat-value { color: #ff9ba0; }
+.stat-retry { border: 0; background: none; color: #ffb0b4; font-size: 10px; font-weight: 650; padding: 0 0 0 4px; text-decoration: underline; }
+.stat-retry:hover { color: #fff; }
+.metric-stale { color: #f1bd6a; }
+.query-error { justify-content: space-between; }
+.query-error .button { color: inherit; font-size: 11px; padding: 3px 7px; }

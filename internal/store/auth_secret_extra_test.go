@@ -88,3 +88,19 @@ func TestExplicitAuthKeyPathDisablesAutomaticGeneration(t *testing.T) {
 		t.Fatalf("blank auth key path changed selection = %q, auto=%v", s.authKeyPath, s.authAutoKey)
 	}
 }
+
+func TestTOTPSecretOpenCompatibilityAndMalformedCiphertext(t *testing.T) {
+	s := &Store{}
+	if got, err := s.openTOTPSecret("legacy-seed"); err != nil || got != "legacy-seed" {
+		t.Fatalf("plaintext TOTP compatibility = %q, %v", got, err)
+	}
+	if got, legacy, err := s.openTOTPSecretForOwner("user-1", "legacy-seed"); err != nil || got != "legacy-seed" || !legacy {
+		t.Fatalf("plaintext owner compatibility = %q, legacy=%t, err=%v", got, legacy, err)
+	}
+	if _, _, err := s.openTOTPSecretForOwner("", authCiphertextV2+"invalid"); !errors.Is(err, ErrTOTPSecretLocked) {
+		t.Fatalf("ownerless v2 ciphertext error = %v", err)
+	}
+	if _, _, err := s.openTOTPSecretForOwner("user-1", authCiphertext+"invalid"); !errors.Is(err, ErrTOTPSecretLocked) {
+		t.Fatalf("malformed legacy ciphertext error = %v", err)
+	}
+}

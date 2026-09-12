@@ -152,3 +152,48 @@ func TestScannerOutputSanitizationAndFingerprint(t *testing.T) {
 		t.Fatalf("address was not removed from command fingerprint: %q/%q", first, second)
 	}
 }
+
+func TestNaabuTemplateAndSmallNormalizationHelpers(t *testing.T) {
+	options := config.NaabuOptions{ScanType: "syn"}
+	for _, assumeAlive := range []bool{true, false} {
+		args := renderNaabuTemplate([]string{
+			config.PlaceholderTargetsFile,
+			config.PlaceholderPorts,
+			config.PlaceholderAddressFamily,
+			config.PlaceholderHostDiscovery,
+			config.PlaceholderScanType,
+			config.PlaceholderAddress,
+			config.PlaceholderAddresses,
+			config.PlaceholderServiceDetection,
+			config.PlaceholderNSE,
+			"--custom",
+		}, "/tmp/targets", options, assumeAlive)
+		joined := strings.Join(args, " ")
+		if !strings.Contains(joined, "-list /tmp/targets") || !strings.Contains(joined, "-p -") || !strings.Contains(joined, "-scan-type s") || !strings.Contains(joined, "--custom") {
+			t.Fatalf("Naabu template rendering = %v", args)
+		}
+		wantDiscovery := "-with-host-discovery"
+		if assumeAlive {
+			wantDiscovery = "-skip-host-discovery"
+		}
+		if !strings.Contains(joined, wantDiscovery) {
+			t.Fatalf("Naabu host discovery rendering = %v", args)
+		}
+	}
+	if got := naabuArgsWithTemplate(config.NaabuOptions{ScanType: "connect", Rate: 10, Workers: 2, Retries: 1, TimeoutMS: 100, Verify: true}, "/tmp/targets", true, []string{config.PlaceholderTargetsFile, config.PlaceholderPorts, config.PlaceholderStructuredOutput}); !strings.Contains(strings.Join(got, " "), "-skip-host-discovery") {
+		t.Fatalf("Naabu template default discovery flag missing: %v", got)
+	}
+	if got := naabuArgsWithTemplate(config.NaabuOptions{ScanType: "connect", Rate: 10, Workers: 2, Retries: 1, TimeoutMS: 100}, "/tmp/targets", false, nil); !strings.Contains(strings.Join(got, " "), "-with-host-discovery") {
+		t.Fatalf("Naabu default discovery flag missing: %v", got)
+	}
+
+	if got := dedupeStrings([]string{"a", "a", "b", "b", "c"}); !reflect.DeepEqual(got, []string{"a", "b", "c"}) {
+		t.Fatalf("dedupeStrings = %v", got)
+	}
+	values := map[string]string{"key": "value"}
+	cloned := cloneStringMap(values)
+	cloned["key"] = "changed"
+	if values["key"] != "value" || cloneStringMap(nil) != nil {
+		t.Fatalf("cloneStringMap did not isolate values: %#v", cloned)
+	}
+}

@@ -169,6 +169,18 @@ describe('authentication and public API contracts', () => {
     vi.stubGlobal('fetch', successFetch)
     await expect(getPublicDashboard()).resolves.toMatchObject({ title: 'Status', hosts: [] })
   })
+
+  it('uses safe fallback messages and omits optional event filters', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response('{}', { status: 500 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(getPublicDashboard()).rejects.toMatchObject({ name: 'APIError', message: 'Public status is not available' })
+    const events = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe('/api/v1/events?limit=20&offset=0')
+      return new Response(JSON.stringify({ events: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', events)
+    await apiRoutes.listEvents()
+  })
 })
 
 describe('API route helpers', () => {

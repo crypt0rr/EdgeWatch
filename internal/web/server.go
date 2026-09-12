@@ -26,31 +26,38 @@ type Server struct {
 	Log     *slog.Logger
 	Version string
 
-	mu            sync.Mutex
-	subscribers   map[chan sseMessage]struct{}
-	subscriberKey map[chan sseMessage]string
-	subscriberUse map[string]int
-	history       []sseMessage
-	historyBytes  int
-	nextEventID   uint64
-	eventIDLimit  uint64
-	dropped       uint64
-	shutdown      chan struct{}
-	shutdownOnce  sync.Once
-	sseWG         sync.WaitGroup
-	sseCancels    map[chan sseMessage]context.CancelFunc
-	sseAuthMu     sync.Mutex
-	sseAuthCache  map[string]sseAuthCacheEntry
-	sseAuthTTL    time.Duration
-	pendingTOTP   map[string]pendingTOTP
-	now           func() time.Time
-	testMu        sync.Mutex
-	testLast      map[string]time.Time
-	publicMu      sync.Mutex
-	publicHits    map[string][]time.Time
-	publicCacheMu sync.Mutex
-	publicCache   *publicDashboardCache
-	publicBuild   *publicDashboardBuild
+	mu sync.Mutex
+	// sseReservationMu serializes durable cursor reservations and ID allocation
+	// without holding mu while SQLite is contacted. A transient startup failure
+	// therefore cannot block subscriber registration or history reads.
+	sseReservationMu sync.Mutex
+	subscribers      map[chan sseMessage]struct{}
+	subscriberKey    map[chan sseMessage]string
+	subscriberUse    map[string]int
+	history          []sseMessage
+	historyBytes     int
+	nextEventID      uint64
+	eventIDLimit     uint64
+	sseDurable       bool
+	sseRetryAt       time.Time
+	sseRetryDelay    time.Duration
+	dropped          uint64
+	shutdown         chan struct{}
+	shutdownOnce     sync.Once
+	sseWG            sync.WaitGroup
+	sseCancels       map[chan sseMessage]context.CancelFunc
+	sseAuthMu        sync.Mutex
+	sseAuthCache     map[string]sseAuthCacheEntry
+	sseAuthTTL       time.Duration
+	pendingTOTP      map[string]pendingTOTP
+	now              func() time.Time
+	testMu           sync.Mutex
+	testLast         map[string]time.Time
+	publicMu         sync.Mutex
+	publicHits       map[string][]time.Time
+	publicCacheMu    sync.Mutex
+	publicCache      *publicDashboardCache
+	publicBuild      *publicDashboardBuild
 	// publicDashboardBuildFunc is used by deterministic tests to control the
 	// cache-fill workload. Production requests use publicDashboardResponse.
 	publicDashboardBuildFunc func(context.Context, store.PublicDashboard) (publicDashboardResponse, error)
@@ -100,6 +107,8 @@ const (
 	defaultMaxSSESubscribersPerUser = 4
 	defaultSSEAuthCacheTTL          = 2 * time.Second
 	sseEventIDBlockSize             = uint64(1 << 20)
+	defaultSSEReservationRetry      = time.Second
+	maxSSEReservationRetry          = time.Minute
 )
 
 // pendingTOTPMaxEntries bounds secrets held for enrolments that were started
@@ -129,18 +138,17 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 		if start, end, err := s.ReserveSSEEventIDs(context.Background(), sseEventIDBlockSize); err != nil {
 			logger.Warn("SSE event cursor could not be reserved", "error", err)
 			// A timestamp seed keeps a degraded/read-only fixture monotonic for
-			// the lifetime of this process even when the durable cursor cannot be
-			// updated. Normal daemon databases use the reserved durable range.
-			if id, maxErr := s.MaxEventID(context.Background()); maxErr == nil {
-				v.nextEventID = id
-			}
-			if seed := uint64(time.Now().UnixNano()); seed > v.nextEventID {
-				v.nextEventID = seed
-			}
-			v.eventIDLimit = ^uint64(0)
+			// the lifetime of this process. The recoverable cursor state below
+			// retries the durable reservation on a bounded backoff; a successful
+			// retry advances past every fallback ID before switching modes.
+			v.seedSSEFallbackCursor(context.Background())
+			v.sseDurable = false
+			v.sseRetryDelay = defaultSSEReservationRetry
+			v.sseRetryAt = v.streamNow().Add(v.sseRetryDelay)
 		} else {
 			v.nextEventID = start - 1
 			v.eventIDLimit = end
+			v.sseDurable = true
 		}
 	}
 	if a != nil && a.Config != nil {
@@ -213,6 +221,16 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener, addre
 	if writeTimeout <= 0 {
 		writeTimeout = defaultHTTPWriteTimeout
 	}
+	// Keep a startup cursor outage recoverable even when no browser is
+	// connected. The retry loop is scoped to this listener and is cancelled and
+	// joined before the server (and its database owner) is allowed to stop.
+	retryCtx, retryCancel := context.WithCancel(ctx)
+	var retryWG sync.WaitGroup
+	retryWG.Add(1)
+	go func() {
+		defer retryWG.Done()
+		s.runSSEReservationRetry(retryCtx)
+	}()
 	// Ordinary handlers get a generous write deadline so a peer that stops
 	// reading cannot pin a goroutine indefinitely. The SSE handler clears this
 	// deadline with ResponseController before it starts its long-lived stream.
@@ -222,6 +240,8 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener, addre
 	var shutdownOnce sync.Once
 	shutdown := func() {
 		shutdownOnce.Do(func() {
+			retryCancel()
+			retryWG.Wait()
 			// http.Server.Shutdown does not cancel active streaming request
 			// contexts. Signal and join SSE handlers first so the application
 			// cannot close SQLite while a stream is still re-authenticating or

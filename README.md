@@ -138,6 +138,10 @@ the replacement is issued.
   reconnects automatically when subscriber limits are reached. Stream
   authorization is refreshed at most every two seconds, so a revoked account
   can lose access within that bound without a database lookup for every event.
+  If the durable SSE cursor is temporarily unavailable at startup, the stream
+  emits monotonic in-process fallback IDs and retries a bounded cursor
+  reservation in the background; a recovered range is advanced past every
+  fallback ID before durable IDs resume.
   During a graceful shutdown, active streams are signalled and joined before
   the HTTP server and database are closed.
 - TOTP is optional. Its seed is encrypted with a separate authentication key

@@ -38,6 +38,10 @@ services:
     healthcheck:
       test: ["CMD", "edgewatch", "health", "--config", "/etc/edgewatch/config.yaml"]
       interval: 30s
+      # Database migrations and resumable FTS rebuilds run before the daemon
+      # lease is acquired. Keep startup failures from triggering a restart
+      # while the migration status is still reporting progress.
+      start_interval: 5s
       timeout: 10s
       retries: 3
-      start_period: 30s
+      start_period: 20m

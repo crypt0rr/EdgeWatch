@@ -426,18 +426,8 @@ func (s *Store) ReleaseLease(ctx context.Context, owner string) error {
 	return err
 }
 func (s *Store) Healthy(ctx context.Context) error {
-	var raw string
-	if err := s.reader().QueryRowContext(ctx, `SELECT heartbeat FROM daemon_lease WHERE id=1`).Scan(&raw); err != nil {
-		return err
-	}
-	v, err := time.Parse(time.RFC3339Nano, raw)
-	if err != nil {
-		return err
-	}
-	if time.Since(v) > 2*time.Minute {
-		return fmt.Errorf("daemon heartbeat is stale: %s", v)
-	}
-	return nil
+	_, err := s.HealthStatus(ctx)
+	return err
 }
 
 func (s *Store) AcquireJobLease(ctx context.Context, job, owner string, expires time.Time) error {

@@ -209,7 +209,11 @@ func run(args []string) error {
 		auditHostCommand(ctx, cfg.Database, s, false, store.AuditEntry{Action: "database.verify", Detail: hostAuditDetail("operation", "database", err)})
 		return err
 	case "health":
-		return s.Healthy(ctx)
+		health, err := s.HealthStatus(ctx)
+		if err != nil {
+			return err
+		}
+		return printValue(*output, health)
 	default:
 		return usage()
 	}

@@ -65,6 +65,7 @@ func run(args []string) error {
 	outPath := fs.String("out", "", "output file for backup or baseline export")
 	fromPath := fs.String("from", "", "source database file for restore")
 	allowSidecarReplay := fs.Bool("allow-sidecar-replay", false, "allow existing SQLite sidecars during an intentional crash-recovery restore")
+	allowActiveDaemon := fs.Bool("allow-active-daemon", false, "allow restore when the destination daemon heartbeat is still active (emergency recovery only)")
 	dryRun := fs.Bool("dry-run", false, "inspect a restore without replacing the destination")
 	jobName := fs.String("job", "", "job name")
 	scanID := fs.String("scan-id", "", "scan ID")
@@ -110,7 +111,7 @@ func run(args []string) error {
 		if *dryRun {
 			return printValue(*output, preflight)
 		}
-		result, err := store.Restore(context.Background(), *fromPath, cfg.Database, store.RestoreOptions{AllowSidecarReplay: *allowSidecarReplay})
+		result, err := store.Restore(context.Background(), *fromPath, cfg.Database, store.RestoreOptions{AllowSidecarReplay: *allowSidecarReplay, AllowActiveDaemon: *allowActiveDaemon})
 		if err != nil {
 			// Do not open the destination to audit a refused restore: doing so
 			// could itself cause SQLite to inspect, checkpoint, or remove the

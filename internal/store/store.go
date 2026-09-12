@@ -101,6 +101,16 @@ func OpenReadOnlyExisting(path string) (*Store, error) {
 	return openWithOptions(path, openOptions{requireExisting: true, queryOnly: true})
 }
 
+// OpenReadOnlyExistingContext is the context-aware variant used by
+// long-running host-side checks. It never creates files, changes journal mode,
+// repairs permissions, or runs migrations.
+func OpenReadOnlyExistingContext(ctx context.Context, path string) (*Store, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return openWithOptionsContext(ctx, path, openOptions{requireExisting: true, queryOnly: true})
+}
+
 type openOptions struct {
 	create          bool
 	requireExisting bool

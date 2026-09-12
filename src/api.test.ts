@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, revokeUserSessions, scheduleSuggestion, setCSRF, setup, suppressIncident, updateNotificationDestination, updateUser } from './api'
+import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, revokeUserSessions, scheduleSuggestion, setCSRF, setup, suppressIncident, updateNotificationDestination, updateUser } from './api'
 import * as apiRoutes from './api'
 
 afterEach(() => {
@@ -54,6 +54,20 @@ describe('API pagination contract', () => {
 
     await expect(api('/notifications/destinations/dest-1', { method: 'PUT', body: '{}' })).rejects.toMatchObject({ code: 'invalid_password' })
     expect(dispatchEvent).not.toHaveBeenCalled()
+  })
+})
+
+describe('historical scan API contract', () => {
+  it('unwraps the server scan envelope while accepting a bare legacy payload', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ scan: { id: 'scan-1', job: 'legacy', status: 'success' } }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'scan-2', job: 'legacy', status: 'success' }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(getScan('scan-1')).resolves.toMatchObject({ id: 'scan-1', job: 'legacy' })
+    await expect(getScan('scan-2')).resolves.toMatchObject({ id: 'scan-2', job: 'legacy' })
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/scans/scan-1')
+    expect(String(fetchMock.mock.calls[1][0])).toBe('/api/v1/scans/scan-2')
   })
 })
 

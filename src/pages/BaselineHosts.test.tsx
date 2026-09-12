@@ -59,11 +59,18 @@ describe('baseline host explorer', () => {
 
     const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    vi.mocked(baselineHosts).mockClear()
     await act(async () => {
+      setter?.call(search, 'r')
+      search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+      setter?.call(search, 'ro')
+      search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
       setter?.call(search, 'router')
-      search.dispatchEvent(new Event('input', { bubbles: true }))
-      await vi.waitFor(() => expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ q: 'router', offset: 0 })), { timeout: 1000 })
+      search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+      await new Promise(resolve => setTimeout(resolve, 300))
     })
+    expect(baselineHosts).toHaveBeenCalledTimes(1)
+    expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ q: 'router', offset: 0 }))
     const protocol = container.querySelectorAll('select')[0] as HTMLSelectElement
     await act(async () => {
       protocol.value = 'tcp'

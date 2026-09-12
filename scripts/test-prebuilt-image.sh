@@ -21,7 +21,7 @@ test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")" =
 
 docker run --rm --platform "$platform" --read-only --tmpfs /tmp:size=32m,mode=1777 "$image" version | grep -Fqx "EdgeWatch $version"
 docker run --rm --platform "$platform" --read-only --entrypoint /usr/bin/nmap "$image" --version | grep -Eq '^Nmap version '
-docker run --rm --platform "$platform" --read-only --entrypoint /usr/local/bin/naabu "$image" -version | grep -Eq 'Naabu|naabu version'
+docker run --rm --platform "$platform" --read-only --entrypoint /usr/local/bin/naabu "$image" -version 2>&1 | grep -Eiq 'Naabu|current version'
 
 root="$(mktemp -d)"
 port="$((18080 + ($$ % 1000)))"
@@ -41,6 +41,10 @@ enrichment:
     enabled: false
 EOF
 mkdir -p "$root/data"
+# The daemon runs as UID 0 with all Linux capabilities dropped. A bind mount
+# owned by the host runner therefore needs an explicit write bit for the
+# container process, just like a freshly-created Compose data directory.
+chmod 0777 "$root/data"
 
 container_id=""
 cleanup() {

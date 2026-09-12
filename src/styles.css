@@ -826,3 +826,15 @@
 .telemetry-updated { display: block; margin-top: 10px; font-size: 10px; }
 @media (max-width: 1050px) { .telemetry-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 760px) { .telemetry-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* Keep keyboard focus visible on rows that navigate to details. The dark
+   inset ring remains legible against both the row hover state and the page
+   background without affecting pointer hover or nested controls. */
+.job-card:focus-visible,
+.host-row:focus-visible,
+.result-row:focus-visible,
+.activity-row[href]:focus-visible {
+  outline: 3px solid #8fc8ff;
+  outline-offset: 3px;
+  box-shadow: 0 0 0 2px #07111f, 0 0 0 5px #8fc8ff;
+}

@@ -271,17 +271,74 @@ func (s *Store) Prune(ctx context.Context, before time.Time) (int64, error) {
 }
 
 func (s *Store) AcquireLease(ctx context.Context, owner string) error {
+	_, err := s.acquireLease(ctx, owner, false)
+	return err
+}
+
+// AcquireDaemonLease claims the singleton daemon lease and, when replacing a
+// daemon whose heartbeat is stale, releases only job leases that were owned by
+// that previous daemon instance. CLI/manual leases are deliberately left
+// untouched. The transaction makes the ownership decision and reclamation
+// atomic, so a second daemon cannot race the cleanup into stealing live work.
+func (s *Store) AcquireDaemonLease(ctx context.Context, owner string) (int64, error) {
+	return s.acquireLease(ctx, owner, true)
+}
+
+var ErrDaemonLeaseBusy = errors.New("another EdgeWatch daemon holds the database lease")
+
+func (s *Store) acquireLease(ctx context.Context, owner string, reclaimPreviousDaemon bool) (int64, error) {
+	if strings.TrimSpace(owner) == "" {
+		return 0, errors.New("daemon lease owner is required")
+	}
 	now := time.Now().UTC()
 	stale := now.Add(-2 * time.Minute).Format(time.RFC3339Nano)
-	r, err := s.DB.ExecContext(ctx, `INSERT INTO daemon_lease(id,owner,heartbeat) VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET owner=excluded.owner,heartbeat=excluded.heartbeat WHERE daemon_lease.owner=excluded.owner OR daemon_lease.heartbeat < ?`, owner, now.Format(time.RFC3339Nano), stale)
+	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	changed, _ := r.RowsAffected()
+	defer func() { _ = tx.Rollback() }()
+	var previousOwner, previousHeartbeat string
+	queryErr := tx.QueryRowContext(ctx, `SELECT owner,heartbeat FROM daemon_lease WHERE id=1`).Scan(&previousOwner, &previousHeartbeat)
+	if errors.Is(queryErr, sql.ErrNoRows) {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO daemon_lease(id,owner,heartbeat) VALUES(1,?,?)`, owner, now.Format(time.RFC3339Nano)); err != nil {
+			return 0, err
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+		return 0, nil
+	}
+	if queryErr != nil {
+		return 0, queryErr
+	}
+	if previousOwner != owner {
+		heartbeat, parseErr := time.Parse(time.RFC3339Nano, previousHeartbeat)
+		if parseErr != nil || !heartbeat.Before(now.Add(-2*time.Minute)) {
+			return 0, ErrDaemonLeaseBusy
+		}
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE daemon_lease SET owner=?,heartbeat=? WHERE id=1 AND (owner=? OR heartbeat<?)`, owner, now.Format(time.RFC3339Nano), owner, stale)
+	if err != nil {
+		return 0, err
+	}
+	changed, _ := result.RowsAffected()
 	if changed == 0 {
-		return errors.New("another EdgeWatch daemon holds the database lease")
+		return 0, ErrDaemonLeaseBusy
 	}
-	return nil
+	var reclaimed int64
+	if reclaimPreviousDaemon && previousOwner != "" && previousOwner != owner {
+		escapedOwner := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(previousOwner)
+		prefix := "daemon/" + escapedOwner + "/%"
+		result, err := tx.ExecContext(ctx, `DELETE FROM job_leases WHERE owner LIKE ? ESCAPE '\'`, prefix)
+		if err != nil {
+			return 0, err
+		}
+		reclaimed, _ = result.RowsAffected()
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return reclaimed, nil
 }
 func (s *Store) Heartbeat(ctx context.Context, owner string) error {
 	r, err := s.DB.ExecContext(ctx, `UPDATE daemon_lease SET heartbeat=? WHERE id=1 AND owner=?`, time.Now().UTC().Format(time.RFC3339Nano), owner)
@@ -296,12 +353,12 @@ func (s *Store) Heartbeat(ctx context.Context, owner string) error {
 }
 
 // ReclaimExpiredJobLeases removes only leases whose owner can no longer be
-// considered live. Every scan writes its opaque run identifier as owner and a
-// bounded expiry before it starts work. A daemon restart must not delete an
-// unexpired lease: that lease may belong to a scan started by the CLI (or to a
-// daemon process that is still draining), and clearing it would allow the same
-// job to run concurrently. Clean shutdowns release the exact owner through
-// ReleaseJobLease; crash recovery waits for expiry.
+// considered live. Every scan writes an opaque owner and a bounded expiry
+// before it starts work. Managed daemon leases are reclaimed earlier by
+// AcquireDaemonLease after the previous daemon's singleton heartbeat is stale;
+// this expiry-only fallback remains conservative for CLI/manual leases and
+// legacy rows whose owner cannot be tied to a daemon instance. Clean shutdowns
+// release the exact owner through ReleaseJobLease.
 func (s *Store) ReclaimExpiredJobLeases(ctx context.Context, now time.Time) (int64, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()

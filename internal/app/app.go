@@ -44,6 +44,8 @@ type App struct {
 	sem               chan struct{}
 	nmapVersion       string
 	naabuVersion      string
+	daemonOwnerMu     sync.RWMutex
+	daemonOwner       string
 	scheduleMu        sync.Mutex
 	cron              *cron.Cron
 	entries           map[string]cron.EntryID
@@ -360,6 +362,30 @@ func (a *App) StopRun() {
 	a.wg.Wait()
 }
 
+func (a *App) setDaemonOwner(owner string) {
+	a.daemonOwnerMu.Lock()
+	a.daemonOwner = owner
+	a.daemonOwnerMu.Unlock()
+}
+
+func (a *App) clearDaemonOwner(owner string) {
+	a.daemonOwnerMu.Lock()
+	if a.daemonOwner == owner {
+		a.daemonOwner = ""
+	}
+	a.daemonOwnerMu.Unlock()
+}
+
+func (a *App) currentDaemonOwner() string {
+	a.daemonOwnerMu.RLock()
+	defer a.daemonOwnerMu.RUnlock()
+	return a.daemonOwner
+}
+
+func daemonProcessOwner() string {
+	return fmt.Sprintf("%s-%d-%s", hostname(), os.Getpid(), scanner.NewID(time.Now().UTC()))
+}
+
 // recoverBackgroundPanic keeps a defect in one daemon-owned goroutine from
 // taking down the scanner and web console together. The full stack is retained
 // in structured logs so recovery is observable and actionable.
@@ -457,11 +483,17 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	if managed {
 		leaseKey = jobID
 	}
+	leaseOwner := scan.ID
+	if managed {
+		if daemonOwner := a.currentDaemonOwner(); daemonOwner != "" {
+			leaseOwner = "daemon/" + daemonOwner + "/" + scan.ID
+		}
+	}
 	var leaseErr error
 	if managed {
-		leaseErr = a.Store.AcquireJobLeaseForRevision(ctx, leaseKey, scan.ID, revision, started.Add(job.Timeout.Value()+time.Minute))
+		leaseErr = a.Store.AcquireJobLeaseForRevision(ctx, leaseKey, leaseOwner, revision, started.Add(job.Timeout.Value()+time.Minute))
 	} else {
-		leaseErr = a.Store.AcquireJobLease(ctx, leaseKey, scan.ID, started.Add(job.Timeout.Value()+time.Minute))
+		leaseErr = a.Store.AcquireJobLease(ctx, leaseKey, leaseOwner, started.Add(job.Timeout.Value()+time.Minute))
 	}
 	if err := leaseErr; err != nil {
 		if errors.Is(err, store.ErrJobBusy) {
@@ -499,7 +531,7 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	defer func() {
 		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer releaseCancel()
-		_ = a.Store.ReleaseJobLease(releaseCtx, leaseKey, scan.ID)
+		_ = a.Store.ReleaseJobLease(releaseCtx, leaseKey, leaseOwner)
 	}()
 	var snapshot model.Snapshot
 	var scanErr error
@@ -822,15 +854,23 @@ func (a *App) Daemon(ctx context.Context) error {
 	daemonCtx, daemonCancel := context.WithCancel(boundCtx)
 	ctx = daemonCtx
 	defer daemonCancel()
+	owner := daemonProcessOwner()
 	if owned {
-		defer a.StopRun()
+		defer func() {
+			a.StopRun()
+			a.clearDaemonOwner(owner)
+		}()
 	}
 	if len(a.Config.Jobs) > 0 {
 		a.Logger.Warn("legacy YAML jobs detected; they are inactive in web-managed mode and must be recreated in the console", "jobs", len(a.Config.Jobs))
 	}
-	owner := fmt.Sprintf("%s-%d", hostname(), os.Getpid())
-	if err := a.Store.AcquireLease(ctx, owner); err != nil {
+	reclaimed, err := a.Store.AcquireDaemonLease(ctx, owner)
+	if err != nil {
 		return err
+	}
+	a.setDaemonOwner(owner)
+	if reclaimed > 0 {
+		a.Logger.Info("reclaimed job leases from previous daemon", "leases", reclaimed)
 	}
 	if released, err := a.Store.ReleaseDeliveryClaims(ctx); err != nil {
 		a.Logger.Error("startup notification claim cleanup failed", "error", err)

@@ -191,6 +191,23 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 	db := sql.OpenDB(sqlitePragmaConnector{Connector: connector, queryOnly: options.queryOnly})
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	if options.migrate && !options.queryOnly {
+		// New databases must select incremental auto-vacuum before WAL mode or
+		// any application table is created. Existing databases are intentionally
+		// left unchanged: converting a populated file requires a one-time
+		// operator-controlled VACUUM and must not happen during startup.
+		var applicationTables int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&applicationTables); err != nil {
+			db.Close()
+			return nil, err
+		}
+		if applicationTables == 0 {
+			if _, err := db.ExecContext(ctx, "PRAGMA auto_vacuum=INCREMENTAL"); err != nil {
+				db.Close()
+				return nil, err
+			}
+		}
+	}
 	pragmas := []string{"PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"}
 	if options.configureWAL && !options.queryOnly {
 		pragmas = append([]string{"PRAGMA journal_mode=WAL"}, pragmas...)

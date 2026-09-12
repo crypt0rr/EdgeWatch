@@ -229,6 +229,17 @@ active scan cycles, and the security audit log are retained; audit records are
 intentionally indefinite. The daemon logs the row counts removed from each
 retention class at startup and during its daily pruning pass.
 
+After scan rows expire, the same bounded maintenance pass asks both FTS5 host
+indexes to optimize their delete-marked segments and runs SQLite's incremental
+page vacuum for at most 1,000 pages. This keeps searchable storage healthy
+without running a database-wide `VACUUM` or holding the writer for an
+unbounded operation. New databases are created with incremental auto-vacuum;
+existing databases retain their current SQLite mode. Converting an older
+database to incremental auto-vacuum requires an operator-controlled downtime
+window and a one-time `VACUUM`, so EdgeWatch never performs that conversion
+automatically. Maintenance outcomes (`fts_optimized` and reclaimed pages) are
+included in the retention log.
+
 Notification deliveries are attempted by four workers in bounded passes so a
 large event burst does not delay scans. Each worker pass drains up to four
 batches; the daemon gives the pass enough time for the provider timeout and

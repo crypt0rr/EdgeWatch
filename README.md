@@ -85,10 +85,13 @@ the replacement is issued.
   administrator explicitly enables `allow_high_cost`. That override is still
   bounded by the 100,000,000-probe per-run safety ceiling.
 - `log.level` controls structured JSON daemon logging and defaults to `info`.
-  Use `debug` for additional request-start diagnostics; `warn` or `error`
-  suppress routine request lines. Each completed HTTP request records a
-  correlation ID, method, path, status, duration, and response size, and the
-  same ID is returned in the `X-Request-ID` response header.
+  Routine successful requests complete at `debug` to avoid filling the
+  container log while the UI polls. Requests returning HTTP 400 or higher,
+  or taking at least one second, remain visible at `info`; panics are logged at
+  `error`. Use `debug` for request-start diagnostics and full request
+  completion records. Each completed HTTP request records a correlation ID,
+  method, path, status, duration, and response size, and the same ID is
+  returned in the `X-Request-ID` response header.
 - `scanner.target_exclusions` is a deployment-wide CIDR/IP denylist applied
   before managed jobs are saved and again when targets are resolved. The safe
   default refuses IPv4/IPv6 loopback and link-local networks, including

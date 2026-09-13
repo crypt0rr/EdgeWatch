@@ -138,6 +138,17 @@ func (n *Nmap) SetTargetExclusions(exclusions []string) error {
 }
 
 func (n *Nmap) excludedNetwork(ip net.IP) string {
+	// Unspecified addresses are never valid scan destinations. This invariant
+	// applies even when an administrator explicitly overrides the configurable
+	// exclusion list with an empty set: DNS answers such as 0.0.0.0 and :: must
+	// not make a host-networked scanner probe itself or populate a false
+	// baseline.
+	if ip == nil {
+		return "invalid-address"
+	}
+	if ip.IsUnspecified() {
+		return "unspecified"
+	}
 	for _, network := range n.targetExclusions {
 		if network != nil && network.Contains(ip) {
 			return network.String()

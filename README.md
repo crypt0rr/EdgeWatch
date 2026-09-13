@@ -94,8 +94,9 @@ the replacement is issued.
   default refuses IPv4/IPv6 loopback and link-local networks, including
   `169.254.169.254` on cloud hosts. Set it explicitly to `[]` only after
   accepting the host-networking implications and intentionally monitoring a
-  local surface. DNS names are checked after resolution as well, so a name
-  resolving to an excluded address fails the scan rather than silently
+  local surface. Unspecified answers (`0.0.0.0` and `::`) are always refused,
+  even with an empty override. DNS names are checked after resolution as well,
+  so a name resolving to a denied address fails the scan rather than silently
   scanning only the remaining addresses.
 - Broad scans use a bounded shutdown sequence: active scanner work receives
   cancellation, resumable progress is checkpointed, and large host snapshots

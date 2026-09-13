@@ -136,11 +136,23 @@ func TestResolveRejectsExcludedAddresses(t *testing.T) {
 	if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"edge.example"}, MaxExpandedHosts: 4}); err == nil || !strings.Contains(err.Error(), "resolved to excluded") {
 		t.Fatalf("DNS result containing excluded address was accepted: %v", err)
 	}
+	for _, address := range []string{"0.0.0.0", "::"} {
+		n.Resolver = fakeResolver{[]net.IP{net.ParseIP(address)}}
+		if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"unspecified.example"}, MaxExpandedHosts: 1}); err == nil || !strings.Contains(err.Error(), "resolved to excluded") || !strings.Contains(err.Error(), "unspecified") {
+			t.Fatalf("DNS result containing unspecified address %q was accepted: %v", address, err)
+		}
+	}
 	if err := n.SetTargetExclusions([]string{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"127.0.0.1"}, MaxExpandedHosts: 1}); err != nil {
 		t.Fatalf("explicit empty exclusion override rejected target: %v", err)
+	}
+	for _, address := range []string{"0.0.0.0", "::"} {
+		n.Resolver = fakeResolver{[]net.IP{net.ParseIP(address)}}
+		if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"override.example"}, MaxExpandedHosts: 1}); err == nil || !strings.Contains(err.Error(), "resolved to excluded") || !strings.Contains(err.Error(), "unspecified") {
+			t.Fatalf("explicit empty exclusion override accepted unspecified address %q: %v", address, err)
+		}
 	}
 }
 

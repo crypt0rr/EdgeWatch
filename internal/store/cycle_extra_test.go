@@ -44,6 +44,40 @@ func TestScanCycleUnitIdentityBackfillIsBoundedAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestScanCycleHasScanRequiresPromotedFinalRecord(t *testing.T) {
+	cases := []struct {
+		name, status, cycleStatus string
+	}{
+		{name: "failed", status: "failed", cycleStatus: "paused"},
+		{name: "canceled", status: "canceled", cycleStatus: "paused"},
+		{name: "timed-out", status: "timed_out", cycleStatus: "paused"},
+		{name: "expired", status: "timed_out", cycleStatus: "expired"},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, s, job, plan := cycleFixture(t)
+			defer s.Close()
+			cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			if err := s.SaveScan(ctx, model.Scan{ID: "attempt-" + test.name, JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: test.status, CycleID: cycle.ID, CycleStatus: test.cycleStatus, ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+				t.Fatal(err)
+			}
+			if hasScan, err := s.ScanCycleHasScan(ctx, cycle.ID); err != nil || hasScan {
+				t.Fatalf("attempt row proved promotion = %v, %v", hasScan, err)
+			}
+			if err := s.SaveScan(ctx, model.Scan{ID: "promoted-" + test.name, JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+				t.Fatal(err)
+			}
+			if hasScan, err := s.ScanCycleHasScan(ctx, cycle.ID); err != nil || !hasScan {
+				t.Fatalf("promoted row did not prove promotion = %v, %v", hasScan, err)
+			}
+		})
+	}
+}
+
 func TestScanCycleAuxiliaryLifecycleAndFragments(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
@@ -115,11 +149,17 @@ func TestScanCycleAuxiliaryLifecycleAndFragments(t *testing.T) {
 	if err := s.SaveScan(ctx, model.Scan{ID: "cycle-timeout", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "timed_out", CycleID: cycle.ID, CycleStatus: "expired", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
-	if hasScan, err := s.ScanCycleHasScan(ctx, cycle.ID); err != nil || !hasScan {
-		t.Fatalf("cycle scan state after save = %v, %v", hasScan, err)
+	if hasScan, err := s.ScanCycleHasScan(ctx, cycle.ID); err != nil || hasScan {
+		t.Fatalf("attempt scan incorrectly proved promotion = %v, %v", hasScan, err)
 	}
 	if notified, err := s.ScanCycleExpiryNotified(ctx, cycle.ID); err != nil || !notified {
 		t.Fatalf("expiry notification after timeout = %v, %v", notified, err)
+	}
+	if err := s.SaveScan(ctx, model.Scan{ID: "cycle-final", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "incomplete", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+		t.Fatal(err)
+	}
+	if hasScan, err := s.ScanCycleHasScan(ctx, cycle.ID); err != nil || !hasScan {
+		t.Fatalf("promoted cycle scan state = %v, %v", hasScan, err)
 	}
 }
 

@@ -651,8 +651,10 @@ func (s *Store) ScanCycleExpiryNotified(ctx context.Context, cycleID string) (bo
 
 // scanCycleHasScanQuery is the production statement explained by the index
 // regression test. Keeping the SQL in one place prevents the test from
-// drifting away from the query used by the cycle guard.
-const scanCycleHasScanQuery = `SELECT COUNT(*) FROM scans WHERE cycle_id=?`
+// drifting away from the query used by the cycle guard. A cycle can have many
+// persisted paused/failed attempt rows; only the successful (or incomplete,
+// but fully promoted) final record proves that the merged cycle was promoted.
+const scanCycleHasScanQuery = `SELECT COUNT(*) FROM scans WHERE cycle_id=? AND cycle_status='completed' AND status IN ('success','incomplete')`
 
 // ScanCycleHasScan reports whether a terminal cycle has already been promoted
 // into scan history. The cycle is marked completed before the engine's final

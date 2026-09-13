@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -283,8 +284,98 @@ func TestRunBackupVerifyAndBaselineExport(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if auditRows != 4 {
-		t.Fatalf("CLI audit rows = %d, want four", auditRows)
+	if auditRows != 2 {
+		t.Fatalf("CLI audit rows = %d, want only mutating operations", auditRows)
+	}
+}
+
+type cliFileSnapshot struct {
+	exists  bool
+	data    []byte
+	mode    os.FileMode
+	modTime time.Time
+}
+
+func snapshotCLIFile(t *testing.T, path string) cliFileSnapshot {
+	t.Helper()
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return cliFileSnapshot{}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cliFileSnapshot{exists: true, data: data, mode: info.Mode(), modTime: info.ModTime()}
+}
+
+func assertCLIFileUnchanged(t *testing.T, path string, before cliFileSnapshot) {
+	t.Helper()
+	after := snapshotCLIFile(t, path)
+	if before.exists != after.exists || !bytes.Equal(before.data, after.data) || before.mode != after.mode || !before.modTime.Equal(after.modTime) {
+		t.Fatalf("read-only command changed %s: before=%#v after=%#v", path, before, after)
+	}
+}
+
+func TestReadOnlyCommandsDoNotModifySQLiteArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	database := filepath.Join(dir, "edgewatch.db")
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("database: "+database+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcquireDaemonLease(context.Background(), "read-only-test"); err != nil {
+		s.Close()
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := []string{database, database + "-wal", database + "-shm"}
+	before := make(map[string]cliFileSnapshot, len(paths))
+	for _, path := range paths {
+		before[path] = snapshotCLIFile(t, path)
+	}
+
+	if err := run([]string{"health", "--config", configPath, "--output", "json"}); err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if err := run([]string{"status", "--config", configPath, "--output", "json"}); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+	if err := run([]string{"history", "--config", configPath, "--output", "json"}); err != nil {
+		t.Fatalf("history: %v", err)
+	}
+	if err := run([]string{"verify", "--config", configPath, "--output", "json"}); err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	exportPath := filepath.Join(dir, "baseline.json")
+	if err := run([]string{"baseline", "export", "--config", configPath, "--out", exportPath, "--output", "json"}); err != nil {
+		t.Fatalf("baseline export: %v", err)
+	}
+	for _, path := range paths {
+		assertCLIFileUnchanged(t, path, before[path])
+	}
+
+	reader, err := store.OpenReadOnlyExisting(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var audits int
+	if err := reader.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM security_audit WHERE actor_username='host-cli'`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 0 {
+		t.Fatalf("read-only commands wrote %d host-cli audit rows", audits)
 	}
 }
 

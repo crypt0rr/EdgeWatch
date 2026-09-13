@@ -123,7 +123,7 @@ func run(args []string) error {
 			// very sidecar that made the restore unsafe.
 			return err
 		}
-		auditHostCommand(context.Background(), cfg.Database, nil, false, store.AuditEntry{Action: "database.restore", Detail: hostAuditDetail("source", *fromPath, err)})
+		auditHostCommandOnExisting(context.Background(), cfg.Database, store.AuditEntry{Action: "database.restore", Detail: hostAuditDetail("source", *fromPath, err)})
 		return printValue(*output, result)
 	}
 	// Keep the daemon as the sole migration/repair owner. Read-only health and
@@ -195,9 +195,9 @@ func run(args []string) error {
 		return printValue(*output, map[string]any{"scans": scans, "events": events})
 	case "baseline":
 		if action == "export" {
-			err := exportBaseline(ctx, s, *jobName, *outPath, *output)
-			auditHostCommand(ctx, cfg.Database, s, false, store.AuditEntry{Action: "baseline.export", Detail: hostAuditDetail("output", *outPath, err)})
-			return err
+			// Baseline export is deliberately read-only. Persisting an audit row
+			// here would violate the command's no-side-effects contract.
+			return exportBaseline(ctx, s, *jobName, *outPath, *output)
 		}
 		return baseline(ctx, action, s, application, *jobName, *scanID, *output)
 	case "notify":
@@ -205,18 +205,17 @@ func run(args []string) error {
 			return errors.New("expected: notify test")
 		}
 		err := application.Notifier.Test()
-		auditHostCommand(ctx, cfg.Database, s, true, store.AuditEntry{Action: "notifications.test", Detail: hostAuditDetail("operation", "global", err)})
+		auditHostCommand(ctx, s, store.AuditEntry{Action: "notifications.test", Detail: hostAuditDetail("operation", "global", err)})
 		return err
 	case "backup":
 		if *outPath == "" {
 			return errors.New("--out is required")
 		}
 		err := backup(ctx, s, *outPath, *output)
-		auditHostCommand(ctx, cfg.Database, s, true, store.AuditEntry{Action: "database.backup", Detail: hostAuditDetail("output", *outPath, err)})
+		auditHostCommand(ctx, s, store.AuditEntry{Action: "database.backup", Detail: hostAuditDetail("output", *outPath, err)})
 		return err
 	case "verify":
 		err := verify(ctx, s, *output)
-		auditHostCommand(ctx, cfg.Database, s, false, store.AuditEntry{Action: "database.verify", Detail: hostAuditDetail("operation", "database", err)})
 		return err
 	case "health":
 		health, err := s.HealthStatus(ctx)

@@ -836,17 +836,15 @@ func hostFromSnapshot(snapshot model.Snapshot, address string) (model.HostObserv
 // historical pages must use that overlay too or they will continue to display
 // ports that the administrator already accepted as removed.
 func (s *Server) expectedHostForScan(ctx context.Context, jobID, address string, job config.Job) (model.HostObservation, bool, error) {
-	baselineID, _, err := s.Store.RuntimeBaselineMeta(ctx, jobID)
+	baselineInfo, err := s.Store.RuntimeBaselineInfo(ctx, jobID)
 	if err != nil {
 		return model.HostObservation{}, false, err
 	}
+	baselineID := baselineInfo.BaselineScanID
 	if baselineID == "" {
 		return model.HostObservation{}, false, nil
 	}
-	modified, err := s.Store.RuntimeBaselineModified(ctx, jobID)
-	if err != nil {
-		return model.HostObservation{}, false, err
-	}
+	modified := baselineInfo.BaselineModified
 	if modified {
 		// Accepted incident changes are stored in baseline_hosts alongside the
 		// runtime state. Prefer that indexed projection so the historical route
@@ -947,16 +945,13 @@ func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	query := r.URL.Query().Get("q")
-	baselineScanID, _, metaErr := s.Store.RuntimeBaselineMeta(r.Context(), id)
+	baselineInfo, metaErr := s.Store.RuntimeBaselineInfo(r.Context(), id)
 	if metaErr != nil {
 		writeError(w, http.StatusInternalServerError, "store", metaErr.Error(), nil)
 		return
 	}
-	baselineModified, modifiedErr := s.Store.RuntimeBaselineModified(r.Context(), id)
-	if modifiedErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", modifiedErr.Error(), nil)
-		return
-	}
+	baselineScanID := baselineInfo.BaselineScanID
+	baselineModified := baselineInfo.BaselineModified
 	if baselineScanID != "" && !baselineModified {
 		indexedExists, existsErr := s.Store.ScanHostIndexExists(r.Context(), baselineScanID)
 		if existsErr != nil {
@@ -1043,12 +1038,14 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, raw
 		writeError(w, http.StatusNotFound, "not_found", "host not found", nil)
 		return
 	}
-	baselineModified, modifiedErr := s.Store.RuntimeBaselineModified(r.Context(), id)
-	if modifiedErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", modifiedErr.Error(), nil)
+	baselineInfo, infoErr := s.Store.RuntimeBaselineInfo(r.Context(), id)
+	if infoErr != nil {
+		writeError(w, http.StatusInternalServerError, "store", infoErr.Error(), nil)
 		return
 	}
-	if baselineScanID, _, metaErr := s.Store.RuntimeBaselineMeta(r.Context(), id); metaErr == nil && baselineScanID != "" && !baselineModified {
+	baselineScanID := baselineInfo.BaselineScanID
+	baselineModified := baselineInfo.BaselineModified
+	if baselineScanID != "" && !baselineModified {
 		indexedExists, existsErr := s.Store.ScanHostIndexExists(r.Context(), baselineScanID)
 		if existsErr != nil {
 			writeError(w, http.StatusInternalServerError, "store", existsErr.Error(), nil)
@@ -1073,9 +1070,6 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, raw
 			writeError(w, http.StatusNotFound, "not_found", "baseline host not found", nil)
 			return
 		}
-	} else if metaErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", metaErr.Error(), nil)
-		return
 	}
 	if baselineModified {
 		if projectionExists, projectionErr := s.Store.BaselineHostProjectionExists(r.Context(), id); projectionErr != nil {
@@ -1085,7 +1079,7 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, raw
 			if projected, projectionErr := s.Store.GetBaselineHost(r.Context(), id, address); projectionErr == nil {
 				dedupeHost(&projected.Host)
 				var source any
-				if baselineScanID, _, _ := s.Store.RuntimeBaselineMeta(r.Context(), id); baselineScanID != "" {
+				if baselineScanID != "" {
 					if summary, summaryErr := s.Store.GetScanSummary(r.Context(), baselineScanID); summaryErr == nil {
 						source = summary
 					}
@@ -1125,12 +1119,14 @@ func (s *Server) jobBaselineHostRDAP(w http.ResponseWriter, r *http.Request, id,
 		writeError(w, http.StatusNotFound, "not_found", "host not found", nil)
 		return
 	}
-	baselineModified, modifiedErr := s.Store.RuntimeBaselineModified(r.Context(), id)
-	if modifiedErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", modifiedErr.Error(), nil)
+	baselineInfo, infoErr := s.Store.RuntimeBaselineInfo(r.Context(), id)
+	if infoErr != nil {
+		writeError(w, http.StatusInternalServerError, "store", infoErr.Error(), nil)
 		return
 	}
-	if baselineScanID, _, metaErr := s.Store.RuntimeBaselineMeta(r.Context(), id); metaErr == nil && baselineScanID != "" && !baselineModified {
+	baselineScanID := baselineInfo.BaselineScanID
+	baselineModified := baselineInfo.BaselineModified
+	if baselineScanID != "" && !baselineModified {
 		indexedExists, existsErr := s.Store.ScanHostIndexExists(r.Context(), baselineScanID)
 		if existsErr != nil {
 			writeError(w, http.StatusInternalServerError, "store", existsErr.Error(), nil)
@@ -1152,9 +1148,6 @@ func (s *Server) jobBaselineHostRDAP(w http.ResponseWriter, r *http.Request, id,
 			writeError(w, http.StatusNotFound, "not_found", "baseline host not found", nil)
 			return
 		}
-	} else if metaErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", metaErr.Error(), nil)
-		return
 	}
 	if baselineModified {
 		if projectionExists, projectionErr := s.Store.BaselineHostProjectionExists(r.Context(), id); projectionErr != nil {

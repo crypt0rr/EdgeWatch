@@ -31,6 +31,74 @@ func (s *Store) RuntimeState(ctx context.Context, jobID string) (model.JobState,
 	return state, nil
 }
 
+// RuntimeBaselineInfo is the compact baseline marker used by host read
+// endpoints. It is persisted separately from the full runtime state so a
+// paginated request does not repeatedly parse large baseline/candidate JSON.
+type RuntimeBaselineInfo struct {
+	BaselineScanID     string
+	BaselineConfigHash string
+	BaselineModified   bool
+	ProjectionVersion  int64
+}
+
+// RuntimeBaselineInfo reads compact baseline metadata. A missing metadata row
+// is a legacy marker: fall back to the runtime JSON once so databases written
+// before the metadata migration remain readable. Current rows always carry a
+// metadata_version and never take this path.
+func (s *Store) RuntimeBaselineInfo(ctx context.Context, jobID string) (RuntimeBaselineInfo, error) {
+	var info RuntimeBaselineInfo
+	var metadataVersion int
+	var scanID, configHash sql.NullString
+	var modified, projectionVersion sql.NullInt64
+	err := s.reader().QueryRowContext(ctx, `SELECT metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version FROM job_runtime_meta WHERE job_id=?`, jobID).Scan(&metadataVersion, &scanID, &configHash, &modified, &projectionVersion)
+	if err == nil && metadataVersion > 0 {
+		info.BaselineScanID = scanID.String
+		info.BaselineConfigHash = configHash.String
+		info.BaselineModified = modified.Int64 != 0
+		info.ProjectionVersion = projectionVersion.Int64
+		return info, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return info, err
+	}
+	// Legacy rows (or a fixture that writes job_runtime directly) have no
+	// compact marker. Preserve the historical missing/null marker semantics
+	// while limiting the expensive decode to this compatibility path.
+	var raw []byte
+	stateErr := s.reader().QueryRowContext(ctx, `SELECT state_json FROM job_runtime WHERE job_id=?`, jobID).Scan(&raw)
+	if errors.Is(stateErr, sql.ErrNoRows) {
+		return info, nil
+	}
+	if stateErr != nil {
+		return info, stateErr
+	}
+	var fields map[string]json.RawMessage
+	if stateErr := json.Unmarshal(raw, &fields); stateErr != nil {
+		return info, stateErr
+	}
+	if value := fields["baseline_scan_id"]; len(value) > 0 {
+		_ = json.Unmarshal(value, &info.BaselineScanID)
+	}
+	if value := fields["baseline_config_hash"]; len(value) > 0 {
+		_ = json.Unmarshal(value, &info.BaselineConfigHash)
+	}
+	marker, present := fields["baseline_modified"]
+	if !present || string(marker) == "null" {
+		info.BaselineModified = true
+	} else {
+		var boolean bool
+		if json.Unmarshal(marker, &boolean) == nil {
+			info.BaselineModified = boolean
+		} else {
+			var numeric int64
+			if json.Unmarshal(marker, &numeric) == nil {
+				info.BaselineModified = numeric != 0
+			}
+		}
+	}
+	return info, nil
+}
+
 // RuntimeStateSummary is the bounded state projection used by job-list
 // responses. It deliberately avoids unmarshalling the baseline/candidate
 // snapshots merely to render counters and host_count. Detailed state remains
@@ -106,39 +174,27 @@ func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeS
 	return summary, nil
 }
 
-// RuntimeBaselineMeta reads only the baseline identifiers from runtime JSON.
-// Host pages use this fast path before deciding whether they need the full
-// legacy state snapshot.
+// RuntimeBaselineMeta retains the small compatibility API used by callers
+// that need only baseline identifiers. Current rows are served from the
+// compact metadata projection; legacy rows use the bounded fallback.
 func (s *Store) RuntimeBaselineMeta(ctx context.Context, jobID string) (scanID, configHash string, err error) {
-	var scan, hash sql.NullString
-	err = s.reader().QueryRowContext(ctx, `SELECT json_extract(state_json,'$.baseline_scan_id'), json_extract(state_json,'$.baseline_config_hash') FROM job_runtime WHERE job_id=?`, jobID).Scan(&scan, &hash)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", nil
-	}
+	info, err := s.RuntimeBaselineInfo(ctx, jobID)
 	if err != nil {
 		return "", "", err
 	}
-	return scan.String, hash.String, nil
+	return info.BaselineScanID, info.BaselineConfigHash, nil
 }
 
 // RuntimeBaselineModified reports whether the current comparison baseline has
-// been changed independently of its immutable source scan. Databases written
-// before the marker was introduced are treated conservatively as modified so
-// host pages cannot silently render stale indexed evidence after an older
-// administrator acceptance.
+// been changed independently of its immutable source scan. Legacy rows without
+// the compact marker are treated conservatively as modified when the JSON
+// marker is missing or null so host pages cannot render stale indexed evidence.
 func (s *Store) RuntimeBaselineModified(ctx context.Context, jobID string) (bool, error) {
-	var marker sql.NullInt64
-	err := s.reader().QueryRowContext(ctx, `SELECT json_extract(state_json,'$.baseline_modified') FROM job_runtime WHERE job_id=?`, jobID).Scan(&marker)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+	info, err := s.RuntimeBaselineInfo(ctx, jobID)
 	if err != nil {
 		return false, err
 	}
-	if !marker.Valid {
-		return true, nil
-	}
-	return marker.Int64 != 0, nil
+	return info.BaselineModified, nil
 }
 
 func (s *Store) UpdateRuntime(ctx context.Context, jobID string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
@@ -512,7 +568,11 @@ func persistRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, state model
 	if err != nil {
 		return nil, err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?) ON CONFLICT(job_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at`, jobID, raw, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	now := time.Now().UTC()
+	if _, err = tx.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?) ON CONFLICT(job_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at`, jobID, raw, now.Format(time.RFC3339Nano)); err != nil {
+		return nil, err
+	}
+	if err := upsertRuntimeBaselineMetaTx(ctx, tx, jobID, state, 0, now); err != nil {
 		return nil, err
 	}
 	for i := range events {
@@ -529,6 +589,14 @@ func persistRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, state model
 		}
 	}
 	return events, nil
+}
+
+func upsertRuntimeBaselineMetaTx(ctx context.Context, tx *sql.Tx, jobID string, state model.JobState, projectionVersion int64, now time.Time) error {
+	if projectionVersion == 0 && state.BaselineModified && state.Baseline != nil {
+		projectionVersion = 1
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET metadata_version=excluded.metadata_version,baseline_scan_id=excluded.baseline_scan_id,baseline_config_hash=excluded.baseline_config_hash,baseline_modified=excluded.baseline_modified,projection_version=excluded.projection_version,updated_at=excluded.updated_at`, jobID, 1, state.BaselineScanID, state.BaselineConfigHash, boolInt(state.BaselineModified), projectionVersion, now.Format(time.RFC3339Nano))
+	return err
 }
 
 func persistRuntimeTxWithOutbox(ctx context.Context, tx *sql.Tx, jobID string, state model.JobState, events []model.Event, destinations []string) ([]model.Event, error) {

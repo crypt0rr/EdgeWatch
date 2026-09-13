@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 36
+const schemaVersion = 37
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -875,6 +875,48 @@ END;`,
 			"ALTER TABLE scan_cycle_units ADD COLUMN probes INTEGER NOT NULL DEFAULT 0",
 			"UPDATE scan_cycle_units SET phase=COALESCE(CASE WHEN json_valid(work_unit_json) THEN json_extract(work_unit_json,'$.phase') END,''), probes=COALESCE(CASE WHEN json_valid(work_unit_json) THEN CAST(json_extract(work_unit_json,'$.probes') AS INTEGER) END,0)",
 			"CREATE INDEX IF NOT EXISTS scan_cycle_units_cycle_phase_status ON scan_cycle_units(cycle_id,phase,status,probes,sequence)",
+		},
+		37: {
+			// Host endpoints need only a few baseline markers to choose an indexed
+			// projection. Keep those values beside the large runtime JSON so normal
+			// requests never parse the complete comparison state. Rows written by
+			// older binaries are backfilled defensively; malformed legacy JSON gets
+			// empty metadata and remains eligible for the bounded fallback path.
+			`CREATE TABLE IF NOT EXISTS jobs (
+ id TEXT PRIMARY KEY,
+ name TEXT NOT NULL UNIQUE,
+ definition_json BLOB NOT NULL,
+ enabled INTEGER NOT NULL DEFAULT 1,
+ archived INTEGER NOT NULL DEFAULT 0,
+ revision INTEGER NOT NULL DEFAULT 1,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);`,
+			`CREATE TABLE IF NOT EXISTS job_runtime (
+ job_id TEXT PRIMARY KEY,
+ state_json BLOB NOT NULL,
+ updated_at TEXT NOT NULL,
+ FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);`,
+			`CREATE TABLE IF NOT EXISTS job_runtime_meta (
+ job_id TEXT PRIMARY KEY,
+ metadata_version INTEGER NOT NULL DEFAULT 1,
+ baseline_scan_id TEXT NOT NULL DEFAULT '',
+ baseline_config_hash TEXT NOT NULL DEFAULT '',
+ baseline_modified INTEGER NOT NULL DEFAULT 0,
+ projection_version INTEGER NOT NULL DEFAULT 0,
+ updated_at TEXT NOT NULL,
+ FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE
+);`,
+			"CREATE INDEX IF NOT EXISTS job_runtime_meta_baseline ON job_runtime_meta(baseline_scan_id,baseline_modified)",
+			`INSERT OR IGNORE INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,updated_at)
+SELECT job_id,1,
+       COALESCE(CASE WHEN json_valid(state_json) THEN json_extract(state_json,'$.baseline_scan_id') END,''),
+       COALESCE(CASE WHEN json_valid(state_json) THEN json_extract(state_json,'$.baseline_config_hash') END,''),
+       COALESCE(CASE WHEN json_valid(state_json) THEN CAST(json_extract(state_json,'$.baseline_modified') AS INTEGER) END,0),
+       0,
+       updated_at
+FROM job_runtime;`,
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

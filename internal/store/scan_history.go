@@ -527,10 +527,13 @@ func (s *Store) ListScanResultsPage(ctx context.Context, id string, limit, offse
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Unit]
 	readDB := s.reader()
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=?`, id).Scan(&page.Total); err != nil {
+	// json_each emits a single SQL NULL row for a JSON null value. Treat a
+	// missing/null units member as an empty array so failed or legacy scans do
+	// not produce a row that cannot be decoded as model.Unit.
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=? AND json_type(scans.snapshot_json, '$.units')='array'`, id).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=? ORDER BY json_each.key LIMIT ? OFFSET ?`, id, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT json_each.value FROM scans, json_each(scans.snapshot_json, '$.units') WHERE scans.id=? AND json_type(scans.snapshot_json, '$.units')='array' ORDER BY json_each.key LIMIT ? OFFSET ?`, id, limit, offset)
 	if err != nil {
 		return page, err
 	}

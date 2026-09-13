@@ -299,3 +299,72 @@ func TestDeliveryDeferralsAreBoundedAndVisible(t *testing.T) {
 		t.Fatalf("bounded deferral terminal event = %s", payload)
 	}
 }
+
+func TestLockedDeliveryAgingIsBoundedAndWakesOnRecovery(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	locked := "locked-recovery"
+	other := "other"
+	if err := s.QueueEvent(ctx, locked, model.Event{Type: "locked", Message: "held", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.QueueEvent(ctx, other, model.Event{Type: "other", Message: "untouched", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Add(-time.Minute)
+	for deferral := 0; deferral < deliveryMaxDeferrals; deferral++ {
+		if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE destination IN (?,?)`, now.Format(time.RFC3339Nano), locked, other); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.AgeLockedDeliveries(ctx, []string{locked, locked, ""}); err != nil {
+			t.Fatal(err)
+		}
+		var attempts, gotDeferrals int
+		var terminalAt, lastError string
+		if err := s.DB.QueryRowContext(ctx, `SELECT attempts,deferrals,terminal_at,last_error FROM outbox WHERE destination=?`, locked).Scan(&attempts, &gotDeferrals, &terminalAt, &lastError); err != nil {
+			t.Fatal(err)
+		}
+		if attempts != 0 || gotDeferrals != deferral+1 || lastError != "destination_locked" {
+			t.Fatalf("locked aging %d = attempts %d, deferrals %d, terminal %q, error %q", deferral+1, attempts, gotDeferrals, terminalAt, lastError)
+		}
+		if deferral < deliveryMaxDeferrals-1 && terminalAt != "" {
+			t.Fatalf("locked delivery became terminal before its grace period: %q", terminalAt)
+		}
+		var otherDeferrals int
+		if err := s.DB.QueryRowContext(ctx, `SELECT deferrals FROM outbox WHERE destination=?`, other).Scan(&otherDeferrals); err != nil {
+			t.Fatal(err)
+		}
+		if otherDeferrals != 0 {
+			t.Fatalf("unlisted destination was aged: %d", otherDeferrals)
+		}
+		if deferral == 0 {
+			if err := s.WakeLockedDeliveries(ctx, []string{locked}); err != nil {
+				t.Fatal(err)
+			}
+			due, err := s.ClaimDueDeliveries(ctx, 1, "locked-recovery")
+			if err != nil || len(due) != 1 || due[0].Deferrals != 1 || due[0].Attempts != 0 {
+				t.Fatalf("recovered delivery claim = %#v, %v", due, err)
+			}
+			if err := s.ReleaseDeliveryClaim(ctx, due[0].ID, due[0].ClaimToken, 0); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if due, err := s.ClaimDueDeliveriesExcluding(ctx, 1, "after-locked-terminal", []string{other}); err != nil || len(due) != 0 {
+		t.Fatalf("terminal locked delivery was claimable: %#v, %v", due, err)
+	}
+	health, err := s.ListDeliveryHealth(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item := health[locked]; item.TerminalFailures != 1 || item.Pending != 0 || item.Deferrals != 0 || item.LastErrorCode != "destination_locked" {
+		t.Fatalf("locked terminal health = %#v", item)
+	}
+	var eventPayload []byte
+	if err := s.DB.QueryRowContext(ctx, `SELECT payload_json FROM events WHERE type=?`, "notification-delivery-terminal").Scan(&eventPayload); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(eventPayload), "locked destination grace period") || !strings.Contains(string(eventPayload), "destination_locked") {
+		t.Fatalf("locked terminal event = %s", eventPayload)
+	}
+}

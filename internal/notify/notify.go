@@ -746,6 +746,14 @@ func (n *Notifier) Drain(ctx context.Context) error {
 	}
 	destinations := n.destinationSnapshot()
 	lockedDestinations := n.lockedDestinationKeys()
+	if n.Store != nil {
+		if err := n.Store.WakeLockedDeliveries(ctx, destinationSnapshotKeys(destinations)); err != nil {
+			return err
+		}
+		if err := n.Store.AgeLockedDeliveries(ctx, lockedDestinations); err != nil {
+			return err
+		}
+	}
 	var all []error
 	for batch := 0; batch < notificationMaxBatches; batch++ {
 		if ctx.Err() != nil {
@@ -767,6 +775,15 @@ func (n *Notifier) Drain(ctx context.Context) error {
 		}
 	}
 	return errors.Join(all...)
+}
+
+func destinationSnapshotKeys(destinations map[string]string) []string {
+	keys := make([]string, 0, len(destinations))
+	for key := range destinations {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func (n *Notifier) deliverBatch(ctx context.Context, deliveries []store.Delivery, destinations map[string]string) []error {

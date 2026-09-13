@@ -255,15 +255,17 @@ Notification deliveries are attempted by four workers in bounded passes so a
 large event burst does not delay scans. Each worker pass drains up to four
 batches; the daemon gives the pass enough time for the provider timeout and
 cancellation grace instead of abandoning a healthy batch midway. A failed
-delivery is retried up to eight times with exponential delays starting at two
-minutes and capped at one hour; after the eighth failure it is marked terminal
-and remains visible until retention pruning. Temporary deferrals (for example,
-an unavailable notification encryption key or an indeterminate provider
-outcome) do not consume provider attempts, but are bounded to eight deferrals
-and then become a redacted terminal delivery event. Claims expire after 30
-minutes so an interrupted worker can be recovered by the next pass. Delivery
-health and terminal events never include destination URLs, credentials, or raw
-provider errors.
+  delivery is retried up to eight times with exponential delays starting at two
+  minutes and capped at one hour; after the eighth failure it is marked terminal
+  and remains visible until retention pruning. Temporary deferrals (for example,
+  an unavailable notification encryption key or an indeterminate provider
+  outcome) do not consume provider attempts, but are bounded to eight deferrals
+  and then become a redacted terminal delivery event. Rows held back because a
+  managed destination key is unavailable are aged once per hour; they remain
+  recoverable for up to eight hours before the same terminal handling applies.
+  Claims expire after 30 minutes so an interrupted worker can be recovered by
+  the next pass. Delivery health and terminal events never include destination
+  URLs, credentials, or raw provider errors.
 
 The web job editor supports individual IP addresses, CIDRs, DNS names, target
 expansion limits, independent TCP and UDP scans, ports `1-65535`, TCP SYN or

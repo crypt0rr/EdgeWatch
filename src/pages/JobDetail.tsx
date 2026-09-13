@@ -125,6 +125,18 @@ export function JobDetail() {
     setResultsOffset(0)
     setShowResults(false)
   }
+  function changeScanPage(offset: number) {
+    setScanOffset(offset)
+    // A click-selected scan belongs to the page it was opened from. Do not
+    // leave its detail detached below a different history page. Route-selected
+    // scans remain open so direct historical links continue to work.
+    if (!routeScanID || selectedScan !== routeScanID) {
+      setSelectedScan('')
+      setShowResults(false)
+      setChangeOffset(0)
+      setResultsOffset(0)
+    }
+  }
   function reportActionError(err: unknown, fallback: string) {
     setActionError(err instanceof Error ? err.message : fallback)
   }
@@ -237,6 +249,67 @@ export function JobDetail() {
   // back to the job payload in that case would keep a discarded/expired cycle
   // banner visible until the next full job refetch.
   const activeCycle = canOperate ? (cycle.data ? cycle.data.cycle : value.scan_cycle) : null
+  const selectedScanDetailID = selectedScan ? `scan-detail-${encodeURIComponent(selectedScan)}` : undefined
+  const selectedScanTitleID = selectedScan ? `scan-detail-title-${encodeURIComponent(selectedScan)}` : undefined
+  const selectedScanDetail = selectedScan ? (
+    <div
+      className="scan-detail-inline"
+      id={selectedScanDetailID}
+      role="region"
+      aria-labelledby={detail.data ? selectedScanTitleID : undefined}
+      aria-label={detail.data ? undefined : `Details for scan ${selectedScan.slice(0, 8)}`}
+    >
+      {detail.isLoading && <div className="loading"><span className="spinner" />Loading scan details…</div>}
+      {detail.error && <div className="error-card" role="alert">Could not load this scan’s details.</div>}
+      {detail.data && (
+        <>
+          <div className="panel-heading">
+            <div>
+              <h3 id={selectedScanTitleID}>Scan diff</h3>
+              <p className="muted">{detail.data.changes_pagination?.total ?? detail.data.changes?.length ?? 0} {detail.data.comparison_source === 'scan_time' ? 'changes recorded at scan time.' : 'changes against the current baseline.'}</p>
+            </div>
+            <div className="heading-actions">
+              {(detail.data.scan.status === 'success' || detail.data.scan.status === 'incomplete') && <button className="button ghost" onClick={() => { setShowResults((shown) => !shown); setResultsOffset(0) }}>{showResults ? 'Hide results' : 'View results'}</button>}
+              <button className="icon-button" onClick={() => routeScanID ? navigate(`/jobs/${encodeURIComponent(id)}`) : setSelectedScan('')} aria-label="Close scan detail">×</button>
+            </div>
+          </div>
+          {selectedScanCanBeBaseline && (
+            <div className="baseline-approval">
+              <span className="muted">This successful scan matches the current security scope.</span>
+              {canOperate && <button className="button secondary" onClick={() => { setActionError(''); setDialog('approve') }} disabled={!!actionBusy}>{actionBusy === 'approve' ? 'Approving…' : 'Use as baseline'}</button>}
+            </div>
+          )}
+          {(detail.data.scan.scanner_engine === 'naabu_nmap' || detail.data.scan.naabu_version || detail.data.scan.scanner_profile_id) && (
+            <div className="scanner-run-summary" role="status">
+              <div><strong>Scanner provenance</strong><span>{detail.data.scan.scanner_engine === 'naabu_nmap' ? 'Naabu full TCP discovery → Nmap confirmation' : detail.data.scan.scanner_engine || 'Nmap'}</span></div>
+              <div><strong>Profile</strong><span>{detail.data.scan.scanner_profile_id ? `${detail.data.scan.scanner_profile_id} · revision ${detail.data.scan.scanner_profile_revision ?? 'current'}` : 'Built-in'}</span></div>
+              {detail.data.scan.naabu_version && <div><strong>Naabu</strong><span>{detail.data.scan.naabu_version}</span></div>}
+              {detail.data.scan.discovery_ports != null && <div><strong>Discovery</strong><span>{detail.data.scan.discovery_ports.toLocaleString()} ports · {formatRunDuration(detail.data.scan.discovery_duration_ms)}</span></div>}
+              {detail.data.scan.confirmed_ports != null && <div><strong>Confirmed</strong><span>{detail.data.scan.confirmed_ports.toLocaleString()} ports · {formatRunDuration(detail.data.scan.enrichment_duration_ms)}</span></div>}
+            </div>
+          )}
+          {detail.data.changes?.length ? (
+            <div className="change-list">
+              {detail.data.changes.map((change, index) => (
+                <div className="change-row" key={`${change.kind}-${index}`}>
+                  <span className={`pill ${change.severity === 'critical' ? 'red' : 'amber'}`}>{change.kind}</span>
+                  <strong>{change.target}{change.port ? ` · ${change.protocol}:${change.port}` : ''}</strong>
+                  <span className="muted">{change.old ?? '—'} → {change.new ?? '—'}</span>
+                </div>
+              ))}
+            </div>
+          ) : <div className="inline-empty">No changes detected.</div>}
+          <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} />
+          {showResults && <div className="scan-results">
+            <div className="panel-heading"><div><h3>Snapshot results</h3><p className="muted">Loaded on demand; open an effective host for technical evidence.</p></div></div>
+            {results.isLoading ? <div className="skeleton-list" /> : results.error ? <div className="form-error" role="alert">Could not load scan results.</div> : results.data?.hosts.length ? <div className="result-list">{results.data.hosts.map((host) => <Link className="result-row" to={`/jobs/${id}/scans/${selectedScan}/hosts/${encodeURIComponent(host.address)}`} key={host.address}><strong>{host.address}</strong><span className="pill blue">{host.protocols?.map(protocol => protocol.protocol.toUpperCase()).join(' + ') || 'HOST'}</span><span className="muted">{host.open_ports + host.open_filtered_ports} positive ports · View host details</span></Link>)}</div> : <div className="inline-empty">No effective hosts in this scan.</div>}
+            <Pagination page={results.data?.pagination} onChange={setResultsOffset} />
+          </div>}
+        </>
+      )}
+    </div>
+  ) : null
+  const selectedScanIsVisible = Boolean(selectedScan && scans.data?.scans.some((scan) => scan.id === selectedScan))
 
   return (
     <section className="page">
@@ -370,80 +443,42 @@ export function JobDetail() {
             </div>
             <Clock3 size={18} className="muted-icon" />
           </div>
+          {selectedScan && !scans.isLoading && !selectedScanIsVisible && (
+            <div className="selected-scan-fallback">
+              <p className="muted">Selected scan {selectedScan.slice(0, 8)} is not on this history page.</p>
+              {selectedScanDetail}
+            </div>
+          )}
           {scans.isLoading ? <div className="skeleton-list" /> : scans.error ? <div className="error-card" role="alert">Could not load recent scans.</div> : scans.data?.scans.length ? (
             <div className="scan-list">
               {scans.data.scans.map((scan) => (
-                <button
-                  className={selectedScan === scan.id ? 'scan-row selected' : 'scan-row'}
-                  key={scan.id}
-                  onClick={() => openScan(scan.id)}
-                >
-                  <span className={scan.status === 'success' ? 'activity-dot success' : 'activity-dot fail'} />
-                  <div>
-                    <strong>{new Date(scan.finished_at).toLocaleString()}</strong>
-                    <span>
-                      {scan.status === 'success'
-                        ? 'Completed successfully · Open results to inspect the snapshot'
-                        : scan.status === 'incomplete'
-                          ? `${scan.error ?? 'Incomplete host discovery'} · Open results to inspect reachable hosts`
-                          : scan.error}
-                    </span>
-                  </div>
-                  <code>{scan.id.slice(0, 8)}</code>
-                </button>
+                <div className={selectedScan === scan.id ? 'scan-entry expanded' : 'scan-entry'} key={scan.id}>
+                  <button
+                    type="button"
+                    className={selectedScan === scan.id ? 'scan-row selected' : 'scan-row'}
+                    onClick={() => openScan(scan.id)}
+                    aria-expanded={selectedScan === scan.id}
+                    aria-controls={selectedScan === scan.id ? selectedScanDetailID : undefined}
+                  >
+                    <span className={scan.status === 'success' ? 'activity-dot success' : 'activity-dot fail'} />
+                    <div>
+                      <strong>{new Date(scan.finished_at).toLocaleString()}</strong>
+                      <span>
+                        {scan.status === 'success'
+                          ? 'Completed successfully · Open results to inspect the snapshot'
+                          : scan.status === 'incomplete'
+                            ? `${scan.error ?? 'Incomplete host discovery'} · Open results to inspect reachable hosts`
+                            : scan.error}
+                      </span>
+                    </div>
+                    <code>{scan.id.slice(0, 8)}</code>
+                  </button>
+                  {selectedScan === scan.id && selectedScanDetail}
+                </div>
               ))}
             </div>
           ) : <div className="inline-empty">No scans have run yet.</div>}
-          <Pagination page={scans.data?.pagination} onChange={setScanOffset} />
-
-          {selectedScan && detail.isLoading && <div className="loading"><span className="spinner" />Loading scan details…</div>}
-          {selectedScan && detail.error && <div className="error-card" role="alert">Could not load this scan’s details.</div>}
-          {selectedScan && detail.data && (
-            <div className="scan-detail">
-              <div className="panel-heading">
-                <div>
-                  <h3>Scan diff</h3>
-                  <p className="muted">{detail.data.changes_pagination?.total ?? detail.data.changes?.length ?? 0} {detail.data.comparison_source === 'scan_time' ? 'changes recorded at scan time.' : 'changes against the current baseline.'}</p>
-                </div>
-                <div className="heading-actions">
-                  {(detail.data.scan.status === 'success' || detail.data.scan.status === 'incomplete') && <button className="button ghost" onClick={() => { setShowResults((shown) => !shown); setResultsOffset(0) }}>{showResults ? 'Hide results' : 'View results'}</button>}
-                  <button className="icon-button" onClick={() => routeScanID ? navigate(`/jobs/${encodeURIComponent(id)}`) : setSelectedScan('')} aria-label="Close scan detail">×</button>
-                </div>
-              </div>
-              {selectedScanCanBeBaseline && (
-                <div className="baseline-approval">
-                  <span className="muted">This successful scan matches the current security scope.</span>
-                  {canOperate && <button className="button secondary" onClick={() => { setActionError(''); setDialog('approve') }} disabled={!!actionBusy}>{actionBusy === 'approve' ? 'Approving…' : 'Use as baseline'}</button>}
-                </div>
-              )}
-              {(detail.data.scan.scanner_engine === 'naabu_nmap' || detail.data.scan.naabu_version || detail.data.scan.scanner_profile_id) && (
-                <div className="scanner-run-summary" role="status">
-                  <div><strong>Scanner provenance</strong><span>{detail.data.scan.scanner_engine === 'naabu_nmap' ? 'Naabu full TCP discovery → Nmap confirmation' : detail.data.scan.scanner_engine || 'Nmap'}</span></div>
-                  <div><strong>Profile</strong><span>{detail.data.scan.scanner_profile_id ? `${detail.data.scan.scanner_profile_id} · revision ${detail.data.scan.scanner_profile_revision ?? 'current'}` : 'Built-in'}</span></div>
-                  {detail.data.scan.naabu_version && <div><strong>Naabu</strong><span>{detail.data.scan.naabu_version}</span></div>}
-                  {detail.data.scan.discovery_ports != null && <div><strong>Discovery</strong><span>{detail.data.scan.discovery_ports.toLocaleString()} ports · {formatRunDuration(detail.data.scan.discovery_duration_ms)}</span></div>}
-                  {detail.data.scan.confirmed_ports != null && <div><strong>Confirmed</strong><span>{detail.data.scan.confirmed_ports.toLocaleString()} ports · {formatRunDuration(detail.data.scan.enrichment_duration_ms)}</span></div>}
-                </div>
-              )}
-              {detail.data.changes?.length ? (
-                <div className="change-list">
-                  {detail.data.changes.map((change, index) => (
-                    <div className="change-row" key={`${change.kind}-${index}`}>
-                      <span className={`pill ${change.severity === 'critical' ? 'red' : 'amber'}`}>{change.kind}</span>
-                      <strong>{change.target}{change.port ? ` · ${change.protocol}:${change.port}` : ''}</strong>
-                      <span className="muted">{change.old ?? '—'} → {change.new ?? '—'}</span>
-                    </div>
-                  ))}
-                </div>
-              ) : <div className="inline-empty">No changes detected.</div>}
-              <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} />
-                {showResults && <div className="scan-results">
-                <div className="panel-heading"><div><h3>Snapshot results</h3><p className="muted">Loaded on demand; open an effective host for technical evidence.</p></div></div>
-                {results.isLoading ? <div className="skeleton-list" /> : results.error ? <div className="form-error" role="alert">Could not load scan results.</div> : results.data?.hosts.length ? <div className="result-list">{results.data.hosts.map((host) => <Link className="result-row" to={`/jobs/${id}/scans/${selectedScan}/hosts/${encodeURIComponent(host.address)}`} key={host.address}><strong>{host.address}</strong><span className="pill blue">{host.protocols?.map(protocol => protocol.protocol.toUpperCase()).join(' + ') || 'HOST'}</span><span className="muted">{host.open_ports + host.open_filtered_ports} positive ports · View host details</span></Link>)}</div> : <div className="inline-empty">No effective hosts in this scan.</div>}
-                <Pagination page={results.data?.pagination} onChange={setResultsOffset} />
-              </div>}
-            </div>
-          )}
+          <Pagination page={scans.data?.pagination} onChange={changeScanPage} />
         </div>}
       </div>
       {dialog === 'reset' && <ActionDialog title="Reset this baseline?" description="New scans will be learned before changes are reported. Existing history is preserved." confirmLabel="Reset baseline" destructive onConfirm={() => reset()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}

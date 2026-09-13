@@ -11,6 +11,7 @@ import {
   jobBaseline,
   jobScans,
   latestSuccessfulScan,
+  scanDetail,
   scanCycle,
   scanResults,
 } from '../api'
@@ -86,6 +87,13 @@ const latestResultsResponse = {
   results: [{ target: 'router.example', protocol: 'tcp', addresses: ['198.51.100.10'], ports: [{ port: 443, state: 'open', service: 'https' }] }],
   pagination,
 }
+const detailResponse = {
+  scan: summary,
+  changes: [],
+  changes_pagination: pagination,
+  current_security_hash: 'scope',
+  comparison_source: 'scan_time',
+}
 
 describe('job surface overview', () => {
   let root: Root
@@ -102,6 +110,7 @@ describe('job surface overview', () => {
     vi.mocked(jobBaseline).mockResolvedValue(baselineResponse)
     vi.mocked(latestSuccessfulScan).mockResolvedValue(latestResponse)
     vi.mocked(scanResults).mockResolvedValue(latestResultsResponse)
+    vi.mocked(scanDetail).mockResolvedValue(detailResponse)
     vi.mocked(jobScans).mockResolvedValue({ scans: [summary], pagination })
     vi.mocked(scanCycle).mockResolvedValue({ cycle: null })
   })
@@ -113,9 +122,9 @@ describe('job surface overview', () => {
     vi.clearAllMocks()
   })
 
-  function renderPage() {
+  function renderPage(initialEntry = '/jobs/job-1') {
     return act(async () => {
-      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={['/jobs/job-1']}><Routes><Route path="/jobs/:id" element={<JobDetail />} /></Routes></MemoryRouter></QueryClientProvider>)
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={[initialEntry]}><Routes><Route path="/jobs/:id/scans/:scanId" element={<JobDetail />} /><Route path="/jobs/:id" element={<JobDetail />} /></Routes></MemoryRouter></QueryClientProvider>)
       await Promise.resolve()
     })
   }
@@ -145,5 +154,74 @@ describe('job surface overview', () => {
     expect(container.textContent).not.toContain('Recent scans')
     expect(latestSuccessfulScan).not.toHaveBeenCalled()
     expect(jobScans).not.toHaveBeenCalled()
+  })
+
+  it('renders the selected scan detail directly beneath its row with accessible expansion state', async () => {
+    await renderPage()
+    await vi.waitFor(() => expect(container.querySelector('.scan-row')).not.toBeNull(), { timeout: 1000 })
+
+    const row = container.querySelector('.scan-row') as HTMLButtonElement
+    expect(row.getAttribute('aria-expanded')).toBe('false')
+
+    act(() => row.click())
+    await vi.waitFor(() => expect(container.querySelector('.scan-detail-inline')).not.toBeNull(), { timeout: 1000 })
+    await vi.waitFor(() => expect(container.textContent).toContain('Scan diff'), { timeout: 1000 })
+
+    const entry = row.closest('.scan-entry')
+    expect(entry).not.toBeNull()
+    expect(entry?.children[0]).toBe(row)
+    expect(entry?.children[1].classList.contains('scan-detail-inline')).toBe(true)
+    expect(row.getAttribute('aria-expanded')).toBe('true')
+    expect(row.getAttribute('aria-controls')).toBe('scan-detail-scan-1')
+    expect(container.querySelector('.scan-detail-inline')?.getAttribute('aria-labelledby')).toBe('scan-detail-title-scan-1')
+
+    const close = container.querySelector('.scan-detail-inline .icon-button') as HTMLButtonElement
+    act(() => close.click())
+    await vi.waitFor(() => expect(container.querySelector('.scan-detail-inline')).toBeNull(), { timeout: 1000 })
+    expect(container.querySelector('.scan-row')?.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('moves the single inline detail section when another scan is selected', async () => {
+    const secondScan: ScanSummary = { ...summary, id: 'scan-2', finished_at: '2026-09-13T10:01:02Z' }
+    vi.mocked(jobScans).mockResolvedValue({ scans: [summary, secondScan], pagination: { ...pagination, total: 2 } })
+    await renderPage()
+    await vi.waitFor(() => expect(container.querySelectorAll('.scan-row')).toHaveLength(2), { timeout: 1000 })
+
+    const rows = Array.from(container.querySelectorAll('.scan-row')) as HTMLButtonElement[]
+    act(() => rows[0].click())
+    await vi.waitFor(() => expect(rows[0].closest('.scan-entry')?.querySelector('.scan-detail-inline')).not.toBeNull(), { timeout: 1000 })
+    act(() => rows[1].click())
+    await vi.waitFor(() => expect(rows[1].closest('.scan-entry')?.querySelector('.scan-detail-inline')).not.toBeNull(), { timeout: 1000 })
+
+    expect(rows[0].closest('.scan-entry')?.querySelector('.scan-detail-inline')).toBeNull()
+    expect(container.querySelectorAll('.scan-detail-inline')).toHaveLength(1)
+  })
+
+  it('clears a click-selected detail when moving to another history page', async () => {
+    vi.mocked(jobScans).mockResolvedValue({ scans: [summary], pagination: { ...pagination, total: 11, has_more: true, next_offset: 10 } })
+    await renderPage()
+    await vi.waitFor(() => expect(container.querySelector('.scan-row')).not.toBeNull(), { timeout: 1000 })
+
+    const row = container.querySelector('.scan-row') as HTMLButtonElement
+    act(() => row.click())
+    await vi.waitFor(() => expect(container.querySelector('.scan-detail-inline')).not.toBeNull(), { timeout: 1000 })
+    const next = container.querySelector('.pagination-actions .button:last-child') as HTMLButtonElement
+    act(() => next.click())
+
+    await vi.waitFor(() => expect(container.querySelector('.scan-detail-inline')).toBeNull(), { timeout: 1000 })
+    await vi.waitFor(() => expect(container.querySelector('.scan-row')?.getAttribute('aria-expanded')).toBe('false'), { timeout: 1000 })
+  })
+
+  it('keeps direct links to scans outside the current history page usable', async () => {
+    const deepLinkedScan: ScanSummary = { ...summary, id: 'scan-old' }
+    vi.mocked(scanDetail).mockResolvedValue({ ...detailResponse, scan: deepLinkedScan })
+    await renderPage('/jobs/job-1/scans/scan-old')
+    await vi.waitFor(() => expect(container.querySelector('.scan-detail-inline')).not.toBeNull(), { timeout: 1000 })
+
+    const fallback = container.querySelector('.selected-scan-fallback')
+    const list = container.querySelector('.scan-list')
+    expect(fallback).not.toBeNull()
+    expect(list).not.toBeNull()
+    expect(fallback!.compareDocumentPosition(list!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
 })

@@ -141,7 +141,7 @@ func (s *Store) CreateScanCycle(ctx context.Context, cycle ScanCycleRecord) (Sca
 		if marshalErr != nil {
 			return ScanCycleRecord{}, marshalErr
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?)`, cycle.ID, unit.Sequence, raw, scanCycleUnitIdentity(unit), "pending", 0, []byte(`{}`), "", "", ""); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,phase,probes,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, cycle.ID, unit.Sequence, raw, scanCycleUnitIdentity(unit), unit.Phase, unit.Probes, "pending", 0, []byte(`{}`), "", "", ""); err != nil {
 			return ScanCycleRecord{}, err
 		}
 	}
@@ -208,11 +208,11 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 		return false, tx.Commit()
 	}
 
-	// JSON1 lets SQLite count phase rows without loading every checkpoint
-	// payload. The table is indexed by cycle and sequence, and only the first
-	// bounded batch is decoded below.
+	// Phase is maintained as an indexed scalar on each unit, so SQLite can
+	// count completed discovery rows without invoking JSON1 or loading any
+	// checkpoint payload. Only the first bounded batch is decoded below.
 	var discoveryCount, completedDiscoveryCount int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0) FROM scan_cycle_units WHERE cycle_id=? AND json_extract(work_unit_json,'$.phase')='discovery'`, cycleID).Scan(&discoveryCount, &completedDiscoveryCount); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END),0) FROM scan_cycle_units WHERE cycle_id=? AND phase='discovery'`, cycleID).Scan(&discoveryCount, &completedDiscoveryCount); err != nil {
 		return false, err
 	}
 	if discoveryCount == 0 {
@@ -225,7 +225,7 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 		unit     scanner.WorkUnit
 		snapshot model.Snapshot
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT u.sequence,u.work_unit_json,u.snapshot_json FROM scan_cycle_units AS u WHERE u.cycle_id=? AND u.status='completed' AND json_extract(u.work_unit_json,'$.phase')='discovery' AND NOT EXISTS (SELECT 1 FROM scan_cycle_discovery_checkpoints AS c WHERE c.cycle_id=u.cycle_id AND c.sequence=u.sequence) ORDER BY u.sequence LIMIT ?`, cycleID, scanCycleReconcileBatchSize)
+	rows, err := tx.QueryContext(ctx, `SELECT u.sequence,u.work_unit_json,u.snapshot_json FROM scan_cycle_units AS u WHERE u.cycle_id=? AND u.status='completed' AND u.phase='discovery' AND NOT EXISTS (SELECT 1 FROM scan_cycle_discovery_checkpoints AS c WHERE c.cycle_id=u.cycle_id AND c.sequence=u.sequence) ORDER BY u.sequence LIMIT ?`, cycleID, scanCycleReconcileBatchSize)
 	if err != nil {
 		return false, err
 	}
@@ -371,13 +371,13 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 	morePending := false
 	if len(pending) > 0 {
 		lastSequence := pending[len(pending)-1].sequence
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_cycle_units AS u WHERE u.cycle_id=? AND u.status='completed' AND json_extract(u.work_unit_json,'$.phase')='discovery' AND u.sequence>? AND NOT EXISTS (SELECT 1 FROM scan_cycle_discovery_checkpoints AS c WHERE c.cycle_id=u.cycle_id AND c.sequence=u.sequence))`, cycleID, lastSequence).Scan(&morePending); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_cycle_units AS u WHERE u.cycle_id=? AND u.status='completed' AND u.phase='discovery' AND u.sequence>? AND NOT EXISTS (SELECT 1 FROM scan_cycle_discovery_checkpoints AS c WHERE c.cycle_id=u.cycle_id AND c.sequence=u.sequence))`, cycleID, lastSequence).Scan(&morePending); err != nil {
 			return false, err
 		}
 	}
 	if discoveryComplete && !morePending && plan.Job.UDP != nil {
 		var udpCount int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycle_units WHERE cycle_id=? AND json_extract(work_unit_json,'$.phase')='udp'`, cycleID).Scan(&udpCount); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycle_units WHERE cycle_id=? AND phase='udp'`, cycleID).Scan(&udpCount); err != nil {
 			return false, err
 		}
 		if udpCount == 0 {
@@ -411,7 +411,7 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 		if err != nil {
 			return false, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?)`, cycleID, unit.Sequence, raw, scanCycleUnitIdentity(unit), "pending", 0, []byte(`{}`), "", "", ""); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,phase,probes,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, cycleID, unit.Sequence, raw, scanCycleUnitIdentity(unit), unit.Phase, unit.Probes, "pending", 0, []byte(`{}`), "", "", ""); err != nil {
 			return false, err
 		}
 		addedProbes += unit.Probes
@@ -605,8 +605,8 @@ func (s *Store) GetScanCycle(ctx context.Context, id string) (ScanCycleRecord, e
 func (s *Store) ScanCycleProbeTotals(ctx context.Context, cycleID string) (discovery, nmap int64, err error) {
 	err = s.reader().QueryRowContext(ctx, `
 		SELECT
-			COALESCE(SUM(CASE WHEN json_extract(work_unit_json,'$.phase')='discovery' THEN CAST(json_extract(work_unit_json,'$.probes') AS INTEGER) ELSE 0 END),0),
-			COALESCE(SUM(CASE WHEN json_extract(work_unit_json,'$.phase')<>'discovery' THEN CAST(json_extract(work_unit_json,'$.probes') AS INTEGER) ELSE 0 END),0)
+		COALESCE(SUM(CASE WHEN phase='discovery' THEN probes ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN phase<>'discovery' THEN probes ELSE 0 END),0)
 		FROM scan_cycle_units WHERE cycle_id=?`, cycleID).Scan(&discovery, &nmap)
 	return discovery, nmap, err
 }
@@ -985,10 +985,10 @@ func (s *Store) SplitScanCycleUnit(ctx context.Context, cycleID string, sequence
 	if err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=?,identity=?,status='pending',last_error=? WHERE cycle_id=? AND sequence=?`, firstRaw, scanCycleUnitIdentity(first), trimCycleError(lastError), cycleID, sequence); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=?,identity=?,phase=?,probes=?,status='pending',last_error=? WHERE cycle_id=? AND sequence=?`, firstRaw, scanCycleUnitIdentity(first), first.Phase, first.Probes, trimCycleError(lastError), cycleID, sequence); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?)`, cycleID, next, secondRaw, scanCycleUnitIdentity(second), "pending", 0, []byte(`{}`), "", "", ""); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,phase,probes,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, cycleID, next, secondRaw, scanCycleUnitIdentity(second), second.Phase, second.Probes, "pending", 0, []byte(`{}`), "", "", ""); err != nil {
 		return err
 	}
 	probeDelta := first.Probes + second.Probes - original.Probes

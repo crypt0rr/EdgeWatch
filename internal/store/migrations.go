@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 35
+const schemaVersion = 36
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -865,6 +865,16 @@ END;`,
  pending_delivery_count INTEGER NOT NULL DEFAULT 0
 );`,
 			"CREATE INDEX IF NOT EXISTS restore_epochs_restored_at ON restore_epochs(restored_at)",
+		},
+		36: {
+			// Cycle reconciliation asks for phase and probe totals frequently. Keep
+			// those values alongside the immutable work-unit JSON so the hot paths
+			// can use indexed scalar predicates instead of invoking JSON1 for every
+			// completed unit. The JSON remains the complete recovery payload.
+			"ALTER TABLE scan_cycle_units ADD COLUMN phase TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE scan_cycle_units ADD COLUMN probes INTEGER NOT NULL DEFAULT 0",
+			"UPDATE scan_cycle_units SET phase=COALESCE(CASE WHEN json_valid(work_unit_json) THEN json_extract(work_unit_json,'$.phase') END,''), probes=COALESCE(CASE WHEN json_valid(work_unit_json) THEN CAST(json_extract(work_unit_json,'$.probes') AS INTEGER) END,0)",
+			"CREATE INDEX IF NOT EXISTS scan_cycle_units_cycle_phase_status ON scan_cycle_units(cycle_id,phase,status,probes,sequence)",
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

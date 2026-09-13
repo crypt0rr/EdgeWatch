@@ -71,7 +71,7 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 		}
 	}
 	if job.TCP == nil {
-		return model.Snapshot{}, errors.New("naabu discovery requires tcp")
+		return model.Snapshot{}, ConfigurationError(errors.New("naabu discovery requires tcp"))
 	}
 	for _, target := range targets {
 		snapshot.Scopes = append(snapshot.Scopes, model.Scope{Target: target.Name, Protocol: "tcp", Ports: naabuFullPortExpression, ServiceDetection: job.TCP.ServiceDetection})
@@ -80,13 +80,13 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 	options := *job.TCP.Naabu
 	config.ApplyNaabuDefaultsForScanner(&options)
 	if err := config.ValidateNaabuOptions(options); err != nil {
-		return model.Snapshot{}, fmt.Errorf("tcp naabu: %w", err)
+		return model.Snapshot{}, ConfigurationError(fmt.Errorf("tcp naabu: %w", err))
 	}
 	if err := validateNaabuInvocation(options, job.AssumesAlive(), hasRawScannerPrivileges()); err != nil {
 		return model.Snapshot{}, err
 	}
 	if len(addresses) == 0 {
-		return model.Snapshot{}, errors.New("no effective targets")
+		return model.Snapshot{}, ConfigurationError(errors.New("no effective targets"))
 	}
 	batchSize := options.AddressBatchSize
 	if batchSize < 1 {
@@ -211,13 +211,13 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 	options := *job.TCP.Naabu
 	config.ApplyNaabuDefaultsForScanner(&options)
 	if err := config.ValidateNaabuOptions(options); err != nil {
-		return model.Snapshot{}, fmt.Errorf("tcp naabu: %w", err)
+		return model.Snapshot{}, ConfigurationError(fmt.Errorf("tcp naabu: %w", err))
 	}
 	if err := validateNaabuInvocation(options, job.AssumesAlive(), hasRawScannerPrivileges()); err != nil {
 		return model.Snapshot{}, err
 	}
 	if len(addresses) == 0 {
-		return model.Snapshot{}, errors.New("no effective targets")
+		return model.Snapshot{}, ConfigurationError(errors.New("no effective targets"))
 	}
 	batchSize := options.AddressBatchSize
 	if batchSize < 1 {
@@ -590,7 +590,7 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	}
 
 	if err := config.ValidateScannerProfile(config.ScannerProfile{Engine: config.EngineNaabuNmap, Naabu: options, NaabuArgs: profileArgs}); err != nil {
-		return nil, "", fmt.Errorf("scanner profile arguments: %w", err)
+		return nil, "", ConfigurationError(fmt.Errorf("scanner profile arguments: %w", err))
 	}
 	args := naabuArgsWithTemplate(options, path, assumeAlive, profileArgs)
 	naabuPath := strings.TrimSpace(n.NaabuPath)
@@ -777,10 +777,10 @@ func renderNaabuTemplate(template []string, targetsFile string, options config.N
 // policy or explicitly select SYN with both raw-packet capabilities.
 func validateNaabuInvocation(options config.NaabuOptions, assumeAlive, rawPrivileges bool) error {
 	if options.ScanType == "connect" && !assumeAlive {
-		return errors.New("Naabu connect mode cannot use host discovery; keep assume_alive enabled or select SYN mode with NET_RAW and NET_ADMIN")
+		return ConfigurationError(errors.New("naabu connect mode cannot use host discovery; keep assume_alive enabled or select SYN mode with NET_RAW and NET_ADMIN"))
 	}
 	if options.ScanType == "syn" && !rawPrivileges {
-		return errors.New("Naabu SYN scanning requires NET_RAW and NET_ADMIN capabilities; choose connect mode or grant the capabilities explicitly")
+		return ConfigurationError(errors.New("naabu SYN scanning requires NET_RAW and NET_ADMIN capabilities; choose connect mode or grant the capabilities explicitly"))
 	}
 	return nil
 }

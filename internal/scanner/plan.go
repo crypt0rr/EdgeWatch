@@ -306,7 +306,7 @@ func (n *Nmap) ScanWorkUnit(ctx context.Context, job config.Job, unit WorkUnit, 
 			phase = "pipeline"
 		}
 		if phase != "pipeline" && phase != "discovery" {
-			return model.Snapshot{}, fmt.Errorf("unsupported Naabu work-unit phase %q", phase)
+			return model.Snapshot{}, ConfigurationError(fmt.Errorf("unsupported Naabu work-unit phase %q", phase))
 		}
 		emit(Progress{StartedAt: started, Phase: phaseLabel(phase), Protocol: "tcp", TotalProbes: unit.Probes, TotalInvocations: 1, CurrentInvocation: 1, TotalBatches: 1, CurrentUnit: unit.Sequence + 1, TotalUnits: 1, UnitPorts: naabuFullPortExpression, UnitAddresses: len(unit.Addresses), ProcessAlive: true})
 		runReport := func(progress Progress) {
@@ -338,7 +338,7 @@ func (n *Nmap) ScanWorkUnit(ctx context.Context, job config.Job, unit WorkUnit, 
 	}
 	pc, ok := protocolForJob(job, unit.Protocol)
 	if !ok {
-		return model.Snapshot{}, fmt.Errorf("%s scan is not enabled", unit.Protocol)
+		return model.Snapshot{}, ConfigurationError(fmt.Errorf("%s scan is not enabled", unit.Protocol))
 	}
 	pc.Ports = unit.Ports
 	started := time.Now().UTC()

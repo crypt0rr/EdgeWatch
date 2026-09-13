@@ -544,7 +544,7 @@ func (n *Nmap) scanProtocolBatchDetailedProgress(ctx context.Context, targets []
 
 func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context, targets []resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool, template []string, report func(int64, int64), statusReports ...func(invocationProgress)) (protocolScanResult, error) {
 	if err := config.ValidateScannerProfile(config.ScannerProfile{Engine: config.EngineNmap, NmapArgs: pc.NmapArgs, EnrichmentArgs: pc.EnrichmentArgs, NSEProfile: pc.NSEProfile, NSEArgs: pc.NSEArgs}); err != nil {
-		return protocolScanResult{}, fmt.Errorf("scanner profile arguments: %w", err)
+		return protocolScanResult{}, ConfigurationError(fmt.Errorf("scanner profile arguments: %w", err))
 	}
 	var status func(invocationProgress)
 	if len(statusReports) > 0 {

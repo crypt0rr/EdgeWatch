@@ -302,6 +302,14 @@ attempt metadata remain for operational history. The payloads are deliberately
 kept between cycle completion and scan promotion so a restart can recover that
 short transaction window safely.
 
+Transient scanner or process failures are retried from the next scheduled or
+manual trigger without discarding completed units. Each work unit is allowed
+three total attempts; after the final retry the cycle is marked stalled and a
+failure notification tells the operator to inspect the saved error or discard
+the cycle. Invalid scanner configuration and deployment errors skip retries and
+stall immediately, so a bad profile or missing binary cannot create repeated
+scheduled no-op scans.
+
 When creating a job, the editor compares its next scheduled run with active
 jobs and offers a non-blocking 30-minute offset when another run is too close.
 The suggestion is optional: keep the chosen schedule when concurrent runs are

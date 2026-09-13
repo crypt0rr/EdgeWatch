@@ -822,7 +822,11 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 		t.Fatalf("changed scan did not persist its scan-time comparison: %#v", changedScan)
 	}
 	incidentKey := changedScan.Changes[0].Key
-	resp = request(http.MethodPost, "/api/v1/jobs/"+created.ID+"/incidents/suppress", `{"key":"`+incidentKey+`"}`, loginResult.CSRF)
+	incidentActionBody, err := json.Marshal(map[string]any{"key": incidentKey, "expected_change": changedScan.Changes[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp = request(http.MethodPost, "/api/v1/jobs/"+created.ID+"/incidents/suppress", string(incidentActionBody), loginResult.CSRF)
 	if resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
@@ -839,7 +843,44 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	resp = request(http.MethodPost, "/api/v1/jobs/"+created.ID+"/incidents/accept", `{"key":"`+incidentKey+`"}`, loginResult.CSRF)
+	// A scan can replace the observed value while the administrator's dialog
+	// remains open. The reviewed snapshot must then be rejected atomically.
+	if _, err := s.UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
+		current := state.Incidents[incidentKey]
+		current.Change.New = "open"
+		state.Incidents[incidentKey] = current
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp = request(http.MethodPost, "/api/v1/jobs/"+created.ID+"/incidents/accept", string(incidentActionBody), loginResult.CSRF)
+	if resp.StatusCode != http.StatusConflict {
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("stale accept status %d: %s", resp.StatusCode, body)
+	}
+	var conflict struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&conflict); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if conflict.Error.Code != "incident_conflict" {
+		t.Fatalf("stale accept code = %q", conflict.Error.Code)
+	}
+	if _, err := s.UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
+		current := state.Incidents[incidentKey]
+		current.Change = changedScan.Changes[0]
+		state.Incidents[incidentKey] = current
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp = request(http.MethodPost, "/api/v1/jobs/"+created.ID+"/incidents/accept", string(incidentActionBody), loginResult.CSRF)
 	if resp.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()

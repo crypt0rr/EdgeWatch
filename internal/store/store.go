@@ -524,12 +524,16 @@ func nullInt64(v int64) any {
 }
 
 var (
-	ErrNotFound                  = errors.New("not found")
-	ErrConflict                  = errors.New("resource was modified by another request")
-	ErrRebaselineRequired        = errors.New("security-relevant job changes require rebaseline confirmation")
-	ErrJobScanActive             = errors.New("job has an active scan")
-	ErrLastAdministrator         = errors.New("at least one enabled administrator is required")
-	ErrIncidentNotFound          = errors.New("incident not found")
+	ErrNotFound           = errors.New("not found")
+	ErrConflict           = errors.New("resource was modified by another request")
+	ErrRebaselineRequired = errors.New("security-relevant job changes require rebaseline confirmation")
+	ErrJobScanActive      = errors.New("job has an active scan")
+	ErrLastAdministrator  = errors.New("at least one enabled administrator is required")
+	ErrIncidentNotFound   = errors.New("incident not found")
+	// ErrIncidentConflict indicates that an incident changed after the
+	// operator loaded it. Callers should refresh the incident list before
+	// attempting the action again.
+	ErrIncidentConflict          = errors.New("incident changed since it was loaded")
 	ErrBaselineNotReady          = errors.New("baseline is not ready")
 	ErrUnsupportedIncidentChange = errors.New("unsupported incident change")
 	// ErrJobRevisionChanged is returned when a scan was queued with an older

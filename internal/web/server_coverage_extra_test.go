@@ -68,6 +68,7 @@ func TestServerErrorMappingHelpers(t *testing.T) {
 		want string
 	}{
 		{store.ErrIncidentNotFound, http.StatusNotFound, "incident_not_found"},
+		{store.ErrIncidentConflict, http.StatusConflict, "incident_conflict"},
 		{store.ErrJobScanActive, http.StatusConflict, "job_active"},
 		{store.ErrBaselineNotReady, http.StatusConflict, "baseline_not_ready"},
 		{store.ErrUnsupportedIncidentChange, http.StatusBadRequest, "incident_change_invalid"},

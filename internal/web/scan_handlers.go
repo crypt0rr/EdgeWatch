@@ -753,7 +753,8 @@ func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, id string)
 }
 
 type incidentActionRequest struct {
-	Key string `json:"key"`
+	Key            string        `json:"key"`
+	ExpectedChange *model.Change `json:"expected_change"`
 }
 
 func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
@@ -764,6 +765,10 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session 
 	key := strings.TrimSpace(input.Key)
 	if key == "" {
 		writeError(w, http.StatusBadRequest, "key_required", "incident key is required", map[string]string{"key": "incident key is required"})
+		return
+	}
+	if input.ExpectedChange == nil {
+		writeError(w, http.StatusBadRequest, "expected_change_required", "the reviewed incident change is required; refresh before retrying", map[string]string{"expected_change": "reload the incident before confirming this action"})
 		return
 	}
 	record, err := s.Store.GetJob(r.Context(), id)
@@ -783,7 +788,7 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session 
 			return
 		}
 	}
-	events, err := s.Store.AcceptIncidentWithOutboxAndAudit(r.Context(), id, record.Job.Name, key, destinations, actorAudit(session, "incident.accepted", id+":"+key))
+	events, err := s.Store.AcceptIncidentWithExpectedOutboxAndAudit(r.Context(), id, record.Job.Name, key, &store.IncidentExpectation{Change: *input.ExpectedChange}, destinations, actorAudit(session, "incident.accepted", id+":"+key))
 	if err != nil {
 		s.writeIncidentActionError(w, err, "incident.accepted")
 		return
@@ -802,6 +807,10 @@ func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, sessio
 		writeError(w, http.StatusBadRequest, "key_required", "incident key is required", map[string]string{"key": "incident key is required"})
 		return
 	}
+	if input.ExpectedChange == nil {
+		writeError(w, http.StatusBadRequest, "expected_change_required", "the reviewed incident change is required; refresh before retrying", map[string]string{"expected_change": "reload the incident before confirming this action"})
+		return
+	}
 	record, err := s.Store.GetJob(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
@@ -819,7 +828,7 @@ func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, sessio
 			return
 		}
 	}
-	events, err := s.Store.SuppressIncidentWithOutboxAndAudit(r.Context(), id, record.Job.Name, key, destinations, actorAudit(session, "incident.suppressed", id+":"+key))
+	events, err := s.Store.SuppressIncidentWithExpectedOutboxAndAudit(r.Context(), id, record.Job.Name, key, &store.IncidentExpectation{Change: *input.ExpectedChange}, destinations, actorAudit(session, "incident.suppressed", id+":"+key))
 	if err != nil {
 		s.writeIncidentActionError(w, err, "incident.suppressed")
 		return
@@ -835,6 +844,8 @@ func (s *Server) writeIncidentActionError(w http.ResponseWriter, err error, acti
 	switch {
 	case errors.Is(err, store.ErrIncidentNotFound):
 		writeError(w, http.StatusNotFound, "incident_not_found", "incident is no longer active", nil)
+	case errors.Is(err, store.ErrIncidentConflict):
+		writeError(w, http.StatusConflict, "incident_conflict", "the incident changed since it was loaded; refresh before retrying", nil)
 	case errors.Is(err, store.ErrJobScanActive):
 		writeError(w, http.StatusConflict, "job_active", "incident actions cannot change the baseline during an active scan", nil)
 	case errors.Is(err, store.ErrBaselineNotReady):

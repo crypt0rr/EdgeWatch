@@ -135,11 +135,12 @@ describe('incident action API contract', () => {
     vi.stubGlobal('fetch', fetchMock)
     setCSRF('csrf-token')
 
-    await acceptIncident('job/1', 'port|192.0.2.1|tcp|443')
-    await suppressIncident('job/1', 'port|192.0.2.1|tcp|443')
+    const expectedChange = { key: 'port|192.0.2.1|tcp|443', kind: 'port', target: '192.0.2.1', protocol: 'tcp', port: 443, old: 'not-open', new: 'open', severity: 'critical' }
+    await acceptIncident('job/1', 'port|192.0.2.1|tcp|443', expectedChange)
+    await suppressIncident('job/1', 'port|192.0.2.1|tcp|443', expectedChange)
 
     expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/jobs/job%2F1/incidents/accept')
-    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ key: 'port|192.0.2.1|tcp|443' })
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({ key: 'port|192.0.2.1|tcp|443', expected_change: expectedChange })
     expect(new Headers(fetchMock.mock.calls[1][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
     expect(String(fetchMock.mock.calls[1][0])).toBe('/api/v1/jobs/job%2F1/incidents/suppress')
   })

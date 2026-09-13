@@ -274,6 +274,13 @@ baseline or opening/recovering incidents. Every terminal non-success outcome
 sent to configured notification destinations; the message includes the scan
 and failure reason.
 
+Nmap runs with a private pseudo-terminal so its supported `--stats-every`
+status stream remains available to the web console even when EdgeWatch has no
+controlling terminal. The dashboard therefore shows live process output and
+intra-invocation progress for long scans instead of an apparently stalled zero
+percent bar; the structured XML result remains bounded and is never replaced by
+diagnostic text.
+
 Archive, pause, restore, and resume transitions are serialized with the scan
 lease. A lifecycle action that would change the job state is rejected with a
 clear conflict while that job has an active scan; it never cancels the process

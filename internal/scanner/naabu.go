@@ -777,10 +777,10 @@ func renderNaabuTemplate(template []string, targetsFile string, options config.N
 // policy or explicitly select SYN with both raw-packet capabilities.
 func validateNaabuInvocation(options config.NaabuOptions, assumeAlive, rawPrivileges bool) error {
 	if options.ScanType == "connect" && !assumeAlive {
-		return ConfigurationError(errors.New("Naabu connect mode cannot use host discovery; keep assume_alive enabled or select SYN mode with NET_RAW and NET_ADMIN"))
+		return ConfigurationError(errors.New("naabu connect mode cannot use host discovery; keep assume_alive enabled or select SYN mode with NET_RAW and NET_ADMIN"))
 	}
 	if options.ScanType == "syn" && !rawPrivileges {
-		return ConfigurationError(errors.New("Naabu SYN scanning requires NET_RAW and NET_ADMIN capabilities; choose connect mode or grant the capabilities explicitly"))
+		return ConfigurationError(errors.New("naabu SYN scanning requires NET_RAW and NET_ADMIN capabilities; choose connect mode or grant the capabilities explicitly"))
 	}
 	return nil
 }

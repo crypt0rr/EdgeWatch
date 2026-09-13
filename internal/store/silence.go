@@ -129,7 +129,11 @@ func jobSilenceReferenceQuery(ctx context.Context, queryer rowQueryer, jobID str
 	if stateErr != nil && !errors.Is(stateErr, sql.ErrNoRows) && !isMissingSilenceState(stateErr) {
 		return time.Time{}, stateErr
 	}
-	if parsed := scanTime(eligible); !parsed.IsZero() && !parsed.After(now) && parsed.After(lastReference) {
+	// Keep eligibility as a lower bound even when it is in the future. A
+	// lifecycle write may race the watchdog (or recover from a clock skew), and
+	// dropping a future marker would let a resumed job be judged against an
+	// older creation/scan timestamp before its grace period begins.
+	if parsed := scanTime(eligible); !parsed.IsZero() && parsed.After(lastReference) {
 		lastReference = parsed
 	}
 	var finished string

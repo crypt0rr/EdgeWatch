@@ -28,6 +28,9 @@ func TestRecordJobSilenceAlertPersistsEventAndOutboxAtomically(t *testing.T) {
 	}
 	now := time.Date(2026, time.January, 1, 4, 30, 0, 0, time.UTC)
 	created := now.Add(-3 * time.Hour)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=? WHERE job_id=?`, created.Format(time.RFC3339Nano), job.ID); err != nil {
+		t.Fatal(err)
+	}
 	event, createdEvent, err := s.RecordJobSilenceAlert(ctx, job.ID, job.Job.Name, created, now, 2*time.Hour, []string{"destination"})
 	if err != nil {
 		t.Fatal(err)
@@ -119,5 +122,36 @@ func TestJobSilenceReferenceUsesNewestEligibleEvidence(t *testing.T) {
 	}
 	if !got.Equal(lastSuccess) {
 		t.Fatalf("reference = %s, want newest successful marker %s", got, lastSuccess)
+	}
+}
+
+func TestJobSilenceReferenceHonorsFutureEligibility(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	job, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name:     "future-eligibility",
+		Schedule: "0 * * * *",
+		Timezone: "UTC",
+		Targets:  []string{"192.0.2.13"},
+		TCP:      &config.Protocol{Ports: "443", Mode: "connect"},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.January, 1, 4, 0, 0, 0, time.UTC)
+	created := now.Add(-24 * time.Hour)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE jobs SET created_at=? WHERE id=?`, created.Format(time.RFC3339Nano), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	eligible := now.Add(30 * time.Minute)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=?,last_success_at=? WHERE job_id=?`, eligible.Format(time.RFC3339Nano), created.Format(time.RFC3339Nano), job.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.JobSilenceReference(ctx, job.ID, created, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.Equal(eligible) {
+		t.Fatalf("reference = %s, want future eligibility marker %s", got, eligible)
 	}
 }

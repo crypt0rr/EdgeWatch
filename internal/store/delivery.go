@@ -218,6 +218,7 @@ ORDER BY id LIMIT ?`
 	if err != nil {
 		return err
 	}
+	defer rows.Close()
 	type lockedDelivery struct {
 		id          int64
 		destination string
@@ -227,16 +228,11 @@ ORDER BY id LIMIT ?`
 	for rows.Next() {
 		var item lockedDelivery
 		if err := rows.Scan(&item.id, &item.destination, &item.deferrals); err != nil {
-			_ = rows.Close()
 			return err
 		}
 		pending = append(pending, item)
 	}
 	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return err
-	}
-	if err := rows.Close(); err != nil {
 		return err
 	}
 	for _, item := range pending {

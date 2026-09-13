@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -212,10 +213,31 @@ func cloneNotificationSelection(selection []string) []string {
 	return cloned
 }
 
-// UpdateManagedNotification atomically updates metadata/ciphertext and
-// invalidates pending deliveries from every previous revision. A delivery
-// key includes the revision so a replaced URL can never receive an event that
-// was queued for the old URL.
+func managedNotificationKey(id string, revision int64) string {
+	return fmt.Sprintf("managed:%s:%d", id, revision)
+}
+
+func pendingManagedDeliveryDiscardAudit(audits []AuditEntry, id string, count int64) AuditEntry {
+	entry := AuditEntry{
+		Action: "notifications.pending_discarded",
+		Detail: fmt.Sprintf("discarded %d pending deliveries for managed notification %s after credential rotation", count, id),
+	}
+	// Preserve request attribution when the caller supplied the normal update
+	// audit entry. No URL, provider response, or credential material is copied.
+	if len(audits) > 0 {
+		entry.ActorUserID = audits[0].ActorUserID
+		entry.ActorUsername = audits[0].ActorUsername
+		entry.RequestID = audits[0].RequestID
+		entry.SourceIP = audits[0].SourceIP
+	}
+	return entry
+}
+
+// UpdateManagedNotification atomically updates metadata/ciphertext. Metadata
+// only changes keep pending delivery intents by moving the current revision
+// selector to the new revision. Credential changes deliberately discard
+// pending intents so a queued event can never be sent with stale credentials;
+// the discard is recorded as a redacted security-audit event.
 func (s *Store) UpdateManagedNotification(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool) (ManagedNotification, error) {
 	return s.updateManagedNotificationWithAudits(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, nil)
 }
@@ -250,6 +272,9 @@ func (s *Store) updateManagedNotificationWithAudits(ctx context.Context, id stri
 	}
 	now := time.Now().UTC()
 	next := current.Revision + 1
+	oldKey := managedNotificationKey(id, current.Revision)
+	newKey := managedNotificationKey(id, next)
+	credentialsChanged := current.Provider != provider || !bytes.Equal(current.Ciphertext, ciphertext) || !bytes.Equal(current.Nonce, nonce)
 	result, err := tx.ExecContext(ctx, `UPDATE managed_notifications SET name=?,provider=?,ciphertext=?,nonce=?,enabled=?,revision=?,updated_at=? WHERE id=? AND revision=?`, name, provider, ciphertext, nonce, boolInt(enabled), next, now.Format(time.RFC3339Nano), id, expectedRevision)
 	if err != nil {
 		return ManagedNotification{}, err
@@ -257,8 +282,24 @@ func (s *Store) updateManagedNotificationWithAudits(ctx context.Context, id stri
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ManagedNotification{}, ErrConflict
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE destination LIKE ? AND sent_at IS NULL`, "managed:"+id+":%"); err != nil {
-		return ManagedNotification{}, err
+	if credentialsChanged {
+		var pending int64
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination LIKE ? AND sent_at IS NULL AND terminal_at=''`, "managed:"+id+":%").Scan(&pending); err != nil {
+			return ManagedNotification{}, err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE destination LIKE ? AND sent_at IS NULL`, "managed:"+id+":%"); err != nil {
+			return ManagedNotification{}, err
+		}
+		if pending > 0 {
+			audits = append(audits, pendingManagedDeliveryDiscardAudit(audits, id, pending))
+		}
+	} else {
+		// A rename, provider-neutral enable/disable, or other metadata-only
+		// edit does not invalidate an alert. Keep the row id and claim state so
+		// an in-flight delivery can finish safely while its selector advances.
+		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET destination=? WHERE destination=? AND sent_at IS NULL AND terminal_at=''`, newKey, oldKey); err != nil {
+			return ManagedNotification{}, err
+		}
 	}
 	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return ManagedNotification{}, err

@@ -343,6 +343,21 @@ func TestLatestLegacyPublicHostsLimitsEachJobIndependently(t *testing.T) {
 	}
 }
 
+func TestLatestLegacyPublicHostsHonorsCanceledContext(t *testing.T) {
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	server := &Server{Store: db}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = server.latestLegacyPublicHosts(ctx, []store.PublicDashboardHost{{JobID: "job", Address: "198.51.100.1"}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled legacy lookup error = %v, want context.Canceled", err)
+	}
+}
+
 func TestCachedPublicDashboardPayloadReusesShortLivedProjection(t *testing.T) {
 	server := &Server{}
 	dashboard := store.PublicDashboard{Enabled: true, Title: "Status", Introduction: "hello"}

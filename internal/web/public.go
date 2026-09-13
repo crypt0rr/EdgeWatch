@@ -470,11 +470,17 @@ func (s *Server) latestLegacyPublicHosts(ctx context.Context, selections []store
 	// high-volume job consume the entire window and starve a low-volume job's
 	// published host.
 	for _, requestedJobID := range jobIDs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		scans, err := s.Store.ListLegacyPublicScans(ctx, requestedJobID, legacyPublicScanLimit)
 		if err != nil {
 			return nil, err
 		}
 		for _, legacyScan := range scans {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			raw := legacyScan.Snapshot
 			if len(raw) > 8<<20 {
 				continue
@@ -487,6 +493,9 @@ func (s *Server) latestLegacyPublicHosts(ctx context.Context, selections []store
 				continue
 			}
 			for _, host := range page.Items {
+				if err := ctx.Err(); err != nil {
+					return nil, err
+				}
 				key := publicSelectionKey(legacyScan.JobID, host.Address)
 				selection, ok := wanted[key]
 				if !ok {
@@ -497,6 +506,12 @@ func (s *Server) latestLegacyPublicHosts(ctx context.Context, selections []store
 				}
 				summary := model.ScanSummary{ID: legacyScan.ID, JobID: legacyScan.JobID, Job: legacyScan.Job, Status: legacyScan.Status, Error: legacyScan.Error, NmapVersion: legacyScan.NmapVersion, ConfigHash: legacyScan.ConfigHash, StartedAt: parsePublicTime(legacyScan.StartedAt), FinishedAt: parsePublicTime(legacyScan.FinishedAt), JobRevision: legacyScan.JobRevision}
 				results[key] = store.PublicDashboardHostResult{Selection: selection, Host: store.ScanHost{ScanID: legacyScan.ID, DataQuality: page.DataQuality, Host: host}, Summary: summary}
+				if len(results) == len(wanted) {
+					break
+				}
+			}
+			if len(results) == len(wanted) {
+				break
 			}
 		}
 		if len(results) == len(wanted) {

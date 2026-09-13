@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -179,10 +180,141 @@ func (s *Store) SavePublicDashboard(ctx context.Context, dashboard PublicDashboa
 	return tx.Commit()
 }
 
-// GetLatestSuccessfulJobHosts returns the newest successful indexed
-// observation for each selected job/address in one set-based query. Missing
-// selections are omitted so callers can apply a bounded legacy fallback.
+// GetLatestSuccessfulJobHosts returns the newest successful observation for
+// each selected job/address. The maintained latest_scan_hosts projection
+// answers the common case without ranking retained history. A selection can
+// still miss that projection when the same address is monitored by more than
+// one job (the projection is address-keyed), so those misses are resolved
+// through a bounded history query.
 func (s *Store) GetLatestSuccessfulJobHosts(ctx context.Context, selections []PublicDashboardHost) ([]PublicDashboardHostResult, error) {
+	if len(selections) == 0 {
+		return []PublicDashboardHostResult{}, nil
+	}
+	if len(selections) > 1000 {
+		selections = selections[:1000]
+	}
+	normalized := make([]PublicDashboardHost, 0, len(selections))
+	seen := make(map[string]struct{}, len(selections))
+	for _, selection := range selections {
+		address, err := normalizePublicAddress(selection.Address)
+		if err != nil || strings.TrimSpace(selection.JobID) == "" {
+			continue
+		}
+		selection.JobID = strings.TrimSpace(selection.JobID)
+		selection.Address = address
+		key := selection.JobID + "\x00" + address
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		normalized = append(normalized, selection)
+	}
+	if len(normalized) == 0 {
+		return []PublicDashboardHostResult{}, nil
+	}
+	values := make([]string, len(normalized))
+	args := make([]any, 0, len(normalized)*2)
+	for i, selection := range normalized {
+		values[i] = "(?,?)"
+		args = append(args, selection.JobID, selection.Address)
+	}
+	projectionQuery := `WITH selected(job_id,address) AS (VALUES ` + strings.Join(values, ",") + `)
+SELECT selected.job_id,selected.address,h.scan_id,h.data_quality,h.host_json,
+       sc.id,sc.job_id,sc.job_revision,sc.job,sc.started_at,sc.finished_at,sc.status,sc.error,sc.nmap_version,sc.config_hash,
+       sc.cycle_id,sc.cycle_attempt,sc.cycle_status,sc.resumable,sc.completed_probes,sc.total_probes,sc.completed_units,sc.total_units,sc.no_progress_attempts,
+       sc.baseline_scan_id,sc.baseline_config_hash,sc.scanner_engine,sc.scanner_profile_id,sc.scanner_profile_revision,sc.naabu_version,sc.discovery_ports,sc.confirmed_ports,sc.discovery_duration_ms,sc.enrichment_duration_ms
+FROM selected
+JOIN latest_scan_hosts h ON h.address=selected.address AND h.job_id=selected.job_id
+JOIN scans sc ON sc.id=h.scan_id AND sc.job_id=selected.job_id AND sc.status='success'
+ORDER BY selected.address,selected.job_id`
+	rows, err := s.reader().QueryContext(ctx, projectionQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]PublicDashboardHostResult, 0, len(normalized))
+	found := make(map[string]struct{}, len(normalized))
+	if err := readPublicDashboardHostRows(rows, &results, found); err != nil {
+		return nil, err
+	}
+
+	if len(found) < len(normalized) {
+		missing := make([]PublicDashboardHost, 0, len(normalized)-len(found))
+		for _, selection := range normalized {
+			key := selection.JobID + "\x00" + selection.Address
+			if _, ok := found[key]; !ok {
+				missing = append(missing, selection)
+			}
+		}
+		if len(missing) > 0 {
+			history, err := s.getLatestSuccessfulJobHostsHistory(ctx, missing)
+			if err != nil {
+				return nil, err
+			}
+			for _, item := range history {
+				key := item.Selection.JobID + "\x00" + item.Selection.Address
+				if _, ok := found[key]; ok {
+					continue
+				}
+				found[key] = struct{}{}
+				results = append(results, item)
+			}
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		left := results[i].Selection.Address + "\x00" + results[i].Selection.JobID
+		right := results[j].Selection.Address + "\x00" + results[j].Selection.JobID
+		return left < right
+	})
+	return results, nil
+}
+
+// readPublicDashboardHostRows decodes the shared projection shape used by
+// the maintained latest-host query and its bounded indexed-history fallback.
+func readPublicDashboardHostRows(rows *sql.Rows, results *[]PublicDashboardHostResult, found map[string]struct{}) error {
+	defer rows.Close()
+	for rows.Next() {
+		var selection PublicDashboardHost
+		var host ScanHost
+		var raw []byte
+		var summary model.ScanSummary
+		var jobID sql.NullString
+		var revision sql.NullInt64
+		var resumable int
+		var started, finished string
+		if err := rows.Scan(&selection.JobID, &selection.Address, &host.ScanID, &host.DataQuality, &raw,
+			&summary.ID, &jobID, &revision, &summary.Job, &started, &finished, &summary.Status, &summary.Error, &summary.NmapVersion, &summary.ConfigHash,
+			&summary.CycleID, &summary.CycleAttempt, &summary.CycleStatus, &resumable, &summary.CompletedProbes, &summary.TotalProbes, &summary.CompletedUnits, &summary.TotalUnits, &summary.NoProgressTries,
+			&summary.BaselineScanID, &summary.BaselineConfigHash, &summary.ScannerEngine, &summary.ScannerProfileID, &summary.ScannerProfileRevision, &summary.NaabuVersion, &summary.DiscoveryPorts, &summary.ConfirmedPorts, &summary.DiscoveryDurationMS, &summary.EnrichmentDurationMS); err != nil {
+			return err
+		}
+		key := selection.JobID + "\x00" + selection.Address
+		if _, exists := found[key]; exists {
+			continue
+		}
+		if jobID.Valid {
+			summary.JobID = jobID.String
+		}
+		if revision.Valid {
+			summary.JobRevision = revision.Int64
+		}
+		summary.Resumable = resumable != 0
+		summary.StartedAt, summary.FinishedAt = scanTime(started), scanTime(finished)
+		decoded, err := decodeScanHost(selection.Address, host.DataQuality, raw)
+		if err != nil {
+			return err
+		}
+		host.Host = decoded.Host
+		*results = append(*results, PublicDashboardHostResult{Selection: selection, Host: host, Summary: summary})
+		found[key] = struct{}{}
+	}
+	return rows.Err()
+}
+
+// getLatestSuccessfulJobHostsHistory resolves selected pairs by ranking the
+// indexed scan history. It is reserved for pairs absent from the maintained
+// latest-host projection, such as an address monitored by multiple jobs.
+func (s *Store) getLatestSuccessfulJobHostsHistory(ctx context.Context, selections []PublicDashboardHost) ([]PublicDashboardHostResult, error) {
 	if len(selections) == 0 {
 		return []PublicDashboardHostResult{}, nil
 	}

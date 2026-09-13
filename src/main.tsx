@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { Activity, ArrowUp, Bell, Boxes, ClipboardList, Code2, Gauge, Globe2, LogOut, Menu, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
-import { acceptIncident, adminStatus, getSession, listIncidents, listJobs, setCSRF, setupStatus, suppressIncident, logout as apiLogout } from './api'
+import { acceptIncident, adminStatus, APIError, getSession, listIncidents, listJobs, setCSRF, setupStatus, suppressIncident, logout as apiLogout } from './api'
 import { Dashboard } from './pages/Dashboard'
 import { JobEditor } from './pages/JobEditor'
 import { JobDetail } from './pages/JobDetail'
@@ -243,8 +243,8 @@ function Incidents() {
     setBusy(actionID)
     setActionError('')
     try {
-      if (action === 'accept') await acceptIncident(row.job_id, key)
-      else await suppressIncident(row.job_id, key)
+      if (action === 'accept') await acceptIncident(row.job_id, key, row.incident.change)
+      else await suppressIncident(row.job_id, key, row.incident.change)
       await client.invalidateQueries({ queryKey: ['incidents'] })
       await client.invalidateQueries({ queryKey: ['job', row.job_id] })
       if (action === 'accept') {
@@ -253,7 +253,16 @@ function Incidents() {
       }
       setPendingAction(null)
     } catch (error) {
-      setActionError(error instanceof Error ? error.message : 'The incident action could not be completed.')
+      if (error instanceof APIError && error.code === 'incident_conflict') {
+        // The reviewed evidence is no longer current. Close the stale dialog
+        // and reload the list so the administrator sees the new observation
+        // before deciding again.
+        setPendingAction(null)
+        await client.invalidateQueries({ queryKey: ['incidents'] })
+        setActionError('This incident changed while it was open. The incident list was refreshed; review the new evidence before retrying.')
+      } else {
+        setActionError(error instanceof Error ? error.message : 'The incident action could not be completed.')
+      }
     } finally {
       setBusy('')
     }

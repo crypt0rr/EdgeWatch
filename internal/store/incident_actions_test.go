@@ -118,6 +118,55 @@ func TestSuppressIncidentStoresOneScanWindow(t *testing.T) {
 	}
 }
 
+func TestIncidentActionsRejectStaleExpectedChange(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("stale-incident-action"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "port|127.0.0.1|tcp|443"
+	reviewed := model.Change{Key: key, Kind: "port", Target: "127.0.0.1", Protocol: "tcp", Port: 443, Old: "not-open", New: "open", Severity: "critical"}
+	if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &model.Snapshot{Scopes: []model.Scope{{Target: "127.0.0.1", Protocol: "tcp", Ports: "443"}}}
+		state.Incidents[key] = model.Incident{Change: reviewed, ScanID: "scan-1"}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a newer scan changing the observed value while the original
+	// confirmation dialog is still open.
+	current := reviewed
+	current.New = "not-open"
+	if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Incidents[key] = model.Incident{Change: current, ScanID: "scan-2"}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expectation := &IncidentExpectation{Change: reviewed}
+	if _, err := s.AcceptIncidentWithExpectedOutboxAndAudit(ctx, record.ID, record.Job.Name, key, expectation, nil, AuditEntry{}); !errors.Is(err, ErrIncidentConflict) {
+		t.Fatalf("stale acceptance error = %v", err)
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := state.Incidents[key].Change.New; got != current.New {
+		t.Fatalf("stale acceptance mutated incident to %q", got)
+	}
+	if _, err := s.SuppressIncidentWithExpectedOutboxAndAudit(ctx, record.ID, record.Job.Name, key, expectation, nil, AuditEntry{}); !errors.Is(err, ErrIncidentConflict) {
+		t.Fatalf("stale suppression error = %v", err)
+	}
+	state, err = s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Incidents[key]; !ok {
+		t.Fatal("stale suppression removed the current incident")
+	}
+}
+
 func TestAcceptRelatedPortAndServiceRemovalsInEitherOrder(t *testing.T) {
 	for _, first := range []string{"port", "service"} {
 		t.Run(first+"-first", func(t *testing.T) {

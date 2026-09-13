@@ -10,10 +10,19 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
-// AcceptIncidentWithOutboxAndAudit folds one active incident into the current
-// baseline and queues the resulting event for the supplied job destinations in
-// the same transaction as the state and audit mutation.
-func (s *Store) AcceptIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
+// IncidentExpectation is the immutable change snapshot an operator reviewed
+// before confirming an incident action. Keeping the expectation separate from
+// the runtime incident lets the store reject stale dialogs transactionally.
+type IncidentExpectation struct {
+	Change model.Change
+}
+
+// AcceptIncidentWithExpectedOutboxAndAudit folds one active incident into the
+// current baseline and queues the resulting event for the supplied job
+// destinations in the same transaction as the state and audit mutation. The
+// expected change must match the current incident exactly; this prevents a
+// stale browser dialog from approving a different observation.
+func (s *Store) AcceptIncidentWithExpectedOutboxAndAudit(ctx context.Context, jobID, jobName, key string, expected *IncidentExpectation, destinations []string, audit AuditEntry) ([]model.Event, error) {
 	return s.updateIncidentAction(ctx, jobID, destinations, []AuditEntry{audit}, func(state *model.JobState) ([]model.Event, error) {
 		if state.Baseline == nil {
 			return nil, ErrBaselineNotReady
@@ -21,6 +30,9 @@ func (s *Store) AcceptIncidentWithOutboxAndAudit(ctx context.Context, jobID, job
 		incident, ok := state.Incidents[key]
 		if !ok {
 			return nil, ErrIncidentNotFound
+		}
+		if !incidentMatchesExpectation(key, incident, expected) {
+			return nil, ErrIncidentConflict
 		}
 		change := incident.Change
 		if change.Key == "" {
@@ -76,6 +88,15 @@ func (s *Store) AcceptIncidentWithOutboxAndAudit(ctx context.Context, jobID, job
 		}
 		return []model.Event{{Type: "incident-accepted", Job: jobName, ScanID: incident.ScanID, Message: acceptedIncidentMessage(len(accepted)), Changes: accepted, CreatedAt: time.Now().UTC()}}, nil
 	})
+}
+
+// AcceptIncidentWithOutboxAndAudit folds one active incident into the current
+// baseline and queues the resulting event for the supplied job destinations in
+// the same transaction as the state and audit mutation. It is retained for
+// internal callers that already operate inside a trusted, current-state flow;
+// HTTP handlers should use the expected-snapshot variant above.
+func (s *Store) AcceptIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return s.AcceptIncidentWithExpectedOutboxAndAudit(ctx, jobID, jobName, key, nil, destinations, audit)
 }
 
 // AcceptIncidentWithAudit is retained for callers that only need the durable
@@ -134,14 +155,18 @@ func acceptedIncidentMessage(count int) string {
 	return "Incident accepted into baseline"
 }
 
-// SuppressIncidentWithOutboxAndAudit hides an active incident for exactly one
-// future successful scan and queues the action event for the supplied job
-// destinations transactionally.
-func (s *Store) SuppressIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
+// SuppressIncidentWithExpectedOutboxAndAudit hides an active incident for
+// exactly one future successful scan and queues the action event for the
+// supplied job destinations transactionally. The expected change must match
+// the current incident exactly so a stale dialog cannot suppress new evidence.
+func (s *Store) SuppressIncidentWithExpectedOutboxAndAudit(ctx context.Context, jobID, jobName, key string, expected *IncidentExpectation, destinations []string, audit AuditEntry) ([]model.Event, error) {
 	return s.updateIncidentAction(ctx, jobID, destinations, []AuditEntry{audit}, func(state *model.JobState) ([]model.Event, error) {
 		incident, ok := state.Incidents[key]
 		if !ok {
 			return nil, ErrIncidentNotFound
+		}
+		if !incidentMatchesExpectation(key, incident, expected) {
+			return nil, ErrIncidentConflict
 		}
 		if state.Suppressed == nil {
 			state.Suppressed = map[string]int{}
@@ -161,10 +186,35 @@ func (s *Store) SuppressIncidentWithOutboxAndAudit(ctx context.Context, jobID, j
 	})
 }
 
+// SuppressIncidentWithOutboxAndAudit hides an active incident for exactly one
+// future successful scan and queues the action event for the supplied job
+// destinations transactionally. It is retained for trusted internal callers;
+// HTTP handlers should use the expected-snapshot variant above.
+func (s *Store) SuppressIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return s.SuppressIncidentWithExpectedOutboxAndAudit(ctx, jobID, jobName, key, nil, destinations, audit)
+}
+
 // SuppressIncidentWithAudit is retained for source compatibility with callers
 // that do not provide notification destinations.
 func (s *Store) SuppressIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
 	return s.SuppressIncidentWithOutboxAndAudit(ctx, jobID, jobName, key, nil, audit)
+}
+
+func incidentMatchesExpectation(key string, incident model.Incident, expected *IncidentExpectation) bool {
+	// A nil expectation is used only by the legacy trusted wrappers below. HTTP
+	// callers always provide the reviewed change snapshot.
+	if expected == nil {
+		return true
+	}
+	actual := incident.Change
+	if actual.Key == "" {
+		actual.Key = key
+	}
+	want := expected.Change
+	if want.Key == "" {
+		want.Key = key
+	}
+	return actual == want
 }
 
 // updateIncidentAction applies a baseline/incident mutation only when the job

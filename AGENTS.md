@@ -66,9 +66,10 @@ Documentation-only changes need a diff review and checks of referenced paths and
 | Frontend code | `npm run lint`, `npm run build`, and `npm run test:coverage` |
 | Browser behavior | `npm run test:e2e` |
 | Database schema | Store migration tests and `./scripts/check-schema-docs.sh` |
-| Compose configuration | `docker compose config --quiet` and `docker compose -f compose.yaml -f compose.syn.yaml config --quiet` |
+| Compose configuration | Run `docker compose config --quiet` and `docker compose -f compose.yaml -f compose.syn.yaml config --quiet`, then verify the rendered capability, hardening, image, and storage policies described in `docs/container-hardening.md` and the CI `Validate Compose deployment` step |
 | Scanner dependency pin | `./scripts/verify-naabu-pin.sh` |
-| Release artifacts | `./scripts/test-release-artifacts.sh` |
+| Release helper scripts | `./scripts/test-release-artifacts.sh`; this uses fixture binaries and does not build a release candidate |
+| Release workflow or GoReleaser configuration | Follow the exact GoReleaser check and immutable-candidate gates in `.github/workflows/release.yml`; the candidate, publication, image, and runtime smoke gates run only for tags |
 
 Install Chromium before the first browser test with `npx playwright install --with-deps chromium`.
 The real-stack browser tests also require Go.
@@ -76,16 +77,17 @@ The real-stack browser tests also require Go.
 `make check` checks Go formatting, runs vet and race tests, checks frontend types, and runs `make security`.
 `make security` runs pinned Go lint, `govulncheck`, and the npm audit at the high-severity threshold.
 It does not replace frontend builds, frontend tests, browser tests, or container checks.
-CI defines the complete checks for pull requests.
+CI defines the normal pull-request gates, but tag-only release candidate, publication, image, and runtime smoke checks remain part of release validation.
 
-Before committing, run `git diff --check` and review the diff for unrelated edits or generated files.
+Before committing, inspect `git status --short`, run `git diff --check` and `git diff --cached --check`, and review both `git diff` and `git diff --cached` for unrelated edits or generated files.
+Remember that untracked files appear in status but not in either diff until added.
 Report the checks you ran and any failures or checks you could not run.
 
 ## Behavior to preserve
 
 - Use controlled listeners for integration scans and scan only authorized targets.
 - Preserve target exclusions, probe budgets, cancellation, and resumable scan behavior.
-- Keep scanner execution on fixed executables with validated argument arrays and `exec.CommandContext`.
+- Keep scanner execution shell-free on fixed executables with validated argument arrays and `exec.CommandContext`; preserve the minimal environment, private temporary inputs and outputs, bounded diagnostic and structured output, and child termination when those bounds are exceeded.
 - Keep UDP scans on Nmap and require Nmap confirmation before Naabu discoveries enter baselines or incidents.
 - Preserve job profile revisions so profile edits do not silently change scheduled jobs.
 - Preserve baseline state for failed or incomplete observations and retain scan history when users accept changes.
@@ -110,3 +112,5 @@ Update operator documentation when configuration, commands, or visible behavior 
 Use a concise commit subject consistent with recent history, such as `docs:`, `fix:`, or `feat:`.
 Describe the resulting behavior and relevant validation in the pull request.
 Call out compatibility changes and unresolved failures that affect review.
+Do not commit, push, open or merge pull requests, tag, publish releases, or perform other external writes unless the user explicitly requested that action.
+Keep Renovate Dependency Dashboard issue `#8` open; it is an intentionally persistent tracking issue and must not be closed during issue cleanup.

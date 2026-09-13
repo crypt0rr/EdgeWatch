@@ -44,6 +44,47 @@ func TestScanCycleUnitIdentityBackfillIsBoundedAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestScanCyclePhaseAndProbeMetadataUsesIndexedColumns(t *testing.T) {
+	ctx, s, job, plan := cycleFixture(t)
+	defer s.Close()
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var phase string
+	var probes int64
+	if err := s.DB.QueryRowContext(ctx, `SELECT phase,probes FROM scan_cycle_units WHERE cycle_id=? AND sequence=0`, cycle.ID).Scan(&phase, &probes); err != nil {
+		t.Fatal(err)
+	}
+	if phase != plan.Units[0].Phase || probes != plan.Units[0].Probes {
+		t.Fatalf("indexed unit metadata = phase %q probes %d, want %q/%d", phase, probes, plan.Units[0].Phase, plan.Units[0].Probes)
+	}
+	var indexCount int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_index_list('scan_cycle_units') WHERE name='scan_cycle_units_cycle_phase_status'`).Scan(&indexCount); err != nil {
+		t.Fatal(err)
+	}
+	if indexCount != 1 {
+		t.Fatal("cycle phase/status index is missing")
+	}
+	// The aggregate query must remain usable from the scalar columns even if a
+	// legacy detail blob is unavailable; recovery paths decode that blob only
+	// when they actually need the unit payload.
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=? WHERE cycle_id=? AND sequence=0`, []byte("not-json"), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	discovery, nmap, err := s.ScanCycleProbeTotals(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if phase == "discovery" {
+		if discovery != probes || nmap != 0 {
+			t.Fatalf("probe totals = discovery %d nmap %d, want %d/0", discovery, nmap, probes)
+		}
+	} else if nmap != probes || discovery != 0 {
+		t.Fatalf("probe totals = discovery %d nmap %d, want 0/%d", discovery, nmap, probes)
+	}
+}
+
 func TestScanCycleHasScanRequiresPromotedFinalRecord(t *testing.T) {
 	cases := []struct {
 		name, status, cycleStatus string

@@ -219,6 +219,13 @@ describe('authentication and public API contracts', () => {
 })
 
 describe('API route helpers', () => {
+	it('builds the latest successful scan endpoint', async () => {
+		const fetchMock = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify({ scan: null }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+		vi.stubGlobal('fetch', fetchMock)
+		await apiRoutes.latestSuccessfulScan('job/1')
+		expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/jobs/job/1/scans/latest-successful')
+	})
+
 	it('covers the remaining authenticated route builders', async () => {
 		const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }))
 		vi.stubGlobal('fetch', fetchMock)
@@ -245,6 +252,7 @@ describe('API route helpers', () => {
 		await apiRoutes.resetBaseline('job/1')
 		await apiRoutes.approveBaseline('job/1', 'scan/1')
 		await apiRoutes.jobScans('job/1')
+		await apiRoutes.latestSuccessfulScan('job/1')
 		await apiRoutes.jobBaseline('job/1')
 		await apiRoutes.baselineHostRDAP('job/1', '192.0.2.1')
 		await apiRoutes.scanHosts('job/1', 'scan/1')

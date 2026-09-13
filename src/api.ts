@@ -144,6 +144,7 @@ export const cancelScan = (id: string) => api<{ status: string; scan_id: string 
 export const resetBaseline = (id: string) => api(`/jobs/${id}/baseline/reset`, { method: 'POST' })
 export const approveBaseline = (jobId: string, scanId: string) => api(`/jobs/${jobId}/baseline/approve`, { method: 'POST', body: JSON.stringify({ scan_id: scanId }) })
 export const jobScans = (id: string, offset = 0, limit = 20) => api<{ scans: ScanSummary[]; pagination: Pagination }>(`/jobs/${id}/scans?limit=${limit}&offset=${offset}`)
+export const latestSuccessfulScan = (id: string) => api<{ scan: ScanSummary | null }>(`/jobs/${id}/scans/latest-successful`)
 export const jobBaseline = (id: string, offset = 0, limit = 50) => api<{ job_id: string; job: string; revision: number; security_hash: string; baseline: Job['baseline']; snapshot: { units: Unit[]; scopes: { target: string; protocol: string; ports: string; service_detection: boolean }[]; dns?: Record<string, string[]> } | null; pagination: Pagination }>(`/jobs/${id}/baseline?limit=${limit}&offset=${offset}`)
 export type HostFilters = { q?: string; protocol?: string; has_open_ports?: boolean; limit?: number; offset?: number; signal?: AbortSignal }
 function hostQuery(filters: HostFilters = {}) {

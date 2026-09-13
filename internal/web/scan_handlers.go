@@ -57,6 +57,22 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), record, state))
 }
 
+// latestSuccessfulScan returns only the newest completed scan summary. The
+// job existence check keeps the null response unambiguous: a known job with
+// no successful history is 200/null, while an unknown job remains 404.
+func (s *Server) latestSuccessfulScan(w http.ResponseWriter, r *http.Request, id string) {
+	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		return
+	}
+	scan, err := s.Store.GetLatestSuccessfulJobScanSummary(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scan": scan})
+}
+
 func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	var p jobPayload
 	if !decodeJSON(w, r, &p) {

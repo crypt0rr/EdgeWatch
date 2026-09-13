@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/creack/pty"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
@@ -992,12 +993,11 @@ func sanitizeStderr(v string) string {
 }
 
 // runNmapInvocation keeps XML available to the parser while consuming Nmap's
-// human status channel and XML taskprogress records concurrently. Nmap flushes
-// periodic taskprogress records when XML is written to a file, but some
-// versions buffer the same records when XML is sent to a pipe. Rewrite the
-// internal stdout destination to a private temporary file so progress is
-// observable without sacrificing the existing stdout fallback used by test
-// scanners and older integrations.
+// human status channel and XML taskprogress records concurrently. Nmap only
+// emits its periodic status stream when stdout is a terminal, even when
+// --stats-every is supplied. Run the fixed child under a private pseudo-terminal
+// so the daemon receives the same supported progress stream as an interactive
+// operator, while XML remains file-backed and bounded.
 func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string, float64), onHeartbeat func()) ([]byte, string, error) {
 	xmlPath, err := prepareNmapXMLOutput(cmd)
 	if err != nil {
@@ -1033,15 +1033,52 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 			_ = cmd.Process.Kill()
 		}
 	}
-	stdout := &cappedBuffer{limit: maxNmapOutput, onExceeded: killOnOutputLimit}
+	// The terminal stream is diagnostic output, not the structured result. Keep
+	// it bounded for the fallback path used by older/test scanner binaries and
+	// emit only human-readable lines; XML fragments printed by a compatibility
+	// binary must never replace the last useful progress detail.
+	stdout := &progressOutputWriter{limit: maxNmapOutput, onExceeded: killOnOutputLimit, emit: func(line string) {
+		if looksLikeNmapXML(line) {
+			return
+		}
+		fraction, _ := parseNmapProgress(line)
+		emitOutput(line, fraction)
+	}}
 	stderr := &progressOutputWriter{limit: maxProgressOutput, onExceeded: killOnOutputLimit, emit: func(line string) {
 		fraction, _ := parseNmapProgress(line)
 		emitOutput(line, fraction)
 	}}
-	cmd.Stdout = stdout
 	cmd.Stderr = stderr
-	if err := cmd.Start(); err != nil {
-		return nil, "", err
+	// pty.Start assigns the slave to stdin/stdout and sets it as the child's
+	// controlling terminal. Stderr intentionally remains our bounded writer so
+	// error diagnostics stay separate. If a non-Unix build cannot provide a
+	// pseudo-terminal, fall back to the existing pipe-based execution; the
+	// heartbeat still reports truthful liveness there.
+	originalStdin, originalSysProcAttr := cmd.Stdin, cmd.SysProcAttr
+	// Keep status records on one line so the parser receives a useful update
+	// even when a terminal implementation would otherwise report a zero-sized
+	// window (common in containers).
+	ptyMaster, ptyErr := pty.StartWithSize(cmd, &pty.Winsize{Rows: 24, Cols: 256})
+	if ptyErr != nil {
+		// pty.Start may have populated the command's terminal fields before a
+		// platform-specific start error. Restore them before the compatibility
+		// path so a failed terminal setup cannot poison a normal invocation.
+		cmd.Stdout = stdout
+		cmd.Stdin = originalStdin
+		cmd.SysProcAttr = originalSysProcAttr
+		if err := cmd.Start(); err != nil {
+			return nil, "", err
+		}
+	}
+
+	terminalDone := make(chan struct{})
+	if ptyMaster != nil {
+		go func() {
+			_, _ = io.Copy(stdout, ptyMaster)
+			close(terminalDone)
+		}()
+	} else {
+		close(terminalDone)
 	}
 
 	progressStop := make(chan struct{})
@@ -1088,6 +1125,15 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 	}()
 
 	waitErr := cmd.Wait()
+	if ptyMaster != nil {
+		// Once the child closes the slave, Linux completes the master read with
+		// EIO. Drain that final terminal buffer before closing the master so XML
+		// fallback output from compatibility binaries cannot be lost.
+		<-terminalDone
+		_ = ptyMaster.Close()
+	} else {
+		<-terminalDone
+	}
 	close(progressStop)
 	stderr.Flush()
 	// The progress goroutine may have observed the stop signal just before the
@@ -1095,6 +1141,8 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 	// invocation's terminal update, then one final poll captures records flushed
 	// as the child exited.
 	<-progressDone
+	structured := stdout.Bytes()
+	structuredExceeded := stdout.exceeded
 	if xmlPath != "" {
 		if exceeded, err := nmapXMLOutputExceeded(xmlPath, maxNmapOutput); err == nil && exceeded {
 			outputExceeded.Store(true)
@@ -1103,27 +1151,26 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 			outputExceeded.Store(true)
 		}
 		if data, exceeded, readErr := readCappedFile(xmlPath, maxNmapOutput); readErr == nil && len(data) > 0 {
-			stdout.Reset()
-			_, _ = stdout.Write(data)
-			stdout.exceeded = exceeded
+			structured = data
+			structuredExceeded = exceeded
 		}
 	}
 	if outputExceeded.Load() {
-		stdout.exceeded = true
+		structuredExceeded = true
 	}
 	if stderr.exceeded {
 		if waitErr != nil {
-			return stdout.Bytes(), stderr.String(), fmt.Errorf("%w; nmap diagnostic output exceeded %d bytes", waitErr, maxProgressOutput)
+			return structured, stderr.String(), fmt.Errorf("%w; nmap diagnostic output exceeded %d bytes", waitErr, maxProgressOutput)
 		}
-		return stdout.Bytes(), stderr.String(), fmt.Errorf("nmap diagnostic output exceeded %d bytes", maxProgressOutput)
+		return structured, stderr.String(), fmt.Errorf("nmap diagnostic output exceeded %d bytes", maxProgressOutput)
 	}
-	if stdout.exceeded {
+	if structuredExceeded {
 		if waitErr != nil {
-			return stdout.Bytes(), stderr.String(), fmt.Errorf("%w; nmap XML output exceeded %d bytes", waitErr, maxNmapOutput)
+			return structured, stderr.String(), fmt.Errorf("%w; nmap XML output exceeded %d bytes", waitErr, maxNmapOutput)
 		}
-		return stdout.Bytes(), stderr.String(), fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput)
+		return structured, stderr.String(), fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput)
 	}
-	return stdout.Bytes(), stderr.String(), waitErrWithContext(ctx, waitErr)
+	return structured, stderr.String(), waitErrWithContext(ctx, waitErr)
 }
 
 func nmapXMLOutputExceeded(path string, limit int) (bool, error) {
@@ -1296,10 +1343,10 @@ func pollNmapXMLProgress(path string, parser *nmapXMLProgressParser, emit func(s
 	return nil
 }
 
-// progressOutputWriter lets os/exec own the pipe-copy lifecycle while still
-// exposing complete stderr lines to the progress callback. Using Stdout and
-// Stderr writers instead of StdoutPipe/StderrPipe avoids a race where Wait
-// closes a pipe at the same moment a reader goroutine observes its EOF.
+// progressOutputWriter lets os/exec (or the pty reader) own the stream-copy
+// lifecycle while still exposing complete diagnostic lines to the progress
+// callback. It accepts both newline-delimited pipe output and carriage-return
+// terminal updates, which Nmap uses when refreshing an interactive status line.
 type progressOutputWriter struct {
 	mu         sync.Mutex
 	all        strings.Builder
@@ -1335,15 +1382,7 @@ func (w *progressOutputWriter) Write(data []byte) (int, error) {
 		_, _ = w.all.Write(accepted)
 		_, _ = w.pending.Write(accepted)
 	}
-	value := w.pending.String()
-	lines := strings.Split(value, "\n")
-	w.pending.Reset()
-	if len(lines) > 0 && lines[len(lines)-1] != "" {
-		w.pending.WriteString(lines[len(lines)-1])
-		lines = lines[:len(lines)-1]
-	} else if len(lines) > 0 {
-		lines = lines[:len(lines)-1]
-	}
+	lines := w.takeLinesLocked()
 	w.mu.Unlock()
 	if trigger && w.onExceeded != nil {
 		w.exceedOnce.Do(w.onExceeded)
@@ -1372,6 +1411,35 @@ func (w *progressOutputWriter) String() string {
 	return w.all.String()
 }
 
+func (w *progressOutputWriter) Bytes() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return []byte(w.all.String())
+}
+
+// takeLinesLocked returns complete lines and leaves an unterminated suffix in
+// pending. CRLF is treated as one delimiter; a bare CR is also a delimiter so
+// terminal refreshes are surfaced promptly instead of waiting for a newline.
+func (w *progressOutputWriter) takeLinesLocked() []string {
+	value := w.pending.String()
+	w.pending.Reset()
+	lines := make([]string, 0, 2)
+	for len(value) > 0 {
+		index := strings.IndexAny(value, "\r\n")
+		if index < 0 {
+			w.pending.WriteString(value)
+			break
+		}
+		lines = append(lines, value[:index])
+		delimiter := value[index]
+		value = value[index+1:]
+		if delimiter == '\r' && strings.HasPrefix(value, "\n") {
+			value = value[1:]
+		}
+	}
+	return lines
+}
+
 func waitErrWithContext(ctx context.Context, waitErr error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -1385,6 +1453,17 @@ func trimProgressOutput(line string) string {
 		line = line[:240] + "…"
 	}
 	return line
+}
+
+func looksLikeNmapXML(line string) bool {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false
+	}
+	// Compatibility/test binaries sometimes ignore the rewritten -oX path and
+	// print XML on stdout. Keep that structured payload available for parsing,
+	// but do not present it as human progress detail.
+	return strings.HasPrefix(line, "<?xml") || strings.HasPrefix(line, "<!DOCTYPE") || strings.HasPrefix(line, "<nmaprun") || strings.HasPrefix(line, "<host") || strings.Contains(line, "<nmaprun")
 }
 
 func parseNmapProgress(line string) (float64, bool) {

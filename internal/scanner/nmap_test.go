@@ -400,6 +400,36 @@ func TestScanWithProgressReportsLiveProcessHeartbeatAndNmapOutput(t *testing.T) 
 	}
 }
 
+func TestScanWithProgressUsesTerminalStatusWithoutControllingTTY(t *testing.T) {
+	dir := t.TempDir()
+	nmapPath := filepath.Join(dir, "nmap")
+	script := "#!/bin/sh\nout=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-oX\" ]; then out=\"$2\"; shift 2; else shift; fi\ndone\nif [ -t 1 ]; then\n  printf 'Scanning 192.0.2.1\\r\\n'\n  printf 'Connect Scan Timing: About 37.50%% done\\r\\n'\nfi\nprintf '%s' '" + sampleXML + "' > \"$out\"\n"
+	if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := New(nmapPath)
+	job := config.NormalizeJob(config.Job{
+		Name: "tty-progress", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		TCP: &config.Protocol{Ports: "22", Mode: "connect"}, Timing: "balanced",
+	})
+	var updates []Progress
+	if _, err := n.ScanWithProgress(context.Background(), job, func(progress Progress) { updates = append(updates, progress) }); err != nil {
+		t.Fatal(err)
+	}
+	foundOutput, foundFraction := false, false
+	for _, update := range updates {
+		if strings.Contains(update.LastOutput, "Scanning 192.0.2.1") || strings.Contains(update.LastOutput, "About 37.50%") {
+			foundOutput = true
+		}
+		if update.ProcessAlive && update.ProcessProgressPercent == 37 {
+			foundFraction = true
+		}
+	}
+	if !foundOutput || !foundFraction {
+		t.Fatalf("terminal status progress missing: output=%v fraction=%v updates=%#v", foundOutput, foundFraction, updates)
+	}
+}
+
 func TestScanWithProgressReportsXMLTaskProgress(t *testing.T) {
 	dir := t.TempDir()
 	nmapPath := filepath.Join(dir, "nmap")

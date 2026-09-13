@@ -421,15 +421,50 @@ func TestCanceledBatchReleasesUnsentClaims(t *testing.T) {
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	_ = notifier.deliverBatch(canceled, deliveries, nil)
-	var liveClaims, attempts int
+	var liveClaims, attempts, deferrals int
 	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE claim_token<>''`).Scan(&liveClaims); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.DB.QueryRowContext(ctx, `SELECT COALESCE(SUM(attempts),0) FROM outbox`).Scan(&attempts); err != nil {
 		t.Fatal(err)
 	}
-	if liveClaims != 0 || attempts != 0 {
-		t.Fatalf("canceled batch left claims/attempts: claims=%d attempts=%d", liveClaims, attempts)
+	if err := db.DB.QueryRowContext(ctx, `SELECT COALESCE(SUM(deferrals),0) FROM outbox`).Scan(&deferrals); err != nil {
+		t.Fatal(err)
+	}
+	if liveClaims != 0 || attempts != 0 || deferrals != 0 {
+		t.Fatalf("canceled batch left claims/budgets: claims=%d attempts=%d deferrals=%d", liveClaims, attempts, deferrals)
+	}
+}
+
+func TestCanceledDeliveryReleasesClaimWithoutBudget(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	notifier, err := New(db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueueEvent(ctx, "destination", model.Event{Type: "cancel-one", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	due, err := db.ClaimDueDeliveries(ctx, 1, "owner")
+	if err != nil || len(due) != 1 {
+		t.Fatalf("claimed delivery = %#v, error = %v", due, err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := notifier.deliverOne(canceled, due[0], nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled delivery error = %v, want context cancellation", err)
+	}
+	var attempts, deferrals, claims int
+	if err := db.DB.QueryRowContext(ctx, `SELECT attempts,deferrals,CASE WHEN claim_token<>'' THEN 1 ELSE 0 END FROM outbox WHERE id=?`, due[0].ID).Scan(&attempts, &deferrals, &claims); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 || deferrals != 0 || claims != 0 {
+		t.Fatalf("canceled delivery consumed state: attempts=%d deferrals=%d claims=%d", attempts, deferrals, claims)
 	}
 }
 

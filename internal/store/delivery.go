@@ -139,11 +139,13 @@ var (
 )
 
 const (
-	deliveryClaimLease   = 30 * time.Minute
-	deliveryMaxAttempts  = 8
-	deliveryMaxDeferrals = 8
-	deliveryInitialDelay = 2 * time.Minute
-	deliveryMaxDelay     = time.Hour
+	deliveryClaimLease       = 30 * time.Minute
+	deliveryMaxAttempts      = 8
+	deliveryMaxDeferrals     = 8
+	deliveryInitialDelay     = 2 * time.Minute
+	deliveryMaxDelay         = time.Hour
+	deliveryLockedDelay      = time.Hour
+	deliveryMaintenanceBatch = 256
 )
 
 // ClaimDueDeliveries atomically leases due outbox rows to one drain owner.
@@ -159,6 +161,154 @@ func (s *Store) ClaimDueDeliveries(ctx context.Context, limit int, owner string)
 // occupy every delivery slot needed by healthy destinations.
 func (s *Store) ClaimDueDeliveriesExcluding(ctx context.Context, limit int, owner string, excluded []string) ([]Delivery, error) {
 	return s.claimDueDeliveries(ctx, limit, owner, excluded)
+}
+
+// AgeLockedDeliveries advances the separate deferral budget for outbox rows
+// belonging to managed destinations whose encryption key is currently
+// unavailable. The notifier excludes those rows from normal claims, so they
+// need an explicit, durable aging path or they would remain pending forever.
+// Aging is performed only when a row is due and is bounded to one maintenance
+// batch. It never consumes a provider-attempt budget; restoring the key before
+// the final deferral leaves the row claimable again.
+func (s *Store) AgeLockedDeliveries(ctx context.Context, destinations []string) error {
+	if len(destinations) == 0 {
+		return nil
+	}
+	unique := make([]string, 0, len(destinations))
+	seen := make(map[string]struct{}, len(destinations))
+	for _, destination := range destinations {
+		destination = strings.TrimSpace(destination)
+		if destination == "" {
+			continue
+		}
+		if _, ok := seen[destination]; ok {
+			continue
+		}
+		seen[destination] = struct{}{}
+		unique = append(unique, destination)
+	}
+	if len(unique) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(unique))
+	for i := range unique {
+		placeholders[i] = "?"
+	}
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339Nano)
+	query := `SELECT id,destination,deferrals FROM outbox
+WHERE sent_at IS NULL AND terminal_at='' AND next_at<=?
+  AND attempts<? AND deferrals<?
+  AND (claim_token='' OR claim_until='' OR claim_until<=?)
+  AND destination IN (` + strings.Join(placeholders, ",") + `)
+ORDER BY id LIMIT ?`
+	// The first timestamp is the due cutoff and the last timestamp before the
+	// destination list is the claim-expiry cutoff.
+	args := []any{nowText, deliveryMaxAttempts, deliveryMaxDeferrals, nowText}
+	for _, destination := range unique {
+		args = append(args, destination)
+	}
+	args = append(args, deliveryMaintenanceBatch)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	type lockedDelivery struct {
+		id          int64
+		destination string
+		deferrals   int
+	}
+	var pending []lockedDelivery
+	for rows.Next() {
+		var item lockedDelivery
+		if err := rows.Scan(&item.id, &item.destination, &item.deferrals); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		pending = append(pending, item)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range pending {
+		deferrals := item.deferrals + 1
+		terminal := deferrals >= deliveryMaxDeferrals
+		terminalAt := ""
+		if terminal {
+			terminalAt = nowText
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE outbox SET deferrals=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until=''
+WHERE id=? AND sent_at IS NULL AND terminal_at='' AND attempts<? AND deferrals=?
+  AND (claim_token='' OR claim_until='' OR claim_until<=?)`, deferrals, now.Add(deliveryLockedDelay).Format(time.RFC3339Nano), deliveryErrorCode(ErrDeliveryDestinationLocked), terminalAt, item.id, deliveryMaxAttempts, item.deferrals, nowText)
+		if err != nil {
+			return err
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			// A concurrent drain may have claimed or completed this row after
+			// the bounded selection. Leave that owner in charge.
+			continue
+		}
+		if err := recordDeliveryFailureTx(ctx, tx, item.destination, ErrDeliveryDestinationLocked, terminal, now); err != nil {
+			return err
+		}
+		if terminal {
+			if err := insertTerminalDeliveryEventTx(ctx, tx, item.destination, ErrDeliveryDestinationLocked, "locked destination grace period", now); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
+}
+
+// WakeLockedDeliveries makes rows immediately due when a previously locked
+// managed destination becomes usable again. Locked aging uses a one-hour
+// cadence to avoid touching the same rows on every worker tick; clearing that
+// delay on recovery prevents an otherwise healthy destination from waiting
+// for the next aging interval before it can drain.
+func (s *Store) WakeLockedDeliveries(ctx context.Context, destinations []string) error {
+	if len(destinations) == 0 {
+		return nil
+	}
+	unique := make([]string, 0, len(destinations))
+	seen := make(map[string]struct{}, len(destinations))
+	for _, destination := range destinations {
+		destination = strings.TrimSpace(destination)
+		if destination == "" {
+			continue
+		}
+		if _, ok := seen[destination]; ok {
+			continue
+		}
+		seen[destination] = struct{}{}
+		unique = append(unique, destination)
+	}
+	if len(unique) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(unique))
+	args := make([]any, 0, len(unique)+3)
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339Nano)
+	for i, destination := range unique {
+		placeholders[i] = "?"
+		args = append(args, destination)
+	}
+	query := `UPDATE outbox SET next_at=?
+WHERE sent_at IS NULL AND terminal_at='' AND last_error='destination_locked'
+  AND (claim_token='' OR claim_until='' OR claim_until<=?)
+  AND destination IN (` + strings.Join(placeholders, ",") + `)`
+	args = append([]any{nowText, nowText}, args...)
+	_, err := s.DB.ExecContext(ctx, query, args...)
+	return err
 }
 
 func (s *Store) claimDueDeliveries(ctx context.Context, limit int, owner string, excluded []string) ([]Delivery, error) {

@@ -390,6 +390,13 @@ func TestLockedDestinationDoesNotStarveHealthyDelivery(t *testing.T) {
 	if pendingLocked != 10 {
 		t.Fatalf("locked rows changed during healthy drain: %d", pendingLocked)
 	}
+	var agedLocked int
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination=? AND deferrals=1 AND last_error=?`, managedDestination, "destination_locked").Scan(&agedLocked); err != nil {
+		t.Fatal(err)
+	}
+	if agedLocked != 10 {
+		t.Fatalf("locked rows were not durably aged: %d", agedLocked)
+	}
 	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE claim_token<>''`).Scan(&liveClaims); err != nil {
 		t.Fatal(err)
 	}

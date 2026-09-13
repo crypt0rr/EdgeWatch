@@ -94,6 +94,19 @@ func (s *Store) JobSilenceDue(ctx context.Context, jobID string, createdAt, now 
 	return decision.due, err
 }
 
+// JobSilenceReference returns the timestamp from which the watchdog should
+// calculate a schedule window. It mirrors the reference precedence used by
+// jobSilenceDecisionQuery: creation time, lifecycle eligibility, the newest
+// successful scan, and the denormalized last-success marker. Keeping this
+// read on the read pool lets the application derive a calendar-aware deadline
+// without making the silence decision itself non-transactional.
+func (s *Store) JobSilenceReference(ctx context.Context, jobID string, createdAt, now time.Time) (time.Time, error) {
+	if jobID == "" {
+		return time.Time{}, nil
+	}
+	return jobSilenceReferenceQuery(ctx, s.reader(), jobID, createdAt, now)
+}
+
 type jobSilenceDecision struct {
 	due           bool
 	lastReference time.Time
@@ -102,6 +115,36 @@ type jobSilenceDecision struct {
 
 func isMissingSilenceState(err error) bool {
 	return err != nil && strings.Contains(strings.ToLower(err.Error()), "no such table")
+}
+
+func jobSilenceReferenceQuery(ctx context.Context, queryer rowQueryer, jobID string, createdAt, now time.Time) (time.Time, error) {
+	if jobID == "" {
+		return time.Time{}, nil
+	}
+	now = now.UTC()
+	createdAt = createdAt.UTC()
+	lastReference := createdAt
+	var eligible, lastSuccess string
+	stateErr := queryer.QueryRowContext(ctx, `SELECT eligible_at,last_success_at FROM job_silence_state WHERE job_id=?`, jobID).Scan(&eligible, &lastSuccess)
+	if stateErr != nil && !errors.Is(stateErr, sql.ErrNoRows) && !isMissingSilenceState(stateErr) {
+		return time.Time{}, stateErr
+	}
+	if parsed := scanTime(eligible); !parsed.IsZero() && !parsed.After(now) && parsed.After(lastReference) {
+		lastReference = parsed
+	}
+	var finished string
+	err := queryer.QueryRowContext(ctx, `SELECT finished_at FROM scans WHERE job_id=? AND status='success' ORDER BY finished_at DESC,id DESC LIMIT 1`, jobID).Scan(&finished)
+	if err == nil {
+		if parsed := scanTime(finished); !parsed.IsZero() && parsed.After(lastReference) {
+			lastReference = parsed
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return time.Time{}, err
+	}
+	if parsed := scanTime(lastSuccess); !parsed.IsZero() && parsed.After(lastReference) {
+		lastReference = parsed
+	}
+	return lastReference, nil
 }
 
 func jobSilenceDecisionTx(ctx context.Context, tx *sql.Tx, jobID string, createdAt, now time.Time, threshold time.Duration) (jobSilenceDecision, error) {
@@ -114,27 +157,15 @@ func jobSilenceDecisionQuery(ctx context.Context, queryer rowQueryer, jobID stri
 	}
 	now = now.UTC()
 	createdAt = createdAt.UTC()
-	lastReference := createdAt
 	var eligible, nextAlert, lastSuccess string
 	var backoff int
 	stateErr := queryer.QueryRowContext(ctx, `SELECT eligible_at,next_alert_at,last_success_at,backoff_level FROM job_silence_state WHERE job_id=?`, jobID).Scan(&eligible, &nextAlert, &lastSuccess, &backoff)
 	if stateErr != nil && !errors.Is(stateErr, sql.ErrNoRows) && !strings.Contains(strings.ToLower(stateErr.Error()), "no such table") {
 		return jobSilenceDecision{}, stateErr
 	}
-	if parsed := scanTime(eligible); !parsed.IsZero() && !parsed.After(now) && parsed.After(lastReference) {
-		lastReference = parsed
-	}
-	var finished string
-	err := queryer.QueryRowContext(ctx, `SELECT finished_at FROM scans WHERE job_id=? AND status='success' ORDER BY finished_at DESC,id DESC LIMIT 1`, jobID).Scan(&finished)
-	if err == nil {
-		if parsed := scanTime(finished); !parsed.IsZero() {
-			lastReference = parsed
-		}
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	lastReference, err := jobSilenceReferenceQuery(ctx, queryer, jobID, createdAt, now)
+	if err != nil {
 		return jobSilenceDecision{}, err
-	}
-	if parsed := scanTime(lastSuccess); !parsed.IsZero() && parsed.After(lastReference) {
-		lastReference = parsed
 	}
 	if lastReference.IsZero() || now.Sub(lastReference) < threshold {
 		return jobSilenceDecision{}, nil

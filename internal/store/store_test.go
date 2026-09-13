@@ -1260,6 +1260,63 @@ func TestReleaseDeliveryClaimsMakesRowsImmediatelyClaimable(t *testing.T) {
 	}
 }
 
+func TestReleaseDeliveryClaimPreservesRetryBudgets(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if err := s.QueueEvent(ctx, "destination", model.Event{Type: "claim-release", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := s.ClaimDueDeliveries(ctx, 1, "owner")
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("initial claim %#v %v", claimed, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempts=2,deferrals=3 WHERE id=?`, claimed[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReleaseDeliveryClaim(ctx, claimed[0].ID, claimed[0].ClaimToken, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	var attempts, deferrals, claims int
+	if err := s.DB.QueryRowContext(ctx, `SELECT attempts,deferrals,CASE WHEN claim_token<>'' THEN 1 ELSE 0 END FROM outbox WHERE id=?`, claimed[0].ID).Scan(&attempts, &deferrals, &claims); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 2 || deferrals != 3 || claims != 0 {
+		t.Fatalf("released delivery state = attempts %d deferrals %d claims %d", attempts, deferrals, claims)
+	}
+	if due, err := s.ClaimDueDeliveries(ctx, 1, "early-retry"); err != nil || len(due) != 0 {
+		t.Fatalf("delayed release was immediately claimable: %#v %v", due, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), claimed[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err := s.ClaimDueDeliveries(ctx, 1, "retry-owner")
+	if err != nil || len(reclaimed) != 1 {
+		t.Fatalf("released delivery was not retryable: %#v %v", reclaimed, err)
+	}
+	if err := s.ReleaseDeliveryClaim(ctx, reclaimed[0].ID, reclaimed[0].ClaimToken, 0); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 9; i++ {
+		if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), claimed[0].ID); err != nil {
+			t.Fatal(err)
+		}
+		next, err := s.ClaimDueDeliveries(ctx, 1, fmt.Sprintf("cancel-owner-%d", i))
+		if err != nil || len(next) != 1 {
+			t.Fatalf("cancellation retry %d claim = %#v, %v", i+1, next, err)
+		}
+		if err := s.ReleaseDeliveryClaim(ctx, next[0].ID, next[0].ClaimToken, 0); err != nil {
+			t.Fatalf("cancellation retry %d release: %v", i+1, err)
+		}
+	}
+	var terminalAt string
+	if err := s.DB.QueryRowContext(ctx, `SELECT terminal_at FROM outbox WHERE id=?`, claimed[0].ID).Scan(&terminalAt); err != nil {
+		t.Fatal(err)
+	}
+	if terminalAt != "" {
+		t.Fatalf("cancellation releases terminalized delivery at %q", terminalAt)
+	}
+}
+
 func TestDeferredDeliveryDoesNotConsumeAttempts(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

@@ -810,7 +810,9 @@ func (n *Notifier) deliverBatch(ctx context.Context, deliveries []store.Delivery
 		}
 	}
 	for _, delivery := range unsent {
-		if err := n.releaseClaim(ctx, delivery, store.ErrDeliveryIndeterminate, time.Minute); err != nil && !errors.Is(err, store.ErrDeliveryClaimLost) {
+		// The caller cancelled before this delivery reached a worker. Return the
+		// claim without consuming either the provider-attempt or deferral budget.
+		if err := n.releaseClaimWithoutBudget(ctx, delivery, 0); err != nil && !errors.Is(err, store.ErrDeliveryClaimLost) {
 			all = append(all, err)
 		}
 	}
@@ -852,7 +854,7 @@ func lockContext(ctx context.Context, mu *sync.Mutex) error {
 
 func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, destinations map[string]string) error {
 	if err := ctx.Err(); err != nil {
-		return errors.Join(err, n.releaseClaim(ctx, delivery, store.ErrDeliveryIndeterminate, time.Minute))
+		return errors.Join(err, n.releaseClaimWithoutBudget(ctx, delivery, 0))
 	}
 	// Refresh before each managed send so an update/delete after the batch was
 	// claimed cannot use the stale URL from the first snapshot.
@@ -874,6 +876,10 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 		sendErr = safeSendContext(ctx, raw, engine.FormatEvent(delivery.Event))
 	}
 	if errors.Is(sendErr, ErrNotificationSendIndeterminate) {
+		// The provider outcome is unknown after the cancellation grace period.
+		// Keep the safety delay and bounded deferral budget for this genuine
+		// indeterminate send; unlike a claim cancelled before dispatch, it may
+		// already have been accepted by the provider.
 		deferErr := n.releaseClaim(ctx, delivery, store.ErrDeliveryIndeterminate, notificationIndeterminateDelay)
 		return errors.Join(sendErr, deferErr)
 	}
@@ -887,6 +893,12 @@ func (n *Notifier) releaseClaim(ctx context.Context, delivery store.Delivery, re
 	releaseCtx, cancel := deliveryResultContext(ctx)
 	defer cancel()
 	return n.Store.DeferDeliveryWithError(releaseCtx, delivery.ID, delivery.ClaimToken, reason, delay)
+}
+
+func (n *Notifier) releaseClaimWithoutBudget(ctx context.Context, delivery store.Delivery, delay time.Duration) error {
+	releaseCtx, cancel := deliveryResultContext(ctx)
+	defer cancel()
+	return n.Store.ReleaseDeliveryClaim(releaseCtx, delivery.ID, delivery.ClaimToken, delay)
 }
 
 // deliveryResultContext keeps claim cleanup independent of a canceled parent

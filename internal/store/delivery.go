@@ -218,6 +218,33 @@ func (s *Store) ReleaseDeliveryClaims(ctx context.Context) (int64, error) {
 	return result.RowsAffected()
 }
 
+// ReleaseDeliveryClaim returns one in-flight delivery to the due queue without
+// recording a provider attempt or a destination deferral. It is used when the
+// delivery pass is cancelled (for example during a clean daemon shutdown), so
+// lifecycle interruptions cannot exhaust the retry budgets reserved for real
+// provider failures. A positive delay is useful when the provider outcome is
+// indeterminate and an immediate retry could duplicate an accepted request.
+func (s *Store) ReleaseDeliveryClaim(ctx context.Context, id int64, claim string, delay time.Duration) error {
+	if claim == "" {
+		return ErrDeliveryClaimLost
+	}
+	if delay < 0 {
+		delay = 0
+	}
+	nextAt := time.Now().UTC()
+	if delay > 0 {
+		nextAt = nextAt.Add(delay)
+	}
+	result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, nextAt.Format(time.RFC3339Nano), id, claim)
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrDeliveryClaimLost
+	}
+	return nil
+}
+
 // DeliveryResult records the result for the current claim. It retains the
 // original API used by CLI/tests by looking up the row's active claim token.
 func (s *Store) DeliveryResult(ctx context.Context, id int64, sendErr error) error {

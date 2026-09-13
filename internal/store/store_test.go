@@ -602,6 +602,30 @@ func TestScanResultsPagePaginatesSnapshotUnits(t *testing.T) {
 	}
 }
 
+func TestScanResultsPageTreatsNullOrMissingUnitsAsEmpty(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, tc := range []struct {
+		id       string
+		snapshot string
+	}{
+		{id: "null-units-results", snapshot: `{"units":null}`},
+		{id: "missing-units-results", snapshot: `{"status":"failed"}`},
+	} {
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?)`, tc.id, "results", now, now, "failed", "scan did not complete", "Nmap", "hash", []byte(tc.snapshot)); err != nil {
+			t.Fatal(err)
+		}
+		page, err := s.ListScanResultsPage(ctx, tc.id, 50, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.id, err)
+		}
+		if page.Total != 0 || len(page.Items) != 0 {
+			t.Fatalf("%s: page=%#v, want an empty result page", tc.id, page)
+		}
+	}
+}
+
 func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

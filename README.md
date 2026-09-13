@@ -315,13 +315,16 @@ once-per-day cadence matters, choose a time outside the local transition hours
 and keep the timezone's daylight-saving rules in mind.
 
 The daemon also watches for jobs that go silent. For each enabled job, a
-heartbeat compares the last successful scan (or the job creation time when it
-has never run) with two of that job's own cron intervals. A running scan is not
-considered silent, and at most one `job-silent` notification is emitted in each
-interval window. This catches a scheduler or lease that has stopped producing
-scans without repeatedly alerting for a legitimately slow weekly job. Silence
-events are retained in the event history and use the job's normal notification
-selection.
+heartbeat anchors the check to the last successful scan (or the job creation
+time when it has never run), finds the next expected cron firing in that job's
+timezone, and allows one representative schedule interval after that firing.
+This keeps calendar-sensitive schedules (weekdays, month days, DST changes, and
+sparse jobs) aligned with the window that is actually being missed. A running
+scan is not considered silent, and at most one `job-silent` notification is
+emitted in each backoff window. This catches a scheduler or lease that has
+stopped producing scans without repeatedly alerting for a legitimately slow
+weekly job. Silence events are retained in the event history and use the job's
+normal notification selection.
 
 `assume_alive` defaults to `true` and passes host-discovery skip flags to the
 selected scanner. Set it to `false` when host discovery is required for an

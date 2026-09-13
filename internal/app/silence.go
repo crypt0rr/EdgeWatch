@@ -14,8 +14,6 @@ import (
 const (
 	jobSilenceMinimumInterval = time.Minute
 	jobSilenceLookback        = 5 * 365 * 24 * time.Hour
-	jobSilenceHorizon         = 2 * 365 * 24 * time.Hour
-	jobSilenceMaxOccurrences  = 4096
 )
 
 // nowUTC is kept behind a small injectable clock so the daemon watchdog can
@@ -46,7 +44,19 @@ func (a *App) checkJobSilence(ctx context.Context, now time.Time) {
 		if !record.Enabled || record.Archived {
 			continue
 		}
-		threshold, err := jobSilenceThreshold(parser, record.Job, now)
+		reference, err := a.Store.JobSilenceReference(ctx, record.ID, record.CreatedAt, now)
+		if err != nil {
+			a.silenceLogger().Warn("job silence watchdog could not determine reference", "job", record.Job.Name, "error", err)
+			continue
+		}
+		if reference.IsZero() {
+			// A malformed legacy row without creation or scan timestamps has no
+			// safe anchor for a calendar window. Wait for the next lifecycle or
+			// successful-scan write to provide one.
+			a.silenceLogger().Debug("job silence watchdog skipped job without reference", "job", record.Job.Name)
+			continue
+		}
+		threshold, err := jobSilenceThreshold(parser, record.Job, reference)
 		if err != nil {
 			// Schedule reconciliation already reports invalid persisted schedules;
 			// avoid repeating that warning every heartbeat.
@@ -90,69 +100,40 @@ func (a *App) silenceLogger() *slog.Logger {
 	return slog.Default()
 }
 
-func jobSilenceThreshold(parser cron.Parser, job config.Job, now time.Time) (time.Duration, error) {
+// jobSilenceThreshold returns the duration from reference until the next
+// expected firing plus one representative interval. The caller supplies the
+// same reference used by the store (creation, eligibility, or last success),
+// so irregular calendars are evaluated against the missed window that is
+// actually in progress rather than a historical maximum-gap sample.
+func jobSilenceThreshold(parser cron.Parser, job config.Job, reference time.Time) (time.Duration, error) {
 	timezone := job.Timezone
 	if timezone == "" {
 		timezone = "UTC"
+	}
+	location, err := time.LoadLocation(timezone)
+	if err != nil {
+		return 0, fmt.Errorf("invalid timezone: %w", err)
 	}
 	parsed, err := parser.Parse(fmt.Sprintf("CRON_TZ=%s %s", timezone, job.Schedule))
 	if err != nil {
 		return 0, err
 	}
-	if parsed.Next(now.UTC()).IsZero() {
+	localReference := reference.In(location)
+	if parsed.Next(localReference).IsZero() {
 		return 0, fmt.Errorf("schedule never fires")
 	}
-	maxGap, typicalGap, ok := maxScheduleGap(parsed, now.UTC())
-	if !ok || maxGap <= 0 {
+	deadline, interval, ok := cronSilenceDeadline(parsed, localReference)
+	if !ok || interval <= 0 || deadline.IsZero() {
 		return 0, fmt.Errorf("schedule interval unavailable")
 	}
-	// Keep one representative interval of grace after the largest expected
-	// calendar gap. This catches weekend/month-end/year-boundary gaps while
-	// staying bounded for schedules that fire every minute.
-	if typicalGap <= 0 {
-		typicalGap = maxGap
-	}
-	if maxGap > time.Duration(1<<63-1)-typicalGap {
+	if !deadline.After(localReference) {
 		return 0, fmt.Errorf("schedule interval overflows watchdog window")
 	}
-	threshold := maxGap + typicalGap
+	threshold := deadline.Sub(localReference)
 	if threshold <= 0 {
 		return 0, fmt.Errorf("schedule interval overflows watchdog window")
 	}
 	return threshold, nil
-}
-
-// maxScheduleGap samples a bounded occurrence window and returns both the
-// largest calendar gap and the smallest positive gap. The occurrence cap
-// keeps minute-level schedules cheap while the two-year horizon catches
-// weekend, month-end, and annual schedules.
-func maxScheduleGap(schedule cron.Schedule, now time.Time) (maxGap, typicalGap time.Duration, ok bool) {
-	if schedule == nil || now.IsZero() {
-		return 0, 0, false
-	}
-	start := now.Add(-jobSilenceHorizon)
-	previous := schedule.Next(start)
-	if previous.IsZero() {
-		return 0, 0, false
-	}
-	end := now.Add(jobSilenceHorizon)
-	for occurrence := 0; occurrence < jobSilenceMaxOccurrences && !previous.After(end); occurrence++ {
-		next := schedule.Next(previous)
-		if next.IsZero() {
-			break
-		}
-		gap := next.Sub(previous)
-		if gap >= jobSilenceMinimumInterval {
-			if gap > maxGap {
-				maxGap = gap
-			}
-			if typicalGap == 0 || gap < typicalGap {
-				typicalGap = gap
-			}
-		}
-		previous = next
-	}
-	return maxGap, typicalGap, maxGap > 0
 }
 
 // cronInterval derives the interval between the two most recent occurrences
@@ -162,6 +143,41 @@ func maxScheduleGap(schedule cron.Schedule, now time.Time) (maxGap, typicalGap t
 func cronInterval(schedule cron.Schedule, now time.Time) (time.Duration, bool) {
 	_, _, interval, ok := cronWindow(schedule, now)
 	return interval, ok
+}
+
+// cronSilenceDeadline returns the next schedule occurrence after reference
+// and one representative interval after it. cronWindow supplies the local
+// preceding interval, while the direct Next call makes an occurrence exactly
+// at reference count as the already-observed run rather than the missed one.
+func cronSilenceDeadline(schedule cron.Schedule, reference time.Time) (deadline time.Time, interval time.Duration, ok bool) {
+	if schedule == nil || reference.IsZero() {
+		return time.Time{}, 0, false
+	}
+	next := schedule.Next(reference)
+	if next.IsZero() || !next.After(reference) {
+		return time.Time{}, 0, false
+	}
+	_, _, preceding, hasWindow := cronWindow(schedule, reference)
+	interval = preceding
+	if !hasWindow || interval < jobSilenceMinimumInterval {
+		following := schedule.Next(next)
+		if following.IsZero() || !following.After(next) {
+			return time.Time{}, 0, false
+		}
+		interval = wallClockDuration(next, following)
+	}
+	if interval < jobSilenceMinimumInterval {
+		return time.Time{}, 0, false
+	}
+	following := schedule.Next(next)
+	deadline = following
+	if following.IsZero() || !following.After(next) || wallClockDuration(next, following) != interval {
+		deadline = addWallDuration(next, interval)
+	}
+	if deadline.IsZero() || !deadline.After(reference) || deadline.Sub(reference) <= 0 {
+		return time.Time{}, 0, false
+	}
+	return deadline, interval, true
 }
 
 // cronWindow returns the last schedule occurrence, the next occurrence, and
@@ -190,7 +206,7 @@ func cronWindow(schedule cron.Schedule, now time.Time) (last, next time.Time, in
 			probe = occurrence
 		}
 		if !previous.IsZero() && !last.IsZero() {
-			interval = last.Sub(previous)
+			interval = wallClockDuration(previous, last)
 			if interval < jobSilenceMinimumInterval {
 				interval = jobSilenceMinimumInterval
 			}
@@ -209,4 +225,29 @@ func cronWindow(schedule cron.Schedule, now time.Time) (last, next time.Time, in
 		}
 	}
 	return time.Time{}, time.Time{}, 0, false
+}
+
+// wallClockDuration measures a cron gap using the displayed calendar fields
+// instead of elapsed UTC time. A daily 09:00 schedule still has a 24-hour
+// interval when a daylight-saving transition makes the elapsed duration 23 or
+// 25 hours. This keeps the representative grace aligned with the user's local
+// schedule while the final deadline retains the real elapsed time.
+func wallClockDuration(from, to time.Time) time.Duration {
+	if from.IsZero() || to.IsZero() || !to.After(from) {
+		return 0
+	}
+	fromCivil := time.Date(from.Year(), from.Month(), from.Day(), from.Hour(), from.Minute(), from.Second(), from.Nanosecond(), time.UTC)
+	toCivil := time.Date(to.Year(), to.Month(), to.Day(), to.Hour(), to.Minute(), to.Second(), to.Nanosecond(), time.UTC)
+	return toCivil.Sub(fromCivil)
+}
+
+// addWallDuration advances a schedule occurrence in its local calendar. It
+// avoids time.Time.Add's fixed-duration behavior, which can shift a 09:00
+// deadline to 08:00 or 10:00 across daylight-saving transitions.
+func addWallDuration(value time.Time, duration time.Duration) time.Time {
+	if value.IsZero() || duration <= 0 {
+		return time.Time{}
+	}
+	civil := time.Date(value.Year(), value.Month(), value.Day(), value.Hour(), value.Minute(), value.Second(), value.Nanosecond(), time.UTC).Add(duration)
+	return time.Date(civil.Year(), civil.Month(), civil.Day(), civil.Hour(), civil.Minute(), civil.Second(), civil.Nanosecond(), value.Location())
 }

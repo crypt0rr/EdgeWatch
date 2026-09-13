@@ -36,6 +36,9 @@ func TestJobSilenceWatchdogAlertsOncePerScheduleWindow(t *testing.T) {
 	if _, err := db.DB.ExecContext(ctx, `UPDATE jobs SET created_at=? WHERE id=?`, created.Format(time.RFC3339Nano), record.ID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=? WHERE job_id=?`, created.Format(time.RFC3339Nano), record.ID); err != nil {
+		t.Fatal(err)
+	}
 	a := &App{Store: db, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), clock: func() time.Time { return now }}
 
 	a.checkJobSilence(ctx, now)
@@ -223,6 +226,9 @@ func TestJobSilenceWatchdogUsesReferenceSpecificDeadline(t *testing.T) {
 	if _, err := db.DB.ExecContext(ctx, `UPDATE jobs SET created_at=? WHERE id=?`, reference.Add(-24*time.Hour).Format(time.RFC3339Nano), record.ID); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=? WHERE job_id=?`, reference.Format(time.RFC3339Nano), record.ID); err != nil {
+		t.Fatal(err)
+	}
 	stamp := reference.Format(time.RFC3339Nano)
 	if _, err := db.DB.ExecContext(ctx, `INSERT INTO scans(id,job_id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?)`, "weekday-scan", record.ID, record.Job.Name, stamp, stamp, "success", "", "Nmap", job.SecurityHash(), []byte(`{"units":[]}`)); err != nil {
 		t.Fatal(err)
@@ -243,5 +249,67 @@ func TestJobSilenceWatchdogUsesReferenceSpecificDeadline(t *testing.T) {
 	}
 	if page.Total != 1 || page.Items[0].Type != "job-silent" {
 		t.Fatalf("weekday job did not alert at its reference-specific deadline: %#v", page.Items)
+	}
+}
+
+func TestJobSilenceWatchdogHonorsFutureEligibility(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	job := config.NormalizeJob(config.Job{
+		Name:     "resume-grace",
+		Schedule: "0 * * * *",
+		Timezone: "UTC",
+		Targets:  []string{"192.0.2.4"},
+		TCP:      &config.Protocol{Ports: "443", Mode: "connect"},
+	})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.January, 1, 4, 0, 0, 0, time.UTC)
+	created := now.Add(-24 * time.Hour)
+	if _, err := db.DB.ExecContext(ctx, `UPDATE jobs SET created_at=? WHERE id=?`, created.Format(time.RFC3339Nano), record.ID); err != nil {
+		t.Fatal(err)
+	}
+	eligible := now.Add(30 * time.Minute)
+	if _, err := db.DB.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=?,last_success_at=? WHERE job_id=?`, eligible.Format(time.RFC3339Nano), created.Format(time.RFC3339Nano), record.ID); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Store: db, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+
+	// The watchdog may run before the lifecycle grace begins. It must not use
+	// the older creation marker and start a silence window prematurely.
+	a.checkJobSilence(ctx, now)
+	page, err := db.ListJobEventsPage(ctx, record.ID, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 0 {
+		t.Fatalf("resume grace generated an early silence event: %#v", page.Items)
+	}
+
+	// The first missed firing after eligibility is still within the
+	// representative schedule window (04:30 eligibility, 05:00 firing,
+	// 06:00 deadline).
+	a.checkJobSilence(ctx, now.Add(90*time.Minute))
+	page, err = db.ListJobEventsPage(ctx, record.ID, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 0 {
+		t.Fatalf("resume grace generated an early post-resume event: %#v", page.Items)
+	}
+
+	a.checkJobSilence(ctx, now.Add(2*time.Hour))
+	page, err = db.ListJobEventsPage(ctx, record.ID, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || page.Items[0].Type != "job-silent" {
+		t.Fatalf("resume grace did not alert at the expected deadline: %#v", page.Items)
 	}
 }

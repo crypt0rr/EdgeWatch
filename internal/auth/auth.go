@@ -701,7 +701,14 @@ func (m *Manager) auditAuthFailure(ctx context.Context, action, subject string, 
 // blocked client can send an unbounded number of rejected requests; writing an
 // audit row for each one would turn the protection itself into a storage DoS.
 func (m *Manager) auditRateLimit(ctx context.Context, subject string, request *http.Request) {
-	key := strings.TrimSpace(subject) + "\x00" + m.sourceScopeFor(request, "rate")
+	// A blocked episode belongs to the resolved source and endpoint, not to
+	// attacker-controlled account text. In particular, unknown-login subjects
+	// include the supplied username; using that value here would let a caller
+	// rotate usernames and force one durable audit row per attempt. Keep the
+	// account/identity in the audit detail for diagnostics, but coalesce the
+	// suppression key to the endpoint bucket so one source produces at most one
+	// rate-limit transition per window for that operation.
+	key := rateAuditEndpoint(subject) + "\x00" + m.sourceScopeFor(request, "rate")
 	now := m.now()
 	m.mu.Lock()
 	m.ensureScopedLimiterMapsLocked()
@@ -720,6 +727,22 @@ func (m *Manager) auditRateLimit(ctx context.Context, subject string, request *h
 	}
 	m.mu.Unlock()
 	m.auditAuthFailure(ctx, "auth.rate_limited", subject, request)
+}
+
+func rateAuditEndpoint(subject string) string {
+	subject = strings.TrimSpace(subject)
+	switch {
+	case subject == "setup":
+		return "setup"
+	case subject == "activation":
+		return "activation"
+	case subject == "password-confirmation":
+		return "password-confirmation"
+	case strings.HasPrefix(subject, "login:"), strings.HasPrefix(subject, "unknown-login:"):
+		return "login"
+	default:
+		return subject
+	}
 }
 
 func requestRemote(request *http.Request) string {

@@ -3,7 +3,11 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
 func TestManagedNotificationStoreCRUDAndLegacySelectionMaterialization(t *testing.T) {
@@ -82,4 +86,74 @@ func TestManagedNotificationStoreCRUDAndLegacySelectionMaterialization(t *testin
 	if err != nil || secondStored.Job.NotificationDestinations == nil || len(secondStored.Job.NotificationDestinations) != 1 {
 		t.Fatalf("second selection = %#v, %v", secondStored, err)
 	}
+}
+
+func TestManagedNotificationMetadataEditPreservesPendingDelivery(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	created, err := s.CreateManagedNotification(ctx, "destination-metadata", "Operations", "generic", []byte{1}, []byte{2}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey := managedNotificationKey(created.ID, created.Revision)
+	if err := s.QueueEvent(ctx, oldKey, model.Event{Type: "metadata-preserved", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := s.UpdateManagedNotificationWithAudit(ctx, created.ID, created.Revision, "Operations renamed", created.Provider, created.Ciphertext, created.Nonce, false, AuditEntry{Action: "notifications.updated", ActorUsername: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newKey := managedNotificationKey(created.ID, updated.Revision)
+	var destination string
+	if err := s.DB.QueryRowContext(ctx, `SELECT destination FROM outbox WHERE sent_at IS NULL`).Scan(&destination); err != nil {
+		t.Fatal(err)
+	}
+	if destination != newKey {
+		t.Fatalf("pending destination = %q, want %q", destination, newKey)
+	}
+	var oldCount int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination=?`, oldKey).Scan(&oldCount); err != nil {
+		t.Fatal(err)
+	}
+	if oldCount != 0 {
+		t.Fatalf("old revision delivery rows = %d, want 0", oldCount)
+	}
+}
+
+func TestManagedNotificationCredentialEditDiscardsAndAuditsPendingDelivery(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	created, err := s.CreateManagedNotification(ctx, "destination-credentials", "Operations", "generic", []byte{1}, []byte{2}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.QueueEvent(ctx, managedNotificationKey(created.ID, created.Revision), model.Event{Type: "credential-discarded", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.UpdateManagedNotificationWithAudit(ctx, created.ID, created.Revision, created.Name, created.Provider, []byte{3}, []byte{4}, true, AuditEntry{Action: "notifications.updated", ActorUsername: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	var pending int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND destination LIKE ?`, "managed:"+created.ID+":%").Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("pending rows after credential rotation = %d, want 0", pending)
+	}
+	var detail, actor string
+	if err := s.DB.QueryRowContext(ctx, `SELECT detail,actor_username FROM security_audit WHERE action='notifications.pending_discarded' ORDER BY id DESC LIMIT 1`).Scan(&detail, &actor); err != nil {
+		t.Fatal(err)
+	}
+	if actor != "admin" || detail == "" || !containsAll(detail, "1", created.ID, "credential rotation") {
+		t.Fatalf("pending-discard audit = detail %q actor %q", detail, actor)
+	}
+}
+
+func containsAll(value string, parts ...string) bool {
+	for _, part := range parts {
+		if !strings.Contains(value, part) {
+			return false
+		}
+	}
+	return true
 }

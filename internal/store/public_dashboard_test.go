@@ -147,6 +147,55 @@ func TestLatestSuccessfulJobHostsResolvesSelectionsInOneSet(t *testing.T) {
 	}
 }
 
+func TestLatestSuccessfulJobHostsUsesProjectionBeforeHistoryFallback(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	jobA, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "same-address-a", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.44"}, TCP: &config.Protocol{Ports: "22", Mode: "connect"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobB, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "same-address-b", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.44"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	for _, scan := range []model.Scan{
+		{ID: "same-address-a-scan", JobID: jobA.ID, JobRevision: jobA.Revision, Job: jobA.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.44", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 22, State: "open"}}}}}}}},
+		{ID: "same-address-b-scan", JobID: jobB.ID, JobRevision: jobB.Revision, Job: jobB.Job.Name, StartedAt: now.Add(time.Second), FinishedAt: now.Add(time.Second), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.44", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}}}},
+	} {
+		if err := s.SaveScan(ctx, scan); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The address-keyed projection now points at job B. Job A must still be
+	// resolved exactly through the bounded history fallback rather than being
+	// given job B's observation.
+	results, err := s.GetLatestSuccessfulJobHosts(ctx, []PublicDashboardHost{{JobID: jobA.ID, Address: "198.51.100.44"}, {JobID: jobB.ID, Address: "198.51.100.44"}})
+	if err != nil || len(results) != 2 {
+		t.Fatalf("same-address lookup = %#v, %v", results, err)
+	}
+	for _, result := range results {
+		if result.Selection.JobID == jobA.ID && result.Summary.ID != "same-address-a-scan" {
+			t.Fatalf("job A crossed into projection row: %#v", result)
+		}
+		if result.Selection.JobID == jobB.ID && result.Summary.ID != "same-address-b-scan" {
+			t.Fatalf("job B did not use projection row: %#v", result)
+		}
+	}
+
+	// Removing the source host row does not invalidate the maintained
+	// projection. This guards the fast path from silently falling back to
+	// decoding/ranking retained history for every normal selection.
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM scan_hosts WHERE scan_id=?`, "same-address-b-scan"); err != nil {
+		t.Fatal(err)
+	}
+	results, err = s.GetLatestSuccessfulJobHosts(ctx, []PublicDashboardHost{{JobID: jobB.ID, Address: "198.51.100.44"}})
+	if err != nil || len(results) != 1 || results[0].Summary.ID != "same-address-b-scan" {
+		t.Fatalf("projection-only lookup = %#v, %v", results, err)
+	}
+}
+
 func TestPublicDashboardDefaultsBlankTitle(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

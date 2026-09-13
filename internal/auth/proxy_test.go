@@ -38,6 +38,47 @@ func TestClientIPResolvesConfiguredProxyChain(t *testing.T) {
 	}
 }
 
+func TestClientIPResolvesBracketedIPv6ProxyChain(t *testing.T) {
+	m := NewManager(nil)
+	if err := m.SetTrustedProxies([]string{"2001:db8::1/128"}); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest("GET", "/", nil)
+	request.RemoteAddr = "[2001:db8::1]:443"
+	request.Header.Set("X-Forwarded-For", "[2001:db8::10]:8443")
+	if got := m.ClientIP(request); got != "2001:db8::10" {
+		t.Fatalf("resolved bracketed IPv6 client = %q", got)
+	}
+}
+
+func TestClientIPPreservesBareIPv6Address(t *testing.T) {
+	m := NewManager(nil)
+	request := httptest.NewRequest("GET", "/", nil)
+	request.RemoteAddr = "2001:db8::10"
+	if got := m.ClientIP(request); got != "2001:db8::10" {
+		t.Fatalf("bare IPv6 client = %q", got)
+	}
+	request.RemoteAddr = "[2001:db8::10]"
+	if got := m.ClientIP(request); got != "2001:db8::10" {
+		t.Fatalf("bracketed bare IPv6 client = %q", got)
+	}
+}
+
+func TestLimiterKeyUsesStandardHostPortParsing(t *testing.T) {
+	cases := map[string]string{
+		"192.0.2.10:443":        "192.0.2.10",
+		"[2001:db8::10]:443":    "2001:db8::10",
+		"2001:db8::10":          "2001:db8::10",
+		"[2001:db8::10]":        "2001:db8::10",
+		"malformed-remote-addr": "malformed-remote-addr",
+	}
+	for input, want := range cases {
+		if got := limiterKey(input); got != want {
+			t.Errorf("limiterKey(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestClientIPRejectsInvalidTrustedProxy(t *testing.T) {
 	m := NewManager(nil)
 	if err := m.SetTrustedProxies([]string{"not-an-ip"}); err == nil {

@@ -929,10 +929,18 @@ func legacySourceScope(source string) string {
 }
 
 func limiterKey(remote string) string {
-	if host, _, err := netSplitHostPort(remote); err == nil {
-		return host
+	value := strings.TrimSpace(remote)
+	if host, _, err := net.SplitHostPort(value); err == nil {
+		return strings.Trim(host, "[]")
 	}
-	return remote
+	// RemoteAddr normally includes a port, but callers and tests may provide a
+	// bare address. Parse it as a complete IP before attempting any permissive
+	// fallback; splitting a bare IPv6 literal at its last colon would silently
+	// turn one client into a different limiter bucket.
+	if ip := net.ParseIP(strings.Trim(value, "[]")); ip != nil {
+		return ip.String()
+	}
+	return value
 }
 
 func (m *Manager) ensureScopedLimiterMapsLocked() {
@@ -1088,15 +1096,12 @@ func (m *Manager) evictLimiterEntryLocked(now time.Time) {
 	}
 }
 
-// netSplitHostPort avoids treating a malformed RemoteAddr as fatal during
-// tests and on unusual reverse-proxy setups.
+// netSplitHostPort delegates to the standard parser so bracketed IPv6
+// addresses are handled correctly. Callers that need to tolerate a bare
+// address should use limiterKey's explicit IP fallback instead of guessing
+// where an IPv6 host ends and a port begins.
 func netSplitHostPort(v string) (string, string, error) {
-	for i := len(v) - 1; i >= 0; i-- {
-		if v[i] == ':' {
-			return v[:i], v[i+1:], nil
-		}
-	}
-	return "", "", errors.New("not host:port")
+	return net.SplitHostPort(strings.TrimSpace(v))
 }
 
 func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (store.Session, bool) {

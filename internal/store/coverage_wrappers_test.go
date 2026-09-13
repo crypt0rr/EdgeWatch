@@ -51,7 +51,7 @@ func TestAtomicWriteJSONAndOpenExistingGuards(t *testing.T) {
 	}
 }
 
-func TestRecoveryCodeTextConsumptionSupportsLegacyAndSaltedForms(t *testing.T) {
+func TestRecoveryCodeTextConsumptionRejectsLegacyAndAcceptsSaltedForms(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	userID := LegacyAdminUserID
@@ -64,11 +64,8 @@ func TestRecoveryCodeTextConsumptionSupportsLegacyAndSaltedForms(t *testing.T) {
 	if matched, err := s.ConsumeRecoveryCodeTextForUser(ctx, userID, "wrong", now); err != nil || matched {
 		t.Fatalf("wrong legacy code = %t, %v", matched, err)
 	}
-	if matched, err := s.ConsumeRecoveryCodeTextForUser(ctx, userID, legacyCode, now); err != nil || !matched {
-		t.Fatalf("legacy code = %t, %v", matched, err)
-	}
 	if matched, err := s.ConsumeRecoveryCodeTextForUser(ctx, userID, legacyCode, now); err != nil || matched {
-		t.Fatalf("consumed legacy code = %t, %v", matched, err)
+		t.Fatalf("legacy code was accepted after retirement = %t, %v", matched, err)
 	}
 	if matched, err := s.ConsumeRecoveryCodeTextForUser(ctx, userID, "", now); err != nil || matched {
 		t.Fatalf("empty recovery code = %t, %v", matched, err)

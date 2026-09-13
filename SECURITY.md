@@ -51,8 +51,13 @@ If the key is lost or replaced, web-managed destinations become unavailable;
 they cannot be recovered from the database alone. Restore the original key and
 database together, or delete and recreate the affected destinations after
 confirming that the old credentials are revoked. A database upgraded to schema
-37 must not be opened by an older EdgeWatch binary; downgrade by restoring the
+38 must not be opened by an older EdgeWatch binary; downgrade by restoring the
 complete pre-upgrade `./data` backup before starting the old version.
+
+Recovery codes are stored in the salted `v2` representation. Schema 38 removes
+legacy unsalted SHA-256 recovery-code digests and records only their count in
+the security audit; generate new recovery codes from the Security page after
+an upgrade. The old plaintext cannot be recovered or safely re-hashed.
 
 Single-file restores create a new notification epoch. Pending deliveries are
 quarantined by default so alerts from the backup cannot be replayed; operators

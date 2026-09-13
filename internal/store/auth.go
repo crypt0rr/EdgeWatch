@@ -651,9 +651,9 @@ func (s *Store) ConsumeRecoveryCodeForUser(ctx context.Context, userID, hash str
 }
 
 // ConsumeRecoveryCodeTextForUser verifies a presented recovery code against
-// the user's unused codes and atomically marks the matching row consumed.
-// Version 2 records use a per-code salt; legacy SHA-256 digests remain
-// readable so an upgrade does not invalidate codes that were already issued.
+// the user's unused v2 codes and atomically marks the matching row consumed.
+// Unsalted legacy SHA-256 digests are retired by schema migration 38 and are
+// never accepted on the authentication path.
 func (s *Store) ConsumeRecoveryCodeTextForUser(ctx context.Context, userID, code string, now time.Time) (bool, error) {
 	code = strings.ToUpper(strings.TrimSpace(code))
 	if code == "" {
@@ -693,19 +693,18 @@ func (s *Store) ConsumeRecoveryCodeTextForUser(ctx context.Context, userID, code
 
 func recoveryCodeMatches(stored, code string) bool {
 	parts := strings.Split(stored, "$")
-	if len(parts) == 3 && parts[0] == "v2" {
-		salt, saltErr := base64.RawStdEncoding.DecodeString(parts[1])
-		expected, hashErr := hex.DecodeString(parts[2])
-		if saltErr != nil || hashErr != nil || len(salt) < 16 || len(expected) != sha256.Size {
-			return false
-		}
-		h := sha256.New()
-		_, _ = h.Write(salt)
-		_, _ = h.Write([]byte(code))
-		return hmac.Equal(h.Sum(nil), expected)
+	if len(parts) != 3 || parts[0] != "v2" {
+		return false
 	}
-	legacy := sha256.Sum256([]byte(code))
-	return hmac.Equal([]byte(strings.ToLower(stored)), []byte(hex.EncodeToString(legacy[:])))
+	salt, saltErr := base64.RawStdEncoding.DecodeString(parts[1])
+	expected, hashErr := hex.DecodeString(parts[2])
+	if saltErr != nil || hashErr != nil || len(salt) < 16 || len(expected) != sha256.Size {
+		return false
+	}
+	h := sha256.New()
+	_, _ = h.Write(salt)
+	_, _ = h.Write([]byte(code))
+	return hmac.Equal(h.Sum(nil), expected)
 }
 
 func (s *Store) Audit(ctx context.Context, action, detail string) error {

@@ -14,7 +14,10 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
-const requestIDHeader = "X-Request-ID"
+const (
+	requestIDHeader         = "X-Request-ID"
+	slowRequestLogThreshold = time.Second
+)
 
 type requestIDContextKey struct{}
 
@@ -112,6 +115,7 @@ func (s *Server) requestLogging(next http.Handler) http.Handler {
 				// is not reused as a successful keep-alive response.
 				wrapped.Header().Set("Connection", "close")
 			}
+			duration := time.Since(started)
 			attributes := []any{
 				"request_id", requestID,
 				"client_ip", clientIP,
@@ -119,14 +123,22 @@ func (s *Server) requestLogging(next http.Handler) http.Handler {
 				"path", r.URL.Path,
 				"status", wrapped.status,
 				"bytes", wrapped.bytes,
-				"duration_ms", time.Since(started).Seconds() * 1000,
+				"duration_ms", duration.Seconds() * 1000,
 			}
 			if recovered != nil {
 				attributes = append(attributes, "panic_type", fmt.Sprintf("%T", recovered), "stack", string(debug.Stack()))
 				logger.ErrorContext(logCtx, "http request recovered panic", attributes...)
 				return
 			}
-			logger.InfoContext(logCtx, "http request completed", attributes...)
+			// Successful, fast requests are useful while diagnosing a request but
+			// are too noisy for the normal information log level (the UI polls
+			// several endpoints regularly). Keep failures and slow requests visible
+			// at info so an idle console cannot hide operational problems.
+			if wrapped.status >= http.StatusBadRequest || duration >= slowRequestLogThreshold {
+				logger.InfoContext(logCtx, "http request completed", attributes...)
+				return
+			}
+			logger.DebugContext(logCtx, "http request completed", attributes...)
 		}(ctx)
 		next.ServeHTTP(wrapped, r.WithContext(ctx))
 	})

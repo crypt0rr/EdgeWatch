@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRequestLoggingRecordsCorrelationAndResponseMetrics(t *testing.T) {
@@ -88,6 +89,51 @@ func TestRequestLoggingLevelControlsRoutineLines(t *testing.T) {
 				t.Fatalf("log lines = %d, want %d: %s", got, test.wantLines, lines)
 			}
 		})
+	}
+}
+
+func TestRequestLoggingKeepsFailuresVisibleAtInfo(t *testing.T) {
+	var output bytes.Buffer
+	server := &Server{Log: slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelInfo}))}
+	handler := server.requestLogging(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeError(w, http.StatusBadGateway, "upstream", "upstream unavailable", nil)
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/status", nil))
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("log lines = %d, want one visible failure completion: %s", len(lines), output.String())
+	}
+	if !strings.Contains(output.String(), `"level":"INFO"`) || !strings.Contains(output.String(), `"status":502`) {
+		t.Fatalf("failure was not logged at info: %s", output.String())
+	}
+}
+
+func TestRequestLoggingKeepsSlowSuccessVisibleAtInfo(t *testing.T) {
+	var output bytes.Buffer
+	server := &Server{Log: slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelInfo}))}
+	handler := server.requestLogging(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(slowRequestLogThreshold + 25*time.Millisecond)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/api/v1/slow", nil))
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("log lines = %d, want one visible slow completion: %s", len(lines), output.String())
+	}
+	if !strings.Contains(output.String(), `"level":"INFO"`) {
+		t.Fatalf("slow request was not logged at info: %s", output.String())
+	}
+}
+
+func TestRequestLoggingSuppressesFastSuccessAtInfo(t *testing.T) {
+	var output bytes.Buffer
+	server := &Server{Log: slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelInfo}))}
+	handler := server.requestLogging(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/health", nil))
+	if output.Len() != 0 {
+		t.Fatalf("fast successful request produced routine info logs: %s", output.String())
 	}
 }
 

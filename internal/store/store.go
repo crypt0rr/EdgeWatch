@@ -292,11 +292,29 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 }
 
 // readOnlySQLiteDSN builds a file URI with SQLite's mode=ro flag from the
-// already validated artifact path. Reconstructing the URI avoids inheriting
+// already validated artifact path. When no WAL/SHM/journal sidecar exists,
+// immutable=1 additionally tells SQLite that the quiescent file is a
+// read-only snapshot, preventing it from creating those sidecars while it is
+// opened. If a sidecar is already present, it is deliberately left enabled so
+// reads include committed WAL frames; SQLite may use the existing companion
+// files but will not create a new set. Reconstructing the URI avoids inheriting
 // a caller-supplied mode=rwc (or other write-oriented options) while still
 // escaping spaces and other URI-sensitive path characters correctly.
 func readOnlySQLiteDSN(artifactPath string) string {
-	return (&url.URL{Scheme: "file", Path: artifactPath, RawQuery: "mode=ro"}).String()
+	query := "mode=ro"
+	if !sqliteSidecarExists(artifactPath) {
+		query += "&immutable=1"
+	}
+	return (&url.URL{Scheme: "file", Path: artifactPath, RawQuery: query}).String()
+}
+
+func sqliteSidecarExists(artifactPath string) bool {
+	for _, candidate := range []string{artifactPath + "-wal", artifactPath + "-shm", artifactPath + "-journal"} {
+		if _, err := os.Stat(candidate); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // SetTargetExclusions installs the deployment-wide scanner target policy. It

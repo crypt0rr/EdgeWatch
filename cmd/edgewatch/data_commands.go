@@ -17,35 +17,36 @@ import (
 
 const hostCLIActor = "host-cli"
 
-// auditHostCommand records host-authorized data operations without making
-// their success depend on the audit store. Read-only commands use a short
-// independent writable connection solely for the audit insert; a read-only
-// filesystem therefore leaves the useful verify/export result intact.
-func auditHostCommand(ctx context.Context, database string, current *store.Store, currentWritable bool, entry store.AuditEntry) {
-	entry.ActorUsername = hostCLIActor
-	auditor := current
-	closeAuditor := false
-	if !currentWritable {
-		var err error
-		auditor, err = store.OpenExistingContext(ctx, database)
-		if err != nil {
-			logAuditFailure(entry.Action)
-			return
-		}
-		closeAuditor = true
-	}
-	if auditor == nil {
+// auditHostCommand records an explicitly mutating host-authorized operation
+// using the already-open writable store. Read-only commands intentionally do
+// not call this helper: adding an audit row would make verify, health, status,
+// history, and baseline export mutate the database they promise to inspect.
+func auditHostCommand(ctx context.Context, current *store.Store, entry store.AuditEntry) {
+	if current == nil {
 		logAuditFailure(entry.Action)
 		return
 	}
-	if err := auditor.AuditEntry(ctx, entry); err != nil {
+	entry.ActorUsername = hostCLIActor
+	if err := current.AuditEntry(ctx, entry); err != nil {
 		logAuditFailure(entry.Action)
 	}
-	if closeAuditor {
+}
+
+// auditHostCommandOnExisting is the explicit audited-write path for a
+// successful operation that intentionally did not keep a writable store open,
+// such as restore. It is never used by read-only inspection commands.
+func auditHostCommandOnExisting(ctx context.Context, database string, entry store.AuditEntry) {
+	auditor, err := store.OpenExistingContext(ctx, database)
+	if err != nil {
+		logAuditFailure(entry.Action)
+		return
+	}
+	defer func() {
 		if err := auditor.Close(); err != nil {
 			logAuditFailure(entry.Action)
 		}
-	}
+	}()
+	auditHostCommand(ctx, auditor, entry)
 }
 
 func logAuditFailure(action string) {

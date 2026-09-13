@@ -56,7 +56,7 @@ test('role route and navigation matrix matches the authorization contract', asyn
         await expect(page.getByRole('button', { name: 'Create activation link' })).toBeVisible()
         await page.goto('/notifications')
         await expect(page.getByRole('heading', { name: 'Notifications', exact: true })).toBeVisible()
-        await expect(page.getByRole('button', { name: 'Save update routing' })).toBeVisible()
+        await expect(page.getByRole('checkbox', { name: 'Disable update alerts for Operations' })).toBeVisible()
         await page.goto('/public-dashboard')
         await expect(page.getByRole('heading', { name: 'Public status', exact: true })).toBeVisible()
         await expect(page.getByRole('button', { name: 'Save public view' })).toBeVisible()
@@ -85,4 +85,3 @@ test('role route and navigation matrix matches the authorization contract', asyn
     }
   }
 })
-

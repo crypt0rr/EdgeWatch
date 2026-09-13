@@ -38,29 +38,26 @@ test('incident acceptance exposes failure and success outcomes', async ({ page }
   expect(controls.calls['incident-accept']).toBe(2)
 })
 
-test('update notification routing exposes failure and success outcomes', async ({ page }, testInfo) => {
+test('inline update notification toggles expose failure and success outcomes', async ({ page }, testInfo) => {
   test.skip(!desktopOnly(testInfo), 'Mutation journeys run once on desktop; responsive behavior is covered separately.')
   const controls = await mockConsole(page)
   await page.goto('/notifications')
-  const selection = page.locator('.update-routing-panel input[type="checkbox"]').first()
-  await expect(selection).toBeChecked()
-  await selection.uncheck()
+  const toggle = page.getByRole('checkbox', { name: 'Disable update alerts for Operations' })
+  await expect(toggle).toBeChecked()
 
   controls.failNext('update-routing')
-  await page.getByRole('button', { name: 'Save update routing' }).click()
-  const dialog = page.getByRole('dialog', { name: 'Confirm update notification routing' })
+  await toggle.click()
+  const dialog = page.getByRole('dialog', { name: 'Confirm update alerts for Operations' })
   await dialog.getByLabel('Account password').fill('fixture-password')
-  await dialog.getByRole('button', { name: 'Save routing' }).click()
-  // Notification actions keep the password dialog open while the page-level
-  // error banner explains a rejected request. The confirmation prompt closes
-  // after submission, so a retry deliberately requires a fresh confirmation.
+  await dialog.getByRole('button', { name: 'Disable update alerts' }).click()
   await expect(page.getByRole('alert')).toContainText('fixture update-routing failed')
+  await expect(page.getByRole('checkbox', { name: 'Disable update alerts for Operations' })).toBeChecked()
 
-  await page.getByRole('button', { name: 'Save update routing' }).click()
-  const retryDialog = page.getByRole('dialog', { name: 'Confirm update notification routing' })
+  await page.getByRole('checkbox', { name: 'Disable update alerts for Operations' }).click()
+  const retryDialog = page.getByRole('dialog', { name: 'Confirm update alerts for Operations' })
   await retryDialog.getByLabel('Account password').fill('fixture-password')
-  await retryDialog.getByRole('button', { name: 'Save routing' }).click()
-  await expect(page.getByRole('status')).toContainText('Application update notification routing saved')
+  await retryDialog.getByRole('button', { name: 'Disable update alerts' }).click()
+  await expect(page.getByRole('status')).toContainText('Application update alerts disabled for Operations')
   expect(controls.payloads['update-routing']).toHaveLength(2)
 })
 

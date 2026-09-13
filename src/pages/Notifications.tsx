@@ -46,15 +46,11 @@ export function Notifications() {
 
   const updateRouting = destinations.data?.update_routing
   useEffect(() => {
-    if (!destinations.data) return
-    const fallback = updateRouting?.configured
-      ? updateRouting.destinations
-      : destinations.data.destinations.filter(destination => destination.enabled).map(destination => destination.id)
+    if (!destinations.data || !updateRouting?.configured) return
     const available = new Set(destinations.data.destinations.map(destination => destination.id))
     setUpdateSelection(current => {
-      if (current === undefined) return [...fallback]
-      const next = current.filter(id => available.has(id))
-      if (next.length === current.length && next.every((id, index) => id === current[index])) return current
+      const next = (current ?? updateRouting.destinations).filter(id => available.has(id))
+      if (current !== undefined && next.length === current.length && next.every((id, index) => id === current[index])) return current
       return next
     })
   }, [destinations.data, updateRouting?.configured, updateRouting?.destinations])
@@ -190,43 +186,44 @@ export function Notifications() {
     }
   }
 
-  async function saveUpdateRouting() {
-    if (!destinations.data) return
-    resetFeedback()
-    const selected = updateSelection ?? (updateRouting?.configured
+  function selectedUpdateDestinationIds() {
+    if (!destinations.data) return []
+    if (updateSelection !== undefined) return updateSelection
+    return updateRouting?.configured
       ? updateRouting.destinations
-      : destinations.data.destinations.filter(destination => destination.enabled).map(destination => destination.id))
-    const confirmation = await askPassword('Confirm update notification routing', 'Enter your account password to choose which destinations receive release and upgrade alerts.', 'Save routing')
+      : destinations.data.destinations.filter(destination => destination.enabled).map(destination => destination.id)
+  }
+
+  async function toggleUpdateRouting(destination: NotificationDestination, checked: boolean) {
+    if (!destinations.data || busy.startsWith('update-routing:') || passwordPrompt) return
+    resetFeedback()
+    const selected = selectedUpdateDestinationIds()
+    const next = checked
+      ? [...new Set([...selected, destination.id])]
+      : selected.filter(id => id !== destination.id)
+    const confirmation = await askPassword(`Confirm update alerts for ${destination.name}`, `Enter your account password to ${checked ? 'send' : 'stop sending'} release and upgrade alerts through this destination.`, checked ? 'Enable update alerts' : 'Disable update alerts')
     if (confirmation === null) return
-    setBusy('update-routing')
+    setBusy(`update-routing:${destination.id}`)
     try {
-      const result = await updateNotificationRouting(selected, confirmation)
+      const result = await updateNotificationRouting(next, confirmation)
       setUpdateSelection([...result.destinations])
-      setMessage('Application update notification routing saved.')
+      setMessage(`Application update alerts ${checked ? 'enabled' : 'disabled'} for ${destination.name}.`)
       await client.invalidateQueries({ queryKey: ['notifications'] })
     } catch (err) {
-      reportError(err, 'Could not save application update notification routing.')
+      reportError(err, 'Could not change application update notification routing.')
     } finally {
       setBusy('')
     }
   }
 
   const status = destinations.data?.status
-  const selectedUpdateDestinations = updateSelection ?? (updateRouting?.configured
-    ? updateRouting.destinations
-    : destinations.data?.destinations.filter(destination => destination.enabled).map(destination => destination.id) ?? [])
+  const selectedUpdateDestinations = selectedUpdateDestinationIds()
+  const updateRoutingBusy = busy.startsWith('update-routing:') || passwordPrompt !== null
   return <section className="page narrow notifications-page">
     <div className="page-heading"><div><p className="eyebrow">Delivery</p><h1>Notifications</h1><p className="muted">Manage named Shoutrrr destinations without exposing their credentials.</p></div><Bell className="muted-icon" size={24} /></div>
     {message && <div className="success-banner" role="status"><Check size={17} />{message}</div>}
     {error && <div className="form-error banner" role="alert"><AlertTriangle size={17} />{error}</div>}
     {status && <div className={status.key_state === 'ready' || status.key_state === 'not_required' ? 'notice notification-status' : 'notice warning notification-status'}><KeyRound size={17} /><span><strong>{status.key_state === 'ready' ? 'Encrypted destinations are available.' : status.key_state === 'not_required' ? 'No web-managed destinations yet.' : 'Managed destination key needs attention.'}</strong> {status.locked ? `${status.locked} destination${status.locked === 1 ? '' : 's'} locked; deployment URLs continue independently.` : 'Credentials are write-only and encrypted at rest.'}</span><button className="icon-button" type="button" onClick={() => destinations.refetch()} aria-label="Refresh notification status"><RefreshCw size={15} /></button></div>}
-
-    {canManage && <div className="panel update-routing-panel">
-      <div className="panel-heading"><div><h2>Application update alerts</h2><p className="muted">Choose one or more destinations for release and upgrade alerts. Update checks still run when every destination is unchecked.</p></div><RefreshCw className="muted-icon" size={20} /></div>
-      {destinations.isLoading ? <div className="loading"><span className="spinner" />Loading update routing…</div> : destinations.data?.destinations.length ? <div className="job-notification-list">{destinations.data.destinations.map(destination => <label className="job-notification-option" key={`update-${destination.id}`}><input type="checkbox" checked={selectedUpdateDestinations.includes(destination.id)} onChange={event => setUpdateSelection(current => { const base = current ?? selectedUpdateDestinations; return event.target.checked ? [...new Set([...base, destination.id])] : base.filter(id => id !== destination.id) })} /><span><strong>{destination.name}</strong><small>{destination.provider || 'unknown provider'} · {destination.enabled ? 'enabled' : 'paused'}{destination.locked ? ' · credentials unavailable' : ''}</small></span>{destination.locked && <span className="pill amber">Locked</span>}</label>)}</div> : <div className="inline-empty">No notification destinations are configured yet.</div>}
-      <p className="helper">Until you save a selection, release and upgrade alerts use all globally enabled destinations. Saving zero destinations keeps those alerts silent.</p>
-      <button type="button" className="button secondary" onClick={saveUpdateRouting} disabled={!destinations.data || busy === 'update-routing'}>{busy === 'update-routing' ? 'Saving…' : 'Save update routing'}</button>
-    </div>}
 
     {canManage && <div className="panel notification-create">
       <div className="panel-heading"><div><h2>Add destination</h2><p className="muted">Paste one complete Shoutrrr URL. It is never returned by the API.</p></div><ShieldCheck className="green-icon" size={20} /></div>
@@ -238,19 +235,19 @@ export function Notifications() {
     </div>}
 
     <div className="panel notification-list-panel">
-      <div className="panel-heading"><div><h2>Configured destinations</h2><p className="muted">Deployment-managed URLs remain read-only here. Web-managed URLs are identified by name and provider.</p></div><span className="pill blue">{status?.active ?? 0} active</span></div>
+      <div className="panel-heading"><div><h2>Configured destinations</h2><p className="muted">Deployment-managed URLs remain read-only here. Web-managed URLs are identified by name and provider. Use each destination’s Update alerts toggle to control release and upgrade notifications.</p></div><span className="pill blue">{status?.active ?? 0} active</span></div>
       {!canManage && <div className="notice notification-read-only" role="status"><LockKeyhole size={16} /><span>Notification destinations are managed by an administrator. You can review their availability and select them for jobs where permitted.</span></div>}
-      {destinations.isLoading ? <div className="loading"><span className="spinner" />Loading destinations…</div> : destinations.error ? <div className="error-card">{destinations.error.message}</div> : destinations.data?.destinations.length ? <div className="notification-list">{destinations.data.destinations.map(destination => <DestinationRow key={destination.id} destination={destination} editing={canManage && edit?.id === destination.id ? edit : null} busy={busy} canManage={canManage} onEdit={beginEdit} onCancel={() => setEdit(null)} onSave={saveEdit} onChange={setEdit} onToggle={toggle} onDelete={remove} onTest={test} />)}</div> : <div className="inline-empty">No notification destinations are configured.</div>}
+      {destinations.isLoading ? <div className="loading"><span className="spinner" />Loading destinations…</div> : destinations.error ? <div className="error-card">{destinations.error.message}</div> : destinations.data?.destinations.length ? <div className="notification-list">{destinations.data.destinations.map(destination => <DestinationRow key={destination.id} destination={destination} editing={canManage && edit?.id === destination.id ? edit : null} busy={busy} canManage={canManage} updateAlertSelected={selectedUpdateDestinations.includes(destination.id)} updateAlertsBusy={updateRoutingBusy} onToggleUpdateAlerts={toggleUpdateRouting} onEdit={beginEdit} onCancel={() => setEdit(null)} onSave={saveEdit} onChange={setEdit} onToggle={toggle} onDelete={remove} onTest={test} />)}</div> : <div className="inline-empty">No notification destinations are configured.</div>}
     </div>
     <p className="helper notification-footnote"><LockKeyhole size={13} /> URLs containing credentials are encrypted with the local notification key. Back up <code>notification.key</code> with <code>edgewatch.db</code>; losing it locks web-managed destinations until the key is restored (or a destination is deleted and recreated).</p>
     {passwordPrompt && <ActionDialog title={passwordPrompt.title} description={passwordPrompt.description} confirmLabel={passwordPrompt.confirmLabel} valueLabel="Account password" valueType="password" valueRequired autoComplete="current-password" onConfirm={value => resolvePassword(value)} onCancel={() => resolvePassword(null)} />}
   </section>
 }
 
-function DestinationRow({ destination, editing, busy, canManage, onEdit, onCancel, onSave, onChange, onToggle, onDelete, onTest }: { destination: NotificationDestination; editing: EditState | null; busy: string; canManage: boolean; onEdit: (destination: NotificationDestination) => void; onCancel: () => void; onSave: (event: FormEvent) => void; onChange: (next: EditState | null) => void; onToggle: (destination: NotificationDestination) => void; onDelete: (destination: NotificationDestination) => void; onTest: (destination: NotificationDestination) => void }) {
+function DestinationRow({ destination, editing, busy, canManage, updateAlertSelected, updateAlertsBusy, onToggleUpdateAlerts, onEdit, onCancel, onSave, onChange, onToggle, onDelete, onTest }: { destination: NotificationDestination; editing: EditState | null; busy: string; canManage: boolean; updateAlertSelected: boolean; updateAlertsBusy: boolean; onToggleUpdateAlerts: (destination: NotificationDestination, checked: boolean) => void; onEdit: (destination: NotificationDestination) => void; onCancel: () => void; onSave: (event: FormEvent) => void; onChange: (next: EditState | null) => void; onToggle: (destination: NotificationDestination) => void; onDelete: (destination: NotificationDestination) => void; onTest: (destination: NotificationDestination) => void }) {
   const deployment = destination.read_only || destination.source === 'deployment'
   return <div className={destination.locked ? 'notification-row locked' : 'notification-row'}>
-    <div className="notification-row-main"><span className={deployment ? 'notification-icon deployment' : 'notification-icon'}>{deployment ? <Plug size={16} /> : <Send size={16} />}</span><div className="notification-meta"><strong>{destination.name}</strong><span>{destination.provider || 'unknown provider'} · {deployment ? 'deployment configuration' : `revision ${destination.revision}`}</span></div><div className="notification-state">{destination.locked ? <span className="pill amber"><LockKeyhole size={11} /> Locked</span> : deployment ? <span className="pill gray">Read-only</span> : <span className={destination.enabled ? 'pill green' : 'pill gray'}>{destination.enabled ? 'Enabled' : 'Paused'}</span>}</div></div>
+    <div className="notification-row-main"><span className={deployment ? 'notification-icon deployment' : 'notification-icon'}>{deployment ? <Plug size={16} /> : <Send size={16} />}</span><div className="notification-meta"><strong>{destination.name}</strong><span>{destination.provider || 'unknown provider'} · {deployment ? 'deployment configuration' : `revision ${destination.revision}`}</span></div>{canManage && <label className="notification-update-toggle"><input type="checkbox" checked={updateAlertSelected} disabled={updateAlertsBusy} onChange={event => onToggleUpdateAlerts(destination, event.currentTarget.checked)} aria-label={`${updateAlertSelected ? 'Disable' : 'Enable'} update alerts for ${destination.name}`} /><span><strong>Update alerts</strong><small>{updateAlertSelected ? 'Release and upgrade alerts on' : 'Release and upgrade alerts off'}</small></span></label>}<div className="notification-state">{destination.locked ? <span className="pill amber"><LockKeyhole size={11} /> Locked</span> : deployment ? <span className="pill gray">Read-only</span> : <span className={destination.enabled ? 'pill green' : 'pill gray'}>{destination.enabled ? 'Enabled' : 'Paused'}</span>}</div></div>
     {destination.locked && <div className="notification-lock"><AlertTriangle size={14} /> Credentials cannot be decrypted ({destination.error_code ?? 'key unavailable'}). Restore the key before editing or enabling it; if it cannot be recovered, remove and recreate this destination.</div>}
     <DeliveryHealth destination={destination} />
     {!deployment && editing && <form className="notification-edit" onSubmit={onSave}><div className="two-fields"><label>Name<input value={editing.name} onChange={event => onChange({ ...editing, name: event.target.value })} maxLength={100} required /></label><label>Replace URL <span className="helper">(optional)</span><input type="url" value={editing.url} onChange={event => onChange({ ...editing, url: event.target.value })} placeholder="Leave blank to keep the encrypted URL" autoComplete="off" spellCheck={false} /></label></div><label className="switch-row notification-check"><input type="checkbox" checked={editing.enabled} onChange={event => onChange({ ...editing, enabled: event.target.checked })} /><span><strong>{editing.enabled ? 'Enabled' : 'Paused'}</strong><small>Saving creates a new destination revision.</small></span></label><div className="notification-edit-actions"><button className="button primary" type="submit" disabled={busy === destination.id}>Save changes</button><button className="button ghost" type="button" onClick={onCancel}>Cancel</button></div></form>}

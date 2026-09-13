@@ -80,3 +80,32 @@ func TestAcceptedChangesSynchronizeDetailedHostObservations(t *testing.T) {
 		}
 	}
 }
+
+func TestAcceptedHostSyncUsesPrecomputedAddressIndex(t *testing.T) {
+	snapshot := &model.Snapshot{
+		Units: []model.Unit{{
+			Target:    "router.example",
+			Protocol:  "tcp",
+			Addresses: []string{"192.0.2.10"},
+		}},
+		Hosts: []model.HostObservation{{
+			Address: "192.0.2.10",
+			Protocols: []model.ProtocolObservation{{
+				Protocol: "tcp",
+				Ports:    []model.PortObservation{{Port: 443, State: "open"}},
+			}},
+		}},
+	}
+
+	// Build the relationship index once, then discard the source units. The
+	// synchronization pass must use the committed index rather than walking
+	// every unit for this host.
+	index := buildAcceptedHostAddressIndex(snapshot)
+	snapshot.Units = nil
+	syncAcceptedPortHostsWithIndex(snapshot, model.Change{
+		Target: "router.example", Protocol: "tcp", Port: 443, New: "not-open",
+	}, index)
+	if ports := snapshot.Hosts[0].Protocols[0].Ports; len(ports) != 0 {
+		t.Fatalf("precomputed host index did not synchronize host: %#v", ports)
+	}
+}

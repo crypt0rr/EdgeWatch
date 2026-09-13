@@ -94,8 +94,10 @@ var ErrShuttingDown = errors.New("application is shutting down")
 var ErrScanWorkBudget = errors.New("estimated scan work exceeds the configured probe budget")
 
 // ErrScanCycleStalled tells scheduled callers that an operator must intervene
-// before another attempt is started. Manual runs are allowed to retry the
-// checkpointed cycle explicitly.
+// before another attempt is started. Transient unit failures are retried a
+// bounded number of times while a cycle remains paused; this state is reserved
+// for permanent failures or an exhausted retry budget. Manual runs are allowed
+// to retry the checkpointed cycle explicitly.
 var ErrScanCycleStalled = errors.New("scan cycle is stalled; manual retry required")
 
 const (

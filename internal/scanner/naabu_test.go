@@ -46,6 +46,12 @@ func TestNaabuConnectHostDiscoveryIsRejected(t *testing.T) {
 	if err := validateNaabuInvocation(syn, true, false); err == nil || !strings.Contains(err.Error(), "NET_RAW") {
 		t.Fatalf("SYN capability error = %v", err)
 	}
+	if !IsConfigurationError(validateNaabuInvocation(connect, false, true)) {
+		t.Fatal("connect host-discovery error was not marked as permanent configuration")
+	}
+	if !IsConfigurationError(validateNaabuInvocation(syn, true, false)) {
+		t.Fatal("SYN capability error was not marked as permanent configuration")
+	}
 	if err := validateNaabuInvocation(syn, false, true); err != nil {
 		t.Fatalf("SYN with capabilities was rejected: %v", err)
 	}

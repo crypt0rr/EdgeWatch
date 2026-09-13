@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -10,6 +12,57 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
+
+// scanCycleMaxUnitAttempts bounds retries for a single resumable work unit.
+// The attempt count is persisted on scan_cycle_units, so scheduled triggers
+// cannot retry a failing scanner forever. A transient failure is left pending
+// for the next scheduled/manual trigger; the final failure stalls the cycle so
+// an operator can inspect the error and choose whether to discard progress.
+const scanCycleMaxUnitAttempts = 3
+
+// retryableResumableError distinguishes execution failures from errors that
+// indicate an invalid or unusable scanner configuration. Process exits,
+// malformed output, and network-level failures are retryable. Validation and
+// deployment errors are surfaced immediately so they do not produce repeated
+// scheduled no-op scans. The scanner deliberately returns sanitized, human
+// readable errors, so keep this classifier conservative and prefix-oriented.
+func retryableResumableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if scanner.IsConfigurationError(err) {
+		return false
+	}
+	message := strings.ToLower(strings.TrimSpace(err.Error()))
+	permanent := []string{
+		"scanner profile arguments",
+		"unsupported naabu work-unit phase",
+		" scan is not enabled",
+		"requires tcp",
+		"requires net_raw",
+		"requires net_admin",
+		"no effective targets",
+		"invalid address",
+		"unexpected address",
+		"invalid port",
+		"non-tcp protocol",
+		"resolve ",
+		"expanded targets exceed",
+		"is excluded by scanner.target_exclusions",
+		"resolved to excluded address",
+		"overlaps excluded network",
+		"executable file not found",
+		"no such file or directory",
+		"permission denied",
+		"configuration",
+	}
+	for _, marker := range permanent {
+		if strings.Contains(message, marker) {
+			return false
+		}
+	}
+	return true
+}
 
 // runResumableAttempt executes one time-bounded portion of a broad scan. It
 // returns handled=false when the scanner's plan fits in one invocation and the
@@ -363,18 +416,58 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 			return true, fragment, scanErr
 		}
 
-		stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, scanErr.Error())
-		if stallErr == nil {
-			cycle = stalled
-		} else {
+		// Non-timeout execution failures used to stall the cycle immediately.
+		// That made a transient process/network failure suppress all future
+		// scheduled triggers until an operator manually intervened. Keep
+		// configuration and deployment failures actionable immediately, but leave
+		// transient failures pending for a bounded number of future attempts.
+		retryable := retryableResumableError(scanErr)
+		if !retryable || claimed.Attempts >= scanCycleMaxUnitAttempts {
+			stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, scanErr.Error())
+			if stallErr == nil {
+				cycle = stalled
+			} else {
+				scan.Status = "failed"
+				scan.Error = stallErr.Error()
+				return true, fragment, stallErr
+			}
+			scan.Resumable = true
 			scan.Status = "failed"
-			scan.Error = stallErr.Error()
-			return true, fragment, stallErr
+			if retryable {
+				scan.Error = fmt.Sprintf("scan failed after %d attempts: %s", claimed.Attempts, scanErr)
+			} else {
+				scan.Error = scanErr.Error()
+			}
+			setScanCycleMetadata(scan, cycle)
+			return true, fragment, scanErr
+		}
+
+		if retryErr := a.Store.RetryScanCycleUnit(stateCtx, cycle.ID, claimed.Sequence, scanErr.Error()); retryErr != nil {
+			if errors.Is(retryErr, store.ErrCycleNotResumable) {
+				applyCycleFailureState(stateCtx, a.Store, scan, cycle.ID, retryErr.Error())
+			} else {
+				scan.Status = "failed"
+				scan.Error = retryErr.Error()
+				if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, retryErr.Error()); stallErr == nil {
+					setScanCycleMetadata(scan, stalled)
+				} else {
+					scan.CycleStatus = "stalled"
+				}
+			}
+			return true, fragment, retryErr
+		}
+		retryMessage := fmt.Sprintf("retryable scanner failure (attempt %d of %d): %s", claimed.Attempts, scanCycleMaxUnitAttempts, scanErr)
+		paused, pauseErr := a.Store.PauseScanCycle(stateCtx, cycle.ID, false, retryMessage)
+		if pauseErr != nil {
+			// A persistence failure must not be reported as resumable progress.
+			scan.Status = "failed"
+			scan.Error = pauseErr.Error()
+			return true, fragment, pauseErr
 		}
 		scan.Resumable = true
 		scan.Status = "failed"
-		scan.Error = scanErr.Error()
-		setScanCycleMetadata(scan, cycle)
+		scan.Error = fmt.Sprintf("scan failed (attempt %d of %d); progress was saved for the next trigger: %s", claimed.Attempts, scanCycleMaxUnitAttempts, scanErr)
+		setScanCycleMetadata(scan, paused)
 		return true, fragment, scanErr
 	}
 }

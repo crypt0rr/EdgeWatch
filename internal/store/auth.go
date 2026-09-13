@@ -18,6 +18,20 @@ import (
 // operation as degraded) rather than claiming a successful audited action.
 var ErrAuditUnavailable = errors.New("security audit unavailable")
 
+// auditPersistenceTimeout bounds standalone audit writes while detaching them
+// from a request's cancellation and deadline. Mutations that include an audit
+// row in their own transaction continue to use the caller context so they can
+// roll back together; this helper is only for post-action, non-transactional
+// audit records.
+const auditPersistenceTimeout = 5 * time.Second
+
+func auditPersistenceContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(context.WithoutCancel(ctx), auditPersistenceTimeout)
+}
+
 // AuditEntry describes a security event that should be committed together
 // with the state mutation that caused it. Keeping this small value type in the
 // store package lets job, baseline, and notification transactions share the
@@ -695,7 +709,9 @@ func recoveryCodeMatches(stored, code string) bool {
 }
 
 func (s *Store) Audit(ctx context.Context, action, detail string) error {
-	return insertAuditExec(ctx, s.DB, action, detail, time.Now().UTC())
+	persistCtx, cancel := auditPersistenceContext(ctx)
+	defer cancel()
+	return insertAuditExec(persistCtx, s.DB, action, detail, time.Now().UTC())
 }
 
 // AuditEntry records a security event with optional actor attribution. It is
@@ -703,7 +719,9 @@ func (s *Store) Audit(ctx context.Context, action, detail string) error {
 // transaction with their state change (for example, a failed notification
 // delivery or a host-initiated recovery action).
 func (s *Store) AuditEntry(ctx context.Context, entry AuditEntry) error {
-	return insertAuditEntryExec(ctx, s.DB, entry, time.Now().UTC())
+	persistCtx, cancel := auditPersistenceContext(ctx)
+	defer cancel()
+	return insertAuditEntryExec(persistCtx, s.DB, entry, time.Now().UTC())
 }
 
 func insertAuditExec(ctx context.Context, execer contextExecer, action, detail string, now time.Time) error {

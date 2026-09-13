@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -689,12 +690,18 @@ func (m *Manager) auditAuthFailure(ctx context.Context, action, subject string, 
 	if len(subject) > 80 {
 		subject = subject[:80]
 	}
-	_ = m.Store.AuditEntry(ctx, store.AuditEntry{
+	if err := m.Store.AuditEntry(ctx, store.AuditEntry{
 		Action:        action,
 		Detail:        "authentication event for " + subject,
 		ActorUsername: subject,
 		SourceIP:      m.ClientIP(request),
-	})
+	}); err != nil {
+		// Authentication failure records are deliberately best-effort so they do
+		// not change the generic response contract, but a storage failure must
+		// remain observable for operators. Store.AuditEntry persists through a
+		// bounded context detached from request cancellation.
+		slog.Default().Warn("security audit write failed", "action", action, "error", err)
+	}
 }
 
 // auditRateLimit records only the transition into a rate-limited episode. A

@@ -38,3 +38,46 @@ func TestAuditEntryValuesOverrideContext(t *testing.T) {
 		t.Fatalf("explicit audit values = request %q source %q", requestID, sourceIP)
 	}
 }
+
+func TestStandaloneAuditPersistsAfterContextCancellation(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+
+	base := WithAuditContext(context.Background(), "cancelled-request", "198.51.100.20")
+	ctx, cancel := context.WithCancel(base)
+	cancel()
+	if err := s.Audit(ctx, "cancelled.audit", "standalone audit"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AuditEntry(ctx, AuditEntry{Action: "cancelled.audit.entry"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.DB.QueryContext(context.Background(), `SELECT action,request_id,source_ip FROM security_audit WHERE action LIKE 'cancelled.audit%' ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var got []struct {
+		action, requestID, sourceIP string
+	}
+	for rows.Next() {
+		var row struct {
+			action, requestID, sourceIP string
+		}
+		if err := rows.Scan(&row.action, &row.requestID, &row.sourceIP); err != nil {
+			t.Fatal(err)
+		}
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("cancelled audit rows = %d, want 2", len(got))
+	}
+	for _, row := range got {
+		if row.requestID != "cancelled-request" || row.sourceIP != "198.51.100.20" {
+			t.Fatalf("cancelled audit context = request %q source %q", row.requestID, row.sourceIP)
+		}
+	}
+}

@@ -64,8 +64,9 @@ func (s *Store) AcceptIncidentWithExpectedOutboxAndAudit(ctx context.Context, jo
 				accepted[index].Key = acceptedKeys[index]
 			}
 		}
+		hostIndex := buildAcceptedHostAddressIndex(state.Baseline)
 		for _, acceptedChange := range accepted {
-			if err := applyAcceptedChange(state.Baseline, acceptedChange); err != nil {
+			if err := applyAcceptedChangeWithHostIndex(state.Baseline, acceptedChange, hostIndex); err != nil {
 				return nil, err
 			}
 		}
@@ -261,14 +262,18 @@ func fingerprintCandidateKey(change model.Change) string {
 // baseline's host evidence is updated only enough for the expected host view
 // to agree with its accepted port/service state.
 func applyAcceptedChange(snapshot *model.Snapshot, change model.Change) error {
+	return applyAcceptedChangeWithHostIndex(snapshot, change, buildAcceptedHostAddressIndex(snapshot))
+}
+
+func applyAcceptedChangeWithHostIndex(snapshot *model.Snapshot, change model.Change, hostIndex acceptedHostAddressIndex) error {
 	if snapshot == nil {
 		return ErrBaselineNotReady
 	}
 	switch change.Kind {
 	case "port":
-		return acceptPortChange(snapshot, change)
+		return acceptPortChangeWithIndex(snapshot, change, hostIndex)
 	case "service":
-		return acceptServiceChange(snapshot, change)
+		return acceptServiceChangeWithIndex(snapshot, change, hostIndex)
 	case "dns-added", "dns-removed":
 		return acceptDNSChange(snapshot, change)
 	default:
@@ -277,6 +282,10 @@ func applyAcceptedChange(snapshot *model.Snapshot, change model.Change) error {
 }
 
 func acceptPortChange(snapshot *model.Snapshot, change model.Change) error {
+	return acceptPortChangeWithIndex(snapshot, change, buildAcceptedHostAddressIndex(snapshot))
+}
+
+func acceptPortChangeWithIndex(snapshot *model.Snapshot, change model.Change, hostIndex acceptedHostAddressIndex) error {
 	if strings.TrimSpace(change.Target) == "" || strings.TrimSpace(change.Protocol) == "" || change.Port < 1 || change.Port > 65535 {
 		return fmt.Errorf("%w: invalid port change", ErrUnsupportedIncidentChange)
 	}
@@ -292,7 +301,7 @@ func acceptPortChange(snapshot *model.Snapshot, change model.Change) error {
 			}
 		}
 		snapshot.Units[unitIndex].Ports = ports
-		syncAcceptedPortHosts(snapshot, change)
+		syncAcceptedPortHostsWithIndex(snapshot, change, hostIndex)
 		snapshot.Normalize()
 		return nil
 	}
@@ -306,18 +315,22 @@ func acceptPortChange(snapshot *model.Snapshot, change model.Change) error {
 	for i := range snapshot.Units[unitIndex].Ports {
 		if snapshot.Units[unitIndex].Ports[i].Port == change.Port {
 			snapshot.Units[unitIndex].Ports[i].State = change.New
-			syncAcceptedPortHosts(snapshot, change)
+			syncAcceptedPortHostsWithIndex(snapshot, change, hostIndex)
 			snapshot.Normalize()
 			return nil
 		}
 	}
 	snapshot.Units[unitIndex].Ports = append(snapshot.Units[unitIndex].Ports, model.PortState{Port: change.Port, State: change.New})
-	syncAcceptedPortHosts(snapshot, change)
+	syncAcceptedPortHostsWithIndex(snapshot, change, hostIndex)
 	snapshot.Normalize()
 	return nil
 }
 
 func acceptServiceChange(snapshot *model.Snapshot, change model.Change) error {
+	return acceptServiceChangeWithIndex(snapshot, change, buildAcceptedHostAddressIndex(snapshot))
+}
+
+func acceptServiceChangeWithIndex(snapshot *model.Snapshot, change model.Change, hostIndex acceptedHostAddressIndex) error {
 	if strings.TrimSpace(change.Target) == "" || strings.TrimSpace(change.Protocol) == "" || change.Port < 1 || change.Port > 65535 {
 		return fmt.Errorf("%w: invalid service change", ErrUnsupportedIncidentChange)
 	}
@@ -341,7 +354,7 @@ func acceptServiceChange(snapshot *model.Snapshot, change model.Change) error {
 				}
 				snapshot.Units[unitIndex].Ports[i].Service = change.New
 			}
-			syncAcceptedServiceHosts(snapshot, change)
+			syncAcceptedServiceHostsWithIndex(snapshot, change, hostIndex)
 			snapshot.Normalize()
 			return nil
 		}
@@ -362,7 +375,38 @@ func normalizedAcceptedTarget(target string) string {
 	return target
 }
 
+type acceptedHostAddressIndex map[string]map[string]struct{}
+
+func buildAcceptedHostAddressIndex(snapshot *model.Snapshot) acceptedHostAddressIndex {
+	index := acceptedHostAddressIndex{}
+	if snapshot == nil {
+		return index
+	}
+	for _, unit := range snapshot.Units {
+		target := normalizedAcceptedTarget(unit.Target)
+		if target == "" {
+			continue
+		}
+		addresses := index[target]
+		if addresses == nil {
+			addresses = map[string]struct{}{}
+			index[target] = addresses
+		}
+		for _, address := range unit.Addresses {
+			address = normalizedAcceptedTarget(address)
+			if address != "" {
+				addresses[address] = struct{}{}
+			}
+		}
+	}
+	return index
+}
+
 func acceptedHostMatches(snapshot *model.Snapshot, host model.HostObservation, target string) bool {
+	return acceptedHostMatchesWithIndex(host, target, buildAcceptedHostAddressIndex(snapshot))
+}
+
+func acceptedHostMatchesWithIndex(host model.HostObservation, target string, index acceptedHostAddressIndex) bool {
 	target = normalizedAcceptedTarget(target)
 	if normalizedAcceptedTarget(host.Address) == target {
 		return true
@@ -372,23 +416,22 @@ func acceptedHostMatches(snapshot *model.Snapshot, host model.HostObservation, t
 			return true
 		}
 	}
-	for _, unit := range snapshot.Units {
-		if normalizedAcceptedTarget(unit.Target) != target {
-			continue
-		}
-		for _, address := range unit.Addresses {
-			if normalizedAcceptedTarget(address) == normalizedAcceptedTarget(host.Address) {
-				return true
-			}
+	if addresses := index[target]; addresses != nil {
+		if _, ok := addresses[normalizedAcceptedTarget(host.Address)]; ok {
+			return true
 		}
 	}
 	return false
 }
 
 func syncAcceptedPortHosts(snapshot *model.Snapshot, change model.Change) {
+	syncAcceptedPortHostsWithIndex(snapshot, change, buildAcceptedHostAddressIndex(snapshot))
+}
+
+func syncAcceptedPortHostsWithIndex(snapshot *model.Snapshot, change model.Change, index acceptedHostAddressIndex) {
 	for hostIndex := range snapshot.Hosts {
 		host := &snapshot.Hosts[hostIndex]
-		if !acceptedHostMatches(snapshot, *host, change.Target) {
+		if !acceptedHostMatchesWithIndex(*host, change.Target, index) {
 			continue
 		}
 		for protocolIndex := range host.Protocols {
@@ -423,9 +466,13 @@ func syncAcceptedPortHosts(snapshot *model.Snapshot, change model.Change) {
 }
 
 func syncAcceptedServiceHosts(snapshot *model.Snapshot, change model.Change) {
+	syncAcceptedServiceHostsWithIndex(snapshot, change, buildAcceptedHostAddressIndex(snapshot))
+}
+
+func syncAcceptedServiceHostsWithIndex(snapshot *model.Snapshot, change model.Change, index acceptedHostAddressIndex) {
 	for hostIndex := range snapshot.Hosts {
 		host := &snapshot.Hosts[hostIndex]
-		if !acceptedHostMatches(snapshot, *host, change.Target) {
+		if !acceptedHostMatchesWithIndex(*host, change.Target, index) {
 			continue
 		}
 		for protocolIndex := range host.Protocols {

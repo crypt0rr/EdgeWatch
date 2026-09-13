@@ -137,6 +137,9 @@ function Shell({ displayName, version, role, permissions, onLogout }: { displayN
             void client.invalidateQueries({ queryKey: ['hosts'] })
             if (event.job_id) {
               void client.invalidateQueries({ queryKey: ['job-scans', event.job_id] })
+              void client.invalidateQueries({ queryKey: ['job-baseline-overview', event.job_id] })
+              void client.invalidateQueries({ queryKey: ['latest-successful-scan', event.job_id] })
+              void client.invalidateQueries({ queryKey: ['latest-successful-results', event.job_id] })
               void client.invalidateQueries({ queryKey: ['scan-cycle', event.job_id] })
               void client.invalidateQueries({ queryKey: ['job', event.job_id] })
             }
@@ -149,6 +152,7 @@ function Shell({ displayName, version, role, permissions, onLogout }: { displayN
             void client.invalidateQueries({ queryKey: ['incidents'] })
             if (event.job_id) void client.invalidateQueries({ queryKey: ['job', event.job_id] })
             if (event.type === 'incident-accepted') {
+              void client.invalidateQueries({ queryKey: ['job-baseline-overview', event.job_id] })
               void client.invalidateQueries({ queryKey: ['baseline-hosts', event.job_id] })
               void client.invalidateQueries({ queryKey: ['host-detail'] })
             }

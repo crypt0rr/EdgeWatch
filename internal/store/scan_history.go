@@ -451,6 +451,26 @@ func (s *Store) GetScanSummary(ctx context.Context, id string) (model.ScanSummar
 	return v, nil
 }
 
+// GetLatestSuccessfulJobScanSummary returns the newest fully successful scan
+// for a job without loading its snapshot or change payload. The ordering is
+// deterministic for scans that finish at the same instant and is backed by
+// the scans_job_id_time index. A job with no successful scan returns a nil
+// summary and a nil error.
+func (s *Store) GetLatestSuccessfulJobScanSummary(ctx context.Context, jobID string) (*model.ScanSummary, error) {
+	var id string
+	if err := s.reader().QueryRowContext(ctx, `SELECT id FROM scans WHERE job_id=? AND status='success' ORDER BY finished_at DESC,id DESC LIMIT 1`, jobID).Scan(&id); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	summary, err := s.GetScanSummary(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &summary, nil
+}
+
 // GetScanComparison returns scan metadata and the immutable scan-time change
 // list without loading snapshot_json. Legacy rows without a scan-time
 // comparison can be resolved through GetScan when callers need to recreate

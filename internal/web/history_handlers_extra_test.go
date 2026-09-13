@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +53,25 @@ func TestHistoryAndIncidentHandlersExposeScopedPages(t *testing.T) {
 	server.jobScans(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans?limit=1", nil), record.ID)
 	if recorder.Code != http.StatusOK || !containsJSONField(recorder.Body.Bytes(), "scans") {
 		t.Fatalf("job scans = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	recorder = httptest.NewRecorder()
+	server.latestSuccessfulScan(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/latest-successful", nil), record.ID)
+	if recorder.Code != http.StatusOK || !containsJSONField(recorder.Body.Bytes(), scan.ID) {
+		t.Fatalf("latest successful scan = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	noSuccess, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "no-success", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder = httptest.NewRecorder()
+	server.latestSuccessfulScan(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+noSuccess.ID+"/scans/latest-successful", nil), noSuccess.ID)
+	if recorder.Code != http.StatusOK || recorder.Body.String() == "" || !strings.Contains(recorder.Body.String(), `"scan":null`) {
+		t.Fatalf("no successful scan = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	recorder = httptest.NewRecorder()
+	server.latestSuccessfulScan(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing/scans/latest-successful", nil), "missing")
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("missing latest successful scan status = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
 	server.jobScan(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID, nil), record.ID, scan.ID)

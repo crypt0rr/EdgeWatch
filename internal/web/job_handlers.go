@@ -413,6 +413,10 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		s.jobScans(w, r, id)
 		return
 	}
+	if len(parts) == 3 && parts[1] == "scans" && parts[2] == "latest-successful" && r.Method == http.MethodGet {
+		s.latestSuccessfulScan(w, r, id)
+		return
+	}
 	if len(parts) == 3 && parts[1] == "scans" && r.Method == http.MethodGet {
 		s.jobScan(w, r, id, parts[2])
 		return

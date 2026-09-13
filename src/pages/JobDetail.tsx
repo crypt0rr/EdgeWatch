@@ -18,6 +18,8 @@ import {
   deleteJob,
   getJob,
   jobScans,
+  latestSuccessfulScan,
+  jobBaseline,
   resetBaseline,
   restoreJob,
   runJob,
@@ -26,10 +28,12 @@ import {
   getSession,
   scanDetail,
   scanHosts,
+  scanResults,
 } from '../api'
 import { Pagination } from '../components/Pagination'
 import { ActionDialog } from '../components/ActionDialog'
 import { PortScopeDetails } from '../components/PortScopeDetails'
+import { SurfaceUnitList } from '../components/SurfaceUnitList'
 import type { WorkEstimate } from '../types'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
@@ -40,6 +44,8 @@ export function JobDetail() {
   const client = useQueryClient()
   const [selectedScan, setSelectedScan] = useState(routeScanID ?? '')
   const [scanOffset, setScanOffset] = useState(0)
+  const [baselineOffset, setBaselineOffset] = useState(0)
+  const [latestResultsOffset, setLatestResultsOffset] = useState(0)
   const [changeOffset, setChangeOffset] = useState(0)
   const [resultsOffset, setResultsOffset] = useState(0)
   const [showResults, setShowResults] = useState(false)
@@ -48,13 +54,33 @@ export function JobDetail() {
   const [dialog, setDialog] = useState<JobDialog | null>(null)
   const job = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id) })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
-  const canOperate = session.data?.role !== 'viewer'
-  const canReadScans = session.data?.role !== 'viewer'
+  // Wait for the principal before enabling scan/action queries. Besides
+  // avoiding a transient unauthorized request, this keeps viewer pages from
+  // ever fetching scan history that their role cannot read.
+  const canOperate = session.data != null && session.data.role !== 'viewer'
+  const canReadScans = session.data != null && session.data.role !== 'viewer'
   const scans = useQuery({
     queryKey: ['job-scans', id, scanOffset],
     queryFn: () => jobScans(id, scanOffset),
     enabled: !!id && canReadScans,
     refetchInterval: 10000,
+  })
+  const baseline = useQuery({
+    queryKey: ['job-baseline-overview', id, baselineOffset],
+    queryFn: () => jobBaseline(id, baselineOffset, 10),
+    enabled: !!id && job.data?.baseline.status === 'complete',
+  })
+  const latest = useQuery({
+    queryKey: ['latest-successful-scan', id],
+    queryFn: () => latestSuccessfulScan(id),
+    enabled: !!id && canReadScans,
+    refetchInterval: 10000,
+  })
+  const latestScanID = latest.data?.scan?.id ?? ''
+  const latestResults = useQuery({
+    queryKey: ['latest-successful-results', id, latestScanID, latestResultsOffset],
+    queryFn: () => scanResults(id, latestScanID, latestResultsOffset, 10),
+    enabled: !!id && !!latestScanID && canReadScans,
   })
   const cycle = useQuery({ queryKey: ['scan-cycle', id], queryFn: () => scanCycle(id), enabled: !!id && canOperate, refetchInterval: 5000 })
   const detail = useQuery({
@@ -74,6 +100,16 @@ export function JobDetail() {
     setChangeOffset(0)
     setResultsOffset(0)
   }, [routeScanID])
+
+  useEffect(() => {
+    setLatestResultsOffset(0)
+  }, [latestScanID])
+
+  useEffect(() => {
+    // A reset or a newly converged baseline can change the number of result
+    // rows. Start its independent pager at the first page in either case.
+    setBaselineOffset(0)
+  }, [job.data?.baseline.status, job.data?.baseline.scan_id])
 
   if (job.isLoading) {
     return <div className="loading"><span className="spinner" />Loading job…</div>
@@ -98,6 +134,8 @@ export function JobDetail() {
     try {
       await runJob(id)
       await client.invalidateQueries({ queryKey: ['job-scans', id] })
+      await client.invalidateQueries({ queryKey: ['latest-successful-scan', id] })
+      await client.invalidateQueries({ queryKey: ['latest-successful-results', id] })
       await client.invalidateQueries({ queryKey: ['jobs'] })
     } catch (err) {
       reportActionError(err, 'Could not start the scan.')
@@ -111,6 +149,8 @@ export function JobDetail() {
     try {
       await resetBaseline(id)
       await client.invalidateQueries({ queryKey: ['job', id] })
+      await client.invalidateQueries({ queryKey: ['job-baseline-overview', id] })
+      setBaselineOffset(0)
       setDialog(null)
     } catch (err) {
       reportActionError(err, 'Could not reset the baseline.')
@@ -125,6 +165,8 @@ export function JobDetail() {
     try {
       await approveBaseline(id, detail.data.scan.id)
       await client.invalidateQueries({ queryKey: ['job', id] })
+      await client.invalidateQueries({ queryKey: ['job-baseline-overview', id] })
+      setBaselineOffset(0)
       setSelectedScan('')
       setDialog(null)
     } catch (err) {
@@ -256,7 +298,70 @@ export function JobDetail() {
       {value.scan_estimate && <div className="notice" role="status">Estimated per run: {value.scan_estimate.probes.toLocaleString()} probes across {value.scan_estimate.hosts.toLocaleString()} hosts ({formatEstimateProcesses(value.scan_estimate)}, roughly {formatEstimateDuration(value.scan_estimate.estimated_seconds)}).{value.scan_estimate.unknown_dns ? ` DNS expansion may increase this estimate for ${value.scan_estimate.unknown_dns} name${value.scan_estimate.unknown_dns === 1 ? '' : 's'}.` : ''}</div>}
       {activeCycle && <div className={activeCycle.status === 'stalled' ? 'form-error banner' : 'notice'} role="status"><strong>{activeCycle.status === 'paused' ? 'Broad scan paused safely.' : activeCycle.status === 'stalled' ? 'Broad scan stalled.' : 'Broad scan cycle active.'}</strong> {activeCycle.completed_units} of {activeCycle.total_units} work units and {activeCycle.completed_probes.toLocaleString()} of {activeCycle.total_probes.toLocaleString()} probes complete. {activeCycle.last_error && <span>{activeCycle.last_error}</span>} {canOperate && (activeCycle.status === 'paused' || activeCycle.status === 'stalled') && <button className="button ghost" onClick={() => { setActionError(''); setDialog('discard-cycle') }} disabled={!!actionBusy}>Discard saved progress</button>}</div>}
 
-      <div className="detail-columns">
+      <div className="detail-sections">
+        <div className="panel overview-panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Expected baseline</h2>
+              <p className="muted">The positive TCP and UDP surface currently considered expected.</p>
+            </div>
+            <ShieldAlert size={18} className="muted-icon" />
+          </div>
+          <div className="baseline-box">
+            {value.baseline.status === 'complete' ? (
+              <>
+                <CheckCircle2 className="green-icon" size={22} />
+                <div>
+                  <strong>Baseline is active</strong>
+                  <span className="muted">
+                    New changes will be confirmed after {value.job.change_confirmations} matching scan{value.job.change_confirmations === 1 ? '' : 's'}.
+                  </span>
+                </div>
+              </>
+            ) : (
+              <>
+                <TimerReset className="amber-icon" size={22} />
+                <div>
+                  <strong>Baseline is learning</strong>
+                  <span className="muted">{value.baseline.samples ?? 0} of {value.job.baseline_samples} samples collected. No expected results are active yet.</span>
+                </div>
+              </>
+            )}
+          </div>
+          <div className="overview-actions">
+            {canOperate && <button className="button secondary" onClick={() => { setActionError(''); setDialog('reset') }} disabled={!!actionBusy}><RotateCcw size={16} /> {actionBusy === 'reset' ? 'Resetting…' : 'Reset baseline'}</button>}
+            {value.baseline.status === 'complete' && <Link className="button secondary explore-button" to={`/jobs/${id}/baseline`}><Server size={16} /> Explore baseline <span className="button-count">{value.baseline.host_count ?? 'hosts'}</span></Link>}
+          </div>
+          {value.baseline.status === 'complete' && (
+            <div className="overview-results">
+              {baseline.isLoading ? <div className="skeleton-list" /> : baseline.error ? <div className="form-error" role="alert">Could not load expected baseline results.</div> : baseline.data?.snapshot?.units?.length ? <SurfaceUnitList units={baseline.data.snapshot.units} /> : <div className="inline-empty">No positive ports are in the current baseline.</div>}
+              <Pagination page={baseline.data?.pagination} onChange={setBaselineOffset} />
+            </div>
+          )}
+        </div>
+
+        {canReadScans && <div className="panel overview-panel">
+          <div className="panel-heading">
+            <div>
+              <h2>Latest successful scan</h2>
+              <p className="muted">The newest complete snapshot, kept separate from failed or incomplete attempts.</p>
+            </div>
+            <Clock3 size={18} className="muted-icon" />
+          </div>
+          {latest.isLoading ? <div className="skeleton-list" /> : latest.error ? <div className="error-card" role="alert">Could not load the latest successful scan.</div> : latest.data?.scan ? (
+            <>
+              <div className="latest-scan-meta">
+                <div><strong>{new Date(latest.data.scan.finished_at).toLocaleString()}</strong><span className="muted">Scan {latest.data.scan.id.slice(0, 8)}</span></div>
+                <Link className="button ghost" to={`/jobs/${id}/scans/${encodeURIComponent(latest.data.scan.id)}`}>Open scan details →</Link>
+              </div>
+              <div className="overview-results">
+                {latestResults.isLoading ? <div className="skeleton-list" /> : latestResults.error ? <div className="form-error" role="alert">Could not load latest scan results.</div> : latestResults.data?.results?.length ? <SurfaceUnitList units={latestResults.data.results} emptyLabel="No positive ports were found in this scan." /> : <div className="inline-empty">No positive ports were found in this scan.</div>}
+                <Pagination page={latestResults.data?.pagination} onChange={setLatestResultsOffset} />
+              </div>
+            </>
+          ) : <div className="inline-empty">No successful scans have run yet.</div>}
+        </div>}
+
         {canReadScans && <div className="panel">
           <div className="panel-heading">
             <div>
@@ -340,39 +445,6 @@ export function JobDetail() {
             </div>
           )}
         </div>}
-
-        <div className="panel">
-          <div className="panel-heading">
-            <div>
-              <h2>Baseline controls</h2>
-              <p className="muted">Scope hash changes require a deliberate reset.</p>
-            </div>
-            <ShieldAlert size={18} className="muted-icon" />
-          </div>
-          <div className="baseline-box">
-            {value.baseline.status === 'complete' ? (
-              <>
-                <CheckCircle2 className="green-icon" size={22} />
-                <div>
-                  <strong>Baseline is active</strong>
-                  <span className="muted">
-                    New changes will be confirmed after {value.job.change_confirmations} matching scan{value.job.change_confirmations === 1 ? '' : 's'}.
-                  </span>
-                </div>
-              </>
-            ) : (
-              <>
-                <TimerReset className="amber-icon" size={22} />
-                <div>
-                  <strong>Baseline is learning</strong>
-                  <span className="muted">Keep the target stable while {value.job.baseline_samples} samples converge.</span>
-                </div>
-              </>
-            )}
-          </div>
-          {canOperate && <button className="button secondary" onClick={() => { setActionError(''); setDialog('reset') }} disabled={!!actionBusy}><RotateCcw size={16} /> {actionBusy === 'reset' ? 'Resetting…' : 'Reset baseline'}</button>}
-          {value.baseline.status === 'complete' && <Link className="button secondary explore-button" to={`/jobs/${id}/baseline`}><Server size={16} /> Explore baseline <span className="button-count">{value.baseline.host_count ?? 'hosts'}</span></Link>}
-        </div>
       </div>
       {dialog === 'reset' && <ActionDialog title="Reset this baseline?" description="New scans will be learned before changes are reported. Existing history is preserved." confirmLabel="Reset baseline" destructive onConfirm={() => reset()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
       {dialog === 'approve' && <ActionDialog title="Use this scan as the baseline?" description="This successful scan matches the current security scope. Future scans will compare against its results." confirmLabel="Use as baseline" onConfirm={() => approve()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}

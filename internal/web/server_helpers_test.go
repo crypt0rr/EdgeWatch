@@ -37,6 +37,7 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 		{"/jobs", http.MethodPost, "jobs.write"},
 		{"/jobs/id/baseline", http.MethodGet, "baselines.read"},
 		{"/jobs/id/scans", http.MethodGet, "scans.read"},
+		{"/jobs/id/scans/latest-successful", http.MethodGet, "scans.read"},
 		{"/jobs/id/hosts", http.MethodGet, auth.PermissionDenied},
 		{"/jobs/id/incidents", http.MethodGet, "incidents.read"},
 		{"/jobs/id/baseline/reset", http.MethodPost, "baselines.manage"},

@@ -576,11 +576,12 @@ PRAGMA user_version = 11;`, now, now, now)
 	if userID != LegacyAdminUserID {
 		t.Fatalf("migrated session user_id = %q", userID)
 	}
-	if err := s.DB.QueryRow(`SELECT user_id FROM recovery_codes WHERE id_hash='recovery-hash'`).Scan(&userID); err != nil {
+	var recoveryCount int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM recovery_codes WHERE id_hash='recovery-hash'`).Scan(&recoveryCount); err != nil {
 		t.Fatal(err)
 	}
-	if userID != LegacyAdminUserID {
-		t.Fatalf("migrated recovery user_id = %q", userID)
+	if recoveryCount != 0 {
+		t.Fatalf("unsalted recovery code survived schema migration: %d", recoveryCount)
 	}
 	var updated string
 	if err := s.DB.QueryRow(`SELECT updated_at FROM public_dashboard WHERE id=1`).Scan(&updated); err != nil {

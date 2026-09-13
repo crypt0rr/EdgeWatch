@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 37
+const schemaVersion = 38
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -916,7 +916,20 @@ SELECT job_id,1,
        COALESCE(CASE WHEN json_valid(state_json) THEN CAST(json_extract(state_json,'$.baseline_modified') AS INTEGER) END,0),
        0,
        updated_at
-FROM job_runtime;`,
+				FROM job_runtime;`,
+		},
+		38: {
+			// Recovery codes written before the salted v2 representation used
+			// unsalted SHA-256 digests. They cannot be upgraded without the
+			// plaintext, so retire them during the first startup at this schema
+			// version. The count is kept in the audit trail, never the old digest,
+			// and administrators can issue fresh codes from the Security page.
+			`INSERT INTO security_audit(action,detail,created_at)
+SELECT 'auth.legacy_recovery_codes_retired','retired=' || CAST(COUNT(*) AS TEXT),datetime('now')
+FROM recovery_codes
+WHERE substr(id_hash,1,3) <> 'v2$'
+HAVING COUNT(*) > 0;`,
+			"DELETE FROM recovery_codes WHERE substr(id_hash,1,3) <> 'v2$'",
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

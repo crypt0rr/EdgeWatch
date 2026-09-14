@@ -982,3 +982,16 @@
   .notification-state { order: 2; }
   .notification-update-toggle { order: 3; flex: 1 1 calc(100% - 43px); min-width: 0; margin-left: 43px; }
 }
+
+/* Keep the scan description flexible so the short scan identifier remains
+   visible on narrow screens instead of extending the row past its panel. */
+.scan-row-copy {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.scan-row-id {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}

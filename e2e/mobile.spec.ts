@@ -136,3 +136,101 @@ test('mobile navigation is modal and incident cards fit the viewport', async ({ 
   const viewport = await page.evaluate(() => ({ clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }))
   expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth)
 })
+
+test('mobile job detail keeps recent scan rows inside the viewport', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === 'desktop', 'The responsive smoke runs in the mobile projects.')
+
+  const scan = {
+    id: 'scan-overflow-123456789',
+    job_id: 'job-mobile',
+    job: 'mobile-long-job',
+    started_at: '2026-01-01T00:00:00Z',
+    finished_at: '2026-01-01T00:00:01Z',
+    status: 'success',
+    config_hash: 'mobile-scope',
+  }
+  const job = {
+    id: 'job-mobile',
+    revision: 1,
+    enabled: true,
+    archived: false,
+    security_hash: 'mobile-scope',
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    job: {
+      name: 'mobile-long-job',
+      schedule: '0 * * * *',
+      timezone: 'UTC',
+      targets: ['192.0.2.1'],
+      max_expanded_hosts: 32,
+      tcp: { ports: '1-65535', mode: 'connect', service_detection: false },
+      timing: 'balanced',
+      timeout: '1h',
+      baseline_samples: 1,
+      change_confirmations: 1,
+    },
+    baseline: { status: 'complete', samples: 1, attempts: 1, scan_id: scan.id, host_count: 1 },
+  }
+  const pagination = { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null }
+  const detail = { scan, changes: [], changes_pagination: pagination, current_security_hash: 'mobile-scope', comparison_source: 'scan_time' }
+
+  await page.route('**/api/v1/**', async route => {
+    const request = route.request()
+    const path = new URL(request.url()).pathname.replace('/api/v1', '')
+    const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+    if (path === '/stream') { await route.abort(); return }
+    if (path === '/setup/status') { await json({ configured: true, setup_available: false, version: 'v0.18.74', password_requirements: { minimum_length: 12 } }); return }
+    if (path === '/auth/session') { await json({ username: 'admin', role: 'administrator', permissions: adminPermissions, csrf_token: 'mobile-csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } }); return }
+    if (path === '/status') { await json({ configured: true, username: 'admin', notification_destinations: 0, retention: '90d', max_concurrent_scans: 1 }); return }
+    if (path === '/jobs/job-mobile') { await json(job); return }
+    if (path === '/jobs/job-mobile/baseline') {
+      await json({ job_id: 'job-mobile', job: job.job.name, revision: 1, security_hash: 'mobile-scope', baseline: job.baseline, snapshot: { units: [], scopes: [] }, pagination: { ...pagination, limit: 10 } })
+      return
+    }
+    if (path === '/jobs/job-mobile/scans') { await json({ scans: [scan], pagination }); return }
+    if (path === '/jobs/job-mobile/scans/latest-successful') { await json({ scan }); return }
+    if (path === `/jobs/job-mobile/scans/${scan.id}`) { await json(detail); return }
+    if (path === '/jobs/job-mobile/scan-cycle') { await json({ cycle: null }); return }
+    await json({ error: { code: 'not_found', message: `GET ${path}` } }, 404)
+  })
+
+  await page.goto('/jobs/job-mobile')
+  await expect(page.getByRole('heading', { name: 'Recent scans' })).toBeVisible()
+  const panel = page.locator('.panel').filter({ has: page.getByRole('heading', { name: 'Recent scans' }) })
+  const row = panel.locator('.scan-row').first()
+  const scanID = row.locator('.scan-row-id')
+  await expect(row).toBeVisible()
+  await expect(scanID).toBeVisible()
+
+  const bounds = await page.evaluate(() => {
+    const row = document.querySelector('.scan-row')?.getBoundingClientRect()
+    const scanID = document.querySelector('.scan-row-id')?.getBoundingClientRect()
+    const panel = Array.from(document.querySelectorAll('.panel')).find(element => element.querySelector('h2')?.textContent === 'Recent scans')?.getBoundingClientRect()
+    return {
+      row: row && { left: row.left, right: row.right },
+      scanID: scanID && { left: scanID.left, right: scanID.right },
+      panel: panel && { left: panel.left, right: panel.right },
+      viewport: { clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth },
+    }
+  })
+  expect(bounds.row?.left).toBeGreaterThanOrEqual(bounds.panel?.left ?? 0)
+  expect(bounds.row?.right).toBeLessThanOrEqual(bounds.panel?.right ?? 0)
+  expect(bounds.scanID?.left).toBeGreaterThanOrEqual(bounds.row?.left ?? 0)
+  expect(bounds.scanID?.right).toBeLessThanOrEqual(bounds.row?.right ?? 0)
+  expect(bounds.viewport.scrollWidth).toBeLessThanOrEqual(bounds.viewport.clientWidth)
+
+  await row.click()
+  await expect(panel.locator('.scan-detail-inline')).toBeVisible()
+  const expandedBounds = await page.evaluate(() => {
+    const entry = document.querySelector('.scan-entry.expanded')?.getBoundingClientRect()
+    const panel = Array.from(document.querySelectorAll('.panel')).find(element => element.querySelector('h2')?.textContent === 'Recent scans')?.getBoundingClientRect()
+    return {
+      entry: entry && { left: entry.left, right: entry.right },
+      panel: panel && { left: panel.left, right: panel.right },
+    }
+  })
+  expect(expandedBounds.entry?.left).toBeGreaterThanOrEqual(expandedBounds.panel?.left ?? 0)
+  expect(expandedBounds.entry?.right).toBeLessThanOrEqual(expandedBounds.panel?.right ?? 0)
+  const expandedViewport = await page.evaluate(() => ({ clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }))
+  expect(expandedViewport.scrollWidth).toBeLessThanOrEqual(expandedViewport.clientWidth)
+})

@@ -84,7 +84,18 @@ jobs:
             test ! -e "$artifact"
           done
       - name: Frontend unit tests
-        run: npm test
+        run: npm run test:coverage
+      - name: Frontend diff coverage
+        run: node scripts/check-diff-coverage.mjs --language frontend --coverage coverage/coverage-final.json --base "${{ steps.release-lint-base.outputs.base }}"
+      - name: Upload frontend coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-frontend-coverage
+          if-no-files-found: error
+          path: |
+            coverage/coverage-final.json
+            coverage/coverage-summary.json
+            coverage/index.html
       - name: Remove stale Google Chrome apt source
         # Playwright installs Chromium and does not need the runner's Chrome repository.
         # Removing it avoids unrelated apt index hash mismatches during dependency setup.
@@ -103,7 +114,21 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Test
-        run: go test -race ./...
+        run: |
+          set -o pipefail
+          go test -race -coverprofile=coverage.out ./... | tee go-coverage-summary.txt
+      - name: Check Go coverage
+        run: ./scripts/check-go-coverage.sh coverage.out go-coverage-summary.txt
+      - name: Go diff coverage
+        run: node scripts/check-diff-coverage.mjs --language go --coverage coverage.out --base "${{ steps.release-lint-base.outputs.base }}"
+      - name: Upload Go coverage
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-go-coverage
+          if-no-files-found: error
+          path: |
+            coverage.out
+            go-coverage-summary.txt
       - name: Check GoReleaser configuration
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
         with:

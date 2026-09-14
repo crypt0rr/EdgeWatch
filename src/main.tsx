@@ -45,7 +45,13 @@ function useIsMobile() {
   return mobile
 }
 
-function Shell({ displayName, version, role, permissions, onLogout }: { displayName: string; version: string; role: Role; permissions: string[]; onLogout: () => void }) {
+/**
+ * The application shell is exported so it can be exercised with a jsdom
+ * router/query harness.  Keeping the browser bootstrap below this component
+ * makes the entrypoint side-effect free in tests while preserving the single
+ * embedded SPA bundle in production.
+ */
+export function Shell({ displayName, version, role, permissions, onLogout }: { displayName: string; version: string; role: Role; permissions: string[]; onLogout: () => void }) {
   const [open, setOpen] = useState(false)
   const [liveState, setLiveState] = useState<'connecting' | 'live' | 'reconnecting'>('connecting')
   const isMobile = useIsMobile()
@@ -215,7 +221,7 @@ function Shell({ displayName, version, role, permissions, onLogout }: { displayN
   </div>
 }
 
-function Jobs() {
+export function Jobs() {
   const navigate = useNavigate()
   const jobs = useQuery({ queryKey: ['jobs'], queryFn: () => listJobs(true) })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
@@ -230,7 +236,7 @@ function protocolSummary(job: { job: { tcp?: { ports: string }; udp?: { ports: s
   ].filter(Boolean).join(' · ')
 }
 
-function Incidents() {
+export function Incidents() {
   const [offset, setOffset] = useState(0)
   const [busy, setBusy] = useState('')
   const [actionError, setActionError] = useState('')
@@ -297,13 +303,13 @@ function IncidentActions({ row, busy, acceptID, suppressID, onAction }: { row: I
   return <div className="incident-actions"><button className="button secondary" type="button" onClick={() => onAction(row, 'accept')} disabled={!key || !!busy}>{busy === acceptID ? 'Accepting…' : 'Accept change'}</button><button className="button ghost" type="button" onClick={() => onAction(row, 'suppress')} disabled={!key || !!busy}>{busy === suppressID ? 'Suppressing…' : 'Suppress 1 scan'}</button></div>
 }
 
-function ProtectedApp({ version, onLogout }: { version: string; onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate]); if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; return <Shell displayName={session.data?.display_name ?? session.data?.username ?? 'admin'} role={session.data?.role ?? 'viewer'} permissions={session.data?.permissions ?? []} version={version} onLogout={onLogout} /> }
+export function ProtectedApp({ version, onLogout }: { version: string; onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate]); if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; return <Shell displayName={session.data?.display_name ?? session.data?.username ?? 'admin'} role={session.data?.role ?? 'viewer'} permissions={session.data?.permissions ?? []} version={version} onLogout={onLogout} /> }
 
-function AuthRoutes({ configured }: { configured: boolean }) { const location = useLocation(); return <Routes><Route path="/setup" element={<Setup />} /><Route path="/activate" element={<Activate />} /><Route path="/login" element={<Login />} /><Route path="*" element={configured ? <Navigate to="/login" replace state={{ from: { pathname: location.pathname, search: location.search } }} /> : <Navigate to="/setup" replace />} /></Routes> }
+export function AuthRoutes({ configured }: { configured: boolean }) { const location = useLocation(); return <Routes><Route path="/setup" element={<Setup />} /><Route path="/activate" element={<Activate />} /><Route path="/login" element={<Login />} /><Route path="*" element={configured ? <Navigate to="/login" replace state={{ from: { pathname: location.pathname, search: location.search } }} /> : <Navigate to="/setup" replace />} /></Routes> }
 
-function App() { return <BrowserRouter><AppContent /></BrowserRouter> }
+export function App() { return <BrowserRouter><AppContent /></BrowserRouter> }
 
-function AppContent() {
+export function AppContent() {
   const location = useLocation()
   const client = useQueryClient()
   const isPublic = location.pathname === '/public' || location.pathname === '/public/'
@@ -313,20 +319,24 @@ function AppContent() {
   // unauthenticated route usable while the administrator is signed out.
   const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus, retry: false, enabled: !isPublic })
   const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false, enabled: !isPublic })
-  useEffect(() => { if (session.data) setSignedOut(false) }, [session.data])
   useEffect(() => {
     function handleUnauthorized() {
       setCSRF('')
       client.setQueryData(['session'], null)
       setSignedOut(true)
     }
+    function handleAuthenticated() { setSignedOut(false) }
     window.addEventListener('edgewatch:unauthorized', handleUnauthorized)
-    return () => window.removeEventListener('edgewatch:unauthorized', handleUnauthorized)
+    window.addEventListener('edgewatch:authenticated', handleAuthenticated)
+    return () => {
+      window.removeEventListener('edgewatch:unauthorized', handleUnauthorized)
+      window.removeEventListener('edgewatch:authenticated', handleAuthenticated)
+    }
   }, [client])
   const authenticated = !signedOut && !!session.data && !session.error
   async function handleLogout() {
     try { await apiLogout() } catch { /* The server clears the cookie before reporting audit errors. */ }
-    finally { setCSRF(''); queryClient.clear(); queryClient.setQueryData(['session'], null); setSignedOut(true) }
+    finally { setCSRF(''); client.clear(); client.setQueryData(['session'], null); setSignedOut(true) }
   }
   if (isPublic) return <PublicDashboard />
   if (status.isLoading || session.isLoading) return <Loading />
@@ -340,4 +350,5 @@ function Loading() { return <div className="loading"><span className="spinner" /
 function ErrorCard({ message }: { message: string }) { return <div className="error-card">{message}</div> }
 function Empty({ icon, title, body, action }: { icon?: React.ReactNode; title: string; body: string; action?: React.ReactNode }) { return <div className="empty"><div className="empty-icon">{icon ?? <Boxes size={23} />}</div><h3>{title}</h3><p>{body}</p>{action}</div> }
 
-createRoot(document.getElementById('root')!).render(<StrictMode><QueryClientProvider client={queryClient}><App /></QueryClientProvider></StrictMode>)
+const rootElement = document.getElementById('root')
+if (rootElement) createRoot(rootElement).render(<StrictMode><QueryClientProvider client={queryClient}><App /></QueryClientProvider></StrictMode>)

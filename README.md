@@ -602,6 +602,15 @@ vulnerability checks always cover the complete module and package trees. The
 individual build, browser-test, and Compose commands can still be run when
 iterating on a specific layer.
 
+`npm run test:coverage` writes the Vitest report to `coverage/` and enforces
+the global (65% statements/lines, 55% branches, 60% functions) and high-risk
+workflow page thresholds. CI also checks that at least 80% of executable lines
+changed in the pull request are covered. The Go test job writes `coverage.out`
+and `go-coverage-summary.txt`, enforces the 82% aggregate and per-package
+policy with `scripts/check-go-coverage.sh`, and applies the same changed-line
+gate. Both reports are uploaded as CI artifacts so a review can inspect missing
+paths instead of silently accepting coverage regressions.
+
 The Go lint gate explicitly includes the high-signal correctness analyzers
 `bodyclose`, `contextcheck`, `errcheck`, `ineffassign`, `nilerr`,
 `nilnesserr`, `rowserrcheck`, `sqlclosecheck`, `staticcheck`, and `unused`.

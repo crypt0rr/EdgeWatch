@@ -461,7 +461,7 @@ export function JobDetail() {
                     aria-controls={selectedScan === scan.id ? selectedScanDetailID : undefined}
                   >
                     <span className={scan.status === 'success' ? 'activity-dot success' : 'activity-dot fail'} />
-                    <div>
+                    <div className="scan-row-copy">
                       <strong>{new Date(scan.finished_at).toLocaleString()}</strong>
                       <span>
                         {scan.status === 'success'
@@ -471,7 +471,7 @@ export function JobDetail() {
                             : scan.error}
                       </span>
                     </div>
-                    <code>{scan.id.slice(0, 8)}</code>
+                    <code className="scan-row-id">{scan.id.slice(0, 8)}</code>
                   </button>
                   {selectedScan === scan.id && selectedScanDetail}
                 </div>

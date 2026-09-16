@@ -22,6 +22,7 @@ var (
 	ErrNoPendingUnit     = errors.New("scan cycle has no pending work")
 	ErrCycleNotResumable = errors.New("scan cycle is not resumable")
 	ErrCycleIncomplete   = errors.New("scan cycle is incomplete")
+	ErrMissingCheckpoint = errors.New("scan cycle checkpoint is missing")
 )
 
 // scanCycleReconcileBatchSize bounds the amount of discovery evidence and
@@ -1183,16 +1184,25 @@ func (s *Store) LoadScanCycleFragments(ctx context.Context, cycleID string) (sca
 	if err != nil {
 		return scanner.WorkPlan{}, nil, err
 	}
-	rows, err := s.reader().QueryContext(ctx, `SELECT snapshot_json FROM scan_cycle_units WHERE cycle_id=? AND status='completed' ORDER BY sequence`, cycleID)
+	rows, err := s.reader().QueryContext(ctx, `SELECT sequence,snapshot_json FROM scan_cycle_units WHERE cycle_id=? AND status='completed' ORDER BY sequence`, cycleID)
 	if err != nil {
 		return scanner.WorkPlan{}, nil, err
 	}
 	defer rows.Close()
 	var fragments []model.Snapshot
 	for rows.Next() {
+		var sequence int
 		var raw []byte
-		if err = rows.Scan(&raw); err != nil {
+		if err = rows.Scan(&sequence, &raw); err != nil {
 			return scanner.WorkPlan{}, nil, err
+		}
+		// '{}' is the durable sentinel used after a promoted or expired cycle's
+		// large payload has been reclaimed.  Treat it as missing during recovery;
+		// unmarshalling it into an empty Snapshot would otherwise look like a
+		// valid zero-result fragment and could establish an empty baseline.
+		trimmed := strings.TrimSpace(string(raw))
+		if trimmed == "" || trimmed == "{}" || trimmed == "null" {
+			return scanner.WorkPlan{}, nil, fmt.Errorf("%w: cycle %s sequence %d", ErrMissingCheckpoint, cycleID, sequence)
 		}
 		var snapshot model.Snapshot
 		if err = json.Unmarshal(raw, &snapshot); err != nil {

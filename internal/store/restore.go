@@ -101,6 +101,7 @@ type RestoreResult struct {
 	PendingDeliveriesPolicy   PendingDeliveryPolicy `json:"pending_deliveries_policy"`
 	PendingDeliveriesAffected int                   `json:"pending_deliveries_affected"`
 	SidecarsPresent           []string              `json:"sidecars_present,omitempty"`
+	SidecarsRemoved           []string              `json:"sidecars_removed,omitempty"`
 	SidecarsWarning           string                `json:"sidecars_warning,omitempty"`
 }
 
@@ -224,6 +225,25 @@ func Restore(ctx context.Context, source, destination string, options RestoreOpt
 	if err != nil {
 		return result, err
 	}
+	// Sidecar replay is an explicit recovery operation. Copy the complete
+	// SQLite artifact set into the private staging directory before opening it;
+	// copying only the main file would silently lose WAL-only transactions.
+	if options.AllowSidecarReplay {
+		for _, sidecar := range preflight.SourceSidecars {
+			// SQLite companions are tied to the database basename. Preserve the
+			// suffix (-wal, -shm, or -journal) while renaming them to the staged
+			// destination basename; copying the source basename would make SQLite
+			// ignore an otherwise valid WAL during validation and replay.
+			suffix := strings.TrimPrefix(sidecar.Path, preflight.SourcePath)
+			destinationSidecar := tempPath + suffix
+			if _, err := copyRestoreFile(ctx, sidecar.Path, destinationSidecar); err != nil {
+				return result, fmt.Errorf("copy restore source %s: %w", sidecar.Kind, err)
+			}
+		}
+	}
+	if err := validateStagedRestore(ctx, tempPath); err != nil {
+		return result, err
+	}
 	restoreEpoch := uuid.NewString()
 	restoredAt := time.Now().UTC()
 	pending, err := applyRestoreDeliveryPolicy(ctx, tempPath, policy, restoreEpoch, restoredAt)
@@ -238,9 +258,20 @@ func Restore(ctx context.Context, source, destination string, options RestoreOpt
 			return result, err
 		}
 	}
+	// Move destination sidecars out of the way only after every staged check and
+	// sanitization has succeeded. If the replacement itself fails, restore the
+	// sidecars in reverse order so a rejected restore leaves the destination
+	// artifact set unchanged.
+	movedSidecars, err := moveDestinationSidecars(preflight.DestinationSidecars, tempDir)
+	if err != nil {
+		return result, err
+	}
+	restoreMovedSidecars := true
+	defer restoreSidecarsOnFailure(&restoreMovedSidecars, movedSidecars)
 	if err := os.Rename(tempPath, preflight.DestinationPath); err != nil {
 		return result, fmt.Errorf("replace restored database: %w", err)
 	}
+	restoreMovedSidecars = false
 	if err := os.Chmod(preflight.DestinationPath, 0o600); err != nil {
 		return result, err
 	}
@@ -260,12 +291,63 @@ func Restore(ctx context.Context, source, destination string, options RestoreOpt
 			result.SidecarsPresent = append(result.SidecarsPresent, sidecar.Path)
 		}
 		for _, sidecar := range preflight.DestinationSidecars {
-			result.SidecarsPresent = append(result.SidecarsPresent, sidecar.Path)
+			result.SidecarsRemoved = append(result.SidecarsRemoved, sidecar.Path)
 		}
 		sort.Strings(result.SidecarsPresent)
-		result.SidecarsWarning = "SQLite sidecars were explicitly allowed to remain; verify that replay is intentional"
+		sort.Strings(result.SidecarsRemoved)
+		result.SidecarsWarning = "SQLite source sidecars were replayed; old destination sidecars were removed"
 	}
 	return result, nil
+}
+
+func restoreSidecarsOnFailure(pending *bool, sidecars []movedRestoreSidecar) {
+	if *pending {
+		_ = restoreDestinationSidecars(sidecars)
+	}
+}
+
+type movedRestoreSidecar struct {
+	original string
+	moved    string
+}
+
+func moveDestinationSidecars(sidecars []RestoreSidecar, tempDir string) ([]movedRestoreSidecar, error) {
+	moved := make([]movedRestoreSidecar, 0, len(sidecars))
+	for _, sidecar := range sidecars {
+		movedPath := filepath.Join(tempDir, "previous-"+filepath.Base(sidecar.Path))
+		if err := os.Rename(sidecar.Path, movedPath); err != nil {
+			_ = restoreDestinationSidecars(moved)
+			return nil, fmt.Errorf("stage destination %s sidecar: %w", sidecar.Kind, err)
+		}
+		moved = append(moved, movedRestoreSidecar{original: sidecar.Path, moved: movedPath})
+	}
+	return moved, nil
+}
+
+func restoreDestinationSidecars(sidecars []movedRestoreSidecar) error {
+	var firstErr error
+	for index := len(sidecars) - 1; index >= 0; index-- {
+		item := sidecars[index]
+		if err := os.Rename(item.moved, item.original); err != nil && !errors.Is(err, os.ErrNotExist) && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// validateStagedRestore performs all read-only checks before the staged file
+// can be sanitized or atomically renamed over the destination. This keeps a
+// corrupt, foreign, or newer-schema source from replacing a healthy database.
+func validateStagedRestore(ctx context.Context, path string) error {
+	staged, err := OpenReadOnlyExistingContext(ctx, path)
+	if err != nil {
+		return fmt.Errorf("open staged restore database for validation: %w", err)
+	}
+	defer staged.Close()
+	if _, err := staged.Verify(ctx); err != nil {
+		return fmt.Errorf("validate staged restore database: %w", err)
+	}
+	return nil
 }
 
 const restoreQuarantineSchema = `

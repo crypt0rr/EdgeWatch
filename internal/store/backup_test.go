@@ -2,10 +2,12 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -152,12 +154,16 @@ func TestBackupSupportsMemoryStore(t *testing.T) {
 
 func TestVerifyReturnsHealthyResult(t *testing.T) {
 	s := openTestStore(t)
+	defer s.Close()
 	result, err := s.Verify(context.Background())
 	if err != nil {
 		t.Fatalf("verify: %v", err)
 	}
 	if result.IntegrityCheck != "ok" || len(result.ForeignKeyViolations) != 0 {
 		t.Fatalf("verify result = %#v", result)
+	}
+	if !result.SchemaSupported || !result.EdgeWatchSchema || result.SchemaVersion != schemaVersion {
+		t.Fatalf("schema verification = %#v", result)
 	}
 	var verificationErr *VerificationError
 	if errors.As(err, &verificationErr) {
@@ -184,5 +190,116 @@ func TestVerifyReportsForeignKeyViolations(t *testing.T) {
 	var verificationErr *VerificationError
 	if !errors.As(err, &verificationErr) || len(result.ForeignKeyViolations) != 1 {
 		t.Fatalf("verification error = %v, result = %#v", err, result)
+	}
+}
+
+func TestVerifyRejectsForeignSQLiteDatabase(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "foreign.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE unrelated(id INTEGER PRIMARY KEY)`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := OpenReadOnlyExisting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	result, err := s.Verify(context.Background())
+	var verificationErr *VerificationError
+	if !errors.As(err, &verificationErr) || result.EdgeWatchSchema || !verificationErr.SchemaChecked {
+		t.Fatalf("foreign verification = %#v, %v", result, err)
+	}
+	if !strings.Contains(err.Error(), "not an EdgeWatch database") {
+		t.Fatalf("foreign verification error = %v", err)
+	}
+}
+
+func TestVerifyRejectsUnsupportedNewerSchema(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "newer.db")
+	fixture, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 999`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := OpenReadOnlyExisting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	result, err := reader.Verify(context.Background())
+	var verificationErr *VerificationError
+	if !errors.As(err, &verificationErr) || result.SchemaSupported || result.SchemaVersion != 999 {
+		t.Fatalf("newer verification = %#v, %v", result, err)
+	}
+	if !strings.Contains(err.Error(), "unsupported schema version") {
+		t.Fatalf("newer verification error = %v", err)
+	}
+}
+
+func TestVerifyRejectsCanceledSchemaChecks(t *testing.T) {
+	s := openTestStore(t)
+	defer s.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.Verify(ctx); err == nil {
+		t.Fatal("canceled verification unexpectedly succeeded")
+	}
+	if detectEdgeWatchSchema(ctx, s.reader()) {
+		t.Fatal("canceled schema probe reported a valid schema")
+	}
+}
+
+func TestVerifyRejectsSQLiteWithIncompleteEdgeWatchSchema(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "incomplete.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE scans(id TEXT PRIMARY KEY, job TEXT)`,
+		`CREATE TABLE events(id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE outbox(id INTEGER PRIMARY KEY)`,
+		`CREATE TABLE daemon_lease(id INTEGER PRIMARY KEY)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := OpenReadOnlyExisting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	result, err := reader.Verify(context.Background())
+	var verificationErr *VerificationError
+	if !errors.As(err, &verificationErr) || result.EdgeWatchSchema {
+		t.Fatalf("incomplete schema verification = %#v, %v", result, err)
 	}
 }

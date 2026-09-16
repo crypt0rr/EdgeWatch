@@ -20,6 +20,7 @@ type PruneStats struct {
 	Cycles         int64
 	RDAPCache      int64
 	FTSOptimized   bool
+	FTSDeferred    bool
 	ReclaimedPages int64
 }
 
@@ -39,6 +40,18 @@ const ftsMaintenanceBudget = 10 * time.Second
 // requires an exclusive lock and can pause scans for the size of the database.
 const incrementalVacuumPageLimit = 1000
 
+// ftsMergePageLimit bounds the amount of FTS5 segment work performed for one
+// index during a retention pass.  Unlike the optimize command, merge only
+// processes a finite number of pages; subsequent passes continue from the
+// remaining segments instead of restarting a whole-index operation.
+const ftsMergePageLimit = 128
+
+// retentionProtectedScans is a connection-local temporary projection.  It is
+// populated once before the scan-pruning loop, so every bounded DELETE batch
+// performs an indexed lookup rather than repeatedly decoding each job's
+// runtime JSON while SQLite's writer is held.
+const retentionProtectedScans = "edgewatch_retention_protected_scans"
+
 func (p PruneStats) Total() int64 {
 	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.Revisions + p.Cycles + p.RDAPCache
 }
@@ -56,10 +69,7 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	// NOT EXISTS avoids SQL's NULL semantics: most state rows do not yet have a
 	// baseline_scan_id, and a NOT IN subquery containing NULL would protect every
 	// old scan from pruning.
-	deletedScans, err := s.deleteRetentionBatches(ctx, `DELETE FROM scans AS scan WHERE scan.id IN (SELECT candidate.id FROM scans AS candidate WHERE candidate.finished_at < ?
-		AND NOT EXISTS (SELECT 1 FROM job_states AS legacy WHERE json_extract(legacy.state_json,'$.baseline_scan_id') = candidate.id)
-		AND NOT EXISTS (SELECT 1 FROM job_runtime AS managed WHERE json_extract(managed.state_json,'$.baseline_scan_id') = candidate.id)
-		AND NOT EXISTS (SELECT 1 FROM job_runtime AS active, json_each(active.state_json,'$.incidents') AS incident WHERE json_extract(incident.value,'$.scan_id') = candidate.id) ORDER BY candidate.finished_at,candidate.id LIMIT ?)`, cutoff)
+	deletedScans, err := s.deleteScanRetentionBatches(ctx, cutoff)
 	if err != nil {
 		return stats, err
 	}
@@ -132,6 +142,7 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	if stats.Scans > 0 {
 		maintenance, maintenanceErr := s.maintainSearchIndexes(ctx)
 		stats.FTSOptimized = maintenance.Optimized
+		stats.FTSDeferred = maintenance.Deferred
 		stats.ReclaimedPages = maintenance.ReclaimedPages
 		if maintenanceErr != nil {
 			return stats, maintenanceErr
@@ -142,6 +153,7 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 
 type searchMaintenanceStats struct {
 	Optimized      bool
+	Deferred       bool
 	ReclaimedPages int64
 }
 
@@ -153,47 +165,92 @@ type searchMaintenanceStats struct {
 // bounded transactions by this point.
 func (s *Store) maintainSearchIndexes(ctx context.Context) (searchMaintenanceStats, error) {
 	var stats searchMaintenanceStats
+	if err := ctx.Err(); err != nil {
+		return stats, err
+	}
 	maintenanceCtx, cancel := context.WithTimeout(ctx, ftsMaintenanceBudget)
 	defer cancel()
 	for _, table := range []string{"scan_host_search", "latest_host_search"} {
-		// FTS5's optimize command merges delete-marked segments without reading
-		// or rewriting the source host evidence table. Table names are static
-		// constants, never user input.
-		statement := "INSERT INTO " + table + "(" + table + ") VALUES('optimize')"
-		if _, err := s.DB.ExecContext(maintenanceCtx, statement); err != nil {
-			return stats, fmt.Errorf("fts optimize: %w", err)
+		// FTS5's merge command accepts a page budget through the special rank
+		// column.  Table names are static constants, never user input.  Keeping
+		// this operation incremental prevents a large index from consuming the
+		// entire maintenance budget on every retention pass.
+		statement := "INSERT INTO " + table + "(" + table + ",rank) VALUES('merge',?)"
+		if _, err := s.DB.ExecContext(maintenanceCtx, statement, ftsMergePageLimit); err != nil {
+			return stats, maintenanceError(ctx, maintenanceCtx, &stats, "fts merge", err)
 		}
-	}
-	if _, err := s.DB.ExecContext(maintenanceCtx, "PRAGMA optimize"); err != nil {
-		return stats, fmt.Errorf("sqlite optimize: %w", err)
 	}
 	stats.Optimized = true
 
 	var autoVacuum int64
 	if err := s.DB.QueryRowContext(maintenanceCtx, "PRAGMA auto_vacuum").Scan(&autoVacuum); err != nil {
-		return stats, fmt.Errorf("read auto-vacuum mode: %w", err)
+		return stats, maintenanceError(ctx, maintenanceCtx, &stats, "read auto-vacuum mode", err)
 	}
 	if autoVacuum != 2 { // SQLITE_AUTO vacuum incremental
 		return stats, nil
 	}
 	var before int64
 	if err := s.DB.QueryRowContext(maintenanceCtx, "PRAGMA freelist_count").Scan(&before); err != nil {
-		return stats, fmt.Errorf("read freelist: %w", err)
+		return stats, maintenanceError(ctx, maintenanceCtx, &stats, "read freelist", err)
 	}
 	if before == 0 {
 		return stats, nil
 	}
 	if _, err := s.DB.ExecContext(maintenanceCtx, fmt.Sprintf("PRAGMA incremental_vacuum(%d)", incrementalVacuumPageLimit)); err != nil {
-		return stats, fmt.Errorf("incremental vacuum: %w", err)
+		return stats, maintenanceError(ctx, maintenanceCtx, &stats, "incremental vacuum", err)
 	}
 	var after int64
 	if err := s.DB.QueryRowContext(maintenanceCtx, "PRAGMA freelist_count").Scan(&after); err != nil {
-		return stats, fmt.Errorf("read freelist after vacuum: %w", err)
+		return stats, maintenanceError(ctx, maintenanceCtx, &stats, "read freelist after vacuum", err)
 	}
 	if before > after {
 		stats.ReclaimedPages = before - after
 	}
 	return stats, nil
+}
+
+// maintenanceError turns expiry of the internal maintenance budget into a
+// resumable no-op while preserving cancellation and real database errors.
+// Keeping this policy in one helper also makes the timeout behavior explicit
+// and deterministic to test without waiting for a ten-second SQLite call.
+func maintenanceError(ctx, maintenanceCtx context.Context, stats *searchMaintenanceStats, operation string, err error) error {
+	if maintenanceCtx.Err() != nil && ctx.Err() == nil {
+		stats.Deferred = true
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
+}
+
+// deleteScanRetentionBatches prepares a compact protected-ID projection once
+// and reuses it for every bounded scan delete.  Baseline markers are read from
+// job_runtime_meta on current databases; the JSON fallbacks cover legacy rows
+// and hand-written recovery fixtures that have no metadata (or whose marker is
+// still empty).  Incident references are likewise expanded once, before the
+// retention loop, rather than once per candidate batch.
+func (s *Store) deleteScanRetentionBatches(ctx context.Context, cutoff string) (int64, error) {
+	if _, err := s.DB.ExecContext(ctx, "CREATE TEMP TABLE IF NOT EXISTS "+retentionProtectedScans+" (scan_id TEXT PRIMARY KEY); DELETE FROM "+retentionProtectedScans); err != nil {
+		return 0, fmt.Errorf("prepare retention protection: %w", err)
+	}
+	// The statements below are static and only insert non-empty identifiers.
+	// INSERT OR IGNORE also makes duplicate references (for example an incident
+	// and a baseline sharing a scan) inexpensive.
+	protectionQueries := []string{
+		"INSERT OR IGNORE INTO " + retentionProtectedScans + "(scan_id) SELECT baseline_scan_id FROM job_runtime_meta WHERE baseline_scan_id <> ''",
+		"INSERT OR IGNORE INTO " + retentionProtectedScans + "(scan_id) SELECT json_extract(state_json,'$.baseline_scan_id') FROM job_runtime AS managed WHERE json_valid(managed.state_json) AND json_extract(managed.state_json,'$.baseline_scan_id') <> '' AND (NOT EXISTS (SELECT 1 FROM job_runtime_meta WHERE job_runtime_meta.job_id=managed.job_id) OR NOT EXISTS (SELECT 1 FROM job_runtime_meta WHERE job_runtime_meta.job_id=managed.job_id AND job_runtime_meta.baseline_scan_id <> ''))",
+		"INSERT OR IGNORE INTO " + retentionProtectedScans + "(scan_id) SELECT json_extract(state_json,'$.baseline_scan_id') FROM job_states AS legacy WHERE json_valid(legacy.state_json) AND json_extract(legacy.state_json,'$.baseline_scan_id') <> ''",
+		// CASE keeps json_each on a valid empty object even when a legacy row is
+		// malformed; SQLite may evaluate table-valued functions before WHERE
+		// predicates, so a json_valid filter alone is not sufficient protection.
+		"INSERT OR IGNORE INTO " + retentionProtectedScans + "(scan_id) SELECT json_extract(incident.value,'$.scan_id') FROM job_runtime AS active, json_each(CASE WHEN json_valid(active.state_json) THEN active.state_json ELSE '{}' END,'$.incidents') AS incident WHERE json_extract(incident.value,'$.scan_id') <> ''",
+		"INSERT OR IGNORE INTO " + retentionProtectedScans + "(scan_id) SELECT json_extract(incident.value,'$.scan_id') FROM job_states AS legacy, json_each(CASE WHEN json_valid(legacy.state_json) THEN legacy.state_json ELSE '{}' END,'$.incidents') AS incident WHERE json_extract(incident.value,'$.scan_id') <> ''",
+	}
+	for _, query := range protectionQueries {
+		if _, err := s.DB.ExecContext(ctx, query); err != nil {
+			return 0, fmt.Errorf("populate retention protection: %w", err)
+		}
+	}
+	return s.deleteRetentionBatches(ctx, `DELETE FROM scans AS scan WHERE scan.id IN (SELECT candidate.id FROM scans AS candidate WHERE candidate.finished_at < ?
+		AND NOT EXISTS (SELECT 1 FROM `+retentionProtectedScans+` AS protected WHERE protected.scan_id = candidate.id) ORDER BY candidate.finished_at,candidate.id LIMIT ? )`, cutoff)
 }
 
 // deleteRetentionBatches repeatedly executes one bounded DELETE transaction.
@@ -321,7 +378,7 @@ func danglingLatestScanHostAddresses(ctx context.Context, tx *sql.Tx) ([]string,
 }
 
 func (s *Store) clearCompletedCyclePayloads(ctx context.Context) error {
-	_, err := s.deleteRetentionBatches(ctx, `UPDATE scan_cycle_units SET snapshot_json='{}' WHERE rowid IN (SELECT unit.rowid FROM scan_cycle_units AS unit WHERE unit.snapshot_json <> '{}' AND unit.cycle_id IN (SELECT cycle.id FROM scan_cycles AS cycle WHERE cycle.status='completed' AND EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id=cycle.id)) ORDER BY unit.rowid LIMIT ?)`)
+	_, err := s.deleteRetentionBatches(ctx, `UPDATE scan_cycle_units SET snapshot_json='{}' WHERE rowid IN (SELECT unit.rowid FROM scan_cycle_units AS unit WHERE unit.snapshot_json <> '{}' AND unit.cycle_id IN (SELECT cycle.id FROM scan_cycles AS cycle WHERE cycle.status='completed' AND EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id=cycle.id AND scans.cycle_status='completed' AND scans.status IN ('success','incomplete'))) ORDER BY unit.rowid LIMIT ?)`)
 	return err
 }
 

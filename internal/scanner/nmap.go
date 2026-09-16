@@ -1874,16 +1874,14 @@ func mergeHostObservationMap(hosts map[string]model.HostObservation, address str
 	if current.AddressFamily == "" {
 		current.AddressFamily = addition.AddressFamily
 	}
-	if current.Status == "" || (current.Status == "unknown" && addition.Status != "") {
-		current.Status = addition.Status
-	}
 	// Naabu discovery creates an address inventory before Nmap enrichment. It
-	// can mark the host up without carrying Nmap's reason/latency fields, so
-	// merge each descriptive field independently rather than treating a
-	// non-empty status as a complete observation.
-	if current.StatusReason == "" && addition.StatusReason != "" {
-		current.StatusReason = addition.StatusReason
-	}
+	// can mark the host up without carrying Nmap's reason/latency fields, while
+	// a later Nmap fragment can prove that the address was not covered. Treat
+	// incomplete coverage as sticky: once any protocol/fragment is unreachable,
+	// the merged address must remain incomplete so the engine protects its
+	// expected ports. This is intentionally independent of merge order because
+	// batches and protocol results can complete in either order.
+	current.Status, current.StatusReason = mergeHostStatus(current.Status, current.StatusReason, addition.Status, addition.StatusReason)
 	if current.ReasonTTL == 0 && addition.ReasonTTL != 0 {
 		current.ReasonTTL = addition.ReasonTTL
 	}
@@ -1891,6 +1889,76 @@ func mergeHostObservationMap(hosts map[string]model.HostObservation, address str
 		current.LatencyMS = addition.LatencyMS
 	}
 	hosts[address] = current
+}
+
+func mergeHostStatus(currentStatus, currentReason, additionStatus, additionReason string) (string, string) {
+	currentStatus = strings.ToLower(strings.TrimSpace(currentStatus))
+	additionStatus = strings.ToLower(strings.TrimSpace(additionStatus))
+	currentReason = strings.TrimSpace(currentReason)
+	additionReason = strings.TrimSpace(additionReason)
+
+	// An explicit incomplete state outranks an up/unknown discovery result. A
+	// host that is unreachable for one protocol is not safe to compare for any
+	// ports from that address, even if another protocol observed it as up.
+	currentIncomplete := isIncompleteHostStatus(currentStatus)
+	additionIncomplete := isIncompleteHostStatus(additionStatus)
+	switch {
+	case additionIncomplete && !currentIncomplete:
+		// Do not carry a successful discovery reason (for example
+		// "arp-response") onto an incomplete result. If the failed fragment did
+		// not include a reason, retain an explicit neutral marker instead.
+		if additionReason == "" {
+			additionReason = "incomplete"
+		}
+		return "unreachable", additionReason
+	case currentIncomplete:
+		return "unreachable", chooseHostStatusReason(currentReason, additionReason)
+	case currentStatus == "" || currentStatus == "unknown":
+		if additionStatus != "" {
+			return additionStatus, chooseHostStatusReason(currentReason, additionReason)
+		}
+	}
+	return currentStatus, chooseHostStatusReason(currentReason, additionReason)
+}
+
+func isIncompleteHostStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "unreachable", "down", "timedout", "timed-out", "timeout":
+		return true
+	default:
+		return false
+	}
+}
+
+// chooseHostStatusReason keeps the most specific failure reason when several
+// fragments describe the same address. The priority makes the result stable
+// regardless of whether an omitted, down, or timed-out fragment arrived first.
+func chooseHostStatusReason(current, addition string) string {
+	current = strings.TrimSpace(current)
+	addition = strings.TrimSpace(addition)
+	if current == "" {
+		return addition
+	}
+	if addition == "" {
+		return current
+	}
+	reasonRank := func(reason string) int {
+		switch strings.ToLower(strings.TrimSpace(reason)) {
+		case "nmap-timeout", "nmap-host-timeout", "timedout", "timeout":
+			return 4
+		case "nmap-host-down", "down", "no-response":
+			return 3
+		case "nmap-omitted", "omitted":
+			return 2
+		default:
+			return 1
+		}
+	}
+	currentRank, additionRank := reasonRank(current), reasonRank(addition)
+	if additionRank > currentRank || (additionRank == currentRank && addition < current) {
+		return addition
+	}
+	return current
 }
 
 func dedupeHostObservation(host *model.HostObservation) {

@@ -196,6 +196,35 @@ func TestLatestSuccessfulJobHostsUsesProjectionBeforeHistoryFallback(t *testing.
 	}
 }
 
+func TestLatestSuccessfulJobHostsHistoryQueryScopesSelectionBeforeLookup(t *testing.T) {
+	s := openTestStore(t)
+	query, args := latestSuccessfulJobHostsHistoryQuery([]PublicDashboardHost{{JobID: "job", Address: "198.51.100.10"}})
+	rows, err := s.DB.QueryContext(context.Background(), `EXPLAIN QUERY PLAN `+query, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var details []string
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatal(err)
+		}
+		details = append(details, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.ToLower(strings.Join(details, " "))
+	if !strings.Contains(joined, "correlated scalar subquery") {
+		t.Fatalf("history lookup did not use a per-selection lookup: %v", details)
+	}
+	if strings.Contains(query, "row_number") {
+		t.Fatal("history lookup still materializes a window over all matching rows")
+	}
+}
+
 func TestPublicDashboardDefaultsBlankTitle(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

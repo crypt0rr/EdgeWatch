@@ -71,6 +71,18 @@ func TestOpenEnforcesPrivateSQLiteModes(t *testing.T) {
 	}
 }
 
+func TestOpenReportsDatabaseDirectoryContext(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Join(dir, "not-a-directory")
+	if err := os.WriteFile(parent, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Open(filepath.Join(parent, "edgewatch.db"))
+	if err == nil || !strings.Contains(err.Error(), "create EdgeWatch database directory") {
+		t.Fatalf("database setup error = %v, want directory context", err)
+	}
+}
+
 func TestOpenEnforcesPrivateModeForSQLiteURI(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "uri.db")

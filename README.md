@@ -37,7 +37,8 @@ From a checkout of this repository:
 
 ```console
 cp config.example.yaml config.yaml
-mkdir -p data
+# Keep the bind-mounted runtime state private without making it world-writable.
+install -d -m 0750 ./data
 docker compose pull
 docker compose up -d
 ```
@@ -45,6 +46,29 @@ docker compose up -d
 The container uses host networking so scanners can reach the same networks as
 the Docker host. Runtime state, the SQLite database, and generated encryption
 keys are stored in ./data.
+
+The published image runs as UID 0 in a rootful Docker installation, so a
+`0750` data directory is sufficient and avoids weakening host permissions. With
+rootless Docker, container UID 0 maps to the invoking host user; if you prepare
+the directory as another account, change its owner to the rootless Docker user
+instead of using `chmod 777`. The same ownership rule applies to mounted secret
+files. Keep notification and authentication key files owner-readable only:
+
+```console
+install -m 0600 notification-urls.example.txt ./notification-urls.txt
+```
+
+After enabling the corresponding secret mount in `compose.yaml`, you can check
+the permissions before starting the daemon:
+
+```console
+docker compose run --rm --no-deps --entrypoint /bin/sh edgewatch \
+  -c 'test -r /etc/edgewatch/config.yaml && test -w /var/lib/edgewatch && echo "runtime paths ready"'
+```
+
+If this check reports `Permission denied`, fix the host ownership for the
+rootful or rootless mode you selected. Do not make the database or secret files
+world-readable to work around the error.
 
 If you are upgrading from a deployment that used the old named
 edgewatch-data volume, the bind mount starts with fresh state. That volume is

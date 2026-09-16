@@ -164,16 +164,16 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 				return nil, fmt.Errorf("database not found: %s", artifactPath)
 			}
 			if err := os.MkdirAll(filepath.Dir(artifactPath), 0o750); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("create EdgeWatch database directory %q: %w", filepath.Dir(artifactPath), err)
 			}
 			if err := ensurePrivateSQLiteFile(artifactPath); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("prepare EdgeWatch database %q: %w", artifactPath, err)
 			}
 			// Refuse unsafe pre-existing sidecars before SQLite can open or update
 			// them. SQLite may follow a WAL/SHM symlink during connection setup, so
 			// checking only after the first pragma would leave a small write window.
 			if err := enforcePrivateSQLiteArtifacts(artifactPath); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("secure EdgeWatch database artifacts %q: %w", artifactPath, err)
 			}
 		}
 		// Query-only commands must open SQLite in read-only mode before any
@@ -242,7 +242,7 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 		if !memoryDatabase && !options.queryOnly {
 			if err := enforcePrivateSQLiteArtifacts(artifactPath); err != nil {
 				db.Close()
-				return nil, err
+				return nil, fmt.Errorf("secure EdgeWatch database artifacts %q: %w", artifactPath, err)
 			}
 		}
 	}
@@ -285,7 +285,7 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 				readDB.Close()
 			}
 			db.Close()
-			return nil, err
+			return nil, fmt.Errorf("secure EdgeWatch database artifacts %q: %w", artifactPath, err)
 		}
 	}
 	return &Store{DB: db, ReadDB: readDB, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true}, nil

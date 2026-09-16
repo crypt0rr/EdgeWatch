@@ -292,10 +292,11 @@ docker compose run --rm --no-deps -T edgewatch edgewatch verify \
 docker compose up -d edgewatch
 ```
 
-Database migrations are forward-only. An older image must not be pointed at a
-database already upgraded by a newer image; restore the matching pre-upgrade
-./data backup if a rollback is required. Keep encryption keys with the
-database or encrypted web-managed destinations and never commit them.
+The current schema is version 38. Database migrations are forward-only. An
+older image must not be pointed at a database already upgraded by a newer
+image; restore the matching pre-upgrade ./data backup if a rollback is
+required. Keep encryption keys with the database or encrypted web-managed
+destinations and never commit them.
 
 ## Useful commands
 

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -135,11 +136,111 @@ func TestRestoreAllowsExplicitCrashRecoverySidecarReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("explicit recovery restore: %v", err)
 	}
-	if result.SidecarsWarning == "" || len(result.SidecarsPresent) != 1 {
+	if result.SidecarsWarning == "" || len(result.SidecarsPresent) != 0 || len(result.SidecarsRemoved) != 1 {
 		t.Fatalf("explicit recovery result = %#v", result)
 	}
-	if _, err := os.Stat(destination + "-shm"); err != nil {
-		t.Fatalf("explicit recovery removed sidecar: %v", err)
+	if _, err := os.Stat(destination + "-shm"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("explicit recovery left destination sidecar: %v", err)
+	}
+}
+
+func TestRestoreSidecarReplayIncludesSourceWALAndRemovesDestinationSidecars(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "destination.db")
+	sourceStore, err := Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sourceStore.Close()
+	createRestoreFixture(t, destination, "destination")
+	if _, err := sourceStore.DB.Exec(`PRAGMA wal_autocheckpoint=0; CREATE TABLE wal_only(value TEXT NOT NULL); INSERT INTO wal_only(value) VALUES('from WAL');`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(source + "-wal"); err != nil {
+		t.Fatalf("source WAL was not created: %v", err)
+	}
+	if err := os.WriteFile(destination+"-shm", []byte("stale destination sidecar"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := Restore(context.Background(), source, destination, RestoreOptions{AllowSidecarReplay: true})
+	if err != nil {
+		t.Fatalf("WAL replay restore: %v", err)
+	}
+	if len(result.SidecarsPresent) == 0 || len(result.SidecarsRemoved) != 1 {
+		t.Fatalf("WAL replay sidecars = %#v", result)
+	}
+	if _, err := os.Stat(destination + "-shm"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old destination sidecar remains before opening restored database: %v", err)
+	}
+	reader, err := OpenReadOnlyExisting(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var value string
+	if err := reader.DB.QueryRow(`SELECT value FROM wal_only`).Scan(&value); err != nil {
+		t.Fatalf("WAL-only row was lost: %v", err)
+	}
+	if value != "from WAL" {
+		t.Fatalf("WAL-only row = %q", value)
+	}
+}
+
+func TestRestoreRejectsForeignAndNewerSchemaBeforeReplacement(t *testing.T) {
+	dir := t.TempDir()
+	destination := filepath.Join(dir, "destination.db")
+	createRestoreFixture(t, destination, "destination")
+	before, err := fileDigest(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	foreign := filepath.Join(dir, "foreign.db")
+	raw, err := sql.Open("sqlite", foreign)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE unrelated(id INTEGER PRIMARY KEY, value TEXT)`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(context.Background(), foreign, destination, RestoreOptions{}); err == nil || !strings.Contains(err.Error(), "not an EdgeWatch database") {
+		t.Fatalf("foreign restore error = %v", err)
+	}
+	after, err := fileDigest(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatal("foreign restore changed destination")
+	}
+
+	newer := filepath.Join(dir, "newer.db")
+	createRestoreFixture(t, newer, "newer")
+	raw, err = sql.Open("sqlite", newer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version = 999`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(context.Background(), newer, destination, RestoreOptions{}); err == nil || !strings.Contains(err.Error(), "unsupported schema version") {
+		t.Fatalf("newer-schema restore error = %v", err)
+	}
+	after, err = fileDigest(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != after {
+		t.Fatal("newer-schema restore changed destination")
 	}
 }
 
@@ -352,6 +453,34 @@ func TestPreflightRestoreRejectsNonSQLiteSource(t *testing.T) {
 	}
 	if _, err := PreflightRestore(context.Background(), source, destination); err == nil {
 		t.Fatal("non-SQLite source was accepted")
+	}
+}
+
+func TestRestoreSidecarErrorPathsAreRecoverable(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing-wal")
+	if _, err := moveDestinationSidecars([]RestoreSidecar{{Kind: "wal", Path: missing}}, dir); err == nil {
+		t.Fatal("missing destination sidecar was staged")
+	}
+
+	original := filepath.Join(dir, "original")
+	if err := os.Mkdir(original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	moved := filepath.Join(dir, "moved")
+	if err := os.WriteFile(moved, []byte("sidecar"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreDestinationSidecars([]movedRestoreSidecar{{original: original, moved: moved}}); err == nil {
+		t.Fatal("sidecar restore over a directory unexpectedly succeeded")
+	}
+	pending := true
+	restoreSidecarsOnFailure(&pending, []movedRestoreSidecar{{original: filepath.Join(dir, "not-there"), moved: filepath.Join(dir, "also-not-there")}})
+	pending = false
+	restoreSidecarsOnFailure(&pending, nil)
+
+	if err := validateStagedRestore(context.Background(), filepath.Join(dir, "does-not-exist.db")); err == nil {
+		t.Fatal("missing staged restore database was accepted")
 	}
 }
 

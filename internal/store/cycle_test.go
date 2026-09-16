@@ -82,6 +82,73 @@ func TestScanCycleCheckpointsAndCompletes(t *testing.T) {
 	}
 }
 
+func TestRetentionDoesNotClearCycleCheckpointForAttemptOnly(t *testing.T) {
+	ctx, s, job, plan := cycleFixture(t)
+	defer s.Close()
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	fragment := model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}}}}
+	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CompleteScanCycle(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := s.SaveScan(ctx, model.Scan{ID: "timeout-attempt", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "timed_out", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.clearCompletedCyclePayloads(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var checkpoint []byte
+	if err := s.DB.QueryRowContext(ctx, `SELECT snapshot_json FROM scan_cycle_units WHERE cycle_id=? AND sequence=?`, cycle.ID, unit.Sequence).Scan(&checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if string(checkpoint) == "{}" {
+		t.Fatal("attempt-only scan caused checkpoint reclamation")
+	}
+	if err := s.SaveScan(ctx, model.Scan{ID: "promoted-final", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.clearCompletedCyclePayloads(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT snapshot_json FROM scan_cycle_units WHERE cycle_id=? AND sequence=?`, cycle.ID, unit.Sequence).Scan(&checkpoint); err != nil {
+		t.Fatal(err)
+	}
+	if string(checkpoint) != "{}" {
+		t.Fatalf("promoted checkpoint = %q, want reclaimed sentinel", checkpoint)
+	}
+}
+
+func TestLoadScanCycleFragmentsRejectsReclaimedCheckpoint(t *testing.T) {
+	ctx, s, job, plan := cycleFixture(t)
+	defer s.Close()
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET status='completed',snapshot_json='{}' WHERE cycle_id=? AND sequence=0`, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.LoadScanCycleFragments(ctx, cycle.ID); !errors.Is(err, ErrMissingCheckpoint) {
+		t.Fatalf("reclaimed checkpoint error = %v, want ErrMissingCheckpoint", err)
+	}
+}
+
 func TestScanCycleCompletionRequiresAllUnits(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})

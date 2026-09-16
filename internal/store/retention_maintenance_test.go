@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -91,6 +92,48 @@ func TestSearchMaintenanceHonorsCancellation(t *testing.T) {
 	cancel()
 	if _, err := s.maintainSearchIndexes(ctx); err == nil {
 		t.Fatal("canceled maintenance unexpectedly succeeded")
+	}
+}
+
+func TestSearchMaintenanceReportsErrorsAndDefersBudgetExpiry(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "error.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.maintainSearchIndexes(context.Background()); err == nil {
+		t.Fatal("closed database maintenance unexpectedly succeeded")
+	}
+
+	maintenanceCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	stats := searchMaintenanceStats{}
+	if err := maintenanceError(context.Background(), maintenanceCtx, &stats, "test operation", errors.New("busy")); err != nil {
+		t.Fatalf("expired maintenance budget returned an error: %v", err)
+	}
+	if !stats.Deferred {
+		t.Fatal("expired maintenance budget was not marked deferred")
+	}
+	activeCtx, activeCancel := context.WithCancel(context.Background())
+	activeCancel()
+	stats = searchMaintenanceStats{}
+	if err := maintenanceError(activeCtx, context.Background(), &stats, "test operation", errors.New("canceled")); err == nil {
+		t.Fatal("caller cancellation was swallowed")
+	}
+}
+
+func TestRetentionProtectionPreparationReportsClosedDatabase(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "protection-error.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.deleteScanRetentionBatches(context.Background(), time.Now().UTC().Format(time.RFC3339Nano)); err == nil {
+		t.Fatal("closed database retention protection unexpectedly succeeded")
 	}
 }
 

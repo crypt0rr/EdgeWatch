@@ -13,6 +13,9 @@ import (
 // used by the verify command. SQLite reports integrity_check as one row, while
 // foreign_key_check returns one row per violating relationship.
 type DatabaseVerification struct {
+	SchemaVersion        int                   `json:"schema_version"`
+	SchemaSupported      bool                  `json:"schema_supported"`
+	EdgeWatchSchema      bool                  `json:"edgewatch_schema"`
 	IntegrityCheck       string                `json:"integrity_check"`
 	ForeignKeyViolations []ForeignKeyViolation `json:"foreign_key_violations"`
 	FTSBackfill          []FTSBackfillProgress `json:"fts_backfill,omitempty"`
@@ -46,6 +49,10 @@ type ForeignKeyViolation struct {
 type VerificationError struct {
 	IntegrityCheck       string
 	ForeignKeyViolations int
+	SchemaVersion        int
+	SchemaChecked        bool
+	SchemaSupported      bool
+	EdgeWatchSchema      bool
 }
 
 func (e *VerificationError) Error() string {
@@ -58,6 +65,12 @@ func (e *VerificationError) Error() string {
 	}
 	if e.ForeignKeyViolations > 0 {
 		parts = append(parts, fmt.Sprintf("foreign_key_check: %d violation(s)", e.ForeignKeyViolations))
+	}
+	if e.SchemaChecked && !e.SchemaSupported {
+		parts = append(parts, fmt.Sprintf("unsupported schema version: %d", e.SchemaVersion))
+	}
+	if e.SchemaChecked && !e.EdgeWatchSchema {
+		parts = append(parts, "not an EdgeWatch database")
 	}
 	if len(parts) == 0 {
 		return "database verification failed"
@@ -76,6 +89,13 @@ func (s *Store) Verify(ctx context.Context) (DatabaseVerification, error) {
 		return result, errors.New("database is not open")
 	}
 	reader := s.reader()
+	var schemaVersionValue int
+	if err := reader.QueryRowContext(ctx, "PRAGMA user_version").Scan(&schemaVersionValue); err != nil {
+		return result, err
+	}
+	result.SchemaVersion = schemaVersionValue
+	result.SchemaSupported = schemaVersionValue >= 1 && schemaVersionValue <= schemaVersion
+	result.EdgeWatchSchema = detectEdgeWatchSchema(ctx, reader)
 	if err := reader.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&result.IntegrityCheck); err != nil {
 		return result, err
 	}
@@ -125,10 +145,42 @@ func (s *Store) Verify(ctx context.Context) (DatabaseVerification, error) {
 			return result, err
 		}
 	}
-	if result.IntegrityCheck != "ok" || len(result.ForeignKeyViolations) > 0 {
-		return result, &VerificationError{IntegrityCheck: result.IntegrityCheck, ForeignKeyViolations: len(result.ForeignKeyViolations)}
+	if result.IntegrityCheck != "ok" || len(result.ForeignKeyViolations) > 0 || !result.SchemaSupported || !result.EdgeWatchSchema {
+		return result, &VerificationError{
+			IntegrityCheck:       result.IntegrityCheck,
+			ForeignKeyViolations: len(result.ForeignKeyViolations),
+			SchemaVersion:        result.SchemaVersion,
+			SchemaChecked:        true,
+			SchemaSupported:      result.SchemaSupported,
+			EdgeWatchSchema:      result.EdgeWatchSchema,
+		}
 	}
 	return result, nil
+}
+
+// detectEdgeWatchSchema distinguishes a supported EdgeWatch database from an
+// arbitrary SQLite file before a restore can replace the live installation.
+// The scans/events/outbox/daemon_lease set is present in the original v1
+// schema and every later migration; checking a few stable columns avoids
+// accepting an unrelated file that happens to use one familiar table name.
+func detectEdgeWatchSchema(ctx context.Context, queryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}) bool {
+	// Keep the probe to one bounded query. Besides avoiding a second metadata
+	// cursor while verifying a live database, this makes a cancelled or damaged
+	// connection fail atomically instead of leaving a partial schema decision.
+	const probe = `SELECT CASE WHEN
+		(SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('scans','events','outbox','daemon_lease')) = 4
+		AND (SELECT COUNT(*) FROM pragma_table_info('scans') WHERE name IN ('id','job','started_at','finished_at','status','config_hash','snapshot_json')) = 7
+		THEN 1 ELSE 0 END`
+	var valid int
+	if err := queryer.QueryRowContext(ctx, probe).Scan(&valid); err != nil {
+		// A metadata read failure is treated as an unsupported schema. Verify
+		// still completes its remaining checks and returns a structured
+		// VerificationError, while a restore remains fail-closed.
+		return false
+	}
+	return valid != 0
 }
 
 // Backup creates a consistent single-file SQLite snapshot while the store is

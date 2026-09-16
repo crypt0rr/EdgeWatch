@@ -41,7 +41,12 @@ func clearCompletedScanCycleCheckpointsTx(ctx context.Context, tx *sql.Tx, cycle
 	if strings.TrimSpace(cycleID) == "" {
 		return nil
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE scan_cycle_units SET snapshot_json='{}' WHERE cycle_id=? AND EXISTS (SELECT 1 FROM scan_cycles WHERE id=? AND status='completed')`, cycleID, cycleID)
+	// A cycle is marked completed before its merged scan is promoted.  Do not
+	// reclaim the source checkpoints merely because an attempt row happens to
+	// reference that cycle: timed-out/failed attempt rows are written before a
+	// successful (or explicitly incomplete) final scan and must remain
+	// recoverable across a crash in that window.
+	_, err := tx.ExecContext(ctx, `UPDATE scan_cycle_units SET snapshot_json='{}' WHERE cycle_id=? AND EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id=? AND scans.cycle_status='completed' AND scans.status IN ('success','incomplete'))`, cycleID, cycleID)
 	return err
 }
 

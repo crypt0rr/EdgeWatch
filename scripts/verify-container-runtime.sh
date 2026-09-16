@@ -44,7 +44,10 @@ docker run --rm $network_args $runtime_args --cap-drop ALL --cap-add NET_RAW --c
 
 workdir=$(mktemp -d)
 trap 'rm -rf "$workdir"' EXIT
-mkdir "$workdir/data"
+install -d -m 0750 "$workdir/data"
+install -m 0600 /dev/null "$workdir/notification-urls.txt"
+test "$(stat -c '%a' "$workdir/data")" = 750
+test "$(stat -c '%a' "$workdir/notification-urls.txt")" = 600
 cat >"$workdir/config.yaml" <<'EOF'
 database: /var/lib/edgewatch/edgewatch.db
 retention: 24h
@@ -65,5 +68,12 @@ docker run --rm $runtime_args \
   -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
   -v "$workdir/data:/var/lib/edgewatch:rw" "$image" status --config /etc/edgewatch/config.yaml
 test -s "$workdir/data/edgewatch.db"
+
+# Verify the same rootful, restricted-capability container can read an
+# owner-only mounted secret without relaxing the host file permissions.
+docker run --rm $runtime_args \
+  -v "$workdir/notification-urls.txt:/run/secrets/edgewatch-test:ro" \
+  --entrypoint /bin/sh "$image" \
+  -c 'test -r /run/secrets/edgewatch-test'
 
 echo "container runtime compatibility matrix passed for $image"

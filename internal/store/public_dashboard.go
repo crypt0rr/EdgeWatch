@@ -311,9 +311,12 @@ func readPublicDashboardHostRows(rows *sql.Rows, results *[]PublicDashboardHostR
 	return rows.Err()
 }
 
-// getLatestSuccessfulJobHostsHistory resolves selected pairs by ranking the
-// indexed scan history. It is reserved for pairs absent from the maintained
-// latest-host projection, such as an address monitored by multiple jobs.
+// getLatestSuccessfulJobHostsHistory resolves selected pairs with an indexed
+// newest-row lookup. It is reserved for pairs absent from the maintained
+// latest-host projection, such as an address monitored by multiple jobs. The
+// correlated lookup is deliberately scoped to each selected address/job pair;
+// it avoids materializing and sorting every matching history row for the whole
+// dashboard request.
 func (s *Store) getLatestSuccessfulJobHostsHistory(ctx context.Context, selections []PublicDashboardHost) ([]PublicDashboardHostResult, error) {
 	if len(selections) == 0 {
 		return []PublicDashboardHostResult{}, nil
@@ -342,64 +345,45 @@ func (s *Store) getLatestSuccessfulJobHostsHistory(ctx context.Context, selectio
 	if len(normalized) == 0 {
 		return []PublicDashboardHostResult{}, nil
 	}
-	values := make([]string, len(normalized))
-	args := make([]any, 0, len(normalized)*2)
-	for i, selection := range normalized {
-		values[i] = "(?,?)"
-		args = append(args, selection.JobID, selection.Address)
-	}
-	query := `WITH selected(job_id,address) AS (VALUES ` + strings.Join(values, ",") + `), ranked AS (
- SELECT selected.job_id AS selected_job_id, selected.address AS selected_address,
-        h.scan_id,h.data_quality,h.host_json,
-        sc.id,sc.job_id,sc.job_revision,sc.job,sc.started_at,sc.finished_at,sc.status,sc.error,sc.nmap_version,sc.config_hash,
-        sc.cycle_id,sc.cycle_attempt,sc.cycle_status,sc.resumable,sc.completed_probes,sc.total_probes,sc.completed_units,sc.total_units,sc.no_progress_attempts,
-        sc.baseline_scan_id,sc.baseline_config_hash,sc.scanner_engine,sc.scanner_profile_id,sc.scanner_profile_revision,sc.naabu_version,sc.discovery_ports,sc.confirmed_ports,sc.discovery_duration_ms,sc.enrichment_duration_ms,
-        ROW_NUMBER() OVER (PARTITION BY selected.job_id,selected.address ORDER BY sc.finished_at DESC,sc.id DESC) AS rn
- FROM selected
- JOIN scan_hosts h ON h.address=selected.address
- JOIN scans sc ON sc.id=h.scan_id AND sc.job_id=selected.job_id AND sc.status='success'
-) SELECT selected_job_id,selected_address,scan_id,data_quality,host_json,
-         id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,
-         cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,
-         baseline_scan_id,baseline_config_hash,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms
- FROM ranked WHERE rn=1 ORDER BY selected_address,selected_job_id`
+	query, args := latestSuccessfulJobHostsHistoryQuery(normalized)
 	rows, err := s.reader().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	results := make([]PublicDashboardHostResult, 0, len(normalized))
-	for rows.Next() {
-		var selection PublicDashboardHost
-		var host ScanHost
-		var raw []byte
-		var summary model.ScanSummary
-		var jobID sql.NullString
-		var revision sql.NullInt64
-		var resumable int
-		var started, finished string
-		if err := rows.Scan(&selection.JobID, &selection.Address, &host.ScanID, &host.DataQuality, &raw,
-			&summary.ID, &jobID, &revision, &summary.Job, &started, &finished, &summary.Status, &summary.Error, &summary.NmapVersion, &summary.ConfigHash,
-			&summary.CycleID, &summary.CycleAttempt, &summary.CycleStatus, &resumable, &summary.CompletedProbes, &summary.TotalProbes, &summary.CompletedUnits, &summary.TotalUnits, &summary.NoProgressTries,
-			&summary.BaselineScanID, &summary.BaselineConfigHash, &summary.ScannerEngine, &summary.ScannerProfileID, &summary.ScannerProfileRevision, &summary.NaabuVersion, &summary.DiscoveryPorts, &summary.ConfirmedPorts, &summary.DiscoveryDurationMS, &summary.EnrichmentDurationMS); err != nil {
-			return nil, err
-		}
-		if jobID.Valid {
-			summary.JobID = jobID.String
-		}
-		if revision.Valid {
-			summary.JobRevision = revision.Int64
-		}
-		summary.Resumable = resumable != 0
-		summary.StartedAt, summary.FinishedAt = scanTime(started), scanTime(finished)
-		decoded, err := decodeScanHost(selection.Address, host.DataQuality, raw)
-		if err != nil {
-			return nil, err
-		}
-		host.Host = decoded.Host
-		results = append(results, PublicDashboardHostResult{Selection: selection, Host: host, Summary: summary})
+	if err := readPublicDashboardHostRows(rows, &results, make(map[string]struct{}, len(normalized))); err != nil {
+		return nil, err
 	}
-	return results, rows.Err()
+	return results, nil
+}
+
+func latestSuccessfulJobHostsHistoryQuery(selections []PublicDashboardHost) (string, []any) {
+	values := make([]string, len(selections))
+	args := make([]any, 0, len(selections)*2)
+	for i, selection := range selections {
+		values[i] = "(?,?)"
+		args = append(args, selection.JobID, selection.Address)
+	}
+	query := `WITH selected(job_id,address) AS (VALUES ` + strings.Join(values, ",") + `)
+SELECT selected.job_id,selected.address,h.scan_id,h.data_quality,h.host_json,
+       sc.id,sc.job_id,sc.job_revision,sc.job,sc.started_at,sc.finished_at,sc.status,sc.error,sc.nmap_version,sc.config_hash,
+       sc.cycle_id,sc.cycle_attempt,sc.cycle_status,sc.resumable,sc.completed_probes,sc.total_probes,sc.completed_units,sc.total_units,sc.no_progress_attempts,
+       sc.baseline_scan_id,sc.baseline_config_hash,sc.scanner_engine,sc.scanner_profile_id,sc.scanner_profile_revision,sc.naabu_version,sc.discovery_ports,sc.confirmed_ports,sc.discovery_duration_ms,sc.enrichment_duration_ms
+FROM selected
+JOIN scan_hosts h ON h.address=selected.address
+ AND h.scan_id=(
+   SELECT h2.scan_id
+   FROM scan_hosts h2
+   JOIN scans sc2 ON sc2.id=h2.scan_id
+   WHERE h2.address=selected.address
+     AND sc2.job_id=selected.job_id
+     AND sc2.status='success'
+   ORDER BY sc2.finished_at DESC,sc2.id DESC
+   LIMIT 1
+ )
+JOIN scans sc ON sc.id=h.scan_id AND sc.job_id=selected.job_id AND sc.status='success'
+ORDER BY selected.address,selected.job_id`
+	return query, args
 }
 
 // GetLatestSuccessfulJobHost is deliberately scoped by both job and address;

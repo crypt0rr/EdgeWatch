@@ -54,6 +54,50 @@ func TestParseXMLCapturesHostEvidenceAndSummaries(t *testing.T) {
 	}
 }
 
+func TestMergeHostObservationKeepsIncompleteStatusRegardlessOfOrder(t *testing.T) {
+	up := model.HostObservation{
+		Address: "192.0.2.10", Status: "up", StatusReason: "arp-response",
+		Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443"}},
+	}
+	omitted := model.HostObservation{
+		Address: "192.0.2.10", Status: "unreachable", StatusReason: "nmap-omitted",
+		Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443"}},
+	}
+	for _, test := range []struct {
+		name          string
+		first, second model.HostObservation
+	}{
+		{name: "up then omitted", first: up, second: omitted},
+		{name: "omitted then up", first: omitted, second: up},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			hosts := map[string]model.HostObservation{}
+			mergeHostObservationMap(hosts, test.first.Address, test.first)
+			mergeHostObservationMap(hosts, test.second.Address, test.second)
+			got := hosts["192.0.2.10"]
+			if got.Status != "unreachable" || got.StatusReason != "nmap-omitted" {
+				t.Fatalf("merged status = %q/%q, want unreachable/nmap-omitted", got.Status, got.StatusReason)
+			}
+		})
+	}
+}
+
+func TestMergeHostObservationMarksAddressIncompleteAcrossProtocols(t *testing.T) {
+	hosts := map[string]model.HostObservation{}
+	mergeHostObservationMap(hosts, "192.0.2.11", model.HostObservation{
+		Address: "192.0.2.11", Status: "up",
+		Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443"}},
+	})
+	mergeHostObservationMap(hosts, "192.0.2.11", model.HostObservation{
+		Address: "192.0.2.11", Status: "unreachable", StatusReason: "nmap-timeout",
+		Protocols: []model.ProtocolObservation{{Protocol: "udp", ScannedPorts: "53"}},
+	})
+	got := hosts["192.0.2.11"]
+	if got.Status != "unreachable" || got.StatusReason != "nmap-timeout" {
+		t.Fatalf("cross-protocol status = %q/%q, want unreachable/nmap-timeout", got.Status, got.StatusReason)
+	}
+}
+
 func TestHostEvidenceDoesNotChangeSnapshotHash(t *testing.T) {
 	base := model.Snapshot{Units: []model.Unit{{Target: "198.51.100.10", Protocol: "tcp", Addresses: []string{"198.51.100.10"}, Ports: []model.PortState{{Port: 443, State: "open"}}}}}
 	withEvidence := base

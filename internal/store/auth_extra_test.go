@@ -195,3 +195,43 @@ func TestSessionAndRecoveryCodeStoreLifecycle(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSessionRevocationRemainsEffectiveWhenAuditInsertFails(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	if err := s.CreateSession(ctx, "delete-one", "csrf", now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`CREATE TRIGGER fail_revocation_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteSessionWithAudit(ctx, "delete-one", "session.revoked", "test"); !errors.Is(err, ErrAuditUnavailable) {
+		t.Fatalf("single-session audit error = %v", err)
+	}
+	if _, err := s.GetSession(ctx, "delete-one"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("single session survived audit failure: %v", err)
+	}
+	if err := s.CreateSession(ctx, "delete-all", "csrf", now, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteAllSessionsWithAudit(ctx, "sessions.revoked", "test"); !errors.Is(err, ErrAuditUnavailable) {
+		t.Fatalf("all-session audit error = %v", err)
+	}
+	if _, err := s.GetSession(ctx, "delete-all"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("all sessions survived audit failure: %v", err)
+	}
+	user, err := s.CreateUser(ctx, User{Username: "revoked-user", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSessionForUserWithAuditEntry(ctx, user.ID, "delete-user", "csrf", now, now.Add(time.Hour), AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteUserSessionsWithAudit(ctx, user.ID, AuditEntry{Action: "user.sessions_revoked", Detail: "test"}); !errors.Is(err, ErrAuditUnavailable) {
+		t.Fatalf("user-session audit error = %v", err)
+	}
+	if _, err := s.GetSession(ctx, "delete-user"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("user session survived audit failure: %v", err)
+	}
+}

@@ -80,6 +80,26 @@ func TestServerErrorMappingHelpers(t *testing.T) {
 			t.Fatalf("incident error = %d %s", recorder.Code, recorder.Body.String())
 		}
 	}
+	for _, test := range []struct {
+		name       string
+		err        error
+		code       int
+		wantHeader string
+	}{
+		{name: "rate limited factor", err: auth.ErrRateLimited, code: http.StatusTooManyRequests, wantHeader: "300"},
+		{name: "missing factor", err: errors.New("factor missing"), code: http.StatusUnauthorized},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			server.writeCurrentFactorError(recorder, test.err)
+			if recorder.Code != test.code {
+				t.Fatalf("factor error status = %d, want %d", recorder.Code, test.code)
+			}
+			if test.wantHeader != "" && recorder.Header().Get("Retry-After") != test.wantHeader {
+				t.Fatalf("Retry-After = %q, want %q", recorder.Header().Get("Retry-After"), test.wantHeader)
+			}
+		})
+	}
 	if server.writeAuditUnavailable(httptest.NewRecorder(), errors.New("not audit"), "action") {
 		t.Fatal("non-audit error was treated as audit unavailable")
 	}

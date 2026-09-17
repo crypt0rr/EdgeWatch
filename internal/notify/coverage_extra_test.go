@@ -125,6 +125,34 @@ func TestNotificationValidationAndSecretCryptoBranches(t *testing.T) {
 	}
 }
 
+func TestRemoveInterruptedKeyOnlyRemovesExpectedEmptyFiles(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing")
+	if err := removeInterruptedKey(missing, 0); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing interrupted key error = %v", err)
+	}
+	nonEmpty := filepath.Join(dir, "non-empty")
+	if err := os.WriteFile(nonEmpty, []byte("not a key"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeInterruptedKey(nonEmpty, 0); !errors.Is(err, ErrKeyInvalid) {
+		t.Fatalf("non-empty interrupted key error = %v", err)
+	}
+	if _, err := os.Stat(nonEmpty); err != nil {
+		t.Fatalf("non-empty key was removed: %v", err)
+	}
+	empty := filepath.Join(dir, "empty")
+	if err := os.WriteFile(empty, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeInterruptedKey(empty, 0); err != nil {
+		t.Fatalf("empty interrupted key removal = %v", err)
+	}
+	if _, err := os.Stat(empty); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty interrupted key still exists: %v", err)
+	}
+}
+
 func TestNotifierLockedAndErrorBranches(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

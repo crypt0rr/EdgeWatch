@@ -1,11 +1,66 @@
 package auth
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/store"
 )
+
+func TestConfirmTOTPForUserConsumesCurrentFactor(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	m := NewManager(db)
+	m.Now = func() time.Time { return now }
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := db.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin.TOTPEnabled = true
+	admin.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	if err := db.SaveAdmin(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp", nil)
+	request.RemoteAddr = "198.51.100.50:8080"
+	code := totpCode(admin.TOTPSecret, now.Unix()/30)
+	if err := m.ConfirmTOTPForUser(ctx, request, store.LegacyAdminUserID, code, ""); err != nil {
+		t.Fatalf("valid current factor rejected: %v", err)
+	}
+	if err := m.ConfirmTOTPForUser(ctx, request, store.LegacyAdminUserID, code, ""); err == nil || !strings.Contains(err.Error(), "current one-time code") {
+		t.Fatalf("replayed current factor error = %v", err)
+	}
+	if err := m.ConfirmTOTPForUser(ctx, request, store.LegacyAdminUserID, "000000", ""); err == nil {
+		t.Fatal("invalid current factor accepted")
+	}
+	plain, hashes, err := RecoveryCodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveRecoveryCodes(ctx, hashes); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ConfirmTOTPForUser(ctx, request, store.LegacyAdminUserID, "", plain[0]); err != nil {
+		t.Fatalf("valid recovery factor rejected: %v", err)
+	}
+}
 
 func TestForwardedAddressAndLimiterHelpers(t *testing.T) {
 	for _, tc := range []struct {

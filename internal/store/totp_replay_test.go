@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 )
@@ -25,5 +26,22 @@ func TestConsumeTOTPStepRejectsReplayAndOlderStep(t *testing.T) {
 	}
 	if accepted, err := s.ConsumeTOTPStep(ctx, user.ID, 101, now.Add(30*time.Second)); err != nil || !accepted {
 		t.Fatalf("next TOTP step = %v, %v", accepted, err)
+	}
+}
+
+func TestConsumeTOTPStepRejectsInvalidAndCancelledRequests(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	if accepted, err := s.ConsumeTOTPStep(ctx, "", 1, now); !errors.Is(err, ErrTOTPReplay) || accepted {
+		t.Fatalf("empty user id = %v, %v", accepted, err)
+	}
+	if accepted, err := s.ConsumeTOTPStep(ctx, "user", -1, now); !errors.Is(err, ErrTOTPReplay) || accepted {
+		t.Fatalf("negative step = %v, %v", accepted, err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if accepted, err := s.ConsumeTOTPStep(cancelled, "user", 1, now); err == nil || accepted {
+		t.Fatalf("cancelled request = %v, %v", accepted, err)
 	}
 }

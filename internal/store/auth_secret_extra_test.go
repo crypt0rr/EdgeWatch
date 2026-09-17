@@ -89,6 +89,25 @@ func TestExplicitAuthKeyPathDisablesAutomaticGeneration(t *testing.T) {
 	}
 }
 
+func TestAuthKeyAutoCreationRecoversInterruptedEmptyFile(t *testing.T) {
+	s := openTestStore(t)
+	path := s.authKeyPath
+	if path == "" || !s.authAutoKey {
+		t.Fatalf("test store did not select an automatic auth key path: %q auto=%t", path, s.authAutoKey)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	key, err := s.authKeyForWrite()
+	if err != nil || len(key) != authKeySize {
+		t.Fatalf("interrupted auth key recovery = %x, %v", key, err)
+	}
+	loaded, err := loadAuthKey(path)
+	if err != nil || string(loaded) != string(key) {
+		t.Fatalf("recovered auth key = %x, %v", loaded, err)
+	}
+}
+
 func TestTOTPSecretOpenCompatibilityAndMalformedCiphertext(t *testing.T) {
 	s := &Store{}
 	if got, err := s.openTOTPSecret("legacy-seed"); err != nil || got != "legacy-seed" {

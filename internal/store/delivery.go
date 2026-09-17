@@ -410,9 +410,9 @@ func (s *Store) DeliveryResultClaim(ctx context.Context, id int64, claim string,
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var attempts int
+	var attempts, deferrals int
 	var destination string
-	if err := tx.QueryRowContext(ctx, `SELECT attempts,destination FROM outbox WHERE id=? AND sent_at IS NULL AND claim_token=?`, id, claim).Scan(&attempts, &destination); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT attempts,deferrals,destination FROM outbox WHERE id=? AND sent_at IS NULL AND claim_token=?`, id, claim).Scan(&attempts, &deferrals, &destination); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrDeliveryClaimLost
 		}
@@ -429,6 +429,35 @@ func (s *Store) DeliveryResultClaim(ctx context.Context, id int64, claim string,
 		}
 		if err := recordDeliverySuccessTx(ctx, tx, destination, now); err != nil {
 			return err
+		}
+		return tx.Commit()
+	}
+	// A transport timeout or cancellation after bytes may have left the
+	// provider in an unknown state. Treat it as a durable deferral, not a
+	// provider attempt: the request may already have been accepted and retrying
+	// against the ordinary attempt budget could both duplicate the notification
+	// and exhaust retries while the daemon is repeatedly restarted.
+	if errors.Is(sendErr, ErrDeliveryIndeterminate) {
+		deferrals++
+		terminal := deferrals >= deliveryMaxDeferrals
+		terminalAt := ""
+		if terminal {
+			terminalAt = now.Format(time.RFC3339Nano)
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE outbox SET deferrals=?,next_at=?,last_error=?,terminal_at=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND claim_token=?`, deferrals, now.Add(deliveryInitialDelay).Format(time.RFC3339Nano), deliveryErrorCode(sendErr), terminalAt, id, claim)
+		if err != nil {
+			return err
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return ErrDeliveryClaimLost
+		}
+		if err := recordDeliveryFailureTx(ctx, tx, destination, sendErr, terminal, now); err != nil {
+			return err
+		}
+		if terminal {
+			if err := insertTerminalDeliveryEventTx(ctx, tx, destination, sendErr, "indeterminate deferral limit", now); err != nil {
+				return err
+			}
 		}
 		return tx.Commit()
 	}

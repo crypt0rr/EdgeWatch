@@ -11,7 +11,7 @@ func TestBaselineHostProjectionPaginatesAcceptedOverlay(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	snapshot := model.Snapshot{Hosts: []model.HostObservation{
-		{Address: "198.51.100.2", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open"}}}}},
+		{Address: "198.51.100.2", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Product: "nginx"}}}}}},
 		{Address: "198.51.100.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 22, State: "open"}}}}},
 	}}
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('overlay-job','overlay','{}',1,0,1,'now','now')`); err != nil {
@@ -27,6 +27,21 @@ func TestBaselineHostProjectionPaginatesAcceptedOverlay(t *testing.T) {
 	}
 	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Host.Address != "198.51.100.1" {
 		t.Fatalf("baseline page = %#v", page)
+	}
+	page, err = s.ListBaselineHostsPage(ctx, "overlay-job", "nginx", "tcp", &open, 10, 0)
+	if err != nil || page.Total != 1 || page.Items[0].Host.Address != "198.51.100.2" {
+		t.Fatalf("baseline service search = %#v, %v", page, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE jobs SET name='renamed-overlay' WHERE id='overlay-job'`); err != nil {
+		t.Fatal(err)
+	}
+	page, err = s.ListBaselineHostsPage(ctx, "overlay-job", "renamed-overlay", "", nil, 10, 0)
+	if err != nil || page.Total != 2 {
+		t.Fatalf("baseline current job-name search = %#v, %v", page, err)
+	}
+	page, err = s.ListBaselineHostsPage(ctx, "overlay-job", "overlay-job", "", nil, 10, 0)
+	if err != nil || page.Total != 0 {
+		t.Fatalf("stale baseline job-name search = %#v, %v", page, err)
 	}
 	if _, err := s.GetBaselineHost(ctx, "overlay-job", "198.51.100.2"); err != nil {
 		t.Fatal(err)

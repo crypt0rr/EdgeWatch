@@ -190,6 +190,36 @@ func TestDeliveryRetryPolicyIsDurableAndBounded(t *testing.T) {
 	}
 }
 
+func TestIndeterminateDeliveryConsumesDeferralNotAttempt(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if err := s.QueueEvent(ctx, "indeterminate", model.Event{Type: "indeterminate", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	due, err := s.ClaimDueDeliveries(ctx, 1, "indeterminate-owner")
+	if err != nil || len(due) != 1 {
+		t.Fatalf("indeterminate claim = %#v, %v", due, err)
+	}
+	if err := s.DeliveryResultClaim(ctx, due[0].ID, due[0].ClaimToken, ErrDeliveryIndeterminate); err != nil {
+		t.Fatal(err)
+	}
+	var attempts, deferrals int
+	var terminalAt string
+	if err := s.DB.QueryRowContext(ctx, `SELECT attempts,deferrals,terminal_at FROM outbox WHERE id=?`, due[0].ID).Scan(&attempts, &deferrals, &terminalAt); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 || deferrals != 1 || terminalAt != "" {
+		t.Fatalf("indeterminate budgets = attempts %d, deferrals %d, terminal_at %q", attempts, deferrals, terminalAt)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), due[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	next, err := s.ClaimDueDeliveries(ctx, 1, "indeterminate-retry")
+	if err != nil || len(next) != 1 || next[0].Attempts != 0 || next[0].Deferrals != 1 {
+		t.Fatalf("indeterminate retry = %#v, %v", next, err)
+	}
+}
+
 func TestDeliveryHealthTracksRedactedOutcomesAndTerminalEvent(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

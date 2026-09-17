@@ -54,7 +54,7 @@ confirming that the old credentials are revoked. A database upgraded to schema
 39 must not be opened by an older EdgeWatch binary; downgrade by restoring the
 complete pre-upgrade `./data` backup before starting the old version.
 
-Recovery codes are stored in the salted `v2` representation. Schema 39 removes
+Recovery codes are stored in the salted `v2` representation. Schema 40 removes
 legacy unsalted SHA-256 recovery-code digests and records only their count in
 the security audit; generate new recovery codes from the Security page after
 an upgrade. The old plaintext cannot be recovered or safely re-hashed.

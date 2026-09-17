@@ -429,6 +429,9 @@ func syncAcceptedPortHosts(snapshot *model.Snapshot, change model.Change) {
 }
 
 func syncAcceptedPortHostsWithIndex(snapshot *model.Snapshot, change model.Change, index acceptedHostAddressIndex) {
+	if change.New != "not-open" {
+		ensureAcceptedHostProtocols(snapshot, change, index)
+	}
 	for hostIndex := range snapshot.Hosts {
 		host := &snapshot.Hosts[hostIndex]
 		if !acceptedHostMatchesWithIndex(*host, change.Target, index) {
@@ -470,6 +473,9 @@ func syncAcceptedServiceHosts(snapshot *model.Snapshot, change model.Change) {
 }
 
 func syncAcceptedServiceHostsWithIndex(snapshot *model.Snapshot, change model.Change, index acceptedHostAddressIndex) {
+	if change.New != "not-open" {
+		ensureAcceptedHostProtocols(snapshot, change, index)
+	}
 	for hostIndex := range snapshot.Hosts {
 		host := &snapshot.Hosts[hostIndex]
 		if !acceptedHostMatchesWithIndex(*host, change.Target, index) {
@@ -480,19 +486,91 @@ func syncAcceptedServiceHostsWithIndex(snapshot *model.Snapshot, change model.Ch
 			if protocol.Protocol != change.Protocol {
 				continue
 			}
+			foundPort := false
 			for portIndex := range protocol.Ports {
 				port := &protocol.Ports[portIndex]
 				if port.Port != change.Port {
 					continue
 				}
+				foundPort = true
 				if change.New == "not-open" {
 					port.Service = nil
 				} else {
 					port.Service = &model.ServiceObservation{Product: change.New, Method: "accepted"}
 				}
 			}
+			if !foundPort && change.New != "not-open" {
+				protocol.Ports = append(protocol.Ports, model.PortObservation{Port: change.Port, State: "open", Service: &model.ServiceObservation{Product: change.New, Method: "accepted"}})
+			}
 		}
 	}
+}
+
+// ensureAcceptedHostProtocols keeps the technical baseline projection in
+// lockstep with the logical unit when an accepted incident introduces a host
+// or protocol that was not present in the source scan's detailed evidence.
+// The change engine still compares only Units; this helper only repairs the
+// operator-facing host view inside the same runtime transaction.
+func ensureAcceptedHostProtocols(snapshot *model.Snapshot, change model.Change, index acceptedHostAddressIndex) {
+	target := normalizedAcceptedTarget(change.Target)
+	addresses := make(map[string]struct{})
+	for address := range index[target] {
+		if normalized := normalizedAcceptedTarget(address); normalized != "" {
+			addresses[normalized] = struct{}{}
+		}
+	}
+	if len(addresses) == 0 {
+		if ip := net.ParseIP(strings.TrimSpace(change.Target)); ip != nil {
+			addresses[ip.String()] = struct{}{}
+		}
+	}
+	for address := range addresses {
+		hostIndex := -1
+		for i := range snapshot.Hosts {
+			if normalizedAcceptedTarget(snapshot.Hosts[i].Address) == address {
+				hostIndex = i
+				break
+			}
+		}
+		if hostIndex < 0 {
+			host := model.HostObservation{Address: address, AddressFamily: "IPv4", Status: "up"}
+			if ip := net.ParseIP(address); ip != nil && ip.To4() == nil {
+				host.AddressFamily = "IPv6"
+			}
+			snapshot.Hosts = append(snapshot.Hosts, host)
+			hostIndex = len(snapshot.Hosts) - 1
+		}
+		host := &snapshot.Hosts[hostIndex]
+		if net.ParseIP(change.Target) == nil {
+			appendUniqueString(&host.SourceTargets, change.Target)
+			appendUniqueString(&host.DNSNames, change.Target)
+		} else {
+			appendUniqueString(&host.SourceTargets, change.Target)
+		}
+		protocolIndex := -1
+		for i := range host.Protocols {
+			if strings.EqualFold(host.Protocols[i].Protocol, change.Protocol) {
+				protocolIndex = i
+				break
+			}
+		}
+		if protocolIndex < 0 {
+			host.Protocols = append(host.Protocols, model.ProtocolObservation{Protocol: strings.ToLower(strings.TrimSpace(change.Protocol))})
+		}
+	}
+}
+
+func appendUniqueString(values *[]string, value string) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	for _, existing := range *values {
+		if strings.EqualFold(existing, value) {
+			return
+		}
+	}
+	*values = append(*values, value)
 }
 
 func acceptDNSChange(snapshot *model.Snapshot, change model.Change) error {

@@ -310,3 +310,39 @@ func TestEngineFingerprintAndApplyChangeEdgeBranches(t *testing.T) {
 		t.Fatalf("expired suppression mismatch = %#v, state=%#v", events, state)
 	}
 }
+
+func TestIncompleteScanLearningStallAndServiceFiltering(t *testing.T) {
+	job := config.Job{Name: "incomplete", Baseline: config.Baseline{Samples: 2}, Change: config.Change{Confirmations: 1}}
+	hosts := make([]model.HostObservation, 0, 9)
+	for i := 1; i <= 9; i++ {
+		hosts = append(hosts, model.HostObservation{Address: fmt.Sprintf("192.0.2.%d", i), Status: "down"})
+	}
+	partial := model.Scan{ID: "partial", Job: job.Name, FinishedAt: time.Now().UTC(), Snapshot: model.Snapshot{Hosts: hosts}}
+	state := model.JobState{}
+	for attempt := 1; attempt <= BaselineStallThreshold; attempt++ {
+		events, changes, err := processIncompleteSuccess(&state, job, partial)
+		if err != nil || len(changes) != 0 {
+			t.Fatalf("incomplete attempt %d = changes %#v, err %v", attempt, changes, err)
+		}
+		if attempt < BaselineStallThreshold && len(events) != 1 {
+			t.Fatalf("incomplete attempt %d events = %#v", attempt, events)
+		}
+		if attempt == BaselineStallThreshold && (len(events) != 2 || events[1].Type != "baseline-stalled") {
+			t.Fatalf("stalled baseline events = %#v", events)
+		}
+	}
+	if !strings.Contains(incompleteScanError(partial.Snapshot), "+1 more") {
+		t.Fatalf("bounded incomplete error = %q", incompleteScanError(partial.Snapshot))
+	}
+	if got := incompleteScanError(model.Snapshot{}); got != "Scan incomplete: host discovery did not complete" {
+		t.Fatalf("empty incomplete error = %q", got)
+	}
+
+	baseline := model.Snapshot{Scopes: []model.Scope{{Target: "edge", Protocol: "tcp", Ports: "80", ServiceDetection: true}}, Units: []model.Unit{{Target: "edge", Protocol: "tcp", Ports: []model.PortState{{Port: 80, State: "open"}}}}}
+	state = model.JobState{Baseline: &baseline, BaselineConfigHash: "same", FingerprintCandidates: map[string]model.ValueCount{}, Incidents: map[string]model.Incident{}, Pending: map[string]model.Pending{}, Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{}}
+	serviceScan := model.Scan{ID: "service-learning", Job: job.Name, ConfigHash: "same", FinishedAt: time.Now().UTC(), Snapshot: model.Snapshot{Scopes: baseline.Scopes, Units: []model.Unit{{Target: "edge", Protocol: "tcp", Ports: []model.PortState{{Port: 80, State: "open", Service: "http"}}}}}}
+	events, changes, err := processSuccessWithChanges(&state, job, serviceScan)
+	if err != nil || len(events) != 0 || len(changes) != 0 {
+		t.Fatalf("service learning result = events %#v changes %#v err %v", events, changes, err)
+	}
+}

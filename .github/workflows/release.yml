@@ -309,7 +309,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
-      contents: read
+      # Draft releases are intentionally hidden from the contents: read API
+      # surface. This job verifies the assets staged by the previous job
+      # before the publication job makes the release public.
+      contents: write
       packages: read
     steps:
       - name: Verify GitHub release assets

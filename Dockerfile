@@ -22,7 +22,7 @@ ARG NAABU_COMMIT=5a0ca8bde91b5bb16213e9e8b5c6871eac954bd8
 ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /naabu
-RUN apk add --no-cache ca-certificates=20260611-r0 git=2.54.0-r0
+RUN apk add --no-cache ca-certificates=20260909-r0 git=2.54.0-r0
 # Fetch the immutable commit and the human-readable release tag, then verify
 # that the tag still resolves to the pinned commit before compiling.
 RUN git init . \
@@ -35,7 +35,7 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build -trimpath -ldfl
 
 FROM --platform=$BUILDPLATFORM golang:1.27.1-alpine3.24@sha256:cf6fca6641884b8433441b2b0652976f975e1d0fdd26d177eaaf8596087f3125 AS build
 WORKDIR /src
-RUN apk add --no-cache ca-certificates=20260611-r0 git=2.54.0-r0
+RUN apk add --no-cache ca-certificates=20260909-r0 git=2.54.0-r0
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
@@ -53,7 +53,7 @@ RUN if [ "$PREBUILT_EDGEWATCH" = "1" ]; then \
     fi
 
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
-RUN apk add --no-cache ca-certificates=20260611-r0 gcompat=1.1.0-r4 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026d-r0 \
+RUN apk add --no-cache ca-certificates=20260909-r0 gcompat=1.1.0-r4 nmap=7.99-r0 nmap-scripts=7.99-r0 tzdata=2026d-r0 \
     && mkdir -p /etc/edgewatch /var/lib/edgewatch /run/secrets \
     && chmod 0750 /etc/edgewatch /var/lib/edgewatch /run/secrets
 COPY --from=build /out/edgewatch /usr/local/bin/edgewatch

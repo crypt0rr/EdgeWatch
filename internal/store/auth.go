@@ -460,8 +460,11 @@ func (s *Store) ConsumeSetupToken(ctx context.Context, hash string, now time.Tim
 }
 
 func (s *Store) CreateSession(ctx context.Context, idHash, csrf string, created, expires time.Time) error {
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, LegacyAdminUserID, created.UTC().Format(time.RFC3339Nano), created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano), csrf)
-	return err
+	// Keep the compatibility entry point on the same transactional primitive as
+	// user-scoped sessions. It intentionally omits an audit row for callers that
+	// predate the audited login API, but it can no longer bypass user attribution
+	// or the session schema safeguards.
+	return s.CreateSessionForUserWithAuditEntry(ctx, LegacyAdminUserID, idHash, csrf, created, expires, AuditEntry{})
 }
 
 // CreateSessionWithAudit creates a login session and its audit record in one
@@ -671,8 +674,7 @@ func (s *Store) TouchSession(ctx context.Context, idHash string, lastSeen, expir
 }
 
 func (s *Store) DeleteSession(ctx context.Context, idHash string) error {
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM sessions WHERE id_hash=?`, idHash)
-	return err
+	return s.DeleteSessionWithAuditEntry(ctx, idHash, AuditEntry{})
 }
 
 func (s *Store) DeleteSessionWithAudit(ctx context.Context, idHash, action, detail string) error {
@@ -693,15 +695,29 @@ func (s *Store) DeleteSessionWithAuditEntry(ctx context.Context, idHash string, 
 	}
 	if audit.Action != "" {
 		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
+			// Revocation is security-critical and must not be rolled back just
+			// because the audit table is unavailable. Retry the deletion in a
+			// detached short-lived context, then report the audit failure so the
+			// caller can surface a degraded-but-safe response.
+			_ = tx.Rollback()
+			if revokeErr := s.deleteSessionWithoutAudit(ctx, idHash); revokeErr != nil {
+				return errors.Join(err, revokeErr)
+			}
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-func (s *Store) DeleteAllSessions(ctx context.Context) error {
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM sessions`)
+func (s *Store) deleteSessionWithoutAudit(ctx context.Context, idHash string) error {
+	persistCtx, cancel := auditPersistenceContext(ctx)
+	defer cancel()
+	_, err := s.DB.ExecContext(persistCtx, `DELETE FROM sessions WHERE id_hash=?`, idHash)
 	return err
+}
+
+func (s *Store) DeleteAllSessions(ctx context.Context) error {
+	return s.DeleteAllSessionsWithAudit(ctx, "", "")
 }
 
 func (s *Store) DeleteAllSessionsWithAudit(ctx context.Context, action, detail string) error {
@@ -715,6 +731,13 @@ func (s *Store) DeleteAllSessionsWithAudit(ctx context.Context, action, detail s
 	}
 	if action != "" {
 		if err := insertAuditExec(ctx, tx, action, detail, time.Now().UTC()); err != nil {
+			_ = tx.Rollback()
+			persistCtx, cancel := auditPersistenceContext(ctx)
+			_, revokeErr := s.DB.ExecContext(persistCtx, `DELETE FROM sessions`)
+			cancel()
+			if revokeErr != nil {
+				return errors.Join(err, revokeErr)
+			}
 			return err
 		}
 	}

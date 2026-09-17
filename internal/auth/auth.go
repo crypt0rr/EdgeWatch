@@ -89,6 +89,9 @@ type Manager struct {
 	accountBlocked       map[string]time.Time
 	unknownSourceFails   map[string][]time.Time
 	unknownSourceBlocked map[string]time.Time
+	sourceInFlight       map[string]int
+	accountInFlight      map[string]int
+	unknownInFlight      map[string]int
 	rateAudit            map[string]time.Time
 	trustedProxies       []*net.IPNet
 	argon2Sem            chan struct{}
@@ -100,6 +103,7 @@ func NewManager(s *store.Store) *Manager {
 		fails: map[string][]time.Time{}, blocked: map[string]time.Time{},
 		accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{},
 		unknownSourceFails: map[string][]time.Time{}, unknownSourceBlocked: map[string]time.Time{},
+		sourceInFlight: map[string]int{}, accountInFlight: map[string]int{}, unknownInFlight: map[string]int{},
 		rateAudit: map[string]time.Time{}, argon2Sem: make(chan struct{}, authArgon2MaxConcurrent),
 	}
 }
@@ -206,6 +210,26 @@ func forwardedCandidates(request *http.Request) []string {
 	if request == nil {
 		return nil
 	}
+	// RFC 7239 Forwarded is the canonical convention whenever a trusted proxy
+	// supplies it. Do not merge it with X-Forwarded-For: accepting whichever
+	// header happens to win would let a client-controlled second header change
+	// the identity used by both throttling and audit records.
+	if values := request.Header.Values("Forwarded"); len(values) > 0 {
+		var candidates []string
+		for _, value := range values {
+			for _, element := range strings.Split(value, ",") {
+				for _, parameter := range strings.Split(element, ";") {
+					key, raw, ok := strings.Cut(strings.TrimSpace(parameter), "=")
+					if !ok || !strings.EqualFold(key, "for") {
+						continue
+					}
+					candidates = append(candidates, parseForwardedAddress(raw))
+					break
+				}
+			}
+		}
+		return candidates
+	}
 	if values := request.Header.Values("X-Forwarded-For"); len(values) > 0 {
 		var candidates []string
 		for _, value := range values {
@@ -218,20 +242,7 @@ func forwardedCandidates(request *http.Request) []string {
 		}
 		return candidates
 	}
-	var candidates []string
-	for _, value := range request.Header.Values("Forwarded") {
-		for _, element := range strings.Split(value, ",") {
-			for _, parameter := range strings.Split(element, ";") {
-				key, raw, ok := strings.Cut(strings.TrimSpace(parameter), "=")
-				if !ok || !strings.EqualFold(key, "for") {
-					continue
-				}
-				candidates = append(candidates, parseForwardedAddress(raw))
-				break
-			}
-		}
-	}
-	return candidates
+	return nil
 }
 
 func parseForwardedAddress(raw string) string {
@@ -406,6 +417,17 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 		m.auditRateLimit(ctx, "setup", request)
 		return ErrRateLimited
 	}
+	defer m.releaseScoped(source, account)
+	usable, checkErr := m.Store.SetupTokenUsable(ctx, digest(strings.TrimSpace(token)), m.now())
+	if checkErr != nil {
+		m.auditAuthFailure(ctx, "auth.setup_failed", "setup", request)
+		return errors.New("administrator setup could not be completed")
+	}
+	if !usable {
+		m.failedScoped(source, account, "", false)
+		m.auditAuthFailure(ctx, "auth.setup_failed", "setup", request)
+		return errors.New("administrator setup could not be completed")
+	}
 	var setupErr error
 	if err := m.withArgon2(ctx, func() error {
 		setupErr = m.Setup(ctx, token, password)
@@ -438,6 +460,17 @@ func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, to
 	if !m.allowScoped(source, account) {
 		m.auditRateLimit(ctx, "activation", request)
 		return ErrRateLimited
+	}
+	defer m.releaseScoped(source, account)
+	usable, checkErr := m.Store.ActivationTokenUsable(ctx, digest(strings.TrimSpace(token)), m.now())
+	if checkErr != nil {
+		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
+		return errors.New("activation could not be completed")
+	}
+	if !usable {
+		m.failedScoped(source, account, "", false)
+		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
+		return errors.New("activation could not be completed")
 	}
 	var hash string
 	if err := m.withArgon2(ctx, func() error {
@@ -483,6 +516,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		m.auditRateLimit(ctx, "login:"+identity, request)
 		return "", store.User{}, ErrRateLimited
 	}
+	defer m.releaseScoped(source, account)
 	user, err := m.Store.GetUserByUsername(ctx, identity)
 	if errors.Is(err, store.ErrNotFound) && strings.EqualFold(strings.TrimSpace(username), "admin") {
 		// Databases created by older test fixtures may not have the migrated
@@ -500,6 +534,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			m.auditRateLimit(ctx, "unknown-login:"+identity, request)
 			return "", store.User{}, ErrRateLimited
 		}
+		defer m.releaseUnknownSource(unknownSource)
 		// Unknown usernames still consume the failure budget. Otherwise an
 		// attacker could bypass the login limiter by rotating arbitrary account
 		// names while probing the endpoint for a real administrator or invitee.
@@ -548,8 +583,24 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		m.auditAuthFailure(ctx, "auth.login_failed", identity, request)
 		return "", user, errors.New("invalid credentials")
 	}
+	totpAccepted := false
+	acceptedTOTPStep := int64(-1)
+	acceptedTOTPSecret := ""
 	if user.TOTPEnabled {
-		valid := user.TOTPSecretError == nil && VerifyTOTPAt(user.TOTPSecret, otp, m.now())
+		valid := false
+		if user.TOTPSecretError == nil {
+			if step, stepValid := VerifyTOTPAtStep(user.TOTPSecret, otp, m.now()); stepValid {
+				consumed, consumeErr := m.Store.ConsumeTOTPStep(ctx, user.ID, step, m.now())
+				if consumeErr != nil {
+					return "", user, consumeErr
+				}
+				valid, totpAccepted = consumed, consumed
+				if consumed {
+					acceptedTOTPStep = step
+					acceptedTOTPSecret = user.TOTPSecret
+				}
+			}
+		}
 		if !valid && recovery != "" {
 			valid, err = m.Store.ConsumeRecoveryCodeTextForUser(ctx, user.ID, recovery, m.now())
 			if valid {
@@ -629,7 +680,21 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			return "", user, errors.New("credentials changed during login")
 		}
 		if current.TOTPEnabled {
-			otpValid := current.TOTPSecretError == nil && VerifyTOTPAt(current.TOTPSecret, otp, m.now())
+			// A password change or display-name edit may legitimately race the
+			// session insert, but a TOTP re-enrolment must invalidate the factor
+			// that was verified before the retry. Only reuse the already-consumed
+			// step when the authoritative encrypted secret is unchanged; otherwise
+			// validate and consume the code against the new secret.
+			otpValid := totpAccepted && acceptedTOTPStep >= 0 && current.TOTPSecret == acceptedTOTPSecret
+			if !otpValid && current.TOTPSecretError == nil {
+				if step, stepValid := VerifyTOTPAtStep(current.TOTPSecret, otp, m.now()); stepValid {
+					var consumeErr error
+					otpValid, consumeErr = m.Store.ConsumeTOTPStep(ctx, current.ID, step, m.now())
+					if consumeErr != nil {
+						return "", user, consumeErr
+					}
+				}
+			}
 			if !otpValid {
 				return "", user, errors.New("credentials changed during login")
 			}
@@ -669,6 +734,7 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 		m.auditRateLimit(ctx, "password-confirmation", request)
 		return ErrRateLimited
 	}
+	defer m.releaseScoped(source, account)
 	user, err := m.Store.GetUser(ctx, userID)
 	if errors.Is(err, store.ErrNotFound) && userID == store.LegacyAdminUserID {
 		// Keep password-confirmation compatible with a pre-RBAC database while
@@ -697,6 +763,50 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 		m.failedScoped(source, account, "", false)
 		m.auditAuthFailure(ctx, "auth.password_confirmation_failed", userID, request)
 		return errors.New("password confirmation failed")
+	}
+	m.clearScoped(source, account, "")
+	return nil
+}
+
+// ConfirmTOTPForUser proves the currently configured second factor for a
+// sensitive security mutation. Unlike VerifyTOTPAt it consumes the accepted
+// time step (or a one-use recovery code), so a captured factor cannot be
+// replayed to disable or replace TOTP.
+func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request, userID, otp, recovery string) error {
+	source := m.sourceScopeFor(request, "totp-confirmation")
+	account := "totp-confirm:" + strings.TrimSpace(userID)
+	if !m.allowScoped(source, account) {
+		m.auditRateLimit(ctx, "totp-confirmation", request)
+		return ErrRateLimited
+	}
+	defer m.releaseScoped(source, account)
+	user, err := m.Store.GetUser(ctx, userID)
+	if errors.Is(err, store.ErrNotFound) && userID == store.LegacyAdminUserID {
+		if admin, adminErr := m.Store.GetAdmin(ctx); adminErr == nil {
+			user = store.User{ID: store.LegacyAdminUserID, Username: admin.Username, PasswordHash: admin.PasswordHash, TOTPSecret: admin.TOTPSecret, TOTPSecretStored: admin.TOTPSecretStored, TOTPSecretError: admin.TOTPSecretError, TOTPEnabled: admin.TOTPEnabled, Enabled: true}
+			err = nil
+		}
+	}
+	valid := false
+	if err == nil && user.Enabled && user.TOTPEnabled && user.TOTPSecretError == nil {
+		if step, stepValid := VerifyTOTPAtStep(user.TOTPSecret, otp, m.now()); stepValid {
+			valid, err = m.Store.ConsumeTOTPStep(ctx, user.ID, step, m.now())
+		}
+	}
+	if !valid && err == nil && recovery != "" {
+		valid, err = m.Store.ConsumeRecoveryCodeTextForUser(ctx, user.ID, recovery, m.now())
+	}
+	if err != nil {
+		if errors.Is(err, ErrRateLimited) {
+			m.auditRateLimit(ctx, "totp-confirmation", request)
+			return err
+		}
+		valid = false
+	}
+	if !valid {
+		m.failedScoped(source, account, "", false)
+		m.auditAuthFailure(ctx, "auth.totp_confirmation_failed", userID, request)
+		return errors.New("current one-time code is required")
 	}
 	m.clearScoped(source, account, "")
 	return nil
@@ -841,6 +951,21 @@ func (m *Manager) allowScoped(source, account string) bool {
 			return false
 		}
 	}
+	// Reserve the bounded admission while the caller performs Argon2 or a
+	// storage lookup. Without this compare-and-reserve step a burst of
+	// concurrent requests could all pass the check before any failure was
+	// recorded, defeating the account/source thresholds.
+	if len(m.fails[source])+m.sourceInFlight[source] >= authSourceFailureThreshold {
+		return false
+	}
+	accountKey := scopedAccountKey(source, account)
+	if accountKey != "" && len(m.accountFails[accountKey])+m.accountInFlight[accountKey] >= authFailureThreshold {
+		return false
+	}
+	m.sourceInFlight[source]++
+	if accountKey != "" {
+		m.accountInFlight[accountKey]++
+	}
 	return true
 }
 
@@ -851,7 +976,48 @@ func (m *Manager) allowUnknownSource(scope string) bool {
 	m.ensureScopedLimiterMapsLocked()
 	m.sweepLimiterLocked(now)
 	until, ok := m.unknownSourceBlocked[scope]
-	return !ok || !now.Before(until)
+	if ok && now.Before(until) {
+		return false
+	}
+	if len(m.unknownSourceFails[scope])+m.unknownInFlight[scope] >= authFailureThreshold {
+		return false
+	}
+	m.unknownInFlight[scope]++
+	return true
+}
+
+// releaseScoped drops an admission reservation made before the expensive or
+// failure-prone portion of an authentication request. Failure recording is
+// deliberately separate so successful requests do not consume the budget.
+func (m *Manager) releaseScoped(source, account string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureScopedLimiterMapsLocked()
+	if m.sourceInFlight[source] > 1 {
+		m.sourceInFlight[source]--
+	} else {
+		delete(m.sourceInFlight, source)
+	}
+	key := scopedAccountKey(source, account)
+	if key == "" {
+		return
+	}
+	if m.accountInFlight[key] > 1 {
+		m.accountInFlight[key]--
+	} else {
+		delete(m.accountInFlight, key)
+	}
+}
+
+func (m *Manager) releaseUnknownSource(scope string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.ensureScopedLimiterMapsLocked()
+	if m.unknownInFlight[scope] > 1 {
+		m.unknownInFlight[scope]--
+	} else {
+		delete(m.unknownInFlight, scope)
+	}
 }
 
 func (m *Manager) failed(remote string) {
@@ -988,6 +1154,15 @@ func (m *Manager) ensureScopedLimiterMapsLocked() {
 	}
 	if m.unknownSourceBlocked == nil {
 		m.unknownSourceBlocked = map[string]time.Time{}
+	}
+	if m.sourceInFlight == nil {
+		m.sourceInFlight = map[string]int{}
+	}
+	if m.accountInFlight == nil {
+		m.accountInFlight = map[string]int{}
+	}
+	if m.unknownInFlight == nil {
+		m.unknownInFlight = map[string]int{}
 	}
 	if m.rateAudit == nil {
 		m.rateAudit = map[string]time.Time{}
@@ -1234,26 +1409,36 @@ func VerifyTOTP(secret, code string) bool {
 // Keeping the clock injectable makes authentication tests deterministic while
 // the public VerifyTOTP helper remains convenient for callers.
 func VerifyTOTPAt(secret, code string, at time.Time) bool {
+	_, ok := VerifyTOTPAtStep(secret, code, at)
+	return ok
+}
+
+// VerifyTOTPAtStep validates a code and returns the exact accepted time step.
+// Callers that authenticate a user must persist that step with the store's
+// atomic replay guard; the pure VerifyTOTPAt helper remains suitable for
+// validating a pending enrollment secret.
+func VerifyTOTPAtStep(secret, code string, at time.Time) (int64, bool) {
 	code = strings.TrimSpace(code)
 	if len(code) != 6 {
-		return false
+		return 0, false
 	}
 	for _, r := range code {
 		if r < '0' || r > '9' {
-			return false
+			return 0, false
 		}
 	}
 	raw, err := decodeTOTPSecret(secret)
 	if err != nil || len(raw) < 10 {
-		return false
+		return 0, false
 	}
 	now := at.Unix() / 30
 	for offset := int64(-1); offset <= 1; offset++ {
-		if totpCodeRaw(raw, now+offset) == code {
-			return true
+		step := now + offset
+		if step >= 0 && totpCodeRaw(raw, step) == code {
+			return step, true
 		}
 	}
-	return false
+	return 0, false
 }
 
 func totpCode(secret string, counter int64) string {

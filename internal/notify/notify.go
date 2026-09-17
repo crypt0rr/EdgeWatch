@@ -225,6 +225,16 @@ func (n *Notifier) ensureKey(ctx context.Context) ([]byte, error) {
 			key, err = loadKey(n.keyPath)
 		}
 	}
+	if errors.Is(err, ErrKeyInvalid) && n.autoCreateKey {
+		// Recover the only failure mode that can be caused by an interrupted
+		// first-start creation. Never replace a non-empty invalid key.
+		if removeErr := removeInterruptedKey(n.keyPath, 0); removeErr == nil {
+			key, err = createKey(n.keyPath)
+			if errors.Is(err, os.ErrExist) {
+				key, err = loadKey(n.keyPath)
+			}
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -579,12 +589,53 @@ func (n *Notifier) destinationSnapshot() map[string]string {
 	return out
 }
 
+// resolveManagedDelivery resolves a queued managed selector by its stable
+// destination ID rather than requiring the revision embedded in the outbox
+// row to still be current. Metadata-only edits intentionally advance that
+// revision while preserving queued alerts; an in-flight delivery may still
+// carry the previous selector when the edit commits. Returning the current
+// URL here lets that delivery complete with the current credentials and also
+// gives paused/locked destinations the normal deferral path.
+func (n *Notifier) resolveManagedDelivery(selector string) (rawURL string, available bool, deferred bool) {
+	parts := strings.Split(selector, ":")
+	if len(parts) < 3 || parts[0] != "managed" || parts[1] == "" {
+		return "", false, false
+	}
+	n.mu.RLock()
+	entry, ok := n.managed[parts[1]]
+	n.mu.RUnlock()
+	if !ok {
+		return "", false, false
+	}
+	if !entry.record.Enabled || entry.locked {
+		return "", false, true
+	}
+	return entry.url, true, false
+}
+
 func (n *Notifier) lockedDestinationKeys() []string {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 	keys := make([]string, 0)
 	for id, entry := range n.managed {
 		if entry.record.Enabled && entry.locked {
+			keys = append(keys, managedKey(id, entry.record.Revision))
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// pausedDestinationKeys are durable selectors for managed destinations that
+// are intentionally disabled. They remain in the outbox so re-enabling a
+// destination resumes queued alerts, but the drain must not claim them and
+// misclassify a deliberate pause as a missing provider.
+func (n *Notifier) pausedDestinationKeys() []string {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	keys := make([]string, 0)
+	for id, entry := range n.managed {
+		if !entry.record.Enabled {
 			keys = append(keys, managedKey(id, entry.record.Revision))
 		}
 	}
@@ -746,6 +797,8 @@ func (n *Notifier) Drain(ctx context.Context) error {
 	}
 	destinations := n.destinationSnapshot()
 	lockedDestinations := n.lockedDestinationKeys()
+	pausedDestinations := n.pausedDestinationKeys()
+	excludedDestinations := append(append([]string{}, lockedDestinations...), pausedDestinations...)
 	if n.Store != nil {
 		if err := n.Store.WakeLockedDeliveries(ctx, destinationSnapshotKeys(destinations)); err != nil {
 			return err
@@ -762,7 +815,7 @@ func (n *Notifier) Drain(ctx context.Context) error {
 		// A bounded pass drains several batches so a burst of events does not
 		// wait for multiple 30-second worker ticks. The batch and pass limits
 		// keep provider latency from starving scans and schedule reconciliation.
-		deliveries, err := n.Store.ClaimDueDeliveriesExcluding(ctx, notificationBatchSize, uuid.NewString(), lockedDestinations)
+		deliveries, err := n.Store.ClaimDueDeliveriesExcluding(ctx, notificationBatchSize, uuid.NewString(), excludedDestinations)
 		if err != nil {
 			return errors.Join(append(all, err)...)
 		}
@@ -875,7 +928,8 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 	}
 	// Refresh before each managed send so an update/delete after the batch was
 	// claimed cannot use the stale URL from the first snapshot.
-	if strings.HasPrefix(delivery.Destination, "managed:") {
+	managedDestination := strings.HasPrefix(delivery.Destination, "managed:")
+	if managedDestination {
 		if reloadErr := n.Reload(ctx); reloadErr != nil {
 			deferErr := n.releaseClaim(ctx, delivery, store.ErrDeliveryDestinationLocked, time.Minute)
 			return errors.Join(reloadErr, deferErr)
@@ -884,8 +938,15 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 	}
 	raw, ok := destinations[delivery.Destination]
 	var sendErr error
+	if managedDestination {
+		var deferred bool
+		raw, ok, deferred = n.resolveManagedDelivery(delivery.Destination)
+		if deferred {
+			return n.releaseClaim(ctx, delivery, store.ErrDeliveryDestinationLocked, time.Minute)
+		}
+	}
 	if !ok {
-		if strings.HasPrefix(delivery.Destination, "managed:") {
+		if managedDestination {
 			return n.releaseClaim(ctx, delivery, store.ErrDeliveryDestinationMissing, time.Minute)
 		}
 		sendErr = store.ErrDeliveryDestinationMissing

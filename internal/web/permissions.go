@@ -25,6 +25,7 @@ func requiredPermission(path, method string) string {
 			path == "/auth/password" && method == http.MethodPut,
 			path == "/auth/totp/setup" && method == http.MethodPost,
 			path == "/auth/totp/enable" && method == http.MethodPost,
+			path == "/auth/totp/recovery-codes" && method == http.MethodPost,
 			path == "/auth/totp" && method == http.MethodDelete,
 			path == "/auth/sessions" && method == http.MethodDelete:
 			return auth.PermissionAccountSelf

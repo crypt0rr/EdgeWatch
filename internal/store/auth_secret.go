@@ -144,17 +144,40 @@ func createAuthKey(path string) ([]byte, error) {
 	if _, err := rand.Read(key); err != nil {
 		return nil, err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// CreateTemp gives each concurrent first writer an exclusive temporary
+	// inode. Publishing with a hard link below never replaces a key another
+	// process already won the race to create.
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return nil, err
 	}
-	if _, err = f.Write(key); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
+	tmpName := tmp.Name()
+	if err = tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return nil, err
 	}
-	if err = f.Close(); err != nil {
+	cleanup := func() { _ = tmp.Close(); _ = os.Remove(tmpName) }
+	if _, err = tmp.Write(key); err != nil {
+		cleanup()
 		return nil, err
+	}
+	if err = tmp.Sync(); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if err = tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return nil, err
+	}
+	if err = os.Link(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return nil, err
+	}
+	_ = os.Remove(tmpName)
+	if dir, dirErr := os.Open(filepath.Dir(path)); dirErr == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	return key, nil
 }
@@ -165,6 +188,16 @@ func (s *Store) authKeyForWrite() ([]byte, error) {
 		key, err = createAuthKey(s.authKeyPath)
 		if errors.Is(err, os.ErrExist) {
 			key, err = loadAuthKey(s.authKeyPath)
+		}
+	}
+	if errors.Is(err, ErrAuthKeyInvalid) && s.authAutoKey {
+		if info, statErr := os.Stat(s.authKeyPath); statErr == nil && info.Mode().IsRegular() && info.Size() == 0 {
+			if removeErr := os.Remove(s.authKeyPath); removeErr == nil {
+				key, err = createAuthKey(s.authKeyPath)
+				if errors.Is(err, os.ErrExist) {
+					key, err = loadAuthKey(s.authKeyPath)
+				}
+			}
 		}
 	}
 	return key, err

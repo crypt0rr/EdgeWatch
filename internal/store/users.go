@@ -91,7 +91,11 @@ func normalizeUsername(username string) (string, error) {
 			return "", errors.New("username contains an invalid character")
 		}
 	}
-	return username, nil
+	// SQLite's NOCASE collation is ASCII-only. Persisting one Unicode-aware
+	// lower-case representation keeps activation and login lookups consistent
+	// across scripts while preserving the original spelling only in the display
+	// name field.
+	return strings.ToLower(username), nil
 }
 
 func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
@@ -234,7 +238,7 @@ func (s *Store) createUser(ctx context.Context, u User, invite *userInviteRecord
 		return User{}, err
 	}
 	if invite != nil {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,created_at,expires_at,used_at) VALUES(?,?,?,?,NULL)`, invite.idHash, u.ID, invite.created.UTC().Format(time.RFC3339Nano), invite.expires.UTC().Format(time.RFC3339Nano)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at,used_at) VALUES(?,?,?,?,?,NULL)`, invite.idHash, u.ID, audit.ActorUserID, invite.created.UTC().Format(time.RFC3339Nano), invite.expires.UTC().Format(time.RFC3339Nano)); err != nil {
 			return User{}, err
 		}
 	}
@@ -301,6 +305,10 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	if expectedRevision == 0 {
 		expectedRevision = currentRevision
 	}
+	if currentRole == u.Role && (currentEnabled != 0) == u.Enabled && currentPasswordHash == u.PasswordHash {
+		// Idempotent updates should not create misleading security transitions.
+		audit.Action = ""
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND revision=?`, u.Username, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID, expectedRevision)
 	if err != nil {
 		return err
@@ -327,6 +335,14 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	// sentinel; editing their display name or role must not kill the invite.
 	if err := revokeUserInvitesOnDisableTx(ctx, tx, u.ID, currentEnabled != 0, currentPasswordHash, u.Enabled, u.UpdatedAt); err != nil {
 		return err
+	}
+	// Invitations issued by an administrator must not outlive the issuer's
+	// administrative privilege. Revoke them on demotion or disablement, while
+	// retaining the issuer identity for audit and recovery diagnostics.
+	if currentRole == RoleAdministrator && (u.Role != RoleAdministrator || !u.Enabled) {
+		if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE issuer_user_id=? AND used_at IS NULL`, u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID); err != nil {
+			return err
+		}
 	}
 	if audit.Action != "" {
 		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
@@ -503,6 +519,13 @@ func (s *Store) DeleteUserSessionsWithAudit(ctx context.Context, userID string, 
 	}
 	if audit.Action != "" {
 		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
+			_ = tx.Rollback()
+			persistCtx, cancel := auditPersistenceContext(ctx)
+			_, revokeErr := s.DB.ExecContext(persistCtx, `DELETE FROM sessions WHERE user_id=?`, userID)
+			cancel()
+			if revokeErr != nil {
+				return errors.Join(err, revokeErr)
+			}
 			return err
 		}
 	}
@@ -510,7 +533,7 @@ func (s *Store) DeleteUserSessionsWithAudit(ctx context.Context, userID string, 
 }
 
 func (s *Store) CreateUserInvite(ctx context.Context, idHash, userID string, created, expires time.Time) error {
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,created_at,expires_at,used_at) VALUES(?,?,?,?,NULL)`, idHash, userID, created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano))
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at,used_at) VALUES(?,?,?, ?,?,NULL)`, idHash, userID, "", created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano))
 	return err
 }
 
@@ -535,7 +558,7 @@ func (s *Store) CreateUserInviteWithAudit(ctx context.Context, idHash, userID st
 	if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL`, created.UTC().Format(time.RFC3339Nano), userID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,created_at,expires_at,used_at) VALUES(?,?,?,?,NULL)`, idHash, userID, created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at,used_at) VALUES(?,?,?,?,?,NULL)`, idHash, userID, audit.ActorUserID, created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	if audit.Action != "" {
@@ -564,13 +587,18 @@ func (s *Store) RevokeUserInvitesWithAudit(ctx context.Context, userID string, n
 	} else if err != nil {
 		return 0, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), userID)
+	result, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL AND expires_at>?`, now.UTC().Format(time.RFC3339Nano), userID, now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
 		return 0, err
+	}
+	if affected == 0 {
+		// Revoking an already-used or expired token is a safe no-op, not an
+		// auditable state transition. Avoid creating misleading audit noise.
+		audit.Action = ""
 	}
 	if audit.Action != "" {
 		if err := insertAuditEntryExec(ctx, tx, audit, now.UTC()); err != nil {

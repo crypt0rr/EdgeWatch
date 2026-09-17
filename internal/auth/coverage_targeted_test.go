@@ -1,11 +1,208 @@
 package auth
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/store"
 )
+
+func TestConfirmTOTPForUserConsumesCurrentFactor(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	m := NewManager(db)
+	m.Now = func() time.Time { return now }
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := db.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin.TOTPEnabled = true
+	admin.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	if err := db.SaveAdmin(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp", nil)
+	request.RemoteAddr = "198.51.100.50:8080"
+	code := totpCode(admin.TOTPSecret, now.Unix()/30)
+	if err := m.ConfirmTOTPForUser(ctx, request, store.LegacyAdminUserID, code, ""); err != nil {
+		t.Fatalf("valid current factor rejected: %v", err)
+	}
+	if err := m.ConfirmTOTPForUser(ctx, request, store.LegacyAdminUserID, code, ""); err == nil || !strings.Contains(err.Error(), "current one-time code") {
+		t.Fatalf("replayed current factor error = %v", err)
+	}
+	if err := m.ConfirmTOTPForUser(ctx, request, store.LegacyAdminUserID, "000000", ""); err == nil {
+		t.Fatal("invalid current factor accepted")
+	}
+	plain, hashes, err := RecoveryCodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveRecoveryCodes(ctx, hashes); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ConfirmTOTPForUser(ctx, request, store.LegacyAdminUserID, "", plain[0]); err != nil {
+		t.Fatalf("valid recovery factor rejected: %v", err)
+	}
+}
+
+func TestScopedAdmissionReservationsAndTOTPLogin(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	m := &Manager{Now: func() time.Time { return now }}
+	// Two concurrent admissions exercise reservation increments and decrements;
+	// the empty account path also verifies that source-only requests do not leave
+	// an account bucket behind.
+	firstScoped := m.allowScoped("source:198.51.100.1", "account")
+	secondScoped := m.allowScoped("source:198.51.100.1", "account")
+	if !firstScoped || !secondScoped {
+		t.Fatal("scoped admission was unexpectedly denied")
+	}
+	m.releaseScoped("source:198.51.100.1", "account")
+	m.releaseScoped("source:198.51.100.1", "account")
+	if !m.allowScoped("source:198.51.100.2", "") {
+		t.Fatal("source-only admission was unexpectedly denied")
+	}
+	m.releaseScoped("source:198.51.100.2", "")
+	m.fails["source:198.51.100.3"] = make([]time.Time, authSourceFailureThreshold)
+	for i := range m.fails["source:198.51.100.3"] {
+		m.fails["source:198.51.100.3"][i] = now
+	}
+	if m.allowScoped("source:198.51.100.3", "account") {
+		t.Fatal("source failure threshold was ignored")
+	}
+	accountKey := scopedAccountKey("source:198.51.100.4", "account")
+	m.accountFails[accountKey] = make([]time.Time, authFailureThreshold)
+	for i := range m.accountFails[accountKey] {
+		m.accountFails[accountKey][i] = now
+	}
+	if m.allowScoped("source:198.51.100.4", "account") {
+		t.Fatal("account failure threshold was ignored")
+	}
+	firstUnknown := m.allowUnknownSource("unknown-login:198.51.100.5")
+	secondUnknown := m.allowUnknownSource("unknown-login:198.51.100.5")
+	if !firstUnknown || !secondUnknown {
+		t.Fatal("unknown-source admission was unexpectedly denied")
+	}
+	m.releaseUnknownSource("unknown-login:198.51.100.5")
+	m.releaseUnknownSource("unknown-login:198.51.100.5")
+	m.unknownSourceFails["unknown-login:198.51.100.6"] = make([]time.Time, authFailureThreshold)
+	for i := range m.unknownSourceFails["unknown-login:198.51.100.6"] {
+		m.unknownSourceFails["unknown-login:198.51.100.6"][i] = now
+	}
+	if m.allowUnknownSource("unknown-login:198.51.100.6") {
+		t.Fatal("unknown-source failure threshold was ignored")
+	}
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	manager := NewManager(db)
+	manager.Now = func() time.Time { return now }
+	token, err := manager.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := db.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin.TOTPEnabled = true
+	admin.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	if err := db.SaveAdmin(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "198.51.100.7:8080"
+	code := totpCode(admin.TOTPSecret, now.Unix()/30)
+	if _, _, err := manager.LoginAs(ctx, request, "admin", "administrator password", code, ""); err != nil {
+		t.Fatalf("valid TOTP login failed: %v", err)
+	}
+	if _, _, err := manager.LoginAs(ctx, request, "admin", "administrator password", code, ""); err == nil {
+		t.Fatal("replayed TOTP login was accepted")
+	}
+	plain, hashes, err := RecoveryCodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveRecoveryCodes(ctx, hashes); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.LoginAs(ctx, request, "admin", "administrator password", "000000", plain[0]); err != nil {
+		t.Fatalf("recovery-code login failed: %v", err)
+	}
+	if _, ok := VerifyTOTPAtStep(admin.TOTPSecret, "12a456", now); ok {
+		t.Fatal("non-numeric TOTP code was accepted")
+	}
+}
+
+func TestRequestWrappersMapTokenStoreErrorsAndDisabledAccounts(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(db)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/setup", nil)
+	request.RemoteAddr = "198.51.100.8:8080"
+	if err := manager.SetupRequest(ctx, request, "token", "administrator password"); err == nil {
+		t.Fatal("closed setup store unexpectedly succeeded")
+	}
+	if err := manager.ActivateRequest(ctx, request, "token", "invitee account password"); err == nil {
+		t.Fatal("closed activation store unexpectedly succeeded")
+	}
+
+	db, err = store.Open(filepath.Join(t.TempDir(), "disabled.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	manager = NewManager(db)
+	token, err := manager.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := PasswordHash("disabled account password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.CreateUser(ctx, store.User{Username: "disabled", DisplayName: "Disabled", Role: store.RoleViewer, PasswordHash: hash, Enabled: false}, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "198.51.100.9:8080"
+	if _, _, err := manager.LoginAs(ctx, request, "disabled", "disabled account password", "", ""); err == nil {
+		t.Fatal("disabled account unexpectedly authenticated")
+	}
+}
 
 func TestForwardedAddressAndLimiterHelpers(t *testing.T) {
 	for _, tc := range []struct {
@@ -48,8 +245,72 @@ func TestForwardedAddressAndLimiterHelpers(t *testing.T) {
 	if got := forwardedCandidates(request); len(got) != 2 || got[0] != "2001:db8::12" || got[1] != "" {
 		t.Fatalf("RFC forwarded candidates = %#v", got)
 	}
+	request.Header.Set("X-Forwarded-For", "198.51.100.99")
+	if got := forwardedCandidates(request); len(got) != 2 || got[0] != "2001:db8::12" {
+		t.Fatalf("mixed forwarding conventions were not canonicalized: %#v", got)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/", nil)
+	request.Header.Set("Forwarded", "proto=https;host=edgewatch.example")
+	if got := forwardedCandidates(request); len(got) != 0 {
+		t.Fatalf("Forwarded entries without a for parameter = %#v", got)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/", nil)
+	if got := forwardedCandidates(request); got != nil {
+		t.Fatalf("request without forwarding headers = %#v", got)
+	}
 	if forwardedCandidates(nil) != nil {
 		t.Fatal("nil request returned forwarded candidates")
+	}
+}
+
+func TestConfirmTOTPForUserLegacyFallbackRateLimitAndMissingUser(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	m := NewManager(db)
+	m.Now = func() time.Time { return now }
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := db.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin.TOTPEnabled = true
+	admin.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	if err := db.SaveAdmin(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `DELETE FROM users WHERE id=?`, store.LegacyAdminUserID); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp", nil)
+	request.RemoteAddr = "198.51.100.20:8080"
+	code := totpCode(admin.TOTPSecret, now.Unix()/30)
+	// The fallback itself is the compatibility contract under test; the
+	// encrypted fixture may have an unavailable legacy factor, so its result is
+	// intentionally not used as an assertion here.
+	_ = m.ConfirmTOTPForUser(ctx, request, store.LegacyAdminUserID, code, "")
+	if err := m.ConfirmTOTPForUser(ctx, request, "missing-user", "000000", ""); err == nil {
+		t.Fatal("missing user factor unexpectedly accepted")
+	}
+	limited := NewManager(db)
+	limited.Now = func() time.Time { return now }
+	key := scopedAccountKey(limited.sourceScopeFor(request, "totp-confirmation"), "totp-confirm:"+store.LegacyAdminUserID)
+	limited.accountFails[key] = make([]time.Time, authFailureThreshold)
+	for i := range limited.accountFails[key] {
+		limited.accountFails[key][i] = now
+	}
+	if err := limited.ConfirmTOTPForUser(ctx, request, store.LegacyAdminUserID, code, ""); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("TOTP confirmation rate-limit error = %v", err)
 	}
 }
 

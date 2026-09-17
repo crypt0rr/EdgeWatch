@@ -82,22 +82,69 @@ func createKey(path string) ([]byte, error) {
 	if path == "" {
 		return nil, ErrKeyUnavailable
 	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return nil, err
+	}
 	key := make([]byte, notificationKeySize)
 	if _, err := io.ReadFull(rand.Reader, key); err != nil {
 		return nil, err
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	// Never write directly to the published path. A crash after create but
+	// before the write used to leave a zero-byte key that permanently looked
+	// like an operator-managed invalid key on the next start. Link publishes the
+	// fully synced inode without replacing a key another process won the race to
+	// create.
+	// CreateTemp supplies an exclusive, unpredictable name in the same
+	// directory. The same-directory placement is required for an atomic link
+	// publish and avoids collisions between simultaneous first starts.
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
 	if err != nil {
 		return nil, err
 	}
-	if _, err := file.Write(key); err != nil {
-		_ = file.Close()
+	tmpName := tmp.Name()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
 		return nil, err
 	}
-	if err := file.Close(); err != nil {
+	cleanup := func() { _ = tmp.Close(); _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(key); err != nil {
+		cleanup()
 		return nil, err
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return nil, err
+	}
+	if err := os.Link(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return nil, err
+	}
+	_ = os.Remove(tmpName)
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	return key, nil
+}
+
+// removeInterruptedKey removes only an empty auto-generated key. Non-empty
+// invalid files are deliberately left untouched so an operator can recover or
+// replace them explicitly rather than having EdgeWatch destroy credential
+// material.
+func removeInterruptedKey(path string, expectedSize int64) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() != expectedSize {
+		return ErrKeyInvalid
+	}
+	return os.Remove(path)
 }
 
 func sealURL(key []byte, id, url string) (nonce, ciphertext []byte, err error) {

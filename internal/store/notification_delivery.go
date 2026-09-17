@@ -152,7 +152,13 @@ func (s *Store) ListDeliveryHealth(ctx context.Context) (map[string]DeliveryHeal
 	}
 
 	rows, err = s.reader().QueryContext(ctx, `SELECT destination,COUNT(*),COALESCE(SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END),0),COALESCE(SUM(deferrals),0)
-FROM outbox WHERE sent_at IS NULL AND terminal_at='' AND attempts < ? GROUP BY destination`, deliveryMaxAttempts)
+FROM outbox
+WHERE sent_at IS NULL AND terminal_at='' AND attempts < ?
+  AND NOT (destination LIKE 'managed:%' AND EXISTS (
+    SELECT 1 FROM managed_notifications m
+    WHERE destination LIKE 'managed:' || m.id || ':%' AND m.enabled=0
+  ))
+GROUP BY destination`, deliveryMaxAttempts)
 	if err != nil {
 		return nil, err
 	}

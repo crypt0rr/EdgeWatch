@@ -185,6 +185,30 @@ func TestSecuritySaveRoleTransitionRevokesSessionsWithoutHint(t *testing.T) {
 	}
 }
 
+func TestRevokeUserInvitesIgnoresExpiredLinks(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	user, err := s.CreateUser(ctx, User{Username: "expired-invite", DisplayName: "Expired invite", Role: RoleViewer, PasswordHash: "!pending", Enabled: false}, AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateUserInvite(ctx, "expired-invite-token", user.ID, now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	affected, err := s.RevokeUserInvitesWithAudit(ctx, user.ID, now, AuditEntry{Action: "user.activation_revoked"})
+	if err != nil || affected != 0 {
+		t.Fatalf("expired invite revocation = %d, %v", affected, err)
+	}
+	var audits int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE action='user.activation_revoked'`).Scan(&audits); err != nil {
+		t.Fatal(err)
+	}
+	if audits != 0 {
+		t.Fatalf("expired invite produced %d revocation audits", audits)
+	}
+}
+
 func TestGetAdminUsesAuthoritativeUserCredentials(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

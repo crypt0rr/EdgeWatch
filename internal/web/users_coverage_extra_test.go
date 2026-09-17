@@ -239,7 +239,11 @@ func TestUserSecurityHandlersCoverOperatorAndTOTPSuccess(t *testing.T) {
 	if secondEnable.Code != http.StatusBadRequest {
 		t.Fatalf("reused pending TOTP setup = %d: %s", secondEnable.Code, secondEnable.Body.String())
 	}
-	disableRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/auth/totp", strings.NewReader(`{"password":"replacement operator password"}`))
+	configured, err := db.GetUser(ctx, operator.ID)
+	if err != nil || configured.TOTPSecret == "" {
+		t.Fatalf("configured TOTP secret = %q, %v", configured.TOTPSecret, err)
+	}
+	disableRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/auth/totp", strings.NewReader(`{"password":"replacement operator password","code":"`+coverageTOTPCode(configured.TOTPSecret, time.Now().Unix()/30)+`"}`))
 	disableRequest.Header.Set("Content-Type", "application/json")
 	disable := httptest.NewRecorder()
 	server.totpDisable(disable, disableRequest, session)

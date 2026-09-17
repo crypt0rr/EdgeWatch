@@ -1,16 +1,28 @@
 package web
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+type hijackableResponseWriter struct {
+	*httptest.ResponseRecorder
+	connection net.Conn
+}
+
+func (w *hijackableResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return w.connection, bufio.NewReadWriter(bufio.NewReader(strings.NewReader("")), bufio.NewWriter(io.Discard)), nil
+}
 
 func TestRequestLoggingRecordsCorrelationAndResponseMetrics(t *testing.T) {
 	var output bytes.Buffer
@@ -152,5 +164,21 @@ func TestRequestLoggingRecoversPanicIntoStructuredError(t *testing.T) {
 	}
 	if entry["level"] != "ERROR" || entry["request_id"] != recorder.Header().Get(requestIDHeader) || entry["status"] != float64(http.StatusInternalServerError) {
 		t.Fatalf("panic record = %#v", entry)
+	}
+}
+
+func TestRequestLoggingClosesConnectionAfterHeadersOnPanic(t *testing.T) {
+	var output bytes.Buffer
+	server := &Server{Log: slog.New(slog.NewJSONHandler(&output, nil))}
+	connection, peer := net.Pipe()
+	defer peer.Close()
+	writer := &hijackableResponseWriter{ResponseRecorder: httptest.NewRecorder(), connection: connection}
+	handler := server.requestLogging(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		panic(errors.New("after headers"))
+	}))
+	handler.ServeHTTP(writer, httptest.NewRequest(http.MethodGet, "/partial", nil))
+	if writer.Header().Get("Connection") != "close" {
+		t.Fatalf("partial panic connection header = %q", writer.Header().Get("Connection"))
 	}
 }

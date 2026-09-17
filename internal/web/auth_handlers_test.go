@@ -156,6 +156,81 @@ func TestTOTPEnablePreservesActingSessionForRecoveryCodes(t *testing.T) {
 	}
 }
 
+func TestTOTPRecoveryCodeRotationRequiresCurrentFactorAndPreservesSession(t *testing.T) {
+	ctx := context.Background()
+	server, db, session := newUsersTestServer(t)
+	now := time.Now().UTC()
+	admin, err := db.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin.TOTPEnabled = true
+	admin.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	if err := db.SaveAdmin(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	cookieValue := "recovery-rotation-session"
+	if err := db.CreateSessionForUserWithAuditEntry(ctx, session.UserID, digest(cookieValue), "csrf", now, now.Add(time.Hour), store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	code := coverageTOTPCode(admin.TOTPSecret, now.Unix()/30)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader(`{"password":"administrator password","code":"`+code+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
+	response := httptest.NewRecorder()
+	server.totpRecoveryCodes(response, request, session)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "recovery_codes") {
+		t.Fatalf("recovery rotation = %d: %s", response.Code, response.Body.String())
+	}
+	if _, err := db.GetSession(ctx, digest(cookieValue)); err != nil {
+		t.Fatalf("acting session was revoked: %v", err)
+	}
+
+	wrong := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader(`{"password":"administrator password","code":"000000"}`))
+	wrong.Header.Set("Content-Type", "application/json")
+	wrong.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
+	wrongResponse := httptest.NewRecorder()
+	server.totpRecoveryCodes(wrongResponse, wrong, session)
+	if wrongResponse.Code != http.StatusUnauthorized || !strings.Contains(wrongResponse.Body.String(), "totp_required") {
+		t.Fatalf("invalid factor response = %d: %s", wrongResponse.Code, wrongResponse.Body.String())
+	}
+}
+
+func TestTOTPRecoveryCodeRotationValidationBranches(t *testing.T) {
+	ctx := context.Background()
+	server, db, session := newUsersTestServer(t)
+	invalid := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader("{"))
+	invalid.Header.Set("Content-Type", "application/json")
+	invalidResponse := httptest.NewRecorder()
+	server.totpRecoveryCodes(invalidResponse, invalid, session)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("malformed recovery rotation status = %d", invalidResponse.Code)
+	}
+	disabled := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader(`{"password":"administrator password"}`))
+	disabled.Header.Set("Content-Type", "application/json")
+	disabledResponse := httptest.NewRecorder()
+	server.totpRecoveryCodes(disabledResponse, disabled, session)
+	if disabledResponse.Code != http.StatusBadRequest || !strings.Contains(disabledResponse.Body.String(), "totp_required") {
+		t.Fatalf("disabled recovery rotation = %d: %s", disabledResponse.Code, disabledResponse.Body.String())
+	}
+	admin, err := db.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin.TOTPEnabled = true
+	admin.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	if err := db.SaveAdmin(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	wrongPassword := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader(`{"password":"wrong password","code":"000000"}`))
+	wrongPassword.Header.Set("Content-Type", "application/json")
+	wrongPasswordResponse := httptest.NewRecorder()
+	server.totpRecoveryCodes(wrongPasswordResponse, wrongPassword, session)
+	if wrongPasswordResponse.Code != http.StatusBadRequest {
+		t.Fatalf("wrong password recovery rotation = %d: %s", wrongPasswordResponse.Code, wrongPasswordResponse.Body.String())
+	}
+}
+
 func TestPendingTOTPEnrolmentsExpireAndRemainBounded(t *testing.T) {
 	server, _, admin := newUsersTestServer(t)
 	base := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)

@@ -3,6 +3,7 @@ package web
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -326,6 +328,133 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 	server.suppressIncident(suppressed, scanHandlerRequest(http.MethodPost, "/", `{"key":"`+change.Key+`","expected_change":`+string(encodedChange)+`}`), admin, record.ID)
 	if suppressed.Code != http.StatusNoContent {
 		t.Fatalf("suppress incident = %d: %s", suppressed.Code, suppressed.Body.String())
+	}
+}
+
+func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
+	ctx := context.Background()
+	newFixture := func(t *testing.T) (*Server, *store.Store, store.Session, store.JobRecord) {
+		t.Helper()
+		server, db, admin := newUsersTestServer(t)
+		job := config.NormalizeJob(config.Job{Name: "failure-branches", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
+		record, err := db.CreateJob(ctx, job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return server, db, admin, record
+	}
+	request := func(method, path, body string) *http.Request {
+		req := scanHandlerRequest(method, path, body)
+		return req
+	}
+
+	server, db, admin, record := newFixture(t)
+	breakReadProjection(t, db, "job_leases")
+	payload := fromConfig(record.Job)
+	payload.Revision = record.Revision
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update := httptest.NewRecorder()
+	server.updateJob(update, request(http.MethodPut, "/jobs/"+record.ID, string(encoded)), admin, record.ID)
+	if update.Code != http.StatusInternalServerError {
+		t.Fatalf("job active lookup failure = %d: %s", update.Code, update.Body.String())
+	}
+
+	server, db, admin, record = newFixture(t)
+	breakReadProjection(t, db, "job_runtime")
+	for name, invoke := range map[string]func(*httptest.ResponseRecorder){
+		"baseline": func(w *httptest.ResponseRecorder) {
+			server.jobBaseline(w, request(http.MethodGet, "/baseline", ""), record.ID)
+		},
+		"reset": func(w *httptest.ResponseRecorder) {
+			server.resetBaseline(w, httptest.NewRequest(http.MethodPost, "/reset", nil), admin, record.ID)
+		},
+		"approve": func(w *httptest.ResponseRecorder) {
+			server.approveBaseline(w, request(http.MethodPost, "/approve", `{}`), admin, record.ID)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			invoke(response)
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	server, db, _, record = newFixture(t)
+	plan := scanner.WorkPlan{Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Family: 4, Addresses: []string{"192.0.2.10"}, Ports: "1", PortCount: 1, Probes: 1}}}
+	cycle, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{ID: "failure-cycle", JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	breakReadProjection(t, db, "scan_cycle_units")
+	cycleResponse := httptest.NewRecorder()
+	server.scanCycle(cycleResponse, request(http.MethodGet, "/cycle", ""), record.ID)
+	if cycleResponse.Code != http.StatusInternalServerError {
+		t.Fatalf("cycle unit lookup failure = %d: %s", cycleResponse.Code, cycleResponse.Body.String())
+	}
+	_ = cycle
+
+	server, db, _, record = newFixture(t)
+	now := time.Now().UTC()
+	scan := model.Scan{ID: "malformed-pages", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), BaselineScanID: "baseline", BaselineConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Units: []model.Unit{{Target: "192.0.2.10", Protocol: "tcp", Addresses: []string{"192.0.2.10"}, Ports: []model.PortState{{Port: 1, State: "open"}}}}}}
+	if err := db.SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE scans SET changes_json=?, snapshot_json=? WHERE id=?`, []byte(`{`), []byte(`{`), scan.ID); err != nil {
+		t.Fatal(err)
+	}
+	for name, invoke := range map[string]func(*httptest.ResponseRecorder){
+		"changes": func(w *httptest.ResponseRecorder) {
+			server.jobScanChanges(w, request(http.MethodGet, "/changes", ""), record.ID, scan.ID)
+		},
+		"results": func(w *httptest.ResponseRecorder) {
+			server.jobScanResults(w, request(http.MethodGet, "/results", ""), record.ID, scan.ID)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			invoke(response)
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	server, db, admin, record = newFixture(t)
+	breakReadProjection(t, db, "jobs")
+	expected := model.Change{Key: "port|192.0.2.10|tcp|1", Kind: "port", Target: "192.0.2.10", Protocol: "tcp", Port: 1, Old: "open", New: "closed"}
+	body, err := json.Marshal(incidentActionRequest{Key: expected.Key, ExpectedChange: &expected})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accept := httptest.NewRecorder()
+	server.acceptIncident(accept, request(http.MethodPost, "/incident", string(body)), admin, record.ID)
+	if accept.Code != http.StatusInternalServerError {
+		t.Fatalf("accept job lookup failure = %d: %s", accept.Code, accept.Body.String())
+	}
+	suppress := httptest.NewRecorder()
+	server.suppressIncident(suppress, request(http.MethodPost, "/incident", string(body)), admin, record.ID)
+	if suppress.Code != http.StatusInternalServerError {
+		t.Fatalf("suppress job lookup failure = %d: %s", suppress.Code, suppress.Body.String())
+	}
+
+	server, _, admin, record = newFixture(t)
+	server.App.BeginRun(ctx)
+	server.App.StopRun()
+	shutdown := httptest.NewRecorder()
+	server.runJob(shutdown, request(http.MethodPost, "/run", `{}`), admin, record.ID)
+	if shutdown.Code != http.StatusServiceUnavailable {
+		t.Fatalf("shutdown run = %d: %s", shutdown.Code, shutdown.Body.String())
+	}
+
+	incidentError := httptest.NewRecorder()
+	server.writeIncidentActionErrorWithRequest(incidentError, request(http.MethodPost, "/incident", ""), errors.New("unexpected store failure"), "incident.test")
+	if incidentError.Code != http.StatusInternalServerError {
+		t.Fatalf("request-aware incident error = %d: %s", incidentError.Code, incidentError.Body.String())
 	}
 }
 

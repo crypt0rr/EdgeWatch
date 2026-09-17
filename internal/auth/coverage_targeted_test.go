@@ -70,7 +70,9 @@ func TestScopedAdmissionReservationsAndTOTPLogin(t *testing.T) {
 	// Two concurrent admissions exercise reservation increments and decrements;
 	// the empty account path also verifies that source-only requests do not leave
 	// an account bucket behind.
-	if !m.allowScoped("source:198.51.100.1", "account") || !m.allowScoped("source:198.51.100.1", "account") {
+	firstScoped := m.allowScoped("source:198.51.100.1", "account")
+	secondScoped := m.allowScoped("source:198.51.100.1", "account")
+	if !firstScoped || !secondScoped {
 		t.Fatal("scoped admission was unexpectedly denied")
 	}
 	m.releaseScoped("source:198.51.100.1", "account")
@@ -94,7 +96,9 @@ func TestScopedAdmissionReservationsAndTOTPLogin(t *testing.T) {
 	if m.allowScoped("source:198.51.100.4", "account") {
 		t.Fatal("account failure threshold was ignored")
 	}
-	if !m.allowUnknownSource("unknown-login:198.51.100.5") || !m.allowUnknownSource("unknown-login:198.51.100.5") {
+	firstUnknown := m.allowUnknownSource("unknown-login:198.51.100.5")
+	secondUnknown := m.allowUnknownSource("unknown-login:198.51.100.5")
+	if !firstUnknown || !secondUnknown {
 		t.Fatal("unknown-source admission was unexpectedly denied")
 	}
 	m.releaseUnknownSource("unknown-login:198.51.100.5")

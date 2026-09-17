@@ -183,6 +183,37 @@ func TestLoginLegacyFallbackAndAuthenticationFailureModes(t *testing.T) {
 	}
 }
 
+func TestConfirmPasswordLegacyAdministratorFallback(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	m := NewManager(db)
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+	// A database upgraded in stages can temporarily retain only the legacy
+	// administrator row. Password confirmation must remain usable for that
+	// stable compatibility identity while refusing arbitrary missing users.
+	if _, err := db.DB.ExecContext(ctx, `DELETE FROM users WHERE id=?`, store.LegacyAdminUserID); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations", nil)
+	request.RemoteAddr = "198.51.100.240:8080"
+	if err := m.ConfirmPasswordForUser(ctx, request, store.LegacyAdminUserID, "administrator password"); err != nil {
+		t.Fatalf("legacy administrator confirmation failed: %v", err)
+	}
+	if err := m.ConfirmPasswordForUser(ctx, request, "missing-user", "administrator password"); err == nil {
+		t.Fatal("missing arbitrary user was accepted")
+	}
+}
+
 func TestLogoutSessionAndLimiterBookkeepingBranches(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

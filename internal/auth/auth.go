@@ -595,42 +595,52 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		action = "admin.login"
 	}
 	audit := store.AuditEntry{Action: action, Detail: "successful login", ActorUserID: user.ID, ActorUsername: user.Username, SourceIP: m.ClientIP(request)}
-	if upgradedHash != "" {
-		if err := m.Store.CreateSessionForUserWithPasswordUpgrade(ctx, user.ID, user.PasswordHash, upgradedHash, digest(session), csrf, now, now.Add(SessionTTL), audit); err != nil {
-			if !errors.Is(err, store.ErrPasswordChangedDuringLogin) {
-				return "", user, err
-			}
-			// Another valid login may have upgraded the same legacy hash first.
-			// Re-read the authoritative row and verify the supplied password
-			// against it before creating a session. A real password change does
-			// not verify and therefore still fails closed.
-			current, readErr := m.Store.GetUser(ctx, user.ID)
-			fallbackValid := false
-			if readErr == nil && current.Enabled {
-				verifyErr := m.withArgon2(ctx, func() error {
-					fallbackValid = VerifyPassword(current.PasswordHash, password)
-					return nil
-				})
-				if errors.Is(verifyErr, ErrRateLimited) {
-					m.auditRateLimit(ctx, "login:"+identity, request)
-					return "", user, verifyErr
-				}
-			}
-			if readErr != nil || !current.Enabled || !fallbackValid {
-				if readErr != nil {
-					return "", user, readErr
-				}
-				return "", user, errors.New("password changed during login")
-			}
-			if sessionErr := m.Store.CreateSessionForUserWithAuditEntry(ctx, current.ID, digest(session), csrf, now, now.Add(SessionTTL), audit); sessionErr != nil {
-				return "", user, sessionErr
-			}
-			user = current
-		} else {
-			user.PasswordHash = upgradedHash
+	createSession := func(candidate store.User, hash string, revision int64, totpEnabled bool) error {
+		if hash != "" {
+			return m.Store.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, candidate.ID, candidate.PasswordHash, hash, revision, totpEnabled, digest(session), csrf, now, now.Add(SessionTTL), audit)
 		}
-	} else if err := m.Store.CreateSessionForUserWithAuditEntry(ctx, user.ID, digest(session), csrf, now, now.Add(SessionTTL), audit); err != nil {
-		return "", user, err
+		return m.Store.CreateSessionForUserIfCurrent(ctx, candidate.ID, candidate.PasswordHash, revision, totpEnabled, digest(session), csrf, now, now.Add(SessionTTL), audit)
+	}
+	if err := createSession(user, upgradedHash, user.Revision, user.TOTPEnabled); err != nil {
+		if !errors.Is(err, store.ErrSessionCredentialsChanged) && !errors.Is(err, store.ErrPasswordChangedDuringLogin) {
+			return "", user, err
+		}
+		// Credential state changed after the initial password/TOTP checks. Re-read
+		// the authoritative row and repeat both checks before retrying; otherwise
+		// a stale login could create a session after a password, TOTP, or disable
+		// operation won the race.
+		current, readErr := m.Store.GetUser(ctx, user.ID)
+		if readErr != nil || !current.Enabled {
+			if readErr != nil {
+				return "", user, readErr
+			}
+			return "", user, errors.New("credentials changed during login")
+		}
+		fallbackValid := false
+		verifyErr := m.withArgon2(ctx, func() error {
+			fallbackValid = VerifyPassword(current.PasswordHash, password)
+			return nil
+		})
+		if errors.Is(verifyErr, ErrRateLimited) {
+			m.auditRateLimit(ctx, "login:"+identity, request)
+			return "", user, verifyErr
+		}
+		if verifyErr != nil || !fallbackValid {
+			return "", user, errors.New("credentials changed during login")
+		}
+		if current.TOTPEnabled {
+			otpValid := current.TOTPSecretError == nil && VerifyTOTPAt(current.TOTPSecret, otp, m.now())
+			if !otpValid {
+				return "", user, errors.New("credentials changed during login")
+			}
+		}
+		if retryErr := createSession(current, "", current.Revision, current.TOTPEnabled); retryErr != nil {
+			return "", user, retryErr
+		}
+		user = current
+	} else if upgradedHash != "" {
+		user.PasswordHash = upgradedHash
+		user.Revision++
 	}
 	if upgradedHash == "" {
 		_ = m.Store.SetUserLastLogin(ctx, user.ID, now)
@@ -660,6 +670,16 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 		return ErrRateLimited
 	}
 	user, err := m.Store.GetUser(ctx, userID)
+	if errors.Is(err, store.ErrNotFound) && userID == store.LegacyAdminUserID {
+		// Keep password-confirmation compatible with a pre-RBAC database while
+		// its legacy administrator row is being migrated into users. The normal
+		// daemon path has an authoritative users row; this fallback is limited to
+		// the stable legacy ID and never applies to a missing arbitrary user.
+		if admin, adminErr := m.Store.GetAdmin(ctx); adminErr == nil {
+			user = store.User{ID: store.LegacyAdminUserID, Username: admin.Username, DisplayName: admin.DisplayName, Role: store.RoleAdministrator, PasswordHash: admin.PasswordHash, TOTPSecret: admin.TOTPSecret, TOTPSecretStored: admin.TOTPSecretStored, TOTPSecretError: admin.TOTPSecretError, TOTPEnabled: admin.TOTPEnabled, Enabled: true, CreatedAt: admin.CreatedAt, UpdatedAt: admin.UpdatedAt}
+			err = nil
+		}
+	}
 	var passwordValid bool
 	if err == nil && user.Enabled {
 		if verifyErr := m.withArgon2(ctx, func() error {

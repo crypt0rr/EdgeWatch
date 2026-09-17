@@ -230,3 +230,10 @@ func TestHighCostOverrideRequiresAdministrator(t *testing.T) {
 		t.Fatalf("administrator high-cost create = %d: %s", adminRec.Code, adminRec.Body.String())
 	}
 }
+
+func TestBaselineJSONReportsStalledLearning(t *testing.T) {
+	result := baselineJSONFromSummary(store.RuntimeStateSummary{IncompleteCandidateAttempts: 3}, "")
+	if result["status"] != "stalled" || result["incomplete_attempts"] != 3 {
+		t.Fatalf("stalled baseline response = %#v", result)
+	}
+}

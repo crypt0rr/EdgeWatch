@@ -58,7 +58,7 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 		return rec
 	}
 
-	created := request(http.MethodPost, "", `{"username":"operator","display_name":"  Ops  ","role":"operator"}`)
+	created := request(http.MethodPost, "", `{"username":"operator","display_name":"  Ops  ","role":"operator","password":"administrator password"}`)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create status %d: %s", created.Code, created.Body.String())
 	}
@@ -106,15 +106,15 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 		t.Fatalf("activated user = %#v", operator)
 	}
 
-	updated := request(http.MethodPatch, "/"+operatorID, `{"display_name":"Operations","role":"viewer"}`)
+	updated := request(http.MethodPatch, "/"+operatorID, `{"display_name":"Operations","role":"viewer","password":"administrator password"}`)
 	if updated.Code != http.StatusOK || !strings.Contains(updated.Body.String(), `"role":"viewer"`) {
 		t.Fatalf("update response = %d: %s", updated.Code, updated.Body.String())
 	}
-	stale := request(http.MethodPatch, "/"+operatorID, `{"display_name":"Stale update","revision":1}`)
+	stale := request(http.MethodPatch, "/"+operatorID, `{"display_name":"Stale update","revision":1,"password":"administrator password"}`)
 	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), "modified") {
 		t.Fatalf("stale update response = %d: %s", stale.Code, stale.Body.String())
 	}
-	reset := request(http.MethodPost, "/"+operatorID+"/password-reset", "{}")
+	reset := request(http.MethodPost, "/"+operatorID+"/password-reset", `{"password":"administrator password"}`)
 	if reset.Code != http.StatusOK {
 		t.Fatalf("password reset issue status = %d: %s", reset.Code, reset.Body.String())
 	}
@@ -144,17 +144,17 @@ func TestUsersRouteValidationAndSessionRevocation(t *testing.T) {
 		server.usersRoute(rec, req, admin, strings.TrimPrefix(rest, "/"))
 		return rec
 	}
-	if rec := call(http.MethodPost, "", `{"username":"bad","role":"not-a-role"}`); rec.Code != http.StatusBadRequest {
+	if rec := call(http.MethodPost, "", `{"username":"bad","role":"not-a-role","password":"administrator password"}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid role status = %d", rec.Code)
 	}
 	if rec := call(http.MethodPost, "", `{"username":"bad","unknown":true}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("unknown field status = %d", rec.Code)
 	}
-	first := call(http.MethodPost, "", `{"username":"duplicate"}`)
+	first := call(http.MethodPost, "", `{"username":"duplicate","password":"administrator password"}`)
 	if first.Code != http.StatusCreated {
 		t.Fatalf("first create status = %d: %s", first.Code, first.Body.String())
 	}
-	if rec := call(http.MethodPost, "", `{"username":"duplicate"}`); rec.Code != http.StatusConflict {
+	if rec := call(http.MethodPost, "", `{"username":"duplicate","password":"administrator password"}`); rec.Code != http.StatusConflict {
 		t.Fatalf("duplicate status = %d: %s", rec.Code, rec.Body.String())
 	}
 	var firstResponse struct {
@@ -163,10 +163,10 @@ func TestUsersRouteValidationAndSessionRevocation(t *testing.T) {
 	if err := json.Unmarshal(first.Body.Bytes(), &firstResponse); err != nil {
 		t.Fatal(err)
 	}
-	if rec := call(http.MethodPatch, "/"+firstResponse.User.ID, `{"enabled":true}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "pending") {
+	if rec := call(http.MethodPatch, "/"+firstResponse.User.ID, `{"enabled":true,"password":"administrator password"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "pending") {
 		t.Fatalf("pending enable response = %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := call(http.MethodPatch, "/"+store.LegacyAdminUserID, `{"role":"viewer"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "self") {
+	if rec := call(http.MethodPatch, "/"+store.LegacyAdminUserID, `{"role":"viewer","password":"administrator password"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "self") {
 		t.Fatalf("self demotion response = %d: %s", rec.Code, rec.Body.String())
 	}
 	if rec := call(http.MethodGet, "/unknown/sessions", ""); rec.Code != http.StatusNotFound {
@@ -184,7 +184,7 @@ func TestUsersRouteValidationAndSessionRevocation(t *testing.T) {
 	if err := db.CreateSessionForUserWithAudit(ctx, operator.ID, "session-digest", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour), "", ""); err != nil {
 		t.Fatal(err)
 	}
-	revoked := call(http.MethodDelete, "/"+operator.ID+"/sessions", "")
+	revoked := call(http.MethodDelete, "/"+operator.ID+"/sessions", `{"password":"administrator password"}`)
 	if revoked.Code != http.StatusNoContent {
 		t.Fatalf("session revoke status = %d: %s", revoked.Code, revoked.Body.String())
 	}
@@ -241,7 +241,7 @@ func TestUsersAPIEnforcesAuthenticationCSRFAndRolePermissions(t *testing.T) {
 		t.Fatalf("missing CSRF users status = %d", csrfRejected.StatusCode)
 	}
 	csrfRejected.Body.Close()
-	created := request("admin-api-session", "admin-csrf", http.MethodPost, "/api/v1/users", `{"username":"api-user"}`)
+	created := request("admin-api-session", "admin-csrf", http.MethodPost, "/api/v1/users", `{"username":"api-user","password":"administrator password"}`)
 	if created.StatusCode != http.StatusCreated {
 		body, _ := io.ReadAll(created.Body)
 		created.Body.Close()

@@ -15,6 +15,7 @@ type userCreatePayload struct {
 	Username    string `json:"username"`
 	DisplayName string `json:"display_name"`
 	Role        string `json:"role"`
+	Password    string `json:"password"`
 }
 
 type userUpdatePayload struct {
@@ -22,6 +23,40 @@ type userUpdatePayload struct {
 	Role        *string `json:"role"`
 	Enabled     *bool   `json:"enabled"`
 	Revision    *int64  `json:"revision"`
+	Password    string  `json:"password"`
+}
+
+type userPasswordPayload struct {
+	Password string `json:"password"`
+}
+
+// confirmUserMutation applies an administrator's fresh-password requirement
+// to account lifecycle operations. The password is accepted only in the
+// request body, never returned or logged, and the auth manager supplies the
+// same rate limiting used by other sensitive mutations.
+func (s *Server) confirmUserMutation(w http.ResponseWriter, r *http.Request, actor store.Session, password string) bool {
+	if strings.TrimSpace(password) == "" {
+		writeError(w, http.StatusBadRequest, "password_required", "administrator password confirmation is required", map[string]string{"password": "password confirmation is required"})
+		return false
+	}
+	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, actor.UserID, password); err != nil {
+		if errors.Is(err, auth.ErrRateLimited) {
+			w.Header().Set("Retry-After", "300")
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many password confirmation attempts; try again later", nil)
+		} else {
+			writeError(w, http.StatusUnauthorized, "invalid_password", "password confirmation failed", nil)
+		}
+		return false
+	}
+	return true
+}
+
+func decodeUserPassword(w http.ResponseWriter, r *http.Request) (string, bool) {
+	var input userPasswordPayload
+	if !decodeJSON(w, r, &input) {
+		return "", false
+	}
+	return input.Password, true
 }
 
 func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session store.Session, rest string) {
@@ -58,6 +93,10 @@ func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session stor
 		return
 	}
 	if len(parts) == 2 && parts[1] == "sessions" && r.Method == http.MethodDelete {
+		password, ok := decodeUserPassword(w, r)
+		if !ok || !s.confirmUserMutation(w, r, session, password) {
+			return
+		}
 		if _, err := s.Store.GetUser(r.Context(), id); errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
 			return
@@ -106,6 +145,9 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, session stor
 	w.Header().Set("Cache-Control", "no-store")
 	var input userCreatePayload
 	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if !s.confirmUserMutation(w, r, session, input.Password) {
 		return
 	}
 	input.Username = strings.TrimSpace(input.Username)
@@ -184,6 +226,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 		}
 	}
 	previousRole, previousEnabled := user.Role, user.Enabled
+	securityRequested := (input.Role != nil && *input.Role != user.Role) || (input.Enabled != nil && *input.Enabled != user.Enabled)
+	if securityRequested && !s.confirmUserMutation(w, r, actor, input.Password) {
+		return
+	}
 	if input.DisplayName != nil {
 		name, validationErr := validateDisplayName(*input.DisplayName)
 		if validationErr != nil {
@@ -254,6 +300,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 
 func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor store.Session, id, action string) {
 	w.Header().Set("Cache-Control", "no-store")
+	password, ok := decodeUserPassword(w, r)
+	if !ok || !s.confirmUserMutation(w, r, actor, password) {
+		return
+	}
 	user, err := s.Store.GetUser(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
@@ -293,6 +343,10 @@ func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor s
 
 func (s *Server) revokeActivation(w http.ResponseWriter, r *http.Request, actor store.Session, id string) {
 	w.Header().Set("Cache-Control", "no-store")
+	password, ok := decodeUserPassword(w, r)
+	if !ok || !s.confirmUserMutation(w, r, actor, password) {
+		return
+	}
 	user, err := s.Store.GetUser(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "user not found", nil)

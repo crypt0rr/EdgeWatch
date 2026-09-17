@@ -36,10 +36,10 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	if rec := call(http.MethodPost, "", `{`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("malformed create = %d", rec.Code)
 	}
-	if rec := call(http.MethodPost, "", `{"display_name":"Missing username"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "username") {
+	if rec := call(http.MethodPost, "", `{"display_name":"Missing username","password":"administrator password"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "username") {
 		t.Fatalf("missing username = %d: %s", rec.Code, rec.Body.String())
 	}
-	created := call(http.MethodPost, "", `{"username":"revokable","display_name":""}`)
+	created := call(http.MethodPost, "", `{"username":"revokable","display_name":"","password":"administrator password"}`)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("empty display name should use username default = %d: %s", created.Code, created.Body.String())
 	}
@@ -49,16 +49,16 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	if err := json.Unmarshal(created.Body.Bytes(), &createdResponse); err != nil {
 		t.Fatal(err)
 	}
-	if rec := call(http.MethodDelete, "/"+createdResponse.User.ID+"/activation", ""); rec.Code != http.StatusNoContent {
+	if rec := call(http.MethodDelete, "/"+createdResponse.User.ID+"/activation", `{"password":"administrator password"}`); rec.Code != http.StatusNoContent {
 		t.Fatalf("revoke activation = %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := call(http.MethodDelete, "/"+createdResponse.User.ID+"/activation", ""); rec.Code != http.StatusNotFound {
+	if rec := call(http.MethodDelete, "/"+createdResponse.User.ID+"/activation", `{"password":"administrator password"}`); rec.Code != http.StatusNotFound {
 		t.Fatalf("revoke missing activation = %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := call(http.MethodPost, "", `{"username":"bad","display_name":"bad\nname"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "display_name") {
+	if rec := call(http.MethodPost, "", `{"username":"bad","display_name":"bad\nname","password":"administrator password"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "display_name") {
 		t.Fatalf("control display name = %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := call(http.MethodPost, "", `{"username":"bad","display_name":"`+strings.Repeat("x", maxDisplayNameRunes+1)+`"}`); rec.Code != http.StatusBadRequest {
+	if rec := call(http.MethodPost, "", `{"username":"bad","display_name":"`+strings.Repeat("x", maxDisplayNameRunes+1)+`","password":"administrator password"}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("long display name = %d", rec.Code)
 	}
 
@@ -68,23 +68,23 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	if rec := call(http.MethodPatch, "/"+store.LegacyAdminUserID, `{`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("malformed update = %d", rec.Code)
 	}
-	if rec := call(http.MethodPatch, "/"+store.LegacyAdminUserID, `{"display_name":""}`); rec.Code != http.StatusBadRequest {
+	if rec := call(http.MethodPatch, "/"+store.LegacyAdminUserID, `{"display_name":"","password":"administrator password"}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid display update = %d", rec.Code)
 	}
-	if rec := call(http.MethodPatch, "/"+store.LegacyAdminUserID, `{"role":"invalid"}`); rec.Code != http.StatusBadRequest {
+	if rec := call(http.MethodPatch, "/"+store.LegacyAdminUserID, `{"role":"invalid","password":"administrator password"}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("invalid role update = %d", rec.Code)
 	}
-	if rec := call(http.MethodPatch, "/"+store.LegacyAdminUserID, `{"enabled":false}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "self") {
+	if rec := call(http.MethodPatch, "/"+store.LegacyAdminUserID, `{"enabled":false,"password":"administrator password"}`); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "self") {
 		t.Fatalf("self disable = %d: %s", rec.Code, rec.Body.String())
 	}
 
 	otherActor := store.Session{UserID: "different-actor", Username: "other", Role: store.RoleAdministrator}
-	lastAdminRequest := httptest.NewRequest(http.MethodPatch, "/api/v1/users/"+store.LegacyAdminUserID, strings.NewReader(`{"role":"viewer"}`))
+	lastAdminRequest := httptest.NewRequest(http.MethodPatch, "/api/v1/users/"+store.LegacyAdminUserID, strings.NewReader(`{"role":"viewer","password":"administrator password"}`))
 	lastAdminRequest.Header.Set("Content-Type", "application/json")
 	lastAdmin := httptest.NewRecorder()
 	server.updateUser(lastAdmin, lastAdminRequest, otherActor, store.LegacyAdminUserID)
-	if lastAdmin.Code != http.StatusBadRequest || !strings.Contains(lastAdmin.Body.String(), "last_admin") {
-		t.Fatalf("last-admin demotion = %d: %s", lastAdmin.Code, lastAdmin.Body.String())
+	if lastAdmin.Code != http.StatusUnauthorized || !strings.Contains(lastAdmin.Body.String(), "invalid_password") {
+		t.Fatalf("unverified actor demotion = %d: %s", lastAdmin.Code, lastAdmin.Body.String())
 	}
 
 	hash, err := auth.PasswordHash("operator account password")
@@ -106,10 +106,10 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	if _, err := db.GetSession(context.Background(), "idempotent-user-update"); err != nil {
 		t.Fatalf("idempotent role update revoked session: %v", err)
 	}
-	if rec := call(http.MethodPost, "/"+operator.ID+"/activation", "{}"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "activation_token") {
+	if rec := call(http.MethodPost, "/"+operator.ID+"/activation", `{"password":"administrator password"}`); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "activation_token") {
 		t.Fatalf("activation issue = %d: %s", rec.Code, rec.Body.String())
 	}
-	if rec := call(http.MethodPost, "/missing/activation", "{}"); rec.Code != http.StatusNotFound {
+	if rec := call(http.MethodPost, "/missing/activation", `{"password":"administrator password"}`); rec.Code != http.StatusNotFound {
 		t.Fatalf("missing activation = %d", rec.Code)
 	}
 
@@ -133,7 +133,7 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, action := range []string{"activation", "password-reset"} {
-		rec := call(http.MethodPost, "/"+disabled.ID+"/"+action, "{}")
+		rec := call(http.MethodPost, "/"+disabled.ID+"/"+action, `{"password":"administrator password"}`)
 		if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "user_disabled") {
 			t.Fatalf("disabled %s issue = %d: %s", action, rec.Code, rec.Body.String())
 		}
@@ -155,7 +155,7 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	if err := closedDB.Close(); err != nil {
 		t.Fatal(err)
 	}
-	for _, run := range []func(*httptest.ResponseRecorder){
+	for index, run := range []func(*httptest.ResponseRecorder){
 		func(w *httptest.ResponseRecorder) {
 			closedServer.listUsers(w, httptest.NewRequest(http.MethodGet, "/", nil))
 		},
@@ -163,12 +163,18 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 			closedServer.getUser(w, httptest.NewRequest(http.MethodGet, "/", nil), closedAdmin.UserID)
 		},
 		func(w *httptest.ResponseRecorder) {
-			closedServer.issueActivation(w, httptest.NewRequest(http.MethodPost, "/", nil), closedAdmin, closedAdmin.UserID, "user.activation_issued")
+			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"password":"administrator password"}`))
+			req.Header.Set("Content-Type", "application/json")
+			closedServer.issueActivation(w, req, closedAdmin, closedAdmin.UserID, "user.activation_issued")
 		},
 	} {
 		rec := httptest.NewRecorder()
 		run(rec)
-		if rec.Code != http.StatusInternalServerError {
+		expected := http.StatusInternalServerError
+		if index == 2 {
+			expected = http.StatusUnauthorized // confirmation fails closed when the store is unavailable
+		}
+		if rec.Code != expected {
 			t.Fatalf("closed-store user handler status = %d: %s", rec.Code, rec.Body.String())
 		}
 	}
@@ -239,6 +245,49 @@ func TestUserSecurityHandlersCoverOperatorAndTOTPSuccess(t *testing.T) {
 	server.totpDisable(disable, disableRequest, session)
 	if disable.Code != http.StatusNoContent {
 		t.Fatalf("operator TOTP disable = %d: %s", disable.Code, disable.Body.String())
+	}
+}
+
+func TestUserMutationConfirmationGuards(t *testing.T) {
+	server, _, admin := newUsersTestServer(t)
+	call := func(method, rest, body, remote string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "/api/v1/users"+rest, strings.NewReader(body))
+		req.RemoteAddr = remote
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.usersRoute(rec, req, admin, strings.TrimPrefix(rest, "/"))
+		return rec
+	}
+	if rec := call(http.MethodPost, "", `{"username":"missing-confirmation"}`, "198.51.100.241:8000"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "password_required") {
+		t.Fatalf("missing create confirmation = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := call(http.MethodPost, "", `{"username":"wrong-confirmation","password":"wrong administrator password"}`, "198.51.100.242:8000"); rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "invalid_password") {
+		t.Fatalf("wrong create confirmation = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := call(http.MethodDelete, "/missing/sessions", `{`, "198.51.100.243:8000"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed session revoke = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := call(http.MethodDelete, "/missing/sessions", `{}`, "198.51.100.244:8000"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "password_required") {
+		t.Fatalf("empty session revoke confirmation = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := call(http.MethodDelete, "/missing/activation", `{}`, "198.51.100.245:8000"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "password_required") {
+		t.Fatalf("empty activation revoke confirmation = %d: %s", rec.Code, rec.Body.String())
+	}
+	// Repeated invalid confirmations exercise the bounded response for the
+	// source-level password limiter without relying on the exact threshold.
+	seenRateLimit := false
+	for i := 0; i < 8; i++ {
+		rec := call(http.MethodPost, "", `{"username":"rate-limited","password":"wrong administrator password"}`, "198.51.100.246:8000")
+		if rec.Code == http.StatusTooManyRequests {
+			seenRateLimit = true
+			if !strings.Contains(rec.Body.String(), "rate_limited") || rec.Header().Get("Retry-After") != "300" {
+				t.Fatalf("rate-limited confirmation response = %d: %s", rec.Code, rec.Body.String())
+			}
+			break
+		}
+	}
+	if !seenRateLimit {
+		t.Fatal("password confirmation limiter was not reached")
 	}
 }
 

@@ -281,13 +281,18 @@ type JobState struct {
 	// the immutable source scan. Host explorer pages must then read the
 	// runtime baseline rather than the source scan's indexed evidence, which
 	// would otherwise show a stale expected port or service.
-	BaselineModified  bool                `json:"baseline_modified"`
-	Candidate         *Snapshot           `json:"candidate,omitempty"`
-	CandidateHash     string              `json:"candidate_hash,omitempty"`
-	CandidateCount    int                 `json:"candidate_count"`
-	CandidateAttempts int                 `json:"candidate_attempts"`
-	Pending           map[string]Pending  `json:"pending,omitempty"`
-	Incidents         map[string]Incident `json:"incidents,omitempty"`
+	BaselineModified  bool      `json:"baseline_modified"`
+	Candidate         *Snapshot `json:"candidate,omitempty"`
+	CandidateHash     string    `json:"candidate_hash,omitempty"`
+	CandidateCount    int       `json:"candidate_count"`
+	CandidateAttempts int       `json:"candidate_attempts"`
+	// IncompleteCandidateAttempts counts successful scan records that could
+	// not provide complete host coverage while a baseline is being learned.
+	// It is intentionally separate from CandidateAttempts so a sparse or
+	// unreachable target cannot make the convergence counter appear healthy.
+	IncompleteCandidateAttempts int                 `json:"incomplete_candidate_attempts"`
+	Pending                     map[string]Pending  `json:"pending,omitempty"`
+	Incidents                   map[string]Incident `json:"incidents,omitempty"`
 	// Suppressed contains incident keys whose next successful scan should be
 	// ignored. Values are remaining successful scans; the UI currently uses one
 	// scan, while keeping the counter makes the state forward-compatible.
@@ -361,16 +366,39 @@ func MarshalBoundedEvent(event Event, max int) (Event, []byte, error) {
 		return event, payload, nil
 	}
 	// A caller could supply an arbitrarily large message even without changes.
-	// Trim it by runes so the fallback remains valid UTF-8 and retain enough
-	// metadata to diagnose the overflow.
-	runes := []rune(event.Message)
-	for len(payload) > max && len(runes) > 0 {
-		runes = runes[:len(runes)-1]
-		event.Message = string(runes)
-		payload, err = json.Marshal(event)
-		if err != nil {
-			return event, nil, err
+	// Compute the JSON string budget once, then walk the UTF-8 runes exactly
+	// once. Encoding each rune independently gives the same escaping length as
+	// encoding the complete string, while avoiding the quadratic remarshal loop
+	// that used to dominate finalization for sparse ranges.
+	emptyMessage := event.Message
+	event.Message = ""
+	basePayload, marshalErr := json.Marshal(event)
+	if marshalErr != nil {
+		return event, nil, marshalErr
+	}
+	budget := max - len(basePayload)
+	if budget < 0 {
+		return event, nil, fmt.Errorf("event payload exceeds %d bytes", max)
+	}
+	var message strings.Builder
+	message.Grow(min(len(emptyMessage), budget))
+	used := 0
+	for _, r := range emptyMessage {
+		encodedRune, runeErr := json.Marshal(string(r))
+		if runeErr != nil {
+			return event, nil, runeErr
 		}
+		runeBytes := len(encodedRune) - 2 // remove the enclosing JSON quotes
+		if used+runeBytes > budget {
+			break
+		}
+		message.WriteRune(r)
+		used += runeBytes
+	}
+	event.Message = message.String()
+	payload, err = json.Marshal(event)
+	if err != nil {
+		return event, nil, err
 	}
 	if len(payload) <= max {
 		return event, payload, nil

@@ -339,11 +339,13 @@ export function JobDetail() {
       <div className="detail-summary">
         <div className="summary-card">
           <span className="summary-label">Baseline</span>
-          <strong>{value.baseline.status === 'complete' ? 'Ready' : 'Learning'}</strong>
+          <strong>{value.baseline.status === 'complete' ? 'Ready' : value.baseline.status === 'stalled' ? 'Stalled' : 'Learning'}</strong>
           <span className="muted">
             {value.baseline.status === 'complete'
               ? `Established from ${value.baseline.scan_id?.slice(0, 8) ?? 'scan'}`
-              : `${value.baseline.samples ?? 0} of ${value.job.baseline_samples} samples`}
+              : value.baseline.status === 'stalled'
+                ? `${value.baseline.incomplete_attempts ?? 0} incomplete scans; coverage is blocking baseline learning`
+                : `${value.baseline.samples ?? 0} of ${value.job.baseline_samples} samples`}
           </span>
         </div>
         <div className="summary-card">
@@ -389,6 +391,14 @@ export function JobDetail() {
                   <span className="muted">
                     New changes will be confirmed after {value.job.change_confirmations} matching scan{value.job.change_confirmations === 1 ? '' : 's'}.
                   </span>
+                </div>
+              </>
+            ) : value.baseline.status === 'stalled' ? (
+              <>
+                <TimerReset className="amber-icon" size={22} />
+                <div>
+                  <strong>Baseline learning is stalled</strong>
+                  <span className="muted">{value.baseline.incomplete_attempts ?? 0} scans have incomplete host coverage. Resolve discovery or target reachability before a baseline can be established.</span>
                 </div>
               </>
             ) : (

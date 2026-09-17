@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, createUser, issueUserActivation, listUsers, revokeUserActivation, updateUser } from '../api'
 import { renderWithProviders } from '../test/test-utils'
@@ -30,8 +30,9 @@ describe('user administration', () => {
     fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'operator' } })
     fireEvent.change(screen.getByLabelText('Display name'), { target: { value: 'Operator' } })
     fireEvent.change(screen.getByLabelText('Role'), { target: { value: 'operator' } })
+    fireEvent.change(screen.getByLabelText(/^Administrator password/), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create activation link' }))
-    await waitFor(() => expect(createUser).toHaveBeenCalledWith('operator', 'Operator', 'operator'))
+    await waitFor(() => expect(createUser).toHaveBeenCalledWith('operator', 'Operator', 'operator', 'administrator-password'))
     expect(screen.getByText('token-123')).toBeInTheDocument()
     expect(screen.getByText(/Created operator/)).toBeInTheDocument()
   })
@@ -40,22 +41,30 @@ describe('user administration', () => {
     renderWithProviders(<Users />)
     await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Disable' }))
-    await waitFor(() => expect(updateUser).toHaveBeenCalledWith('user-2', { enabled: false, revision: 4 }))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(updateUser).toHaveBeenCalledWith('user-2', { enabled: false, revision: 4, password: 'administrator-password' }))
     expect(screen.getByText('operator disabled.')).toBeInTheDocument()
 
     vi.mocked(updateUser).mockRejectedValueOnce(new APIError('stale', 'conflict', { current: { ...user, revision: 5 } }))
     fireEvent.click(screen.getByRole('button', { name: 'Disable' }))
-    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('changed in another session'))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(within(screen.getByRole('dialog')).getByRole('alert')).toHaveTextContent('changed in another session'))
   })
 
   it('renews and revokes pending activation links', async () => {
     renderWithProviders(<Users />)
     await waitFor(() => expect(screen.getByRole('button', { name: 'Renew activation' })).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Renew activation' }))
-    await waitFor(() => expect(issueUserActivation).toHaveBeenCalledWith('user-3'))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(issueUserActivation).toHaveBeenCalledWith('user-3', 'administrator-password'))
     expect(screen.getByText('renewed-token')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Revoke link' }))
-    await waitFor(() => expect(revokeUserActivation).toHaveBeenCalledWith('user-3'))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(revokeUserActivation).toHaveBeenCalledWith('user-3', 'administrator-password'))
     expect(screen.getByText('The outstanding activation link was revoked.')).toBeInTheDocument()
   })
 

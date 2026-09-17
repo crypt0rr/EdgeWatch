@@ -656,6 +656,7 @@ func (s *Store) Approve(ctx context.Context, job string, scan model.Scan) ([]mod
 		state.CandidateHash = ""
 		state.CandidateCount = 0
 		state.CandidateAttempts = 0
+		state.IncompleteCandidateAttempts = 0
 		state.Pending = map[string]model.Pending{}
 		state.Incidents = map[string]model.Incident{}
 		state.Suppressed = map[string]int{}
@@ -674,6 +675,7 @@ func (s *Store) ResetBaseline(ctx context.Context, job string) ([]model.Event, e
 		state.CandidateHash = ""
 		state.CandidateCount = 0
 		state.CandidateAttempts = 0
+		state.IncompleteCandidateAttempts = 0
 		state.Pending = map[string]model.Pending{}
 		state.Incidents = map[string]model.Incident{}
 		state.Suppressed = map[string]int{}

@@ -360,6 +360,12 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 	for _, scope := range groupScopes {
 		group := append([]string(nil), groups[scope]...)
 		ports := portsByGroup[scope]
+		// A discovered port is not a closed result until Nmap confirms it. Drop
+		// the optimistic empty units before enrichment so an omitted/failed Nmap
+		// response cannot be persisted as a false all-closed observation.
+		for _, address := range group {
+			delete(confirmedUnits, address)
+		}
 		pc := *job.TCP
 		pc.Engine = config.EngineNmap
 		pc.Ports = scope
@@ -392,10 +398,30 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 			}
 			reportProgress(report, Progress{StartedAt: started, Phase: "nmap enrichment", Protocol: "tcp", TotalProbes: discoveryTotal, CompletedProbes: discoveryTotal, ProcessAlive: update.Alive, ProcessProgressPercent: int(update.Fraction * 100), LastOutput: update.Output, UnitAddresses: len(group), UnitPorts: pc.Ports, DiscoveryPortsFound: portsFound, DiscoveryAddresses: addressesFound, DiscoveryDurationMS: discoveryDuration, EnrichmentDurationMS: time.Since(enrichmentStarted).Milliseconds()})
 		})
+		// A successful Nmap process can still omit an address when host
+		// discovery reports it down. That is incomplete enrichment, not an
+		// authoritative all-closed result. Convert the omission into the same
+		// failure path as a process error so the caller cannot promote it into
+		// a baseline or incident comparison.
+		missingAddresses := missingNmapAddresses(result, group)
+		if err == nil && len(missingAddresses) > 0 {
+			err = fmt.Errorf("nmap enrichment omitted expected address(s): %s", strings.Join(missingAddresses, ", "))
+		}
 		if err != nil {
 			// Preserve all discovery and any partial Nmap host evidence. The
 			// enclosing scan is marked failed, so these Units cannot affect a
 			// baseline, while the persisted snapshot remains useful for diagnosis.
+			for _, unit := range result.Units {
+				address := normalizeAddress(unit.Target)
+				if address == "" {
+					continue
+				}
+				unit.Target = address
+				confirmedUnits[address] = unit
+			}
+			for address, host := range result.Hosts {
+				mergeHostObservationMap(discoveryHosts, address, host)
+			}
 			for address, unit := range confirmedUnits {
 				if unit.Target == "" {
 					unit.Target = address
@@ -416,7 +442,13 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 					}
 				}
 			}
-			snapshot.Hosts = mapHosts(materializeNaabuDiscoveryHosts(targets, addresses, discovered, discoveryHosts, options, job))
+			hosts := materializeNaabuDiscoveryHosts(targets, addresses, discovered, discoveryHosts, options, job)
+			for _, address := range failedNmapAddresses(missingAddresses, group) {
+				failedHost := hosts[address]
+				markNaabuEnrichmentFailure(&failedHost, ports)
+				hosts[address] = failedHost
+			}
+			snapshot.Hosts = mapHosts(hosts)
 			snapshot.Normalize()
 			return snapshot, fmt.Errorf("nmap enrichment for %s: %w", strings.Join(group, ","), err)
 		}
@@ -449,9 +481,13 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 			continue
 		}
 		for _, address := range target.Addresses {
-			unit := confirmedUnits[address]
-			unit.Target = address
-			snapshot.Units = append(snapshot.Units, unit)
+			// Addresses whose enrichment was omitted are intentionally absent.
+			// Appending a zero Unit here would make a failed Nmap confirmation look
+			// like an authoritative all-closed result.
+			if unit, ok := confirmedUnits[address]; ok {
+				unit.Target = address
+				snapshot.Units = append(snapshot.Units, unit)
+			}
 		}
 	}
 	for address, host := range discoveryHosts {
@@ -478,6 +514,37 @@ func unitsForAddresses(units map[string]model.Unit, addresses []string) map[stri
 		}
 	}
 	return scoped
+}
+
+// missingNmapAddresses identifies effective addresses that did not produce an
+// authoritative Nmap Unit. A host observation alone is not sufficient: down,
+// timed-out, and omitted hosts are deliberately represented without a Unit so
+// they cannot be mistaken for closed ports.
+func missingNmapAddresses(result protocolScanResult, expected []string) []string {
+	present := make(map[string]struct{}, len(result.Units))
+	for _, unit := range result.Units {
+		if address := normalizeAddress(unit.Target); address != "" {
+			present[address] = struct{}{}
+		}
+	}
+	missing := make([]string, 0)
+	for _, address := range expected {
+		if _, ok := present[address]; !ok {
+			missing = append(missing, address)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+func failedNmapAddresses(missing, expected []string) []string {
+	if len(missing) > 0 {
+		return missing
+	}
+	// A process, parse, or output failure without any address-level result
+	// leaves the whole invocation untrusted. Mark every address incomplete so
+	// diagnostics are explicit even when the child emitted no usable XML.
+	return expected
 }
 
 // materializeNaabuDiscoveryHosts turns the positive JSONL records collected
@@ -928,6 +995,35 @@ func markNaabuDisagreements(host *model.HostObservation, discovered []int) {
 			if !confirmed[port] {
 				host.Protocols[index].UnconfirmedPorts = append(host.Protocols[index].UnconfirmedPorts, model.PortObservation{Port: port, State: "unconfirmed", Reason: "nmap-disagreement", Verification: "unconfirmed"})
 			}
+		}
+	}
+}
+
+// markNaabuEnrichmentFailure keeps a discovery-only host visibly incomplete
+// when the confirming Nmap invocation fails. Naabu discoveries remain useful
+// diagnostics, but every discovered port is explicitly unconfirmed so a
+// failed enrichment can never look like authoritative closed-state evidence.
+func markNaabuEnrichmentFailure(host *model.HostObservation, discovered []int) {
+	if host == nil {
+		return
+	}
+	host.Status = "unknown"
+	host.StatusReason = "nmap-enrichment-failed"
+	for index := range host.Protocols {
+		protocol := &host.Protocols[index]
+		if !strings.EqualFold(protocol.Protocol, "tcp") || !strings.EqualFold(protocol.DiscoveryEngine, "naabu") {
+			continue
+		}
+		seen := make(map[int]struct{}, len(protocol.UnconfirmedPorts))
+		for _, port := range protocol.UnconfirmedPorts {
+			seen[port.Port] = struct{}{}
+		}
+		for _, port := range discovered {
+			if _, exists := seen[port]; exists {
+				continue
+			}
+			protocol.UnconfirmedPorts = append(protocol.UnconfirmedPorts, model.PortObservation{Port: port, State: "unconfirmed", Reason: "nmap-enrichment-failed", Verification: "unconfirmed"})
+			addStateSummary(protocol, "unconfirmed", "nmap-enrichment-failed", 1)
 		}
 	}
 }

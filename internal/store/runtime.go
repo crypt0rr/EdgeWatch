@@ -104,22 +104,23 @@ func (s *Store) RuntimeBaselineInfo(ctx context.Context, jobID string) (RuntimeB
 // snapshots merely to render counters and host_count. Detailed state remains
 // available through RuntimeState for mutation and detail endpoints.
 type RuntimeStateSummary struct {
-	HasBaseline        bool
-	BaselineScanID     string
-	BaselineConfigHash string
-	BaselineModified   bool
-	CandidateCount     int
-	CandidateAttempts  int
-	IncidentCount      int
-	PendingCount       int
-	BaselineHostCount  int
+	HasBaseline                 bool
+	BaselineScanID              string
+	BaselineConfigHash          string
+	BaselineModified            bool
+	CandidateCount              int
+	CandidateAttempts           int
+	IncompleteCandidateAttempts int
+	IncidentCount               int
+	PendingCount                int
+	BaselineHostCount           int
 }
 
 func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeStateSummary, error) {
 	var summary RuntimeStateSummary
 	var baselineType sql.NullString
 	var scanID, configHash sql.NullString
-	var modified, candidateCount, candidateAttempts, incidentCount, pendingCount, hostArrayCount, unitAddressCount sql.NullInt64
+	var modified, candidateCount, candidateAttempts, incompleteCandidateAttempts, incidentCount, pendingCount, hostArrayCount, unitAddressCount sql.NullInt64
 	err := s.reader().QueryRowContext(ctx, `SELECT
  json_type(state_json,'$.baseline'),
  json_extract(state_json,'$.baseline_scan_id'),
@@ -127,13 +128,14 @@ func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeS
  COALESCE(json_extract(state_json,'$.baseline_modified'),0),
  COALESCE(json_extract(state_json,'$.candidate_count'),0),
  COALESCE(json_extract(state_json,'$.candidate_attempts'),0),
+ COALESCE(json_extract(state_json,'$.incomplete_candidate_attempts'),0),
  COALESCE((SELECT COUNT(*) FROM json_each(state_json,'$.incidents')),0),
  COALESCE((SELECT COUNT(*) FROM json_each(state_json,'$.pending')),0),
  COALESCE(json_array_length(state_json,'$.baseline.hosts'),-1),
  COALESCE((SELECT COUNT(DISTINCT addresses.value)
    FROM json_each(state_json,'$.baseline.units') AS units
    JOIN json_each(units.value,'$.addresses') AS addresses),0)
- FROM job_runtime WHERE job_id=?`, jobID).Scan(&baselineType, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incidentCount, &pendingCount, &hostArrayCount, &unitAddressCount)
+	 FROM job_runtime WHERE job_id=?`, jobID).Scan(&baselineType, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incompleteCandidateAttempts, &incidentCount, &pendingCount, &hostArrayCount, &unitAddressCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return summary, nil
 	}
@@ -145,6 +147,7 @@ func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeS
 	summary.BaselineModified = modified.Int64 != 0
 	summary.CandidateCount = int(candidateCount.Int64)
 	summary.CandidateAttempts = int(candidateAttempts.Int64)
+	summary.IncompleteCandidateAttempts = int(incompleteCandidateAttempts.Int64)
 	summary.IncidentCount = int(incidentCount.Int64)
 	summary.PendingCount = int(pendingCount.Int64)
 	// A detailed baseline may be represented by an indexed source scan. The
@@ -641,6 +644,7 @@ func (s *Store) resetRuntimeWithAudits(ctx context.Context, jobID, name string, 
 		state.CandidateHash = ""
 		state.CandidateCount = 0
 		state.CandidateAttempts = 0
+		state.IncompleteCandidateAttempts = 0
 		state.Pending = map[string]model.Pending{}
 		state.Incidents = map[string]model.Incident{}
 		state.Suppressed = map[string]int{}
@@ -705,6 +709,7 @@ func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string
 		state.CandidateHash = ""
 		state.CandidateCount = 0
 		state.CandidateAttempts = 0
+		state.IncompleteCandidateAttempts = 0
 		state.Pending = map[string]model.Pending{}
 		state.Incidents = map[string]model.Incident{}
 		state.Suppressed = map[string]int{}

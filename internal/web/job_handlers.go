@@ -208,7 +208,7 @@ func fromConfig(j config.Job) jobPayload {
 }
 
 func baselineJSON(state model.JobState, currentHash string) map[string]any {
-	summary := store.RuntimeStateSummary{HasBaseline: state.Baseline != nil, BaselineScanID: state.BaselineScanID, BaselineConfigHash: state.BaselineConfigHash, BaselineModified: state.BaselineModified, CandidateCount: state.CandidateCount, CandidateAttempts: state.CandidateAttempts, IncidentCount: len(state.Incidents), PendingCount: len(state.Pending)}
+	summary := store.RuntimeStateSummary{HasBaseline: state.Baseline != nil, BaselineScanID: state.BaselineScanID, BaselineConfigHash: state.BaselineConfigHash, BaselineModified: state.BaselineModified, CandidateCount: state.CandidateCount, CandidateAttempts: state.CandidateAttempts, IncompleteCandidateAttempts: state.IncompleteCandidateAttempts, IncidentCount: len(state.Incidents), PendingCount: len(state.Pending)}
 	if state.Baseline != nil {
 		summary.BaselineHostCount = len(state.Baseline.Hosts)
 		if summary.BaselineHostCount == 0 && len(state.Baseline.Units) > 0 {
@@ -222,13 +222,17 @@ func baselineJSON(state model.JobState, currentHash string) map[string]any {
 
 func baselineJSONFromSummary(summary store.RuntimeStateSummary, currentHash string) map[string]any {
 	if !summary.HasBaseline {
-		return map[string]any{"status": "collecting", "samples": summary.CandidateCount, "attempts": summary.CandidateAttempts}
+		status := "collecting"
+		if summary.IncompleteCandidateAttempts >= 3 {
+			status = "stalled"
+		}
+		return map[string]any{"status": status, "samples": summary.CandidateCount, "attempts": summary.CandidateAttempts, "incomplete_attempts": summary.IncompleteCandidateAttempts}
 	}
 	status := "complete"
 	if currentHash != "" && summary.BaselineConfigHash != "" && summary.BaselineConfigHash != currentHash {
 		status = "updating"
 	}
-	return map[string]any{"status": status, "scan_id": summary.BaselineScanID, "config_hash": summary.BaselineConfigHash, "samples": summary.CandidateCount, "attempts": summary.CandidateAttempts, "incidents": summary.IncidentCount, "pending": summary.PendingCount, "host_count": summary.BaselineHostCount}
+	return map[string]any{"status": status, "scan_id": summary.BaselineScanID, "config_hash": summary.BaselineConfigHash, "samples": summary.CandidateCount, "attempts": summary.CandidateAttempts, "incomplete_attempts": summary.IncompleteCandidateAttempts, "incidents": summary.IncidentCount, "pending": summary.PendingCount, "host_count": summary.BaselineHostCount}
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {

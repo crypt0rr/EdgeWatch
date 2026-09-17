@@ -496,6 +496,122 @@ func (s *Store) CreateSessionForUserWithAuditEntry(ctx context.Context, userID, 
 	return tx.Commit()
 }
 
+// CreateSessionForUserIfCurrent creates a session only when the credential
+// material that was verified by the authentication layer is still current.
+// The comparison and insert share one transaction so a password, TOTP, or
+// enabled-state change cannot race a successful login and leave a stale
+// session behind.
+func (s *Store) CreateSessionForUserIfCurrent(ctx context.Context, userID, expectedPasswordHash string, expectedRevision int64, expectedTOTPEnabled bool, idHash, csrf string, created, expires time.Time, audit AuditEntry) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var passwordHash string
+	var totpEnabled, enabled int
+	var revision int64
+	err = tx.QueryRowContext(ctx, `SELECT password_hash,totp_enabled,enabled,revision FROM users WHERE id=?`, userID).Scan(&passwordHash, &totpEnabled, &enabled, &revision)
+	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(strings.ToLower(err.Error()), "no such table")) {
+		// Very old databases (and compatibility fixtures) may only have the
+		// legacy administrator row. Keep that account able to sign in while the
+		// normal migration path restores the authoritative users row.
+		if userID != LegacyAdminUserID {
+			return ErrSessionCredentialsChanged
+		}
+		err = tx.QueryRowContext(ctx, `SELECT password_hash,totp_enabled FROM admins WHERE id=1`).Scan(&passwordHash, &totpEnabled)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrSessionCredentialsChanged
+		}
+		if err != nil {
+			return err
+		}
+		enabled, revision = 1, 0
+	} else if err != nil {
+		return err
+	}
+	if enabled == 0 || revision != expectedRevision || passwordHash != expectedPasswordHash || (totpEnabled != 0) != expectedTOTPEnabled {
+		return ErrSessionCredentialsChanged
+	}
+	stamp := created.UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, stamp, stamp, expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
+		return err
+	}
+	if audit.Action != "" {
+		if err := insertAuditEntryExec(ctx, tx, audit, created.UTC()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// CreateSessionForUserWithPasswordUpgradeIfCurrent atomically upgrades a
+// verified legacy password and creates its session only when every credential
+// revision still matches the values read before Argon2id verification.
+func (s *Store) CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx context.Context, userID, previousHash, upgradedHash string, expectedRevision int64, expectedTOTPEnabled bool, idHash, csrf string, created, expires time.Time, audit AuditEntry) error {
+	if strings.TrimSpace(upgradedHash) == "" {
+		return errors.New("upgraded password hash is required")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stamp := created.UTC().Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,last_login_at=?,updated_at=?,revision=revision+1 WHERE id=? AND password_hash=? AND revision=? AND totp_enabled=? AND enabled=1`, upgradedHash, stamp, stamp, userID, previousHash, expectedRevision, boolInt(expectedTOTPEnabled))
+	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+		return err
+	}
+	if err == nil {
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			// A partially migrated legacy database can have the users table but
+			// still keep the administrator only in the compatibility row. Fall
+			// back only when the authoritative row is genuinely absent; a
+			// present-but-mismatched row must fail closed and may not be bypassed
+			// by the legacy credential.
+			var present int
+			lookupErr := tx.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id=?`, userID).Scan(&present)
+			if userID != LegacyAdminUserID || !errors.Is(lookupErr, sql.ErrNoRows) {
+				return ErrSessionCredentialsChanged
+			}
+			legacyResult, legacyErr := tx.ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at=? WHERE id=1 AND password_hash=? AND totp_enabled=?`, upgradedHash, stamp, previousHash, boolInt(expectedTOTPEnabled))
+			if legacyErr != nil {
+				return legacyErr
+			}
+			if legacyAffected, _ := legacyResult.RowsAffected(); legacyAffected != 1 {
+				return ErrSessionCredentialsChanged
+			}
+		}
+		if userID == LegacyAdminUserID {
+			if _, err := tx.ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at=? WHERE id=1 AND password_hash=?`, upgradedHash, stamp, previousHash); err != nil {
+				return err
+			}
+		}
+	} else {
+		// Compatibility path for a pre-users schema. The legacy administrator
+		// has no revision or enabled columns, so the password hash is the
+		// conditional credential marker in this fallback.
+		if userID != LegacyAdminUserID {
+			return ErrSessionCredentialsChanged
+		}
+		legacyResult, legacyErr := tx.ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at=? WHERE id=1 AND password_hash=? AND totp_enabled=?`, upgradedHash, stamp, previousHash, boolInt(expectedTOTPEnabled))
+		if legacyErr != nil {
+			return legacyErr
+		}
+		if affected, _ := legacyResult.RowsAffected(); affected != 1 {
+			return ErrSessionCredentialsChanged
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, stamp, stamp, expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
+		return err
+	}
+	if audit.Action != "" {
+		if err := insertAuditEntryExec(ctx, tx, audit, created.UTC()); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // CreateSessionForUserWithPasswordUpgrade atomically upgrades a verified
 // password hash with the login session and its audit record. The conditional
 // update protects against overwriting a password changed concurrently while

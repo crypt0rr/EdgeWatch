@@ -194,6 +194,44 @@ func TestNaabuPipelineKeepsDiscoveryEvidenceOutOfUnits(t *testing.T) {
 	}
 }
 
+func TestNaabuPipelineRejectsOmittedNmapConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	naabuPath := filepath.Join(dir, "naabu")
+	if err := os.WriteFile(naabuPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nmapPath := filepath.Join(dir, "nmap")
+	// A successful run with no host records models host discovery omitting the
+	// expected address. The discovered port must remain diagnostic only; it
+	// must never be converted into an authoritative closed/empty Unit.
+	noHostXML := `<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/></runstats></nmaprun>`
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s' '"+noHostXML+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := NewWithNaabu(nmapPath, naabuPath)
+	job := config.NormalizeJob(config.Job{
+		Name: "omitted-confirmation", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Mode: "syn", ServiceDetection: true, Naabu: &config.NaabuOptions{ScanType: "connect", Verify: true}},
+	})
+	snapshot, err := n.Scan(context.Background(), job)
+	if err == nil || !strings.Contains(err.Error(), "nmap enrichment omitted expected address") {
+		t.Fatalf("omitted Nmap confirmation error = %v", err)
+	}
+	if len(snapshot.Units) != 0 {
+		t.Fatalf("omitted confirmation produced authoritative units: %#v", snapshot.Units)
+	}
+	if len(snapshot.Hosts) != 1 {
+		t.Fatalf("omitted confirmation host evidence = %#v", snapshot.Hosts)
+	}
+	host := snapshot.Hosts[0]
+	if host.Status != "unknown" || host.StatusReason != "nmap-enrichment-failed" {
+		t.Fatalf("omitted confirmation host status = %q/%q", host.Status, host.StatusReason)
+	}
+	if len(host.Protocols) != 1 || len(host.Protocols[0].UnconfirmedPorts) != 1 || host.Protocols[0].UnconfirmedPorts[0].Port != 22 {
+		t.Fatalf("discovered port was not retained as unconfirmed evidence: %#v", host.Protocols)
+	}
+}
+
 func TestNaabuPipelinePreservesDistinctDNSConfirmationPorts(t *testing.T) {
 	dir := t.TempDir()
 	naabuPath := filepath.Join(dir, "naabu")

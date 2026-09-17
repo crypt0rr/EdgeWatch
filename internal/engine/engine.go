@@ -100,6 +100,7 @@ func processSuccessWithChanges(state *model.JobState, job config.Job, scan model
 		// deferred until a later scan observes every address again.
 		return processIncompleteSuccess(state, job, scan)
 	}
+	state.IncompleteCandidateAttempts = 0
 	state.ConsecutiveFailures = 0
 	state.LastFailureAlert = 0
 	now := scan.FinishedAt
@@ -119,8 +120,20 @@ func processSuccessWithChanges(state *model.JobState, job config.Job, scan model
 	if totalLoss, event := guardTotalLoss(state, scan); totalLoss {
 		return event, nil, nil
 	}
-	learnMissingFingerprints(state, scan.Snapshot, job.Baseline.Samples)
+	learningServices := learnMissingFingerprints(state, scan.Snapshot, job.Baseline.Samples)
 	changes := Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+	if len(learningServices) > 0 {
+		filtered := changes[:0]
+		for _, change := range changes {
+			if change.Kind == "service" {
+				if _, learning := learningServices[change.Key]; learning {
+					continue
+				}
+			}
+			filtered = append(filtered, change)
+		}
+		changes = filtered
+	}
 	events := applyChanges(state, job.Name, scan.ID, changes, job.Change.Confirmations, now)
 	if state.BaselineConfigHash != scan.ConfigHash {
 		candidateEvents := advanceCandidate(state, scan, job.Baseline.Samples, true)
@@ -133,7 +146,13 @@ func processSuccessWithChanges(state *model.JobState, job config.Job, scan model
 // scan. It deliberately leaves baseline candidates, fingerprint learning, and
 // failure counters untouched: an incomplete result is useful for detecting a
 // reachable addition, but cannot establish expected state from missing data.
+// While no baseline exists, a separate counter records repeated incomplete
+// attempts so the UI can surface a stalled learning state without pretending
+// that partial evidence is safe to establish as expected state.
 func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, []model.Change, error) {
+	if state.Baseline == nil {
+		state.IncompleteCandidateAttempts++
+	}
 	incompleteAddresses := incompleteHostAddresses(scan.Snapshot)
 	protectedTargets := incompleteTargets(state.Baseline, scan.Snapshot, incompleteAddresses)
 	var changes []model.Change
@@ -153,10 +172,17 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 	}
 	message := incompleteScanError(scan.Snapshot)
 	events = append(events, model.Event{Type: "scan-incomplete", Job: scan.Job, ScanID: scan.ID, Message: message, CreatedAt: scan.FinishedAt})
+	if state.Baseline == nil && state.IncompleteCandidateAttempts == BaselineStallThreshold {
+		events = append(events, model.Event{Type: "baseline-stalled", Job: scan.Job, ScanID: scan.ID, Message: fmt.Sprintf("Baseline learning is stalled after %d incomplete scans", state.IncompleteCandidateAttempts), CreatedAt: scan.FinishedAt})
+	}
 	return events, changes, nil
 }
 
 const totalLossConfirmationScans = 2
+
+// BaselineStallThreshold bounds the number of incomplete attempts before the
+// operator is warned that baseline learning cannot converge.
+const BaselineStallThreshold = 3
 
 // guardTotalLoss returns a scan-level anomaly event while a zero-positive
 // result is awaiting one matching confirmation. Once the confirmation count
@@ -225,6 +251,10 @@ func incompleteScanError(snapshot model.Snapshot) string {
 	addresses := incompleteHostAddresses(snapshot)
 	if len(addresses) == 0 {
 		return "Scan incomplete: host discovery did not complete"
+	}
+	const previewLimit = 8
+	if len(addresses) > previewLimit {
+		return fmt.Sprintf("Scan incomplete: host discovery did not complete for %s (+%d more)", strings.Join(addresses[:previewLimit], ", "), len(addresses)-previewLimit)
 	}
 	return "Scan incomplete: host discovery did not complete for " + strings.Join(addresses, ", ")
 }
@@ -347,6 +377,7 @@ func advanceCandidate(state *model.JobState, scan model.Scan, required int, merg
 		state.CandidateHash = ""
 		state.CandidateCount = 0
 		state.CandidateAttempts = 0
+		state.IncompleteCandidateAttempts = 0
 		typeName := "baseline-complete"
 		message := "Baseline established"
 		if merge {
@@ -356,8 +387,8 @@ func advanceCandidate(state *model.JobState, scan model.Scan, required int, merg
 		return []model.Event{{Type: typeName, Job: scan.Job, ScanID: scan.ID, Message: message, CreatedAt: scan.FinishedAt}}
 	}
 	stallAt := required * 3
-	if stallAt < 3 {
-		stallAt = 3
+	if stallAt < BaselineStallThreshold {
+		stallAt = BaselineStallThreshold
 	}
 	if state.CandidateAttempts == stallAt {
 		return []model.Event{{Type: "baseline-stalled", Job: scan.Job, ScanID: scan.ID, Message: fmt.Sprintf("Baseline has not converged after %d scans", state.CandidateAttempts), CreatedAt: scan.FinishedAt}}
@@ -407,9 +438,10 @@ func withStableFingerprints(snapshot model.Snapshot, candidates map[string]model
 	return snapshot
 }
 
-func learnMissingFingerprints(state *model.JobState, current model.Snapshot, required int) {
+func learnMissingFingerprints(state *model.JobState, current model.Snapshot, required int) map[string]struct{} {
+	learning := map[string]struct{}{}
 	if state.Baseline == nil {
-		return
+		return learning
 	}
 	seen := map[string]bool{}
 	for _, unit := range current.Units {
@@ -433,6 +465,8 @@ func learnMissingFingerprints(state *model.JobState, current model.Snapshot, req
 				// runtime baseline until a later scan establishes a new source.
 				state.BaselineModified = true
 				delete(state.FingerprintCandidates, key)
+			} else {
+				learning[key] = struct{}{}
 			}
 		}
 	}
@@ -441,6 +475,7 @@ func learnMissingFingerprints(state *model.JobState, current model.Snapshot, req
 			delete(state.FingerprintCandidates, key)
 		}
 	}
+	return learning
 }
 
 func baselineService(snapshot model.Snapshot, target, protocol string, port int) string {

@@ -33,6 +33,11 @@ var (
 	// upgrade race. The caller may safely re-read and verify the current hash;
 	// it must not report a valid password as a generic storage failure.
 	ErrPasswordChangedDuringLogin = errors.New("password changed during login")
+	// ErrSessionCredentialsChanged indicates that credentials verified before
+	// session creation no longer match the authoritative user row. Callers
+	// must re-read and re-verify before retrying; a stale session is never
+	// created.
+	ErrSessionCredentialsChanged = errors.New("session credentials changed during login")
 )
 
 func defaultAuthKeyPath(database string) string {

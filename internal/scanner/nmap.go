@@ -509,7 +509,15 @@ func incrementIP(ip net.IP) {
 }
 
 func (n *Nmap) scanProtocol(ctx context.Context, target resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool) ([]model.Unit, error) {
-	return n.scanProtocolBatch(ctx, []resolvedTarget{target}, protocol, pc, timing, assumeAlive)
+	result, err := n.scanProtocolBatchDetailedProgress(ctx, []resolvedTarget{target}, protocol, pc, timing, assumeAlive, nil)
+	if err == nil && len(result.Units) == 0 && len(result.Hosts) > 0 {
+		// Keep the narrow legacy helper's contract for callers that request a
+		// single protocol directly. The production Scan/ScanWorkUnit paths use
+		// the detailed result and treat an all-down host as a successful,
+		// explicitly incomplete observation so resumable cycles can advance.
+		return result.Units, fmt.Errorf("nmap output omitted expected address(s): %s", strings.Join(unreachableAddresses(result.Hosts), ", "))
+	}
+	return result.Units, err
 }
 
 func (n *Nmap) scanProtocolBatch(ctx context.Context, targets []resolvedTarget, protocol string, pc config.Protocol, timing string, assumeAlive bool) ([]model.Unit, error) {
@@ -568,7 +576,6 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 	}
 	all := map[string]model.Unit{}
 	allHosts := map[string]model.HostObservation{}
-	observedAnyHost := false
 	batchLimit := nmapBatchSize
 	// {address} is deliberately singular. A custom profile that uses it is
 	// still safe for a multi-address target set, but each invocation must carry
@@ -639,9 +646,6 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			if parsed.Exit != "success" {
 				return protocolScanResult{Units: unitsFromMap(all), Hosts: allHosts}, fmt.Errorf("nmap run incomplete: %s", parsed.Exit)
 			}
-			if len(parsed.Units) > 0 || len(parsed.Hosts) > 0 {
-				observedAnyHost = true
-			}
 			// A successful XML response with no host records is not a usable
 			// result. Keep this hard failure for a completely empty invocation,
 			// while allowing mixed responses to commit the addresses Nmap did
@@ -659,8 +663,9 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			}
 			if !hasExpectedHost {
 				// Preserve an explicit observation for every omitted address and
-				// continue remaining batches. The final check below only rejects an
-				// invocation that produced no host records at all.
+				// continue remaining batches. A completely omitted invocation is
+				// therefore represented as incomplete evidence rather than as closed
+				// ports; callers decide whether that makes the overall scan partial.
 				for _, address := range batch {
 					mergeHostObservationMap(allHosts, address, unreachableHostObservation(address, protocol, pc, "nmap-omitted"))
 				}
@@ -739,12 +744,18 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 		dedupeHostObservation(&host)
 		allHosts[address] = host
 	}
-	result := protocolScanResult{Units: units, Hosts: allHosts}
-	if !observedAnyHost {
-		incomplete := incompleteHostAddresses(model.Snapshot{Hosts: mapsToHosts(allHosts)})
-		return result, fmt.Errorf("nmap output omitted expected address(s): %s", strings.Join(incomplete, ", "))
+	return protocolScanResult{Units: units, Hosts: allHosts}, nil
+}
+
+func unreachableAddresses(hosts map[string]model.HostObservation) []string {
+	addresses := make([]string, 0, len(hosts))
+	for address, host := range hosts {
+		if strings.EqualFold(strings.TrimSpace(host.Status), "unreachable") || strings.EqualFold(strings.TrimSpace(host.Status), "down") {
+			addresses = append(addresses, address)
+		}
 	}
-	return result, nil
+	sort.Strings(addresses)
+	return addresses
 }
 
 func mapsToHosts(values map[string]model.HostObservation) []model.HostObservation {

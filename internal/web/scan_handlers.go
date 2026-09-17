@@ -93,11 +93,12 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	// High-cost approval is administrator-owned. Preserve it for older clients
-	// that omit the field, and only require administrator permission when an
-	// update actually attempts to change the approval state.
+	// that omit the field until the immutable security scope is known below;
+	// any scope change then clears the approval unless an administrator
+	// explicitly re-approves it in the same update.
 	if p.AllowHighCost == nil {
 		job.AllowHighCost = current.Job.AllowHighCost
-	} else if job.AllowHighCost != current.Job.AllowHighCost && !canOverrideHighCost(session) {
+	} else if job.AllowHighCost != current.Job.AllowHighCost && job.AllowHighCost && !canOverrideHighCost(session) {
 		writeError(w, http.StatusForbidden, "high_cost_admin_required", "only administrators may change high-cost scan approval", map[string]string{"allow_high_cost": "administrator permission is required"})
 		return
 	}
@@ -112,7 +113,12 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		}
 		allowArchivedProfile = job.TCP.ProfileRevision > 0 && job.TCP.ProfileRevision == current.Job.TCP.ProfileRevision
 	}
-	if err := s.applySelectedScannerProfile(r.Context(), &job, allowArchivedProfile, auth.HasPermission(session, auth.PermissionScannerProfilesManage)); err != nil {
+	// An operator may retain the exact profile revision already pinned to this
+	// job (including an archived revision), but cannot select a historical
+	// revision as a new profile choice. Administrators may explicitly roll back
+	// to any retained revision.
+	allowHistoricalProfile := auth.HasPermission(session, auth.PermissionScannerProfilesManage) || allowArchivedProfile
+	if err := s.applySelectedScannerProfile(r.Context(), &job, allowArchivedProfile, allowHistoricalProfile); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, "profile_conflict", "scanner profile was modified; reload and select its current revision", nil)
 		} else {
@@ -134,6 +140,16 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	scopeChanged := current.Job.SecurityHash() != job.SecurityHash()
+	// High-cost approval is bound to the exact security scope that was
+	// reviewed. Any target/protocol/port/engine change invalidates the old
+	// approval. An administrator may explicitly set allow_high_cost=true in
+	// this same request to make a fresh approval; operators can never carry an
+	// approval across a scope change.
+	if scopeChanged {
+		if !canOverrideHighCost(session) || p.AllowHighCost == nil {
+			job.AllowHighCost = false
+		}
+	}
 	if active && scopeChanged {
 		writeError(w, 409, "job_active", "security-relevant settings cannot change during an active scan", nil)
 		return

@@ -338,11 +338,11 @@ func TestIncompleteScanLearningStallAndServiceFiltering(t *testing.T) {
 		t.Fatalf("empty incomplete error = %q", got)
 	}
 
-	baseline := model.Snapshot{Scopes: []model.Scope{{Target: "edge", Protocol: "tcp", Ports: "80", ServiceDetection: true}}, Units: []model.Unit{{Target: "edge", Protocol: "tcp", Ports: []model.PortState{{Port: 80, State: "open"}}}}}
+	baseline := model.Snapshot{Scopes: []model.Scope{{Target: "edge", Protocol: "tcp", Ports: "80,81", ServiceDetection: true}}, Units: []model.Unit{{Target: "edge", Protocol: "tcp", Ports: []model.PortState{{Port: 80, State: "open"}, {Port: 81, State: "closed"}}}}}
 	state = model.JobState{Baseline: &baseline, BaselineConfigHash: "same", FingerprintCandidates: map[string]model.ValueCount{}, Incidents: map[string]model.Incident{}, Pending: map[string]model.Pending{}, Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{}}
-	serviceScan := model.Scan{ID: "service-learning", Job: job.Name, ConfigHash: "same", FinishedAt: time.Now().UTC(), Snapshot: model.Snapshot{Scopes: baseline.Scopes, Units: []model.Unit{{Target: "edge", Protocol: "tcp", Ports: []model.PortState{{Port: 80, State: "open", Service: "http"}}}}}}
+	serviceScan := model.Scan{ID: "service-learning", Job: job.Name, ConfigHash: "same", FinishedAt: time.Now().UTC(), Snapshot: model.Snapshot{Scopes: baseline.Scopes, Units: []model.Unit{{Target: "edge", Protocol: "tcp", Ports: []model.PortState{{Port: 80, State: "open", Service: "http"}, {Port: 81, State: "open"}}}}}}
 	events, changes, err := processSuccessWithChanges(&state, job, serviceScan)
-	if err != nil || len(events) != 0 || len(changes) != 0 {
+	if err != nil || len(events) != 1 || len(changes) != 1 || changes[0].Port != 81 {
 		t.Fatalf("service learning result = events %#v changes %#v err %v", events, changes, err)
 	}
 }

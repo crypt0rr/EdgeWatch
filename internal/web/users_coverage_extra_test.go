@@ -248,6 +248,49 @@ func TestUserSecurityHandlersCoverOperatorAndTOTPSuccess(t *testing.T) {
 	}
 }
 
+func TestUserMutationConfirmationGuards(t *testing.T) {
+	server, _, admin := newUsersTestServer(t)
+	call := func(method, rest, body, remote string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, "/api/v1/users"+rest, strings.NewReader(body))
+		req.RemoteAddr = remote
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		server.usersRoute(rec, req, admin, strings.TrimPrefix(rest, "/"))
+		return rec
+	}
+	if rec := call(http.MethodPost, "", `{"username":"missing-confirmation"}`, "198.51.100.241:8000"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "password_required") {
+		t.Fatalf("missing create confirmation = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := call(http.MethodPost, "", `{"username":"wrong-confirmation","password":"wrong administrator password"}`, "198.51.100.242:8000"); rec.Code != http.StatusUnauthorized || !strings.Contains(rec.Body.String(), "invalid_password") {
+		t.Fatalf("wrong create confirmation = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := call(http.MethodDelete, "/missing/sessions", `{`, "198.51.100.243:8000"); rec.Code != http.StatusBadRequest {
+		t.Fatalf("malformed session revoke = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := call(http.MethodDelete, "/missing/sessions", `{}`, "198.51.100.244:8000"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "password_required") {
+		t.Fatalf("empty session revoke confirmation = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := call(http.MethodDelete, "/missing/activation", `{}`, "198.51.100.245:8000"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "password_required") {
+		t.Fatalf("empty activation revoke confirmation = %d: %s", rec.Code, rec.Body.String())
+	}
+	// Repeated invalid confirmations exercise the bounded response for the
+	// source-level password limiter without relying on the exact threshold.
+	seenRateLimit := false
+	for i := 0; i < 8; i++ {
+		rec := call(http.MethodPost, "", `{"username":"rate-limited","password":"wrong administrator password"}`, "198.51.100.246:8000")
+		if rec.Code == http.StatusTooManyRequests {
+			seenRateLimit = true
+			if !strings.Contains(rec.Body.String(), "rate_limited") || rec.Header().Get("Retry-After") != "300" {
+				t.Fatalf("rate-limited confirmation response = %d: %s", rec.Code, rec.Body.String())
+			}
+			break
+		}
+	}
+	if !seenRateLimit {
+		t.Fatal("password confirmation limiter was not reached")
+	}
+}
+
 func coverageTOTPCode(secret string, counter int64) string {
 	raw, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(strings.ToUpper(strings.TrimSpace(secret)))
 	if err != nil {

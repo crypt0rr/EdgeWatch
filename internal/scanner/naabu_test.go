@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
 func TestNaabuArgsUseFixedFullRangeAndDiscoveryPolicy(t *testing.T) {
@@ -310,6 +311,34 @@ func TestNaabuPipelineWithNoDiscoveriesCompletesFullCoverage(t *testing.T) {
 func TestNaabuResultAddressNormalization(t *testing.T) {
 	if got := normalizeAddress(net.ParseIP("2001:0db8::1").String()); got != "2001:db8::1" {
 		t.Fatalf("normalized address = %q", got)
+	}
+}
+
+func TestNaabuEnrichmentFailureMarksDiscoveryEvidenceUnconfirmed(t *testing.T) {
+	markNaabuEnrichmentFailure(nil, []int{22})
+	host := model.HostObservation{
+		Address:      "192.0.2.10",
+		Status:       "up",
+		StatusReason: "naabu",
+		Protocols: []model.ProtocolObservation{
+			{Protocol: "tcp", DiscoveryEngine: "naabu", UnconfirmedPorts: []model.PortObservation{{Port: 22, State: "unconfirmed"}}},
+			{Protocol: "udp", DiscoveryEngine: "naabu"},
+			{Protocol: "tcp", DiscoveryEngine: "nmap"},
+		},
+	}
+	markNaabuEnrichmentFailure(&host, []int{22, 80, 443})
+	if host.Status != "unknown" || host.StatusReason != "nmap-enrichment-failed" {
+		t.Fatalf("failed host status = %#v", host)
+	}
+	protocol := host.Protocols[0]
+	if len(protocol.UnconfirmedPorts) != 3 || len(protocol.StateSummaries) != 1 {
+		t.Fatalf("unconfirmed discovery evidence = %#v", protocol)
+	}
+	if protocol.UnconfirmedPorts[1].Port != 80 || protocol.UnconfirmedPorts[2].Port != 443 {
+		t.Fatalf("new unconfirmed ports = %#v", protocol.UnconfirmedPorts)
+	}
+	if got := failedNmapAddresses(nil, []string{"192.0.2.10"}); len(got) != 1 || got[0] != "192.0.2.10" {
+		t.Fatalf("failed address fallback = %#v", got)
 	}
 }
 

@@ -751,49 +751,30 @@ func hostMatches(host model.HostObservation, summary hostSummary, query, protoco
 		return true
 	}
 	query = strings.ToLower(query)
-	if strings.Contains(strings.ToLower(host.Address), query) {
-		return true
-	}
-	for _, target := range host.SourceTargets {
-		if strings.Contains(strings.ToLower(target), query) {
-			return true
-		}
-	}
-	for _, dnsName := range host.DNSNames {
-		if strings.Contains(strings.ToLower(dnsName), query) {
-			return true
-		}
-	}
+	// Keep the legacy fallback on exactly the same bounded normalized document
+	// as the indexed scan/baseline searches. This prevents the old path from
+	// accepting a field (or casing) that the normal FTS path cannot find.
+	return strings.Contains(storeHostSearchContent(host), query)
+}
+
+func storeHostSearchContent(host model.HostObservation) string {
+	var values []string
+	values = append(values, host.Address)
+	values = append(values, host.SourceTargets...)
+	values = append(values, host.DNSNames...)
 	for _, name := range host.Hostnames {
-		if strings.Contains(strings.ToLower(name.Name), query) {
-			return true
-		}
+		values = append(values, name.Name)
 	}
-	// The indexed path searches these fields through FTS. Keep the bounded
-	// legacy-compatibility path semantically equivalent when a database still
-	// contains snapshots without a host index.
-	for _, protocolItem := range host.Protocols {
-		for _, port := range protocolItem.Ports {
-			if strings.Contains(strconv.Itoa(port.Port), query) {
-				return true
-			}
-			if port.Service == nil {
-				continue
-			}
-			service := port.Service
-			for _, value := range []string{service.Name, service.Product, service.Version, service.ExtraInfo, service.OSType, service.DeviceType} {
-				if strings.Contains(strings.ToLower(value), query) {
-					return true
-				}
-			}
-			for _, cpe := range service.CPEs {
-				if strings.Contains(strings.ToLower(cpe), query) {
-					return true
-				}
+	for _, protocol := range host.Protocols {
+		for _, port := range protocol.Ports {
+			values = append(values, strconv.Itoa(port.Port))
+			if port.Service != nil {
+				values = append(values, port.Service.Name, port.Service.Product, port.Service.Version, port.Service.ExtraInfo, port.Service.OSType, port.Service.DeviceType)
+				values = append(values, port.Service.CPEs...)
 			}
 		}
 	}
-	return false
+	return strings.ToLower(strings.Join(values, " "))
 }
 
 func filterHosts(hosts []model.HostObservation, quality, query, protocol string, hasOpen *bool, offset, limit int) ([]hostSummary, int) {

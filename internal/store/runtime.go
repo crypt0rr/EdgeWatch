@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -118,10 +119,35 @@ type RuntimeStateSummary struct {
 
 func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeStateSummary, error) {
 	var summary RuntimeStateSummary
-	var baselineType sql.NullString
+	var metadataVersion int
 	var scanID, configHash sql.NullString
-	var modified, candidateCount, candidateAttempts, incompleteCandidateAttempts, incidentCount, pendingCount, hostArrayCount, unitAddressCount sql.NullInt64
-	err := s.reader().QueryRowContext(ctx, `SELECT
+	var projectionVersion sql.NullInt64
+	var modified, candidateCount, candidateAttempts, incompleteCandidateAttempts, pendingCount sql.NullInt64
+	var metaUpdated, runtimeUpdated string
+	err := s.reader().QueryRowContext(ctx, `SELECT m.metadata_version,m.projection_version,m.baseline_scan_id,m.baseline_config_hash,m.baseline_modified,m.candidate_count,m.candidate_attempts,m.incomplete_candidate_attempts,m.pending_count,m.updated_at,COALESCE(r.updated_at,'') FROM job_runtime_meta m LEFT JOIN job_runtime r ON r.job_id=m.job_id WHERE m.job_id=?`, jobID).
+		Scan(&metadataVersion, &projectionVersion, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incompleteCandidateAttempts, &pendingCount, &metaUpdated, &runtimeUpdated)
+	if err == nil && metadataVersion > 0 && (runtimeUpdated == "" || metaUpdated >= runtimeUpdated) {
+		summary.HasBaseline = projectionVersion.Int64 > 0 || (scanID.Valid && scanID.String != "")
+		summary.BaselineScanID, summary.BaselineConfigHash = scanID.String, configHash.String
+		summary.BaselineModified = modified.Int64 != 0
+		summary.CandidateCount = int(candidateCount.Int64)
+		summary.CandidateAttempts = int(candidateAttempts.Int64)
+		summary.IncompleteCandidateAttempts = int(incompleteCandidateAttempts.Int64)
+		summary.PendingCount = int(pendingCount.Int64)
+		if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents WHERE job_id=?`, jobID).Scan(&summary.IncidentCount); err != nil {
+			return summary, err
+		}
+		return s.completeRuntimeSummary(ctx, jobID, summary)
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return summary, err
+	}
+	// Compatibility fallback for databases written before migration 40 and
+	// fixtures that intentionally write only job_runtime. This path is bounded
+	// to old rows; current writes always use the scalar projection above.
+	var baselineType sql.NullString
+	var incidentCount, hostArrayCount, unitAddressCount sql.NullInt64
+	err = s.reader().QueryRowContext(ctx, `SELECT
  json_type(state_json,'$.baseline'),
  json_extract(state_json,'$.baseline_scan_id'),
  json_extract(state_json,'$.baseline_config_hash'),
@@ -172,6 +198,22 @@ func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeS
 			// Legacy baselines may only contain logical units. Count distinct
 			// effective addresses in SQLite rather than decoding the snapshot.
 			summary.BaselineHostCount = int(unitAddressCount.Int64)
+		}
+	}
+	return summary, nil
+}
+
+func (s *Store) completeRuntimeSummary(ctx context.Context, jobID string, summary RuntimeStateSummary) (RuntimeStateSummary, error) {
+	var projectedCount int
+	var projected bool
+	if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*),EXISTS(SELECT 1 FROM baseline_hosts WHERE job_id=?) FROM baseline_hosts WHERE job_id=?`, jobID, jobID).Scan(&projectedCount, &projected); err != nil {
+		return summary, err
+	}
+	if projected {
+		summary.BaselineHostCount = projectedCount
+	} else if summary.BaselineScanID != "" {
+		if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, summary.BaselineScanID).Scan(&summary.BaselineHostCount); err != nil {
+			return summary, err
 		}
 	}
 	return summary, nil
@@ -578,6 +620,9 @@ func persistRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, state model
 	if err := upsertRuntimeBaselineMetaTx(ctx, tx, jobID, state, 0, now); err != nil {
 		return nil, err
 	}
+	if err := replaceRuntimeIncidentProjectionTx(ctx, tx, jobID, state); err != nil {
+		return nil, err
+	}
 	for i := range events {
 		if events[i].JobID == "" {
 			events[i].JobID = jobID
@@ -595,11 +640,32 @@ func persistRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, state model
 }
 
 func upsertRuntimeBaselineMetaTx(ctx context.Context, tx *sql.Tx, jobID string, state model.JobState, projectionVersion int64, now time.Time) error {
-	if projectionVersion == 0 && state.BaselineModified && state.Baseline != nil {
+	if projectionVersion == 0 && state.Baseline != nil {
 		projectionVersion = 1
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET metadata_version=excluded.metadata_version,baseline_scan_id=excluded.baseline_scan_id,baseline_config_hash=excluded.baseline_config_hash,baseline_modified=excluded.baseline_modified,projection_version=excluded.projection_version,updated_at=excluded.updated_at`, jobID, 1, state.BaselineScanID, state.BaselineConfigHash, boolInt(state.BaselineModified), projectionVersion, now.Format(time.RFC3339Nano))
+	_, err := tx.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET metadata_version=excluded.metadata_version,baseline_scan_id=excluded.baseline_scan_id,baseline_config_hash=excluded.baseline_config_hash,baseline_modified=excluded.baseline_modified,projection_version=excluded.projection_version,candidate_count=excluded.candidate_count,candidate_attempts=excluded.candidate_attempts,incomplete_candidate_attempts=excluded.incomplete_candidate_attempts,pending_count=excluded.pending_count,updated_at=excluded.updated_at`, jobID, 1, state.BaselineScanID, state.BaselineConfigHash, boolInt(state.BaselineModified), projectionVersion, state.CandidateCount, state.CandidateAttempts, state.IncompleteCandidateAttempts, len(state.Pending), now.Format(time.RFC3339Nano))
 	return err
+}
+
+func replaceRuntimeIncidentProjectionTx(ctx context.Context, tx *sql.Tx, jobID string, state model.JobState) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM runtime_incidents WHERE job_id=?`, jobID); err != nil {
+		return err
+	}
+	keys := make([]string, 0, len(state.Incidents))
+	for key := range state.Incidents {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		raw, err := json.Marshal(state.Incidents[key])
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO runtime_incidents(job_id,key,incident_json) VALUES(?,?,?)`, jobID, key, raw); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func persistRuntimeTxWithOutbox(ctx context.Context, tx *sql.Tx, jobID string, state model.JobState, events []model.Event, destinations []string) ([]model.Event, error) {

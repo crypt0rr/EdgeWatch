@@ -247,3 +247,36 @@ func TestNotificationRoutesAndRateLimit(t *testing.T) {
 		t.Fatal("new notification test identity was unexpectedly limited")
 	}
 }
+
+func TestBaselineMutationsRejectActiveJobs(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	job := config.NormalizeJob(config.Job{Name: "active-baseline", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.20"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}, Baseline: config.Baseline{Samples: 1}})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	scan := model.Scan{ID: "active-baseline-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{}}
+	if err := db.SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AcquireJobLease(ctx, record.ID, "active-baseline-test", now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.ReleaseJobLease(ctx, record.ID, "active-baseline-test") }()
+
+	reset := httptest.NewRecorder()
+	server.resetBaseline(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, record.ID)
+	if reset.Code != http.StatusConflict || !strings.Contains(reset.Body.String(), `"code":"job_active"`) {
+		t.Fatalf("active baseline reset = %d: %s", reset.Code, reset.Body.String())
+	}
+
+	approveRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/approve", strings.NewReader(`{"scan_id":"`+scan.ID+`"}`))
+	approveRequest.Header.Set("Content-Type", "application/json")
+	approve := httptest.NewRecorder()
+	server.approveBaseline(approve, approveRequest, admin, record.ID)
+	if approve.Code != http.StatusConflict || !strings.Contains(approve.Body.String(), `"code":"job_active"`) {
+		t.Fatalf("active baseline approval = %d: %s", approve.Code, approve.Body.String())
+	}
+}

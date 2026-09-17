@@ -640,6 +640,34 @@ func (s *Store) GetLatestScanCycle(ctx context.Context, jobID string) (ScanCycle
 	return s.GetScanCycle(ctx, id)
 }
 
+// GetRecoverableScanCycle returns an active cycle or a completed cycle whose
+// final scan was not promoted. The latter is the narrow crash-recovery window
+// between marking a cycle complete and committing its immutable scan record.
+func (s *Store) GetRecoverableScanCycle(ctx context.Context, jobID string) (ScanCycleRecord, error) {
+	cycle, err := s.GetActiveScanCycle(ctx, jobID)
+	if err == nil {
+		return cycle, nil
+	}
+	if !errors.Is(err, ErrNoScanCycle) {
+		return ScanCycleRecord{}, err
+	}
+	cycle, err = s.GetLatestScanCycle(ctx, jobID)
+	if err != nil {
+		return ScanCycleRecord{}, err
+	}
+	if cycle.Status != "completed" {
+		return ScanCycleRecord{}, ErrNoScanCycle
+	}
+	promoted, err := s.ScanCycleHasScan(ctx, cycle.ID)
+	if err != nil {
+		return ScanCycleRecord{}, err
+	}
+	if promoted {
+		return ScanCycleRecord{}, ErrNoScanCycle
+	}
+	return cycle, nil
+}
+
 // ScanCycleExpiryNotified reports whether an expired cycle already produced
 // its terminal scan record. Housekeeping can expire a cycle between schedule
 // ticks; keeping this check separate lets the next trigger emit exactly one
@@ -826,8 +854,9 @@ func (s *Store) NextScanCycleUnit(ctx context.Context, cycleID string) (ScanCycl
 }
 
 func (s *Store) ClaimScanCycleUnit(ctx context.Context, cycleID string, sequence int) (ScanCycleUnit, error) {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET status='running',attempts=attempts+1,started_at=?,last_error='' WHERE cycle_id=? AND sequence=? AND status='pending' AND EXISTS (SELECT 1 FROM scan_cycles WHERE id=? AND status='running')`, now, cycleID, sequence, cycleID)
+	now := time.Now().UTC()
+	nowText := now.Format(time.RFC3339Nano)
+	result, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET status='running',attempts=attempts+1,started_at=?,last_error='' WHERE cycle_id=? AND sequence=? AND status='pending' AND EXISTS (SELECT 1 FROM scan_cycles WHERE id=? AND status='running' AND (expires_at='' OR expires_at>?))`, nowText, cycleID, sequence, cycleID, nowText)
 	if err != nil {
 		return ScanCycleUnit{}, err
 	}
@@ -836,6 +865,16 @@ func (s *Store) ClaimScanCycleUnit(ctx context.Context, cycleID string, sequence
 			return ScanCycleUnit{}, statusErr
 		} else if status != "running" {
 			return ScanCycleUnit{}, ErrCycleNotResumable
+		}
+		// A deadline can pass between NextScanCycleUnit and the atomic claim.
+		// Expire it before reporting the refusal so a retry cannot consume an
+		// attempt budget after the resume window has closed.
+		var expires string
+		if expiryErr := s.reader().QueryRowContext(ctx, `SELECT expires_at FROM scan_cycles WHERE id=? AND status='running'`, cycleID).Scan(&expires); expiryErr == nil {
+			if deadline, parseErr := time.Parse(time.RFC3339Nano, expires); parseErr == nil && !deadline.IsZero() && !now.Before(deadline) {
+				_, _ = s.ExpireScanCycles(ctx, now)
+				return ScanCycleUnit{}, ErrCycleNotResumable
+			}
 		}
 		return ScanCycleUnit{}, ErrNoPendingUnit
 	}
@@ -953,8 +992,9 @@ func (s *Store) SplitScanCycleUnit(ctx context.Context, cycleID string, sequence
 	}
 	defer tx.Rollback()
 	var status string
+	var parentAttempts int
 	var originalRaw []byte
-	if err = tx.QueryRowContext(ctx, `SELECT status,work_unit_json FROM scan_cycle_units WHERE cycle_id=? AND sequence=?`, cycleID, sequence).Scan(&status, &originalRaw); err != nil {
+	if err = tx.QueryRowContext(ctx, `SELECT status,attempts,work_unit_json FROM scan_cycle_units WHERE cycle_id=? AND sequence=?`, cycleID, sequence).Scan(&status, &parentAttempts, &originalRaw); err != nil {
 		return err
 	}
 	if status == "completed" {
@@ -986,10 +1026,10 @@ func (s *Store) SplitScanCycleUnit(ctx context.Context, cycleID string, sequence
 	if err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=?,identity=?,phase=?,probes=?,status='pending',last_error=? WHERE cycle_id=? AND sequence=?`, firstRaw, scanCycleUnitIdentity(first), first.Phase, first.Probes, trimCycleError(lastError), cycleID, sequence); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=?,identity=?,phase=?,probes=?,status='pending',attempts=?,last_error=? WHERE cycle_id=? AND sequence=?`, firstRaw, scanCycleUnitIdentity(first), first.Phase, first.Probes, parentAttempts, trimCycleError(lastError), cycleID, sequence); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,phase,probes,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, cycleID, next, secondRaw, scanCycleUnitIdentity(second), second.Phase, second.Probes, "pending", 0, []byte(`{}`), "", "", ""); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,phase,probes,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, cycleID, next, secondRaw, scanCycleUnitIdentity(second), second.Phase, second.Probes, "pending", parentAttempts, []byte(`{}`), "", "", ""); err != nil {
 		return err
 	}
 	probeDelta := first.Probes + second.Probes - original.Probes
@@ -1070,11 +1110,20 @@ func (s *Store) DiscardScanCycle(ctx context.Context, cycleID string) error {
 	} else if err != nil {
 		return err
 	}
-	if status != "paused" && status != "stalled" {
+	if status != "paused" && status != "stalled" && status != "completed" {
 		return ErrCycleNotResumable
 	}
+	if status == "completed" {
+		promoted, scanErr := s.ScanCycleHasScan(ctx, cycleID)
+		if scanErr != nil {
+			return scanErr
+		}
+		if promoted {
+			return ErrCycleNotResumable
+		}
+	}
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded',updated_at=?,finished_at=?,last_error='discarded by administrator' WHERE id=? AND status IN ('paused','stalled')`, stamp, stamp, cycleID); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded',updated_at=?,finished_at=?,last_error='discarded by administrator' WHERE id=? AND status IN ('paused','stalled','completed')`, stamp, stamp, cycleID); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM scan_cycle_units WHERE cycle_id=?`, cycleID); err != nil {

@@ -27,6 +27,12 @@ var ErrRestoreSidecars = errors.New("restore refused because SQLite sidecars are
 // commands open the replacement, splitting the installation's state.
 var ErrRestoreDaemonLive = errors.New("restore refused because an EdgeWatch daemon is active")
 
+// ErrRestoreDestinationUnreadable means the existing destination cannot be
+// inspected for an active daemon lease. Operators may use the explicit
+// unreadable-destination recovery option after stopping EdgeWatch; source
+// validation and staged verification still run before replacement.
+var ErrRestoreDestinationUnreadable = errors.New("restore destination is unreadable")
+
 // PendingDeliveryPolicy controls what happens to unsent notification rows
 // copied from a backup. A restore is an epoch boundary: replaying an older
 // outbox by accident can send stale incident or lifecycle alerts. The zero
@@ -87,6 +93,10 @@ type RestoreOptions struct {
 	// independently stopped or isolated the daemon but its heartbeat row has
 	// not yet gone stale. It is never inferred from sidecar state.
 	AllowActiveDaemon bool
+	// AllowUnreadableDestination is an explicit stopped-daemon recovery escape
+	// hatch for a damaged destination that cannot be opened to inspect its
+	// lease. It never skips source or staged-database validation.
+	AllowUnreadableDestination bool
 	// PendingDeliveries applies an explicit restore epoch policy to unsent
 	// notification rows. Empty uses the safe quarantine default.
 	PendingDeliveries PendingDeliveryPolicy
@@ -207,7 +217,9 @@ func Restore(ctx context.Context, source, destination string, options RestoreOpt
 	}
 	if preflight.DestinationExists && !options.AllowActiveDaemon {
 		if err := refuseActiveDaemon(ctx, preflight.DestinationPath); err != nil {
-			return result, err
+			if !errors.Is(err, ErrRestoreDestinationUnreadable) || !options.AllowUnreadableDestination {
+				return result, err
+			}
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -265,7 +277,9 @@ func Restore(ctx context.Context, source, destination string, options RestoreOpt
 	// the operator-facing escape hatch remains explicit for intentional recovery.
 	if preflight.DestinationExists && !options.AllowActiveDaemon {
 		if err := refuseActiveDaemon(ctx, preflight.DestinationPath); err != nil {
-			return result, err
+			if !errors.Is(err, ErrRestoreDestinationUnreadable) || !options.AllowUnreadableDestination {
+				return result, err
+			}
 		}
 	}
 	// Move destination sidecars out of the way only after every staged check and
@@ -462,6 +476,18 @@ SELECT ?,destination,payload_json,attempts,` + deferrals + `,next_at,last_error,
 	if _, err := tx.ExecContext(ctx, `INSERT INTO restore_epochs(epoch,restored_at,pending_delivery_policy,pending_delivery_count) VALUES(?,?,?,?)`, epoch, restoredAt.Format(time.RFC3339Nano), policy, pending); err != nil {
 		return 0, fmt.Errorf("record restore epoch: %w", err)
 	}
+	// Sessions are bearer credentials. A restored backup may contain sessions
+	// that were revoked after the backup was taken, so retaining them would
+	// resurrect access across the restore boundary. Clearing the copied table
+	// is deliberately compatible with older schemas and lets users establish
+	// fresh sessions after the restored daemon starts.
+	if exists, err := tableExistsTx(ctx, tx, "sessions"); err != nil {
+		return 0, err
+	} else if exists {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions`); err != nil {
+			return 0, fmt.Errorf("invalidate restored sessions: %w", err)
+		}
+	}
 	if err := insertRestoreAuditTx(ctx, tx, policy, pending, epoch, restoredAt); err != nil {
 		return 0, err
 	}
@@ -559,15 +585,15 @@ func refuseActiveDaemon(ctx context.Context, destination string) error {
 	before := snapshotSQLiteSidecars(destination)
 	reader, err := OpenReadOnlyExistingContext(ctx, destination)
 	if err != nil {
-		return fmt.Errorf("check destination daemon lease: %w", err)
+		return fmt.Errorf("%w: %v; confirm EdgeWatch is stopped and rerun with unreadable-destination recovery", ErrRestoreDestinationUnreadable, err)
 	}
 	status, err := reader.DaemonLeaseStatus(ctx)
 	closeErr := reader.Close()
 	if err != nil {
-		return fmt.Errorf("check destination daemon lease: %w", err)
+		return fmt.Errorf("%w: check destination daemon lease: %v; confirm EdgeWatch is stopped and rerun with unreadable-destination recovery", ErrRestoreDestinationUnreadable, err)
 	}
 	if closeErr != nil {
-		return fmt.Errorf("close destination daemon lease check: %w", closeErr)
+		return fmt.Errorf("%w: close destination daemon lease check: %v; confirm EdgeWatch is stopped and rerun with unreadable-destination recovery", ErrRestoreDestinationUnreadable, closeErr)
 	}
 	if !status.Active {
 		// SQLite may create an empty WAL/SHM pair when a live-safe read-only

@@ -50,6 +50,11 @@ type BaselineExportEntry struct {
 	SourceScan         *model.ScanSummary `json:"source_scan,omitempty"`
 }
 
+type exportQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
 // ExportBaselines returns the current runtime baseline for one managed job,
 // or every managed and legacy job when name is empty. Legacy job_states rows
 // are included for portability but are explicitly marked so they cannot be
@@ -57,7 +62,12 @@ type BaselineExportEntry struct {
 func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExport, error) {
 	result := BaselineExport{FormatVersion: BaselineExportVersion, ExportedAt: time.Now().UTC(), Jobs: []BaselineExportEntry{}}
 	name = strings.TrimSpace(name)
-	managed, err := s.ListJobs(ctx, true)
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return result, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	managed, err := listJobsForExport(ctx, tx, true)
 	if err != nil {
 		return result, err
 	}
@@ -73,7 +83,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 			}
 		}
 		if !selectedFound {
-			legacy, legacyErr := s.exportLegacyBaseline(ctx, name)
+			legacy, legacyErr := exportLegacyBaselineForQuery(ctx, tx, name)
 			if legacyErr != nil {
 				if !errors.Is(legacyErr, sql.ErrNoRows) {
 					return result, legacyErr
@@ -83,7 +93,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 			result.Jobs = append(result.Jobs, legacy)
 			return result, nil
 		}
-		entry, err := s.exportManagedBaseline(ctx, selected)
+		entry, err := exportManagedBaselineForQuery(ctx, tx, selected)
 		if err != nil {
 			return result, err
 		}
@@ -93,7 +103,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 
 	for _, record := range managed {
 		seen[record.Job.Name] = record.ID
-		entry, err := s.exportManagedBaseline(ctx, record)
+		entry, err := exportManagedBaselineForQuery(ctx, tx, record)
 		if err != nil {
 			return result, err
 		}
@@ -107,7 +117,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 		raw  []byte
 	}
 	legacyRows, err := func() ([]legacyRow, error) {
-		rows, err := s.reader().QueryContext(ctx, `SELECT job,state_json FROM job_states ORDER BY job`)
+		rows, err := tx.QueryContext(ctx, `SELECT job,state_json FROM job_states ORDER BY job`)
 		if err != nil {
 			return nil, err
 		}
@@ -131,7 +141,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 	}
 	for _, legacy := range legacyRows {
 		legacyName := legacy.name
-		entry, err := s.exportLegacyBaselineJSON(ctx, legacyName, legacy.raw)
+		entry, err := exportLegacyBaselineJSONForQuery(ctx, tx, legacyName, legacy.raw)
 		if err != nil {
 			return result, err
 		}
@@ -156,18 +166,29 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 		}
 		return result.Jobs[i].JobID < result.Jobs[j].JobID
 	})
+	if err := tx.Commit(); err != nil {
+		return result, err
+	}
 	return result, nil
 }
 
 func (s *Store) exportLegacyBaseline(ctx context.Context, name string) (BaselineExportEntry, error) {
+	return exportLegacyBaselineForQuery(ctx, s.reader(), name)
+}
+
+func exportLegacyBaselineForQuery(ctx context.Context, queryer exportQueryer, name string) (BaselineExportEntry, error) {
 	var raw []byte
-	if err := s.reader().QueryRowContext(ctx, `SELECT state_json FROM job_states WHERE job=?`, name).Scan(&raw); err != nil {
+	if err := queryer.QueryRowContext(ctx, `SELECT state_json FROM job_states WHERE job=?`, name).Scan(&raw); err != nil {
 		return BaselineExportEntry{}, err
 	}
-	return s.exportLegacyBaselineJSON(ctx, name, raw)
+	return exportLegacyBaselineJSONForQuery(ctx, queryer, name, raw)
 }
 
 func (s *Store) exportLegacyBaselineJSON(ctx context.Context, name string, raw []byte) (BaselineExportEntry, error) {
+	return exportLegacyBaselineJSONForQuery(ctx, s.reader(), name, raw)
+}
+
+func exportLegacyBaselineJSONForQuery(ctx context.Context, queryer exportQueryer, name string, raw []byte) (BaselineExportEntry, error) {
 	var state model.JobState
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return BaselineExportEntry{}, err
@@ -177,7 +198,7 @@ func (s *Store) exportLegacyBaselineJSON(ctx context.Context, name string, raw [
 		entry.Status = "ready"
 	}
 	if state.BaselineScanID != "" {
-		if summary, summaryErr := s.GetScanSummary(ctx, state.BaselineScanID); summaryErr == nil {
+		if summary, summaryErr := getScanSummaryForQuery(ctx, queryer, state.BaselineScanID); summaryErr == nil {
 			entry.SourceScan = &summary
 		}
 	}
@@ -185,10 +206,22 @@ func (s *Store) exportLegacyBaselineJSON(ctx context.Context, name string, raw [
 }
 
 func (s *Store) exportManagedBaseline(ctx context.Context, record JobRecord) (BaselineExportEntry, error) {
-	state, err := s.RuntimeState(ctx, record.ID)
-	if err != nil {
+	return exportManagedBaselineForQuery(ctx, s.reader(), record)
+}
+
+func exportManagedBaselineForQuery(ctx context.Context, queryer exportQueryer, record JobRecord) (BaselineExportEntry, error) {
+	var raw []byte
+	err := queryer.QueryRowContext(ctx, `SELECT state_json FROM job_runtime WHERE job_id=?`, record.ID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		raw = []byte(`{}`)
+	} else if err != nil {
 		return BaselineExportEntry{}, err
 	}
+	var state model.JobState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		return BaselineExportEntry{}, err
+	}
+	ensureMaps(&state)
 	entry := BaselineExportEntry{
 		JobID:              record.ID,
 		Name:               record.Job.Name,
@@ -203,9 +236,63 @@ func (s *Store) exportManagedBaseline(ctx context.Context, record JobRecord) (Ba
 		entry.Status = "ready"
 	}
 	if state.BaselineScanID != "" {
-		if summary, summaryErr := s.GetScanSummary(ctx, state.BaselineScanID); summaryErr == nil {
+		if summary, summaryErr := getScanSummaryForQuery(ctx, queryer, state.BaselineScanID); summaryErr == nil {
 			entry.SourceScan = &summary
 		}
 	}
 	return entry, nil
+}
+
+func listJobsForExport(ctx context.Context, queryer exportQueryer, includeArchived bool) ([]JobRecord, error) {
+	query := `SELECT id,name,definition_json,enabled,archived,revision,created_at,updated_at FROM jobs`
+	if !includeArchived {
+		query += ` WHERE archived=0`
+	}
+	query += ` ORDER BY archived ASC,name,id`
+	rows, err := queryer.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []JobRecord
+	for rows.Next() {
+		var record JobRecord
+		var raw []byte
+		var enabled, archived int
+		var created, updated string
+		if err := rows.Scan(&record.ID, &record.Job.Name, &raw, &enabled, &archived, &record.Revision, &created, &updated); err != nil {
+			return nil, err
+		}
+		job, err := unmarshalJob(raw)
+		if err != nil {
+			return nil, err
+		}
+		record.Job = job
+		record.Enabled, record.Archived = enabled != 0, archived != 0
+		record.CreatedAt, record.UpdatedAt = scanTime(created), scanTime(updated)
+		out = append(out, record)
+	}
+	return out, rows.Err()
+}
+
+func getScanSummaryForQuery(ctx context.Context, queryer exportQueryer, id string) (model.ScanSummary, error) {
+	var v model.ScanSummary
+	var started, finished string
+	var jobID sql.NullString
+	var revision sql.NullInt64
+	var resumable int
+	err := queryer.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE id=?`, id).
+		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash)
+	if err != nil {
+		return v, err
+	}
+	if jobID.Valid {
+		v.JobID = jobID.String
+	}
+	if revision.Valid {
+		v.JobRevision = revision.Int64
+	}
+	v.Resumable = resumable != 0
+	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
+	return v, nil
 }

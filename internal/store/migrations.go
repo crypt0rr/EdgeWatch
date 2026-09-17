@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 39
+const schemaVersion = 40
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -942,6 +942,49 @@ HAVING COUNT(*) > 0;`,
  FOREIGN KEY(scan_id) REFERENCES scans(id) ON DELETE CASCADE
 );`,
 			"CREATE INDEX IF NOT EXISTS legacy_scan_host_backfill_processed ON legacy_scan_host_backfill(processed_at)",
+		},
+		40: {
+			// Keep small runtime counters and active incidents in maintained
+			// projections. List endpoints must not repeatedly decode a potentially
+			// very large baseline from job_runtime.state_json.
+			"ALTER TABLE job_runtime_meta ADD COLUMN candidate_count INTEGER NOT NULL DEFAULT 0",
+			"ALTER TABLE job_runtime_meta ADD COLUMN candidate_attempts INTEGER NOT NULL DEFAULT 0",
+			"ALTER TABLE job_runtime_meta ADD COLUMN incomplete_candidate_attempts INTEGER NOT NULL DEFAULT 0",
+			"ALTER TABLE job_runtime_meta ADD COLUMN pending_count INTEGER NOT NULL DEFAULT 0",
+			"CREATE TABLE IF NOT EXISTS runtime_incidents (job_id TEXT NOT NULL,key TEXT NOT NULL,incident_json BLOB NOT NULL,PRIMARY KEY(job_id,key),FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE)",
+			"CREATE INDEX IF NOT EXISTS runtime_incidents_key ON runtime_incidents(key)",
+			`UPDATE job_runtime_meta SET
+ candidate_count=COALESCE((SELECT json_extract(state_json,'$.candidate_count') FROM job_runtime WHERE job_runtime.job_id=job_runtime_meta.job_id),0),
+ candidate_attempts=COALESCE((SELECT json_extract(state_json,'$.candidate_attempts') FROM job_runtime WHERE job_runtime.job_id=job_runtime_meta.job_id),0),
+ incomplete_candidate_attempts=COALESCE((SELECT json_extract(state_json,'$.incomplete_candidate_attempts') FROM job_runtime WHERE job_runtime.job_id=job_runtime_meta.job_id),0),
+ pending_count=COALESCE((SELECT json_array_length(json_extract(state_json,'$.pending')) FROM job_runtime WHERE job_runtime.job_id=job_runtime_meta.job_id),0),
+ projection_version=CASE WHEN EXISTS (SELECT 1 FROM job_runtime WHERE job_runtime.job_id=job_runtime_meta.job_id AND json_type(job_runtime.state_json,'$.baseline')='object') THEN 1 ELSE projection_version END`,
+			`INSERT OR IGNORE INTO runtime_incidents(job_id,key,incident_json)
+SELECT job_runtime.job_id,json_each.key,json_each.value
+FROM job_runtime,json_each(job_runtime.state_json,'$.incidents')
+WHERE json_valid(job_runtime.state_json)`,
+			// Baseline host search uses the same bounded normalized document as
+			// scan and latest-host search. The job/name columns are unindexed join
+			// keys; only content participates in FTS matching.
+			`CREATE VIRTUAL TABLE IF NOT EXISTS baseline_host_search USING fts5(
+ job_id UNINDEXED,
+ address UNINDEXED,
+ content,
+ tokenize='trigram'
+);`,
+			`CREATE TRIGGER IF NOT EXISTS baseline_hosts_search_ai AFTER INSERT ON baseline_hosts BEGIN
+ INSERT INTO baseline_host_search(job_id,address,content) VALUES(NEW.job_id,NEW.address,lower(coalesce(NEW.search_text,'')));
+END;`,
+			`CREATE TRIGGER IF NOT EXISTS baseline_hosts_search_au AFTER UPDATE ON baseline_hosts BEGIN
+ DELETE FROM baseline_host_search WHERE job_id=OLD.job_id AND address=OLD.address;
+ INSERT INTO baseline_host_search(job_id,address,content) VALUES(NEW.job_id,NEW.address,lower(coalesce(NEW.search_text,'')));
+END;`,
+			`CREATE TRIGGER IF NOT EXISTS baseline_hosts_search_ad AFTER DELETE ON baseline_hosts BEGIN
+ DELETE FROM baseline_host_search WHERE job_id=OLD.job_id AND address=OLD.address;
+END;`,
+			`INSERT INTO baseline_host_search(job_id,address,content)
+SELECT job_id,address,lower(coalesce(search_text,'')) FROM baseline_hosts
+WHERE NOT EXISTS (SELECT 1 FROM baseline_host_search hs WHERE hs.job_id=baseline_hosts.job_id AND hs.address=baseline_hosts.address)`,
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

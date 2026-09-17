@@ -321,9 +321,9 @@ func (s *Store) State(ctx context.Context, job string) (model.JobState, error) {
 }
 
 // JobIncident is the bounded API representation of one active incident. The
-// incident itself remains in the runtime JSON for atomic state transitions,
-// while list methods below use SQLite's json_each to page without decoding the
-// complete incident map into Go memory.
+// incident itself remains in the runtime JSON for atomic state transitions;
+// list methods use the maintained runtime_incidents projection so paging does
+// not repeatedly parse a complete baseline/candidate state.
 type JobIncident struct {
 	JobID    string
 	Job      string
@@ -334,10 +334,10 @@ func (s *Store) ListJobIncidentsPage(ctx context.Context, jobID string, limit, o
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Incident]
 	readDB := s.reader()
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_runtime, json_each(job_runtime.state_json, '$.incidents') WHERE job_runtime.job_id=?`, jobID).Scan(&page.Total); err != nil {
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT json_each.value FROM job_runtime, json_each(job_runtime.state_json, '$.incidents') WHERE job_runtime.job_id=? ORDER BY json_each.key LIMIT ? OFFSET ?`, jobID, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT incident_json FROM runtime_incidents WHERE job_id=? ORDER BY key LIMIT ? OFFSET ?`, jobID, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -360,10 +360,10 @@ func (s *Store) ListIncidentsPage(ctx context.Context, limit, offset int) (Page[
 	limit, offset = normalizePage(limit, offset)
 	var page Page[JobIncident]
 	readDB := s.reader()
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_runtime JOIN jobs ON jobs.id=job_runtime.job_id, json_each(job_runtime.state_json, '$.incidents')`).Scan(&page.Total); err != nil {
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents JOIN jobs ON jobs.id=runtime_incidents.job_id`).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT jobs.id,jobs.name,json_each.value FROM job_runtime JOIN jobs ON jobs.id=job_runtime.job_id, json_each(job_runtime.state_json, '$.incidents') ORDER BY jobs.name,json_each.key LIMIT ? OFFSET ?`, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT jobs.id,jobs.name,runtime_incidents.incident_json FROM runtime_incidents JOIN jobs ON jobs.id=runtime_incidents.job_id ORDER BY jobs.name,runtime_incidents.key LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return page, err
 	}

@@ -493,7 +493,7 @@ func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
 		return
 	}
-	cycle, err := s.Store.GetActiveScanCycle(r.Context(), id)
+	cycle, err := s.Store.GetRecoverableScanCycle(r.Context(), id)
 	if errors.Is(err, store.ErrNoScanCycle) {
 		writeJSON(w, http.StatusOK, map[string]any{"cycle": nil})
 		return
@@ -947,6 +947,10 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session s
 		if s.writeAuditUnavailable(w, err, "baseline.reset") {
 			return
 		}
+		if errors.Is(err, store.ErrJobScanActive) {
+			writeError(w, http.StatusConflict, "job_active", "baseline reset is unavailable while a scan is running; wait for it to finish and try again", nil)
+			return
+		}
 		writeError(w, 500, "store", err.Error(), nil)
 		return
 	}
@@ -982,6 +986,10 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 	events, err := s.Store.ApproveRuntimeWithOutboxAndAudit(r.Context(), id, record.Job.Name, scan, destinations, actorAudit(session, "baseline.approved", id))
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "baseline.approved") {
+			return
+		}
+		if errors.Is(err, store.ErrJobScanActive) {
+			writeError(w, http.StatusConflict, "job_active", "baseline approval is unavailable while a scan is running; wait for it to finish and try again", nil)
 			return
 		}
 		writeError(w, 400, "approve_failed", err.Error(), nil)

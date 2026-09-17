@@ -286,6 +286,36 @@ func TestRestoreQuarantinesPendingDeliveriesByDefault(t *testing.T) {
 	}
 }
 
+func TestRestoreInvalidatesSessionsCopiedFromBackup(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "destination.db")
+	createRestoreFixture(t, source, "source")
+	createRestoreFixture(t, destination, "destination")
+	sourceStore, err := Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sourceStore.CreateSession(context.Background(), "restored-session", "csrf", time.Now().UTC(), time.Now().UTC().Add(time.Hour)); err != nil {
+		sourceStore.Close()
+		t.Fatal(err)
+	}
+	if err := sourceStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(context.Background(), source, destination, RestoreOptions{}); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	restored, err := OpenReadOnlyExisting(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if _, err := restored.GetSession(context.Background(), "restored-session"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("restored bearer session = %v, want ErrNotFound", err)
+	}
+}
+
 func TestRestorePendingDeliveryPoliciesAreExplicit(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -382,6 +412,32 @@ func TestRestoreRefusesLiveDaemonLeaseUnlessExplicitlyOverridden(t *testing.T) {
 	}
 	if got, err := readRestoreValue(destination); err != nil || got != "source" {
 		t.Fatalf("overridden restore value = %q, %v; want source", got, err)
+	}
+}
+
+func TestRestoreCanReplaceUnreadableDestinationAfterExplicitConfirmation(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "damaged.db")
+	createRestoreFixture(t, source, "source")
+	if err := os.WriteFile(destination, []byte("not a usable EdgeWatch database"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(context.Background(), source, destination, RestoreOptions{}); !errors.Is(err, ErrRestoreDestinationUnreadable) {
+		t.Fatalf("damaged destination error = %v, want ErrRestoreDestinationUnreadable", err)
+	}
+	if got, err := os.ReadFile(destination); err != nil || string(got) != "not a usable EdgeWatch database" {
+		t.Fatalf("refused restore changed damaged destination: %q, %v", got, err)
+	}
+	result, err := Restore(context.Background(), source, destination, RestoreOptions{AllowUnreadableDestination: true})
+	if err != nil {
+		t.Fatalf("explicit damaged-destination recovery: %v", err)
+	}
+	if result.Bytes == 0 {
+		t.Fatal("recovery copied no database bytes")
+	}
+	if got, err := readRestoreValue(destination); err != nil || got != "source" {
+		t.Fatalf("recovered destination value = %q, %v; want source", got, err)
 	}
 }
 

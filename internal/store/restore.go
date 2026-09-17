@@ -184,6 +184,16 @@ func Restore(ctx context.Context, source, destination string, options RestoreOpt
 	if err != nil {
 		return result, err
 	}
+	// Surface an invalid source schema before reporting an unrelated sidecar
+	// refusal. This is intentionally limited to sources that already have
+	// SQLite companions: opening a sidecar-free source for validation could
+	// itself create WAL/SHM artifacts and change the very preflight state we
+	// are about to enforce.
+	if len(preflight.SourceSidecars) > 0 {
+		if err := validateRestoreSourceSchema(ctx, preflight.SourcePath); err != nil {
+			return result, err
+		}
+	}
 	if !preflight.Safe && !options.AllowSidecarReplay {
 		paths := make([]string, 0, len(preflight.SourceSidecars)+len(preflight.DestinationSidecars))
 		for _, sidecar := range preflight.SourceSidecars {
@@ -298,6 +308,18 @@ func Restore(ctx context.Context, source, destination string, options RestoreOpt
 		result.SidecarsWarning = "SQLite source sidecars were replayed; old destination sidecars were removed"
 	}
 	return result, nil
+}
+
+func validateRestoreSourceSchema(ctx context.Context, path string) error {
+	reader, err := OpenReadOnlyExistingContext(ctx, path)
+	if err != nil {
+		return fmt.Errorf("validate restore source database: %w", err)
+	}
+	defer reader.Close()
+	if _, err := reader.Verify(ctx); err != nil {
+		return fmt.Errorf("validate restore source database: %w", err)
+	}
+	return nil
 }
 
 func restoreSidecarsOnFailure(pending *bool, sidecars []movedRestoreSidecar) {
@@ -534,19 +556,64 @@ func syncRestoreFile(path string) error {
 }
 
 func refuseActiveDaemon(ctx context.Context, destination string) error {
+	before := snapshotSQLiteSidecars(destination)
 	reader, err := OpenReadOnlyExistingContext(ctx, destination)
 	if err != nil {
 		return fmt.Errorf("check destination daemon lease: %w", err)
 	}
-	defer reader.Close()
 	status, err := reader.DaemonLeaseStatus(ctx)
+	closeErr := reader.Close()
 	if err != nil {
 		return fmt.Errorf("check destination daemon lease: %w", err)
 	}
+	if closeErr != nil {
+		return fmt.Errorf("close destination daemon lease check: %w", closeErr)
+	}
 	if !status.Active {
+		// SQLite may create an empty WAL/SHM pair when a live-safe read-only
+		// connection first observes a WAL-mode database. A restore preflight
+		// must not turn that read into a persistent sidecar refusal, so remove
+		// only companions created by this probe and only when the WAL is empty.
+		cleanupSQLiteProbeSidecars(destination, before)
 		return nil
 	}
 	return fmt.Errorf("%w (owner %s heartbeat %s)", ErrRestoreDaemonLive, status.Owner, status.Heartbeat.UTC().Format(time.RFC3339Nano))
+}
+
+func snapshotSQLiteSidecars(database string) map[string]bool {
+	result := make(map[string]bool, 3)
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		_, err := os.Lstat(database + suffix)
+		result[suffix] = err == nil
+	}
+	return result
+}
+
+func cleanupSQLiteProbeSidecars(database string, before map[string]bool) {
+	walPath := database + "-wal"
+	walInfo, walErr := os.Stat(walPath)
+	walEmpty := walErr != nil && errors.Is(walErr, os.ErrNotExist)
+	if walErr == nil {
+		walEmpty = walInfo.Size() == 0
+	}
+	if !walEmpty {
+		return
+	}
+	removed := false
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if before[suffix] {
+			continue
+		}
+		path := database + suffix
+		if err := os.Remove(path); err == nil {
+			removed = true
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return
+		}
+	}
+	if removed {
+		_ = syncDirectory(filepath.Dir(database))
+	}
 }
 
 func restorePath(path string) (string, error) {

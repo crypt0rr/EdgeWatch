@@ -141,10 +141,16 @@ func run(args []string) error {
 		openStore = store.OpenReadOnlyExisting
 	case cmd == "backup":
 		openStore = store.OpenExisting
-	default:
+	case cmd == "daemon":
+		// The daemon is the sole owner of schema migrations and startup
+		// reconciliation. All other commands open the already-migrated database
+		// without touching startup_state, avoiding health-signal changes and
+		// writer contention while a healthy daemon is running.
 		openStore = func(path string) (*store.Store, error) {
 			return store.OpenWithLogger(path, logger)
 		}
+	default:
+		openStore = store.OpenExisting
 	}
 	s, err := openStore(cfg.Database)
 	if err != nil {

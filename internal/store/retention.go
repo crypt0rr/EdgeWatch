@@ -74,15 +74,13 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 		return stats, err
 	}
 	stats.Scans = deletedScans
-	if deletedScans > 0 {
-		// A projection row is a copy rather than a foreign-key child of its
-		// source scan. Repair only addresses whose current row became dangling;
-		// rebuilding the complete retained history would hold the writer for the
-		// size of the deployment and make every retention pass increasingly
-		// expensive. Each repair transaction is bounded by retentionBatchSize.
-		if err := s.repairLatestScanHosts(ctx); err != nil {
-			return stats, err
-		}
+	// A projection row is a copy rather than a foreign-key child of its source
+	// scan. Repair on every pass, even when this pass removed no scans, so a row
+	// left dangling by an interrupted/older retention run cannot survive until
+	// another deletion happens to trigger cleanup. Each repair transaction is
+	// bounded by retentionBatchSize.
+	if err := s.repairLatestScanHosts(ctx); err != nil {
+		return stats, err
 	}
 
 	stats.Events, err = s.deleteRetentionBatches(ctx, `DELETE FROM events WHERE rowid IN (SELECT rowid FROM events WHERE created_at < ? ORDER BY created_at,rowid LIMIT ?)`, cutoff)

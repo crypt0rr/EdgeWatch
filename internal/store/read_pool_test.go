@@ -95,6 +95,40 @@ func TestOpenReadOnlyExistingUsesSQLiteReadOnlyMode(t *testing.T) {
 	}
 }
 
+func TestReadOnlyExistingSeesWALCommitsAfterOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "edgewatch.db")
+	writer, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if _, err := writer.DB.ExecContext(context.Background(), `CREATE TABLE wal_visibility(value TEXT NOT NULL)`); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := OpenReadOnlyExisting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var count int
+	if err := reader.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM wal_visibility`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("initial WAL visibility count = %d", count)
+	}
+	if _, err := writer.DB.ExecContext(context.Background(), `INSERT INTO wal_visibility(value) VALUES('committed after reader open')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.DB.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM wal_visibility`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("reader missed post-open WAL commit: count=%d", count)
+	}
+}
+
 func TestHistoryReadsRemainAvailableWhileWriterTransactionIsHeld(t *testing.T) {
 	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {

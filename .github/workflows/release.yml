@@ -167,7 +167,7 @@ jobs:
             release-binaries
 
   binaries:
-    name: Publish GitHub release
+    name: Stage draft GitHub release
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -196,15 +196,20 @@ jobs:
             echo "release $GITHUB_REF_NAME already exists; refusing to publish a mixed rerun" >&2
             exit 1
           fi
-      - name: Publish the verified release assets
+      - name: Stage the verified release assets as a draft
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          release_args=(--draft --latest=false)
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            release_args+=(--prerelease)
+          fi
           gh release create "$GITHUB_REF_NAME" \
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --title "EdgeWatch ${GITHUB_REF_NAME#v}" \
             --generate-notes \
+            "${release_args[@]}" \
             dist/*.tar.gz dist/checksums.txt dist/release-manifest.json
       - name: Attest release archives
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
@@ -247,10 +252,14 @@ jobs:
         id: meta
         with:
           images: ${{ env.REGISTRY_IMAGE }}
+          # Publish only the immutable full semantic version. Major/minor
+          # aliases would be overwritten by every patch release and make a
+          # rerun indistinguishable from an accidental replacement. The
+          # verified highest stable release is promoted to :latest below.
           tags: |
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}},enable=${{ !startsWith(github.ref_name, 'v0.') }}
+          flavor: |
+            latest=false
           labels: |
             org.opencontainers.image.title=EdgeWatch
             org.opencontainers.image.description=Scheduled Nmap port monitoring with baseline change notifications
@@ -258,6 +267,18 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
+      - name: Refuse existing immutable semver tags
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            if docker buildx imagetools inspect "$tag" >/dev/null 2>&1; then
+              echo "image tag already exists; refusing to overwrite $tag" >&2
+              exit 1
+            fi
+          done <<< "$TAGS"
       - name: Build and push image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         id: push
@@ -457,10 +478,34 @@ jobs:
           trap - EXIT
           test -s "$smoke_dir/data/edgewatch.db"
 
+  publish-release:
+    name: Publish verified GitHub release
+    needs: [binaries, image, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Publish the staged draft after smoke verification
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq '.id')"
+          prerelease=false
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=true; fi
+          # Use the API's explicit make_latest=false setting. Latest promotion
+          # is a separate job which first verifies this is the highest stable
+          # release, so a late prerelease or out-of-order tag cannot displace it.
+          gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+            -F draft=false \
+            -F prerelease="$prerelease" \
+            -f make_latest=false >/dev/null
+
   promote-latest:
     name: Promote verified image to latest
-    needs: smoke
-    if: ${{ needs.smoke.result == 'success' && !contains(github.ref_name, '-') }}
+    needs: [smoke, publish-release]
+    if: ${{ needs.smoke.result == 'success' && needs.publish-release.result == 'success' && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -477,8 +522,15 @@ jobs:
       - name: Promote semver image after verification
         env:
           IMAGE: ${{ env.REGISTRY_IMAGE }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           image_tag="${GITHUB_REF_NAME#v}"
+          highest_stable="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' | sed -nE 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' | sort -V | tail -n 1)"
+          if [ "$highest_stable" != "$image_tag" ]; then
+            echo "${GITHUB_REF_NAME} is not the highest stable release; latest remains unchanged"
+            exit 0
+          fi
           docker buildx imagetools create \
             --tag "$IMAGE:latest" \
             "$IMAGE:$image_tag"

@@ -86,6 +86,19 @@ func TestRunVersionHelpAndConfigValidation(t *testing.T) {
 	if err := run([]string{"config", "unknown", "--config", configPath}); err == nil {
 		t.Fatal("unknown config action unexpectedly succeeded")
 	}
+	seed, err := store.Open(filepath.Join(dir, "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Unknown top-level commands still open an existing database only to return
+	// the normal usage error. Exercise this fallback explicitly so the daemon's
+	// migration-only branch remains covered without starting a second daemon.
+	if err := run([]string{"unknown", "--config", configPath}); err == nil || !strings.Contains(err.Error(), "invalid or missing command") {
+		t.Fatalf("unknown command error = %v", err)
+	}
 }
 
 func TestHealthDoesNotConstructScannerApplication(t *testing.T) {
@@ -339,7 +352,11 @@ func TestReadOnlyCommandsDoNotModifySQLiteArtifacts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	paths := []string{database, database + "-wal", database + "-shm"}
+	// A live-safe read-only SQLite connection may initialize the WAL shared
+	// memory pair even though it never writes application data. The main
+	// database bytes and startup state must remain unchanged; companion files
+	// are SQLite coordination artifacts rather than daemon state.
+	paths := []string{database}
 	before := make(map[string]cliFileSnapshot, len(paths))
 	for _, path := range paths {
 		before[path] = snapshotCLIFile(t, path)

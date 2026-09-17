@@ -43,8 +43,21 @@ jobs:
           done
       - name: Frontend unit tests
         run: npm run test:coverage
+      - name: Resolve diff coverage base
+        id: frontend-diff-base
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$PR_BASE"
+          if [ -z "$base" ]; then base="$PUSH_BEFORE"; fi
+          if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]]; then
+            base="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
       - name: Frontend diff coverage
-        run: node scripts/check-diff-coverage.mjs --language frontend --coverage coverage/coverage-final.json
+        run: node scripts/check-diff-coverage.mjs --language frontend --coverage coverage/coverage-final.json --base "${{ steps.frontend-diff-base.outputs.base }}"
       - name: Upload frontend coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -113,8 +126,21 @@ jobs:
           go test -race -coverprofile=coverage.out ./... | tee go-coverage-summary.txt
       - name: Check Go coverage
         run: ./scripts/check-go-coverage.sh coverage.out go-coverage-summary.txt
+      - name: Resolve diff coverage base
+        id: go-diff-base
+        env:
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="$PR_BASE"
+          if [ -z "$base" ]; then base="$PUSH_BEFORE"; fi
+          if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]]; then
+            base="$(git rev-parse --verify HEAD^ 2>/dev/null || true)"
+          fi
+          echo "base=$base" >> "$GITHUB_OUTPUT"
       - name: Go diff coverage
-        run: node scripts/check-diff-coverage.mjs --language go --coverage coverage.out
+        run: node scripts/check-diff-coverage.mjs --language go --coverage coverage.out --base "${{ steps.go-diff-base.outputs.base }}"
       - name: Upload Go coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

@@ -71,20 +71,6 @@ func saveScanExec(ctx context.Context, execer contextExecer, scan model.Scan) er
 	return saveScanHostsExec(ctx, execer, scan)
 }
 
-func loadScanMetadata(ctx context.Context, queryer rowQueryer, id string, scan *model.Scan) error {
-	if scan == nil {
-		return nil
-	}
-	return queryer.QueryRowContext(ctx, `SELECT scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms FROM scans WHERE id=?`, id).Scan(&scan.ScannerEngine, &scan.ScannerProfileID, &scan.ScannerProfileRevision, &scan.NaabuVersion, &scan.DiscoveryPorts, &scan.ConfirmedPorts, &scan.DiscoveryDurationMS, &scan.EnrichmentDurationMS)
-}
-
-func loadScanSummaryMetadata(ctx context.Context, queryer rowQueryer, id string, scan *model.ScanSummary) error {
-	if scan == nil {
-		return nil
-	}
-	return queryer.QueryRowContext(ctx, `SELECT scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms FROM scans WHERE id=?`, id).Scan(&scan.ScannerEngine, &scan.ScannerProfileID, &scan.ScannerProfileRevision, &scan.NaabuVersion, &scan.DiscoveryPorts, &scan.ConfirmedPorts, &scan.DiscoveryDurationMS, &scan.EnrichmentDurationMS)
-}
-
 func saveScanHostsExec(ctx context.Context, execer contextExecer, scan model.Scan) error {
 	if len(scan.Snapshot.Hosts) == 0 {
 		return nil
@@ -376,15 +362,16 @@ func (s *Store) ListLatestScanHosts(ctx context.Context) ([]LatestScanHost, erro
 }
 
 // LegacySuccessfulScanExists reports whether at least one successful scan has
-// no derived host index. Such rows are expected in databases upgraded from a
-// release predating scan_hosts and require the bounded compatibility merge in
-// the global Hosts endpoint.
+// no derived host index or completed backfill checkpoint. Such rows are
+// expected in databases upgraded from a release predating scan_hosts and
+// require the bounded compatibility merge in the global Hosts endpoint.
 func (s *Store) LegacySuccessfulScanExists(ctx context.Context) (bool, error) {
 	var exists bool
 	err := s.reader().QueryRowContext(ctx, `SELECT EXISTS(
-SELECT 1 FROM scans s
-WHERE s.status='success'
-  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
+	SELECT 1 FROM scans s
+	WHERE s.status='success'
+	  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
+	  AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
 )`).Scan(&exists)
 	return exists, err
 }
@@ -398,8 +385,8 @@ func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {
 	var revision sql.NullInt64
 	var resumable int
 	readDB := s.reader()
-	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE id=?`, id).
-		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot)
+	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE id=?`, id).
+		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot)
 	if err != nil {
 		return v, err
 	}
@@ -421,9 +408,6 @@ func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {
 	if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
 		return v, err
 	}
-	if err := loadScanMetadata(ctx, readDB, id, &v); err != nil {
-		return v, err
-	}
 	return v, nil
 }
 
@@ -437,8 +421,8 @@ func (s *Store) GetScanSummary(ctx context.Context, id string) (model.ScanSummar
 	var revision sql.NullInt64
 	var resumable int
 	readDB := s.reader()
-	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE id=?`, id).
-		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash)
+	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE id=?`, id).
+		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash)
 	if err != nil {
 		return v, err
 	}
@@ -450,9 +434,6 @@ func (s *Store) GetScanSummary(ctx context.Context, id string) (model.ScanSummar
 	}
 	v.Resumable = resumable != 0
 	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
-	if err := loadScanSummaryMetadata(ctx, readDB, id, &v); err != nil {
-		return v, err
-	}
 	return v, nil
 }
 
@@ -462,18 +443,28 @@ func (s *Store) GetScanSummary(ctx context.Context, id string) (model.ScanSummar
 // the scans_job_id_time index. A job with no successful scan returns a nil
 // summary and a nil error.
 func (s *Store) GetLatestSuccessfulJobScanSummary(ctx context.Context, jobID string) (*model.ScanSummary, error) {
-	var id string
-	if err := s.reader().QueryRowContext(ctx, `SELECT id FROM scans WHERE job_id=? AND status='success' ORDER BY finished_at DESC,id DESC LIMIT 1`, jobID).Scan(&id); err != nil {
+	var v model.ScanSummary
+	var started, finished string
+	var jid sql.NullString
+	var revision sql.NullInt64
+	var resumable int
+	err := s.reader().QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE job_id=? AND status='success' ORDER BY finished_at DESC,id DESC LIMIT 1`, jobID).
+		Scan(&v.ID, &jid, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	summary, err := s.GetScanSummary(ctx, id)
-	if err != nil {
-		return nil, err
+	if jid.Valid {
+		v.JobID = jid.String
 	}
-	return &summary, nil
+	if revision.Valid {
+		v.JobRevision = revision.Int64
+	}
+	v.Resumable = resumable != 0
+	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
+	return &v, nil
 }
 
 // GetScanComparison returns scan metadata and the immutable scan-time change
@@ -488,8 +479,8 @@ func (s *Store) GetScanComparison(ctx context.Context, id string) (model.ScanSum
 	var revision sql.NullInt64
 	var resumable int
 	readDB := s.reader()
-	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json FROM scans WHERE id=?`, id).
-		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash, &changesJSON)
+	err := readDB.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json FROM scans WHERE id=?`, id).
+		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash, &changesJSON)
 	if err != nil {
 		return v, nil, err
 	}
@@ -501,9 +492,6 @@ func (s *Store) GetScanComparison(ctx context.Context, id string) (model.ScanSum
 	}
 	v.Resumable = resumable != 0
 	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
-	if err := loadScanSummaryMetadata(ctx, readDB, id, &v); err != nil {
-		return v, nil, err
-	}
 	var changes []model.Change
 	if len(changesJSON) > 0 && string(changesJSON) != "null" {
 		if err := json.Unmarshal(changesJSON, &changes); err != nil {

@@ -11,8 +11,10 @@ import (
 
 // AtomicWriteFile creates a new owner-only file without ever replacing an
 // existing destination. The writer receives a private temporary path; once it
-// succeeds, the file is fsynced, atomically renamed, and the parent directory
-// is synced so the directory entry survives a host crash.
+// succeeds, the file is fsynced and published with a no-replace hard-link
+// operation. A normal os.Rename would replace a file created between the
+// initial existence check and publication, so it is deliberately not used.
+// The parent directory is synced so the directory entry survives a host crash.
 //
 // afterRename is optional and is run after the destination becomes visible.
 // It is useful for format-specific companion-artifact checks (for example,
@@ -69,17 +71,58 @@ func AtomicWriteFile(path, tempPrefix string, writer func(string) error, afterRe
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", err
 	}
-	if err := os.Rename(tempPath, path); err != nil {
+	// Link and unlink is atomic from readers' perspective and, unlike rename,
+	// fails with EEXIST when another creator wins the race. The temporary file
+	// lives below the same parent, so the operation cannot cross filesystems.
+	if err := os.Link(tempPath, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return "", errors.New("output was created concurrently")
+		}
+		return "", err
+	}
+	publishedInfo, err := os.Lstat(path)
+	if err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	removePublished := func() error {
+		current, statErr := os.Lstat(path)
+		if errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+		if statErr != nil {
+			return statErr
+		}
+		// Never remove a file that replaced our publication while a
+		// post-publication validator was running.
+		if !os.SameFile(publishedInfo, current) {
+			return nil
+		}
+		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return removeErr
+		}
+		return syncDirectory(parent)
+	}
+	if err := os.Remove(tempPath); err != nil {
+		cleanupErr := removePublished()
+		if cleanupErr != nil {
+			return "", fmt.Errorf("remove temporary output: %w (cleanup failed: %v)", err, cleanupErr)
+		}
 		return "", err
 	}
 	if afterRename != nil {
 		if err := afterRename(path); err != nil {
+			cleanupErr := removePublished()
+			if cleanupErr != nil {
+				return "", fmt.Errorf("%w (cleanup failed: %v)", err, cleanupErr)
+			}
 			return "", err
 		}
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
-		return "", err
-	}
+	// The temporary payload was chmod'ed before publication. Keeping the
+	// published path free of a second pathname-based chmod closes a small
+	// replacement race where an attacker could swap the destination between
+	// publication and this point and have their file's mode changed.
 	if err := syncDirectory(filepath.Dir(path)); err != nil {
 		return "", fmt.Errorf("sync output directory: %w", err)
 	}

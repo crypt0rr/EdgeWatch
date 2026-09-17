@@ -31,7 +31,10 @@ func (s *Store) ListLegacySuccessfulScanSnapshotsPage(ctx context.Context, limit
 	limit, offset = normalizePage(limit, offset)
 	var page Page[LegacyScanSnapshot]
 	reader := s.reader()
-	const legacyPredicate = `status='success' AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=scans.id)`
+	// A completed backfill checkpoint also excludes snapshots that were
+	// malformed or empty. Retrying those on every request would recreate the
+	// history-wide decode cost the migration is designed to remove.
+	const legacyPredicate = `status='success' AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=scans.id) AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=scans.id)`
 	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE `+legacyPredicate).Scan(&page.Total); err != nil {
 		return page, err
 	}
@@ -67,8 +70,8 @@ func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {
 	var jobID sql.NullString
 	var revision sql.NullInt64
 	var resumable int
-	err := tx.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE id=?`, id).
-		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot)
+	err := tx.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE id=?`, id).
+		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &baselineScanID, &baselineConfigHash, &changesJSON, &snapshot)
 	if err != nil {
 		return v, err
 	}
@@ -87,9 +90,6 @@ func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {
 		}
 	}
 	if err := json.Unmarshal(snapshot, &v.Snapshot); err != nil {
-		return v, err
-	}
-	if err := loadScanMetadata(ctx, tx, id, &v); err != nil {
 		return v, err
 	}
 	return v, nil

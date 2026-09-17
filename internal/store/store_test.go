@@ -1542,6 +1542,29 @@ func TestPruneRepairsLatestHostProjectionForProtectedOlderScan(t *testing.T) {
 	}
 }
 
+func TestPruneRepairsDanglingLatestHostProjectionWithoutScanDeletions(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,host_json) VALUES(?,?,?,?,?,?)`, "198.51.100.88", "missing-scan", "missing-job", "legacy", time.Now().UTC().Format(time.RFC3339Nano), []byte(`{"address":"198.51.100.88"}`)); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Scans != 0 {
+		t.Fatalf("unexpected scan deletions while repairing dangling projection: %#v", stats)
+	}
+	var count int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM latest_scan_hosts WHERE address=?`, "198.51.100.88").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("dangling latest-host row survived retention repair: %d", count)
+	}
+}
+
 func TestPruneRetentionClassesAndAuditPolicy(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

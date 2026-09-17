@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 38
+const schemaVersion = 39
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -931,6 +931,18 @@ WHERE substr(id_hash,1,3) <> 'v2$'
 HAVING COUNT(*) > 0;`,
 			"DELETE FROM recovery_codes WHERE substr(id_hash,1,3) <> 'v2$'",
 		},
+		39: {
+			// Successful snapshots written before scan_hosts was introduced are
+			// indexed once in bounded, restartable batches. The checkpoint keeps
+			// legacy compatibility work out of every Hosts request and remains
+			// independent of the FTS backfill state.
+			`CREATE TABLE IF NOT EXISTS legacy_scan_host_backfill (
+ scan_id TEXT PRIMARY KEY,
+ processed_at TEXT NOT NULL,
+ FOREIGN KEY(scan_id) REFERENCES scans(id) ON DELETE CASCADE
+);`,
+			"CREATE INDEX IF NOT EXISTS legacy_scan_host_backfill_processed ON legacy_scan_host_backfill(processed_at)",
+		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an
@@ -980,6 +992,14 @@ HAVING COUNT(*) > 0;`,
 		_ = updateMigrationStatus(statusCtx, db, "host-search:"+progress.table, int64(progress.processedRows), 0)
 		cancel()
 	}, logger); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return err
+	}
+	if err := updateMigrationStatus(ctx, db, "legacy-host-index", 0, 0); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return err
+	}
+	if err := backfillLegacyScanHostsContext(ctx, db); err != nil {
 		markMigrationFailed(ctx, db, err)
 		return err
 	}

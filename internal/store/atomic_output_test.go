@@ -69,3 +69,51 @@ func TestAtomicWriteFileIsPrivateCrashSafeAndNonReplacing(t *testing.T) {
 		}
 	}
 }
+
+func TestAtomicWriteFileDoesNotRemoveAReplacementAfterValidationFailure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "export.json")
+	_, err := AtomicWriteFile(path, ".edgewatch-test-", func(tempPath string) error {
+		return os.WriteFile(tempPath, []byte("published"), 0o600)
+	}, func(publishedPath string) error {
+		moved := publishedPath + ".original"
+		if err := os.Rename(publishedPath, moved); err != nil {
+			return err
+		}
+		if err := os.WriteFile(publishedPath, []byte("replacement"), 0o600); err != nil {
+			return err
+		}
+		return errors.New("simulated post-publication validation failure")
+	})
+	if err == nil || !strings.Contains(err.Error(), "validation failure") {
+		t.Fatalf("validation error = %v", err)
+	}
+	contents, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("replacement output was removed: %v", readErr)
+	}
+	if string(contents) != "replacement" {
+		t.Fatalf("replacement output = %q, want replacement", contents)
+	}
+}
+
+func TestAtomicWriteFileRejectsAConcurrentCreator(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "export.json")
+	_, err := AtomicWriteFile(path, ".edgewatch-test-", func(tempPath string) error {
+		if err := os.WriteFile(tempPath, []byte("ours"), 0o600); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte("the other writer"), 0o600)
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "created concurrently") {
+		t.Fatalf("concurrent creator error = %v", err)
+	}
+	contents, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("concurrent creator output missing: %v", readErr)
+	}
+	if string(contents) != "the other writer" {
+		t.Fatalf("concurrent creator output = %q", contents)
+	}
+}

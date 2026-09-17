@@ -74,6 +74,15 @@ let executable = 0
 let covered = 0
 const missingCoverage = []
 
+// A documentation-only change should be an explicit no-op, not an accidental
+// 100% result caused by comparing a push to itself. Keeping the skipped file
+// list in the output also makes the gate useful when it runs on main pushes.
+if (productionChanges.length === 0) {
+  const skipped = [...changed.keys()].filter((file) => !isProductionFile(file))
+  console.log(`diff coverage (${language}): no executable changes (skipped: ${skipped.length ? skipped.join(', ') : 'none'})`)
+  process.exit(0)
+}
+
 if (language === 'frontend') {
   const report = JSON.parse(await readFile(coveragePath, 'utf8'))
   for (const [file, lines] of productionChanges) {
@@ -89,7 +98,10 @@ if (language === 'frontend') {
         .map(([id]) => id)
       if (!statementIDs.length) continue
       executable += 1
-      if (statementIDs.some((id) => Number(entry.s[id]) > 0)) covered += 1
+      // A source line can contain more than one executable statement (for
+      // example a covered condition and an untested error return). Credit the
+      // line only when every overlapping statement was executed.
+      if (statementIDs.every((id) => Number(entry.s[id]) > 0)) covered += 1
     }
   }
 } else {
@@ -110,7 +122,9 @@ if (language === 'frontend') {
       const matching = ranges.filter((entry) => entry.start <= line && entry.end >= line)
       if (!matching.length) continue
       executable += 1
-      if (matching.some((entry) => entry.count > 0)) covered += 1
+      // Go coverage ranges may overlap on a single source line. All of the
+      // overlapping executable blocks must have run for that line to count.
+      if (matching.every((entry) => entry.count > 0)) covered += 1
     }
   }
 }

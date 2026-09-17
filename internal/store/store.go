@@ -103,15 +103,19 @@ func OpenExistingContext(ctx context.Context, path string) (*Store, error) {
 }
 
 // OpenReadOnlyExisting opens an existing database using SQLite's query-only
-// mode. It never creates files, changes journal mode, repairs permissions, or
-// runs migrations, making it safe for health, verification, and export reads.
+// mode. It never changes database content, journal mode, repairs permissions,
+// or runs migrations, making it safe for health, verification, and export
+// reads. SQLite may still initialize transient WAL/SHM coordination files
+// while attaching to a live database; callers must not treat those companions
+// as content mutations.
 func OpenReadOnlyExisting(path string) (*Store, error) {
 	return openWithOptions(path, openOptions{requireExisting: true, queryOnly: true})
 }
 
 // OpenReadOnlyExistingContext is the context-aware variant used by
-// long-running host-side checks. It never creates files, changes journal mode,
-// repairs permissions, or runs migrations.
+// long-running host-side checks. It never changes database content, journal
+// mode, permissions, or schema. SQLite may initialize transient coordination
+// sidecars while opening a live WAL database.
 func OpenReadOnlyExistingContext(ctx context.Context, path string) (*Store, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -291,30 +295,16 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 	return &Store{DB: db, ReadDB: readDB, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true}, nil
 }
 
-// readOnlySQLiteDSN builds a file URI with SQLite's mode=ro flag from the
-// already validated artifact path. When no WAL/SHM/journal sidecar exists,
-// immutable=1 additionally tells SQLite that the quiescent file is a
-// read-only snapshot, preventing it from creating those sidecars while it is
-// opened. If a sidecar is already present, it is deliberately left enabled so
-// reads include committed WAL frames; SQLite may use the existing companion
-// files but will not create a new set. Reconstructing the URI avoids inheriting
-// a caller-supplied mode=rwc (or other write-oriented options) while still
-// escaping spaces and other URI-sensitive path characters correctly.
+// readOnlySQLiteDSN builds a live-safe file URI with SQLite's mode=ro flag from
+// the already validated artifact path. Do not add immutable=1 here: an
+// inspection command may open while the daemon is running, and SQLite must be
+// able to observe WAL frames committed after this connection was created.
+// mode=ro prevents this reader from changing database content while still
+// allowing SQLite's normal WAL coordination to provide a current view. The
+// driver may initialize transient coordination sidecars even in read-only
+// mode; those are not durable application state.
 func readOnlySQLiteDSN(artifactPath string) string {
-	query := "mode=ro"
-	if !sqliteSidecarExists(artifactPath) {
-		query += "&immutable=1"
-	}
-	return (&url.URL{Scheme: "file", Path: artifactPath, RawQuery: query}).String()
-}
-
-func sqliteSidecarExists(artifactPath string) bool {
-	for _, candidate := range []string{artifactPath + "-wal", artifactPath + "-shm", artifactPath + "-journal"} {
-		if _, err := os.Stat(candidate); err == nil {
-			return true
-		}
-	}
-	return false
+	return (&url.URL{Scheme: "file", Path: artifactPath, RawQuery: "mode=ro"}).String()
 }
 
 // SetTargetExclusions installs the deployment-wide scanner target policy. It

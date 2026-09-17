@@ -30,8 +30,46 @@ awk -v value="$total" 'BEGIN { if (value < 82) exit 1 }' || {
 
 failures=0
 packages_seen=0
-while IFS='|' read -r package coverage; do
+
+# Keep the production package contract explicit. Deriving this list from the
+# test output lets an accidentally removed package disappear from the gate
+# without changing the aggregate profile, which is exactly the failure mode
+# this check is meant to prevent.
+required_packages='github.com/crypt0rr/edgewatch/cmd/edgewatch
+github.com/crypt0rr/edgewatch/internal/app
+github.com/crypt0rr/edgewatch/internal/auth
+github.com/crypt0rr/edgewatch/internal/config
+github.com/crypt0rr/edgewatch/internal/engine
+github.com/crypt0rr/edgewatch/internal/model
+github.com/crypt0rr/edgewatch/internal/notify
+github.com/crypt0rr/edgewatch/internal/rdap
+github.com/crypt0rr/edgewatch/internal/scanner
+github.com/crypt0rr/edgewatch/internal/store
+github.com/crypt0rr/edgewatch/internal/updatecheck
+github.com/crypt0rr/edgewatch/internal/web
+github.com/crypt0rr/edgewatch/internal/webui'
+
+while IFS= read -r package; do
 	[ -n "$package" ] || continue
+	coverage=$(awk -v wanted="$package" '
+		{
+			for (i = 1; i <= NF; i++) {
+				if ($i != wanted) continue
+				for (j = i + 1; j <= NF; j++) {
+					if ($(j) == "coverage:") {
+						value = $(j + 1)
+						sub(/%$/, "", value)
+						print value
+						exit
+					}
+				}
+			}
+		}' "$summary")
+	if [ -z "$coverage" ]; then
+		echo "$package is missing from $summary" >&2
+		failures=$((failures + 1))
+		continue
+	fi
 	packages_seen=$((packages_seen + 1))
 	threshold=80
 	case "$package" in
@@ -43,20 +81,14 @@ while IFS='|' read -r package coverage; do
 		echo "$package coverage ${coverage}% is below the required ${threshold}%" >&2
 		failures=$((failures + 1))
 	fi
-	done <<EOF
-$(awk '
-/coverage: [0-9.]+% of statements/ {
-		package = $2
-		value = $0
-		sub(/.*coverage: /, "", value)
-		sub(/% of statements.*/, "", value)
-		print package "|" value
-}' "$summary")
+done <<EOF
+$required_packages
 EOF
 
-if [ "$packages_seen" -eq 0 ]; then
-	echo "no package coverage summaries found in $summary" >&2
-	exit 1
+required_count=$(printf '%s\n' "$required_packages" | awk 'NF { count++ } END { print count + 0 }')
+if [ "$packages_seen" -ne "$required_count" ]; then
+	echo "Go coverage summaries covered $packages_seen of $required_count required production packages" >&2
+	failures=$((failures + 1))
 fi
 if [ "$failures" -ne 0 ]; then
 	exit 1

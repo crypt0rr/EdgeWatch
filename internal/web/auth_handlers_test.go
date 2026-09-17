@@ -196,6 +196,41 @@ func TestTOTPRecoveryCodeRotationRequiresCurrentFactorAndPreservesSession(t *tes
 	}
 }
 
+func TestTOTPRecoveryCodeRotationValidationBranches(t *testing.T) {
+	ctx := context.Background()
+	server, db, session := newUsersTestServer(t)
+	invalid := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader("{"))
+	invalid.Header.Set("Content-Type", "application/json")
+	invalidResponse := httptest.NewRecorder()
+	server.totpRecoveryCodes(invalidResponse, invalid, session)
+	if invalidResponse.Code != http.StatusBadRequest {
+		t.Fatalf("malformed recovery rotation status = %d", invalidResponse.Code)
+	}
+	disabled := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader(`{"password":"administrator password"}`))
+	disabled.Header.Set("Content-Type", "application/json")
+	disabledResponse := httptest.NewRecorder()
+	server.totpRecoveryCodes(disabledResponse, disabled, session)
+	if disabledResponse.Code != http.StatusBadRequest || !strings.Contains(disabledResponse.Body.String(), "totp_required") {
+		t.Fatalf("disabled recovery rotation = %d: %s", disabledResponse.Code, disabledResponse.Body.String())
+	}
+	admin, err := db.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin.TOTPEnabled = true
+	admin.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	if err := db.SaveAdmin(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	wrongPassword := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader(`{"password":"wrong password","code":"000000"}`))
+	wrongPassword.Header.Set("Content-Type", "application/json")
+	wrongPasswordResponse := httptest.NewRecorder()
+	server.totpRecoveryCodes(wrongPasswordResponse, wrongPassword, session)
+	if wrongPasswordResponse.Code != http.StatusBadRequest {
+		t.Fatalf("wrong password recovery rotation = %d: %s", wrongPasswordResponse.Code, wrongPasswordResponse.Body.String())
+	}
+}
+
 func TestPendingTOTPEnrolmentsExpireAndRemainBounded(t *testing.T) {
 	server, _, admin := newUsersTestServer(t)
 	base := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)

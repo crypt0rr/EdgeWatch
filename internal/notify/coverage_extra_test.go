@@ -153,6 +153,46 @@ func TestRemoveInterruptedKeyOnlyRemovesExpectedEmptyFiles(t *testing.T) {
 	}
 }
 
+func TestNotifierRecoversInterruptedKeyAndResolvesManagedSelectors(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	keyPath := filepath.Join(t.TempDir(), "notification.key")
+	notifier, err := newWithKeyFile(db, nil, keyPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := notifier.ensureKey(ctx); err != nil {
+		t.Fatalf("interrupted key recovery failed: %v", err)
+	}
+	if _, err := notifier.CreateManaged(ctx, "Recovered", "generic://localhost/recovered?disabletls=yes&template=json", true); err != nil {
+		t.Fatalf("managed destination creation after key recovery failed: %v", err)
+	}
+	notifier.mu.Lock()
+	notifier.managed["active"] = managedDestination{record: store.ManagedNotification{ID: "active", Enabled: true}, url: "generic://localhost/active?disabletls=yes"}
+	notifier.managed["paused"] = managedDestination{record: store.ManagedNotification{ID: "paused", Enabled: false}, url: "generic://localhost/paused?disabletls=yes"}
+	notifier.managed["locked"] = managedDestination{record: store.ManagedNotification{ID: "locked", Enabled: true}, locked: true}
+	notifier.mu.Unlock()
+	if _, available, deferred := notifier.resolveManagedDelivery("invalid"); available || deferred {
+		t.Fatal("malformed selector unexpectedly resolved")
+	}
+	if _, available, deferred := notifier.resolveManagedDelivery("managed:missing:1"); available || deferred {
+		t.Fatal("missing selector unexpectedly resolved")
+	}
+	if _, available, deferred := notifier.resolveManagedDelivery("managed:paused:1"); available || !deferred {
+		t.Fatal("paused selector was not deferred")
+	}
+	if _, available, deferred := notifier.resolveManagedDelivery("managed:locked:1"); available || !deferred {
+		t.Fatal("locked selector was not deferred")
+	}
+	if raw, available, deferred := notifier.resolveManagedDelivery("managed:active:1"); !available || deferred || raw == "" {
+		t.Fatalf("active selector = %q, available=%v deferred=%v", raw, available, deferred)
+	}
+}
+
 func TestNotifierLockedAndErrorBranches(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

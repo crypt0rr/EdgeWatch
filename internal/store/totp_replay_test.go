@@ -44,4 +44,7 @@ func TestConsumeTOTPStepRejectsInvalidAndCancelledRequests(t *testing.T) {
 	if accepted, err := s.ConsumeTOTPStep(cancelled, "user", 1, now); err == nil || accepted {
 		t.Fatalf("cancelled request = %v, %v", accepted, err)
 	}
+	if accepted, err := s.ConsumeTOTPStep(ctx, "missing-user", 1, now); err == nil || accepted {
+		t.Fatalf("unknown user request = %v, %v", accepted, err)
+	}
 }

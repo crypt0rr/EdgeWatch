@@ -379,11 +379,19 @@ func (s *Server) runSSEReservationRetry(ctx context.Context) {
 }
 
 func (s *Server) broadcast(value map[string]any) {
+	s.broadcastContext(context.Background(), value)
+}
+
+// broadcastContext preserves the caller's lifecycle context while attempting
+// to recover a durable event-ID range. Background daemon callbacks use the
+// compatibility wrapper above; request handlers should pass their request
+// context so a slow database cannot outlive the request unnecessarily.
+func (s *Server) broadcastContext(ctx context.Context, value map[string]any) {
 	payload := boundedSSEPayload(value)
 	// Reserve/recover outside the subscriber mutex. The reservation mutex also
 	// serializes ID allocation, preventing fallback IDs from racing a durable
 	// range switch and making overlap impossible after an outage.
-	s.retrySSEReservation()
+	s.retrySSEReservationContext(ctx)
 	s.sseReservationMu.Lock()
 	defer s.sseReservationMu.Unlock()
 	s.mu.Lock()

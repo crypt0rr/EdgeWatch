@@ -1236,7 +1236,7 @@ func validateHostName(value string) error {
 			return fmt.Errorf("invalid host name %q", value)
 		}
 		for _, r := range label {
-			if !(r == '-' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9') {
+			if r != '-' && (r < 'a' || r > 'z') && (r < '0' || r > '9') {
 				return fmt.Errorf("invalid host name %q", value)
 			}
 		}

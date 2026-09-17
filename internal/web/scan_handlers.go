@@ -351,7 +351,7 @@ func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, session stor
 		return
 	}
 	s.App.RefreshSchedules()
-	s.broadcast(map[string]any{"type": action, "job_id": id})
+	s.broadcastContext(r.Context(), map[string]any{"type": action, "job_id": id})
 	writeJSON(w, 204, nil)
 }
 
@@ -421,7 +421,7 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	s.App.RefreshSchedules()
-	s.broadcast(map[string]any{"type": action, "job_id": id})
+	s.broadcastContext(r.Context(), map[string]any{"type": action, "job_id": id})
 	writeJSON(w, 204, nil)
 }
 

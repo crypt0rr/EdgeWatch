@@ -83,6 +83,7 @@ test('user invitation exposes failure and success outcomes', async ({ page }, te
   await page.goto('/users')
   await page.getByLabel('Username').fill('new-user')
   await page.getByLabel('Display name').fill('New User')
+  await page.getByLabel('Administrator password').fill('fixture-password')
 
   controls.failNext('user-create')
   await page.getByRole('button', { name: 'Create activation link' }).click()

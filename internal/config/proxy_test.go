@@ -38,6 +38,35 @@ func TestTrustedProxyConfigurationValidatesAddresses(t *testing.T) {
 	}
 }
 
+func TestAllowedHostConfigurationValidatesNamesAndPorts(t *testing.T) {
+	base := Config{Version: 1, Database: "db", Retention: Duration(24 * 60 * 60 * 1e9), Scheduler: Scheduler{MaxConcurrent: 1}, Web: Web{Listen: "127.0.0.1:8080", AllowedHosts: []string{"console.example.test", "[2001:db8::10]:8443"}}}
+	if err := base.ValidateDeployment(); err != nil {
+		t.Fatal(err)
+	}
+	for _, hosts := range [][]string{{"https://console.example.test"}, {"bad host"}, {"console.example.test:0"}, {""}, {"[not-an-ip]:8443"}, {"console.example.test:bad"}, {"console.example.test:1"}, {":80"}, {"2001:db8:::10"}, {"-bad.example"}, {"bad-.example"}, {"bad..example"}, {strings.Repeat("a", 64) + ".example"}, {"bad_example"}} {
+		base.Web.AllowedHosts = hosts
+		err := base.ValidateDeployment()
+		if hosts[0] == "console.example.test:1" {
+			if err != nil {
+				t.Fatalf("valid host with port rejected: %v", err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Fatalf("invalid allowed host %v was accepted", hosts)
+		}
+	}
+	base.Web.AllowedHosts = []string{"192.0.2.1"}
+	if err := base.ValidateDeployment(); err != nil {
+		t.Fatalf("valid IPv4 host rejected: %v", err)
+	}
+	tooLong := strings.Repeat("a", 254)
+	base.Web.AllowedHosts = []string{tooLong}
+	if err := base.ValidateDeployment(); err == nil {
+		t.Fatal("overlong allowed host was accepted")
+	}
+}
+
 func TestTargetExclusionConfigurationValidatesNetworks(t *testing.T) {
 	base := Config{Version: 1, Database: "db", Retention: Duration(24 * 60 * 60 * 1e9), Scheduler: Scheduler{MaxConcurrent: 1}, Scanner: ScannerConfig{TargetExclusions: []string{"127.0.0.0/8"}}, Web: Web{Listen: "127.0.0.1:8080"}}
 	if err := base.ValidateDeployment(); err != nil {

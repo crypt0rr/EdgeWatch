@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -28,7 +29,7 @@ func TestIsPrivateAddressClassifiesSpecialAndPublicRanges(t *testing.T) {
 			t.Errorf("%s was classified as public", address)
 		}
 	}
-	for _, address := range []string{"8.8.8.8", "198.51.100.10", "2001:db8::10"} {
+	for _, address := range []string{"8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"} {
 		if isPrivateAddress(net.ParseIP(address)) {
 			t.Errorf("%s was classified as private", address)
 		}
@@ -37,12 +38,12 @@ func TestIsPrivateAddressClassifiesSpecialAndPublicRanges(t *testing.T) {
 
 func TestPublicHostProjectionRedactsAndSortsPositivePorts(t *testing.T) {
 	s := &Server{}
-	host := model.HostObservation{Address: " 198.51.100.10 ", Protocols: []model.ProtocolObservation{
+	host := model.HostObservation{Address: " 8.8.8.8 ", Protocols: []model.ProtocolObservation{
 		{Protocol: "udp", Ports: []model.PortObservation{{Port: 53, State: "open|filtered", Reason: "response", Service: &model.ServiceObservation{Name: "domain", Product: "BIND", Version: "9"}}, {Port: 54, State: "closed", Service: &model.ServiceObservation{Name: "hidden"}}}},
 		{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https", Product: "nginx", Version: "1.2", ExtraInfo: "must not leak"}}, {Port: 22, State: "filtered"}}},
 	}}
 	response := s.publicHostFromObservation(context.Background(), "public-job", host, model.ScanSummary{FinishedAt: time.Unix(10, 0).UTC()})
-	if response.Address != "198.51.100.10" || !response.Public || response.Private || len(response.OpenPorts) != 1 || len(response.OpenFiltered) != 1 {
+	if response.Address != "8.8.8.8" || !response.Public || response.Private || len(response.OpenPorts) != 1 || len(response.OpenFiltered) != 1 {
 		t.Fatalf("projection = %#v", response)
 	}
 	if response.OpenPorts[0].Protocol != "tcp" || response.OpenPorts[0].Service != "https" || response.OpenPorts[0].Port != 443 {
@@ -71,7 +72,7 @@ func TestPublicHostProjectionRedactsAndSortsPositivePorts(t *testing.T) {
 }
 
 func TestPublicRdapProjectionAndCachedPayloadValidation(t *testing.T) {
-	result := rdap.Result{Status: "success", Address: "198.51.100.10", NetworkName: "Example", Country: "NL", Registry: "ripe", Organizations: []string{"Example Org"}, SourceURL: "https://registry.example/rdap/ip/198.51.100.10"}
+	result := rdap.Result{Status: "success", Address: "8.8.8.8", NetworkName: "Example", Country: "NL", Registry: "ripe", Organizations: []string{"Example Org"}, SourceURL: "https://registry.example/rdap/ip/8.8.8.8"}
 	projected := publicRdapFromResult(result)
 	if projected.Status != "success" || projected.NetworkName != "Example" || len(projected.Organization) != 1 {
 		t.Fatalf("projected RDAP = %#v", projected)
@@ -101,7 +102,7 @@ func TestPublicHostProjectionDoesNotServeRDAPBeyondStaleWindow(t *testing.T) {
 	clock := time.Date(2026, time.January, 1, 12, 0, 0, 0, time.UTC)
 	server := &Server{App: &app.App{Config: cfg}, Store: db, now: func() time.Time { return clock }}
 	if err := db.PutRDAPCache(ctx, store.RDAPCacheEntry{
-		Address:    "198.51.100.44",
+		Address:    "8.8.8.8",
 		Payload:    []byte(`{"status":"success","network_name":"Example"}`),
 		FetchedAt:  clock.Add(-2 * 24 * time.Hour),
 		ExpiresAt:  clock.Add(-time.Hour),
@@ -109,7 +110,7 @@ func TestPublicHostProjectionDoesNotServeRDAPBeyondStaleWindow(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	host := model.HostObservation{Address: "198.51.100.44"}
+	host := model.HostObservation{Address: "8.8.8.8"}
 	within := server.publicHostFromObservation(ctx, "job", host, model.ScanSummary{})
 	if within.Rdap == nil || within.Rdap.Status != "stale" || !within.Rdap.Stale {
 		t.Fatalf("bounded stale RDAP was not projected: %#v", within.Rdap)
@@ -188,8 +189,41 @@ func TestPublicAPIDisabledEnabledAndRateLimited(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	server.invalidatePublicDashboardCache()
 	if rec := call(http.MethodGet, "/api/public/v1/dashboard", "198.51.100.21:1000"); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("public API store failure status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPublicDashboardFailureCacheAndFreshBucketEviction(t *testing.T) {
+	ctx := context.Background()
+	failure := errors.New("dashboard builder failed")
+	now := time.Now().UTC()
+	server := &Server{
+		now: func() time.Time { return now },
+		publicDashboardBuildFunc: func(context.Context, store.PublicDashboard) (publicDashboardResponse, error) {
+			return publicDashboardResponse{}, failure
+		},
+	}
+	dashboard := store.PublicDashboard{Enabled: true, Title: "failure"}
+	if _, err := server.cachedPublicDashboardPayload(ctx, dashboard); !errors.Is(err, failure) {
+		t.Fatalf("first dashboard build error = %v", err)
+	}
+	if _, err := server.cachedPublicDashboardPayload(ctx, dashboard); !errors.Is(err, failure) {
+		t.Fatalf("negative dashboard cache error = %v", err)
+	}
+
+	server.publicHits = make(map[string][]time.Time, 4097)
+	for i := 0; i < 4097; i++ {
+		server.publicHits[fmt.Sprintf("fresh-%d", i)] = []time.Time{now.Add(-time.Duration(i) * time.Millisecond)}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "198.51.100.250:1234"
+	if !server.allowAnonymousRequest(request, "public-dashboard") {
+		t.Fatal("fresh bucket was unexpectedly rate limited")
+	}
+	if len(server.publicHits) > 4096 {
+		t.Fatalf("fresh rate-limit buckets exceeded bound: %d", len(server.publicHits))
 	}
 }
 

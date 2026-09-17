@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 41
+const schemaVersion = 42
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -1011,6 +1011,18 @@ WHERE NOT EXISTS (SELECT 1 FROM baseline_host_search hs WHERE hs.job_id=baseline
 );`,
 			"ALTER TABLE user_invites ADD COLUMN issuer_user_id TEXT NOT NULL DEFAULT ''",
 			"CREATE INDEX IF NOT EXISTS user_invites_issuer ON user_invites(issuer_user_id,used_at,expires_at)",
+		},
+		42: {
+			// Deployment-managed notification URLs historically used a readable
+			// SHA-256 digest as their selector. Keep that legacy value only as an
+			// internal migration key; the API and new outbox selectors use random,
+			// persisted opaque identifiers instead.
+			`CREATE TABLE IF NOT EXISTS deployment_notification_ids (
+ legacy_hash TEXT PRIMARY KEY,
+ opaque_id TEXT NOT NULL UNIQUE,
+ created_at TEXT NOT NULL
+);`,
+			"CREATE INDEX IF NOT EXISTS deployment_notification_ids_opaque ON deployment_notification_ids(opaque_id)",
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

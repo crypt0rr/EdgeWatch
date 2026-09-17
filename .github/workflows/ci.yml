@@ -90,7 +90,10 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # The race-enabled store suite migrates a fresh SQLite database for each
+    # case. Keep the job bounded, but allow the Go package to use the same
+    # headroom as the CI job instead of Go's 10-minute default timeout.
+    timeout-minutes: 20
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -123,7 +126,7 @@ jobs:
       - name: Test
         run: |
           set -o pipefail
-          go test -race -coverprofile=coverage.out ./... | tee go-coverage-summary.txt
+          go test -race -timeout=15m -coverprofile=coverage.out ./... | tee go-coverage-summary.txt
       - name: Check Go coverage
         run: ./scripts/check-go-coverage.sh coverage.out go-coverage-summary.txt
       - name: Resolve diff coverage base

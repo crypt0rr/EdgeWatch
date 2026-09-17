@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net"
@@ -17,6 +18,10 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/rdap"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
+
+func hostStoreNotFound(err error) bool {
+	return errors.Is(err, store.ErrNotFound) || errors.Is(err, sql.ErrNoRows)
+}
 
 type hostSummary struct {
 	Address           string                `json:"address"`
@@ -624,18 +629,18 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	indexedExists, err := s.Store.SuccessfulScanHostIndexExists(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	legacyExists, err := s.Store.LegacySuccessfulScanExists(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	if indexedExists && !legacyExists {
 		indexed, err := s.Store.ListLatestScanHostsPage(r.Context(), query, protocol, hasOpen, limit, offset)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+			s.writeInternalError(w, r, "store", err)
 			return
 		}
 		items := make([]allHostSummary, 0, len(indexed.Items))
@@ -654,7 +659,7 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 	if indexedExists {
 		indexed, err := s.Store.ListLatestScanHosts(r.Context())
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+			s.writeInternalError(w, r, "store", err)
 			return
 		}
 		hosts = make([]allHostSummary, 0, len(indexed))
@@ -664,7 +669,7 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 	}
 	legacyHosts, err := s.latestScannedHosts(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	if !indexedExists {
@@ -834,7 +839,7 @@ func (s *Server) expectedHostForScan(ctx context.Context, jobID, address string,
 			hosts := []model.HostObservation{projected.Host}
 			restoreHostScopes(hosts, scopesForJob(job))
 			return hosts[0], true, nil
-		} else if !errors.Is(projectionErr, store.ErrNotFound) {
+		} else if !hostStoreNotFound(projectionErr) {
 			return model.HostObservation{}, false, projectionErr
 		}
 		// Databases from before the indexed overlay projection may still carry
@@ -864,7 +869,7 @@ func (s *Server) expectedHostForScan(ctx context.Context, jobID, address string,
 			hosts := []model.HostObservation{baselineHost.Host}
 			restoreHostScopes(hosts, scopesForJob(job))
 			return hosts[0], true, nil
-		} else if !errors.Is(sourceErr, store.ErrNotFound) {
+		} else if !hostStoreNotFound(sourceErr) {
 			return model.HostObservation{}, false, sourceErr
 		}
 		return model.HostObservation{}, false, nil
@@ -907,7 +912,11 @@ func parseHostProtocol(raw string) (string, error) {
 func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, id string) {
 	record, err := s.Store.GetJob(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		} else {
+			s.writeInternalError(w, r, "store", err)
+		}
 		return
 	}
 	limit, offset, err := parseHostPagination(r)
@@ -928,7 +937,7 @@ func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, id str
 	query := r.URL.Query().Get("q")
 	baselineInfo, metaErr := s.Store.RuntimeBaselineInfo(r.Context(), id)
 	if metaErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", metaErr.Error(), nil)
+		s.writeInternalError(w, r, "store", metaErr)
 		return
 	}
 	baselineScanID := baselineInfo.BaselineScanID
@@ -936,13 +945,13 @@ func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, id str
 	if baselineScanID != "" && !baselineModified {
 		indexedExists, existsErr := s.Store.ScanHostIndexExists(r.Context(), baselineScanID)
 		if existsErr != nil {
-			writeError(w, http.StatusInternalServerError, "store", existsErr.Error(), nil)
+			s.writeInternalError(w, r, "store", existsErr)
 			return
 		}
 		if indexedExists {
 			indexed, indexErr := s.Store.ListScanHostsPage(r.Context(), baselineScanID, query, protocol, hasOpen, limit, offset)
 			if indexErr != nil {
-				writeError(w, http.StatusInternalServerError, "store", indexErr.Error(), nil)
+				s.writeInternalError(w, r, "store", indexErr)
 				return
 			}
 			items := make([]hostSummary, 0, len(indexed.Items))
@@ -960,13 +969,13 @@ func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, id str
 	if baselineModified {
 		projectionExists, projectionErr := s.Store.BaselineHostProjectionExists(r.Context(), id)
 		if projectionErr != nil {
-			writeError(w, http.StatusInternalServerError, "store", projectionErr.Error(), nil)
+			s.writeInternalError(w, r, "store", projectionErr)
 			return
 		}
 		if projectionExists {
 			projected, listErr := s.Store.ListBaselineHostsPage(r.Context(), id, query, protocol, hasOpen, limit, offset)
 			if listErr != nil {
-				writeError(w, http.StatusInternalServerError, "store", listErr.Error(), nil)
+				s.writeInternalError(w, r, "store", listErr)
 				return
 			}
 			items := make([]hostSummary, 0, len(projected.Items))
@@ -985,7 +994,7 @@ func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, id str
 	}
 	state, err := s.Store.RuntimeState(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	quality := "none"
@@ -994,7 +1003,7 @@ func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, id str
 	if state.Baseline != nil {
 		page, pageErr := observationsForSnapshot(*state.Baseline)
 		if pageErr != nil {
-			writeError(w, http.StatusInternalServerError, "snapshot", pageErr.Error(), nil)
+			s.writeInternalError(w, r, "snapshot", pageErr)
 			return
 		}
 		hosts, quality = page.Items, page.DataQuality
@@ -1011,7 +1020,11 @@ func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, id str
 func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, rawAddress string) {
 	record, err := s.Store.GetJob(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		} else {
+			s.writeInternalError(w, r, "store", err)
+		}
 		return
 	}
 	address, err := normalizedHostAddress(rawAddress)
@@ -1021,7 +1034,7 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, raw
 	}
 	baselineInfo, infoErr := s.Store.RuntimeBaselineInfo(r.Context(), id)
 	if infoErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", infoErr.Error(), nil)
+		s.writeInternalError(w, r, "store", infoErr)
 		return
 	}
 	baselineScanID := baselineInfo.BaselineScanID
@@ -1029,7 +1042,7 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, raw
 	if baselineScanID != "" && !baselineModified {
 		indexedExists, existsErr := s.Store.ScanHostIndexExists(r.Context(), baselineScanID)
 		if existsErr != nil {
-			writeError(w, http.StatusInternalServerError, "store", existsErr.Error(), nil)
+			s.writeInternalError(w, r, "store", existsErr)
 			return
 		}
 		if indexedExists {
@@ -1044,8 +1057,8 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, raw
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": record.Job.Name, "data_quality": indexed.DataQuality, "host": indexed.Host, "expected": indexed.Host, "source_scan": source})
 				return
-			} else if !errors.Is(indexErr, store.ErrNotFound) {
-				writeError(w, http.StatusInternalServerError, "store", indexErr.Error(), nil)
+			} else if !hostStoreNotFound(indexErr) {
+				s.writeInternalError(w, r, "store", indexErr)
 				return
 			}
 			writeError(w, http.StatusNotFound, "not_found", "baseline host not found", nil)
@@ -1054,7 +1067,7 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, raw
 	}
 	if baselineModified {
 		if projectionExists, projectionErr := s.Store.BaselineHostProjectionExists(r.Context(), id); projectionErr != nil {
-			writeError(w, http.StatusInternalServerError, "store", projectionErr.Error(), nil)
+			s.writeInternalError(w, r, "store", projectionErr)
 			return
 		} else if projectionExists {
 			if projected, projectionErr := s.Store.GetBaselineHost(r.Context(), id, address); projectionErr == nil {
@@ -1067,8 +1080,8 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, raw
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": record.Job.Name, "data_quality": projected.DataQuality, "host": projected.Host, "expected": projected.Host, "source_scan": source})
 				return
-			} else if !errors.Is(projectionErr, store.ErrNotFound) {
-				writeError(w, http.StatusInternalServerError, "store", projectionErr.Error(), nil)
+			} else if !hostStoreNotFound(projectionErr) {
+				s.writeInternalError(w, r, "store", projectionErr)
 				return
 			}
 			writeError(w, http.StatusNotFound, "not_found", "baseline host not found", nil)
@@ -1076,7 +1089,11 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, raw
 		}
 	}
 	state, err := s.Store.RuntimeState(r.Context(), id)
-	if err != nil || state.Baseline == nil {
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
+	}
+	if state.Baseline == nil {
 		writeError(w, http.StatusNotFound, "not_found", "baseline host not found", nil)
 		return
 	}
@@ -1102,7 +1119,7 @@ func (s *Server) jobBaselineHostRDAP(w http.ResponseWriter, r *http.Request, id,
 	}
 	baselineInfo, infoErr := s.Store.RuntimeBaselineInfo(r.Context(), id)
 	if infoErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", infoErr.Error(), nil)
+		s.writeInternalError(w, r, "store", infoErr)
 		return
 	}
 	baselineScanID := baselineInfo.BaselineScanID
@@ -1110,7 +1127,7 @@ func (s *Server) jobBaselineHostRDAP(w http.ResponseWriter, r *http.Request, id,
 	if baselineScanID != "" && !baselineModified {
 		indexedExists, existsErr := s.Store.ScanHostIndexExists(r.Context(), baselineScanID)
 		if existsErr != nil {
-			writeError(w, http.StatusInternalServerError, "store", existsErr.Error(), nil)
+			s.writeInternalError(w, r, "store", existsErr)
 			return
 		}
 		if indexedExists {
@@ -1122,8 +1139,8 @@ func (s *Server) jobBaselineHostRDAP(w http.ResponseWriter, r *http.Request, id,
 				w.Header().Set("Cache-Control", "no-store")
 				writeJSON(w, http.StatusOK, map[string]any{"rdap": result})
 				return
-			} else if !errors.Is(indexErr, store.ErrNotFound) {
-				writeError(w, http.StatusInternalServerError, "store", indexErr.Error(), nil)
+			} else if !hostStoreNotFound(indexErr) {
+				s.writeInternalError(w, r, "store", indexErr)
 				return
 			}
 			writeError(w, http.StatusNotFound, "not_found", "baseline host not found", nil)
@@ -1132,7 +1149,7 @@ func (s *Server) jobBaselineHostRDAP(w http.ResponseWriter, r *http.Request, id,
 	}
 	if baselineModified {
 		if projectionExists, projectionErr := s.Store.BaselineHostProjectionExists(r.Context(), id); projectionErr != nil {
-			writeError(w, http.StatusInternalServerError, "store", projectionErr.Error(), nil)
+			s.writeInternalError(w, r, "store", projectionErr)
 			return
 		} else if projectionExists {
 			if _, projectionErr := s.Store.GetBaselineHost(r.Context(), id, address); projectionErr == nil {
@@ -1143,8 +1160,8 @@ func (s *Server) jobBaselineHostRDAP(w http.ResponseWriter, r *http.Request, id,
 				w.Header().Set("Cache-Control", "no-store")
 				writeJSON(w, http.StatusOK, map[string]any{"rdap": result})
 				return
-			} else if !errors.Is(projectionErr, store.ErrNotFound) {
-				writeError(w, http.StatusInternalServerError, "store", projectionErr.Error(), nil)
+			} else if !hostStoreNotFound(projectionErr) {
+				s.writeInternalError(w, r, "store", projectionErr)
 				return
 			}
 			writeError(w, http.StatusNotFound, "not_found", "baseline host not found", nil)
@@ -1152,7 +1169,11 @@ func (s *Server) jobBaselineHostRDAP(w http.ResponseWriter, r *http.Request, id,
 		}
 	}
 	state, err := s.Store.RuntimeState(r.Context(), id)
-	if err != nil || state.Baseline == nil {
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
+	}
+	if state.Baseline == nil {
 		writeError(w, http.StatusNotFound, "not_found", "baseline host not found", nil)
 		return
 	}
@@ -1177,7 +1198,11 @@ func rdapUnavailable(address string) rdap.Result {
 func (s *Server) jobScanHosts(w http.ResponseWriter, r *http.Request, id, scanID string) {
 	record, err := s.Store.GetJob(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		} else {
+			s.writeInternalError(w, r, "store", err)
+		}
 		return
 	}
 	s.renderScanHosts(w, r, id, record.Job.Name, scanID)
@@ -1185,7 +1210,15 @@ func (s *Server) jobScanHosts(w http.ResponseWriter, r *http.Request, id, scanID
 
 func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, id, jobName, scanID string) {
 	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil || (id != "" && summary.JobID != id) {
+	if err != nil {
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		} else {
+			s.writeInternalError(w, r, "store", err)
+		}
+		return
+	}
+	if id != "" && summary.JobID != id {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
 	}
@@ -1206,13 +1239,13 @@ func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, id, job
 	}
 	indexedExists, existsErr := s.Store.ScanHostIndexExists(r.Context(), scanID)
 	if existsErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", existsErr.Error(), nil)
+		s.writeInternalError(w, r, "store", existsErr)
 		return
 	}
 	if indexedExists {
 		indexed, indexErr := s.Store.ListScanHostsPage(r.Context(), scanID, r.URL.Query().Get("q"), protocol, hasOpen, limit, offset)
 		if indexErr != nil {
-			writeError(w, http.StatusInternalServerError, "store", indexErr.Error(), nil)
+			s.writeInternalError(w, r, "store", indexErr)
 			return
 		}
 		items := make([]hostSummary, 0, len(indexed.Items))
@@ -1224,7 +1257,7 @@ func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, id, job
 	}
 	scan, err := s.Store.GetScan(r.Context(), scanID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	page, _ := observationsForSnapshot(scan.Snapshot)
@@ -1238,7 +1271,11 @@ func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, id, job
 func (s *Server) scanHostsRoute(w http.ResponseWriter, r *http.Request, scanID string) {
 	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		} else {
+			s.writeInternalError(w, r, "store", err)
+		}
 		return
 	}
 	if summary.JobID != "" {
@@ -1251,18 +1288,64 @@ func (s *Server) scanHostsRoute(w http.ResponseWriter, r *http.Request, scanID s
 func (s *Server) jobScanHost(w http.ResponseWriter, r *http.Request, id, scanID, rawAddress string) {
 	record, err := s.Store.GetJob(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "store", "job detail could not be loaded", nil)
+		}
 		return
 	}
-	s.renderScanHost(w, r, id, record.Job.Name, scanID, rawAddress)
+	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
+	if err != nil {
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
+		}
+		return
+	}
+	if summary.JobID != id {
+		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		return
+	}
+	s.renderScanHostWithSummary(w, r, id, record.Job.Name, scanID, rawAddress, summary, &record)
 }
 
 func (s *Server) renderScanHost(w http.ResponseWriter, r *http.Request, id, jobName, scanID, rawAddress string) {
 	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil || (id != "" && summary.JobID != id) {
+	if err != nil {
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
+		}
+		return
+	}
+	if id != "" && summary.JobID != id {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
 	}
+	var record *store.JobRecord
+	expectedJobID := id
+	if expectedJobID == "" {
+		expectedJobID = summary.JobID
+	}
+	if expectedJobID != "" {
+		loaded, recordErr := s.Store.GetJob(r.Context(), expectedJobID)
+		if recordErr != nil {
+			if hostStoreNotFound(recordErr) {
+				writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+			} else {
+				writeError(w, http.StatusInternalServerError, "store", "job detail could not be loaded", nil)
+			}
+			return
+		}
+		record = &loaded
+	}
+	s.renderScanHostWithSummary(w, r, id, jobName, scanID, rawAddress, summary, record)
+}
+
+func (s *Server) renderScanHostWithSummary(w http.ResponseWriter, r *http.Request, id, jobName, scanID, rawAddress string, summary model.ScanSummary, record *store.JobRecord) {
 	address, err := normalizedHostAddress(rawAddress)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "host not found", nil)
@@ -1277,19 +1360,13 @@ func (s *Server) renderScanHost(w http.ResponseWriter, r *http.Request, id, jobN
 		expectedJobID = summary.JobID
 	}
 	var expectedJob config.Job
-	haveExpectedJob := false
-	if expectedJobID != "" {
-		if record, recordErr := s.Store.GetJob(r.Context(), expectedJobID); recordErr == nil {
-			expectedJob = record.Job
-			haveExpectedJob = true
-		} else if id != "" || !errors.Is(recordErr, store.ErrNotFound) {
-			writeError(w, http.StatusInternalServerError, "store", recordErr.Error(), nil)
-			return
-		}
+	haveExpectedJob := record != nil
+	if record != nil {
+		expectedJob = record.Job
 	}
 	indexedExists, existsErr := s.Store.ScanHostIndexExists(r.Context(), scanID)
 	if existsErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", existsErr.Error(), nil)
+		writeError(w, http.StatusInternalServerError, "store", "scan host detail could not be loaded", nil)
 		return
 	}
 	if indexedExists {
@@ -1301,14 +1378,14 @@ func (s *Server) renderScanHost(w http.ResponseWriter, r *http.Request, id, jobN
 					dedupeHost(&baselineHost)
 					expected = baselineHost
 				} else if expectedErr != nil {
-					writeError(w, http.StatusInternalServerError, "store", expectedErr.Error(), nil)
+					writeError(w, http.StatusInternalServerError, "store", "baseline host detail could not be loaded", nil)
 					return
 				}
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": jobName, "scan": summary, "data_quality": indexed.DataQuality, "host": indexed.Host, "expected": expected})
 			return
-		} else if !errors.Is(indexErr, store.ErrNotFound) {
-			writeError(w, http.StatusInternalServerError, "store", indexErr.Error(), nil)
+		} else if !hostStoreNotFound(indexErr) {
+			writeError(w, http.StatusInternalServerError, "store", "scan host detail could not be loaded", nil)
 			return
 		}
 		writeError(w, http.StatusNotFound, "not_found", "scan host not found", nil)
@@ -1316,7 +1393,11 @@ func (s *Server) renderScanHost(w http.ResponseWriter, r *http.Request, id, jobN
 	}
 	scan, err := s.Store.GetScan(r.Context(), scanID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
 		return
 	}
 	host, quality, ok := hostFromSnapshot(scan.Snapshot, address)
@@ -1326,7 +1407,12 @@ func (s *Server) renderScanHost(w http.ResponseWriter, r *http.Request, id, jobN
 	}
 	var expected any
 	if expectedJobID != "" {
-		if state, stateErr := s.Store.RuntimeState(r.Context(), expectedJobID); stateErr == nil && state.Baseline != nil {
+		state, stateErr := s.Store.RuntimeState(r.Context(), expectedJobID)
+		if stateErr != nil {
+			s.writeInternalError(w, r, "store", stateErr)
+			return
+		}
+		if state.Baseline != nil {
 			if baselineHost, _, found := hostFromSnapshot(*state.Baseline, address); found {
 				expected = baselineHost
 			}
@@ -1338,30 +1424,73 @@ func (s *Server) renderScanHost(w http.ResponseWriter, r *http.Request, id, jobN
 func (s *Server) scanHostRoute(w http.ResponseWriter, r *http.Request, scanID, rawAddress string) {
 	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
+		}
 		return
 	}
 	if summary.JobID != "" {
-		s.jobScanHost(w, r, summary.JobID, scanID, rawAddress)
+		record, recordErr := s.Store.GetJob(r.Context(), summary.JobID)
+		if recordErr != nil {
+			if hostStoreNotFound(recordErr) {
+				writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+			} else {
+				writeError(w, http.StatusInternalServerError, "store", "job detail could not be loaded", nil)
+			}
+			return
+		}
+		s.renderScanHostWithSummary(w, r, summary.JobID, record.Job.Name, scanID, rawAddress, summary, &record)
 		return
 	}
-	s.renderScanHost(w, r, "", summary.Job, scanID, rawAddress)
+	s.renderScanHostWithSummary(w, r, "", summary.Job, scanID, rawAddress, summary, nil)
 }
 
 func (s *Server) jobScanHostRDAP(w http.ResponseWriter, r *http.Request, id, scanID, rawAddress string) {
-	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+	_, err := s.Store.GetJob(r.Context(), id)
+	if err != nil {
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "store", "host detail could not be loaded", nil)
+		}
 		return
 	}
-	s.renderScanHostRDAP(w, r, id, scanID, rawAddress)
+	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
+	if err != nil {
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
+		}
+		return
+	}
+	if summary.JobID != id {
+		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		return
+	}
+	s.renderScanHostRDAPWithSummary(w, r, id, scanID, rawAddress, summary)
 }
 
 func (s *Server) renderScanHostRDAP(w http.ResponseWriter, r *http.Request, id, scanID, rawAddress string) {
 	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil || (id != "" && summary.JobID != id) {
+	if err != nil {
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
+		}
+		return
+	}
+	if id != "" && summary.JobID != id {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
 	}
+	s.renderScanHostRDAPWithSummary(w, r, id, scanID, rawAddress, summary)
+}
+
+func (s *Server) renderScanHostRDAPWithSummary(w http.ResponseWriter, r *http.Request, id, scanID, rawAddress string, summary model.ScanSummary) {
 	address, err := normalizedHostAddress(rawAddress)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "host not found", nil)
@@ -1369,7 +1498,7 @@ func (s *Server) renderScanHostRDAP(w http.ResponseWriter, r *http.Request, id, 
 	}
 	indexedExists, existsErr := s.Store.ScanHostIndexExists(r.Context(), scanID)
 	if existsErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", existsErr.Error(), nil)
+		writeError(w, http.StatusInternalServerError, "store", "scan host detail could not be loaded", nil)
 		return
 	}
 	if indexedExists {
@@ -1381,8 +1510,8 @@ func (s *Server) renderScanHostRDAP(w http.ResponseWriter, r *http.Request, id, 
 			w.Header().Set("Cache-Control", "no-store")
 			writeJSON(w, http.StatusOK, map[string]any{"rdap": result})
 			return
-		} else if !errors.Is(indexErr, store.ErrNotFound) {
-			writeError(w, http.StatusInternalServerError, "store", indexErr.Error(), nil)
+		} else if !hostStoreNotFound(indexErr) {
+			writeError(w, http.StatusInternalServerError, "store", "scan host detail could not be loaded", nil)
 			return
 		}
 		writeError(w, http.StatusNotFound, "not_found", "scan host not found", nil)
@@ -1390,7 +1519,11 @@ func (s *Server) renderScanHostRDAP(w http.ResponseWriter, r *http.Request, id, 
 	}
 	scan, err := s.Store.GetScan(r.Context(), scanID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
 		return
 	}
 	if _, _, ok := hostFromSnapshot(scan.Snapshot, address); !ok {
@@ -1408,12 +1541,24 @@ func (s *Server) renderScanHostRDAP(w http.ResponseWriter, r *http.Request, id, 
 func (s *Server) scanHostRDAPRoute(w http.ResponseWriter, r *http.Request, scanID, rawAddress string) {
 	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		} else {
+			writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
+		}
 		return
 	}
 	if summary.JobID != "" {
-		s.jobScanHostRDAP(w, r, summary.JobID, scanID, rawAddress)
+		if _, jobErr := s.Store.GetJob(r.Context(), summary.JobID); jobErr != nil {
+			if hostStoreNotFound(jobErr) {
+				writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+			} else {
+				writeError(w, http.StatusInternalServerError, "store", "host detail could not be loaded", nil)
+			}
+			return
+		}
+		s.renderScanHostRDAPWithSummary(w, r, summary.JobID, scanID, rawAddress, summary)
 		return
 	}
-	s.renderScanHostRDAP(w, r, "", scanID, rawAddress)
+	s.renderScanHostRDAPWithSummary(w, r, "", scanID, rawAddress, summary)
 }

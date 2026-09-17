@@ -45,6 +45,10 @@ func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	if payload, ok := s.cachedPublicDashboardResponse(); ok {
+		writeJSON(w, http.StatusOK, json.RawMessage(payload))
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), publicDashboardBuildTimeout)
 	defer cancel()
 	dashboard, err := s.Store.GetPublicDashboard(ctx)
@@ -87,12 +91,17 @@ func publicDashboardCacheKey(dashboard store.PublicDashboard) string {
 func (s *Server) cachedPublicDashboardPayload(ctx context.Context, dashboard store.PublicDashboard) ([]byte, error) {
 	key := publicDashboardCacheKey(dashboard)
 	for {
-		now := time.Now().UTC()
+		now := s.currentTime()
 		s.publicCacheMu.Lock()
 		if cached := s.publicCache; cached != nil && cached.key == key && now.Before(cached.expiresAt) {
 			payload := append([]byte(nil), cached.payload...)
 			s.publicCacheMu.Unlock()
 			return payload, nil
+		}
+		if failure := s.publicFailure; failure != nil && now.Before(failure.retryAt) {
+			err := failure.err
+			s.publicCacheMu.Unlock()
+			return nil, err
 		}
 		if building := s.publicBuild; building != nil {
 			s.publicCacheMu.Unlock()
@@ -142,11 +151,18 @@ func (s *Server) buildPublicDashboardPayload(parent context.Context, building *p
 	if err == nil {
 		payload, err = json.Marshal(response)
 	}
+	now := s.currentTime()
 
 	s.publicCacheMu.Lock()
 	building.err = err
 	if err == nil && generation == s.publicGen {
-		s.publicCache = &publicDashboardCache{key: key, expiresAt: time.Now().UTC().Add(publicDashboardCacheTTL), payload: append([]byte(nil), payload...)}
+		s.publicCache = &publicDashboardCache{key: key, expiresAt: now.Add(publicDashboardCacheTTL), payload: append([]byte(nil), payload...)}
+		s.publicFailure = nil
+	} else if err != nil && generation == s.publicGen {
+		// Short negative caching prevents a broken legacy snapshot or slow store
+		// from being rebuilt for every anonymous request. It expires quickly so a
+		// transient failure does not hide a recovered dashboard.
+		s.publicFailure = &publicDashboardFailure{retryAt: now.Add(time.Second), err: err}
 	}
 	if s.publicBuild == building {
 		s.publicBuild = nil
@@ -159,7 +175,18 @@ func (s *Server) invalidatePublicDashboardCache() {
 	s.publicCacheMu.Lock()
 	s.publicGen++
 	s.publicCache = nil
+	s.publicFailure = nil
 	s.publicCacheMu.Unlock()
+}
+
+func (s *Server) cachedPublicDashboardResponse() ([]byte, bool) {
+	now := s.currentTime()
+	s.publicCacheMu.Lock()
+	defer s.publicCacheMu.Unlock()
+	if s.publicCache == nil || !now.Before(s.publicCache.expiresAt) {
+		return nil, false
+	}
+	return append([]byte(nil), s.publicCache.payload...), true
 }
 
 func (s *Server) allowPublicRequest(r *http.Request) bool {
@@ -195,6 +222,27 @@ func (s *Server) allowAnonymousRequest(r *http.Request, namespace string) bool {
 			if len(values) == 0 || !values[len(values)-1].After(cutoff) {
 				delete(s.publicHits, candidate)
 			}
+		}
+		// A burst of distinct source addresses can otherwise keep the map above
+		// its bound when all entries are still fresh. Evict the oldest buckets
+		// until the memory bound is restored.
+		for len(s.publicHits) > 4096 {
+			oldestKey := ""
+			var oldest time.Time
+			for candidate, values := range s.publicHits {
+				if len(values) == 0 {
+					oldestKey = candidate
+					break
+				}
+				last := values[len(values)-1]
+				if oldestKey == "" || last.Before(oldest) {
+					oldestKey, oldest = candidate, last
+				}
+			}
+			if oldestKey == "" {
+				break
+			}
+			delete(s.publicHits, oldestKey)
 		}
 	}
 	return true
@@ -565,6 +613,7 @@ func (s *Server) publicHostFromObservation(ctx context.Context, job string, host
 	if result.Public && s.App != nil && s.App.Config != nil && s.App.Config.RDAPEnabled() {
 		if cached, err := s.Store.GetRDAPCache(ctx, address); err == nil {
 			if payload, decodeErr := decodeCachedPublicRDAP(cached.Payload); decodeErr == nil {
+				payload.FetchedAt = cached.FetchedAt
 				now := time.Now().UTC()
 				if s.now != nil {
 					now = s.now().UTC()
@@ -589,24 +638,7 @@ func (s *Server) publicHostFromObservation(ctx context.Context, job string, host
 }
 
 func isPrivateAddress(ip net.IP) bool {
-	if v4 := ip.To4(); v4 != nil {
-		ip = v4
-	}
-	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() {
-		return true
-	}
-	private := []*net.IPNet{}
-	for _, raw := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "fc00::/7"} {
-		if _, network, err := net.ParseCIDR(raw); err == nil {
-			private = append(private, network)
-		}
-	}
-	for _, network := range private {
-		if network.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	return rdap.IsPrivateAddress(ip)
 }
 
 func publicRdapFromResult(result rdap.Result) *publicRdapResponse {

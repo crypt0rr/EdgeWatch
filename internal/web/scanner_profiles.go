@@ -236,7 +236,7 @@ func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, se
 		if r.Method == http.MethodGet {
 			result, err := s.Store.ListScannerProfilesReport(r.Context(), r.URL.Query().Get("include_archived") == "true")
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+				s.writeInternalError(w, r, "store", err)
 				return
 			}
 			items := make([]map[string]any, 0, len(result.Profiles))

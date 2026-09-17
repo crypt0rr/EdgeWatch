@@ -116,7 +116,7 @@ jobs:
       - name: Test
         run: |
           set -o pipefail
-          go test -race -coverprofile=coverage.out ./... | tee go-coverage-summary.txt
+          go test -race -timeout=15m -coverprofile=coverage.out ./... | tee go-coverage-summary.txt
       - name: Check Go coverage
         run: ./scripts/check-go-coverage.sh coverage.out go-coverage-summary.txt
       - name: Go diff coverage

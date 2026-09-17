@@ -293,6 +293,9 @@ func phaseLabel(phase string) string {
 // ScanWorkUnit executes exactly one planned Nmap invocation and returns a
 // fragment that can be committed independently by the application.
 func (n *Nmap) ScanWorkUnit(ctx context.Context, job config.Job, unit WorkUnit, report ProgressReporter) (model.Snapshot, error) {
+	if err := n.validatePersistedWorkUnit(unit); err != nil {
+		return model.Snapshot{}, err
+	}
 	if unit.Engine == config.EngineNaabuNmap || (unit.Engine == "" && job.TCP != nil && job.TCP.Engine == config.EngineNaabuNmap && (unit.Phase == "" || unit.Phase == "pipeline")) {
 		started := time.Now().UTC()
 		emit := func(progress Progress) {
@@ -375,6 +378,20 @@ func (n *Nmap) ScanWorkUnit(ctx context.Context, job config.Job, unit WorkUnit, 
 	snapshot.Normalize()
 	emit(Progress{StartedAt: started, CompletedProbes: unit.Probes, TotalProbes: unit.Probes, CompletedInvocations: 1, TotalInvocations: 1, Phase: "unit complete", Protocol: unit.Protocol, CurrentInvocation: 1, TotalBatches: 1, ProcessProgressPercent: 100, LastOutput: lastOutput, ProcessAlive: false, CurrentUnit: unit.Sequence + 1, TotalUnits: 1, UnitPorts: unit.Ports, UnitAddresses: len(unit.Addresses)})
 	return snapshot, nil
+}
+
+// validatePersistedWorkUnit re-applies the deployment target policy at the
+// point of execution. A resumable plan can outlive a configuration reload;
+// never allow a checkpoint created before an exclusion change to probe the
+// newly forbidden address.
+func (n *Nmap) validatePersistedWorkUnit(unit WorkUnit) error {
+	for _, raw := range unit.Addresses {
+		ip := net.ParseIP(strings.TrimSpace(raw))
+		if exclusion := n.excludedNetwork(ip); exclusion != "" {
+			return ConfigurationError(fmt.Errorf("target %s is excluded by deployment policy (%s)", raw, exclusion))
+		}
+	}
+	return nil
 }
 
 func protocolForJob(job config.Job, protocol string) (config.Protocol, bool) {

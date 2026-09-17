@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -131,11 +132,25 @@ func (p jobPayload) config() (config.Job, error) {
 }
 
 func parseDuration(raw string) (time.Duration, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, errors.New("duration is required")
+	}
 	if strings.HasSuffix(raw, "d") {
 		days, err := strconv.ParseFloat(strings.TrimSuffix(raw, "d"), 64)
-		return time.Duration(days * float64(24*time.Hour)), err
+		if err != nil || math.IsNaN(days) || math.IsInf(days, 0) || days <= 0 || days > 30 {
+			return 0, errors.New("duration must be greater than zero and no more than 30d")
+		}
+		return time.Duration(days * float64(24*time.Hour)), nil
 	}
-	return time.ParseDuration(raw)
+	duration, err := time.ParseDuration(raw)
+	if err != nil {
+		return 0, err
+	}
+	if duration <= 0 || duration > 30*24*time.Hour {
+		return 0, errors.New("duration must be greater than zero and no more than 30d")
+	}
+	return duration, nil
 }
 
 func jobJSON(record store.JobRecord, state model.JobState) map[string]any {
@@ -232,21 +247,21 @@ func baselineJSONFromSummary(summary store.RuntimeStateSummary, currentHash stri
 	if currentHash != "" && summary.BaselineConfigHash != "" && summary.BaselineConfigHash != currentHash {
 		status = "updating"
 	}
-	return map[string]any{"status": status, "scan_id": summary.BaselineScanID, "config_hash": summary.BaselineConfigHash, "samples": summary.CandidateCount, "attempts": summary.CandidateAttempts, "incomplete_attempts": summary.IncompleteCandidateAttempts, "incidents": summary.IncidentCount, "pending": summary.PendingCount, "host_count": summary.BaselineHostCount}
+	return map[string]any{"status": status, "scan_id": summary.BaselineScanID, "config_hash": summary.BaselineConfigHash, "modified": summary.BaselineModified, "samples": summary.CandidateCount, "attempts": summary.CandidateAttempts, "incomplete_attempts": summary.IncompleteCandidateAttempts, "incidents": summary.IncidentCount, "pending": summary.PendingCount, "host_count": summary.BaselineHostCount}
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	include := r.URL.Query().Get("include_archived") == "true"
 	jobs, err := s.Store.ListJobs(r.Context(), include)
 	if err != nil {
-		writeError(w, 500, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	out := make([]map[string]any, 0, len(jobs))
 	for _, j := range jobs {
 		summary, summaryErr := s.Store.RuntimeStateSummary(r.Context(), j.ID)
 		if summaryErr != nil {
-			writeError(w, 500, "store", summaryErr.Error(), nil)
+			s.writeInternalError(w, r, "store", summaryErr)
 			return
 		}
 		out = append(out, s.jobJSONWithCycleSummary(r.Context(), j, summary))

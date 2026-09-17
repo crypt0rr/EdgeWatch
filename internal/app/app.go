@@ -26,38 +26,43 @@ type App struct {
 	// Version is the build version shown by the web console and CLI. It is
 	// populated by the command package when the process starts and defaults to
 	// "dev" for library and test users.
-	Version           string
-	Config            *config.Config
-	Store             *store.Store
-	Scanner           Scanner
-	Engine            *engine.Engine
-	Notifier          *notify.Notifier
-	Logger            *slog.Logger
-	active            sync.Map
-	running           sync.Map
-	wg                sync.WaitGroup
-	runMu             sync.Mutex
-	runCtx            context.Context
-	runCancel         context.CancelFunc
-	runAccepting      bool
-	runStarted        bool
-	sem               chan struct{}
-	nmapVersion       string
-	naabuVersion      string
-	daemonOwnerMu     sync.RWMutex
-	daemonOwner       string
-	scheduleMu        sync.Mutex
-	cron              *cron.Cron
-	entries           map[string]cron.EntryID
-	scheduleSpecs     map[string]string
-	scheduleWake      chan struct{}
-	eventMu           sync.RWMutex
-	eventHandler      func(model.Event)
-	deliveryWake      chan struct{}
-	heartbeatInterval time.Duration
-	ReleaseChecker    ReleaseChecker
-	UpdateInterval    time.Duration
-	clock             func() time.Time
+	Version  string
+	Config   *config.Config
+	Store    *store.Store
+	Scanner  Scanner
+	Engine   *engine.Engine
+	Notifier *notify.Notifier
+	Logger   *slog.Logger
+	active   sync.Map
+	// managedReservations closes the window between an HTTP manual-run request
+	// and the goroutine reaching runJob. Scheduled work checks this map too, so
+	// a queued manual run receives the slot deterministically instead of two
+	// requests both returning 202 and one being dropped later.
+	managedReservations sync.Map
+	running             sync.Map
+	wg                  sync.WaitGroup
+	runMu               sync.Mutex
+	runCtx              context.Context
+	runCancel           context.CancelFunc
+	runAccepting        bool
+	runStarted          bool
+	sem                 chan struct{}
+	nmapVersion         string
+	naabuVersion        string
+	daemonOwnerMu       sync.RWMutex
+	daemonOwner         string
+	scheduleMu          sync.Mutex
+	cron                *cron.Cron
+	entries             map[string]cron.EntryID
+	scheduleSpecs       map[string]string
+	scheduleWake        chan struct{}
+	eventMu             sync.RWMutex
+	eventHandler        func(model.Event)
+	deliveryWake        chan struct{}
+	heartbeatInterval   time.Duration
+	ReleaseChecker      ReleaseChecker
+	UpdateInterval      time.Duration
+	clock               func() time.Time
 }
 
 type activeRun struct {
@@ -405,10 +410,19 @@ func (a *App) recoverBackgroundPanic(name string) {
 // same wait group as scheduled work. The callback runs after the scan has
 // reached a terminal state (or could not be started).
 func (a *App) StartManagedRun(id string, done func(model.Scan, []model.Event, error)) error {
+	reservation := scanner.NewID(time.Now().UTC())
+	if _, loaded := a.managedReservations.LoadOrStore(id, reservation); loaded {
+		return scanner.ErrBusy
+	}
+	if _, active := a.active.Load(id); active {
+		a.managedReservations.Delete(id)
+		return scanner.ErrBusy
+	}
 	a.runMu.Lock()
 	if !a.runAccepting {
 		if a.runStarted {
 			a.runMu.Unlock()
+			a.managedReservations.Delete(id)
 			return ErrShuttingDown
 		}
 		// Keep direct httptest/embedded-server users functional before a daemon
@@ -421,6 +435,7 @@ func (a *App) StartManagedRun(id string, done func(model.Scan, []model.Event, er
 	a.wg.Add(1)
 	a.runMu.Unlock()
 	go func() {
+		defer a.managedReservations.Delete(id)
 		defer a.wg.Done()
 		defer a.recoverBackgroundPanic("managed-scan")
 		latest, err := a.Store.GetJob(ctx, id)
@@ -448,6 +463,11 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	key := job.Name
 	if managed {
 		key = jobID
+	}
+	if managed && !manual {
+		if _, reserved := a.managedReservations.Load(key); reserved {
+			return model.Scan{}, nil, scanner.ErrBusy
+		}
 	}
 	if _, loaded := a.active.LoadOrStore(key, true); loaded {
 		return model.Scan{}, nil, scanner.ErrBusy

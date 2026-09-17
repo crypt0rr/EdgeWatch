@@ -108,6 +108,10 @@ type Web struct {
 	Listen         string   `yaml:"listen"`
 	AuthKeyFile    string   `yaml:"auth_key_file"`
 	TrustedProxies []string `yaml:"trusted_proxies"`
+	// AllowedHosts contains the host names (without a scheme) that may be used
+	// to reach the authenticated web API through a tunnel or reverse proxy.
+	// Loopback IP literals and localhost are always accepted.
+	AllowedHosts []string `yaml:"allowed_hosts"`
 }
 type Scheduler struct {
 	MaxConcurrent      int   `yaml:"max_concurrent_scans"`
@@ -707,8 +711,8 @@ func (c Config) Validate() error {
 		if j.Change.Confirmations < 1 || j.Change.Confirmations > 100 {
 			return fmt.Errorf("job %s: change confirmations must be 1..100", j.Name)
 		}
-		if j.Timeout.Value() < time.Second {
-			return fmt.Errorf("job %s: timeout must be at least 1s", j.Name)
+		if j.Timeout.Value() < time.Second || j.Timeout.Value() > 30*24*time.Hour {
+			return fmt.Errorf("job %s: timeout must be between 1s and 30d", j.Name)
 		}
 		if j.ResumeWindow.Value() < time.Hour || j.ResumeWindow.Value() > 30*24*time.Hour {
 			return fmt.Errorf("job %s: resume_window must be between 1h and 30d", j.Name)
@@ -856,6 +860,41 @@ func (c Config) ValidateDeployment() error {
 			if _, _, err := net.ParseCIDR(value); err != nil {
 				return fmt.Errorf("web.trusted_proxies[%d] must be an IP address or CIDR: %q", index, raw)
 			}
+		}
+	}
+	for index, raw := range c.Web.AllowedHosts {
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			return fmt.Errorf("web.allowed_hosts[%d] must not be empty", index)
+		}
+		if strings.ContainsAny(value, "/?#\t\r\n ") {
+			return fmt.Errorf("web.allowed_hosts[%d] must be a host name or IP address: %q", index, raw)
+		}
+		if strings.HasPrefix(value, "[") {
+			host, _, err := net.SplitHostPort(value)
+			if err != nil || net.ParseIP(host) == nil {
+				return fmt.Errorf("web.allowed_hosts[%d] must be a host name or IP address: %q", index, raw)
+			}
+			continue
+		}
+		if ip := net.ParseIP(value); ip != nil {
+			continue
+		}
+		// A single colon is allowed for an optional port. Unbracketed IPv6
+		// literals are intentionally rejected so comparisons cannot be
+		// ambiguous; use the usual [addr]:port form instead.
+		if strings.Count(value, ":") == 1 {
+			host, port, err := net.SplitHostPort(value)
+			if err != nil || host == "" {
+				return fmt.Errorf("web.allowed_hosts[%d] must be a host name or IP address: %q", index, raw)
+			}
+			if number, portErr := strconv.Atoi(port); portErr != nil || number < 1 || number > 65535 {
+				return fmt.Errorf("web.allowed_hosts[%d] has an invalid port: %q", index, raw)
+			}
+			value = host
+		}
+		if err := validateHostName(value); err != nil {
+			return fmt.Errorf("web.allowed_hosts[%d]: %w", index, err)
 		}
 	}
 	return nil
@@ -1183,6 +1222,24 @@ func validateWebListen(listen string) error {
 	value, err := strconv.Atoi(port)
 	if err != nil || value < 1 || value > 65535 {
 		return fmt.Errorf("web.listen port must be between 1 and 65535")
+	}
+	return nil
+}
+
+func validateHostName(value string) error {
+	value = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), ".")
+	if value == "" || len(value) > 253 {
+		return fmt.Errorf("host name must not be empty or longer than 253 characters")
+	}
+	for _, label := range strings.Split(value, ".") {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return fmt.Errorf("invalid host name %q", value)
+		}
+		for _, r := range label {
+			if r != '-' && (r < 'a' || r > 'z') && (r < '0' || r > '9') {
+				return fmt.Errorf("invalid host name %q", value)
+			}
+		}
 	}
 	return nil
 }

@@ -38,3 +38,21 @@ func TestNmapVersionAndScanWorkUnit(t *testing.T) {
 		t.Fatalf("disabled protocol error = %v", err)
 	}
 }
+
+func TestScanWorkUnitReappliesTargetExclusions(t *testing.T) {
+	n := New("missing-nmap")
+	if err := n.SetTargetExclusions(config.DefaultTargetExclusions()); err != nil {
+		t.Fatal(err)
+	}
+	unit := WorkUnit{Protocol: "tcp", Addresses: []string{"127.0.0.1"}, Ports: "1", PortCount: 1, Probes: 1}
+	if _, err := n.ScanWorkUnit(context.Background(), config.Job{}, unit, nil); err == nil || !strings.Contains(err.Error(), "excluded by deployment policy") {
+		t.Fatalf("excluded persisted work unit accepted: %v", err)
+	}
+	if err := n.SetTargetExclusions([]string{"192.0.2.0/24"}); err != nil {
+		t.Fatal(err)
+	}
+	unit.Addresses = []string{"192.0.2.1"}
+	if _, err := n.ScanWorkUnit(context.Background(), config.Job{}, unit, nil); err == nil || !strings.Contains(err.Error(), "192.0.2.0/24") {
+		t.Fatalf("CIDR-excluded persisted work unit accepted: %v", err)
+	}
+}

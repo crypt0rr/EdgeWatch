@@ -52,7 +52,10 @@ func (s *Server) scheduleSuggestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-	now := time.Now().UTC()
+	// Capture one clock value for the whole comparison. Using the server clock
+	// also makes suggestions deterministic for tests and avoids neighboring
+	// jobs crossing a minute boundary during one request.
+	now := s.currentTime()
 	draft, err := parseNextRun(parser, schedule, timezone, now)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_schedule", err.Error(), map[string]string{"schedule": err.Error()})
@@ -61,7 +64,7 @@ func (s *Server) scheduleSuggestion(w http.ResponseWriter, r *http.Request) {
 
 	jobs, err := s.Store.ListJobs(r.Context(), false)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	var nearest *scheduleReference

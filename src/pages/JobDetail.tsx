@@ -159,7 +159,11 @@ export function JobDetail() {
     setActionError('')
     setActionBusy('reset')
     try {
-      await resetBaseline(id)
+      if (value.baseline.scan_id === undefined && value.baseline.modified === undefined) {
+        await resetBaseline(id)
+      } else {
+        await resetBaseline(id, value.baseline.scan_id ?? '', value.baseline.modified ?? false)
+      }
       await client.invalidateQueries({ queryKey: ['job', id] })
       await client.invalidateQueries({ queryKey: ['job-baseline-overview', id] })
       setBaselineOffset(0)
@@ -175,7 +179,11 @@ export function JobDetail() {
     setActionError('')
     setActionBusy('approve')
     try {
-      await approveBaseline(id, detail.data.scan.id)
+      if (value.baseline.scan_id === undefined && value.baseline.modified === undefined) {
+        await approveBaseline(id, detail.data.scan.id)
+      } else {
+        await approveBaseline(id, detail.data.scan.id, value.baseline.scan_id ?? '', value.baseline.modified ?? false)
+      }
       await client.invalidateQueries({ queryKey: ['job', id] })
       await client.invalidateQueries({ queryKey: ['job-baseline-overview', id] })
       setBaselineOffset(0)

@@ -142,3 +142,29 @@ func TestExportBaselinesIncludesJobsWithoutReadyBaseline(t *testing.T) {
 		t.Fatalf("not-ready entry = %#v", export.Jobs[0])
 	}
 }
+
+func TestBaselineExportCompatibilityWrappers(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("wrapper-export"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := model.JobState{BaselineScanID: "missing-source", BaselineConfigHash: "legacy", Baseline: &model.Snapshot{}}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_states(job,state_json,updated_at) VALUES(?,?,?)`, "wrapper-legacy", raw, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if entry, err := s.exportLegacyBaseline(ctx, "wrapper-legacy"); err != nil || !entry.Legacy || entry.Status != "ready" {
+		t.Fatalf("legacy wrapper = %#v, %v", entry, err)
+	}
+	if entry, err := s.exportLegacyBaselineJSON(ctx, "wrapper-json", raw); err != nil || !entry.Legacy || entry.Name != "wrapper-json" {
+		t.Fatalf("legacy JSON wrapper = %#v, %v", entry, err)
+	}
+	if entry, err := s.exportManagedBaseline(ctx, record); err != nil || entry.JobID != record.ID || entry.Status != "not_ready" {
+		t.Fatalf("managed wrapper = %#v, %v", entry, err)
+	}
+}

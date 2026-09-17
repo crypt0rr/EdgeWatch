@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -17,6 +18,66 @@ import (
 )
 
 const sampleXML = `<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open"/><service name="ssh" product="OpenSSH" version="9.7" extrainfo="Ubuntu" method="probed"><cpe>cpe:/a:openbsd:openssh:9.7</cpe></service></port><port protocol="tcp" portid="23"><state state="closed"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`
+
+func TestWeightedProcessPercentClampsAndWeightsInvocations(t *testing.T) {
+	cases := []struct {
+		completed, total int64
+		fraction         float64
+		want             int
+	}{
+		{completed: 0, total: 0, fraction: 0.5, want: 0},
+		{completed: 0, total: 4, fraction: -1, want: 0},
+		{completed: 0, total: 4, fraction: 0.5, want: 12},
+		{completed: 3, total: 4, fraction: 2, want: 100},
+		{completed: 4, total: 4, fraction: 0, want: 100},
+		{completed: -1, total: 4, fraction: 0.5, want: 12},
+	}
+	for _, test := range cases {
+		if got := weightedProcessPercent(test.completed, test.total, test.fraction); got != test.want {
+			t.Errorf("weightedProcessPercent(%d, %d, %v) = %d, want %d", test.completed, test.total, test.fraction, got, test.want)
+		}
+	}
+	if got := weightedProcessPercent(1, 2, math.NaN()); got != 0 {
+		t.Fatalf("weightedProcessPercent NaN = %d, want 0", got)
+	}
+}
+
+func TestNmapHostAndUnitCollectionHelpers(t *testing.T) {
+	hosts := map[string]model.HostObservation{
+		"192.0.2.2": {Address: "192.0.2.2", Status: "down"},
+		"192.0.2.1": {Address: "192.0.2.1", Status: "unreachable"},
+		"192.0.2.3": {Address: "192.0.2.3", Status: "up"},
+		"192.0.2.4": {Address: "192.0.2.2", Status: "timeout"},
+		"192.0.2.5": {Address: "192.0.2.5", Status: "timedout"},
+		"192.0.2.6": {Address: "192.0.2.6", Status: "timed-out"},
+	}
+	if got := incompleteHostAddresses(model.Snapshot{Hosts: mapsToHosts(hosts)}); !reflect.DeepEqual(got, []string{"192.0.2.1", "192.0.2.2", "192.0.2.5", "192.0.2.6"}) {
+		t.Fatalf("incomplete host addresses = %#v", got)
+	}
+	if got := unreachableAddresses(hosts); !reflect.DeepEqual(got, []string{"192.0.2.1", "192.0.2.2"}) {
+		t.Fatalf("unreachable addresses = %#v", got)
+	}
+	if got := dedupeStrings([]string{"a", "a", "b", "b"}); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("deduped strings = %#v", got)
+	}
+	if dedupeStrings(nil) != nil || !reflect.DeepEqual(dedupeStrings([]string{"only"}), []string{"only"}) {
+		t.Fatal("short dedupe inputs changed unexpectedly")
+	}
+	units := unitsFromMap(map[string]model.Unit{
+		"z": {Target: "z", Protocol: "udp"},
+		"a": {Target: "a", Protocol: "tcp"},
+		"b": {Target: "a", Protocol: "udp"},
+	})
+	if len(units) != 3 || units[0].Target != "a" || units[0].Protocol != "tcp" || units[1].Protocol != "udp" {
+		t.Fatalf("sorted units = %#v", units)
+	}
+	// The compatibility wrappers remain callable by integrations that do not
+	// need detailed host evidence; an empty batch is a safe no-op.
+	n := New("missing-nmap")
+	if units, err := n.scanProtocolBatch(context.Background(), nil, "tcp", config.Protocol{Ports: "1", Mode: "connect"}, "balanced", true); err != nil || units != nil {
+		t.Fatalf("empty compatibility batch = %#v, %v", units, err)
+	}
+}
 
 func TestParseXML(t *testing.T) {
 	r, err := parseXML([]byte(sampleXML), "tcp", true)
@@ -89,12 +150,12 @@ func TestMergeHostObservationMarksAddressIncompleteAcrossProtocols(t *testing.T)
 		Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443"}},
 	})
 	mergeHostObservationMap(hosts, "192.0.2.11", model.HostObservation{
-		Address: "192.0.2.11", Status: "unreachable", StatusReason: "nmap-timeout",
+		Address: "192.0.2.11", Status: "unreachable", StatusReason: "nmap-host-timeout",
 		Protocols: []model.ProtocolObservation{{Protocol: "udp", ScannedPorts: "53"}},
 	})
 	got := hosts["192.0.2.11"]
-	if got.Status != "unreachable" || got.StatusReason != "nmap-timeout" {
-		t.Fatalf("cross-protocol status = %q/%q, want unreachable/nmap-timeout", got.Status, got.StatusReason)
+	if got.Status != "unreachable" || got.StatusReason != "nmap-host-timeout" {
+		t.Fatalf("cross-protocol status = %q/%q, want unreachable/nmap-host-timeout", got.Status, got.StatusReason)
 	}
 }
 
@@ -141,7 +202,7 @@ func TestParseXMLRetainsTimedOutHost(t *testing.T) {
 		t.Fatalf("timed-out host discarded healthy evidence: %v", err)
 	}
 	host, ok := run.Hosts["192.0.2.10"]
-	if !ok || host.Status != "unreachable" || host.StatusReason != "nmap-timeout" {
+	if !ok || host.Status != "unreachable" || host.StatusReason != "nmap-host-timeout" {
 		t.Fatalf("timed-out host observation = %#v", host)
 	}
 }

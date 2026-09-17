@@ -87,6 +87,22 @@ func TestLookupUsesLongestBootstrapPrefixAndCachesNormalizedData(t *testing.T) {
 	_ = time.Now() // keep this test explicit about wall-clock cache semantics
 }
 
+func TestIsPrivateAddressRejectsSpecialUseAndSharedSpace(t *testing.T) {
+	for _, raw := range []string{
+		"10.0.0.1", "100.64.0.1", "127.0.0.1", "169.254.1.1",
+		"192.0.2.1", "198.51.100.10", "203.0.113.5", "2001:db8::1",
+	} {
+		if !IsPrivateAddress(net.ParseIP(raw)) {
+			t.Errorf("IsPrivateAddress(%s) = false, want true", raw)
+		}
+	}
+	for _, raw := range []string{"8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"} {
+		if IsPrivateAddress(net.ParseIP(raw)) {
+			t.Errorf("IsPrivateAddress(%s) = true, want false", raw)
+		}
+	}
+}
+
 func TestLookupAllowsIANAListedRIRReferral(t *testing.T) {
 	var authorityRequests atomic.Int32
 	rir := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -181,7 +197,7 @@ func TestRDAPPinsValidatedDNSAnswersAndNormalizesMappedSpecialUse(t *testing.T) 
 	client := New(nil, true)
 	client.AllowPrivateHosts = false
 	resolver := &sequenceResolver{answers: [][]net.IPAddr{
-		{{IP: net.ParseIP("198.51.100.20")}},
+		{{IP: net.ParseIP("8.8.8.8")}},
 		{{IP: net.ParseIP("127.0.0.1")}}, // A rebinding must not be consulted for the dial.
 	}}
 	client.Resolver = resolver
@@ -195,7 +211,7 @@ func TestRDAPPinsValidatedDNSAnswersAndNormalizesMappedSpecialUse(t *testing.T) 
 		return nil, errors.New("expected test dial failure")
 	}, map[string][]net.IPAddr{origin: addresses})
 	_, err = dial(context.Background(), "tcp", "registry.example:443")
-	if err == nil || dialed != "198.51.100.20:443" || resolver.count.Load() != 1 {
+	if err == nil || dialed != "8.8.8.8:443" || resolver.count.Load() != 1 {
 		t.Fatalf("pinned dial = address %q error %v resolver calls %d", dialed, err, resolver.count.Load())
 	}
 	for _, raw := range []string{"::ffff:127.0.0.1", "::ffff:169.254.1.1", "::ffff:192.168.1.1"} {

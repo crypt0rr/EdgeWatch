@@ -40,12 +40,16 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	if maxSubscribersPerUser <= 0 {
 		maxSubscribersPerUser = defaultMaxSSESubscribersPerUser
 	}
-	subscriberKey := strings.TrimSpace(session.IDHash)
-	if subscriberKey == "" {
-		subscriberKey = "user:" + strings.TrimSpace(session.UserID)
-	}
-	if subscriberKey == "user:" {
-		subscriberKey = "unknown"
+	// Per-user limits must be keyed by the stable account identity, not by a
+	// session hash. Otherwise one account can consume the entire nominal limit
+	// simply by opening several browser sessions (or bypass it by rotating
+	// sessions). Anonymous/future service sessions retain a hash fallback.
+	subscriberKey := "user:" + strings.TrimSpace(session.UserID)
+	if strings.TrimSpace(session.UserID) == "" {
+		subscriberKey = "session:" + strings.TrimSpace(session.IDHash)
+		if subscriberKey == "session:" {
+			subscriberKey = "unknown"
+		}
 	}
 	lastID := parseSSELastEventID(r.Header.Get("Last-Event-ID"))
 	ch := make(chan sseMessage, 64)
@@ -375,11 +379,19 @@ func (s *Server) runSSEReservationRetry(ctx context.Context) {
 }
 
 func (s *Server) broadcast(value map[string]any) {
+	s.broadcastContext(context.Background(), value)
+}
+
+// broadcastContext preserves the caller's lifecycle context while attempting
+// to recover a durable event-ID range. Background daemon callbacks use the
+// compatibility wrapper above; request handlers should pass their request
+// context so a slow database cannot outlive the request unnecessarily.
+func (s *Server) broadcastContext(ctx context.Context, value map[string]any) {
 	payload := boundedSSEPayload(value)
 	// Reserve/recover outside the subscriber mutex. The reservation mutex also
 	// serializes ID allocation, preventing fallback IDs from racing a durable
 	// range switch and making overlap impossible after an outage.
-	s.retrySSEReservation()
+	s.retrySSEReservationContext(ctx)
 	s.sseReservationMu.Lock()
 	defer s.sseReservationMu.Unlock()
 	s.mu.Lock()

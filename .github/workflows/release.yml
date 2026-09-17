@@ -492,9 +492,15 @@ jobs:
       - name: Publish the staged draft after smoke verification
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" --jq '.id')"
+          # GitHub's tag-specific release endpoint hides draft releases. The
+          # stage job intentionally creates a draft, so resolve its ID from
+          # the authenticated release list before making it public.
+          release_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.tag_name == env.RELEASE_TAG) | .id' | head -n 1)"
+          test -n "$release_id"
           prerelease=false
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=true; fi
           # Use the API's explicit make_latest=false setting. Latest promotion

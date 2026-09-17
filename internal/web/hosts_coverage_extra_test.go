@@ -314,13 +314,13 @@ func TestHostRoutesCoverNestedStoreFailureBranches(t *testing.T) {
 
 	// Global host inventory: each projection stage has an explicit internal
 	// error response, and a closed projection must never leak SQLite details.
-	server, db, record := newCase(t)
+	server, db, _ := newCase(t)
 	drop(t, db, "scan_hosts")
 	call(t, "hosts-index", server, server.listHosts, http.StatusInternalServerError)
 	server, db, _ = newCase(t)
 	drop(t, db, "legacy_scan_host_backfill")
 	call(t, "hosts-legacy-checkpoint", server, server.listHosts, http.StatusInternalServerError)
-	server, db, record = newCase(t)
+	server, db, record := newCase(t)
 	saveHostScan(t, db, record, "latest-error")
 	drop(t, db, "latest_scan_hosts")
 	call(t, "hosts-latest-page", server, server.listHosts, http.StatusInternalServerError)

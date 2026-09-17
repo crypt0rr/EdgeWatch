@@ -335,6 +335,7 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 	ctx := context.Background()
 	newFixture := func(t *testing.T) (*Server, *store.Store, store.Session, store.JobRecord) {
 		t.Helper()
+		//nolint:contextcheck // the shared test fixture owns its background setup context.
 		server, db, admin := newUsersTestServer(t)
 		job := config.NormalizeJob(config.Job{Name: "failure-branches", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
 		record, err := db.CreateJob(ctx, job)

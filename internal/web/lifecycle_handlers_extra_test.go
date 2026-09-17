@@ -264,7 +264,7 @@ func TestBaselineMutationsRejectActiveJobs(t *testing.T) {
 	if err := db.AcquireJobLease(ctx, record.ID, "active-baseline-test", now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	defer db.ReleaseJobLease(ctx, record.ID, "active-baseline-test")
+	defer func() { _ = db.ReleaseJobLease(ctx, record.ID, "active-baseline-test") }()
 
 	reset := httptest.NewRecorder()
 	server.resetBaseline(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, record.ID)

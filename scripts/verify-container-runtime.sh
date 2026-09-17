@@ -43,7 +43,14 @@ docker run --rm $network_args $runtime_args --cap-drop ALL --cap-add NET_RAW --c
   -host 127.0.0.1 -p 1 -scan-type s -silent -no-stdin -disable-update-check -json >/dev/null
 
 workdir=$(mktemp -d)
-trap 'rm -rf "$workdir"' EXIT
+daemon_container=
+cleanup() {
+  if [ -n "$daemon_container" ]; then
+    docker rm -f "$daemon_container" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$workdir"
+}
+trap cleanup EXIT
 install -d -m 0750 "$workdir/data"
 install -m 0600 /dev/null "$workdir/notification-urls.txt"
 test "$(stat -c '%a' "$workdir/data")" = 750
@@ -59,8 +66,29 @@ notifications:
   urls: []
 EOF
 # Read-only diagnostic commands intentionally refuse to create or migrate a
-# database. Bootstrap the disposable fixture through the host-authorized
-# setup-token command before checking status and the persisted SQLite file.
+# database. Bootstrap the disposable fixture through the daemon, which is the
+# sole owner of migrations and startup reconciliation, before checking status
+# and the persisted SQLite file.
+daemon_container=$(docker run -d $network_args $runtime_args \
+  --cap-drop ALL --cap-add NET_RAW \
+  -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
+  -v "$workdir/data:/var/lib/edgewatch:rw" "$image" daemon --config /etc/edgewatch/config.yaml)
+for attempt in $(seq 1 30); do
+  if test -s "$workdir/data/edgewatch.db"; then
+    break
+  fi
+  if [ -z "$(docker ps -q --filter "id=$daemon_container")" ]; then
+    docker logs "$daemon_container"
+    exit 1
+  fi
+  sleep 1
+  if [ "$attempt" = 30 ]; then
+    docker logs "$daemon_container"
+    exit 1
+  fi
+done
+docker rm -f "$daemon_container" >/dev/null
+daemon_container=
 docker run --rm $runtime_args \
   -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
   -v "$workdir/data:/var/lib/edgewatch:rw" "$image" admin setup-token --force --config /etc/edgewatch/config.yaml >/dev/null

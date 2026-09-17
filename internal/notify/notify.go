@@ -85,6 +85,7 @@ type Notifier struct {
 	mu            sync.RWMutex
 	drainMu       sync.Mutex
 	fileURLs      map[string]string
+	fileLegacy    map[string]string // legacy digest -> opaque selector
 	managed       map[string]managedDestination
 	keyPath       string
 	keyErr        error
@@ -104,18 +105,47 @@ func NewWithKeyFile(s *store.Store, urls []string, keyPath string) (*Notifier, e
 }
 
 func newWithKeyFile(s *store.Store, urls []string, keyPath string, autoCreateKey bool) (*Notifier, error) {
-	n := &Notifier{Store: s, fileURLs: map[string]string{}, managed: map[string]managedDestination{}, keyPath: keyPath, autoCreateKey: autoCreateKey}
+	n := &Notifier{Store: s, fileURLs: map[string]string{}, fileLegacy: map[string]string{}, managed: map[string]managedDestination{}, keyPath: keyPath, autoCreateKey: autoCreateKey}
+	legacyURLs := make(map[string]string, len(urls))
 	for _, raw := range urls {
 		if _, err := shoutrrr.CreateSender(raw); err != nil {
 			id := hashURL(raw)
 			return nil, fmt.Errorf("invalid Shoutrrr destination %s", id[:12])
 		}
-		n.fileURLs[hashURL(raw)] = raw
+		legacyURLs[hashURL(raw)] = raw
+	}
+	opaqueIDs := map[string]string{}
+	if s != nil {
+		var err error
+		opaqueIDs, err = s.EnsureDeploymentNotificationIDs(context.Background(), sortedKeys(legacyURLs))
+		if err != nil {
+			return nil, fmt.Errorf("persist deployment notification IDs: %w", err)
+		}
+	}
+	for legacy, raw := range legacyURLs {
+		opaque := opaqueIDs[legacy]
+		if opaque == "" {
+			// Library-only notifier instances have no durable store. Preserve
+			// their historical selector shape while the appliance path above
+			// always uses persisted UUIDs.
+			opaque = legacy
+		}
+		n.fileURLs[opaque] = raw
+		n.fileLegacy[legacy] = opaque
 	}
 	if err := n.Reload(context.Background()); err != nil {
 		return nil, err
 	}
 	return n, nil
+}
+
+func sortedKeys(values map[string]string) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func hashURL(raw string) string {
@@ -581,6 +611,11 @@ func (n *Notifier) destinationSnapshot() map[string]string {
 	for id, raw := range n.fileURLs {
 		out[id] = raw
 	}
+	for legacy, opaque := range n.fileLegacy {
+		if raw, ok := n.fileURLs[opaque]; ok {
+			out[legacy] = raw // compatibility for outbox rows created before migration
+		}
+	}
 	for id, entry := range n.managed {
 		if entry.record.Enabled && !entry.locked {
 			out[managedKey(id, entry.record.Revision)] = entry.url
@@ -663,7 +698,7 @@ func (n *Notifier) destinationKeys() map[string]struct{} {
 }
 
 // QueueDestinations reloads metadata and returns enabled destination keys for
-// an atomic event transition. Keys are opaque hashes or managed revisions.
+// an atomic event transition. Keys are opaque IDs or managed revisions.
 func (n *Notifier) QueueDestinations(ctx context.Context) ([]string, error) {
 	return n.QueueDestinationsForSelection(ctx, nil)
 }
@@ -672,8 +707,9 @@ func (n *Notifier) QueueDestinations(ctx context.Context) ([]string, error) {
 // job. A nil selection is the backwards-compatible legacy mode and sends to
 // every enabled global destination. An explicit empty selection intentionally
 // disables delivery for that job. Stable selectors are destination IDs (the
-// file: hash returned for deployment URLs or the UUID returned for a managed
-// destination); managed revision keys are resolved at queue time so a
+// file: opaque ID returned for deployment URLs or the UUID returned for a
+// managed destination); legacy file hashes are translated at queue time, and
+// managed revision keys are resolved at queue time so a
 // credential update does not require editing every job.
 func (n *Notifier) QueueDestinationsForJob(ctx context.Context, job config.Job) ([]string, error) {
 	return n.QueueDestinationsForSelection(ctx, job.NotificationDestinations)
@@ -747,7 +783,10 @@ func (n *Notifier) destinationSelectorExistsLocked(selector string) bool {
 		if id == "" {
 			return false
 		}
-		_, ok := n.fileURLs[id]
+		if _, ok := n.fileURLs[id]; ok {
+			return true
+		}
+		_, ok := n.fileLegacy[id]
 		return ok
 	}
 	_, ok := n.managed[selector]
@@ -759,6 +798,9 @@ func (n *Notifier) destinationKeyLocked(selector string) (string, bool) {
 		id := strings.TrimPrefix(selector, "file:")
 		if _, ok := n.fileURLs[id]; ok && id != "" {
 			return id, true
+		}
+		if opaque, ok := n.fileLegacy[id]; ok && opaque != "" {
+			return opaque, true
 		}
 		return "", false
 	}

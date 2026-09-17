@@ -12,6 +12,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/engine"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -33,7 +34,7 @@ func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session stor
 			writeError(w, http.StatusConflict, "scan_not_active", "scan is no longer active", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "cancel_failed", err.Error(), nil)
+		s.writeInternalError(w, r, "cancel_failed", err)
 		return
 	}
 	// Cancellation is an operational action; keep its audit detail opaque and
@@ -51,7 +52,7 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	state, err := s.Store.RuntimeState(r.Context(), id)
 	if err != nil {
-		writeError(w, 500, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), record, state))
@@ -67,7 +68,7 @@ func (s *Server) latestSuccessfulScan(w http.ResponseWriter, r *http.Request, id
 	}
 	scan, err := s.Store.GetLatestSuccessfulJobScanSummary(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"scan": scan})
@@ -136,7 +137,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 	}
 	active, activeErr := s.Store.JobActive(r.Context(), id)
 	if activeErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", activeErr.Error(), nil)
+		s.writeInternalError(w, r, "store", activeErr)
 		return
 	}
 	scopeChanged := current.Job.SecurityHash() != job.SecurityHash()
@@ -345,7 +346,7 @@ func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, session stor
 		} else if errors.Is(err, store.ErrJobScanActive) {
 			writeError(w, http.StatusConflict, "job_active", "archive or restore is unavailable while a scan is running; wait for it to finish and try again", nil)
 		} else {
-			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+			s.writeInternalError(w, r, "store", err)
 		}
 		return
 	}
@@ -383,9 +384,9 @@ func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session
 			return
 		}
 		if errors.Is(err, store.ErrJobScanActive) {
-			writeError(w, http.StatusConflict, "job_active", err.Error(), nil)
+			writeError(w, http.StatusConflict, "job_active", "job is still active", nil)
 		} else {
-			writeError(w, http.StatusConflict, "delete_blocked", err.Error(), nil)
+			writeError(w, http.StatusConflict, "delete_blocked", "job cannot be deleted while it is in use or retained history refers to it", nil)
 		}
 		return
 	}
@@ -415,11 +416,12 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, session store
 		} else if errors.Is(err, store.ErrJobScanActive) {
 			writeError(w, http.StatusConflict, "job_active", "pause or resume is unavailable while a scan is running; wait for it to finish and try again", nil)
 		} else {
-			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+			writeError(w, http.StatusInternalServerError, "store", "job state could not be changed", nil)
 		}
 		return
 	}
 	s.App.RefreshSchedules()
+	s.broadcast(map[string]any{"type": action, "job_id": id})
 	writeJSON(w, 204, nil)
 }
 
@@ -443,7 +445,7 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Se
 		return
 	}
 	if active, activeErr := s.Store.JobActive(r.Context(), id); activeErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", activeErr.Error(), nil)
+		s.writeInternalError(w, r, "store", activeErr)
 		return
 	} else if active {
 		writeError(w, http.StatusConflict, "job_active", "job already has a scan in progress", nil)
@@ -454,17 +456,25 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Se
 	//nolint:contextcheck // the lifecycle context is managed by App, not the request
 	if runErr := s.App.StartManagedRun(id, func(scan model.Scan, events []model.Event, err error) {
 		if err != nil {
-			s.Log.Error("manual scan failed", "job_id", id, "scan_id", scan.ID, "error", err)
+			if errors.Is(err, scanner.ErrBusy) {
+				s.Log.Info("manual scan was already in progress", "job_id", id, "scan_id", scan.ID)
+			} else {
+				s.Log.Error("manual scan failed", "job_id", id, "scan_id", scan.ID, "error", err)
+			}
 		}
 		if scan.ID != "" {
 			s.broadcast(map[string]any{"type": "scan.completed", "job_id": id, "scan_id": scan.ID, "status": scan.Status, "events": len(events)})
 		}
 	}); runErr != nil {
+		if errors.Is(runErr, scanner.ErrBusy) {
+			writeError(w, http.StatusConflict, "job_active", "job already has a scan in progress", nil)
+			return
+		}
 		if errors.Is(runErr, app.ErrShuttingDown) {
 			writeError(w, http.StatusServiceUnavailable, "shutting_down", "the application is shutting down", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "scan", runErr.Error(), nil)
+		s.writeInternalError(w, r, "scan", runErr)
 		return
 	}
 	mode := "standard"
@@ -499,7 +509,7 @@ func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	// The plan contains the immutable job and target expansion needed to
@@ -508,7 +518,7 @@ func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, id string) {
 	limit, offset := queryLimit(r), queryOffset(r)
 	unitsPage, unitsErr := s.Store.ListScanCycleUnitSummariesPage(r.Context(), cycle.ID, limit, offset)
 	if unitsErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", unitsErr.Error(), nil)
+		s.writeInternalError(w, r, "store", unitsErr)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"cycle": map[string]any{
@@ -534,7 +544,7 @@ func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 	if err := s.Store.DiscardScanCycle(r.Context(), cycleID); err != nil {
-		writeError(w, http.StatusConflict, "cycle_discard_failed", err.Error(), nil)
+		writeError(w, http.StatusConflict, "cycle_discard_failed", "scan cycle could not be discarded", nil)
 		return
 	}
 	s.auditOptionalEntry(r.Context(), actorAudit(session, "scan.cycle_discarded", cycleID))
@@ -551,7 +561,7 @@ func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, id string) {
 	offset := queryOffset(r)
 	page, err := s.Store.ListJobScanSummariesPage(r.Context(), id, limit, offset)
 	if err != nil {
-		writeError(w, 500, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	if page.Items == nil {
@@ -584,7 +594,7 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID stri
 		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
 			page, pageErr := s.Store.ListScanChangesPage(r.Context(), scanID, limit, offset)
 			if pageErr != nil {
-				writeError(w, http.StatusInternalServerError, "store", pageErr.Error(), nil)
+				s.writeInternalError(w, r, "store", pageErr)
 				return
 			}
 			items := page.Items
@@ -601,7 +611,7 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID stri
 			// always carry their immutable comparison in changes_json.
 			scan, scanErr := s.Store.GetScan(r.Context(), scanID)
 			if scanErr != nil {
-				writeError(w, http.StatusInternalServerError, "store", scanErr.Error(), nil)
+				s.writeInternalError(w, r, "store", scanErr)
 				return
 			}
 			changes := engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != summary.ConfigHash)
@@ -626,7 +636,7 @@ func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, id, scan
 	offset, limit := queryOffset(r), queryLimit(r)
 	resultPage, err := s.Store.ListScanResultsPage(r.Context(), scanID, limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	results := resultPage.Items
@@ -654,7 +664,7 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scan
 		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
 			page, pageErr := s.Store.ListScanChangesPage(r.Context(), scanID, limit, offset)
 			if pageErr != nil {
-				writeError(w, http.StatusInternalServerError, "store", pageErr.Error(), nil)
+				s.writeInternalError(w, r, "store", pageErr)
 				return
 			}
 			changes, total = page.Items, page.Total
@@ -662,13 +672,13 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scan
 		} else if state, stateErr := s.Store.RuntimeState(r.Context(), id); stateErr == nil && state.Baseline != nil {
 			scan, scanErr := s.Store.GetScan(r.Context(), scanID)
 			if scanErr != nil {
-				writeError(w, http.StatusInternalServerError, "store", scanErr.Error(), nil)
+				s.writeInternalError(w, r, "store", scanErr)
 				return
 			}
 			changes = engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != summary.ConfigHash)
 			comparisonSource = "current_baseline_legacy"
 		} else if stateErr != nil {
-			writeError(w, http.StatusInternalServerError, "store", stateErr.Error(), nil)
+			s.writeInternalError(w, r, "store", stateErr)
 			return
 		}
 	}
@@ -686,7 +696,7 @@ func (s *Server) listScans(w http.ResponseWriter, r *http.Request) {
 	offset := queryOffset(r)
 	page, err := s.Store.ListScanSummariesPage(r.Context(), r.URL.Query().Get("job"), limit, offset)
 	if err != nil {
-		writeError(w, 500, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	if page.Items == nil {
@@ -708,7 +718,7 @@ func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request) {
 	offset, limit := queryOffset(r), queryLimit(r)
 	incidentPage, err := s.Store.ListIncidentsPage(r.Context(), limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	items := make([]map[string]any, 0, len(incidentPage.Items))
@@ -723,7 +733,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, job string) 
 		offset, limit := queryOffset(r), queryLimit(r)
 		page, err := s.Store.ListJobEventsPage(r.Context(), jobID, limit, offset)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+			s.writeInternalError(w, r, "store", err)
 			return
 		}
 		if page.Items == nil {
@@ -740,7 +750,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, job string) 
 	offset, limit := queryOffset(r), queryLimit(r)
 	page, err := s.Store.ListEventsPage(r.Context(), job, limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	if page.Items == nil {
@@ -757,7 +767,7 @@ func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, id string) {
 	offset, limit := queryOffset(r), queryLimit(r)
 	page, err := s.Store.ListJobEventsPage(r.Context(), id, limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	if page.Items == nil {
@@ -774,7 +784,7 @@ func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, id string)
 	offset, limit := queryOffset(r), queryLimit(r)
 	incidentPage, err := s.Store.ListJobIncidentsPage(r.Context(), id, limit, offset)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	items := incidentPage.Items
@@ -809,7 +819,7 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session 
 			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	var destinations []string
@@ -822,7 +832,7 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session 
 	}
 	events, err := s.Store.AcceptIncidentWithExpectedOutboxAndAudit(r.Context(), id, record.Job.Name, key, &store.IncidentExpectation{Change: *input.ExpectedChange}, destinations, actorAudit(session, "incident.accepted", id+":"+key))
 	if err != nil {
-		s.writeIncidentActionError(w, err, "incident.accepted")
+		s.writeIncidentActionErrorWithRequest(w, r, err, "incident.accepted")
 		return
 	}
 	s.broadcastIncidentEvents(id, events)
@@ -849,7 +859,7 @@ func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, sessio
 			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	var destinations []string
@@ -862,14 +872,21 @@ func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, sessio
 	}
 	events, err := s.Store.SuppressIncidentWithExpectedOutboxAndAudit(r.Context(), id, record.Job.Name, key, &store.IncidentExpectation{Change: *input.ExpectedChange}, destinations, actorAudit(session, "incident.suppressed", id+":"+key))
 	if err != nil {
-		s.writeIncidentActionError(w, err, "incident.suppressed")
+		s.writeIncidentActionErrorWithRequest(w, r, err, "incident.suppressed")
 		return
 	}
 	s.broadcastIncidentEvents(id, events)
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
+// writeIncidentActionError retains the small helper contract used by package
+// callers that do not have an HTTP request. Routed handlers use the request-
+// aware variant so failures carry a correlation ID.
 func (s *Server) writeIncidentActionError(w http.ResponseWriter, err error, action string) {
+	s.writeIncidentActionErrorWithRequest(w, nil, err, action)
+}
+
+func (s *Server) writeIncidentActionErrorWithRequest(w http.ResponseWriter, r *http.Request, err error, action string) {
 	if s.writeAuditUnavailable(w, err, action) {
 		return
 	}
@@ -885,7 +902,11 @@ func (s *Server) writeIncidentActionError(w http.ResponseWriter, err error, acti
 	case errors.Is(err, store.ErrUnsupportedIncidentChange):
 		writeError(w, http.StatusBadRequest, "incident_change_invalid", "this incident cannot be applied to the baseline", nil)
 	default:
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		if r != nil {
+			s.writeInternalError(w, r, "store", err)
+		} else {
+			writeError(w, http.StatusInternalServerError, "store", "internal server error", nil)
+		}
 	}
 }
 
@@ -907,7 +928,7 @@ func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, id string) 
 	}
 	state, err := s.Store.RuntimeState(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	value := map[string]any{
@@ -932,17 +953,38 @@ func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, id string) 
 }
 
 func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
+	var input struct {
+		ExpectedBaselineScanID   *string `json:"expected_baseline_scan_id"`
+		ExpectedBaselineModified *bool   `json:"expected_baseline_modified"`
+	}
+	if r.Body != nil && r.Body != http.NoBody {
+		if !decodeJSON(w, r, &input) {
+			return
+		}
+	}
 	record, err := s.Store.GetJob(r.Context(), id)
 	if err != nil {
 		writeError(w, 404, "not_found", "job not found", nil)
 		return
+	}
+	state, stateErr := s.Store.RuntimeState(r.Context(), id)
+	if stateErr != nil {
+		writeError(w, http.StatusInternalServerError, "store", "baseline state could not be loaded", nil)
+		return
+	}
+	expected := store.BaselineExpectation{ScanID: state.BaselineScanID, ScanIDSet: true, Modified: state.BaselineModified, ModifiedSet: true}
+	if input.ExpectedBaselineScanID != nil {
+		expected.ScanID, expected.ScanIDSet = strings.TrimSpace(*input.ExpectedBaselineScanID), true
+	}
+	if input.ExpectedBaselineModified != nil {
+		expected.Modified, expected.ModifiedSet = *input.ExpectedBaselineModified, true
 	}
 	destinations, err := s.App.Notifier.QueueDestinationsForJob(r.Context(), record.Job)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 		return
 	}
-	events, err := s.Store.ResetRuntimeWithOutboxAndAudit(r.Context(), id, record.Job.Name, destinations, actorAudit(session, "baseline.reset", id))
+	events, err := s.Store.ResetRuntimeWithExpectationAndAudit(r.Context(), id, record.Job.Name, destinations, actorAudit(session, "baseline.reset", id), expected)
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "baseline.reset") {
 			return
@@ -951,7 +993,11 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session s
 			writeError(w, http.StatusConflict, "job_active", "baseline reset is unavailable while a scan is running; wait for it to finish and try again", nil)
 			return
 		}
-		writeError(w, 500, "store", err.Error(), nil)
+		if errors.Is(err, store.ErrConflict) {
+			s.writeBaselineConflict(w, r, id)
+			return
+		}
+		writeError(w, 500, "store", "baseline reset could not be completed", nil)
 		return
 	}
 	s.App.WakeDelivery()
@@ -963,7 +1009,9 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session s
 
 func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	var input struct {
-		ScanID string `json:"scan_id"`
+		ScanID                   string  `json:"scan_id"`
+		ExpectedBaselineScanID   *string `json:"expected_baseline_scan_id"`
+		ExpectedBaselineModified *bool   `json:"expected_baseline_modified"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -972,6 +1020,18 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 	if err != nil {
 		writeError(w, 404, "not_found", "job not found", nil)
 		return
+	}
+	state, stateErr := s.Store.RuntimeState(r.Context(), id)
+	if stateErr != nil {
+		writeError(w, http.StatusInternalServerError, "store", "baseline state could not be loaded", nil)
+		return
+	}
+	expected := store.BaselineExpectation{ScanID: state.BaselineScanID, ScanIDSet: true, Modified: state.BaselineModified, ModifiedSet: true}
+	if input.ExpectedBaselineScanID != nil {
+		expected.ScanID, expected.ScanIDSet = strings.TrimSpace(*input.ExpectedBaselineScanID), true
+	}
+	if input.ExpectedBaselineModified != nil {
+		expected.Modified, expected.ModifiedSet = *input.ExpectedBaselineModified, true
 	}
 	scan, err := s.Store.GetScan(r.Context(), input.ScanID)
 	if err != nil || scan.JobID != id || scan.ConfigHash != record.Job.SecurityHash() {
@@ -983,7 +1043,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 		return
 	}
-	events, err := s.Store.ApproveRuntimeWithOutboxAndAudit(r.Context(), id, record.Job.Name, scan, destinations, actorAudit(session, "baseline.approved", id))
+	events, err := s.Store.ApproveRuntimeWithExpectationAndAudit(r.Context(), id, record.Job.Name, scan, destinations, actorAudit(session, "baseline.approved", id), expected)
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "baseline.approved") {
 			return
@@ -992,7 +1052,11 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 			writeError(w, http.StatusConflict, "job_active", "baseline approval is unavailable while a scan is running; wait for it to finish and try again", nil)
 			return
 		}
-		writeError(w, 400, "approve_failed", err.Error(), nil)
+		if errors.Is(err, store.ErrConflict) {
+			s.writeBaselineConflict(w, r, id)
+			return
+		}
+		writeError(w, 400, "approve_failed", "baseline approval could not be completed", nil)
 		return
 	}
 	s.App.WakeDelivery()
@@ -1000,4 +1064,12 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 		s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
 	}
 	writeJSON(w, 200, map[string]any{"events": events})
+}
+
+func (s *Server) writeBaselineConflict(w http.ResponseWriter, r *http.Request, id string) {
+	current := map[string]any{}
+	if info, err := s.Store.RuntimeBaselineInfo(r.Context(), id); err == nil {
+		current = map[string]any{"baseline_scan_id": info.BaselineScanID, "baseline_modified": info.BaselineModified, "baseline_config_hash": info.BaselineConfigHash}
+	}
+	writeError(w, http.StatusConflict, "baseline_conflict", "the baseline changed; refresh before retrying", map[string]any{"current": current})
 }

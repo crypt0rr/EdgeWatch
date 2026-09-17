@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,6 +60,7 @@ type Server struct {
 	publicCacheMu    sync.Mutex
 	publicCache      *publicDashboardCache
 	publicBuild      *publicDashboardBuild
+	publicFailure    *publicDashboardFailure
 	// publicDashboardBuildFunc is used by deterministic tests to control the
 	// cache-fill workload. Production requests use publicDashboardResponse.
 	publicDashboardBuildFunc func(context.Context, store.PublicDashboard) (publicDashboardResponse, error)
@@ -89,6 +91,11 @@ type sseMessage struct {
 type publicDashboardBuild struct {
 	done chan struct{}
 	err  error
+}
+
+type publicDashboardFailure struct {
+	retryAt time.Time
+	err     error
 }
 
 type sseAuthCacheEntry struct {
@@ -196,7 +203,17 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/", s.api)
 	mux.HandleFunc("/assets/", s.asset)
 	mux.HandleFunc("/", s.spa)
-	return s.requestLogging(securityHeaders(mux))
+	// Apply Host validation at the HTTP boundary, before API routing and
+	// authentication. Direct handler calls used by package tests intentionally
+	// bypass this network-boundary middleware.
+	hostGuard := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/v1") && !s.validateRequestHost(r) {
+			writeError(w, http.StatusMisdirectedRequest, "host", "request host is not allowed", nil)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+	return s.requestLogging(securityHeaders(hostGuard))
 }
 
 func (s *Server) ListenAndServe(ctx context.Context, address string) error {
@@ -321,6 +338,30 @@ func validateListenAddress(address string) error {
 	return nil
 }
 
+// validateBrowserOrigin protects the unauthenticated state-changing entry
+// points (setup, login, and activation) when the loopback service is exposed
+// through a tunnel or reverse proxy. Browsers omit Origin for ordinary CLI
+// clients, so absence remains allowed; a supplied origin must be an exact
+// same-origin HTTPS/HTTP request for the Host the server received.
+func validateBrowserOrigin(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true
+	}
+	if strings.EqualFold(origin, "null") {
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	host := strings.TrimSpace(r.Host)
+	if host == "" && r.URL != nil {
+		host = strings.TrimSpace(r.URL.Host)
+	}
+	return host != "" && strings.EqualFold(parsed.Host, host)
+}
+
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -345,14 +386,26 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if path == "/setup" && r.Method == http.MethodPost {
+		if !validateBrowserOrigin(r) {
+			writeError(w, http.StatusForbidden, "origin", "request origin is not allowed", nil)
+			return
+		}
 		s.setup(w, r)
 		return
 	}
 	if path == "/auth/login" && r.Method == http.MethodPost {
+		if !validateBrowserOrigin(r) {
+			writeError(w, http.StatusForbidden, "origin", "request origin is not allowed", nil)
+			return
+		}
 		s.login(w, r)
 		return
 	}
 	if path == "/auth/activate" && r.Method == http.MethodPost {
+		if !validateBrowserOrigin(r) {
+			writeError(w, http.StatusForbidden, "origin", "request origin is not allowed", nil)
+			return
+		}
 		s.activateUser(w, r)
 		return
 	}
@@ -370,9 +423,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "csrf", "missing or invalid CSRF token", nil)
 		return
 	}
-	if permission := requestPermission(path, r); permission == auth.PermissionDenied || (permission != "" && !auth.HasPermission(session, permission)) {
+	permission := requestPermission(path, r)
+	if permission == "" || permission == auth.PermissionDenied || !auth.HasPermission(session, permission) {
 		details := map[string]string{"permission": permission}
-		if permission == auth.PermissionDenied {
+		if permission == auth.PermissionDenied || permission == "" {
 			// Keep the internal sentinel out of the public API. Callers only need
 			// to know that the route is not authorized, not how the matrix stores
 			// its fail-closed default.
@@ -408,7 +462,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "sessions were revoked, but the security audit is temporarily unavailable", nil)
 				return
 			}
-			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)
+			writeError(w, http.StatusInternalServerError, "store", "sessions could not be revoked", nil)
 			return
 		}
 		writeJSON(w, http.StatusNoContent, nil)
@@ -475,6 +529,56 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "endpoint not found", nil)
 	}
+}
+
+// validateRequestHost accepts only loopback/localhost host names, the
+// configured listener host, or an explicitly configured reverse-proxy name.
+// The public dashboard intentionally does not use this guard: it is an
+// unauthenticated publication endpoint and may be served under a public host.
+func (s *Server) validateRequestHost(r *http.Request) bool {
+	if s == nil || s.App == nil || s.App.Config == nil {
+		// Unit callers can invoke the API with a lightweight Server fixture. A
+		// real daemon always has a validated deployment configuration.
+		return true
+	}
+	host := requestHostName(r.Host)
+	if host == "" && r.URL != nil {
+		host = requestHostName(r.URL.Host)
+	}
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	if configured := requestHostName(s.App.Config.Web.Listen); configured != "" && strings.EqualFold(host, configured) {
+		return true
+	}
+	for _, allowed := range s.App.Config.Web.AllowedHosts {
+		if strings.EqualFold(host, requestHostName(allowed)) {
+			return true
+		}
+	}
+	return false
+}
+
+// requestHostName strips an optional port while preserving bracketed IPv6
+// literals. Host values are normalized for case-insensitive DNS comparison.
+func requestHostName(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	}
+	if strings.HasPrefix(raw, "[") && strings.HasSuffix(raw, "]") {
+		raw = strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]")
+	}
+	return strings.TrimSuffix(strings.ToLower(raw), ".")
 }
 
 // requiredPermission centralizes the route authorization boundary. The

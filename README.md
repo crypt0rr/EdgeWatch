@@ -154,7 +154,7 @@ validated schema.
 | Configuration | Managed in | Purpose |
 | --- | --- | --- |
 | database, retention | YAML | SQLite location and history retention. |
-| web.listen, web.trusted_proxies | YAML | Loopback listener and explicitly trusted proxy networks. |
+| web.listen, web.allowed_hosts, web.trusted_proxies | YAML | Loopback listener, approved tunnel/proxy host names, and explicitly trusted proxy networks. |
 | scheduler.* | YAML | Concurrent scans and probe budgets. |
 | scanner.target_exclusions | YAML | Addresses that may never be scanned. |
 | enrichment.rdap.enabled | YAML | Enable or disable on-demand public network-registration lookups. |
@@ -170,6 +170,9 @@ Important defaults:
 
 - The web listener defaults to 127.0.0.1:8080; non-loopback listeners are
   rejected.
+- Requests using a proxy or tunnel host must match `web.allowed_hosts`; foreign
+  Host headers are rejected before authentication. Keep this list limited to
+  names you control.
 - Forwarding headers are ignored unless the connecting proxy addresses are
   explicitly listed in web.trusted_proxies.
 - Loopback, link-local, and cloud metadata addresses are excluded by default.
@@ -316,7 +319,7 @@ docker compose run --rm --no-deps -T edgewatch edgewatch verify \
 docker compose up -d edgewatch
 ```
 
-The current schema is version 41. Database migrations are forward-only. An
+The current schema is version 42. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. Keep encryption keys with the database or encrypted web-managed

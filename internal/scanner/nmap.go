@@ -233,6 +233,35 @@ func (n *Nmap) Scan(ctx context.Context, job config.Job) (model.Snapshot, error)
 	return n.ScanWithProgress(ctx, job, nil)
 }
 
+// weightedProcessPercent keeps live progress monotonic across a scan made up
+// of several Nmap invocations. A process reaching 100% for batch one must not
+// make the overall scan appear complete before later batches have started.
+func weightedProcessPercent(completedInvocations, totalInvocations int64, fraction float64) int {
+	if totalInvocations <= 0 {
+		return 0
+	}
+	if completedInvocations < 0 {
+		completedInvocations = 0
+	}
+	if completedInvocations >= totalInvocations {
+		return 100
+	}
+	if fraction < 0 {
+		fraction = 0
+	}
+	if fraction > 1 {
+		fraction = 1
+	}
+	value := int(((float64(completedInvocations) + fraction) / float64(totalInvocations)) * 100)
+	if value < 0 {
+		return 0
+	}
+	if value > 100 {
+		return 100
+	}
+	return value
+}
+
 // ScanWithProgress is the cancellable scanner entry point used by the web
 // console. The legacy Scan method delegates here so test and plugin scanners
 // do not need to implement progress reporting.
@@ -279,7 +308,7 @@ func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report Prog
 			live.Protocol = update.Protocol
 			live.CurrentInvocation = baseInvocations + update.Invocation
 			live.TotalBatches = totalInvocations
-			live.ProcessProgressPercent = int(update.Fraction * 100)
+			live.ProcessProgressPercent = weightedProcessPercent(baseInvocations+update.Invocation-1, totalInvocations, update.Fraction)
 			live.ProcessAlive = update.Alive
 			live.LastOutput = update.Output
 			live.CompletedProbes = baseProbes + int64(float64(update.BatchProbes)*update.Fraction)
@@ -311,7 +340,7 @@ func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report Prog
 			live.Protocol = update.Protocol
 			live.CurrentInvocation = baseInvocations + update.Invocation
 			live.TotalBatches = totalInvocations
-			live.ProcessProgressPercent = int(update.Fraction * 100)
+			live.ProcessProgressPercent = weightedProcessPercent(baseInvocations+update.Invocation-1, totalInvocations, update.Fraction)
 			live.ProcessAlive = update.Alive
 			live.LastOutput = update.Output
 			live.CompletedProbes = baseProbes + int64(float64(update.BatchProbes)*update.Fraction)
@@ -646,30 +675,10 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			if parsed.Exit != "success" {
 				return protocolScanResult{Units: unitsFromMap(all), Hosts: allHosts}, fmt.Errorf("nmap run incomplete: %s", parsed.Exit)
 			}
-			// A successful XML response with no host records is not a usable
-			// result. Keep this hard failure for a completely empty invocation,
-			// while allowing mixed responses to commit the addresses Nmap did
-			// report below.
-			hasExpectedHost := false
-			for _, address := range batch {
-				if _, unitOK := parsed.Units[address]; unitOK {
-					hasExpectedHost = true
-					break
-				}
-				if _, hostOK := parsed.Hosts[address]; hostOK {
-					hasExpectedHost = true
-					break
-				}
-			}
-			if !hasExpectedHost {
-				// Preserve an explicit observation for every omitted address and
-				// continue remaining batches. A completely omitted invocation is
-				// therefore represented as incomplete evidence rather than as closed
-				// ports; callers decide whether that makes the overall scan partial.
-				for _, address := range batch {
-					mergeHostObservationMap(allHosts, address, unreachableHostObservation(address, protocol, pc, "nmap-omitted"))
-				}
-			}
+			// A completely omitted invocation is represented below, once per
+			// effective address. Do not merge an additional copy here: merging
+			// observations is additive for state summaries and would otherwise
+			// double unreachable-host evidence.
 			for _, address := range batch {
 				unit, ok := parsed.Units[address]
 				if ok {
@@ -1596,7 +1605,7 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 			// scan-level caller reject baseline processing after parsing finishes.
 			reason := strings.TrimSpace(host.Status.Reason)
 			if reason == "" {
-				reason = "nmap-timeout"
+				reason = "nmap-host-timeout"
 			}
 			observation := unreachableHostObservation(address, protocol, pc, reason)
 			observation.ReasonTTL = host.Status.TTL

@@ -40,12 +40,16 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	if maxSubscribersPerUser <= 0 {
 		maxSubscribersPerUser = defaultMaxSSESubscribersPerUser
 	}
-	subscriberKey := strings.TrimSpace(session.IDHash)
-	if subscriberKey == "" {
-		subscriberKey = "user:" + strings.TrimSpace(session.UserID)
-	}
-	if subscriberKey == "user:" {
-		subscriberKey = "unknown"
+	// Per-user limits must be keyed by the stable account identity, not by a
+	// session hash. Otherwise one account can consume the entire nominal limit
+	// simply by opening several browser sessions (or bypass it by rotating
+	// sessions). Anonymous/future service sessions retain a hash fallback.
+	subscriberKey := "user:" + strings.TrimSpace(session.UserID)
+	if strings.TrimSpace(session.UserID) == "" {
+		subscriberKey = "session:" + strings.TrimSpace(session.IDHash)
+		if subscriberKey == "session:" {
+			subscriberKey = "unknown"
+		}
 	}
 	lastID := parseSSELastEventID(r.Header.Get("Last-Event-ID"))
 	ch := make(chan sseMessage, 64)

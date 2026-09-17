@@ -42,6 +42,23 @@ type RuntimeBaselineInfo struct {
 	ProjectionVersion  int64
 }
 
+// BaselineExpectation identifies the runtime state an operator saw before a
+// baseline mutation. The set flags distinguish an expected empty source scan
+// from an omitted field and let older callers keep using the wrapper methods.
+type BaselineExpectation struct {
+	ScanID      string
+	ScanIDSet   bool
+	Modified    bool
+	ModifiedSet bool
+}
+
+func (e BaselineExpectation) matches(state model.JobState) bool {
+	if e.ScanIDSet && e.ScanID != state.BaselineScanID {
+		return false
+	}
+	return !e.ModifiedSet || e.Modified == state.BaselineModified
+}
+
 // RuntimeBaselineInfo reads compact baseline metadata. A missing metadata row
 // is a legacy marker: fall back to the runtime JSON once so databases written
 // before the metadata migration remain readable. Current rows always carry a
@@ -689,19 +706,30 @@ func (s *Store) ResetRuntime(ctx context.Context, jobID, name string) ([]model.E
 // ResetRuntimeWithOutbox persists the baseline reset event and its notification
 // intent in the same transaction.
 func (s *Store) ResetRuntimeWithOutbox(ctx context.Context, jobID, name string, destinations []string) ([]model.Event, error) {
-	return s.resetRuntimeWithAudits(ctx, jobID, name, destinations, nil)
+	return s.resetRuntimeWithAudits(ctx, jobID, name, destinations, nil, BaselineExpectation{})
 }
 
 // ResetRuntimeWithOutboxAndAudit clears comparison state, persists any reset
 // notification intent, and records the administrator action atomically.
 func (s *Store) ResetRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name string, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.resetRuntimeWithAudits(ctx, jobID, name, destinations, []AuditEntry{audit})
+	return s.resetRuntimeWithAudits(ctx, jobID, name, destinations, []AuditEntry{audit}, BaselineExpectation{})
 }
 
-func (s *Store) resetRuntimeWithAudits(ctx context.Context, jobID, name string, destinations []string, audits []AuditEntry) ([]model.Event, error) {
+// ResetRuntimeWithExpectationAndAudit is the stale-view-safe baseline reset
+// entry point used by the web API. The comparison is made inside the same
+// writer transaction that clears the state, so two administrators cannot both
+// mutate a baseline they loaded before the other action committed.
+func (s *Store) ResetRuntimeWithExpectationAndAudit(ctx context.Context, jobID, name string, destinations []string, audit AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
+	return s.resetRuntimeWithAudits(ctx, jobID, name, destinations, []AuditEntry{audit}, expected)
+}
+
+func (s *Store) resetRuntimeWithAudits(ctx context.Context, jobID, name string, destinations []string, audits []AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
 	return s.updateRuntimeWithOutboxAndAuditsGuardedPost(ctx, jobID, "", destinations, audits, true, func(tx *sql.Tx, _ *model.JobState) error {
 		return clearBaselineHostProjectionTx(ctx, tx, jobID)
 	}, func(state *model.JobState) ([]model.Event, error) {
+		if (expected.ScanIDSet || expected.ModifiedSet) && !expected.matches(*state) {
+			return nil, ErrConflict
+		}
 		state.Baseline = nil
 		state.BaselineScanID = ""
 		state.BaselineConfigHash = ""
@@ -727,16 +755,22 @@ func (s *Store) ApproveRuntime(ctx context.Context, jobID, name string, scan mod
 // ApproveRuntimeWithOutbox persists a manual baseline approval and notification
 // intent together, while retaining the current-scope validation.
 func (s *Store) ApproveRuntimeWithOutbox(ctx context.Context, jobID, name string, scan model.Scan, destinations []string) ([]model.Event, error) {
-	return s.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, nil)
+	return s.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, nil, BaselineExpectation{})
 }
 
 // ApproveRuntimeWithOutboxAndAudit applies a manual baseline approval and its
 // notification intent/audit row in one transaction.
 func (s *Store) ApproveRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, []AuditEntry{audit})
+	return s.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, []AuditEntry{audit}, BaselineExpectation{})
 }
 
-func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audits []AuditEntry) ([]model.Event, error) {
+// ApproveRuntimeWithExpectationAndAudit applies a manual baseline approval
+// only if the caller's baseline marker still matches the committed runtime.
+func (s *Store) ApproveRuntimeWithExpectationAndAudit(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audit AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
+	return s.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, []AuditEntry{audit}, expected)
+}
+
+func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audits []AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
 	if scan.ID == "" {
 		return nil, errors.New("scan ID is required")
 	}
@@ -767,6 +801,9 @@ func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string
 		return nil, errors.New("scan does not belong to the current job scope")
 	}
 	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, destinations, func(state *model.JobState) ([]model.Event, error) {
+		if (expected.ScanIDSet || expected.ModifiedSet) && !expected.matches(*state) {
+			return nil, ErrConflict
+		}
 		state.Baseline = &stored.Snapshot
 		state.BaselineScanID = stored.ID
 		state.BaselineConfigHash = stored.ConfigHash

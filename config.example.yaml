@@ -5,6 +5,9 @@ retention: 90d
 # host at http://127.0.0.1:8080 or through an SSH tunnel.
 web:
   listen: 127.0.0.1:8080
+  # Optional host names accepted when the UI is reached through a reverse
+  # proxy or tunnel. Loopback addresses and localhost are always accepted.
+  # allowed_hosts: [edgewatch.example.com]
   # Forwarding headers are ignored by default. Add only the proxy addresses
   # or networks that directly connect to EdgeWatch before trusting client IPs.
   # trusted_proxies: ["127.0.0.1/32"]

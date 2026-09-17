@@ -38,6 +38,19 @@ func TestTrustedProxyConfigurationValidatesAddresses(t *testing.T) {
 	}
 }
 
+func TestAllowedHostConfigurationValidatesNamesAndPorts(t *testing.T) {
+	base := Config{Version: 1, Database: "db", Retention: Duration(24 * 60 * 60 * 1e9), Scheduler: Scheduler{MaxConcurrent: 1}, Web: Web{Listen: "127.0.0.1:8080", AllowedHosts: []string{"console.example.test", "[2001:db8::10]:8443"}}}
+	if err := base.ValidateDeployment(); err != nil {
+		t.Fatal(err)
+	}
+	for _, hosts := range [][]string{{"https://console.example.test"}, {"bad host"}, {"console.example.test:0"}} {
+		base.Web.AllowedHosts = hosts
+		if err := base.ValidateDeployment(); err == nil {
+			t.Fatalf("invalid allowed host %v was accepted", hosts)
+		}
+	}
+}
+
 func TestTargetExclusionConfigurationValidatesNetworks(t *testing.T) {
 	base := Config{Version: 1, Database: "db", Retention: Duration(24 * 60 * 60 * 1e9), Scheduler: Scheduler{MaxConcurrent: 1}, Scanner: ScannerConfig{TargetExclusions: []string{"127.0.0.0/8"}}, Web: Web{Listen: "127.0.0.1:8080"}}
 	if err := base.ValidateDeployment(); err != nil {

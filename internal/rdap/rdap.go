@@ -151,7 +151,7 @@ func (c *Client) Lookup(ctx context.Context, rawAddress string) (Result, error) 
 	if !c.Enabled {
 		return Result{Status: "disabled", Address: address, Message: "RDAP lookups are disabled by deployment configuration"}, nil
 	}
-	if isPrivate(ip) {
+	if !c.AllowPrivateHosts && isPrivate(ip) {
 		return Result{Status: "private", Address: address, Message: "private or special-use addresses are not queried"}, nil
 	}
 
@@ -285,7 +285,45 @@ func isPrivate(ip net.IP) bool {
 	if ip4 := ip.To4(); ip4 != nil && ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
 		return true
 	}
-	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
+	if ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	// RFC 6890/IANA special-purpose ranges are not useful registration
+	// subjects. Keeping them out of RDAP prevents documentation, benchmark,
+	// protocol-assignment, and reserved addresses from leaking to registries.
+	for _, network := range rdapSpecialUseNetworks {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsPrivateAddress reports whether an address is private or otherwise
+// special-use and therefore must not be sent to a public registration
+// authority. The same policy is shared by the authenticated RDAP endpoint and
+// the unauthenticated public-status projection.
+func IsPrivateAddress(ip net.IP) bool {
+	return isPrivate(ip)
+}
+
+var rdapSpecialUseNetworks = mustSpecialUseNetworks([]string{
+	"0.0.0.0/8", "192.0.0.0/24", "192.0.2.0/24", "192.31.196.0/24", "192.52.193.0/24",
+	"192.88.99.0/24", "198.18.0.0/15", "198.51.100.0/24", "203.0.113.0/24", "240.0.0.0/4",
+	"::/128", "100::/64", "2001:2::/48", "2001:10::/28", "2001:20::/28", "2001:db8::/32",
+	"2002::/16", "3fff::/20",
+})
+
+func mustSpecialUseNetworks(cidrs []string) []*net.IPNet {
+	result := make([]*net.IPNet, 0, len(cidrs))
+	for _, raw := range cidrs {
+		_, network, err := net.ParseCIDR(raw)
+		if err != nil {
+			panic("invalid RDAP special-use network: " + raw)
+		}
+		result = append(result, network)
+	}
+	return result
 }
 
 func (c *Client) serviceFor(ctx context.Context, ip net.IP) (bootstrapService, error) {

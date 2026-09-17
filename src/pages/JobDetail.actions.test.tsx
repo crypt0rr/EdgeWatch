@@ -58,13 +58,13 @@ describe('job detail actions', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Reset baseline' })).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Reset baseline' }))
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
-    await waitFor(() => expect(resetBaseline).toHaveBeenCalledWith('job-1'))
+    await waitFor(() => expect(resetBaseline).toHaveBeenCalledWith('job-1', 'scan-1', false))
 
     fireEvent.click(screen.getByRole('button', { name: /scan-1/i }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Use as baseline' })).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Use as baseline' }))
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
-    await waitFor(() => expect(approveBaseline).toHaveBeenCalledWith('job-1', 'scan-1'))
+    await waitFor(() => expect(approveBaseline).toHaveBeenCalledWith('job-1', 'scan-1', 'scan-1', false))
   })
 
   it('reports action failures and archives through confirmation', async () => {

@@ -184,6 +184,25 @@ func (s *Server) auditFailure(err error, action string) {
 	s.Log.Error("security audit write failed", "action", action, "error", err)
 }
 
+// writeInternalError keeps implementation details out of API responses while
+// preserving a request correlation ID for operators. The original error is
+// logged server-side only; SQLite, provider, and filesystem messages can
+// otherwise disclose deployment details or request-adjacent secrets.
+func (s *Server) writeInternalError(w http.ResponseWriter, r *http.Request, code string, err error) {
+	if code == "" {
+		code = "internal_error"
+	}
+	requestID := RequestID(r.Context())
+	if s != nil && s.Log != nil {
+		s.Log.ErrorContext(r.Context(), "web internal error", "request_id", requestID, "code", code, "error", err)
+	}
+	var details any
+	if requestID != "" {
+		details = map[string]string{"request_id": requestID}
+	}
+	writeError(w, http.StatusInternalServerError, code, "internal server error", details)
+}
+
 func (s *Server) auditOptional(ctx context.Context, action, detail string) {
 	s.auditOptionalEntry(ctx, store.AuditEntry{Action: action, Detail: detail})
 }

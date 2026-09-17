@@ -89,12 +89,12 @@ func TestMergeHostObservationMarksAddressIncompleteAcrossProtocols(t *testing.T)
 		Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443"}},
 	})
 	mergeHostObservationMap(hosts, "192.0.2.11", model.HostObservation{
-		Address: "192.0.2.11", Status: "unreachable", StatusReason: "nmap-timeout",
+		Address: "192.0.2.11", Status: "unreachable", StatusReason: "nmap-host-timeout",
 		Protocols: []model.ProtocolObservation{{Protocol: "udp", ScannedPorts: "53"}},
 	})
 	got := hosts["192.0.2.11"]
-	if got.Status != "unreachable" || got.StatusReason != "nmap-timeout" {
-		t.Fatalf("cross-protocol status = %q/%q, want unreachable/nmap-timeout", got.Status, got.StatusReason)
+	if got.Status != "unreachable" || got.StatusReason != "nmap-host-timeout" {
+		t.Fatalf("cross-protocol status = %q/%q, want unreachable/nmap-host-timeout", got.Status, got.StatusReason)
 	}
 }
 
@@ -141,7 +141,7 @@ func TestParseXMLRetainsTimedOutHost(t *testing.T) {
 		t.Fatalf("timed-out host discarded healthy evidence: %v", err)
 	}
 	host, ok := run.Hosts["192.0.2.10"]
-	if !ok || host.Status != "unreachable" || host.StatusReason != "nmap-timeout" {
+	if !ok || host.Status != "unreachable" || host.StatusReason != "nmap-host-timeout" {
 		t.Fatalf("timed-out host observation = %#v", host)
 	}
 }

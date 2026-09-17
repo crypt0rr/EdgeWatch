@@ -111,6 +111,16 @@ func TestQueueDestinationsForJobUsesStableSelection(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var deploymentSelector string
+	for _, view := range notifier.Destinations() {
+		if view.Source == "deployment" {
+			deploymentSelector = view.ID
+			break
+		}
+	}
+	if deploymentSelector == "" {
+		t.Fatal("deployment destination selector is empty")
+	}
 	managed, err := notifier.CreateManaged(ctx, "Operations", "generic://localhost/managed?disabletls=yes&template=json", true)
 	if err != nil {
 		t.Fatal(err)
@@ -129,12 +139,12 @@ func TestQueueDestinationsForJobUsesStableSelection(t *testing.T) {
 	if len(selected) != 1 || selected[0] != managedKey(managed.ID, managed.Revision) {
 		t.Fatalf("managed selection = %#v, want current managed revision", selected)
 	}
-	selected, err = notifier.QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{"file:" + hashURL(deployment)}})
+	selected, err = notifier.QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{deploymentSelector}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(selected) != 1 || selected[0] != hashURL(deployment) {
-		t.Fatalf("deployment selection = %#v, want hashed file key", selected)
+	if len(selected) != 1 || selected[0] != strings.TrimPrefix(deploymentSelector, "file:") {
+		t.Fatalf("deployment selection = %#v, want opaque file key", selected)
 	}
 	none, err := notifier.QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{}})
 	if err != nil {
@@ -143,8 +153,11 @@ func TestQueueDestinationsForJobUsesStableSelection(t *testing.T) {
 	if len(none) != 0 {
 		t.Fatalf("explicit empty selection returned %#v", none)
 	}
-	if err := notifier.ValidateDestinationSelection(ctx, []string{managed.ID, "file:" + hashURL(deployment)}); err != nil {
+	if err := notifier.ValidateDestinationSelection(ctx, []string{managed.ID, deploymentSelector}); err != nil {
 		t.Fatalf("valid selection rejected: %v", err)
+	}
+	if err := notifier.ValidateDestinationSelection(ctx, []string{"file:" + hashURL(deployment)}); err != nil {
+		t.Fatalf("legacy valid selection rejected: %v", err)
 	}
 	if err := notifier.ValidateDestinationSelection(ctx, []string{"managed:missing"}); err == nil {
 		t.Fatal("unknown destination selection accepted")
@@ -181,6 +194,16 @@ func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var deploymentSelector string
+	for _, view := range notifier.Destinations() {
+		if view.Source == "deployment" {
+			deploymentSelector = view.ID
+			break
+		}
+	}
+	if deploymentSelector == "" {
+		t.Fatal("deployment destination selector is empty")
+	}
 	created, err := notifier.CreateManaged(ctx, "Operations", "generic://localhost/managed?disabletls=yes&template=json", true)
 	if err != nil {
 		t.Fatal(err)
@@ -196,8 +219,8 @@ func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
 	if stored.Job.NotificationDestinations == nil || len(stored.Job.NotificationDestinations) != 1 {
 		t.Fatalf("legacy job selection = %#v, want the pre-existing deployment destination", stored.Job.NotificationDestinations)
 	}
-	if stored.Job.NotificationDestinations[0] != "file:"+hashURL(deployment) {
-		t.Fatalf("legacy job selection = %#v, want file destination", stored.Job.NotificationDestinations)
+	if stored.Job.NotificationDestinations[0] != deploymentSelector {
+		t.Fatalf("legacy job selection = %#v, want opaque file destination", stored.Job.NotificationDestinations)
 	}
 	if stored.Job.NotificationDestinations[0] == created.ID {
 		t.Fatalf("new managed destination was added to legacy job selection: %#v", stored.Job.NotificationDestinations)
@@ -206,7 +229,7 @@ func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(keys) != 1 || keys[0] != hashURL(deployment) {
+	if len(keys) != 1 || keys[0] != strings.TrimPrefix(deploymentSelector, "file:") {
 		t.Fatalf("legacy job queued destinations = %#v, want only the pre-existing deployment destination", keys)
 	}
 }
@@ -659,11 +682,21 @@ func TestManagedNotificationLocksWhenKeyIsUnavailable(t *testing.T) {
 	if locked.ActiveCount() != 1 {
 		t.Fatalf("active destination count = %d, want deployment destination only", locked.ActiveCount())
 	}
+	var deploymentSelector string
+	for _, view := range views {
+		if view.Source == "deployment" {
+			deploymentSelector = strings.TrimPrefix(view.ID, "file:")
+			break
+		}
+	}
+	if deploymentSelector == "" {
+		t.Fatal("deployment destination selector is empty")
+	}
 	if err := locked.Queue(ctx, []model.Event{{Type: "test", Job: "ops", CreatedAt: time.Now().UTC()}}); err != nil {
 		t.Fatal(err)
 	}
 	var queued int
-	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM outbox WHERE destination=?`, hashURL(fileURL)).Scan(&queued); err != nil {
+	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM outbox WHERE destination=?`, deploymentSelector).Scan(&queued); err != nil {
 		t.Fatal(err)
 	}
 	if queued != 1 {

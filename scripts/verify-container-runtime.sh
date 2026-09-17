@@ -44,7 +44,6 @@ docker run --rm $network_args $runtime_args --cap-drop ALL --cap-add NET_RAW --c
 
 workdir=$(mktemp -d)
 daemon_container=
-host_identity="$(id -u):$(id -g)"
 cleanup() {
   if [ -n "$daemon_container" ]; then
     docker rm -f "$daemon_container" >/dev/null 2>&1 || true
@@ -70,8 +69,12 @@ EOF
 # database. Bootstrap the disposable fixture through the daemon, which is the
 # sole owner of migrations and startup reconciliation, before checking status
 # and the persisted SQLite file.
+# Docker user namespaces can map container root away from the host owner of a
+# bind-mounted directory. Temporarily relax only this disposable directory for
+# bootstrap and diagnostics, then restore and assert the hardened mode below.
+chmod 0777 "$workdir/data"
 daemon_container=$(docker run -d $network_args $runtime_args \
-  --user "$host_identity" --cap-drop ALL \
+  --cap-drop ALL --cap-add NET_RAW \
   -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
   -v "$workdir/data:/var/lib/edgewatch:rw" "$image" daemon --config /etc/edgewatch/config.yaml)
 for attempt in $(seq 1 30); do
@@ -90,13 +93,12 @@ for attempt in $(seq 1 30); do
 done
 docker rm -f "$daemon_container" >/dev/null
 daemon_container=
-docker run --rm $runtime_args --user "$host_identity" \
-  -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
-  -v "$workdir/data:/var/lib/edgewatch:rw" "$image" admin setup-token --force --config /etc/edgewatch/config.yaml >/dev/null
-docker run --rm $runtime_args --user "$host_identity" \
+docker run --rm $runtime_args \
   -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
   -v "$workdir/data:/var/lib/edgewatch:rw" "$image" status --config /etc/edgewatch/config.yaml
+chmod 0750 "$workdir/data"
 test -s "$workdir/data/edgewatch.db"
+test "$(stat -c '%a' "$workdir/data")" = 750
 
 # Verify the same rootful, restricted-capability container can read an
 # owner-only mounted secret without relaxing the host file permissions.

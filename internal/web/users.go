@@ -266,7 +266,11 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 	// out while still protecting role and enabled-state changes. The store
 	// repeats this policy transactionally for non-HTTP callers.
 	revokeSessions := user.Role != previousRole || user.Enabled != previousEnabled
-	if err := s.Store.UpdateUser(r.Context(), user, revokeSessions, store.AuditEntry{Action: "user.updated", Detail: fmt.Sprintf("user %s updated by %s", user.Username, actor.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
+	detail := fmt.Sprintf("user %s updated by %s", user.Username, actor.Username)
+	if previousRole != user.Role || previousEnabled != user.Enabled {
+		detail = fmt.Sprintf("user %s updated by %s role=%s->%s enabled=%t->%t", user.Username, actor.Username, previousRole, user.Role, previousEnabled, user.Enabled)
+	}
+	if err := s.Store.UpdateUser(r.Context(), user, revokeSessions, store.AuditEntry{Action: "user.updated", Detail: detail, ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
 		if s.writeAuditUnavailable(w, err, "user.updated") {
 			return
 		}

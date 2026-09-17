@@ -45,6 +45,7 @@ type Server struct {
 	shutdown         chan struct{}
 	shutdownOnce     sync.Once
 	sseWG            sync.WaitGroup
+	handlerWG        sync.WaitGroup
 	sseCancels       map[chan sseMessage]context.CancelFunc
 	sseAuthMu        sync.Mutex
 	sseAuthCache     map[string]sseAuthCacheEntry
@@ -234,7 +235,10 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener, addre
 	// Ordinary handlers get a generous write deadline so a peer that stops
 	// reading cannot pin a goroutine indefinitely. The SSE handler clears this
 	// deadline with ResponseController before it starts its long-lived stream.
-	server := &http.Server{Handler: handler, ErrorLog: slog.NewLogLogger(s.Log.Handler(), slog.LevelError), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: writeTimeout, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10}
+	// Track every request, including handlers supplied by deterministic tests or
+	// future embedders that do not use the normal request-logging middleware.
+	// Shutdown joins this counter before the caller is allowed to close SQLite.
+	server := &http.Server{Handler: s.trackHandlers(handler), ErrorLog: slog.NewLogLogger(s.Log.Handler(), slog.LevelError), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: writeTimeout, IdleTimeout: 120 * time.Second, MaxHeaderBytes: 32 << 10}
 	serveDone := make(chan struct{})
 	shutdownDone := make(chan struct{})
 	var shutdownOnce sync.Once
@@ -251,6 +255,7 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener, addre
 			defer cancel()
 			s.waitForSSEShutdown(shutdownCtx)
 			_ = server.Shutdown(shutdownCtx)
+			s.waitForHandlers(shutdownCtx)
 			close(shutdownDone)
 		})
 	}
@@ -274,6 +279,32 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener, addre
 	shutdown()
 	<-shutdownDone
 	return err
+}
+
+func (s *Server) trackHandlers(next http.Handler) http.Handler {
+	if next == nil {
+		next = http.NotFoundHandler()
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.handlerWG.Add(1)
+		defer s.handlerWG.Done()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) waitForHandlers(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		s.handlerWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		if s.Log != nil {
+			s.Log.Warn("HTTP handlers did not drain before shutdown deadline")
+		}
+	}
 }
 
 func validateListenAddress(address string) error {
@@ -362,6 +393,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.totpSetup(w, r, session)
 	case path == "/auth/totp/enable" && r.Method == http.MethodPost:
 		s.totpEnable(w, r, session)
+	case path == "/auth/totp/recovery-codes" && r.Method == http.MethodPost:
+		s.totpRecoveryCodes(w, r, session)
 	case path == "/auth/totp" && r.Method == http.MethodDelete:
 		s.totpDisable(w, r, session)
 	case path == "/auth/sessions" && r.Method == http.MethodDelete:
@@ -372,7 +405,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		if err := s.Auth.Store.DeleteUserSessionsWithAudit(r.Context(), session.UserID, actorAudit(session, action, "all sessions revoked")); err != nil {
 			if errors.Is(err, store.ErrAuditUnavailable) {
 				s.auditFailure(err, action)
-				writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "sessions were not revoked because the security audit could not be recorded", nil)
+				writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "sessions were revoked, but the security audit is temporarily unavailable", nil)
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "store", err.Error(), nil)

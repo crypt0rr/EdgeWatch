@@ -313,7 +313,7 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, session store.Se
 				action = "admin.logout"
 			}
 			s.auditFailure(err, action)
-			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "logout could not be recorded by the security audit", nil)
+			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "logout was completed, but the security audit is temporarily unavailable", nil)
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "store", "session could not be ended", nil)
@@ -443,6 +443,8 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store.Session) {
 	var input struct {
 		Password string `json:"password"`
+		Code     string `json:"code"`
+		Recovery string `json:"recovery_code"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -455,6 +457,12 @@ func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store
 	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, input.Password); err != nil {
 		s.writePasswordConfirmationError(w, err, "password is incorrect")
 		return
+	}
+	if user.TOTPEnabled {
+		if err := s.Auth.ConfirmTOTPForUser(r.Context(), r, session.UserID, input.Code, input.Recovery); err != nil {
+			s.writeCurrentFactorError(w, err)
+			return
+		}
 	}
 	secret, err := auth.NewTOTPSecret()
 	if err != nil {
@@ -532,6 +540,8 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session store.Session) {
 	var input struct {
 		Password string `json:"password"`
+		Code     string `json:"code"`
+		Recovery string `json:"recovery_code"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -544,6 +554,12 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, input.Password); err != nil {
 		s.writePasswordConfirmationError(w, err, "password is incorrect")
 		return
+	}
+	if user.TOTPEnabled {
+		if err := s.Auth.ConfirmTOTPForUser(r.Context(), r, session.UserID, input.Code, input.Recovery); err != nil {
+			s.writeCurrentFactorError(w, err)
+			return
+		}
 	}
 	user.TOTPEnabled, user.TOTPSecret, user.UpdatedAt = false, "", time.Now().UTC()
 	auditAction := "user.totp_disabled"
@@ -567,4 +583,73 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 		return
 	}
 	writeJSON(w, http.StatusNoContent, nil)
+}
+
+// totpRecoveryCodes rotates the one-use recovery set without exposing the
+// existing hashes. Both the password and the currently configured factor are
+// required, and the current browser session is preserved so the newly issued
+// codes can be copied before the page is left.
+func (s *Server) totpRecoveryCodes(w http.ResponseWriter, r *http.Request, session store.Session) {
+	var input struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+		Recovery string `json:"recovery_code"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	user, err := s.Store.GetUser(r.Context(), session.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "totp_failed", "account could not be loaded for recovery-code rotation", nil)
+		return
+	}
+	if !user.TOTPEnabled {
+		writeError(w, http.StatusBadRequest, "totp_required", "TOTP must be enabled before recovery codes can be regenerated", nil)
+		return
+	}
+	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, input.Password); err != nil {
+		s.writePasswordConfirmationError(w, err, "password is incorrect")
+		return
+	}
+	if err := s.Auth.ConfirmTOTPForUser(r.Context(), r, session.UserID, input.Code, input.Recovery); err != nil {
+		s.writeCurrentFactorError(w, err)
+		return
+	}
+	plain, hashes, err := auth.RecoveryCodes()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "totp_failed", "recovery codes could not be generated", nil)
+		return
+	}
+	cookie, cookieErr := r.Cookie(auth.SessionCookie)
+	preserve := ""
+	if cookieErr == nil && cookie.Value != "" {
+		preserve = digest(cookie.Value)
+	}
+	user.UpdatedAt = s.currentTime()
+	auditAction := "user.totp_recovery_codes_rotated"
+	var saveErr error
+	if user.ID == store.LegacyAdminUserID {
+		auditAction = "admin.totp_recovery_codes_rotated"
+		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Revision: user.Revision}
+		saveErr = s.Store.SaveAdminSecurityWithAuditPreservingSession(r.Context(), admin, hashes, true, true, actorAudit(session, auditAction, "TOTP recovery codes rotated"), preserve)
+	} else {
+		saveErr = s.Store.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, actorAudit(session, auditAction, "TOTP recovery codes rotated"), preserve)
+	}
+	if saveErr != nil {
+		if s.writeAuditUnavailable(w, saveErr, auditAction) {
+			return
+		}
+		writeSecurityMutationError(w, saveErr, "totp_failed", "recovery codes could not be saved")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": plain})
+}
+
+func (s *Server) writeCurrentFactorError(w http.ResponseWriter, err error) {
+	if errors.Is(err, auth.ErrRateLimited) {
+		w.Header().Set("Retry-After", "300")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many authenticator confirmation attempts; try again later", nil)
+		return
+	}
+	writeError(w, http.StatusUnauthorized, "totp_required", "the current authenticator code or recovery code is required", nil)
 }

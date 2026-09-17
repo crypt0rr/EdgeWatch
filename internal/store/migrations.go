@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 40
+const schemaVersion = 41
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -985,6 +985,32 @@ END;`,
 			`INSERT INTO baseline_host_search(job_id,address,content)
 SELECT job_id,address,lower(coalesce(search_text,'')) FROM baseline_hosts
 WHERE NOT EXISTS (SELECT 1 FROM baseline_host_search hs WHERE hs.job_id=baseline_hosts.job_id AND hs.address=baseline_hosts.address)`,
+		},
+		41: {
+			// TOTP acceptance is a durable, account-scoped replay guard. Keeping
+			// it separate from users preserves compatibility with restored legacy
+			// identity rows while allowing one atomic compare-and-set per factor.
+			`CREATE TABLE IF NOT EXISTS totp_replay (
+ user_id TEXT PRIMARY KEY,
+ last_step INTEGER NOT NULL DEFAULT -1,
+ updated_at TEXT NOT NULL DEFAULT '',
+ FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);`,
+			"CREATE INDEX IF NOT EXISTS totp_replay_updated ON totp_replay(updated_at)",
+			// Recovery fixtures may carry the schema marker without the invite
+			// table. Create the current shape first so the additive ALTER below is
+			// restart-safe for both normal and partial databases.
+			`CREATE TABLE IF NOT EXISTS user_invites (
+ id_hash TEXT PRIMARY KEY,
+ user_id TEXT NOT NULL,
+ issuer_user_id TEXT NOT NULL DEFAULT '',
+ created_at TEXT NOT NULL,
+ expires_at TEXT NOT NULL,
+ used_at TEXT,
+ FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);`,
+			"ALTER TABLE user_invites ADD COLUMN issuer_user_id TEXT NOT NULL DEFAULT ''",
+			"CREATE INDEX IF NOT EXISTS user_invites_issuer ON user_invites(issuer_user_id,used_at,expires_at)",
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

@@ -6,7 +6,7 @@ type ActionDialogProps = {
   title: string
   description: string
   confirmLabel: string
-  onConfirm: (value: string) => void | Promise<void>
+  onConfirm: (value: string, secondaryValue?: string) => void | Promise<void>
   onCancel: () => void
   destructive?: boolean
   valueLabel?: string
@@ -15,6 +15,11 @@ type ActionDialogProps = {
   expectedValue?: string
   placeholder?: string
   autoComplete?: string
+  secondaryValueLabel?: string
+  secondaryValueType?: 'password' | 'text'
+  secondaryValueRequired?: boolean
+  secondaryPlaceholder?: string
+  secondaryAutoComplete?: string
   error?: string
 }
 
@@ -45,12 +50,19 @@ export function ActionDialog({
   expectedValue,
   placeholder,
   autoComplete,
+  secondaryValueLabel,
+  secondaryValueType = 'text',
+  secondaryValueRequired = false,
+  secondaryPlaceholder,
+  secondaryAutoComplete,
   error,
 }: ActionDialogProps) {
   const dialogRef = useRef<HTMLElement>(null)
   const valueRef = useRef<HTMLInputElement>(null)
+  const secondaryValueRef = useRef<HTMLInputElement>(null)
   const previousFocusRef = useRef<HTMLElement | null>(null)
   const [value, setValue] = useState('')
+  const [secondaryValue, setSecondaryValue] = useState('')
   const [busy, setBusy] = useState(false)
   const [validationError, setValidationError] = useState('')
   const titleID = useId()
@@ -141,7 +153,13 @@ export function ActionDialog({
     setValidationError('')
     setBusy(true)
     try {
-      await onConfirm(value)
+    if (secondaryValueRequired && !secondaryValue.trim()) {
+      setValidationError(`${secondaryValueLabel ?? 'This value'} is required.`)
+      secondaryValueRef.current?.focus({ preventScroll: true })
+      return
+    }
+    if (secondaryValueLabel) await onConfirm(value, secondaryValue)
+    else await onConfirm(value)
     } finally {
       setBusy(false)
     }
@@ -155,8 +173,9 @@ export function ActionDialog({
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{busy ? `${confirmLabel} in progress.` : ''}</div>
       <form className="action-dialog-form" onSubmit={event => { event.preventDefault(); void submit() }}>
         {valueLabel && <label>{valueLabel}<input ref={valueRef} type={valueType} value={value} onChange={event => { setValue(event.target.value); setValidationError('') }} placeholder={placeholder} autoComplete={autoComplete} aria-invalid={!!(validationError || error)} aria-describedby={validationError || error ? errorID : undefined} required={valueRequired} /></label>}
+        {secondaryValueLabel && <label>{secondaryValueLabel}<input ref={secondaryValueRef} type={secondaryValueType} value={secondaryValue} onChange={event => { setSecondaryValue(event.target.value); setValidationError('') }} placeholder={secondaryPlaceholder} autoComplete={secondaryAutoComplete} aria-invalid={!!(validationError || error)} aria-describedby={validationError || error ? errorID : undefined} required={secondaryValueRequired} /></label>}
         {(validationError || error) && <div id={errorID} className="form-error" role="alert">{validationError || error}</div>}
-        <div className="action-dialog-actions"><button className="button ghost" type="button" onClick={onCancel} disabled={busy}>Cancel</button><button className={destructive ? 'button danger' : 'button primary'} type="submit" disabled={busy || (valueRequired && !value.trim())}>{busy ? 'Working…' : confirmLabel}</button></div>
+        <div className="action-dialog-actions"><button className="button ghost" type="button" onClick={onCancel} disabled={busy}>Cancel</button><button className={destructive ? 'button danger' : 'button primary'} type="submit" disabled={busy || (valueRequired && !value.trim()) || (secondaryValueRequired && !secondaryValue.trim())}>{busy ? 'Working…' : confirmLabel}</button></div>
       </form>
     </section>
   </div>

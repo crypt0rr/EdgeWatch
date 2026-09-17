@@ -4,13 +4,101 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
+
+func TestManagedDeliverySurvivesMetadataEditAndPause(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawURL := fmt.Sprintf("generic://%s/alerts?disabletls=yes&template=json", parsed.Host)
+	notifier, err := New(db, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := notifier.CreateManaged(ctx, "Operations", rawURL, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldKey := managedKey(created.ID, created.Revision)
+	if err := db.QueueEvent(ctx, oldKey, model.Event{Type: "rename", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	renamed, err := notifier.UpdateManaged(ctx, created.ID, created.Revision, "Operations renamed", nil, boolPtr(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.Revision != created.Revision+1 {
+		t.Fatalf("metadata revision = %d, want %d", renamed.Revision, created.Revision+1)
+	}
+	if err := notifier.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("metadata-edited delivery calls = %d, want 1", calls.Load())
+	}
+
+	if err := db.QueueEvent(ctx, managedKey(renamed.ID, renamed.Revision), model.Event{Type: "pause", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	paused, err := notifier.UpdateManaged(ctx, renamed.ID, renamed.Revision, renamed.Name, nil, boolPtr(false))
+	if err != nil || paused.Enabled {
+		t.Fatalf("pause result = %#v, %v", paused, err)
+	}
+	if err := notifier.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("paused delivery was attempted: calls=%d", calls.Load())
+	}
+	var attempts, terminal int
+	if err := db.DB.QueryRowContext(ctx, `SELECT attempts,CASE WHEN terminal_at='' THEN 0 ELSE 1 END FROM outbox WHERE sent_at IS NULL`).Scan(&attempts, &terminal); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != 0 || terminal != 0 {
+		t.Fatalf("paused outbox state = attempts %d terminal %d", attempts, terminal)
+	}
+	if health, err := db.ListDeliveryHealth(ctx); err != nil {
+		t.Fatal(err)
+	} else if health["managed:"+created.ID].Pending != 0 {
+		t.Fatalf("paused delivery counted as pending: %#v", health["managed:"+created.ID])
+	}
+	resumed, err := notifier.UpdateManaged(ctx, paused.ID, paused.Revision, paused.Name, nil, boolPtr(true))
+	if err != nil || !resumed.Enabled {
+		t.Fatalf("resume result = %#v, %v", resumed, err)
+	}
+	if err := notifier.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("resumed delivery calls = %d, want 2", calls.Load())
+	}
+}
 
 func TestAuditedNotificationWrappersAndReadViews(t *testing.T) {
 	ctx := context.Background()

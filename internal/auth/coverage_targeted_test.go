@@ -48,6 +48,10 @@ func TestForwardedAddressAndLimiterHelpers(t *testing.T) {
 	if got := forwardedCandidates(request); len(got) != 2 || got[0] != "2001:db8::12" || got[1] != "" {
 		t.Fatalf("RFC forwarded candidates = %#v", got)
 	}
+	request.Header.Set("X-Forwarded-For", "198.51.100.99")
+	if got := forwardedCandidates(request); len(got) != 2 || got[0] != "2001:db8::12" {
+		t.Fatalf("mixed forwarding conventions were not canonicalized: %#v", got)
+	}
 	if forwardedCandidates(nil) != nil {
 		t.Fatal("nil request returned forwarded candidates")
 	}

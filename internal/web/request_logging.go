@@ -112,8 +112,15 @@ func (s *Server) requestLogging(next http.Handler) http.Handler {
 			} else if recovered != nil {
 				// Once headers have reached the peer net/http cannot change the
 				// status code. Ask it to close the connection so a partial response
-				// is not reused as a successful keep-alive response.
+				// is not reused as a successful keep-alive response. HTTP/1 writers
+				// that support Hijack are closed immediately; other transports use
+				// the connection-close response hint.
 				wrapped.Header().Set("Connection", "close")
+				if hijacker, ok := wrapped.ResponseWriter.(http.Hijacker); ok {
+					if connection, _, hijackErr := hijacker.Hijack(); hijackErr == nil {
+						_ = connection.Close()
+					}
+				}
 			}
 			duration := time.Since(started)
 			attributes := []any{

@@ -127,6 +127,28 @@ describe('ActionDialog accessibility', () => {
     expect(onCancel).toHaveBeenCalledTimes(1)
   })
 
+  it('requires a secondary value and passes both confirmation values', async () => {
+    const onConfirm = vi.fn()
+    act(() => {
+      root.render(<ActionDialog title="Protect" description="Confirm both factors." confirmLabel="Continue" valueLabel="Password" valueRequired secondaryValueLabel="Authenticator code" secondaryValueRequired onConfirm={onConfirm} onCancel={vi.fn()} />)
+    })
+    const form = document.querySelector('form') as HTMLFormElement
+    const inputs = Array.from(document.querySelectorAll('input')) as HTMLInputElement[]
+    expect(inputs).toHaveLength(2)
+
+    act(() => setInputValue(inputs[0], 'password'))
+    act(() => submitForm(form))
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain('Authenticator code is required.')
+    expect(document.activeElement).toBe(inputs[1])
+
+    act(() => setInputValue(inputs[1], '123456'))
+    await act(async () => {
+      submitForm(form)
+      await Promise.resolve()
+    })
+    expect(onConfirm).toHaveBeenCalledWith('password', '123456')
+  })
+
   it('keeps keyboard focus inside the dialog while tabbing', () => {
     act(() => {
       root.render(<ActionDialog title="Confirm" description="Confirm this action." confirmLabel="Continue" onConfirm={vi.fn()} onCancel={vi.fn()} />)

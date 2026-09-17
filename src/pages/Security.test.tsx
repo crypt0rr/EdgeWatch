@@ -89,4 +89,24 @@ describe('security settings', () => {
     await waitFor(() => expect(api).toHaveBeenCalledWith('/auth/totp', expect.objectContaining({ method: 'DELETE' })))
     expect(logout).not.toHaveBeenCalled()
   })
+
+  it('regenerates recovery codes after the current factor and surfaces failures', async () => {
+    vi.mocked(getSession).mockResolvedValue({ ...administrator, totp_enabled: true })
+    vi.mocked(api).mockRejectedValueOnce(new Error('registry unavailable'))
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Regenerate recovery codes' })).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Regenerate recovery codes' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(screen.getByLabelText('Account password'), { target: { value: 'correct-password' } })
+    fireEvent.change(screen.getByLabelText('Current authenticator code or recovery code'), { target: { value: '654321' } })
+    fireEvent.click(dialog.querySelector('button[type="submit"]')!)
+    await waitFor(() => expect(screen.getAllByRole('alert').some(element => element.textContent?.includes('registry unavailable'))).toBe(true))
+
+    vi.mocked(api).mockResolvedValue({ recovery_codes: ['new-one', 'new-two'] } as never)
+    fireEvent.click(dialog.querySelector('button[type="submit"]')!)
+    await waitFor(() => expect(screen.getByText('new-one')).toBeInTheDocument())
+    expect(screen.getByText('Recovery codes regenerated. Save the new codes before leaving this page.')).toBeInTheDocument()
+    expect(api).toHaveBeenLastCalledWith('/auth/totp/recovery-codes', expect.objectContaining({ body: JSON.stringify({ password: 'correct-password', code: '654321', recovery_code: '' }) }))
+  })
 })

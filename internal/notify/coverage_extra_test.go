@@ -193,6 +193,41 @@ func TestNotifierRecoversInterruptedKeyAndResolvesManagedSelectors(t *testing.T)
 	}
 }
 
+func TestNotifierDeploymentSelectorCompatibilityBranches(t *testing.T) {
+	url := "generic://localhost/fallback?disabletls=yes&template=json"
+	withoutStore, err := newWithKeyFile(nil, []string{url}, filepath.Join(t.TempDir(), "notification.key"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := hashURL(url)
+	withoutStore.mu.RLock()
+	opaque := withoutStore.fileLegacy[legacy]
+	withoutStore.mu.RUnlock()
+	if opaque != legacy {
+		t.Fatalf("library-only selector = %q, want legacy hash", opaque)
+	}
+
+	withoutStore.mu.Lock()
+	withoutStore.fileURLs["opaque-id"] = url
+	withoutStore.fileLegacy["legacy-id"] = "opaque-id"
+	if key, ok := withoutStore.destinationKeyLocked("file:legacy-id"); !ok || key != "opaque-id" {
+		withoutStore.mu.Unlock()
+		t.Fatalf("legacy selector resolution = %q, %v", key, ok)
+	}
+	withoutStore.mu.Unlock()
+
+	db, err := store.Open(filepath.Join(t.TempDir(), "closed.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := newWithKeyFile(db, []string{url}, filepath.Join(t.TempDir(), "notification.key"), true); err == nil {
+		t.Fatal("closed store unexpectedly accepted deployment destinations")
+	}
+}
+
 func TestNotifierLockedAndErrorBranches(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

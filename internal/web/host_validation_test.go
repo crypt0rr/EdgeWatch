@@ -78,4 +78,44 @@ func TestValidateBrowserOriginRequiresExactRequestOrigin(t *testing.T) {
 			}
 		})
 	}
+	urlFallback := httptest.NewRequest(http.MethodPost, "https://console.example.test:8443/api/v1/auth/login", nil)
+	urlFallback.Host = ""
+	urlFallback.Header.Set("Origin", "https://console.example.test:8443")
+	if !validateBrowserOrigin(urlFallback) {
+		t.Fatal("browser origin did not use URL host fallback")
+	}
+}
+
+func TestUnauthenticatedMutationRoutesRejectForeignOrigins(t *testing.T) {
+	server := &Server{}
+	for _, path := range []string{"/api/v1/setup", "/api/v1/auth/login", "/api/v1/auth/activate"} {
+		req := httptest.NewRequest(http.MethodPost, "http://localhost"+path, strings.NewReader(`{}`))
+		req.Header.Set("Origin", "https://attacker.example.test")
+		rec := httptest.NewRecorder()
+		server.api(rec, req)
+		if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), `"code":"origin"`) {
+			t.Fatalf("%s origin response = %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestHostHelpersHandleURLFallbackAndEmptyValues(t *testing.T) {
+	if requestHostName("[2001:db8::1]") != "2001:db8::1" || requestHostName("Example.TEST.") != "example.test" || requestHostName("") != "" {
+		t.Fatal("request host normalization failed")
+	}
+	server := &Server{App: &app.App{Config: &config.Config{Web: config.Web{Listen: "127.0.0.1:8080"}}}}
+	for _, test := range []struct {
+		host, urlHost string
+		want          bool
+	}{
+		{host: "", urlHost: "127.0.0.1:8080", want: true},
+		{host: "", urlHost: "", want: false},
+		{host: "attacker.example.test", urlHost: "", want: false},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "http://"+test.urlHost+"/api/v1/status", nil)
+		req.Host = test.host
+		if got := server.validateRequestHost(req); got != test.want {
+			t.Errorf("validateRequestHost(%q,%q) = %v, want %v", test.host, test.urlHost, got, test.want)
+		}
+	}
 }

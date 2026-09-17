@@ -11,6 +11,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
 func scanHandlerRequest(method, path, body string) *http.Request {
@@ -19,6 +20,137 @@ func scanHandlerRequest(method, path, body string) *http.Request {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	return req
+}
+
+func breakReadProjection(t *testing.T, db *store.Store, table string) {
+	t.Helper()
+	if db.ReadDB != nil {
+		_ = db.ReadDB.Close()
+		db.ReadDB = nil
+	}
+	if _, err := db.DB.ExecContext(context.Background(), "DROP TABLE "+table); err != nil {
+		t.Fatalf("drop %s: %v", table, err)
+	}
+}
+
+func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	job := config.NormalizeJob(config.Job{Name: "scan-error-handlers", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	get := func(fn func(http.ResponseWriter, *http.Request)) int {
+		rec := httptest.NewRecorder()
+		fn(rec, scanHandlerRequest(http.MethodGet, "/api/v1", ""))
+		return rec.Code
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for name, fn := range map[string]func(http.ResponseWriter, *http.Request){
+		"scans":     server.listScans,
+		"incidents": server.listIncidents,
+		"events":    func(w http.ResponseWriter, r *http.Request) { server.listEvents(w, r, "") },
+	} {
+		if code := get(fn); code != http.StatusInternalServerError {
+			t.Errorf("%s status = %d", name, code)
+		}
+	}
+	for name, fn := range map[string]func(http.ResponseWriter, *http.Request){
+		"archive": func(w http.ResponseWriter, r *http.Request) {
+			server.archiveJob(w, scanHandlerRequest(http.MethodPost, "/archive", `{"revision":1}`), admin, record.ID, true)
+		},
+		"pause": func(w http.ResponseWriter, r *http.Request) {
+			server.enableJob(w, scanHandlerRequest(http.MethodPost, "/pause", `{"revision":1}`), admin, record.ID, false)
+		},
+	} {
+		if code := get(fn); code != http.StatusInternalServerError {
+			t.Errorf("%s status = %d", name, code)
+		}
+	}
+
+	// Recreate independent fixtures so each broken projection is reached after
+	// the route's ownership check has succeeded.
+	server, db, admin = newUsersTestServer(t)
+	record, err = db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	breakReadProjection(t, db, "job_runtime")
+	if code := get(func(w http.ResponseWriter, r *http.Request) { server.getJob(w, r, record.ID) }); code != http.StatusInternalServerError {
+		t.Fatalf("job runtime failure status = %d", code)
+	}
+
+	server, db, _ = newUsersTestServer(t)
+	record, err = db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	breakReadProjection(t, db, "scans")
+	if code := get(func(w http.ResponseWriter, r *http.Request) { server.latestSuccessfulScan(w, r, record.ID) }); code != http.StatusInternalServerError {
+		t.Fatalf("latest scan failure status = %d", code)
+	}
+	if code := get(func(w http.ResponseWriter, r *http.Request) { server.jobScans(w, r, record.ID) }); code != http.StatusInternalServerError {
+		t.Fatalf("job scans failure status = %d", code)
+	}
+
+	server, db, admin = newUsersTestServer(t)
+	record, err = db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	breakReadProjection(t, db, "job_leases")
+	if code := get(func(w http.ResponseWriter, r *http.Request) {
+		server.runJob(w, scanHandlerRequest(http.MethodPost, "/run", `{}`), admin, record.ID)
+	}); code != http.StatusInternalServerError {
+		t.Fatalf("manual run failure status = %d", code)
+	}
+
+	server, db, _ = newUsersTestServer(t)
+	record, err = db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	breakReadProjection(t, db, "scan_cycles")
+	if code := get(func(w http.ResponseWriter, r *http.Request) { server.scanCycle(w, r, record.ID) }); code != http.StatusInternalServerError {
+		t.Fatalf("scan cycle failure status = %d", code)
+	}
+
+	server, db, _ = newUsersTestServer(t)
+	record, err = db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	breakReadProjection(t, db, "events")
+	if code := get(func(w http.ResponseWriter, r *http.Request) { server.jobEvents(w, r, record.ID) }); code != http.StatusInternalServerError {
+		t.Fatalf("job events failure status = %d", code)
+	}
+
+	server, db, _ = newUsersTestServer(t)
+	record, err = db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	breakReadProjection(t, db, "runtime_incidents")
+	if code := get(func(w http.ResponseWriter, r *http.Request) { server.jobIncidents(w, r, record.ID) }); code != http.StatusInternalServerError {
+		t.Fatalf("job incidents failure status = %d", code)
+	}
+
+	server, db, admin = newUsersTestServer(t)
+	breakReadProjection(t, db, "scanner_profiles")
+	if code := get(func(w http.ResponseWriter, r *http.Request) { server.scannerProfilesRoute(w, r, admin, "") }); code != http.StatusInternalServerError {
+		t.Fatalf("scanner profiles failure status = %d", code)
+	}
+
+	server, db, _ = newUsersTestServer(t)
+	breakReadProjection(t, db, "jobs")
+	if code := get(func(w http.ResponseWriter, r *http.Request) {
+		server.scheduleSuggestion(w, httptest.NewRequest(http.MethodGet, "/api/v1/schedule/suggestion?schedule=0+*+*+*+*&timezone=UTC", nil))
+	}); code != http.StatusInternalServerError {
+		t.Fatalf("schedule suggestion failure status = %d", code)
+	}
 }
 
 func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {

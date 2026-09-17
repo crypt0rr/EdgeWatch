@@ -215,3 +215,36 @@ func TestStartManagedRunReportsLookupAndArchivedErrors(t *testing.T) {
 	}
 	a.StopRun()
 }
+
+func TestManagedRunReservationsRejectDuplicateAndScheduledStarts(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "reservation.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := config.NormalizeJob(config.Job{Name: "reserved", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.managedReservations.Store(record.ID, "already-queued")
+	if err := a.StartManagedRun(record.ID, nil); !errors.Is(err, scanner.ErrBusy) {
+		t.Fatalf("duplicate reservation error = %v, want ErrBusy", err)
+	}
+	a.managedReservations.Delete(record.ID)
+	a.active.Store(record.ID, true)
+	if err := a.StartManagedRun(record.ID, nil); !errors.Is(err, scanner.ErrBusy) {
+		t.Fatalf("active reservation error = %v, want ErrBusy", err)
+	}
+	a.active.Delete(record.ID)
+	a.managedReservations.Store(record.ID, "scheduled-reservation")
+	if _, _, err := a.runJob(ctx, record.Job, record.ID, record.Revision, true, false); !errors.Is(err, scanner.ErrBusy) {
+		t.Fatalf("scheduled reservation error = %v, want ErrBusy", err)
+	}
+}

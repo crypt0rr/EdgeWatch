@@ -109,6 +109,31 @@ func TestServerErrorMappingHelpers(t *testing.T) {
 	}
 }
 
+func TestWriteInternalErrorRedactsDetailsAndIncludesRequestID(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request = request.WithContext(context.WithValue(request.Context(), requestIDContextKey{}, "req-123"))
+	for _, test := range []struct {
+		name   string
+		server *Server
+		code   string
+		wantID bool
+	}{
+		{name: "logged server", server: &Server{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, code: "store", wantID: true},
+		{name: "nil server", server: nil, code: "", wantID: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			test.server.writeInternalError(rec, request, test.code, errors.New("secret database detail"))
+			if rec.Code != http.StatusInternalServerError || strings.Contains(rec.Body.String(), "secret database") || !strings.Contains(rec.Body.String(), `"internal_error"`) && test.code == "" {
+				t.Fatalf("internal error response = %d %s", rec.Code, rec.Body.String())
+			}
+			if test.wantID && !strings.Contains(rec.Body.String(), "req-123") {
+				t.Fatalf("request ID missing: %s", rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 	server, _, admin := newUsersTestServer(t)
 	for _, test := range []struct {

@@ -43,11 +43,27 @@ func TestAllowedHostConfigurationValidatesNamesAndPorts(t *testing.T) {
 	if err := base.ValidateDeployment(); err != nil {
 		t.Fatal(err)
 	}
-	for _, hosts := range [][]string{{"https://console.example.test"}, {"bad host"}, {"console.example.test:0"}} {
+	for _, hosts := range [][]string{{"https://console.example.test"}, {"bad host"}, {"console.example.test:0"}, {""}, {"[not-an-ip]:8443"}, {"console.example.test:bad"}, {"console.example.test:1"}, {":80"}, {"2001:db8:::10"}, {"-bad.example"}, {"bad-.example"}, {"bad..example"}, {strings.Repeat("a", 64) + ".example"}, {"bad_example"}} {
 		base.Web.AllowedHosts = hosts
-		if err := base.ValidateDeployment(); err == nil {
+		err := base.ValidateDeployment()
+		if hosts[0] == "console.example.test:1" {
+			if err != nil {
+				t.Fatalf("valid host with port rejected: %v", err)
+			}
+			continue
+		}
+		if err == nil {
 			t.Fatalf("invalid allowed host %v was accepted", hosts)
 		}
+	}
+	base.Web.AllowedHosts = []string{"192.0.2.1"}
+	if err := base.ValidateDeployment(); err != nil {
+		t.Fatalf("valid IPv4 host rejected: %v", err)
+	}
+	tooLong := strings.Repeat("a", 254)
+	base.Web.AllowedHosts = []string{tooLong}
+	if err := base.ValidateDeployment(); err == nil {
+		t.Fatal("overlong allowed host was accepted")
 	}
 }
 

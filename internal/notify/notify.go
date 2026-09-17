@@ -184,6 +184,15 @@ func validateManagedURL(raw string) (string, error) {
 // current key. A missing/invalid key locks managed destinations but does not
 // stop scans or file-managed notifications.
 func (n *Notifier) Reload(ctx context.Context) error {
+	if n.Store == nil {
+		// Library-only notifier instances have no managed destinations to
+		// reload. Keep the file-backed destinations initialized by the
+		// constructor and avoid dereferencing an absent durable store.
+		n.mu.Lock()
+		n.managed = map[string]managedDestination{}
+		n.mu.Unlock()
+		return nil
+	}
 	records, err := n.Store.ListManagedNotifications(ctx)
 	if err != nil {
 		return err

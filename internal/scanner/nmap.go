@@ -256,9 +256,6 @@ func weightedProcessPercent(completedInvocations, totalInvocations int64, fracti
 	if value < 0 {
 		return 0
 	}
-	if value > 100 {
-		return 100
-	}
 	return value
 }
 

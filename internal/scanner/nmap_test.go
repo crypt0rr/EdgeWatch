@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"path/filepath"
@@ -35,6 +36,9 @@ func TestWeightedProcessPercentClampsAndWeightsInvocations(t *testing.T) {
 		if got := weightedProcessPercent(test.completed, test.total, test.fraction); got != test.want {
 			t.Errorf("weightedProcessPercent(%d, %d, %v) = %d, want %d", test.completed, test.total, test.fraction, got, test.want)
 		}
+	}
+	if got := weightedProcessPercent(1, 2, math.NaN()); got != 0 {
+		t.Fatalf("weightedProcessPercent NaN = %d, want 0", got)
 	}
 }
 

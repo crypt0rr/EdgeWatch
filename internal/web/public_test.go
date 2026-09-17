@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -191,6 +192,38 @@ func TestPublicAPIDisabledEnabledAndRateLimited(t *testing.T) {
 	server.invalidatePublicDashboardCache()
 	if rec := call(http.MethodGet, "/api/public/v1/dashboard", "198.51.100.21:1000"); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("public API store failure status = %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPublicDashboardFailureCacheAndFreshBucketEviction(t *testing.T) {
+	ctx := context.Background()
+	failure := errors.New("dashboard builder failed")
+	now := time.Now().UTC()
+	server := &Server{
+		now: func() time.Time { return now },
+		publicDashboardBuildFunc: func(context.Context, store.PublicDashboard) (publicDashboardResponse, error) {
+			return publicDashboardResponse{}, failure
+		},
+	}
+	dashboard := store.PublicDashboard{Enabled: true, Title: "failure"}
+	if _, err := server.cachedPublicDashboardPayload(ctx, dashboard); !errors.Is(err, failure) {
+		t.Fatalf("first dashboard build error = %v", err)
+	}
+	if _, err := server.cachedPublicDashboardPayload(ctx, dashboard); !errors.Is(err, failure) {
+		t.Fatalf("negative dashboard cache error = %v", err)
+	}
+
+	server.publicHits = make(map[string][]time.Time, 4097)
+	for i := 0; i < 4097; i++ {
+		server.publicHits[fmt.Sprintf("fresh-%d", i)] = []time.Time{now.Add(-time.Duration(i) * time.Millisecond)}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/", nil)
+	request.RemoteAddr = "198.51.100.250:1234"
+	if !server.allowAnonymousRequest(request, "public-dashboard") {
+		t.Fatal("fresh bucket was unexpectedly rate limited")
+	}
+	if len(server.publicHits) > 4096 {
+		t.Fatalf("fresh rate-limit buckets exceeded bound: %d", len(server.publicHits))
 	}
 }
 

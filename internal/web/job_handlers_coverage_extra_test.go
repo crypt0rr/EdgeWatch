@@ -210,6 +210,27 @@ func TestJobListAndAPIDispatchCoverage(t *testing.T) {
 	}
 }
 
+func TestJobPayloadConfigCopiesProfilesAndDurationFields(t *testing.T) {
+	payload := jobPayload{
+		Name: " payload ", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
+		Timeout: "2h", ResumeWindow: "1.5d", NotificationDestinations: &[]string{"dest"},
+		TCP: &protocolPayload{Ports: "1-2", Mode: "connect", ServiceDetection: true, ProfileID: "tcp-profile", ProfileRevision: 3, NaabuArgs: []string{"-rate", "100"}, NmapArgs: []string{"-sV"}, EnrichmentArgs: []string{"-sC"}, NSEProfile: "safe", NSEArgs: map[string]string{"a": "b"}},
+		UDP: &protocolPayload{Ports: "53", Mode: "udp", ServiceDetection: true},
+	}
+	job, err := payload.config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Name != "payload" || job.Timeout.Value() != 2*time.Hour || job.ResumeWindow.Value() != 36*time.Hour || job.TCP == nil || job.UDP == nil || job.TCP.ProfileRevision != 3 || len(job.TCP.NSEArgs) != 1 {
+		t.Fatalf("payload config = %#v", job)
+	}
+	for _, raw := range []string{"", "0d", "31d", "NaNd", "0s", "721h"} {
+		if _, err := parseDuration(raw); err == nil {
+			t.Fatalf("invalid duration %q was accepted", raw)
+		}
+	}
+}
+
 func TestHighCostOverrideRequiresAdministrator(t *testing.T) {
 	server, _, admin := newUsersTestServer(t)
 	operator := admin

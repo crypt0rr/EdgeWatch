@@ -245,6 +245,18 @@ func TestSSESubscriberLimits(t *testing.T) {
 	}
 }
 
+func TestSSEAnonymousSubscriberUsesStableFallbackKeys(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	cancel, done := startTestSSEStream(server, store.Session{})
+	waitForSSESubscribers(t, server, 1)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("anonymous SSE stream did not close")
+	}
+}
+
 func TestSSEStreamsCloseOnShutdownSignal(t *testing.T) {
 	server, _, _ := newUsersTestServer(t)
 	cancel, done := startTestSSEStream(server, store.Session{IDHash: "shutdown-session", UserID: "user"})

@@ -43,3 +43,18 @@ func TestEnsureDeploymentNotificationIDsIsStableAndSkipsBlankHashes(t *testing.T
 		t.Fatalf("stored mapping rows = %d, want 2", rows)
 	}
 }
+
+func TestEnsureDeploymentNotificationIDsReturnsProjectionErrors(t *testing.T) {
+	s := openTestStore(t)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := s.EnsureDeploymentNotificationIDs(canceled, []string{"cancelled"}); err == nil {
+		t.Fatal("canceled transaction unexpectedly succeeded")
+	}
+	if _, err := s.DB.Exec(`DROP TABLE deployment_notification_ids`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.EnsureDeploymentNotificationIDs(context.Background(), []string{"missing-table"}); err == nil {
+		t.Fatal("missing projection unexpectedly succeeded")
+	}
+}

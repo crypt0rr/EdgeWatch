@@ -159,6 +159,57 @@ func TestHostHandlersRejectInvalidOwnershipAndPagination(t *testing.T) {
 	}
 }
 
+func TestHistoricalHostWrapperRoutesHandleMissingAndInvalidEvidence(t *testing.T) {
+	server, db, record := newHostHandlerServer(t)
+	ctx := context.Background()
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/missing/hosts/bad", nil)
+	for name, fn := range map[string]func(http.ResponseWriter, *http.Request){
+		"scan host": func(w http.ResponseWriter, r *http.Request) {
+			server.renderScanHost(w, r, record.ID, record.Job.Name, "missing", "198.51.100.1")
+		},
+		"scan rdap": func(w http.ResponseWriter, r *http.Request) {
+			server.renderScanHostRDAP(w, r, record.ID, "missing", "198.51.100.1")
+		},
+	} {
+		response := httptest.NewRecorder()
+		fn(response, req.Clone(req.Context()))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("%s missing scan status = %d", name, response.Code)
+		}
+	}
+	now := time.Now().UTC()
+	scan := model.Scan{ID: "wrapper-host-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1"}}}}
+	if err := db.SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	for name, fn := range map[string]func(http.ResponseWriter, *http.Request){
+		"invalid host": func(w http.ResponseWriter, r *http.Request) {
+			server.renderScanHost(w, r, record.ID, record.Job.Name, scan.ID, "not-an-ip")
+		},
+		"wrong job host": func(w http.ResponseWriter, r *http.Request) {
+			server.renderScanHost(w, r, "wrong-job", record.Job.Name, scan.ID, "198.51.100.1")
+		},
+		"global invalid host": func(w http.ResponseWriter, r *http.Request) {
+			server.renderScanHost(w, r, "", "", scan.ID, "not-an-ip")
+		},
+		"invalid rdap host": func(w http.ResponseWriter, r *http.Request) {
+			server.renderScanHostRDAP(w, r, record.ID, scan.ID, "not-an-ip")
+		},
+		"wrong job rdap": func(w http.ResponseWriter, r *http.Request) {
+			server.renderScanHostRDAP(w, r, "wrong-job", scan.ID, "198.51.100.1")
+		},
+		"global invalid rdap host": func(w http.ResponseWriter, r *http.Request) {
+			server.renderScanHostRDAP(w, r, "", scan.ID, "not-an-ip")
+		},
+	} {
+		response := httptest.NewRecorder()
+		fn(response, httptest.NewRequest(http.MethodGet, "/api/v1", nil))
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("%s status = %d", name, response.Code)
+		}
+	}
+}
+
 func TestHistoricalHostHandlersUseLegacyFallback(t *testing.T) {
 	server, db, record := newHostHandlerServer(t)
 	ctx := context.Background()

@@ -87,6 +87,22 @@ func TestLookupUsesLongestBootstrapPrefixAndCachesNormalizedData(t *testing.T) {
 	_ = time.Now() // keep this test explicit about wall-clock cache semantics
 }
 
+func TestIsPrivateAddressRejectsSpecialUseAndSharedSpace(t *testing.T) {
+	for _, raw := range []string{
+		"10.0.0.1", "100.64.0.1", "127.0.0.1", "169.254.1.1",
+		"192.0.2.1", "198.51.100.10", "203.0.113.5", "2001:db8::1",
+	} {
+		if !IsPrivateAddress(net.ParseIP(raw)) {
+			t.Errorf("IsPrivateAddress(%s) = false, want true", raw)
+		}
+	}
+	for _, raw := range []string{"8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"} {
+		if IsPrivateAddress(net.ParseIP(raw)) {
+			t.Errorf("IsPrivateAddress(%s) = true, want false", raw)
+		}
+	}
+}
+
 func TestLookupAllowsIANAListedRIRReferral(t *testing.T) {
 	var authorityRequests atomic.Int32
 	rir := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

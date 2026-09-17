@@ -49,3 +49,33 @@ func TestHandlerRejectsForeignAPIHostBeforeAuthentication(t *testing.T) {
 		t.Fatalf("foreign API host status = %d, want %d", rec.Code, http.StatusMisdirectedRequest)
 	}
 }
+
+func TestValidateBrowserOriginRequiresExactRequestOrigin(t *testing.T) {
+	cases := []struct {
+		name   string
+		origin string
+		host   string
+		want   bool
+	}{
+		{name: "missing origin", host: "127.0.0.1:8080", want: true},
+		{name: "same origin", origin: "https://console.example.test:8443", host: "console.example.test:8443", want: true},
+		{name: "case insensitive host", origin: "HTTP://CONSOLE.EXAMPLE.TEST:8443", host: "console.example.test:8443", want: true},
+		{name: "null origin", origin: "null", host: "console.example.test:8443", want: false},
+		{name: "foreign host", origin: "https://attacker.example.test", host: "console.example.test:8443", want: false},
+		{name: "path", origin: "https://console.example.test:8443/console", host: "console.example.test:8443", want: false},
+		{name: "query", origin: "https://console.example.test:8443?next=login", host: "console.example.test:8443", want: false},
+		{name: "userinfo", origin: "https://admin@console.example.test:8443", host: "console.example.test:8443", want: false},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "http://"+test.host+"/api/v1/auth/login", nil)
+			req.Host = test.host
+			if test.origin != "" {
+				req.Header.Set("Origin", test.origin)
+			}
+			if got := validateBrowserOrigin(req); got != test.want {
+				t.Fatalf("validateBrowserOrigin(%q, %q) = %v, want %v", test.origin, test.host, got, test.want)
+			}
+		})
+	}
+}

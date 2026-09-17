@@ -456,6 +456,27 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 	if incidentError.Code != http.StatusInternalServerError {
 		t.Fatalf("request-aware incident error = %d: %s", incidentError.Code, incidentError.Body.String())
 	}
+
+	// Conditional baseline mutations copy both expectation fields when an older
+	// browser sends an explicit, unchanged state rather than omitting them.
+	server, db, admin, record = newFixture(t)
+	reset := httptest.NewRecorder()
+	resetReq := request(http.MethodPost, "/reset", `{"expected_baseline_scan_id":"","expected_baseline_modified":false}`)
+	server.resetBaseline(reset, resetReq, admin, record.ID)
+	if reset.Code != http.StatusOK {
+		t.Fatalf("conditional reset = %d: %s", reset.Code, reset.Body.String())
+	}
+	now = time.Now().UTC()
+	scan = model.Scan{ID: "conditional-approval", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Units: []model.Unit{{Target: "192.0.2.10", Protocol: "tcp", Addresses: []string{"192.0.2.10"}, Ports: []model.PortState{{Port: 1, State: "open"}}}}}}
+	if err := db.SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	approve := httptest.NewRecorder()
+	approveReq := request(http.MethodPost, "/approve", `{"scan_id":"conditional-approval","expected_baseline_scan_id":"","expected_baseline_modified":false}`)
+	server.approveBaseline(approve, approveReq, admin, record.ID)
+	if approve.Code != http.StatusOK {
+		t.Fatalf("conditional approval = %d: %s", approve.Code, approve.Body.String())
+	}
 }
 
 func TestScanRunAndCancellationGuards(t *testing.T) {

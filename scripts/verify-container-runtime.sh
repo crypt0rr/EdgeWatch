@@ -44,6 +44,7 @@ docker run --rm $network_args $runtime_args --cap-drop ALL --cap-add NET_RAW --c
 
 workdir=$(mktemp -d)
 daemon_container=
+host_identity="$(id -u):$(id -g)"
 cleanup() {
   if [ -n "$daemon_container" ]; then
     docker rm -f "$daemon_container" >/dev/null 2>&1 || true
@@ -70,7 +71,7 @@ EOF
 # sole owner of migrations and startup reconciliation, before checking status
 # and the persisted SQLite file.
 daemon_container=$(docker run -d $network_args $runtime_args \
-  --cap-drop ALL --cap-add NET_RAW \
+  --user "$host_identity" --cap-drop ALL \
   -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
   -v "$workdir/data:/var/lib/edgewatch:rw" "$image" daemon --config /etc/edgewatch/config.yaml)
 for attempt in $(seq 1 30); do
@@ -89,10 +90,10 @@ for attempt in $(seq 1 30); do
 done
 docker rm -f "$daemon_container" >/dev/null
 daemon_container=
-docker run --rm $runtime_args \
+docker run --rm $runtime_args --user "$host_identity" \
   -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
   -v "$workdir/data:/var/lib/edgewatch:rw" "$image" admin setup-token --force --config /etc/edgewatch/config.yaml >/dev/null
-docker run --rm $runtime_args \
+docker run --rm $runtime_args --user "$host_identity" \
   -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
   -v "$workdir/data:/var/lib/edgewatch:rw" "$image" status --config /etc/edgewatch/config.yaml
 test -s "$workdir/data/edgewatch.db"

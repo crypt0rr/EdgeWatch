@@ -49,9 +49,11 @@ describe('global hosts explorer', () => {
   }
 
   function setInputValue(input: HTMLInputElement, value: string) {
-    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
-    setter?.call(input, value)
-    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+      setter?.call(input, value)
+      input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+    })
   }
 
   it('renders active and archived hosts with searchable filter controls', async () => {

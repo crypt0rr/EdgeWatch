@@ -19,13 +19,15 @@ vi.mock('../api', () => ({
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
 function setInputValue(input: HTMLInputElement, value: string) {
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
-  setter?.call(input, value)
-  input.dispatchEvent(new Event('input', { bubbles: true }))
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    setter?.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
 }
 
 function submitForm(form: HTMLFormElement) {
-  form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+  act(() => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })))
 }
 
 function LocationProbe() {

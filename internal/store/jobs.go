@@ -276,7 +276,6 @@ func (s *Store) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context, id st
 		}
 	}
 	now := time.Now().UTC()
-	nowText := sqliteTimestamp(now)
 	next := current.Revision + 1
 	result, err := tx.ExecContext(ctx, `UPDATE jobs SET name=?,definition_json=?,enabled=?,archived=?,revision=?,updated_at=? WHERE id=? AND revision=?`, job.Name, raw, boolInt(enabled), boolInt(archived), next, now.Format(time.RFC3339Nano), id, expectedRevision)
 	if err != nil {
@@ -300,6 +299,9 @@ func (s *Store) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context, id st
 		if err = upsertRuntimeBaselineMetaTx(ctx, tx, id, emptyState(), 0, now); err != nil {
 			return JobRecord{}, false, nil, err
 		}
+		if err = bumpRuntimeBaselineEpochTx(ctx, tx, id); err != nil {
+			return JobRecord{}, false, nil, err
+		}
 		// The indexed baseline overlay belongs to the previous security scope.
 		// Clear it in the same transaction as the runtime reset so a concurrent
 		// host request cannot observe old expected hosts after the new revision
@@ -317,13 +319,10 @@ func (s *Store) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context, id st
 			return JobRecord{}, false, nil, err
 		}
 		events = append(events, event)
-		// A paused/stalled resumable cycle belongs to the previous security
-		// scope. Discard its checkpoints atomically with the rebaseline reset so
-		// a later trigger cannot merge old work into the new baseline.
-		if _, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded',updated_at=?,finished_at=?,last_error='security scope changed' WHERE job_id=? AND status IN ('running','paused','stalled')`, nowText, nowText, id); err != nil {
-			return JobRecord{}, false, nil, err
-		}
-		if _, err = tx.ExecContext(ctx, `DELETE FROM scan_cycle_units WHERE cycle_id IN (SELECT id FROM scan_cycles WHERE job_id=? AND status='discarded' AND finished_at=?)`, id, nowText); err != nil {
+		// A resumable cycle belongs to the previous security scope. Discard its
+		// checkpoints atomically with the rebaseline reset so a later trigger
+		// cannot merge old work into the new baseline.
+		if err = discardUnpromotedCyclesTx(ctx, tx, id, "security scope changed", now); err != nil {
 			return JobRecord{}, false, nil, err
 		}
 	}

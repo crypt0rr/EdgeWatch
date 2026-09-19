@@ -89,6 +89,12 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		return true, model.Snapshot{}, previousCycleErr
 	}
 	now := time.Now().UTC()
+	baselineEpoch, epochErr := a.Store.RuntimeBaselineEpoch(stateCtx, jobID)
+	if epochErr != nil {
+		scan.Status = "failed"
+		scan.Error = epochErr.Error()
+		return true, model.Snapshot{}, epochErr
+	}
 	if _, expiryErr := a.Store.ExpireScanCycles(stateCtx, now); expiryErr != nil {
 		scan.Status = "failed"
 		scan.Error = expiryErr.Error()
@@ -132,14 +138,20 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		// range could be scanned twice while its first result never reaches the
 		// baseline engine.
 		if latest, latestErr := a.Store.GetLatestScanCycle(stateCtx, jobID); latestErr == nil && latest.Status == "completed" {
-			hasScan, scanErr := a.Store.ScanCycleHasScan(stateCtx, latest.ID)
-			if scanErr != nil {
-				scan.Status = "failed"
-				scan.Error = scanErr.Error()
-				return true, model.Snapshot{}, scanErr
-			}
-			if !hasScan {
-				return a.recoverCompletedCycle(stateCtx, scan, run, latest)
+			if latest.BaselineEpoch == baselineEpoch {
+				hasScan, scanErr := a.Store.ScanCycleHasScan(stateCtx, latest.ID)
+				if scanErr != nil {
+					scan.Status = "failed"
+					scan.Error = scanErr.Error()
+					return true, model.Snapshot{}, scanErr
+				}
+				if !hasScan {
+					return a.recoverCompletedCycle(stateCtx, scan, run, latest)
+				}
+			} else {
+				// A completed but unpromoted cycle from an older baseline is
+				// historical debris, never a source for the current baseline.
+				_ = a.Store.DiscardScanCycle(stateCtx, latest.ID)
 			}
 		} else if latestErr != nil && !errors.Is(latestErr, store.ErrNoScanCycle) {
 			scan.Status = "failed"
@@ -179,6 +191,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 			JobRevision:   scan.JobRevision,
 			ConfigHash:    job.SecurityHash(),
 			ExecutionHash: job.ExecutionHash(),
+			BaselineEpoch: baselineEpoch,
 			Plan:          plan,
 			StartedAt:     now,
 			UpdatedAt:     now,
@@ -195,6 +208,15 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		// scheduler performs the same guard before acquiring a lease; this second
 		// check protects against a race with a manual retry or another process.
 		return true, model.Snapshot{}, ErrScanCycleStalled
+	}
+	if cycle.BaselineEpoch != baselineEpoch {
+		_ = a.Store.DiscardScanCycle(stateCtx, cycle.ID)
+		scan.Resumable = true
+		scan.CycleID = cycle.ID
+		scan.CycleStatus = "discarded"
+		scan.Status = "failed"
+		scan.Error = "scan cycle belongs to an older baseline epoch; progress was discarded"
+		return true, model.Snapshot{}, errors.New(scan.Error)
 	}
 
 	if cycle.ConfigHash != job.SecurityHash() {
@@ -231,7 +253,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		return true, model.Snapshot{}, budgetErr
 	}
 
-	cycle, err = a.Store.StartScanCycleAttempt(stateCtx, cycle.ID)
+	startedCycle, err := a.Store.StartScanCycleAttempt(stateCtx, cycle.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrCycleNotResumable) {
 			scan.Resumable = true
@@ -245,6 +267,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		scan.Error = err.Error()
 		return true, model.Snapshot{}, err
 	}
+	cycle = startedCycle
 	setScanCycleMetadata(scan, cycle)
 	setActiveCycle(run, cycle, "starting", 0)
 

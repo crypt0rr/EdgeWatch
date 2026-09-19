@@ -319,7 +319,7 @@ docker compose run --rm --no-deps -T edgewatch edgewatch verify \
 docker compose up -d edgewatch
 ```
 
-The current schema is version 43. Database migrations are forward-only. An
+The current schema is version 44. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. Keep encryption keys with the database or encrypted web-managed

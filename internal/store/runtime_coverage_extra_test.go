@@ -74,6 +74,43 @@ func TestRuntimeMetadataFallbackAndSummaryBranches(t *testing.T) {
 	}
 }
 
+func TestRuntimeBaselineEpochAdvancesOnlyForBaselineChanges(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+	record, err := s.CreateJob(ctx, testJob("runtime-epoch"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if epoch, err := s.RuntimeBaselineEpoch(ctx, record.ID); err != nil || epoch != 0 {
+		t.Fatalf("initial baseline epoch = %d, %v", epoch, err)
+	}
+	if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &model.Snapshot{Units: []model.Unit{{Target: "192.0.2.20", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}}}}}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if epoch, err := s.RuntimeBaselineEpoch(ctx, record.ID); err != nil || epoch != 1 {
+		t.Fatalf("changed baseline epoch = %d, %v", epoch, err)
+	}
+	if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.CandidateCount++
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if epoch, err := s.RuntimeBaselineEpoch(ctx, record.ID); err != nil || epoch != 1 {
+		t.Fatalf("candidate-only baseline epoch = %d, %v", epoch, err)
+	}
+	if _, err := s.ResetRuntime(ctx, record.ID, record.Job.Name); err != nil {
+		t.Fatal(err)
+	}
+	if epoch, err := s.RuntimeBaselineEpoch(ctx, record.ID); err != nil || epoch != 2 {
+		t.Fatalf("reset baseline epoch = %d, %v", epoch, err)
+	}
+}
+
 func TestFinalizeManagedScanValidationAndRollback(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

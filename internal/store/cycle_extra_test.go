@@ -50,6 +50,47 @@ func TestScanCycleUnitIdentityBackfillIsBoundedAndDeterministic(t *testing.T) {
 	}
 }
 
+func TestScanCycleExpiryAndDiscardRespectLiveJobLease(t *testing.T) {
+	ctx, s, job, plan := cycleFixture(t)
+	defer s.Close()
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
+		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(),
+		Plan: plan, ExpiresAt: time.Now().UTC().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET expires_at=? WHERE id=?`, sqliteTimestamp(time.Now().UTC().Add(-time.Minute)), cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AcquireJobLease(ctx, job.ID, "cycle-owner", time.Now().UTC().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if expired, err := s.ExpireScanCycles(ctx, time.Now().UTC()); err != nil || expired != 0 {
+		t.Fatalf("live cycle expiry = %d, %v", expired, err)
+	}
+	if err := s.DiscardScanCycle(ctx, cycle.ID); !errors.Is(err, ErrJobScanActive) {
+		t.Fatalf("live cycle discard error = %v, want ErrJobScanActive", err)
+	}
+	if err := s.ReleaseJobLease(ctx, job.ID, "cycle-owner"); err != nil {
+		t.Fatal(err)
+	}
+	if expired, err := s.ExpireScanCycles(ctx, time.Now().UTC()); err != nil || expired != 1 {
+		t.Fatalf("expired cycle cleanup = %d, %v", expired, err)
+	}
+	updated, err := s.GetScanCycle(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "expired" {
+		t.Fatalf("cycle status = %q, want expired", updated.Status)
+	}
+}
+
 func TestScanCyclePhaseAndProbeMetadataUsesIndexedColumns(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()

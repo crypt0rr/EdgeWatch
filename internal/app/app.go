@@ -645,6 +645,15 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 			return scan, nil, destinationErr
 		}
 	}
+	if managed {
+		// Keep the scan lease live while the immutable result and runtime state are
+		// committed. This prevents cycle expiry housekeeping from racing the final
+		// promotion of a broad resumable scan.
+		leaseUntil := time.Now().UTC().Add(persistTimeout + time.Minute)
+		if err := a.Store.RenewJobLease(persistCtx, leaseKey, leaseOwner, leaseUntil); err != nil && a.Logger != nil {
+			a.Logger.Warn("scan lease renewal before finalization failed", "job", job.Name, "scan_id", scan.ID, "error", err)
+		}
+	}
 	var events []model.Event
 	var finalizeErr error
 	if managed {

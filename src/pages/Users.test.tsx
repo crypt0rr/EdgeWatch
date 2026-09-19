@@ -25,6 +25,8 @@ describe('user administration', () => {
   afterEach(() => vi.clearAllMocks())
 
   it('creates an invitation, exposes the token once, and clears the form', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
     renderWithProviders(<Users />)
     await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
     fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'operator' } })
@@ -35,11 +37,27 @@ describe('user administration', () => {
     await waitFor(() => expect(createUser).toHaveBeenCalledWith('operator', 'Operator', 'operator', 'administrator-password'))
     expect(screen.getByText('token-123')).toBeInTheDocument()
     expect(screen.getByText(/Created operator/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy token' }))
+    expect(writeText).toHaveBeenCalledWith('token-123')
+  })
+
+  it('surfaces invitation creation failures', async () => {
+    vi.mocked(createUser).mockRejectedValueOnce(new Error('creation failed'))
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'operator' } })
+    fireEvent.change(screen.getByLabelText('Display name'), { target: { value: 'Operator' } })
+    fireEvent.change(screen.getByLabelText(/^Administrator password/), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create activation link' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('creation failed'))
   })
 
   it('toggles enabled users and handles optimistic-concurrency conflicts', async () => {
     renderWithProviders(<Users />)
     await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Disable' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Disable' }))
     fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))

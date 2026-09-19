@@ -31,7 +31,7 @@ type PasswordPromptState = {
 export function Notifications() {
   const client = useQueryClient()
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
-  const canManage = session.data?.role === 'administrator'
+  const canManage = session.data?.permissions.includes('notifications.manage') ?? false
   const destinations = useQuery({ queryKey: ['notifications'], queryFn: listNotificationDestinations, refetchInterval: 30_000 })
   const [name, setName] = useState('')
   const [url, setURL] = useState('')

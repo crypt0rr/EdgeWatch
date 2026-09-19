@@ -3,7 +3,7 @@ set -eu
 
 image=${1:?usage: verify-container-runtime.sh IMAGE}
 network_args="--network host"
-runtime_args="--read-only --tmpfs /tmp:size=32m,mode=1777"
+runtime_args="--read-only --tmpfs /tmp:size=128m,mode=1777"
 
 root_caps=$(docker run --rm $runtime_args --cap-drop ALL --cap-add NET_RAW --entrypoint /bin/sh "$image" -c "id -u; awk '/^CapEff:/{print \$2}' /proc/self/status")
 root_uid=$(printf '%s\n' "$root_caps" | sed -n '1p')
@@ -39,8 +39,13 @@ docker run --rm $network_args $runtime_args --cap-drop ALL --cap-add NET_RAW --e
   -n -Pn -sS -p 1 127.0.0.1 >/dev/null
 docker run --rm $network_args $runtime_args --cap-drop ALL --cap-add NET_RAW --entrypoint /usr/bin/nmap "$image" \
   -n -Pn -sU -p 53 127.0.0.1 >/dev/null
-docker run --rm $network_args $runtime_args --cap-drop ALL --cap-add NET_RAW --cap-add NET_ADMIN --entrypoint /usr/local/bin/naabu "$image" \
-  -host 127.0.0.1 -p 1 -scan-type s -silent -no-stdin -disable-update-check -json >/dev/null
+syn_output=$(docker run --rm $network_args $runtime_args --cap-drop ALL --cap-add NET_RAW --cap-add NET_ADMIN --entrypoint /usr/local/bin/naabu "$image" \
+  -host 127.0.0.1 -p 1 -scan-type s -no-stdin -disable-update-check -json 2>&1)
+printf '%s\n' "$syn_output" | grep -Eiq 'running[[:space:]]+syn|syn[[:space:]]+scan'
+if printf '%s\n' "$syn_output" | grep -Eiq 'connect scan|running[[:space:]]+connect'; then
+  echo "Naabu SYN probe fell back to CONNECT" >&2
+  exit 1
+fi
 
 workdir=$(mktemp -d)
 daemon_container=

@@ -133,7 +133,7 @@ func (s *Store) CreateScanCycle(ctx context.Context, cycle ScanCycleRecord) (Sca
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,no_progress_attempts,total_units,completed_units,total_probes,completed_probes,started_at,updated_at,expires_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		cycle.ID, cycle.JobID, cycle.Job, cycle.JobRevision, cycle.ConfigHash, cycle.ExecutionHash, planJSON, cycle.Status, cycle.AttemptCount, cycle.NoProgressAttempts, cycle.TotalUnits, cycle.CompletedUnits, cycle.TotalProbes, cycle.CompletedProbes, cycle.StartedAt.Format(time.RFC3339Nano), cycle.UpdatedAt.Format(time.RFC3339Nano), cycle.ExpiresAt.Format(time.RFC3339Nano), "", cycle.LastError)
+		cycle.ID, cycle.JobID, cycle.Job, cycle.JobRevision, cycle.ConfigHash, cycle.ExecutionHash, planJSON, cycle.Status, cycle.AttemptCount, cycle.NoProgressAttempts, cycle.TotalUnits, cycle.CompletedUnits, cycle.TotalProbes, cycle.CompletedProbes, sqliteTimestamp(cycle.StartedAt), sqliteTimestamp(cycle.UpdatedAt), sqliteTimestamp(cycle.ExpiresAt), "", cycle.LastError)
 	if err != nil {
 		return ScanCycleRecord{}, err
 	}
@@ -444,7 +444,7 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 		}
 	}
 
-	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	stamp := sqliteTimestamp(time.Now())
 	for _, row := range pending {
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO scan_cycle_discovery_checkpoints(cycle_id,sequence,processed_at) VALUES(?,?,?)`, cycleID, row.sequence, stamp); err != nil {
 			return false, err
@@ -879,7 +879,7 @@ func (s *Store) StartScanCycleAttempt(ctx context.Context, id string) (ScanCycle
 		return ScanCycleRecord{}, ErrCycleNotResumable
 	}
 	if expiry, parseErr := time.Parse(time.RFC3339Nano, expires); parseErr == nil && !expiry.IsZero() && !now.Before(expiry) {
-		stamp := now.Format(time.RFC3339Nano)
+		stamp := sqliteTimestamp(now)
 		transition, transitionErr := tx.ExecContext(ctx, `UPDATE scan_cycles SET status='expired',updated_at=?,finished_at=?,last_error='scan cycle exceeded its resume window' WHERE id=? AND status IN ('running','paused','stalled')`, stamp, stamp, id)
 		if transitionErr != nil {
 			return ScanCycleRecord{}, transitionErr
@@ -908,7 +908,7 @@ func (s *Store) StartScanCycleAttempt(ctx context.Context, id string) (ScanCycle
 	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET status='pending',started_at='',last_error=last_error WHERE cycle_id=? AND status='running'`, id); err != nil {
 		return ScanCycleRecord{}, err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET status='running',attempt_count=attempt_count+1,updated_at=? WHERE id=? AND status IN ('paused','stalled','running')`, now.Format(time.RFC3339Nano), id); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET status='running',attempt_count=attempt_count+1,updated_at=? WHERE id=? AND status IN ('paused','stalled','running')`, sqliteTimestamp(now), id); err != nil {
 		return ScanCycleRecord{}, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -954,7 +954,7 @@ func (s *Store) NextScanCycleUnit(ctx context.Context, cycleID string) (ScanCycl
 
 func (s *Store) ClaimScanCycleUnit(ctx context.Context, cycleID string, sequence int) (ScanCycleUnit, error) {
 	now := time.Now().UTC()
-	nowText := now.Format(time.RFC3339Nano)
+	nowText := sqliteTimestamp(now)
 	result, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET status='running',attempts=attempts+1,started_at=?,last_error='' WHERE cycle_id=? AND sequence=? AND status='pending' AND EXISTS (SELECT 1 FROM scan_cycles WHERE id=? AND status='running' AND (expires_at='' OR expires_at>?))`, nowText, cycleID, sequence, cycleID, nowText)
 	if err != nil {
 		return ScanCycleUnit{}, err
@@ -1045,10 +1045,10 @@ func (s *Store) CompleteScanCycleUnit(ctx context.Context, cycleID string, seque
 	if err = json.Unmarshal(unitRaw, &unit); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET status='completed',snapshot_json=?,finished_at=?,last_error='' WHERE cycle_id=? AND sequence=?`, raw, now.Format(time.RFC3339Nano), cycleID, sequence); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET status='completed',snapshot_json=?,finished_at=?,last_error='' WHERE cycle_id=? AND sequence=?`, raw, sqliteTimestamp(now), cycleID, sequence); err != nil {
 		return err
 	}
-	cycleUpdate, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET completed_units=completed_units+1,completed_probes=completed_probes+?,updated_at=? WHERE id=? AND status='running'`, unit.Probes, now.Format(time.RFC3339Nano), cycleID)
+	cycleUpdate, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET completed_units=completed_units+1,completed_probes=completed_probes+?,updated_at=? WHERE id=? AND status='running'`, unit.Probes, sqliteTimestamp(now), cycleID)
 	if err != nil {
 		return err
 	}
@@ -1132,7 +1132,7 @@ func (s *Store) SplitScanCycleUnit(ctx context.Context, cycleID string, sequence
 		return err
 	}
 	probeDelta := first.Probes + second.Probes - original.Probes
-	cycleUpdate, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET total_units=total_units+1,total_probes=total_probes+?,updated_at=?,last_error=? WHERE id=? AND status='running'`, probeDelta, time.Now().UTC().Format(time.RFC3339Nano), trimCycleError(lastError), cycleID)
+	cycleUpdate, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET total_units=total_units+1,total_probes=total_probes+?,updated_at=?,last_error=? WHERE id=? AND status='running'`, probeDelta, sqliteTimestamp(time.Now()), trimCycleError(lastError), cycleID)
 	if err != nil {
 		return err
 	}
@@ -1143,7 +1143,7 @@ func (s *Store) SplitScanCycleUnit(ctx context.Context, cycleID string, sequence
 }
 
 func (s *Store) PauseScanCycle(ctx context.Context, cycleID string, noProgress bool, lastError string) (ScanCycleRecord, error) {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := sqliteTimestamp(time.Now())
 	query := `UPDATE scan_cycles SET status='paused',no_progress_attempts=CASE WHEN ? THEN no_progress_attempts+1 ELSE 0 END,updated_at=?,last_error=? WHERE id=? AND status IN ('running','paused','stalled')`
 	if _, err := s.DB.ExecContext(ctx, query, noProgress, now, trimCycleError(lastError), cycleID); err != nil {
 		return ScanCycleRecord{}, err
@@ -1152,14 +1152,14 @@ func (s *Store) PauseScanCycle(ctx context.Context, cycleID string, noProgress b
 }
 
 func (s *Store) MarkScanCycleStalled(ctx context.Context, cycleID, lastError string) (ScanCycleRecord, error) {
-	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='stalled',updated_at=?,last_error=? WHERE id=? AND status IN ('running','paused','stalled')`, time.Now().UTC().Format(time.RFC3339Nano), trimCycleError(lastError), cycleID); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='stalled',updated_at=?,last_error=? WHERE id=? AND status IN ('running','paused','stalled')`, sqliteTimestamp(time.Now()), trimCycleError(lastError), cycleID); err != nil {
 		return ScanCycleRecord{}, err
 	}
 	return s.GetScanCycle(ctx, cycleID)
 }
 
 func (s *Store) CompleteScanCycle(ctx context.Context, cycleID string) (ScanCycleRecord, error) {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := sqliteTimestamp(time.Now())
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return ScanCycleRecord{}, err
@@ -1221,7 +1221,7 @@ func (s *Store) DiscardScanCycle(ctx context.Context, cycleID string) error {
 			return ErrCycleNotResumable
 		}
 	}
-	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	stamp := sqliteTimestamp(time.Now())
 	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded',updated_at=?,finished_at=?,last_error='discarded by administrator' WHERE id=? AND status IN ('paused','stalled','completed')`, stamp, stamp, cycleID); err != nil {
 		return err
 	}
@@ -1235,7 +1235,7 @@ func (s *Store) ExpireScanCycles(ctx context.Context, now time.Time) (int64, err
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	stamp := now.UTC().Format(time.RFC3339Nano)
+	stamp := sqliteTimestamp(now)
 	var total int64
 	for {
 		if err := ctx.Err(); err != nil {

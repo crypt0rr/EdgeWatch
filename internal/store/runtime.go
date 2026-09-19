@@ -438,7 +438,7 @@ func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID
 		// A successful result clears any silence watchdog backoff in the same
 		// transaction as the scan and runtime update. This prevents a delayed
 		// heartbeat from emitting a stale silence alert after recovery.
-		stamp := scan.FinishedAt.UTC().Format(time.RFC3339Nano)
+		stamp := sqliteTimestamp(scan.FinishedAt)
 		if _, err := tx.ExecContext(ctx, `INSERT INTO job_silence_state(job_id,eligible_at,last_success_at,updated_at) VALUES(?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET backoff_level=0,next_alert_at='',last_success_at=excluded.last_success_at,updated_at=excluded.updated_at`, jobID, stamp, stamp, stamp); err != nil {
 			return nil, err
 		}
@@ -470,7 +470,7 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 	if len(destinations) == 0 || len(events) == 0 {
 		return nil
 	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
+	now := sqliteTimestamp(time.Now())
 	for _, event := range events {
 		bounded, payload, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
 		if err != nil {
@@ -631,7 +631,7 @@ func persistRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, state model
 		return nil, err
 	}
 	now := time.Now().UTC()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?) ON CONFLICT(job_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at`, jobID, raw, now.Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?) ON CONFLICT(job_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at`, jobID, raw, sqliteTimestamp(now)); err != nil {
 		return nil, err
 	}
 	if err := upsertRuntimeBaselineMetaTx(ctx, tx, jobID, state, 0, now); err != nil {
@@ -649,7 +649,7 @@ func persistRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, state model
 			return nil, err
 		}
 		events[i] = bounded
-		if _, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,job_id,scan_id,payload_json,created_at) VALUES(?,?,?,?,?,?)`, events[i].Type, events[i].Job, events[i].JobID, events[i].ScanID, payload, events[i].CreatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,job_id,scan_id,payload_json,created_at) VALUES(?,?,?,?,?,?)`, events[i].Type, events[i].Job, events[i].JobID, events[i].ScanID, payload, sqliteTimestamp(events[i].CreatedAt)); err != nil {
 			return nil, err
 		}
 	}
@@ -660,7 +660,7 @@ func upsertRuntimeBaselineMetaTx(ctx context.Context, tx *sql.Tx, jobID string, 
 	if projectionVersion == 0 && state.Baseline != nil {
 		projectionVersion = 1
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET metadata_version=excluded.metadata_version,baseline_scan_id=excluded.baseline_scan_id,baseline_config_hash=excluded.baseline_config_hash,baseline_modified=excluded.baseline_modified,projection_version=excluded.projection_version,candidate_count=excluded.candidate_count,candidate_attempts=excluded.candidate_attempts,incomplete_candidate_attempts=excluded.incomplete_candidate_attempts,pending_count=excluded.pending_count,updated_at=excluded.updated_at`, jobID, 1, state.BaselineScanID, state.BaselineConfigHash, boolInt(state.BaselineModified), projectionVersion, state.CandidateCount, state.CandidateAttempts, state.IncompleteCandidateAttempts, len(state.Pending), now.Format(time.RFC3339Nano))
+	_, err := tx.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET metadata_version=excluded.metadata_version,baseline_scan_id=excluded.baseline_scan_id,baseline_config_hash=excluded.baseline_config_hash,baseline_modified=excluded.baseline_modified,projection_version=excluded.projection_version,candidate_count=excluded.candidate_count,candidate_attempts=excluded.candidate_attempts,incomplete_candidate_attempts=excluded.incomplete_candidate_attempts,pending_count=excluded.pending_count,updated_at=excluded.updated_at`, jobID, 1, state.BaselineScanID, state.BaselineConfigHash, boolInt(state.BaselineModified), projectionVersion, state.CandidateCount, state.CandidateAttempts, state.IncompleteCandidateAttempts, len(state.Pending), sqliteTimestamp(now))
 	return err
 }
 

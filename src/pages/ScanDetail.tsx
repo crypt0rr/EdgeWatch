@@ -17,7 +17,8 @@ export function ScanDetail() {
   const hosts = useQuery({ queryKey: ['scan-hosts', scanId, offset], queryFn: () => historicalScanHosts(scanId, { offset }), enabled: !!scanId })
 
   if (scan.isLoading) return <div className="loading"><span className="spinner" />Loading scan…</div>
-  if (scan.error || !scan.data) return <section className="page"><div className="error-card" role="alert">This scan could not be found.</div></section>
+  const notFound = (scan.error as { code?: string } | null)?.code === 'not_found'
+  if (scan.error || !scan.data) return <section className="page"><div className="error-card" role="alert">{scan.error ? (notFound ? 'This scan could not be found.' : 'This scan could not be loaded.') : 'This scan could not be found.'} {scan.error && !notFound && <button type="button" className="button ghost" onClick={() => void scan.refetch()}>Retry</button>}</div></section>
   const value = scan.data
   return <section className="page">
     <div className="page-heading"><div><Link className="back-link" to="/">← Overview</Link><p className="eyebrow">Historical scan</p><h1>{value.job}</h1><p className="muted">Scan {value.id}</p></div><Clock3 className="muted-icon" size={24} /></div>

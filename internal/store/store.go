@@ -60,7 +60,7 @@ func (c sqlitePragmaConnector) Connect(ctx context.Context) (driver.Conn, error)
 		_ = conn.Close()
 		return nil, errors.New("SQLite driver does not support connection setup")
 	}
-	statements := []string{"PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000"}
+	statements := []string{"PRAGMA foreign_keys=ON", "PRAGMA busy_timeout=5000", "PRAGMA temp_store=FILE"}
 	if c.queryOnly {
 		statements = append(statements, "PRAGMA query_only=ON")
 	}
@@ -169,6 +169,9 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 			}
 			if err := os.MkdirAll(filepath.Dir(artifactPath), 0o750); err != nil {
 				return nil, fmt.Errorf("create EdgeWatch database directory %q: %w", filepath.Dir(artifactPath), err)
+			}
+			if err := os.MkdirAll(filepath.Join(filepath.Dir(artifactPath), "tmp"), 0o750); err != nil {
+				return nil, fmt.Errorf("create EdgeWatch temporary directory %q: %w", filepath.Join(filepath.Dir(artifactPath), "tmp"), err)
 			}
 			if err := ensurePrivateSQLiteFile(artifactPath); err != nil {
 				return nil, fmt.Errorf("prepare EdgeWatch database %q: %w", artifactPath, err)

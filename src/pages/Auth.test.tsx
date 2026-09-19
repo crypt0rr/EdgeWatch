@@ -87,6 +87,7 @@ describe('authentication pages', () => {
   it('logs in and routes administrators to the dashboard', async () => {
     await renderPage(<Login />, '/login')
     const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
+    setInputValue(inputs[0], 'admin')
     setInputValue(inputs[1], 'correct horse battery staple')
 
     await act(async () => {
@@ -158,6 +159,7 @@ describe('authentication pages', () => {
     await renderPage(<Activate />, '/activate?token=%20invite-token%20')
     const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
     expect(inputs[0].value).toBe(' invite-token ')
+    setInputValue(inputs[0], ' invite-token ')
     setInputValue(inputs[1], 'correct horse battery staple')
     setInputValue(inputs[2], 'different password')
     await act(async () => submitForm(container.querySelector('form') as HTMLFormElement))
@@ -172,5 +174,36 @@ describe('authentication pages', () => {
     })
     expect(activate).toHaveBeenCalledWith('invite-token', 'correct horse battery staple')
     expect(container.querySelector('[data-testid="location"]')?.textContent).toBe('/login')
+  })
+
+  it('announces setup and activation failures accessibly', async () => {
+    vi.mocked(setup).mockRejectedValueOnce(new Error('setup unavailable'))
+    await renderPage(<Setup />, '/setup')
+    let inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
+    setInputValue(inputs[0], 'setup-token')
+    setInputValue(inputs[1], 'correct horse battery staple')
+    setInputValue(inputs[2], 'correct horse battery staple')
+    await act(async () => {
+      submitForm(container.querySelector('form') as HTMLFormElement)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('setup unavailable')
+
+    act(() => root.unmount())
+    container.innerHTML = ''
+    root = createRoot(container)
+    vi.mocked(activate).mockRejectedValueOnce(new Error('activation unavailable'))
+    await renderPage(<Activate />, '/activate?token=invite-token')
+    inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
+    setInputValue(inputs[0], 'invite-token')
+    setInputValue(inputs[1], 'correct horse battery staple')
+    setInputValue(inputs[2], 'correct horse battery staple')
+    await act(async () => {
+      submitForm(container.querySelector('form') as HTMLFormElement)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('activation unavailable')
   })
 })

@@ -498,9 +498,34 @@ func broadScan(job config.Job) bool {
 	return estimate.TCPPorts > 4096 || estimate.UDPPorts > 4096 || estimate.Probes > 65_536
 }
 
-func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, id string) {
-	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
+func (s *Server) requireJob(w http.ResponseWriter, r *http.Request, id string) (*store.JobRecord, bool) {
+	record, err := s.Store.GetJob(r.Context(), id)
+	if err == nil {
+		return &record, true
+	}
+	if hostStoreNotFound(err) {
 		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+	} else {
+		s.writeInternalError(w, r, "store", err)
+	}
+	return nil, false
+}
+
+func (s *Server) requireScanSummary(w http.ResponseWriter, r *http.Request, scanID string) (model.ScanSummary, bool) {
+	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
+	if err == nil {
+		return summary, true
+	}
+	if hostStoreNotFound(err) {
+		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+	} else {
+		s.writeInternalError(w, r, "store", err)
+	}
+	return model.ScanSummary{}, false
+}
+
+func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, id string) {
+	if _, ok := s.requireJob(w, r, id); !ok {
 		return
 	}
 	cycle, err := s.Store.GetRecoverableScanCycle(r.Context(), id)
@@ -534,8 +559,7 @@ func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, session store.Session, id, cycleID string) {
-	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+	if _, ok := s.requireJob(w, r, id); !ok {
 		return
 	}
 	cycle, err := s.Store.GetScanCycle(r.Context(), cycleID)
@@ -553,8 +577,7 @@ func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, sessio
 }
 
 func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, id string) {
-	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
-		writeError(w, 404, "not_found", "job not found", nil)
+	if _, ok := s.requireJob(w, r, id); !ok {
 		return
 	}
 	limit := queryLimit(r)
@@ -571,18 +594,21 @@ func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID string) {
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+	record, ok := s.requireJob(w, r, id)
+	if !ok {
 		return
 	}
-	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil || summary.JobID != id {
+	summary, ok := s.requireScanSummary(w, r, scanID)
+	if !ok {
+		return
+	}
+	if summary.JobID != id {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
 	}
 	offset, limit := queryOffset(r), queryLimit(r)
-	value := map[string]any{"scan": summary, "changes": []model.Change{}, "changes_pagination": paginationJSON(offset, limit, 0), "comparison_source": "none"}
+	comparisonState := "not_compared"
+	value := map[string]any{"scan": summary, "changes": []model.Change{}, "changes_pagination": paginationJSON(offset, limit, 0), "comparison_source": "none", "comparison_state": comparisonState}
 	var state model.JobState
 	var stateErr error
 	comparable := summary.Status == "success" || summary.Status == "incomplete"
@@ -603,6 +629,7 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID stri
 			}
 			value["changes"], value["changes_pagination"] = items, paginationJSON(offset, limit, page.Total)
 			value["comparison_source"] = "scan_time"
+			value["comparison_state"] = "compared"
 			value["baseline_scan_id"] = summary.BaselineScanID
 		} else if stateErr == nil && state.Baseline != nil {
 			// Legacy scans from before the immutable comparison columns were
@@ -617,6 +644,7 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID stri
 			changes := engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != summary.ConfigHash)
 			value["changes"], value["changes_pagination"] = pageSlice(changes, offset, limit)
 			value["comparison_source"] = "current_baseline_legacy"
+			value["comparison_state"] = "compared"
 		}
 	}
 	value["current_security_hash"] = record.Job.SecurityHash()
@@ -624,12 +652,14 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID stri
 }
 
 func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, id, scanID string) {
-	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+	if _, ok := s.requireJob(w, r, id); !ok {
 		return
 	}
-	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil || summary.JobID != id {
+	summary, ok := s.requireScanSummary(w, r, scanID)
+	if !ok {
+		return
+	}
+	if summary.JobID != id {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
 	}
@@ -647,12 +677,14 @@ func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, id, scan
 }
 
 func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scanID string) {
-	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
+	if _, ok := s.requireJob(w, r, id); !ok {
 		return
 	}
-	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil || summary.JobID != id {
+	summary, ok := s.requireScanSummary(w, r, scanID)
+	if !ok {
+		return
+	}
+	if summary.JobID != id {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
 	}
@@ -660,6 +692,7 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scan
 	changes := []model.Change{}
 	var total int
 	comparisonSource := "none"
+	comparisonState := "not_compared"
 	if summary.Status == "success" || summary.Status == "incomplete" {
 		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
 			page, pageErr := s.Store.ListScanChangesPage(r.Context(), scanID, limit, offset)
@@ -669,6 +702,7 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scan
 			}
 			changes, total = page.Items, page.Total
 			comparisonSource = "scan_time"
+			comparisonState = "compared"
 		} else if state, stateErr := s.Store.RuntimeState(r.Context(), id); stateErr == nil && state.Baseline != nil {
 			scan, scanErr := s.Store.GetScan(r.Context(), scanID)
 			if scanErr != nil {
@@ -677,6 +711,7 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scan
 			}
 			changes = engine.Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != summary.ConfigHash)
 			comparisonSource = "current_baseline_legacy"
+			comparisonState = "compared"
 		} else if stateErr != nil {
 			s.writeInternalError(w, r, "store", stateErr)
 			return
@@ -689,7 +724,7 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scan
 	if items == nil {
 		items = []model.Change{}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"changes": items, "pagination": page, "comparison_source": comparisonSource, "baseline_scan_id": summary.BaselineScanID})
+	writeJSON(w, http.StatusOK, map[string]any{"changes": items, "pagination": page, "comparison_source": comparisonSource, "comparison_state": comparisonState, "baseline_scan_id": summary.BaselineScanID})
 }
 func (s *Server) listScans(w http.ResponseWriter, r *http.Request) {
 	limit := queryLimit(r)
@@ -948,6 +983,10 @@ func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, id string) 
 	units, page := pageSlice(state.Baseline.Units, offset, limit)
 	snapshot := *state.Baseline
 	snapshot.Units = units
+	// Host observations are served by the dedicated, filtered host endpoints.
+	// Do not copy the complete evidence array into every paginated baseline
+	// response; a large CIDR baseline would otherwise defeat pagination.
+	snapshot.Hosts = nil
 	value["snapshot"], value["pagination"] = snapshot, page
 	writeJSON(w, http.StatusOK, value)
 }

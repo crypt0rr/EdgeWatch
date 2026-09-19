@@ -755,7 +755,7 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 		return nil, stderr.String(), fmt.Errorf("naabu JSON output exceeded %d bytes", maxNaabuOutput)
 	}
 	if waitErr != nil {
-		return nil, stderr.String(), waitErrWithContext(ctx, waitErr)
+		return nil, stderr.String(), scannerStorageError(waitErrWithContext(ctx, waitErr), stderr.String())
 	}
 	results, err := parseNaabuJSON(stdout.Bytes())
 	return results, stderr.String(), err

@@ -19,7 +19,7 @@ actual_arch="$(docker image inspect --format '{{.Architecture}}' "$image")"
 test "$actual_arch" = "$arch"
 test "$(docker image inspect --format '{{json .Config.Entrypoint}}' "$image")" = '["edgewatch"]'
 
-edgewatch_version_output="$(docker run --rm --platform "$platform" --read-only --tmpfs /tmp:size=32m,mode=1777 "$image" version)"
+edgewatch_version_output="$(docker run --rm --platform "$platform" --read-only --tmpfs /tmp:size=128m,mode=1777 "$image" version)"
 grep -Fqx "EdgeWatch $version" <<<"$edgewatch_version_output"
 nmap_version_output="$(docker run --rm --platform "$platform" --read-only --entrypoint /usr/bin/nmap "$image" --version)"
 grep -Eq '^Nmap version ' <<<"$nmap_version_output"
@@ -59,7 +59,7 @@ cleanup() {
 trap cleanup EXIT
 
 container_id="$(docker run -d --rm --platform "$platform" --network host --read-only \
-  --tmpfs /tmp:size=32m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
+  --tmpfs /tmp:size=128m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
   -v "$root/config.yaml:/etc/edgewatch/config.yaml:ro" \
   -v "$root/data:/var/lib/edgewatch" \
   "$image" daemon --config /etc/edgewatch/config.yaml)"

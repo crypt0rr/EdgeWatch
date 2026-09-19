@@ -13,9 +13,9 @@ export function Dashboard() {
   const [cancelBusy, setCancelBusy] = useState('')
   const jobs = useQuery({ queryKey: ['jobs', false], queryFn: () => listJobs(false) })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
-  const canOperate = session.data?.role !== 'viewer'
-  const isAdmin = session.data?.role === 'administrator'
-  const canReadScans = session.data?.role !== 'viewer'
+  const canOperate = session.data?.permissions.includes('jobs.write') ?? false
+  const isAdmin = session.data?.permissions.includes('users.manage') ?? false
+  const canReadScans = session.data?.permissions.includes('scans.read') ?? false
   const scans = useQuery({ queryKey: ['scans'], queryFn: () => listScans(0, 20), refetchInterval: 15000, enabled: session.data != null && canReadScans })
   const active = useQuery({ queryKey: ['active-scans'], queryFn: activeScans, refetchInterval: 2000, enabled: session.data != null && canOperate })
   const incidents = useQuery({ queryKey: ['incidents'], queryFn: () => listIncidents(0, 20), refetchInterval: 15000, enabled: session.data != null && canOperate })

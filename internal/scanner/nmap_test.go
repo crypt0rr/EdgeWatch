@@ -603,3 +603,11 @@ func TestPollNmapXMLProgressHonorsOutputLimit(t *testing.T) {
 		t.Fatalf("oversized progress file error = %v", err)
 	}
 }
+
+func TestScannerStorageErrorClassifiesExhaustedTemporaryStorage(t *testing.T) {
+	underlying := errors.New("write failed")
+	err := scannerStorageError(underlying, "open output: no space left on device")
+	if err == nil || !strings.Contains(err.Error(), "scanner temporary storage exhausted") || !errors.Is(err, underlying) {
+		t.Fatalf("storage error = %v", err)
+	}
+}

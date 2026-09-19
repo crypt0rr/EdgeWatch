@@ -564,6 +564,40 @@ func TestSafeSendContextWaitsForInFlightSendAfterCancellation(t *testing.T) {
 	}
 }
 
+func TestSafeSendContextBoundsProviderThatIgnoresCancellation(t *testing.T) {
+	oldTimeout := notificationProviderTimeout
+	oldSend := notificationProviderSend
+	notificationProviderTimeout = 10 * time.Millisecond
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	notificationProviderSend = func(string, string) error {
+		close(entered)
+		<-release
+		return nil
+	}
+	defer func() {
+		notificationProviderTimeout = oldTimeout
+		notificationProviderSend = oldSend
+		close(release)
+	}()
+
+	done := make(chan error, 1)
+	go func() { done <- safeSendContext(context.Background(), "generic://ignored", "test") }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("provider was not invoked")
+	}
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrNotificationSendIndeterminate) {
+			t.Fatalf("bounded provider error = %v, want indeterminate", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provider timeout did not return")
+	}
+}
+
 func TestManagedNotificationCRUDEncryptsAndCancelsOldDeliveries(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

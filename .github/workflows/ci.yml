@@ -173,16 +173,8 @@ jobs:
           cache: npm
       - name: Validate Compose deployment
         run: |
-          docker compose config --quiet
-          if docker compose config | grep -Eq '^[[:space:]]+build:|edgewatch-data'; then
-            echo "Compose must pull the published image and use ./data"
-            exit 1
-          fi
-          docker compose -f compose.yaml -f compose.syn.yaml config --quiet
-          if ! docker compose -f compose.yaml -f compose.syn.yaml config | grep -Eq '^[[:space:]]+- NET_ADMIN$'; then
-            echo "The SYN Compose override must grant NET_ADMIN"
-            exit 1
-          fi
+          ./scripts/verify-compose-policy.sh base
+          ./scripts/verify-compose-policy.sh syn
       - name: Verify pinned Naabu release
         run: ./scripts/verify-naabu-pin.sh
       - name: Verify release artifact contract

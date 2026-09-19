@@ -36,7 +36,7 @@ frontend-audit:
 security: lint-go vulncheck frontend-audit
 
 check:
-	@test -z "$(gofmt -l cmd internal)"
+	@test -z "$$(gofmt -l $$(git ls-files '*.go'))"
 	go vet ./...
 	go test -race ./...
 	npm run lint

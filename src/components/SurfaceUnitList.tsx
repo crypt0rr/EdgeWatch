@@ -16,6 +16,12 @@ function addressSummary(addresses: string[] | undefined) {
   return `${values.slice(0, 3).join(', ')} +${values.length - 3} more`
 }
 
+function evidenceSummary(addresses: string[] | undefined) {
+  const values = (addresses ?? []).filter(Boolean)
+  if (values.length === 0) return ''
+  return values.length <= 2 ? `on ${values.join(', ')}` : `on ${values.slice(0, 2).join(', ')} +${values.length - 2} more`
+}
+
 /**
  * Compact, responsive rendering of the positive surface represented by Unit
  * records. It is shared by the expected-baseline and latest-scan panels so
@@ -46,6 +52,7 @@ export function SurfaceUnitList({ units, emptyLabel = 'No expected results.' }: 
                       <code>{port.port}/{unit.protocol.toLowerCase()}</code>
                       <span>{port.state}</span>
                       {port.service && <small>{port.service}</small>}
+                      {port.evidence?.length && <small className="surface-port-evidence">{evidenceSummary(port.evidence)}</small>}
                     </span>
                   ))}
                 </div>

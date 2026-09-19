@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, createNotificationDestination, deleteNotificationDestination, getSession, listNotificationDestinations, testNotificationDestination, updateNotificationDestination } from '../api'
 import { renderWithProviders } from '../test/test-utils'
@@ -28,8 +29,11 @@ describe('notification destination workflows', () => {
   async function confirmDialog(password = 'administrator-password') {
     const dialog = await screen.findByRole('dialog')
     const input = dialog.querySelector('input[type="password"]') as HTMLInputElement
-    fireEvent.change(input, { target: { value: password } })
-    fireEvent.click(dialog.querySelector('button[type="submit"]')!)
+    await act(async () => {
+      fireEvent.change(input, { target: { value: password } })
+      fireEvent.click(dialog.querySelector('button[type="submit"]')!)
+      await Promise.resolve()
+    })
   }
 
   it('creates, edits, pauses, tests, and removes a destination', async () => {

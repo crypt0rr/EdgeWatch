@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act } from 'react'
 import { Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, createJob, getJob, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
@@ -69,8 +70,13 @@ describe('job editor workflow coverage', () => {
   it('shows the schedule stagger suggestion and applies the recommended time', async () => {
     vi.mocked(scheduleSuggestion).mockResolvedValue({ suggested: true, suggested_schedule: '30 */6 * * *', offset_minutes: 30, gap_minutes: 0, nearest: { id: 'job-2', name: 'Existing job', schedule: '0 */6 * * *', timezone: 'UTC', next_run: '2026-09-13T12:00:00Z' } })
     renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
-    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Stagger scheduled scans'), { timeout: 2000 })
-    fireEvent.click(screen.getByRole('button', { name: /Use later time/ }))
+    await act(async () => {
+      await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Stagger scheduled scans'), { timeout: 2000 })
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Use later time/ }))
+      await Promise.resolve()
+    })
     expect(screen.getByLabelText(/^Five-field cron/)).toHaveValue('30 */6 * * *')
   })
 

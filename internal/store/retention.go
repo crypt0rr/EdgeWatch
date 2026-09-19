@@ -638,6 +638,27 @@ func (s *Store) ReleaseJobLease(ctx context.Context, job, owner string) error {
 	return err
 }
 
+// RenewJobLease extends an existing scan lease without allowing a different
+// owner to take it over. Long resumable scans can outlive their initial
+// timeout-plus-grace window while final scan promotion is still committing;
+// callers must renew immediately before that finalization boundary.
+func (s *Store) RenewJobLease(ctx context.Context, job, owner string, expires time.Time) error {
+	if strings.TrimSpace(job) == "" || strings.TrimSpace(owner) == "" {
+		return errors.New("job lease job and owner are required")
+	}
+	if !expires.After(time.Now().UTC()) {
+		return errors.New("job lease expiry must be in the future")
+	}
+	result, err := s.DB.ExecContext(ctx, `UPDATE job_leases SET expires_at=? WHERE job=? AND owner=?`, expires.UTC().Format(time.RFC3339Nano), job, owner)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return ErrLeaseLost
+	}
+	return nil
+}
+
 func (s *Store) Approve(ctx context.Context, job string, scan model.Scan) ([]model.Event, error) {
 	if scan.Job != job {
 		return nil, fmt.Errorf("scan %s belongs to job %s", scan.ID, scan.Job)

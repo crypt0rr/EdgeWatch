@@ -84,6 +84,8 @@ jobs:
             test ! -e "$artifact"
           done
       - name: Frontend unit tests
+        env:
+          EDGEWATCH_REPORT_ACT_WARNINGS: '1'
         run: npm run test:coverage
       - name: Frontend diff coverage
         run: node scripts/check-diff-coverage.mjs --language frontend --coverage coverage/coverage-final.json --base "${{ steps.release-lint-base.outputs.base }}"
@@ -510,13 +512,23 @@ jobs:
           test -n "$release_id"
           prerelease=false
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=true; fi
-          # Use the API's explicit make_latest=false setting. Latest promotion
-          # is a separate job which first verifies this is the highest stable
-          # release, so a late prerelease or out-of-order tag cannot displace it.
+          # Publish the highest stable release as GitHub's "Latest" release.
+          # Drafts and prereleases never participate, and an out-of-order tag
+          # cannot displace a newer stable release already published.
+          make_latest=false
+          if [ "$prerelease" = false ]; then
+            current_version="${GITHUB_REF_NAME#v}"
+            highest_stable="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              --jq '.[] | select(.draft == false and .prerelease == false) | .tag_name' \
+              | sed -nE 's/^v([0-9]+\.[0-9]+\.[0-9]+)$/\1/p' | sort -V | tail -n 1)"
+            if [ -z "$highest_stable" ] || [ "$(printf '%s\n%s\n' "$highest_stable" "$current_version" | sort -V | tail -n 1)" = "$current_version" ]; then
+              make_latest=true
+            fi
+          fi
           gh api --method PATCH "repos/$GITHUB_REPOSITORY/releases/$release_id" \
             -F draft=false \
             -F prerelease="$prerelease" \
-            -f make_latest=false >/dev/null
+            -f make_latest="$make_latest" >/dev/null
 
   promote-latest:
     name: Promote verified image to latest

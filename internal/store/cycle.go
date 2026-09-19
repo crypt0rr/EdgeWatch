@@ -41,6 +41,7 @@ type ScanCycleRecord struct {
 	JobRevision        int64
 	ConfigHash         string
 	ExecutionHash      string
+	BaselineEpoch      int64
 	Plan               scanner.WorkPlan
 	Status             string
 	AttemptCount       int
@@ -132,8 +133,8 @@ func (s *Store) CreateScanCycle(ctx context.Context, cycle ScanCycleRecord) (Sca
 		return ScanCycleRecord{}, err
 	}
 	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,no_progress_attempts,total_units,completed_units,total_probes,completed_probes,started_at,updated_at,expires_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		cycle.ID, cycle.JobID, cycle.Job, cycle.JobRevision, cycle.ConfigHash, cycle.ExecutionHash, planJSON, cycle.Status, cycle.AttemptCount, cycle.NoProgressAttempts, cycle.TotalUnits, cycle.CompletedUnits, cycle.TotalProbes, cycle.CompletedProbes, sqliteTimestamp(cycle.StartedAt), sqliteTimestamp(cycle.UpdatedAt), sqliteTimestamp(cycle.ExpiresAt), "", cycle.LastError)
+	_, err = tx.ExecContext(ctx, `INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,baseline_epoch,plan_json,status,attempt_count,no_progress_attempts,total_units,completed_units,total_probes,completed_probes,started_at,updated_at,expires_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		cycle.ID, cycle.JobID, cycle.Job, cycle.JobRevision, cycle.ConfigHash, cycle.ExecutionHash, cycle.BaselineEpoch, planJSON, cycle.Status, cycle.AttemptCount, cycle.NoProgressAttempts, cycle.TotalUnits, cycle.CompletedUnits, cycle.TotalProbes, cycle.CompletedProbes, sqliteTimestamp(cycle.StartedAt), sqliteTimestamp(cycle.UpdatedAt), sqliteTimestamp(cycle.ExpiresAt), "", cycle.LastError)
 	if err != nil {
 		return ScanCycleRecord{}, err
 	}
@@ -673,8 +674,8 @@ func (s *Store) GetScanCycle(ctx context.Context, id string) (ScanCycleRecord, e
 	var cycle ScanCycleRecord
 	var planJSON []byte
 	var started, updated, expires, finished string
-	err := s.reader().QueryRowContext(ctx, `SELECT id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,attempt_count,no_progress_attempts,total_units,completed_units,total_probes,completed_probes,started_at,updated_at,expires_at,finished_at,last_error FROM scan_cycles WHERE id=?`, id).
-		Scan(&cycle.ID, &cycle.JobID, &cycle.Job, &cycle.JobRevision, &cycle.ConfigHash, &cycle.ExecutionHash, &planJSON, &cycle.Status, &cycle.AttemptCount, &cycle.NoProgressAttempts, &cycle.TotalUnits, &cycle.CompletedUnits, &cycle.TotalProbes, &cycle.CompletedProbes, &started, &updated, &expires, &finished, &cycle.LastError)
+	err := s.reader().QueryRowContext(ctx, `SELECT id,job_id,job,job_revision,config_hash,execution_hash,baseline_epoch,plan_json,status,attempt_count,no_progress_attempts,total_units,completed_units,total_probes,completed_probes,started_at,updated_at,expires_at,finished_at,last_error FROM scan_cycles WHERE id=?`, id).
+		Scan(&cycle.ID, &cycle.JobID, &cycle.Job, &cycle.JobRevision, &cycle.ConfigHash, &cycle.ExecutionHash, &cycle.BaselineEpoch, &planJSON, &cycle.Status, &cycle.AttemptCount, &cycle.NoProgressAttempts, &cycle.TotalUnits, &cycle.CompletedUnits, &cycle.TotalProbes, &cycle.CompletedProbes, &started, &updated, &expires, &finished, &cycle.LastError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return cycle, fmt.Errorf("%w: %s", ErrNoScanCycle, id)
 	}
@@ -1203,14 +1204,23 @@ func (s *Store) DiscardScanCycle(ctx context.Context, cycleID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	var status string
-	if err = tx.QueryRowContext(ctx, `SELECT status FROM scan_cycles WHERE id=?`, cycleID).Scan(&status); errors.Is(err, sql.ErrNoRows) {
+	var status, jobID string
+	if err = tx.QueryRowContext(ctx, `SELECT status,job_id FROM scan_cycles WHERE id=?`, cycleID).Scan(&status, &jobID); errors.Is(err, sql.ErrNoRows) {
 		return ErrNoScanCycle
 	} else if err != nil {
 		return err
 	}
-	if status != "paused" && status != "stalled" && status != "completed" {
+	if status != "running" && status != "paused" && status != "stalled" && status != "completed" {
 		return ErrCycleNotResumable
+	}
+	if status == "running" {
+		var leased int
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM job_leases WHERE job=? AND expires_at>?)`, jobID, sqliteTimestamp(time.Now())).Scan(&leased); err != nil {
+			return err
+		}
+		if leased != 0 {
+			return ErrJobScanActive
+		}
 	}
 	if status == "completed" {
 		promoted, scanErr := s.ScanCycleHasScan(ctx, cycleID)
@@ -1280,7 +1290,10 @@ func (s *Store) ExpireScanCycles(ctx context.Context, now time.Time) (int64, err
 }
 
 func expiredScanCycleIDs(ctx context.Context, tx *sql.Tx, stamp string) ([]string, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM scan_cycles WHERE status IN ('running','paused','stalled') AND expires_at<=? ORDER BY expires_at,id LIMIT ?`, stamp, scanCycleReconcileBatchSize)
+	// A cycle with a live job lease is still being worked, even if its resume
+	// window has elapsed. The scan owner renews its lease through finalization;
+	// excluding it here prevents housekeeping from racing that final commit.
+	rows, err := tx.QueryContext(ctx, `SELECT c.id FROM scan_cycles AS c WHERE c.status IN ('running','paused','stalled') AND c.expires_at<=? AND NOT EXISTS (SELECT 1 FROM job_leases AS l WHERE l.job=c.job_id AND l.expires_at>?) ORDER BY c.expires_at,c.id LIMIT ?`, stamp, stamp, scanCycleReconcileBatchSize)
 	if err != nil {
 		return nil, err
 	}

@@ -40,6 +40,7 @@ type RuntimeBaselineInfo struct {
 	BaselineConfigHash string
 	BaselineModified   bool
 	ProjectionVersion  int64
+	BaselineEpoch      int64
 }
 
 // BaselineExpectation identifies the runtime state an operator saw before a
@@ -67,13 +68,14 @@ func (s *Store) RuntimeBaselineInfo(ctx context.Context, jobID string) (RuntimeB
 	var info RuntimeBaselineInfo
 	var metadataVersion int
 	var scanID, configHash sql.NullString
-	var modified, projectionVersion sql.NullInt64
-	err := s.reader().QueryRowContext(ctx, `SELECT metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version FROM job_runtime_meta WHERE job_id=?`, jobID).Scan(&metadataVersion, &scanID, &configHash, &modified, &projectionVersion)
+	var modified, projectionVersion, baselineEpoch sql.NullInt64
+	err := s.reader().QueryRowContext(ctx, `SELECT metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,baseline_epoch FROM job_runtime_meta WHERE job_id=?`, jobID).Scan(&metadataVersion, &scanID, &configHash, &modified, &projectionVersion, &baselineEpoch)
 	if err == nil && metadataVersion > 0 {
 		info.BaselineScanID = scanID.String
 		info.BaselineConfigHash = configHash.String
 		info.BaselineModified = modified.Int64 != 0
 		info.ProjectionVersion = projectionVersion.Int64
+		info.BaselineEpoch = baselineEpoch.Int64
 		return info, nil
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -115,6 +117,20 @@ func (s *Store) RuntimeBaselineInfo(ctx context.Context, jobID string) (RuntimeB
 		}
 	}
 	return info, nil
+}
+
+// RuntimeBaselineEpoch returns the monotonic epoch used to fence resumable
+// cycles from a reset or accepted baseline mutation. Legacy rows start at zero.
+func (s *Store) RuntimeBaselineEpoch(ctx context.Context, jobID string) (int64, error) {
+	var epoch sql.NullInt64
+	err := s.reader().QueryRowContext(ctx, `SELECT baseline_epoch FROM job_runtime_meta WHERE job_id=?`, jobID).Scan(&epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return epoch.Int64, nil
 }
 
 // RuntimeStateSummary is the bounded state projection used by job-list
@@ -411,6 +427,32 @@ func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID
 		}
 		return nil, ErrJobRevisionChanged
 	}
+	if scan.CycleID != "" {
+		var cycleEpoch int64
+		var cycleStatus string
+		cycleErr := tx.QueryRowContext(ctx, `SELECT baseline_epoch,status FROM scan_cycles WHERE id=?`, scan.CycleID).Scan(&cycleEpoch, &cycleStatus)
+		if cycleErr == nil {
+			var currentEpoch int64
+			if err := tx.QueryRowContext(ctx, `SELECT COALESCE(baseline_epoch,0) FROM job_runtime_meta WHERE job_id=?`, jobID).Scan(&currentEpoch); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+			cycleNotResumable := cycleStatus == "discarded" || cycleStatus == "expired" || cycleEpoch != currentEpoch
+			if cycleNotResumable && (scan.Status == "success" || scan.Status == "incomplete") {
+				if err := saveScanExec(ctx, tx, *scan); err != nil {
+					return nil, err
+				}
+				if err := clearCompletedScanCycleCheckpointsTx(ctx, tx, scan.CycleID); err != nil {
+					return nil, err
+				}
+				if err := tx.Commit(); err != nil {
+					return nil, err
+				}
+				return nil, ErrCycleNotResumable
+			}
+		} else if !errors.Is(cycleErr, sql.ErrNoRows) {
+			return nil, cycleErr
+		}
+	}
 
 	state, err := loadRuntimeTx(ctx, tx, jobID)
 	if err != nil {
@@ -430,6 +472,15 @@ func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID
 	}
 	if _, err := persistRuntimeTxWithOutbox(ctx, tx, jobID, state, events, destinations); err != nil {
 		return nil, err
+	}
+	baselineAfter, err := marshalBaselineForProjection(state.Baseline)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(baselineBefore, baselineAfter) {
+		if err := bumpRuntimeBaselineEpochTx(ctx, tx, jobID); err != nil {
+			return nil, err
+		}
 	}
 	if err := refreshBaselineHostProjectionTx(ctx, tx, jobID, baselineModifiedBefore, baselineBefore, state); err != nil {
 		return nil, err
@@ -558,6 +609,15 @@ func updateRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, fn func(*mod
 	if err != nil {
 		return nil, err
 	}
+	baselineAfter, err := marshalBaselineForProjection(state.Baseline)
+	if err != nil {
+		return nil, err
+	}
+	if !bytes.Equal(baselineBefore, baselineAfter) {
+		if err := bumpRuntimeBaselineEpochTx(ctx, tx, jobID); err != nil {
+			return nil, err
+		}
+	}
 	if err := refreshBaselineHostProjectionTx(ctx, tx, jobID, baselineModifiedBefore, baselineBefore, state); err != nil {
 		return nil, err
 	}
@@ -664,6 +724,30 @@ func upsertRuntimeBaselineMetaTx(ctx context.Context, tx *sql.Tx, jobID string, 
 	return err
 }
 
+func bumpRuntimeBaselineEpochTx(ctx context.Context, tx *sql.Tx, jobID string) error {
+	result, err := tx.ExecContext(ctx, `UPDATE job_runtime_meta SET baseline_epoch=baseline_epoch+1 WHERE job_id=?`, jobID)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return fmt.Errorf("baseline metadata missing for job %s", jobID)
+	}
+	return nil
+}
+
+// discardUnpromotedCyclesTx fences checkpointed work whenever the comparison
+// baseline changes. Completed cycles that already have an immutable promoted
+// scan remain history; an unpromoted completion is safe to discard because it
+// belongs to the old baseline epoch.
+func discardUnpromotedCyclesTx(ctx context.Context, tx *sql.Tx, jobID, reason string, now time.Time) error {
+	stamp := sqliteTimestamp(now)
+	if _, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded',updated_at=?,finished_at=?,last_error=? WHERE job_id=? AND status IN ('running','paused','stalled','completed') AND (status<>'completed' OR NOT EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id=scan_cycles.id AND scans.cycle_status='completed' AND scans.status IN ('success','incomplete')))`, stamp, stamp, trimCycleError(reason), jobID); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM scan_cycle_units WHERE cycle_id IN (SELECT id FROM scan_cycles WHERE job_id=? AND status='discarded' AND finished_at=?)`, jobID, stamp)
+	return err
+}
+
 func replaceRuntimeIncidentProjectionTx(ctx context.Context, tx *sql.Tx, jobID string, state model.JobState) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM runtime_incidents WHERE job_id=?`, jobID); err != nil {
 		return err
@@ -725,7 +809,10 @@ func (s *Store) ResetRuntimeWithExpectationAndAudit(ctx context.Context, jobID, 
 
 func (s *Store) resetRuntimeWithAudits(ctx context.Context, jobID, name string, destinations []string, audits []AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
 	return s.updateRuntimeWithOutboxAndAuditsGuardedPost(ctx, jobID, "", destinations, audits, true, func(tx *sql.Tx, _ *model.JobState) error {
-		return clearBaselineHostProjectionTx(ctx, tx, jobID)
+		if err := clearBaselineHostProjectionTx(ctx, tx, jobID); err != nil {
+			return err
+		}
+		return discardUnpromotedCyclesTx(ctx, tx, jobID, "baseline reset", time.Now().UTC())
 	}, func(state *model.JobState) ([]model.Event, error) {
 		if (expected.ScanIDSet || expected.ModifiedSet) && !expected.matches(*state) {
 			return nil, ErrConflict
@@ -821,6 +908,9 @@ func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string
 		return []model.Event{{Type: "baseline-approved", Job: name, ScanID: stored.ID, Message: "Baseline manually approved", CreatedAt: time.Now().UTC()}}, nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := discardUnpromotedCyclesTx(ctx, tx, jobID, "baseline approved", time.Now().UTC()); err != nil {
 		return nil, err
 	}
 	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {

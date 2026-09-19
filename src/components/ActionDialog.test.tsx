@@ -10,13 +10,15 @@ import { ActionDialog } from './ActionDialog'
 function setInputValue(input: HTMLInputElement, value: string) {
   // Use the native setter so React's value tracker observes the synthetic
   // input event just as it would from a real browser keystroke.
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
-  setter?.call(input, value)
-  input.dispatchEvent(new Event('input', { bubbles: true }))
+  act(() => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+    setter?.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  })
 }
 
 function submitForm(form: HTMLFormElement) {
-  form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }))
+  act(() => form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })))
 }
 
 describe('ActionDialog accessibility', () => {

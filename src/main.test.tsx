@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
+import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, adminStatus, acceptIncident, getSession, listIncidents, listJobs, login, logout, setupStatus, suppressIncident } from './api'
 import { AppContent, AuthRoutes, Incidents, Jobs, Shell } from './main'
@@ -66,22 +67,24 @@ describe('application shell', () => {
     const invalidate = vi.spyOn(client, 'invalidateQueries')
     await waitFor(() => expect(EventSourceStub.instances).toHaveLength(1))
     const stream = EventSourceStub.instances[0]
-    stream.emit('scan.completed', 'job-9')
+    act(() => stream.emit('scan.completed', 'job-9'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['active-scans'] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['job', 'job-9'] })
-    stream.onmessage?.({ data: '{not-json' } as MessageEvent)
+    act(() => stream.onmessage?.({ data: '{not-json' } as MessageEvent))
     expect(invalidate).toHaveBeenCalledWith()
-    stream.emit('application.update_status')
+    act(() => stream.emit('application.update_status'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['admin-status'] })
-    for (const type of ['changes-detected', 'incident-opened', 'incident-closed', 'incident-accepted', 'incident-suppressed']) stream.emit(type, 'job-9')
-    for (const type of ['job.created', 'job.updated', 'job.archived', 'job.restored', 'job.deleted']) stream.emit(type, 'job-9')
-    stream.emit('notification.changed')
-    stream.emit('stream_limit')
-    stream.emit('refresh_required')
-    stream.emit('unrecognised-event')
-    stream.onopen?.()
+    act(() => {
+      for (const type of ['changes-detected', 'incident-opened', 'incident-closed', 'incident-accepted', 'incident-suppressed']) stream.emit(type, 'job-9')
+      for (const type of ['job.created', 'job.updated', 'job.archived', 'job.restored', 'job.deleted']) stream.emit(type, 'job-9')
+      stream.emit('notification.changed')
+      stream.emit('stream_limit')
+      stream.emit('refresh_required')
+      stream.emit('unrecognised-event')
+      stream.onopen?.()
+    })
     await waitFor(() => expect(screen.getByText('Live updates')).toBeInTheDocument())
-    stream.onerror?.()
+    act(() => stream.onerror?.())
     await waitFor(() => expect(screen.getByText('Reconnecting…')).toBeInTheDocument())
   })
 
@@ -132,7 +135,7 @@ describe('application shell', () => {
     expect(document.body.style.overflow).toBe('hidden')
     const media = vi.mocked(window.matchMedia).mock.results[0]?.value as MediaQueryList & { matches: boolean }
     Object.defineProperty(media, 'matches', { value: false, configurable: true })
-    listeners.forEach(listener => listener())
+    act(() => listeners.forEach(listener => listener()))
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     expect(document.body.style.overflow).toBe('')
   })
@@ -217,7 +220,7 @@ describe('application shell', () => {
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
     renderWithProviders(<AppContent />, { route: ['/'] })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument())
-    window.dispatchEvent(new Event('edgewatch:unauthorized'))
+    act(() => window.dispatchEvent(new Event('edgewatch:unauthorized')))
     await waitFor(() => expect(screen.getByRole('heading', { name: /Sign in to EdgeWatch/ })).toBeInTheDocument())
   })
 })

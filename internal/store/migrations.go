@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 43
+const schemaVersion = 44
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -1049,6 +1049,55 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
  updated_at TEXT NOT NULL DEFAULT ''
 );`,
 			"INSERT OR IGNORE INTO timestamp_normalization_state(id,complete,updated_at) VALUES(1,0,datetime('now'))",
+		},
+		44: {
+			// Baseline epochs fence resumable work from an older comparison scope.
+			// A reset, accepted change, or security-scope edit increments the job's
+			// epoch; every cycle captures that value and may only be promoted while
+			// it still matches. Existing installations start at epoch zero so their
+			// current cycles remain readable and are fenced by subsequent mutations.
+			// A handful of supported recovery databases carry a schema marker from
+			// the authentication migrations without the later cycle/runtime tables.
+			// Create their pre-epoch shapes here before the additive ALTER statements
+			// so the upgrade remains restart-safe for those partially-created files.
+			`CREATE TABLE IF NOT EXISTS scan_cycles (
+ id TEXT PRIMARY KEY,
+ job_id TEXT NOT NULL,
+ job TEXT NOT NULL,
+ job_revision INTEGER NOT NULL,
+ config_hash TEXT NOT NULL,
+ execution_hash TEXT NOT NULL,
+ plan_json BLOB NOT NULL,
+ status TEXT NOT NULL,
+ attempt_count INTEGER NOT NULL DEFAULT 0,
+ no_progress_attempts INTEGER NOT NULL DEFAULT 0,
+ total_units INTEGER NOT NULL,
+ completed_units INTEGER NOT NULL DEFAULT 0,
+ total_probes INTEGER NOT NULL,
+ completed_probes INTEGER NOT NULL DEFAULT 0,
+ started_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL,
+ expires_at TEXT NOT NULL,
+ finished_at TEXT NOT NULL DEFAULT '',
+ last_error TEXT NOT NULL DEFAULT ''
+);`,
+			`CREATE TABLE IF NOT EXISTS job_runtime_meta (
+ job_id TEXT PRIMARY KEY,
+ metadata_version INTEGER NOT NULL DEFAULT 1,
+ baseline_scan_id TEXT NOT NULL DEFAULT '',
+ baseline_config_hash TEXT NOT NULL DEFAULT '',
+ baseline_modified INTEGER NOT NULL DEFAULT 0,
+ projection_version INTEGER NOT NULL DEFAULT 0,
+ updated_at TEXT NOT NULL,
+ candidate_count INTEGER NOT NULL DEFAULT 0,
+ candidate_attempts INTEGER NOT NULL DEFAULT 0,
+ incomplete_candidate_attempts INTEGER NOT NULL DEFAULT 0,
+ pending_count INTEGER NOT NULL DEFAULT 0
+);`,
+			"ALTER TABLE scan_cycles ADD COLUMN baseline_epoch INTEGER NOT NULL DEFAULT 0",
+			"ALTER TABLE job_runtime_meta ADD COLUMN baseline_epoch INTEGER NOT NULL DEFAULT 0",
+			"UPDATE job_runtime_meta SET baseline_epoch=1 WHERE baseline_epoch=0 AND (baseline_scan_id<>'' OR baseline_modified<>0)",
+			"CREATE INDEX IF NOT EXISTS scan_cycles_job_epoch_status ON scan_cycles(job_id,baseline_epoch,status)",
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

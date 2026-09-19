@@ -18,10 +18,11 @@ import (
 )
 
 type coverageResumableScanner struct {
-	plan    scanner.WorkPlan
-	planErr error
-	scanErr error
-	closeDB *store.Store
+	plan        scanner.WorkPlan
+	planErr     error
+	scanErr     error
+	closeDB     *store.Store
+	clearLeases bool
 }
 
 type transientResumableScanner struct {
@@ -161,7 +162,15 @@ func (s coverageResumableScanner) Plan(context.Context, config.Job) (scanner.Wor
 	return s.plan, s.planErr
 }
 func (s coverageResumableScanner) ScanWorkUnit(context.Context, config.Job, scanner.WorkUnit, scanner.ProgressReporter) (model.Snapshot, error) {
-	if s.closeDB != nil {
+	if s.clearLeases {
+		// Exercise the finalization lease-renewal warning without affecting the
+		// scanner result itself. The dedicated test store has no other runners.
+		if s.closeDB == nil {
+			panic("clearLeases requires a test store")
+		}
+		_, _ = s.closeDB.DB.Exec(`DELETE FROM job_leases`)
+	}
+	if s.closeDB != nil && !s.clearLeases {
 		_ = s.closeDB.Close()
 	}
 	if s.scanErr != nil {
@@ -260,6 +269,29 @@ func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 	if got, err := db.GetScanCycle(ctx, mismatch.ID); err != nil || got.Status != "stalled" {
 		t.Fatalf("mismatched cycle state = %#v %v", got, err)
 	}
+
+	// A paused cycle from before a baseline reset must be discarded rather than
+	// resumed into the new comparison scope.
+	epochJob := job
+	epochJob.Name = "resumable-epoch"
+	epochRecord, err := db.CreateJob(ctx, epochJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UpdateRuntime(ctx, epochRecord.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp"}}}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	oldEpoch, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: epochRecord.ID, Job: epochJob.Name, JobRevision: epochRecord.Revision, BaselineEpoch: 0, ConfigHash: epochJob.SecurityHash(), Plan: cyclePlan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var epochScan model.Scan
+	if handled, _, err := a.runResumableAttempt(ctx, ctx, epochJob, epochRecord.ID, &epochScan, nil, coverageResumableScanner{plan: cyclePlan}, false); !handled || err == nil || epochScan.CycleID != oldEpoch.ID || epochScan.CycleStatus != "discarded" {
+		t.Fatalf("stale epoch cycle = handled %v scan %#v err %v", handled, epochScan, err)
+	}
 }
 
 func TestResumableRecoveryAndFinishPersistenceFailures(t *testing.T) {
@@ -344,6 +376,37 @@ func TestResumableAttemptHandlesUnitFailuresAndNoProgressStalls(t *testing.T) {
 	var completeError model.Scan
 	if handled, _, err := a.runResumableAttempt(ctx, ctx, job, record.ID, &completeError, nil, coverageResumableScanner{plan: twoUnits, closeDB: db}, false); !handled || err == nil || completeError.Status != "failed" {
 		t.Fatalf("checkpoint persistence failure = handled %v scan %#v err %v", handled, completeError, err)
+	}
+}
+
+func TestManagedFinalizationContinuesWhenLeaseRenewalIsLost(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "resumable-lease-warning.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := config.NormalizeJob(config.Job{Name: "lease-warning", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.40"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour)})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Scanner = coverageResumableScanner{
+		plan: scanner.WorkPlan{Units: []scanner.WorkUnit{
+			{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.40"}, Ports: "1", PortCount: 1, Probes: 1},
+			{Sequence: 1, Protocol: "tcp", Addresses: []string{"192.0.2.40"}, Ports: "2", PortCount: 1, Probes: 1},
+		}},
+		clearLeases: true,
+		closeDB:     db,
+	}
+	scan, _, runErr := a.RunJobRecord(ctx, record)
+	if runErr != nil || scan.Status != "success" {
+		t.Fatalf("managed scan after lost lease = %#v, %v", scan, runErr)
 	}
 }
 

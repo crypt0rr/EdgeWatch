@@ -19,6 +19,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/web"
 	"github.com/robfig/cron/v3"
@@ -81,6 +82,9 @@ func run(args []string) error {
 	}
 	if cmd == "help" {
 		return usage()
+	}
+	if cmd == "notify-send" {
+		return notify.RunSendChild(os.Stdin)
 	}
 	loadConfig := config.Load
 	if cmd == "admin" || cmd == "backup" || cmd == "verify" || cmd == "health" || cmd == "status" || cmd == "history" || cmd == "restore" || (cmd == "baseline" && action == "export") {

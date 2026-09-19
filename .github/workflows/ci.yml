@@ -42,6 +42,8 @@ jobs:
             test ! -e "$artifact"
           done
       - name: Frontend unit tests
+        env:
+          EDGEWATCH_REPORT_ACT_WARNINGS: '1'
         run: npm run test:coverage
       - name: Resolve diff coverage base
         id: frontend-diff-base

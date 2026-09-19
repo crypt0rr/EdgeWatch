@@ -70,6 +70,9 @@ func TestRunVersionHelpAndConfigValidation(t *testing.T) {
 	if err := run([]string{"help"}); err == nil {
 		t.Fatal("help unexpectedly succeeded")
 	}
+	if err := run([]string{"notify-send"}); err == nil || !strings.Contains(err.Error(), "invalid notification child request") {
+		t.Fatalf("notification child dispatch error = %v", err)
+	}
 	if err := run(nil); err == nil {
 		t.Fatal("empty command unexpectedly succeeded")
 	}

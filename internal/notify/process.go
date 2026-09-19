@@ -22,12 +22,17 @@ type notificationProcessRequest struct {
 	Message string `json:"message"`
 }
 
+// These indirections keep the process boundary deterministic in unit tests
+// without ever starting the test binary recursively.
+var notificationExecutable = os.Executable
+var notificationCommand = exec.Command
+
 // runNotificationProcess executes provider code in a short-lived child. A
 // provider panic can therefore terminate only this child instead of the
 // daemon's notification worker or process. The caller already bounds the
 // operation and converts child failures into a redacted delivery error.
 func runNotificationProcess(rawURL, message string) error {
-	executable, err := os.Executable()
+	executable, err := notificationExecutable()
 	if err != nil {
 		return errors.Join(store.ErrDeliveryProvider, err)
 	}
@@ -35,7 +40,7 @@ func runNotificationProcess(rawURL, message string) error {
 	if err != nil {
 		return errors.Join(store.ErrDeliveryProvider, err)
 	}
-	command := exec.Command(executable, "notify-send")
+	command := notificationCommand(executable, "notify-send")
 	command.Stdin = bytes.NewReader(payload)
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard

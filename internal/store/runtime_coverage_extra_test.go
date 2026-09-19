@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/scanner"
 )
 
 func TestRuntimeMetadataFallbackAndSummaryBranches(t *testing.T) {
@@ -108,6 +109,42 @@ func TestRuntimeBaselineEpochAdvancesOnlyForBaselineChanges(t *testing.T) {
 	}
 	if epoch, err := s.RuntimeBaselineEpoch(ctx, record.ID); err != nil || epoch != 2 {
 		t.Fatalf("reset baseline epoch = %d, %v", epoch, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `DROP TABLE job_runtime_meta`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RuntimeBaselineEpoch(ctx, record.ID); err == nil {
+		t.Fatal("missing runtime metadata table did not return an error")
+	}
+}
+
+func TestFinalizeManagedScanRejectsStaleCycleAfterSavingHistory(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+	record, err := s.CreateJob(ctx, testJob("stale-finalize"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := scanner.WorkPlan{Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.30"}, Ports: "1", PortCount: 1, Probes: 1}}}
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), BaselineEpoch: 0, Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded' WHERE id=?`, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	scan := model.Scan{ID: "stale-finalize-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{}}
+	if _, err := s.FinalizeManagedScan(ctx, &scan, record.ID, scan.ConfigHash, nil, func(*model.JobState, *model.Scan) ([]model.Event, error) {
+		t.Fatal("stale cycle finalizer callback should not run")
+		return nil, nil
+	}); !errors.Is(err, ErrCycleNotResumable) {
+		t.Fatalf("stale cycle finalization error = %v", err)
+	}
+	stored, err := s.GetScan(ctx, scan.ID)
+	if err != nil || stored.Status != "success" {
+		t.Fatalf("stale scan history = %#v, %v", stored, err)
 	}
 }
 

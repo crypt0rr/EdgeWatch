@@ -1047,11 +1047,14 @@ func deliveryResultContext(ctx context.Context) (context.Context, context.Cancel
 }
 
 func send(rawURL, message string) error {
-	if isTestBinary() {
+	if notificationIsTestBinary() {
 		return sendInProcess(rawURL, message)
 	}
-	return runNotificationProcess(rawURL, message)
+	return notificationProcessRunner(rawURL, message)
 }
+
+var notificationIsTestBinary = isTestBinary
+var notificationProcessRunner = runNotificationProcess
 
 func sendInProcess(rawURL, message string) error {
 	sender, err := shoutrrr.CreateSender(rawURL)

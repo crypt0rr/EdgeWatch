@@ -185,6 +185,52 @@ func TestLeaseAndDeliveryHelpersCoverBoundaries(t *testing.T) {
 	}
 }
 
+func TestRenewJobLeaseValidatesAndRefreshesOwnership(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	job, err := s.CreateJob(ctx, testJob("renew-lease"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RenewJobLease(ctx, "", "owner", time.Now().Add(time.Minute)); err == nil {
+		t.Fatal("empty job lease was accepted")
+	}
+	if err := s.RenewJobLease(ctx, job.ID, "", time.Now().Add(time.Minute)); err == nil {
+		t.Fatal("empty lease owner was accepted")
+	}
+	if err := s.RenewJobLease(ctx, job.ID, "owner", time.Now().Add(-time.Minute)); err == nil {
+		t.Fatal("expired lease renewal was accepted")
+	}
+	if err := s.RenewJobLease(ctx, job.ID, "owner", time.Now().Add(time.Minute)); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("missing lease renewal = %v, want ErrLeaseLost", err)
+	}
+	if err := s.AcquireJobLease(ctx, job.ID, "owner", time.Now().Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(2 * time.Minute)
+	if err := s.RenewJobLease(ctx, job.ID, "owner", expires); err != nil {
+		t.Fatal(err)
+	}
+	var stored string
+	if err := s.DB.QueryRowContext(ctx, `SELECT expires_at FROM job_leases WHERE job=?`, job.ID).Scan(&stored); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stored, expires.UTC().Format("2006-01-02T15:04")) {
+		t.Fatalf("renewed expiry = %q, want %s", stored, expires.UTC().Format(time.RFC3339))
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := s.RenewJobLease(canceled, job.ID, "owner", time.Now().Add(time.Minute)); err == nil {
+		t.Fatal("canceled lease renewal unexpectedly succeeded")
+	}
+	if err := s.ReleaseJobLease(ctx, job.ID, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RenewJobLease(ctx, job.ID, "owner", time.Now().Add(time.Minute)); !errors.Is(err, ErrLeaseLost) {
+		t.Fatalf("released lease renewal = %v, want ErrLeaseLost", err)
+	}
+}
+
 func TestIncidentChangeApplicationBranches(t *testing.T) {
 	if err := applyAcceptedChange(nil, model.Change{Kind: "port"}); !errors.Is(err, ErrBaselineNotReady) {
 		t.Fatalf("nil baseline error = %v", err)

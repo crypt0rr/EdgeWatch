@@ -288,6 +288,9 @@ func TestEngineProcessSuccessRebuildsCandidateAfterScopeHashChange(t *testing.T)
 }
 
 func TestEngineFingerprintAndApplyChangeEdgeBranches(t *testing.T) {
+	if got := sanitizeNotificationText("mention|spoiler"); !strings.Contains(got, "｜") || strings.Contains(got, "|") {
+		t.Fatalf("notification pipe was not neutralized: %q", got)
+	}
 	learnMissingFingerprints(&model.JobState{}, model.Snapshot{}, 1)
 
 	oldChange := model.Change{Key: "port|edge|tcp|80", Kind: "port", Target: "edge", Protocol: "tcp", Port: 80, Old: "open", New: "not-open", Severity: "info"}

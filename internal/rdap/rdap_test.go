@@ -336,3 +336,25 @@ func TestLookupNegativeCachesUpstreamFailures(t *testing.T) {
 		t.Fatalf("negative cache allowed %d upstream requests, want one", got)
 	}
 }
+
+func TestNegativeLookupLifecycle(t *testing.T) {
+	now := time.Date(2026, time.September, 19, 12, 0, 0, 0, time.UTC)
+	client := New(nil, true)
+	client.Now = func() time.Time { return now }
+
+	client.rememberNegative("", errors.New("ignored"))
+	client.rememberNegative("8.8.8.8", nil)
+	if len(client.negative) != 0 {
+		t.Fatalf("invalid negative entries were retained: %#v", client.negative)
+	}
+
+	client.rememberNegative("8.8.8.8", errors.New(strings.Repeat("x", 600)))
+	message, ok := client.negativeMessage("8.8.8.8", now)
+	if !ok || len(message) != 512 {
+		t.Fatalf("negative cache message = (%q, %v), want bounded active entry", message, ok)
+	}
+	now = now.Add(negativeCacheFor)
+	if _, ok := client.negativeMessage("8.8.8.8", now); ok {
+		t.Fatal("expired negative cache entry remained active")
+	}
+}

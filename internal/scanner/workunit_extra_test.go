@@ -37,6 +37,20 @@ func TestNmapVersionAndScanWorkUnit(t *testing.T) {
 	if _, err := n.ScanWorkUnit(context.Background(), config.Job{}, unit, nil); err == nil || !strings.Contains(err.Error(), "not enabled") {
 		t.Fatalf("disabled protocol error = %v", err)
 	}
+
+	// Older Naabu revisions stored the confirmation template in nmap_args and
+	// left enrichment_args empty. ScanWorkUnit must keep those revisions
+	// executable rather than attempting an empty command template.
+	enrichmentJob := config.NormalizeJob(config.Job{
+		Name:    "legacy-enrichment",
+		Targets: []string{"192.0.2.1"},
+		TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "22", Mode: "connect"},
+	})
+	enrichmentUnit := unit
+	enrichmentUnit.Phase = "enrichment"
+	if _, err := n.ScanWorkUnit(context.Background(), enrichmentJob, enrichmentUnit, nil); err != nil {
+		t.Fatalf("legacy enrichment fallback failed: %v", err)
+	}
 }
 
 func TestScanWorkUnitReappliesTargetExclusions(t *testing.T) {

@@ -29,6 +29,7 @@ const (
 	lookupTimeout        = 8 * time.Second
 	cacheFreshFor        = 24 * time.Hour
 	cacheStaleFor        = 7 * 24 * time.Hour
+	negativeCacheFor     = 30 * time.Second
 	bootstrapFreshFor    = 24 * time.Hour
 	cacheWriteTimeout    = time.Second
 )
@@ -82,6 +83,16 @@ type bootstrapCall struct {
 	err         error
 }
 
+type negativeLookup struct {
+	until   time.Time
+	message string
+}
+
+// dialPinsContextKey carries the per-request DNS answers into the shared
+// hardened transport. Keeping pins in request context lets the transport be
+// reused without sharing mutable maps between concurrent redirects.
+type dialPinsContextKey struct{}
+
 // AddressResolver is deliberately small so tests can provide deterministic
 // DNS answers. Production uses net.DefaultResolver.
 type AddressResolver interface {
@@ -111,7 +122,11 @@ type Client struct {
 	bootstrapFetched  map[int]time.Time
 	bootstrapInflight map[int]*bootstrapCall
 	inflight          map[string]*lookupCall
+	negative          map[string]negativeLookup
 	sem               chan struct{}
+	transportMu       sync.Mutex
+	transportSource   *http.Transport
+	hardenedTransport *http.Transport
 }
 
 func New(s *store.Store, enabled bool) *Client {
@@ -134,6 +149,7 @@ func New(s *store.Store, enabled bool) *Client {
 		bootstrapFetched:  map[int]time.Time{},
 		bootstrapInflight: map[int]*bootstrapCall{},
 		inflight:          map[string]*lookupCall{},
+		negative:          map[string]negativeLookup{},
 		sem:               make(chan struct{}, 4),
 	}
 }
@@ -161,6 +177,9 @@ func (c *Client) Lookup(ctx context.Context, rawAddress string) (Result, error) 
 	}
 	if c.services == nil {
 		c.services = map[int][]bootstrapService{}
+	}
+	if c.negative == nil {
+		c.negative = map[string]negativeLookup{}
 	}
 	if c.sem == nil {
 		c.sem = make(chan struct{}, 4)
@@ -203,6 +222,15 @@ func (c *Client) lookup(ctx context.Context, ip net.IP) (Result, error) {
 			cacheErr = err
 		}
 	}
+	if message, ok := c.negativeMessage(ip.String(), now); ok {
+		if cacheErr == nil && now.Before(cached.StaleUntil) {
+			if result, decodeErr := decodeCached(cached.Payload); decodeErr == nil {
+				result.Status, result.Address, result.FetchedAt, result.ExpiresAt, result.Stale, result.Message = "stale", ip.String(), cached.FetchedAt, cached.ExpiresAt, true, "Registry unavailable; showing cached data"
+				return result, nil
+			}
+		}
+		return Result{Status: "unavailable", Address: ip.String(), Message: message}, errors.New(message)
+	}
 
 	select {
 	case c.sem <- struct{}{}:
@@ -214,6 +242,7 @@ func (c *Client) lookup(ctx context.Context, ip net.IP) (Result, error) {
 	if err == nil {
 		result, fetchErr := c.fetch(lookupCtx, ip, service)
 		if fetchErr == nil {
+			c.clearNegative(ip.String())
 			result.Status, result.Address = "success", ip.String()
 			result.FetchedAt, result.ExpiresAt = now, now.Add(cacheFreshFor)
 			if c.Store != nil {
@@ -235,6 +264,9 @@ func (c *Client) lookup(ctx context.Context, ip net.IP) (Result, error) {
 		}
 		err = fetchErr
 	}
+	if err != nil && lookupCtx.Err() == nil {
+		c.rememberNegative(ip.String(), err)
+	}
 	if cacheErr == nil && now.Before(cached.StaleUntil) {
 		if result, decodeErr := decodeCached(cached.Payload); decodeErr == nil {
 			result.Status, result.Address, result.FetchedAt, result.ExpiresAt, result.Stale, result.Message = "stale", ip.String(), cached.FetchedAt, cached.ExpiresAt, true, "Registry unavailable; showing cached data"
@@ -242,6 +274,42 @@ func (c *Client) lookup(ctx context.Context, ip net.IP) (Result, error) {
 		}
 	}
 	return Result{Status: "unavailable", Address: ip.String(), Message: unavailableMessage(err)}, err
+}
+
+func (c *Client) rememberNegative(address string, err error) {
+	if err == nil || strings.TrimSpace(address) == "" {
+		return
+	}
+	message := unavailableMessage(err)
+	if len(message) > 512 {
+		message = message[:512]
+	}
+	c.mu.Lock()
+	if c.negative == nil {
+		c.negative = map[string]negativeLookup{}
+	}
+	c.negative[address] = negativeLookup{until: c.now().Add(negativeCacheFor), message: message}
+	c.mu.Unlock()
+}
+
+func (c *Client) negativeMessage(address string, now time.Time) (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	failure, ok := c.negative[address]
+	if !ok {
+		return "", false
+	}
+	if !now.Before(failure.until) {
+		delete(c.negative, address)
+		return "", false
+	}
+	return failure.message, true
+}
+
+func (c *Client) clearNegative(address string) {
+	c.mu.Lock()
+	delete(c.negative, address)
+	c.mu.Unlock()
 }
 
 func (c *Client) now() time.Time {
@@ -581,7 +649,7 @@ func (c *Client) getLimited(ctx context.Context, endpoint string, allowlists ...
 	if len(addresses) > 0 {
 		pinned[origin] = append([]net.IPAddr(nil), addresses...)
 	}
-	transport, err := c.safeTransport(baseClient.Transport, pinned)
+	transport, err := c.safeTransport(baseClient.Transport)
 	if err != nil {
 		return nil, err
 	}
@@ -606,7 +674,8 @@ func (c *Client) getLimited(ctx context.Context, endpoint string, allowlists ...
 		}
 		return nil
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	requestCtx := context.WithValue(ctx, dialPinsContextKey{}, pinned)
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -706,6 +775,27 @@ func (c *Client) safeTransport(raw http.RoundTripper, pinSets ...map[string][]ne
 	if !ok {
 		return nil, errors.New("RDAP HTTP client must use a net/http transport")
 	}
+	// Explicit pin sets are retained for low-level tests and callers that need
+	// a one-off transport. Normal requests use the cached context-aware clone
+	// below so concurrent RDAP lookups do not clone transports repeatedly.
+	if len(pinSets) == 0 {
+		c.transportMu.Lock()
+		defer c.transportMu.Unlock()
+		if c.transportSource == base && c.hardenedTransport != nil {
+			return c.hardenedTransport, nil
+		}
+		cloned := base.Clone()
+		cloned.Proxy = nil
+		cloned.DialTLSContext = nil
+		baseDial := cloned.DialContext
+		if baseDial == nil {
+			dialer := &net.Dialer{}
+			baseDial = dialer.DialContext
+		}
+		cloned.DialContext = c.contextAwareDialContext(baseDial)
+		c.transportSource, c.hardenedTransport = base, cloned
+		return cloned, nil
+	}
 	cloned := base.Clone()
 	// Proxies receive the original hostname and can bypass the endpoint
 	// validation/pinned dialer. RDAP deliberately uses direct HTTPS only.
@@ -721,6 +811,13 @@ func (c *Client) safeTransport(raw http.RoundTripper, pinSets ...map[string][]ne
 	}
 	cloned.DialContext = c.safeDialContext(baseDial, pinned)
 	return cloned, nil
+}
+
+func (c *Client) contextAwareDialContext(base func(context.Context, string, string) (net.Conn, error)) func(context.Context, string, string) (net.Conn, error) {
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		pinned, _ := ctx.Value(dialPinsContextKey{}).(map[string][]net.IPAddr)
+		return c.safeDialContext(base, pinned)(ctx, network, address)
+	}
 }
 
 func (c *Client) safeDialContext(base func(context.Context, string, string) (net.Conn, error), pinSets ...map[string][]net.IPAddr) func(context.Context, string, string) (net.Conn, error) {

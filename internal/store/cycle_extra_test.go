@@ -262,6 +262,70 @@ func TestReconcileNaabuDiscoveryAddsDeterministicEnrichmentAndUDP(t *testing.T) 
 	}
 }
 
+func TestReconcileNaabuDiscoveryIncludesBaselineExpectedPorts(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+	jobValue := config.NormalizeJob(config.Job{
+		Name: "naabu-baseline-union", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{AddressBatchSize: 1}},
+	})
+	job, err := s.CreateJob(ctx, jobValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}},
+		Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 443, State: "open"}}}},
+	}
+	if _, err := s.UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &baseline
+		state.BaselineScanID = "baseline"
+		state.BaselineConfigHash = job.Job.SecurityHash()
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	target := scanner.ResolvedTarget{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}}
+	plan := scanner.WorkPlan{
+		Job: job.Job, Targets: []scanner.ResolvedTarget{target},
+		Scopes:     []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}},
+		Units:      []scanner.WorkUnit{{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Targets: []scanner.ResolvedTarget{target}, Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535}},
+		TotalUnits: 1, TotalProbes: 65535,
+	}
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	// Naabu sees only 22 in this run. The active baseline still expects 443,
+	// so resumable reconciliation must create one Nmap unit for both ports.
+	fragment := model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", DiscoveryEngine: "naabu", DiscoveredPorts: []model.PortObservation{{Port: 22, State: "open", Verification: "discovered"}}}}}}}
+	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 2 || summaries[1].Phase != "enrichment" || summaries[1].Ports != "22,443" {
+		t.Fatalf("baseline union enrichment = %#v", summaries)
+	}
+}
+
 func TestReconcileNaabuDiscoveryChunksLargePortSets(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

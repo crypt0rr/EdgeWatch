@@ -116,12 +116,6 @@ func TestAppRunJobAndScheduledWrappers(t *testing.T) {
 	}
 	bound, owner := a.BeginRun(ctx)
 	if !owner {
-		t.Fatal("scheduled wrapper did not own the lifecycle")
-	}
-	a.startScheduled(bound, job)
-	a.StopRun()
-	bound, owner = a.BeginRun(ctx)
-	if !owner {
 		t.Fatal("managed scheduled wrapper did not own the lifecycle")
 	}
 	jobs, err := s.ListJobs(ctx, false)

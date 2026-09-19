@@ -317,7 +317,15 @@ func RenderScannerProfilePreview(profile ScannerProfile) ([]CommandPreview, erro
 		}
 		return result
 	}
-	previews := []CommandPreview{{Executable: "/usr/bin/nmap", Args: nmap(profile.NmapArgs, "tcp", true)}}
+	// A Naabu pipeline has one Nmap invocation: enrichment. Older persisted
+	// profiles used nmap_args for that invocation before enrichment_args was
+	// introduced, so use it only as a compatibility fallback. Never show an
+	// extra Nmap command that the runtime will not execute.
+	nmapTemplate := profile.NmapArgs
+	if profile.Engine == EngineNaabuNmap && len(profile.EnrichmentArgs) > 0 {
+		nmapTemplate = profile.EnrichmentArgs
+	}
+	previews := []CommandPreview{{Executable: "/usr/bin/nmap", Args: nmap(nmapTemplate, "tcp", true)}}
 	if profile.Engine == EngineNaabuNmap {
 		options := profile.Naabu
 		scanType := "c"
@@ -366,9 +374,6 @@ func RenderScannerProfilePreview(profile ScannerProfile) ([]CommandPreview, erro
 			}
 		}
 		previews = append([]CommandPreview{{Executable: "/usr/local/bin/naabu", Args: naabu}}, previews...)
-	}
-	if len(profile.EnrichmentArgs) > 0 {
-		previews = append(previews, CommandPreview{Executable: "/usr/bin/nmap", Args: nmap(profile.EnrichmentArgs, "tcp", true)})
 	}
 	return previews, nil
 }
@@ -479,7 +484,10 @@ func validateArgTemplate(args []string, label string) error {
 		}
 		if strings.HasPrefix(arg, "-") {
 			flag, operand, hasOperand := strings.Cut(arg, "=")
-			flag = strings.ToLower(flag)
+			// Scanner flags are case-sensitive. In particular, Nmap's -V
+			// requests version detection and must not be accepted as the safe
+			// verbosity flag -v merely because validation lowercased it.
+			flag = strings.TrimSpace(flag)
 			if forbiddenScannerFlag(flag) {
 				return fmt.Errorf("%s flag %q is not allowed", label, arg)
 			}

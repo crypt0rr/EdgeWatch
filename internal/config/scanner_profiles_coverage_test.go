@@ -107,16 +107,16 @@ func TestScannerProfileValidationAndPreviewBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(previews) != 3 || previews[0].Executable != "/usr/local/bin/naabu" || previews[1].Executable != "/usr/bin/nmap" || previews[2].Executable != "/usr/bin/nmap" {
+	if len(previews) != 2 || previews[0].Executable != "/usr/local/bin/naabu" || previews[1].Executable != "/usr/bin/nmap" {
 		t.Fatalf("unexpected previews: %#v", previews)
 	}
 	joined := strings.Join(previews[1].Args, " ")
-	for _, expected := range []string{"192.0.2.10", "2001:db8::10", "-4", "-Pn", "-sS", "-sV", "--script", "http-title", "a=example,z=example"} {
+	for _, expected := range []string{"192.0.2.10", "-Pn", "-sS", "--host-timeout", "5m"} {
 		if !strings.Contains(joined, expected) {
 			t.Errorf("custom preview missing %q: %v", expected, previews[1].Args)
 		}
 	}
-	if !strings.Contains(strings.Join(previews[0].Args, " "), "-scan-type") || !strings.Contains(strings.Join(previews[2].Args, " "), "--host-timeout") {
+	if !strings.Contains(strings.Join(previews[0].Args, " "), "-scan-type") || !strings.Contains(joined, "--host-timeout") {
 		t.Fatalf("Naabu/enrichment preview missing expected args: %#v", previews)
 	}
 

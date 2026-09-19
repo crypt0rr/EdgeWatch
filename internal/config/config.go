@@ -53,6 +53,10 @@ type Config struct {
 	Updates       Updates       `yaml:"updates"`
 	Notifications Notifications `yaml:"notifications"`
 	Jobs          []Job         `yaml:"jobs"`
+	// retentionSet distinguishes an omitted deployment setting (which keeps
+	// the safe 90-day default) from an explicit zero value. It is populated
+	// while decoding YAML and intentionally never serialized.
+	retentionSet bool
 }
 
 // ScannerConfig contains deployment-wide safeguards for scanner execution.
@@ -417,6 +421,24 @@ func decode(path string) (*Config, error) {
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, err
 	}
+	// yaml's zero value cannot distinguish `retention: 0` from omission. Read
+	// the already-loaded document tree solely to retain that presence bit; the
+	// strict decoder above remains authoritative for field validation.
+	var document yaml.Node
+	if err := yaml.Unmarshal(b, &document); err != nil {
+		return nil, err
+	}
+	if len(document.Content) > 0 {
+		root := document.Content[0]
+		if root.Kind == yaml.MappingNode {
+			for index := 0; index+1 < len(root.Content); index += 2 {
+				if root.Content[index].Value == "retention" && root.Content[index+1].Tag != "!!null" {
+					cfg.retentionSet = true
+					break
+				}
+			}
+		}
+	}
 	var trailing yaml.Node
 	if err := dec.Decode(&trailing); err != io.EOF {
 		if err == nil {
@@ -514,7 +536,7 @@ func applyDefaults(c *Config) {
 	if c.Database == "" {
 		c.Database = "/var/lib/edgewatch/edgewatch.db"
 	}
-	if c.Retention == 0 {
+	if c.Retention == 0 && !c.retentionSet {
 		c.Retention = Duration(90 * 24 * time.Hour)
 	}
 	if c.Scheduler.MaxConcurrent == 0 && !c.Scheduler.maxConcurrentSet {

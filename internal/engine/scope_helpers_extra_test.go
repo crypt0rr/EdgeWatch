@@ -43,19 +43,25 @@ func TestScopeHelpersAndScopeChangeMerge(t *testing.T) {
 	merged := mergeForScopeChange(old, candidate)
 	units := unitMap(merged)
 	unit := units["edge.example\x00tcp"]
-	if len(unit.Ports) != 2 {
-		t.Fatalf("merged ports = %#v, want candidate and retained old ports", unit.Ports)
+	if len(unit.Ports) != 1 || unit.Ports[0].Port != 443 {
+		t.Fatalf("merged ports = %#v, want only ports in the new scope", unit.Ports)
 	}
 	for _, port := range unit.Ports {
 		if port.Port == 443 && port.Service != "" {
 			t.Fatalf("service fingerprint should be cleared after disabling detection: %#v", port)
 		}
 	}
-	if got := merged.DNS["edge.example"]; len(got) != 1 || got[0] != "192.0.2.1" {
-		t.Fatalf("retained DNS addresses = %#v", got)
+	if got := merged.DNS["edge.example"]; len(got) != 1 || got[0] != "192.0.2.9" {
+		t.Fatalf("candidate DNS addresses = %#v", got)
 	}
 	if _, ok := merged.DNS["old.example"]; ok {
 		t.Fatal("removed DNS target was retained")
+	}
+	if got := candidate.DNS["edge.example"]; len(got) != 1 || got[0] != "192.0.2.9" {
+		t.Fatalf("candidate DNS was mutated: %#v", got)
+	}
+	if len(candidate.Units) != 1 || len(candidate.Units[0].Ports) != 2 {
+		t.Fatalf("candidate units were mutated: %#v", candidate.Units)
 	}
 	if len(unitMap(merged)) != 1 {
 		t.Fatalf("unit map = %#v", unitMap(merged))

@@ -14,6 +14,7 @@ import (
 const (
 	jobSilenceMinimumInterval = time.Minute
 	jobSilenceLookback        = 5 * 365 * 24 * time.Hour
+	jobSilenceHeartbeatBudget = 5 * time.Second
 )
 
 // nowUTC is kept behind a small injectable clock so the daemon watchdog can
@@ -91,6 +92,22 @@ func (a *App) checkJobSilence(ctx context.Context, now time.Time) {
 			a.wakeDelivery()
 		}
 	}
+}
+
+// checkJobSilenceBounded keeps the daemon heartbeat responsive when a large
+// installation or a temporarily busy SQLite writer makes the watchdog query
+// slow. A missed maintenance pass is safe; the next heartbeat retries it.
+func (a *App) checkJobSilenceBounded(ctx context.Context, now time.Time) {
+	budget := jobSilenceHeartbeatBudget
+	if a.heartbeatInterval > 0 && a.heartbeatInterval/2 < budget {
+		budget = a.heartbeatInterval / 2
+	}
+	if budget <= 0 {
+		budget = time.Second
+	}
+	maintenanceCtx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	a.checkJobSilence(maintenanceCtx, now)
 }
 
 func (a *App) silenceLogger() *slog.Logger {

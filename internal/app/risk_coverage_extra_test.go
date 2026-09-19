@@ -116,23 +116,7 @@ func TestAppStartTrackedAndManagedSchedulerSkips(t *testing.T) {
 	a.startManagedScheduled(bound, archivedRecord.ID)
 	a.StopRun()
 
-	// Direct wrapper coverage keeps the scheduler's busy and failure branches
-	// deterministic without waiting for a cron tick.
 	job := config.NormalizeJob(config.Job{Name: "wrapper", Schedule: "0 * * * *", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Second)})
-	a, err = New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Exercise busy before the scanner is reached, then an ordinary failure on
-	// an app created by New so all required runtime dependencies are present.
-	a.active.Store(job.Name, true)
-	a.runScheduled(ctx, job)
-	a.active.Delete(job.Name)
-	a.Scanner = failingScanner{err: errors.New("wrapper failure")}
-	a.runScheduled(ctx, job)
-	a.Scanner = schedulerFake{}
-	a.runScheduled(ctx, job)
-
 	if _, _, err := a.runJobRecord(ctx, store.JobRecord{ID: "archived", Job: job, Archived: true}, false); err == nil || !strings.Contains(err.Error(), "archived") {
 		t.Fatal("archived record was accepted")
 	}

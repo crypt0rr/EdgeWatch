@@ -392,7 +392,11 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 		for index := range groupTargets {
 			groupTargets[index].Aggregate = false
 		}
-		result, err := n.scanProtocolBatchDetailedProgressWithTemplate(ctx, groupTargets, "tcp", pc, job.Timing, job.AssumesAlive(), pc.EnrichmentArgs, nil, func(update invocationProgress) {
+		enrichmentArgs := pc.EnrichmentArgs
+		if len(enrichmentArgs) == 0 {
+			enrichmentArgs = pc.NmapArgs
+		}
+		result, err := n.scanProtocolBatchDetailedProgressWithTemplate(ctx, groupTargets, "tcp", pc, job.Timing, job.AssumesAlive(), enrichmentArgs, nil, func(update invocationProgress) {
 			if report == nil {
 				return
 			}

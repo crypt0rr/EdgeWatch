@@ -51,6 +51,13 @@ const maxNmapOutput = 16 << 20
 
 var errNmapProgressOutputExceeded = fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput)
 
+// scannerProbeEnv keeps version probes deterministic and prevents a scanner
+// binary from reading user configuration or credentials from the daemon's
+// environment. Scan invocations have the same contract in their own runner;
+// version checks use it as well so startup cannot be influenced by host-local
+// settings.
+var scannerProbeEnv = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent", "XDG_CONFIG_HOME=/nonexistent"}
+
 // Progress describes the bounded, operator-facing work completed by a scan.
 // Counts are based on resolved addresses and ports, and are deliberately
 // estimates of Nmap probes rather than an SLA for network response time.
@@ -173,7 +180,7 @@ type resolvedTarget struct {
 const nmapBatchSize = 128
 
 func (n *Nmap) Version(ctx context.Context) string {
-	out, err := exec.CommandContext(ctx, n.Path, "--version").Output()
+	out, err := runScannerVersionProbe(ctx, n.Path, "--version")
 	if err != nil {
 		return "unknown"
 	}
@@ -190,9 +197,9 @@ func (n *Nmap) NaabuVersion(ctx context.Context) string {
 	if strings.TrimSpace(path) == "" {
 		path = "/usr/local/bin/naabu"
 	}
-	out, err := exec.CommandContext(ctx, path, "-version").CombinedOutput()
+	out, err := runScannerVersionProbe(ctx, path, "-version")
 	if err != nil {
-		out, err = exec.CommandContext(ctx, path, "--version").CombinedOutput()
+		out, err = runScannerVersionProbe(ctx, path, "--version")
 	}
 	if err != nil {
 		return "unknown"
@@ -227,6 +234,41 @@ func (n *Nmap) NaabuVersion(ctx context.Context) string {
 		}
 	}
 	return "unknown"
+}
+
+const maxVersionProbeOutput = 64 << 10
+
+// runScannerVersionProbe bounds both stdout and stderr independently. A
+// scanner banner is diagnostic startup metadata, not a scan result, and must
+// never be allowed to consume the daemon's output budget or inherit a user's
+// scanner configuration. The fixed command is killed as soon as either stream
+// exceeds the cap so a malicious replacement cannot keep running after the
+// bound is reached.
+func runScannerVersionProbe(ctx context.Context, path string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, path, args...)
+	cmd.Env = append([]string(nil), scannerProbeEnv...)
+	var stdout, stderr cappedBuffer
+	var exceeded atomic.Bool
+	kill := func() {
+		if exceeded.CompareAndSwap(false, true) && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}
+	stdout = cappedBuffer{limit: maxVersionProbeOutput, onExceeded: kill}
+	stderr = cappedBuffer{limit: maxVersionProbeOutput, onExceeded: kill}
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if exceeded.Load() || stdout.exceeded || stderr.exceeded {
+		return nil, fmt.Errorf("scanner version output exceeded %d bytes", maxVersionProbeOutput)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// A few Naabu builds print their version banner on stderr. Keep stdout and
+	// stderr independently bounded above, then expose their bounded combined
+	// text to the conservative parser used by NaabuVersion.
+	return append(stdout.Bytes(), stderr.Bytes()...), nil
 }
 
 func (n *Nmap) Scan(ctx context.Context, job config.Job) (model.Snapshot, error) {
@@ -790,13 +832,17 @@ func nmapArgs(family int, protocol string, pc config.Protocol, timing string, as
 	return nmapArgsWithTemplate(family, protocol, pc, timing, assumeAlive, addresses, pc.NmapArgs)
 }
 
-// nmapEnrichmentArgs renders the Naabu→Nmap confirmation invocation. The
-// profile has separate Nmap-only and enrichment templates; applying the former
-// here would make a job silently inherit switches intended for a different
-// engine. NSE settings remain common to both paths and are rendered by the
-// shared helper.
+// nmapEnrichmentArgs renders the Naabu→Nmap confirmation invocation. New
+// profiles use enrichment_args; nmap_args remains a compatibility fallback
+// for older persisted Naabu revisions that predate the separate field. The
+// preview uses the same precedence so administrators see the command that
+// will actually run.
 func nmapEnrichmentArgs(family int, protocol string, pc config.Protocol, timing string, assumeAlive bool, addresses []string) []string {
-	return nmapArgsWithTemplate(family, protocol, pc, timing, assumeAlive, addresses, pc.EnrichmentArgs)
+	template := pc.EnrichmentArgs
+	if len(template) == 0 {
+		template = pc.NmapArgs
+	}
+	return nmapArgsWithTemplate(family, protocol, pc, timing, assumeAlive, addresses, template)
 }
 
 func nmapArgsWithTemplate(family int, protocol string, pc config.Protocol, timing string, assumeAlive bool, addresses, template []string) []string {
@@ -1054,7 +1100,7 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 	// it bounded for the fallback path used by older/test scanner binaries and
 	// emit only human-readable lines; XML fragments printed by a compatibility
 	// binary must never replace the last useful progress detail.
-	stdout := &progressOutputWriter{limit: maxNmapOutput, onExceeded: killOnOutputLimit, emit: func(line string) {
+	stdout := &progressOutputWriter{limit: maxProgressOutput, onExceeded: killOnOutputLimit, emit: func(line string) {
 		if looksLikeNmapXML(line) {
 			return
 		}

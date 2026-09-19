@@ -314,3 +314,47 @@ func TestUnavailableMessage(t *testing.T) {
 		t.Fatalf("error unavailable message = %q", got)
 	}
 }
+
+func TestLookupNegativeCachesUpstreamFailures(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "temporary outage", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	client := New(nil, true)
+	client.AllowPrivateHosts = true
+	client.HTTPClient = server.Client()
+	client.BootstrapIPv4URL = server.URL + "/ipv4.json"
+	for attempt := 0; attempt < 2; attempt++ {
+		result, err := client.Lookup(context.Background(), "198.51.100.20")
+		if err == nil || result.Status != "unavailable" {
+			t.Fatalf("failed lookup %d = %#v, %v", attempt, result, err)
+		}
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("negative cache allowed %d upstream requests, want one", got)
+	}
+}
+
+func TestNegativeLookupLifecycle(t *testing.T) {
+	now := time.Date(2026, time.September, 19, 12, 0, 0, 0, time.UTC)
+	client := New(nil, true)
+	client.Now = func() time.Time { return now }
+
+	client.rememberNegative("", errors.New("ignored"))
+	client.rememberNegative("8.8.8.8", nil)
+	if len(client.negative) != 0 {
+		t.Fatalf("invalid negative entries were retained: %#v", client.negative)
+	}
+
+	client.rememberNegative("8.8.8.8", errors.New(strings.Repeat("x", 600)))
+	message, ok := client.negativeMessage("8.8.8.8", now)
+	if !ok || len(message) != 512 {
+		t.Fatalf("negative cache message = (%q, %v), want bounded active entry", message, ok)
+	}
+	now = now.Add(negativeCacheFor)
+	if _, ok := client.negativeMessage("8.8.8.8", now); ok {
+		t.Fatal("expired negative cache entry remained active")
+	}
+}

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -158,6 +159,20 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 	var changes []model.Change
 	var events []model.Event
 	if state.Baseline != nil {
+		// An incomplete scan with no positive evidence cannot confirm that every
+		// expected port disappeared: the missing coverage may be the reason for
+		// the empty result. Do not let it advance the complete-scan total-loss
+		// confirmation counter, and discard pending closure anomalies that were
+		// waiting on this unreliable observation.
+		if positivePortCount(scan.Snapshot) == 0 {
+			clearTotalLossCandidate(state)
+			clearPendingTotalLoss(state)
+			events = append(events, model.Event{Type: "scan-incomplete", Job: scan.Job, ScanID: scan.ID, Message: incompleteScanError(scan.Snapshot), CreatedAt: scan.FinishedAt})
+			return events, nil, nil
+		}
+		// A partial scan with some positive evidence can still compare reachable
+		// targets, but it must never carry a stale total-loss candidate forward.
+		clearTotalLossCandidate(state)
 		changes = Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
 		filtered := changes[:0]
 		for _, change := range changes {
@@ -176,6 +191,14 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		events = append(events, model.Event{Type: "baseline-stalled", Job: scan.Job, ScanID: scan.ID, Message: fmt.Sprintf("Baseline learning is stalled after %d incomplete scans", state.IncompleteCandidateAttempts), CreatedAt: scan.FinishedAt})
 	}
 	return events, changes, nil
+}
+
+func clearPendingTotalLoss(state *model.JobState) {
+	for key, pending := range state.Pending {
+		if pending.Change.New == "not-open" {
+			delete(state.Pending, key)
+		}
+	}
 }
 
 const totalLossConfirmationScans = 2
@@ -356,7 +379,7 @@ func advanceCandidate(state *model.JobState, scan model.Scan, required int, merg
 	if state.CandidateHash == hash {
 		state.CandidateCount++
 	} else {
-		candidate := scan.Snapshot
+		candidate := cloneSnapshot(scan.Snapshot)
 		state.Candidate = &candidate
 		state.CandidateHash = hash
 		state.CandidateCount = 1
@@ -459,11 +482,12 @@ func learnMissingFingerprints(state *model.JobState, current model.Snapshot, req
 			}
 			state.FingerprintCandidates[key] = candidate
 			if candidate.Count >= required {
-				setBaselineService(state.Baseline, unit.Target, unit.Protocol, port.Port, candidate.Value)
-				// The learned service is an expected-state mutation that does not
-				// replace the immutable source scan. Host explorer reads must use the
-				// runtime baseline until a later scan establishes a new source.
-				state.BaselineModified = true
+				if setBaselineService(state.Baseline, unit.Target, unit.Protocol, port.Port, candidate.Value) {
+					// The learned service is an expected-state mutation that does not
+					// replace the immutable source scan. Host explorer reads must use the
+					// runtime baseline until a later scan establishes a new source.
+					state.BaselineModified = true
+				}
 				delete(state.FingerprintCandidates, key)
 			} else {
 				learning[key] = struct{}{}
@@ -492,18 +516,22 @@ func baselineService(snapshot model.Snapshot, target, protocol string, port int)
 	return ""
 }
 
-func setBaselineService(snapshot *model.Snapshot, target, protocol string, port int, service string) {
+func setBaselineService(snapshot *model.Snapshot, target, protocol string, port int, service string) bool {
 	for i := range snapshot.Units {
 		if snapshot.Units[i].Target != target || snapshot.Units[i].Protocol != protocol {
 			continue
 		}
 		for j := range snapshot.Units[i].Ports {
 			if snapshot.Units[i].Ports[j].Port == port {
+				if snapshot.Units[i].Ports[j].Service == service {
+					return false
+				}
 				snapshot.Units[i].Ports[j].Service = service
-				return
+				return true
 			}
 		}
 	}
+	return false
 }
 
 func (e *Engine) Failure(ctx context.Context, job string, scan model.Scan) ([]model.Event, error) {
@@ -789,28 +817,32 @@ func applyChangesWithIncomplete(state *model.JobState, job, scanID string, curre
 }
 
 func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
-	result := candidate
+	result := cloneSnapshot(candidate)
 	oldUnits := unitMap(old)
 	candidateUnits := unitMap(candidate)
+	// Keep only ports that the new security scope actually covers. A malformed
+	// or stale candidate must not smuggle an out-of-scope positive port into the
+	// new baseline during a hash migration.
 	for key, cu := range candidateUnits {
 		parts := strings.Split(key, "\x00")
 		target, protocol := parts[0], parts[1]
 		ou, oldExists := oldUnits[key]
-		if !oldExists {
-			continue
-		}
 		ports := map[int]model.PortState{}
 		for _, p := range cu.Ports {
-			if !scopeAllows(old, target, protocol, p.Port, false) {
+			if scopeAllows(candidate, target, protocol, p.Port, false) {
 				ports[p.Port] = p
 			}
 		}
-		for _, p := range ou.Ports {
-			if scopeAllows(candidate, target, protocol, p.Port, false) {
-				if !scopeAllows(candidate, target, protocol, p.Port, true) {
-					p.Service = ""
+		if oldExists {
+			for _, p := range ou.Ports {
+				if scopeAllows(candidate, target, protocol, p.Port, false) {
+					if !scopeAllows(candidate, target, protocol, p.Port, true) {
+						p.Service = ""
+					}
+					if _, exists := ports[p.Port]; !exists {
+						ports[p.Port] = p
+					}
 				}
-				ports[p.Port] = p
 			}
 		}
 		cu.Ports = nil
@@ -819,17 +851,64 @@ func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
 		}
 		candidateUnits[key] = cu
 	}
+	// If a target remains in the new scope but a degraded candidate omitted its
+	// unit entirely, retain the old expected unit filtered to the new scope. A
+	// target removed from the scope is intentionally not copied forward.
+	for key, ou := range oldUnits {
+		if _, exists := candidateUnits[key]; exists {
+			continue
+		}
+		parts := strings.Split(key, "\x00")
+		target, protocol := parts[0], parts[1]
+		if !hasTarget(candidate, target) || !scopeAllowsProtocol(candidate, target, protocol) {
+			continue
+		}
+		clone := ou
+		clone.Ports = nil
+		for _, p := range ou.Ports {
+			if !scopeAllows(candidate, target, protocol, p.Port, false) {
+				continue
+			}
+			if !scopeAllows(candidate, target, protocol, p.Port, true) {
+				p.Service = ""
+			}
+			clone.Ports = append(clone.Ports, p)
+		}
+		if addresses := result.DNS[target]; len(addresses) > 0 {
+			clone.Addresses = append([]string(nil), addresses...)
+		}
+		candidateUnits[key] = clone
+	}
 	result.Units = nil
 	for _, u := range candidateUnits {
 		result.Units = append(result.Units, u)
 	}
-	for target, addresses := range old.DNS {
-		if hasTarget(candidate, target) {
-			result.DNS[target] = append([]string(nil), addresses...)
-		}
-	}
 	result.Normalize()
 	return result
+}
+
+func scopeAllowsProtocol(snapshot model.Snapshot, target, protocol string) bool {
+	for _, scope := range snapshot.Scopes {
+		if scope.Target == target && strings.EqualFold(scope.Protocol, protocol) {
+			return true
+		}
+	}
+	return false
+}
+
+// cloneSnapshot makes scope migration work on an independent value. Scan
+// snapshots are immutable history; in particular DNS relationships and unit
+// slices must not be changed while constructing the mutable runtime baseline.
+func cloneSnapshot(snapshot model.Snapshot) model.Snapshot {
+	payload, err := json.Marshal(snapshot)
+	if err != nil {
+		return snapshot
+	}
+	var clone model.Snapshot
+	if err := json.Unmarshal(payload, &clone); err != nil {
+		return snapshot
+	}
+	return clone
 }
 func unitMap(s model.Snapshot) map[string]model.Unit {
 	m := map[string]model.Unit{}
@@ -908,7 +987,10 @@ const maxNotificationFieldRunes = 512
 // delimiters are replaced with visually similar, non-parsing characters.
 func sanitizeNotificationText(value string) string {
 	value = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		// Unicode format characters include bidi overrides and isolates. They
+		// can reorder or hide notification text even though they are not ASCII
+		// controls; flatten them along with line separators.
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
 			return ' '
 		}
 		switch r {
@@ -934,6 +1016,10 @@ func sanitizeNotificationText(value string) string {
 			return '＿'
 		case '~':
 			return '～'
+		case '@':
+			return '＠'
+		case '|':
+			return '｜'
 		default:
 			return r
 		}

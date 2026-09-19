@@ -362,6 +362,12 @@ func (n *Nmap) ScanWorkUnit(ctx context.Context, job config.Job, unit WorkUnit, 
 	template := pc.NmapArgs
 	if unit.Phase == "enrichment" {
 		template = pc.EnrichmentArgs
+		if len(template) == 0 {
+			// Older Naabu profiles used nmap_args for the confirmation command.
+			// Keep those revisions executable while newer profiles can use the
+			// clearer enrichment_args field.
+			template = pc.NmapArgs
+		}
 	}
 	result, err := n.scanProtocolBatchDetailedProgressWithTemplate(ctx, importResolvedTargets(unit.Targets), unit.Protocol, pc, job.Timing, job.AssumesAlive(), template, nil, func(update invocationProgress) {
 		lastOutput = update.Output

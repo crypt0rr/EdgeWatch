@@ -93,6 +93,27 @@ func TestJobSilenceWatchdogSkipsActiveJob(t *testing.T) {
 	}
 }
 
+func TestCheckJobSilenceBoundedUsesHeartbeatBudget(t *testing.T) {
+	now := time.Date(2026, time.January, 1, 4, 30, 0, 0, time.UTC)
+	a := &App{}
+
+	// A normal heartbeat shortens the maintenance context to half the
+	// heartbeat interval, keeping a slow watchdog query from delaying the next
+	// daemon tick.
+	a.heartbeatInterval = 2 * time.Second
+	a.checkJobSilenceBounded(context.Background(), now)
+
+	// A sub-second heartbeat would otherwise produce a zero duration. The
+	// bounded path must still provide a usable timeout rather than passing a
+	// context that is already expired.
+	a.heartbeatInterval = time.Nanosecond
+	a.checkJobSilenceBounded(context.Background(), now)
+
+	// With no configured heartbeat, retain the five-second maintenance budget.
+	a.heartbeatInterval = 0
+	a.checkJobSilenceBounded(context.Background(), now)
+}
+
 func TestCronIntervalHandlesSlowSchedules(t *testing.T) {
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	parsed, err := parser.Parse("CRON_TZ=UTC 0 3 * * 0")

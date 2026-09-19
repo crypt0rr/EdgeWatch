@@ -905,6 +905,14 @@ func (a *App) Daemon(ctx context.Context) error {
 		a.Logger.Info("startup expired job leases reclaimed", "leases", released)
 	}
 	defer func() {
+		// Release the daemon lease only after all tracked scans have stopped.
+		// Otherwise another process can acquire the lease while an in-flight
+		// scan still owns the old daemon's resources and writes state.
+		if owned {
+			a.StopRun()
+		} else {
+			a.wg.Wait()
+		}
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = a.Store.ReleaseLease(releaseCtx, owner)
@@ -1003,7 +1011,7 @@ func (a *App) Daemon(ctx context.Context) error {
 				continue
 			}
 			missedHeartbeats = 0
-			a.checkJobSilence(ctx, a.nowUTC())
+			a.checkJobSilenceBounded(ctx, a.nowUTC())
 		case <-prune.C:
 			if removed, err := a.Store.DeleteExpiredSessions(ctx, time.Now().UTC()); err != nil {
 				a.Logger.Error("expired-session cleanup failed", "error", err)
@@ -1162,16 +1170,18 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 	a.emitUpdateStatus()
 }
 
-func (a *App) startScheduled(ctx context.Context, job config.Job) {
-	a.startTracked(func() {
-		a.runScheduled(ctx, job)
-	})
-}
-
 func (a *App) startManagedScheduled(ctx context.Context, id string) {
 	a.startTracked(func() {
 		record, err := a.Store.GetJob(ctx, id)
-		if err != nil || record.Archived || !record.Enabled {
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				a.Logger.Warn("scheduled job no longer exists", "job_id", id)
+			} else {
+				a.Logger.Error("scheduled job lookup failed", "job_id", id, "error", err)
+			}
+			return
+		}
+		if record.Archived || !record.Enabled {
 			return
 		}
 		scan, events, runErr := a.runJobRecord(ctx, record, false)
@@ -1401,18 +1411,6 @@ func (a *App) startDeliveryWorker(ctx context.Context) <-chan struct{} {
 	return done
 }
 
-func (a *App) runScheduled(ctx context.Context, job config.Job) {
-	scan, events, err := a.RunJob(ctx, job)
-	if errors.Is(err, scanner.ErrBusy) {
-		a.Logger.Warn("scheduled run skipped because job is active", "job", job.Name)
-		return
-	}
-	if err != nil {
-		a.Logger.Error("scan failed", "job", job.Name, "scan_id", scan.ID, "error", err)
-		return
-	}
-	a.Logger.Info("scan complete", "job", job.Name, "scan_id", scan.ID, "events", len(events))
-}
 func hostname() string {
 	v, err := os.Hostname()
 	if err != nil {

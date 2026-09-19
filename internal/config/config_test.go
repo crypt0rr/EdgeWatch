@@ -133,6 +133,21 @@ jobs:
 	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "max_concurrent_scans") {
 		t.Fatalf("explicit zero scheduler limit was silently defaulted: %v", err)
 	}
+	withoutRetention := strings.Replace(yaml, "retention: 90d\n", "", 1)
+	if err := os.WriteFile(path, []byte(withoutRetention), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load(path)
+	if err != nil || cfg.Version != 1 || cfg.Retention.Value() != 90*24*time.Hour {
+		t.Fatalf("omitted retention/version defaults = %#v, error = %v", cfg, err)
+	}
+	explicitZeroRetention := strings.Replace(yaml, "retention: 90d", "retention: 0s", 1)
+	if err := os.WriteFile(path, []byte(explicitZeroRetention), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "retention") {
+		t.Fatalf("explicit zero retention was silently defaulted: %v", err)
+	}
 }
 
 func TestTargetExclusionsRejectUnsafeTargetsByDefaultAndAllowExplicitOverride(t *testing.T) {
@@ -533,7 +548,7 @@ func TestNormalizeNaabuForcesFullTCPRange(t *testing.T) {
 
 func TestScannerProfileValidationRejectsUnsafeFlagsAndEngineMismatch(t *testing.T) {
 	validNaabu := ScannerProfile{Engine: EngineNaabuNmap, Naabu: BuiltinNaabuProfile().Naabu, NaabuArgs: []string{PlaceholderTargetsFile, PlaceholderPorts, PlaceholderStructuredOutput}}
-	for _, value := range []string{"-A", "-O", "-R", "-sC", "--traceroute", "-Pn", "--script=default", "$(touch /tmp/x)", "/bin/sh", "evil.example", "evil", "192.0.2.10", "-", "--"} {
+	for _, value := range []string{"-A", "-O", "-R", "-V", "-sC", "--traceroute", "-Pn", "--script=default", "$(touch /tmp/x)", "/bin/sh", "evil.example", "evil", "192.0.2.10", "-", "--"} {
 		profile := validNaabu
 		profile.NaabuArgs = append([]string(nil), validNaabu.NaabuArgs...)
 		profile.NaabuArgs = append(profile.NaabuArgs, value)

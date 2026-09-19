@@ -321,7 +321,12 @@ func (s *Store) ListScannerProfileRevisions(ctx context.Context, id string) ([]S
 		}
 		definition, err := decodeProfileDefinition([]byte(raw))
 		if err != nil {
-			return nil, err
+			// Historical rows are immutable audit data. A malformed revision
+			// must not make the whole profile history (or its API page) appear
+			// missing; current profile reads still validate the active definition.
+			// Omit only this unusable revision and continue returning the rows
+			// that can be safely rendered.
+			continue
 		}
 		revision.Definition = definition
 		revision.CreatedAt = profileTime(created)

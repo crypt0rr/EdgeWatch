@@ -262,8 +262,8 @@ func TestEngineScopeEdgeBranches(t *testing.T) {
 		Scopes: []model.Scope{{Target: "edge", Protocol: "tcp", Ports: "80"}, {Target: "new", Protocol: "tcp", Ports: "22"}},
 		Units:  []model.Unit{{Target: "new", Protocol: "tcp", Ports: []model.PortState{{Port: 22, State: "open"}}}},
 	})
-	if len(merged.Units) != 1 || merged.Units[0].Target != "new" {
-		t.Fatalf("new-unit scope merge = %#v", merged.Units)
+	if len(merged.Units) != 2 || unitMap(merged)["edge\x00tcp"].Target != "edge" || unitMap(merged)["new\x00tcp"].Target != "new" {
+		t.Fatalf("scope merge did not preserve retained target expectations = %#v", merged.Units)
 	}
 
 	change := model.Change{Key: "port|edge|tcp|1", Kind: "port", Target: "edge", Protocol: "tcp", Port: 1, Old: "not-open", New: "open", Severity: "critical"}
@@ -288,6 +288,9 @@ func TestEngineProcessSuccessRebuildsCandidateAfterScopeHashChange(t *testing.T)
 }
 
 func TestEngineFingerprintAndApplyChangeEdgeBranches(t *testing.T) {
+	if got := sanitizeNotificationText("mention|spoiler"); !strings.Contains(got, "｜") || strings.Contains(got, "|") {
+		t.Fatalf("notification pipe was not neutralized: %q", got)
+	}
 	learnMissingFingerprints(&model.JobState{}, model.Snapshot{}, 1)
 
 	oldChange := model.Change{Key: "port|edge|tcp|80", Kind: "port", Target: "edge", Protocol: "tcp", Port: 80, Old: "open", New: "not-open", Severity: "info"}
@@ -344,5 +347,48 @@ func TestIncompleteScanLearningStallAndServiceFiltering(t *testing.T) {
 	events, changes, err := processSuccessWithChanges(&state, job, serviceScan)
 	if err != nil || len(events) != 1 || len(changes) != 1 || changes[0].Port != 81 {
 		t.Fatalf("service learning result = events %#v changes %#v err %v", events, changes, err)
+	}
+	state.Baseline.Units[0].Ports[0].Service = "http"
+	state.BaselineModified = false
+	if setBaselineService(state.Baseline, "edge", "tcp", 80, "http") {
+		t.Fatal("unchanged service fingerprint reported a mutation")
+	}
+	if state.BaselineModified {
+		t.Fatal("unchanged service fingerprint marked baseline modified")
+	}
+}
+
+func TestIncompleteTotalLossDoesNotConfirmOrRetainPendingClosure(t *testing.T) {
+	job := config.Job{Name: "incomplete-total-loss", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{{Target: "edge", Protocol: "tcp", Ports: "80"}},
+		Units:  []model.Unit{{Target: "edge", Protocol: "tcp", Ports: []model.PortState{{Port: 80, State: "open"}}}},
+	}
+	state := model.JobState{
+		Baseline:                &baseline,
+		BaselineConfigHash:      "same",
+		TotalLossCandidateHash:  "stale",
+		TotalLossCandidateCount: 1,
+		Pending: map[string]model.Pending{
+			"port|edge|tcp|80": {Change: model.Change{Key: "port|edge|tcp|80", Kind: "port", Target: "edge", Protocol: "tcp", Port: 80, New: "not-open"}, Count: 1},
+			"port|edge|tcp|22": {Change: model.Change{Key: "port|edge|tcp|22", Kind: "port", Target: "edge", Protocol: "tcp", Port: 22, New: "open"}, Count: 1},
+		},
+	}
+	scan := model.Scan{ID: "partial-total-loss", Job: job.Name, ConfigHash: "same", FinishedAt: time.Now().UTC(), Snapshot: model.Snapshot{
+		Scopes: baseline.Scopes,
+		Hosts:  []model.HostObservation{{Address: "192.0.2.1", Status: "down", StatusReason: "nmap-omitted"}},
+	}}
+	events, changes, err := processIncompleteSuccess(&state, job, scan)
+	if err != nil || len(changes) != 0 || len(events) != 1 || events[0].Type != "scan-incomplete" {
+		t.Fatalf("incomplete total-loss result = events %#v changes %#v err %v", events, changes, err)
+	}
+	if state.TotalLossCandidateHash != "" || state.TotalLossCandidateCount != 0 {
+		t.Fatalf("incomplete scan advanced total-loss confirmation: %#v", state)
+	}
+	if _, ok := state.Pending["port|edge|tcp|80"]; ok {
+		t.Fatal("incomplete total-loss retained a pending closure")
+	}
+	if _, ok := state.Pending["port|edge|tcp|22"]; !ok {
+		t.Fatal("incomplete total-loss removed an unrelated pending addition")
 	}
 }

@@ -199,8 +199,8 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 		return false, err
 	}
 	defer tx.Rollback()
-	var status string
-	if err := tx.QueryRowContext(ctx, `SELECT status FROM scan_cycles WHERE id=?`, cycleID).Scan(&status); errors.Is(err, sql.ErrNoRows) {
+	var status, cycleJob string
+	if err := tx.QueryRowContext(ctx, `SELECT status,job_id FROM scan_cycles WHERE id=?`, cycleID).Scan(&status, &cycleJob); errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("%w: %s", ErrNoScanCycle, cycleID)
 	} else if err != nil {
 		return false, err
@@ -258,8 +258,44 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 
 	// Gather one deterministic port set per effective address from only this
 	// batch. Discovery address batches are disjoint; unioning within the batch
-	// still protects against duplicate host observations during recovery.
+	// still protects against duplicate host observations during recovery. A
+	// current baseline expectation is included as a bounded safety net: Naabu
+	// emits positive discoveries only, so a transient miss must still be
+	// confirmed by Nmap before EdgeWatch records a closure.
 	portsByAddress := map[string]map[int]struct{}{}
+	batchAddresses := map[string]struct{}{}
+	for _, row := range pending {
+		for _, address := range row.unit.Addresses {
+			if normalized := normalizeCycleAddress(address); normalized != "" {
+				batchAddresses[normalized] = struct{}{}
+			}
+		}
+		for _, host := range row.snapshot.Hosts {
+			if normalized := normalizeCycleAddress(host.Address); normalized != "" {
+				batchAddresses[normalized] = struct{}{}
+			}
+		}
+	}
+	baselinePorts, baselineErr := baselineExpectedTCPPortsTx(ctx, tx, cycleJob)
+	if baselineErr != nil {
+		return false, baselineErr
+	}
+	for address, ports := range baselinePorts {
+		if _, inBatch := batchAddresses[address]; !inBatch {
+			continue
+		}
+		if len(ports) == 0 {
+			continue
+		}
+		set := portsByAddress[address]
+		if set == nil {
+			set = map[int]struct{}{}
+			portsByAddress[address] = set
+		}
+		for port := range ports {
+			set[port] = struct{}{}
+		}
+	}
 	for _, row := range pending {
 		for _, host := range row.snapshot.Hosts {
 			address := normalizeCycleAddress(host.Address)
@@ -324,7 +360,15 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 	var added []scanner.WorkUnit
 	newIdentities := make(map[string]struct{})
 	factor := boolFactor(plan.Job.TCP.ServiceDetection)
-	addressBatchSize := scanner.NmapAddressBatchLimit(plan.Job.TCP.EnrichmentArgs)
+	enrichmentTemplate := plan.Job.TCP.EnrichmentArgs
+	if len(enrichmentTemplate) == 0 {
+		// Older Naabu profiles used nmap_args for the confirmation command.
+		// Match the scanner executor's compatibility fallback so persisted
+		// checkpoints never describe a multi-address unit that the template
+		// can only render one address for.
+		enrichmentTemplate = plan.Job.TCP.NmapArgs
+	}
+	addressBatchSize := scanner.NmapAddressBatchLimit(enrichmentTemplate)
 	for _, key := range groupKeys {
 		group := groups[key]
 		sort.Strings(group.addresses)
@@ -431,6 +475,61 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 		return false, err
 	}
 	return worked, nil
+}
+
+func baselineExpectedTCPPortsTx(ctx context.Context, tx *sql.Tx, jobID string) (map[string]map[int]struct{}, error) {
+	expected := map[string]map[int]struct{}{}
+	if strings.TrimSpace(jobID) == "" {
+		return expected, nil
+	}
+	var raw []byte
+	if err := tx.QueryRowContext(ctx, `SELECT state_json FROM job_runtime WHERE job_id=?`, jobID).Scan(&raw); errors.Is(err, sql.ErrNoRows) {
+		return expected, nil
+	} else if err != nil {
+		return expected, err
+	}
+	var state model.JobState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		// Legacy or corrupt runtime state cannot safely add expected-port work;
+		// keep the empty map and let the discovery evidence stand on its own.
+		state = model.JobState{}
+	}
+	if state.Baseline == nil {
+		return expected, nil
+	}
+	positive := func(port model.PortState) bool {
+		value := strings.ToLower(strings.TrimSpace(port.State))
+		return port.Port >= 1 && port.Port <= 65535 && (value == "open" || value == "open|filtered")
+	}
+	for _, unit := range state.Baseline.Units {
+		if !strings.EqualFold(unit.Protocol, "tcp") {
+			continue
+		}
+		addresses := unit.Addresses
+		if len(addresses) == 0 {
+			addresses = []string{unit.Target}
+		}
+		for _, address := range addresses {
+			address = normalizeCycleAddress(address)
+			if address == "" {
+				address = normalizeCycleAddress(unit.Target)
+			}
+			if address == "" {
+				continue
+			}
+			set := expected[address]
+			if set == nil {
+				set = map[int]struct{}{}
+				expected[address] = set
+			}
+			for _, port := range unit.Ports {
+				if positive(port) {
+					set[port.Port] = struct{}{}
+				}
+			}
+		}
+	}
+	return expected, nil
 }
 
 func scanCycleUnitIdentity(unit scanner.WorkUnit) string {

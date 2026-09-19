@@ -490,7 +490,9 @@ func baselineExpectedTCPPortsTx(ctx context.Context, tx *sql.Tx, jobID string) (
 	}
 	var state model.JobState
 	if err := json.Unmarshal(raw, &state); err != nil {
-		return expected, nil // legacy/corrupt runtime state cannot add scan work
+		// Legacy or corrupt runtime state cannot safely add expected-port work;
+		// keep the empty map and let the discovery evidence stand on its own.
+		state = model.JobState{}
 	}
 	if state.Baseline == nil {
 		return expected, nil

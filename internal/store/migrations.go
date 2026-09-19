@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 42
+const schemaVersion = 43
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -676,8 +676,12 @@ END;`,
 			"DROP TRIGGER IF EXISTS latest_scan_hosts_search_ai",
 			"DROP TRIGGER IF EXISTS latest_scan_hosts_search_au",
 			"DROP TRIGGER IF EXISTS latest_scan_hosts_search_ad",
-			"DELETE FROM scan_host_search",
-			"DELETE FROM latest_host_search",
+			// FTS5 DELETE is a full virtual-table write and can hold the writer for
+			// the entire retained history. Dropping the projections makes the
+			// rebuild start from empty tables; the normal resumable backfill below
+			// recreates the schema and repopulates both indexes in bounded batches.
+			"DROP TABLE IF EXISTS scan_host_search",
+			"DROP TABLE IF EXISTS latest_host_search",
 			// Keep this migration compatible with databases whose schema 22
 			// backfill state predates the cumulative counter. Migration 28 adds
 			// processed_rows and resets it after every migration has run.
@@ -1024,6 +1028,28 @@ WHERE NOT EXISTS (SELECT 1 FROM baseline_host_search hs WHERE hs.job_id=baseline
 );`,
 			"CREATE INDEX IF NOT EXISTS deployment_notification_ids_opaque ON deployment_notification_ids(opaque_id)",
 		},
+		43: {
+			// Startup backfills are explicitly checkpointed. Once the identity
+			// migration has observed an empty pending set, later opens can skip the
+			// history-wide probe entirely.
+			`CREATE TABLE IF NOT EXISTS scan_cycle_identity_backfill (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ complete INTEGER NOT NULL DEFAULT 0,
+ updated_at TEXT NOT NULL DEFAULT ''
+);`,
+			`INSERT OR IGNORE INTO scan_cycle_identity_backfill(id,complete,updated_at)
+VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THEN 0 ELSE 1 END,datetime('now'));`,
+			"CREATE INDEX IF NOT EXISTS scan_cycle_units_identity_pending ON scan_cycle_units(identity,cycle_id,sequence)",
+			// Timestamp strings are an indexed ordering key throughout the store.
+			// The marker lets a restart resume normalization without scanning the
+			// same retained rows on every daemon start.
+			`CREATE TABLE IF NOT EXISTS timestamp_normalization_state (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ complete INTEGER NOT NULL DEFAULT 0,
+ updated_at TEXT NOT NULL DEFAULT ''
+);`,
+			"INSERT OR IGNORE INTO timestamp_normalization_state(id,complete,updated_at) VALUES(1,0,datetime('now'))",
+		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an
@@ -1050,9 +1076,17 @@ WHERE NOT EXISTS (SELECT 1 FROM baseline_host_search hs WHERE hs.job_id=baseline
 		}
 		logger.Info("database migration step completed", "schema", version, "target_schema", schemaVersion)
 	}
-	if err := repairScanHostsForeignKey(db); err != nil {
+	if err := updateMigrationStatus(ctx, db, "timestamp-normalization", 0, 0); err != nil {
 		markMigrationFailed(ctx, db, err)
 		return err
+	}
+	if err := normalizePersistedTimestampsContext(ctx, db); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return fmt.Errorf("normalize persisted timestamps: %w", err)
+	}
+	if err := repairScanHostsForeignKey(db); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return fmt.Errorf("repair scan host foreign key: %w", err)
 	}
 	if err := updateMigrationStatus(ctx, db, "scan-cycle-identities", int64(version), int64(schemaVersion)); err != nil {
 		markMigrationFailed(ctx, db, err)
@@ -1182,6 +1216,14 @@ func backfillScanCycleUnitIdentitiesContext(ctx context.Context, db *sql.DB) err
 		if err != nil {
 			return err
 		}
+		var complete int
+		if err := tx.QueryRowContext(ctx, `SELECT complete FROM scan_cycle_identity_backfill WHERE id=1`).Scan(&complete); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+		if complete != 0 {
+			return tx.Commit()
+		}
 		rows, err := tx.QueryContext(ctx, `SELECT rowid,work_unit_json FROM scan_cycle_units WHERE identity='' ORDER BY rowid LIMIT 256`)
 		if err != nil {
 			_ = tx.Rollback()
@@ -1211,6 +1253,10 @@ func backfillScanCycleUnitIdentitiesContext(ctx context.Context, db *sql.DB) err
 			return batchErr
 		}
 		if len(batch) == 0 {
+			if _, err := tx.ExecContext(ctx, `UPDATE scan_cycle_identity_backfill SET complete=1,updated_at=? WHERE id=1`, sqliteTimestamp(time.Now())); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
 			if err := tx.Commit(); err != nil {
 				return err
 			}

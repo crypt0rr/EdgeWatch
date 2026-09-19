@@ -20,6 +20,14 @@ if [[ "${#archives[@]}" -eq 0 ]]; then
   exit 1
 fi
 
+# sha256sum accepts several whitespace-separated variants and, without
+# --strict, silently skips malformed lines. Validate the exact manifest shape
+# before checking any digest so a damaged checksum file cannot pass coverage.
+if ! awk 'NF != 2 || $1 !~ /^[0-9a-fA-F]{64}$/ || $2 !~ /^\*?[A-Za-z0-9][A-Za-z0-9._+-]*$/ { bad=1 } END { exit bad }' "$checksums"; then
+  echo "checksums.txt contains a malformed line" >&2
+  exit 1
+fi
+
 mapfile -t listed < <(awk 'NF >= 2 { sub(/^\*/, "", $2); print $2 }' "$checksums" | LC_ALL=C sort)
 if [[ "${#archives[@]}" -ne "${#listed[@]}" ]]; then
   echo "checksum coverage does not match release archives" >&2
@@ -48,13 +56,30 @@ for name in "${listed[@]}"; do
   fi
 done
 
-(cd "$artifact_dir" && sha256sum -c checksums.txt)
+(cd "$artifact_dir" && sha256sum --strict --quiet -c checksums.txt)
 
 if ! jq -e --arg tag "$tag" --arg commit "$expected_commit" '
   .schema_version == 1 and .tag == $tag and ($commit == "" or .source_commit == $commit) and
   (.artifacts | length > 0) and (.frontend_sha256 | type == "string" and length == 64)
 ' "$manifest" >/dev/null; then
   echo "release manifest metadata is invalid" >&2
+  exit 1
+fi
+
+frontend_dir="${FRONTEND_DIST:-internal/webui/dist}"
+if [[ ! -d "$frontend_dir" ]]; then
+  echo "frontend asset directory is required to verify the release manifest: $frontend_dir" >&2
+  exit 1
+fi
+frontend_hash="$({
+  while IFS= read -r -d '' file; do
+    relative="${file#"$frontend_dir"/}"
+    digest="$(sha256sum "$file" | awk '{print $1}')"
+    printf '%s  %s\n' "$relative" "$digest"
+  done < <(find "$frontend_dir" -type f ! -name '.gitkeep' -print0 | LC_ALL=C sort -z)
+} | sha256sum | awk '{print $1}')"
+if [[ "$(jq -r '.frontend_sha256' "$manifest")" != "$frontend_hash" ]]; then
+  echo "release manifest frontend hash does not match the built assets" >&2
   exit 1
 fi
 

@@ -84,9 +84,20 @@ describe('historical scan detail', () => {
   })
 
   it('shows a not-found state when the historical scan cannot be loaded', async () => {
-    vi.mocked(getScan).mockRejectedValue(new Error('missing'))
+    vi.mocked(getScan).mockRejectedValue(Object.assign(new Error('missing'), { code: 'not_found' }))
     await renderPage()
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('could not be found')
     expect(container.querySelector('h1')).toBeNull()
+  })
+
+  it('offers retry for transient historical scan failures', async () => {
+    vi.mocked(getScan).mockRejectedValue(new Error('scan service unavailable'))
+    await renderPage()
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('could not be loaded')
+    const retry = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Retry') as HTMLButtonElement
+    expect(retry).toBeTruthy()
+    vi.mocked(getScan).mockResolvedValueOnce(scan)
+    await act(async () => retry.click())
+    await vi.waitFor(() => expect(container.querySelector('h1')).toBeTruthy(), { timeout: 1000 })
   })
 })

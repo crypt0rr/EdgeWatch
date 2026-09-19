@@ -106,7 +106,7 @@ describe('job surface overview', () => {
     root = createRoot(container)
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     vi.mocked(getJob).mockResolvedValue(job)
-    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'user-1', username: 'admin', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'user-1', username: 'admin', permissions: ['jobs.write', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
     vi.mocked(jobBaseline).mockResolvedValue(baselineResponse)
     vi.mocked(latestSuccessfulScan).mockResolvedValue(latestResponse)
     vi.mocked(scanResults).mockResolvedValue(latestResultsResponse)

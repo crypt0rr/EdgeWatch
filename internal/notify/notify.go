@@ -41,10 +41,17 @@ const (
 	// caller is canceled first, wait briefly for a definitive result before
 	// treating the delivery as indeterminate and deferring it.
 	notificationSendCancellationGrace = 2 * time.Second
+	// Keep the caller-side bound independent from third-party provider code. A
+	// provider that ignores its own timeout must not leave the delivery worker
+	// waiting forever; the outcome is indeterminate and the claim is deferred.
 	// Match the store's claim lease so an uncertain provider outcome cannot be
 	// retried while the original request may still complete.
 	notificationIndeterminateDelay = 30 * time.Minute
 )
+
+// Kept as a variable so deterministic provider-timeout tests can use a short
+// bound without waiting for the production timeout.
+var notificationProviderTimeout = 15 * time.Second
 
 type DestinationView struct {
 	ID                   string    `json:"id"`
@@ -1044,10 +1051,15 @@ func send(rawURL, message string) error {
 	if err != nil {
 		return err
 	}
-	sender.Timeout = 15 * time.Second
+	sender.Timeout = notificationProviderTimeout
 	errs := sender.Send(message, &types.Params{"title": "EdgeWatch"})
 	return errors.Join(errs...)
 }
+
+// notificationProviderSend is isolated behind one function so timeout and
+// panic paths can be tested without contacting a real notification service.
+// Production code always points it at send.
+var notificationProviderSend = send
 
 // safeSend deliberately strips provider errors before they reach logs, the
 // outbox, or the CLI. Shoutrrr providers may echo a destination URL (and its
@@ -1078,6 +1090,8 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	providerCtx, cancelProvider := context.WithTimeout(context.WithoutCancel(ctx), notificationProviderTimeout)
+	defer cancelProvider()
 	result := make(chan error, 1)
 	go func() {
 		// Provider implementations are third-party code. A panic must be
@@ -1088,7 +1102,7 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 				result <- store.ErrDeliveryProviderPanic
 			}
 		}()
-		result <- send(rawURL, message)
+		result <- notificationProviderSend(rawURL, message)
 	}()
 	select {
 	case err := <-result:
@@ -1102,6 +1116,11 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 		case <-timer.C:
 			return ErrNotificationSendIndeterminate
 		}
+	case <-providerCtx.Done():
+		// The provider has not reported a definitive result within the hard
+		// caller-side bound. Do not immediately retry: the provider may still
+		// complete its request after this goroutine returns.
+		return ErrNotificationSendIndeterminate
 	}
 }
 

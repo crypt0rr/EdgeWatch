@@ -13,6 +13,9 @@ builds:
       - arm64
     flags:
       - -trimpath
+    # Use the commit timestamp for binary and archive metadata so rebuilding
+    # the same tag does not change the release checksum.
+    mod_timestamp: '{{ .CommitTimestamp }}'
     ldflags:
       - -s -w -X main.version={{.Version}}
 

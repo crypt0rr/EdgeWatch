@@ -23,7 +23,7 @@ const page = { limit: 10, offset: 0, total: 1, has_more: false, next_offset: nul
 describe('job detail actions', () => {
   beforeEach(() => {
     vi.mocked(getJob).mockResolvedValue(job as never)
-    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
     vi.mocked(jobBaseline).mockResolvedValue({ job_id: 'job-1', job: 'Production', revision: 7, security_hash: 'scope', baseline: job.baseline, snapshot: { units: [], scopes: [] }, pagination: page } as never)
     vi.mocked(latestSuccessfulScan).mockResolvedValue({ scan } as never)
     vi.mocked(jobScans).mockResolvedValue({ scans: [scan], pagination: page } as never)
@@ -104,5 +104,16 @@ describe('job detail actions', () => {
     fireEvent.change(input, { target: { value: 'Production' } })
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
     await waitFor(() => expect(deleteJob).toHaveBeenCalledWith('job-1', 'Production'))
+  })
+
+  it('offers retry when the job detail cannot be loaded', async () => {
+    vi.mocked(getJob).mockRejectedValueOnce(new Error('job service unavailable'))
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('could not be loaded'))
+    const retry = screen.getByRole('button', { name: 'Retry' })
+    expect(retry).toBeInTheDocument()
+    vi.mocked(getJob).mockResolvedValueOnce(job as never)
+    fireEvent.click(retry)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Production' })).toBeInTheDocument())
   })
 })

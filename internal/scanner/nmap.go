@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -44,9 +45,10 @@ const maxProgressOutput = 4 << 20
 // Nmap output is normally compact even for a 65,535-port scope because only
 // positive ports are emitted individually; extraports state summaries cover
 // the remainder. A pathological or compromised child is failed safely.
-// Compose gives the container a 32 MiB /tmp tmpfs. Keep the XML cap below
+// Compose gives the container a 128 MiB /tmp tmpfs while scanner XML is
+// redirected to the data-volume temporary directory. Keep the XML cap below
 // that limit and terminate a child while it is writing, rather than waiting
-// for a full tmpfs or allocating an oversized result in memory.
+// for a full filesystem or allocating an oversized result in memory.
 const maxNmapOutput = 16 << 20
 
 var errNmapProgressOutputExceeded = fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput)
@@ -1233,7 +1235,21 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 		}
 		return structured, stderr.String(), fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput)
 	}
-	return structured, stderr.String(), waitErrWithContext(ctx, waitErr)
+	return structured, stderr.String(), scannerStorageError(waitErrWithContext(ctx, waitErr), stderr.String())
+}
+
+// scannerStorageError turns the platform-specific ENOSPC/diagnostic outcome
+// into a stable operator-facing error. This is important for a read-only
+// container: a full tmpfs should fail one scan clearly rather than look like a
+// parser, timeout, or unexplained child-process failure.
+func scannerStorageError(err error, diagnostic string) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, syscall.ENOSPC) || strings.Contains(strings.ToLower(diagnostic), "no space left on device") {
+		return fmt.Errorf("scanner temporary storage exhausted: %w", err)
+	}
+	return err
 }
 
 func nmapXMLOutputExceeded(path string, limit int) (bool, error) {

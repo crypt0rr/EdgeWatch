@@ -15,6 +15,10 @@ services:
     # large detailed snapshots may need the full persistence budget to commit.
     stop_grace_period: 7m
     network_mode: host
+    environment:
+      # Nmap XML, Naabu JSON, and SQLite temporary files share the writable
+      # data volume instead of competing for a small root filesystem tmpfs.
+      TMPDIR: /var/lib/edgewatch/tmp
     cap_drop:
       - ALL
     cap_add:
@@ -23,7 +27,7 @@ services:
       - no-new-privileges:true
     read_only: true
     tmpfs:
-      - /tmp:size=32m,mode=1777
+      - /tmp:size=128m,mode=1777
     volumes:
       - ./config.yaml:/etc/edgewatch/config.yaml:ro
       # Uncomment after creating notification-urls.txt and enabling urls_file in config.yaml.

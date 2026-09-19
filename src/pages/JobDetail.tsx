@@ -57,8 +57,8 @@ export function JobDetail() {
   // Wait for the principal before enabling scan/action queries. Besides
   // avoiding a transient unauthorized request, this keeps viewer pages from
   // ever fetching scan history that their role cannot read.
-  const canOperate = session.data != null && session.data.role !== 'viewer'
-  const canReadScans = session.data != null && session.data.role !== 'viewer'
+  const canOperate = session.data?.permissions.includes('jobs.write') ?? false
+  const canReadScans = session.data?.permissions.includes('scans.read') ?? false
   const scans = useQuery({
     queryKey: ['job-scans', id, scanOffset],
     queryFn: () => jobScans(id, scanOffset),
@@ -115,7 +115,7 @@ export function JobDetail() {
     return <div className="loading"><span className="spinner" />Loading job…</div>
   }
   if (job.error || !job.data) {
-    return <div className="error-card">This job could not be found.</div>
+    return <div className="error-card" role="alert">{job.error ? 'This job could not be loaded.' : 'This job could not be found.'} {job.error && <button type="button" className="button ghost" onClick={() => void job.refetch()}>Retry</button>}</div>
   }
 
   const value = job.data
@@ -274,7 +274,7 @@ export function JobDetail() {
           <div className="panel-heading">
             <div>
               <h3 id={selectedScanTitleID}>Scan diff</h3>
-              <p className="muted">{detail.data.changes_pagination?.total ?? detail.data.changes?.length ?? 0} {detail.data.comparison_source === 'scan_time' ? 'changes recorded at scan time.' : 'changes against the current baseline.'}</p>
+              <p className="muted">{detail.data.comparison_state === 'not_compared' ? 'This scan was not compared because it did not complete successfully.' : `${detail.data.changes_pagination?.total ?? detail.data.changes?.length ?? 0} ${detail.data.comparison_source === 'scan_time' ? 'changes recorded at scan time.' : 'changes against the current baseline.'}`}</p>
             </div>
             <div className="heading-actions">
               {(detail.data.scan.status === 'success' || detail.data.scan.status === 'incomplete') && <button className="button ghost" onClick={() => { setShowResults((shown) => !shown); setResultsOffset(0) }}>{showResults ? 'Hide results' : 'View results'}</button>}
@@ -306,7 +306,7 @@ export function JobDetail() {
                 </div>
               ))}
             </div>
-          ) : <div className="inline-empty">No changes detected.</div>}
+          ) : <div className="inline-empty">{detail.data.comparison_state === 'not_compared' ? 'No comparison was performed for this scan.' : 'No changes detected.'}</div>}
           <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} />
           {showResults && <div className="scan-results">
             <div className="panel-heading"><div><h3>Snapshot results</h3><p className="muted">Loaded on demand; open an effective host for technical evidence.</p></div></div>

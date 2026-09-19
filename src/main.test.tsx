@@ -157,10 +157,11 @@ describe('application shell', () => {
 
   it('accepts and suppresses incidents, refreshes conflicts, and disables legacy actions', async () => {
     const incident = { job_id: 'job-1', job: 'TCP monitor', incident: { change: { key: 'tcp:198.51.100.10:443', kind: 'port', target: '198.51.100.10', protocol: 'tcp', port: 443, old: 'closed', new: 'open', severity: 'critical' }, opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:01:00Z' } }
-    const legacy = { ...incident, job_id: 'job-2', incident: { ...incident.incident, change: { ...incident.incident.change, key: undefined } } }
+    const legacy = { ...incident, job_id: 'job-2', incident: { ...incident.incident, change: { ...incident.incident.change, key: undefined, old: undefined, new: undefined } } }
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [incident, legacy], pagination: { limit: 50, offset: 0, total: 2, has_more: false, next_offset: null } } as never)
     renderWithProviders(<Incidents />)
     await waitFor(() => expect(screen.getAllByRole('button', { name: 'Accept change' })).toHaveLength(4))
+    expect(screen.getAllByText('No before/after value recorded')).toHaveLength(2)
     expect(screen.getAllByRole('button', { name: 'Accept change' })[1]).toBeDisabled()
     fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)

@@ -32,8 +32,14 @@ func TestScanCycleUnitIdentityBackfillIsBoundedAndDeterministic(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=?,identity='' WHERE cycle_id=? AND sequence=?`, raw, cycle.ID, unit.Sequence); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_identity_backfill SET complete=0 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
 	if err := backfillScanCycleUnitIdentitiesContext(ctx, s.DB); err != nil {
 		t.Fatal(err)
+	}
+	if err := backfillScanCycleUnitIdentitiesContext(ctx, s.DB); err != nil {
+		t.Fatalf("completed identity backfill: %v", err)
 	}
 	var got string
 	if err := s.DB.QueryRowContext(ctx, `SELECT identity FROM scan_cycle_units WHERE cycle_id=? AND sequence=?`, cycle.ID, unit.Sequence).Scan(&got); err != nil {

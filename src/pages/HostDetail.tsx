@@ -81,7 +81,8 @@ export function HostDetail() {
   const detail = useQuery({ queryKey: ['host-detail', id, scanID, address], queryFn: () => scanID ? historical ? historicalScanHost(scanID, address) : scanHost(id, scanID, address) : baselineHost(id, address), enabled: !!address && (historical || !!id) })
   const rdap = useQuery({ queryKey: ['host-rdap', id, scanID, address], queryFn: () => scanID ? historical ? historicalScanHostRDAP(scanID, address) : scanHostRDAP(id, scanID, address) : baselineHostRDAP(id, address), enabled: !!address && (historical || !!id), retry: false })
   if (detail.isLoading) return <div className="loading"><span className="spinner" />Loading host evidence…</div>
-  if (detail.error || !detail.data) return <section className="page"><div className="error-card">This host could not be found in the selected {scanID ? 'scan' : 'baseline'}.</div></section>
+  const notFound = (detail.error as { code?: string } | null)?.code === 'not_found'
+  if (detail.error || !detail.data) return <section className="page"><div className="error-card" role="alert">{detail.error ? (notFound ? `This host could not be found in the selected ${scanID ? 'scan' : 'baseline'}.` : 'Host evidence could not be loaded.') : `This host could not be found in the selected ${scanID ? 'scan' : 'baseline'}.`} {detail.error && !notFound && <button type="button" className="button ghost" onClick={() => void detail.refetch()}>Retry</button>}</div></section>
   const value = detail.data
   const host = value.host
   const sourceScan = value.source_scan ?? value.scan

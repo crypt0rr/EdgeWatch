@@ -155,6 +155,37 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	}
 }
 
+func TestScanHandlersRedactJobLookupFailures(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	job := config.NormalizeJob(config.Job{Name: "scan-job-lookup-failure", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.20"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := func() *http.Request { return scanHandlerRequest(http.MethodGet, "/api/v1", "") }
+	cases := map[string]func(http.ResponseWriter, *http.Request){
+		"scan cycle":    func(w http.ResponseWriter, r *http.Request) { server.scanCycle(w, r, record.ID) },
+		"discard cycle": func(w http.ResponseWriter, r *http.Request) { server.discardScanCycle(w, r, admin, record.ID, "cycle") },
+		"job scans":     func(w http.ResponseWriter, r *http.Request) { server.jobScans(w, r, record.ID) },
+		"scan detail":   func(w http.ResponseWriter, r *http.Request) { server.jobScan(w, r, record.ID, "scan") },
+		"scan results":  func(w http.ResponseWriter, r *http.Request) { server.jobScanResults(w, r, record.ID, "scan") },
+		"scan changes":  func(w http.ResponseWriter, r *http.Request) { server.jobScanChanges(w, r, record.ID, "scan") },
+	}
+	for name, handler := range cases {
+		t.Run(name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			handler(response, request())
+			if response.Code != http.StatusInternalServerError {
+				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
 func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)

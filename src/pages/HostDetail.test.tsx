@@ -143,8 +143,19 @@ describe('host detail', () => {
   })
 
   it('renders a not-found state when host evidence is unavailable', async () => {
-    vi.mocked(baselineHost).mockRejectedValue(new Error('missing'))
+    vi.mocked(baselineHost).mockRejectedValue(Object.assign(new Error('missing'), { code: 'not_found' }))
     await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')
     expect(container.querySelector('.error-card')?.textContent).toContain('could not be found')
+  })
+
+  it('offers retry for transient host evidence failures', async () => {
+    vi.mocked(baselineHost).mockRejectedValue(new Error('database unavailable'))
+    await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')
+    expect(container.querySelector('.error-card')?.textContent).toContain('could not be loaded')
+    const retry = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Retry') as HTMLButtonElement
+    expect(retry).toBeTruthy()
+    vi.mocked(baselineHost).mockResolvedValueOnce(detail)
+    await act(async () => retry.click())
+    await vi.waitFor(() => expect(container.textContent).toContain('198.51.100.10'), { timeout: 1000 })
   })
 })

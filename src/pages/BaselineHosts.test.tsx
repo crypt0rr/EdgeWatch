@@ -88,4 +88,18 @@ describe('baseline host explorer', () => {
     expect(container.textContent).toContain('Complete the configured baseline samples')
     expect(container.querySelector('input[placeholder*="Search IP"]')).toBeNull()
   })
+
+  it('offers a retry when baseline hosts cannot be loaded', async () => {
+    vi.mocked(baselineHosts).mockRejectedValueOnce(new Error('baseline unavailable'))
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter initialEntries={['/jobs/job-1/baseline']}><Routes><Route path="/jobs/:id/baseline" element={<BaselineHosts />} /></Routes></MemoryRouter></QueryClientProvider>)
+    })
+    await vi.waitFor(() => expect(container.querySelector('[role="alert"]')).toBeTruthy(), { timeout: 1000 })
+    expect(container.textContent).toContain('Could not load baseline hosts')
+    const retry = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Retry') as HTMLButtonElement
+    expect(retry).toBeTruthy()
+    vi.mocked(baselineHosts).mockResolvedValueOnce(detailed)
+    await act(async () => retry.click())
+    await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+  })
 })

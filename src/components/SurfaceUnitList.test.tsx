@@ -26,8 +26,8 @@ describe('SurfaceUnitList', () => {
       protocol: 'tcp',
       addresses: ['198.51.100.10', '198.51.100.11'],
       ports: [
-        { port: 443, state: 'open', service: 'https' },
-        { port: 8443, state: 'open|filtered' },
+        { port: 443, state: 'open', service: 'https', evidence: ['reason ttl 64', 'nmap', 'verified'] },
+        { port: 8443, state: 'open|filtered', evidence: ['udp-response'] },
         { port: 22, state: 'closed' },
       ],
     }]} />))
@@ -37,7 +37,9 @@ describe('SurfaceUnitList', () => {
     expect(container.textContent).toContain('198.51.100.10, 198.51.100.11')
     expect(container.textContent).toContain('443/tcp')
     expect(container.textContent).toContain('https')
+    expect(container.textContent).toContain('on reason ttl 64, nmap +1 more')
     expect(container.textContent).toContain('8443/tcp')
+    expect(container.textContent).toContain('on udp-response')
     expect(container.textContent).not.toContain('22/tcp')
   })
 

@@ -7,13 +7,23 @@ set -euo pipefail
 
 root="$(mktemp -d)"
 trap 'rm -rf "$root"' EXIT
-mkdir -p "$root/dist/edgewatch_0.0.0_Linux_x86_64" "$root/dist/edgewatch_0.0.0_Linux_arm64"
+mkdir -p "$root/dist/edgewatch_0.0.0_Linux_x86_64" "$root/dist/edgewatch_0.0.0_Linux_arm64" "$root/frontend-dist"
+printf 'fixture frontend\n' > "$root/frontend-dist/index.html"
 
 for arch in x86_64 arm64; do
   printf '#!/bin/sh\nexit 0\n' > "$root/dist/edgewatch_0.0.0_Linux_$arch/edgewatch"
   chmod 0755 "$root/dist/edgewatch_0.0.0_Linux_$arch/edgewatch"
   tar -czf "$root/dist/edgewatch_0.0.0_Linux_$arch.tar.gz" -C "$root/dist" "edgewatch_0.0.0_Linux_$arch"
 done
+
+# GoReleaser archives must be reproducible when the same tag and commit are
+# rebuilt. Exercise the archive contract with fixed ordering, ownership, and
+# timestamps; a future packaging change that leaks filesystem metadata fails
+# this deterministic comparison before it can reach a release.
+for output in "$root/repro-a.tar.gz" "$root/repro-b.tar.gz"; do
+  tar --sort=name --mtime='@0' --owner=0 --group=0 --numeric-owner -C "$root/dist" -cf - edgewatch_0.0.0_Linux_x86_64 | gzip -n > "$output"
+done
+cmp "$root/repro-a.tar.gz" "$root/repro-b.tar.gz"
 
 (cd "$root/dist" && sha256sum -- *.tar.gz > checksums.txt)
 artifacts='[]'
@@ -23,12 +33,13 @@ for artifact in "$root/dist"/*.tar.gz "$root/dist"/checksums.txt; do
   size="$(stat -c '%s' "$artifact")"
   artifacts="$(jq -c --arg name "$name" --arg sha256 "$sha256" --argjson size "$size" '. + [{name:$name,sha256:$sha256,size:$size}]' <<<"$artifacts")"
 done
-jq -n --arg tag v0.0.0 --arg commit "fixture-commit" --argjson artifacts "$artifacts" \
-  '{schema_version:1,tag:$tag,source_commit:$commit,frontend_sha256:("a"*64),artifacts:$artifacts}' \
+frontend_hash="$(printf '%s  %s\n' index.html "$(sha256sum "$root/frontend-dist/index.html" | awk '{print $1}')" | sha256sum | awk '{print $1}')"
+jq -n --arg tag v0.0.0 --arg commit "fixture-commit" --arg frontend "$frontend_hash" --argjson artifacts "$artifacts" \
+  '{schema_version:1,tag:$tag,source_commit:$commit,frontend_sha256:$frontend,artifacts:$artifacts}' \
   > "$root/dist/release-manifest.json"
 
 ./scripts/prepare-release-binaries.sh "$root/dist" "$root/release-binaries"
-./scripts/verify-release-artifacts.sh "$root/dist" "$root/dist/release-manifest.json" v0.0.0 fixture-commit
+FRONTEND_DIST="$root/frontend-dist" ./scripts/verify-release-artifacts.sh "$root/dist" "$root/dist/release-manifest.json" v0.0.0 fixture-commit
 test -x "$root/release-binaries/linux_amd64/edgewatch"
 test -x "$root/release-binaries/linux_arm64/edgewatch"
 
@@ -44,7 +55,7 @@ expect_rejected() {
   local case_dir="$cases/$name"
   cp -a "$root/dist" "$case_dir"
   "$@" "$case_dir"
-  if ./scripts/verify-release-artifacts.sh "$case_dir" "$case_dir/release-manifest.json" v0.0.0 fixture-commit >"$case_dir/verify.log" 2>&1; then
+  if FRONTEND_DIST="$root/frontend-dist" ./scripts/verify-release-artifacts.sh "$case_dir" "$case_dir/release-manifest.json" v0.0.0 fixture-commit >"$case_dir/verify.log" 2>&1; then
     echo "negative release-artifact case passed unexpectedly: $name" >&2
     cat "$case_dir/verify.log" >&2
     exit 1
@@ -65,6 +76,7 @@ duplicate_checksum_entry() {
 corrupt_checksum_digest() {
   sed -i '1s/^[0-9a-f]*/0000000000000000000000000000000000000000000000000000000000000000/' "$1/checksums.txt"
 }
+malformed_checksum() { printf 'not-a-checksum line\n' > "$1/checksums.txt"; }
 corrupt_manifest_schema() {
   jq '.schema_version = 2' "$1/release-manifest.json" >"$1/manifest.tmp"
   mv "$1/manifest.tmp" "$1/release-manifest.json"
@@ -104,6 +116,7 @@ expect_rejected no-archives remove_archives
 expect_rejected checksum-coverage remove_checksum_entry
 expect_rejected duplicate-checksum duplicate_checksum_entry
 expect_rejected checksum-integrity corrupt_checksum_digest
+expect_rejected checksum-format malformed_checksum
 expect_rejected manifest-schema corrupt_manifest_schema
 expect_rejected manifest-tag corrupt_manifest_tag
 expect_rejected manifest-commit corrupt_manifest_commit

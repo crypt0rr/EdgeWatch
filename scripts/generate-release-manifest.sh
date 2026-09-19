@@ -41,9 +41,9 @@ fi
 frontend_hash="$({
   while IFS= read -r -d '' file; do
     relative="${file#internal/webui/dist/}"
-    printf '%s  ' "$relative"
-    sha256sum "$file"
-  done < <(find internal/webui/dist -type f -print0 | LC_ALL=C sort -z)
+    digest="$(sha256sum "$file" | awk '{print $1}')"
+    printf '%s  %s\n' "$relative" "$digest"
+  done < <(find internal/webui/dist -type f ! -name '.gitkeep' -print0 | LC_ALL=C sort -z)
 } | sha256sum | awk '{print $1}')"
 
 artifact_json='[]'

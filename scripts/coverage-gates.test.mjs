@@ -79,6 +79,12 @@ test('frontend coverage gates reject low aggregate and missing critical entries'
     delete missing['src/pages/Users.tsx']
     await writeFile(reportPath, JSON.stringify(missing))
     assert.notEqual(runScript('check-frontend-coverage.mjs', [reportPath]).status, 0)
+
+    const criticalRegression = frontendReport({
+      'src/pages/JobDetail.tsx': { lines: percentage(69), branches: percentage(54) },
+    })
+    await writeFile(reportPath, JSON.stringify(criticalRegression))
+    assert.notEqual(runScript('check-frontend-coverage.mjs', [reportPath]).status, 0)
   })
 })
 

@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { act } from 'react'
+import { fireEvent } from '@testing-library/react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
@@ -101,5 +102,36 @@ describe('baseline host explorer', () => {
     vi.mocked(baselineHosts).mockResolvedValueOnce(detailed)
     await act(async () => retry.click())
     await vi.waitFor(() => expect(container.textContent).toContain('router.example'), { timeout: 1000 })
+  })
+
+  it('resets pagination for every filter and renders legacy/private host states', async () => {
+    const hosts = [
+      { address: '10.0.0.1', source_targets: [], protocols: [{ protocol: 'tcp', open_ports: 0, open_filtered_ports: 0 }], open_ports: 0, open_filtered_ports: 0, has_open_ports: false },
+      { address: '2001:db8::1', address_family: 'IPv6', source_targets: ['dns.example'], protocols: [{ protocol: 'udp', open_ports: 1, open_filtered_ports: 2 }], open_ports: 1, open_filtered_ports: 2, has_open_ports: true, legacy: true },
+    ] as never
+    vi.mocked(baselineHosts).mockImplementation(async (_job, filters) => ({
+      ...detailed,
+      data_quality: 'legacy',
+      hosts,
+      pagination: { limit: 1, offset: filters?.offset ?? 0, total: 2, has_more: (filters?.offset ?? 0) === 0, next_offset: (filters?.offset ?? 0) === 0 ? 1 : null },
+    }))
+    await renderPage()
+    expect(container.textContent).toContain('Older scan details')
+    expect(container.textContent).toContain('Private')
+    expect(container.textContent).toContain('Legacy detail')
+    expect(container.textContent).toContain('2 open|filtered')
+
+    const next = container.querySelector('nav[aria-label="Pagination"] button:last-child') as HTMLButtonElement
+    expect(next).toBeTruthy()
+    await act(async () => next.click())
+    await vi.waitFor(() => expect(baselineHosts).toHaveBeenLastCalledWith('job-1', expect.objectContaining({ offset: 1 })), { timeout: 1000 })
+
+    const selects = container.querySelectorAll('select')
+    await act(async () => {
+      fireEvent.change(selects[1], { target: { value: 'true' } })
+      await vi.waitFor(() => expect(baselineHosts).toHaveBeenLastCalledWith('job-1', expect.objectContaining({ has_open_ports: true, offset: 0 })), { timeout: 1000 })
+      fireEvent.change(selects[1], { target: { value: 'false' } })
+      await vi.waitFor(() => expect(baselineHosts).toHaveBeenLastCalledWith('job-1', expect.objectContaining({ has_open_ports: false, offset: 0 })), { timeout: 1000 })
+    })
   })
 })

@@ -83,3 +83,50 @@ func TestSetupStatusHidesVersionBeforeSetupAndIsRateLimited(t *testing.T) {
 		t.Fatalf("setup status was not throttled: %d headers=%v body=%s", limited.Code, limited.Header(), limited.Body.String())
 	}
 }
+
+func TestApplicationUpdateStatusCoversVersionStateMatrix(t *testing.T) {
+	server, db, _ := newUsersTestServer(t)
+	ctx := context.Background()
+	server.Version = "v1.2.0"
+	for _, tc := range []struct {
+		name   string
+		latest string
+		check  string
+		want   string
+	}{
+		{name: "up to date", latest: "v1.2.0", check: "ok", want: "up_to_date"},
+		{name: "ahead", latest: "v1.1.0", check: "ok", want: "ahead"},
+		{name: "failed", latest: "v1.3.0", check: "failed", want: "check_failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := db.RecordReleaseCheck(ctx, server.Version, tc.latest, "", "", "", "", false, nil); err != nil {
+				t.Fatal(err)
+			}
+			if tc.check == "failed" {
+				if err := db.RecordReleaseCheckFailure(ctx, "registry unavailable"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			status := server.applicationUpdateStatus(ctx)
+			if status["status"] != tc.want {
+				t.Fatalf("status = %#v, want %q", status, tc.want)
+			}
+		})
+	}
+	server.Version = "dev"
+	if status := server.applicationUpdateStatus(ctx); status["status"] != "development_build" {
+		t.Fatalf("development status = %#v", status)
+	}
+}
+
+func TestWithAuthRejectsMissingSessionWithoutCallingHandler(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	called := false
+	recorder := httptest.NewRecorder()
+	server.withAuth(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/status", nil), func(http.ResponseWriter, *http.Request, store.Session) {
+		called = true
+	})
+	if recorder.Code != http.StatusUnauthorized || called || !strings.Contains(recorder.Body.String(), "authentication required") {
+		t.Fatalf("withAuth response = %d called=%v body=%s", recorder.Code, called, recorder.Body.String())
+	}
+}

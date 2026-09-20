@@ -1,6 +1,7 @@
 package web
 
 import (
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -117,5 +118,36 @@ func TestHostHelpersHandleURLFallbackAndEmptyValues(t *testing.T) {
 		if got := server.validateRequestHost(req); got != test.want {
 			t.Errorf("validateRequestHost(%q,%q) = %v, want %v", test.host, test.urlHost, got, test.want)
 		}
+	}
+}
+
+func TestSessionCookieSecureKeepsOnlyLoopbackHTTPUnsecured(t *testing.T) {
+	cases := []struct {
+		name string
+		url  string
+		host string
+		tls  bool
+		want bool
+	}{
+		{name: "ipv4 loopback", url: "http://127.0.0.1:8080/api/v1/auth/login", host: "127.0.0.1:8080", want: false},
+		{name: "ipv6 loopback", url: "http://[::1]:8080/api/v1/auth/login", host: "[::1]:8080", want: false},
+		{name: "localhost", url: "http://localhost:8080/api/v1/auth/login", host: "localhost:8080", want: false},
+		{name: "tailscale host", url: "http://edgewatch.example.ts.net:8443/api/v1/auth/login", host: "edgewatch.example.ts.net:8443", want: true},
+		{name: "tls loopback", url: "http://127.0.0.1:8080/api/v1/auth/login", host: "127.0.0.1:8080", tls: true, want: true},
+		{name: "https host", url: "https://edgewatch.example.ts.net:8443/api/v1/auth/login", host: "edgewatch.example.ts.net:8443", want: true},
+		{name: "missing host", url: "/api/v1/auth/login", want: true},
+		{name: "malformed host", url: "http://invalid.example/api/v1/auth/login", host: "invalid host", want: true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, test.url, nil)
+			req.Host = test.host
+			if test.tls {
+				req.TLS = &tls.ConnectionState{}
+			}
+			if got := sessionCookieSecure(req); got != test.want {
+				t.Fatalf("sessionCookieSecure(%q) = %v, want %v", test.host, got, test.want)
+			}
+		})
 	}
 }

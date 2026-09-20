@@ -565,6 +565,35 @@ func (s *Server) validateRequestHost(r *http.Request) bool {
 	return false
 }
 
+// sessionCookieSecure keeps direct loopback administration usable over the
+// documented HTTP listener while protecting cookies for every externally named
+// host. The host guard runs before API handlers and only allows configured
+// non-loopback names, so a non-loopback request represents a deliberately
+// configured proxy or tunnel endpoint that is expected to use HTTPS.
+func sessionCookieSecure(r *http.Request) bool {
+	if r == nil {
+		return true
+	}
+	if r.TLS != nil || (r.URL != nil && strings.EqualFold(strings.TrimSpace(r.URL.Scheme), "https")) {
+		return true
+	}
+	host := strings.TrimSpace(r.Host)
+	if host == "" && r.URL != nil {
+		host = strings.TrimSpace(r.URL.Host)
+	}
+	host = requestHostName(host)
+	if host == "" {
+		return true
+	}
+	if strings.EqualFold(host, "localhost") {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	return true
+}
+
 // requestHostName strips an optional port while preserving bracketed IPv6
 // literals. Host values are normalized for case-insensitive DNS comparison.
 func requestHostName(raw string) string {

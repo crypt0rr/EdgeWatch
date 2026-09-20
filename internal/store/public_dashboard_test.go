@@ -70,6 +70,12 @@ func TestPublicDashboardRoundTripNormalizesAndDeduplicatesHosts(t *testing.T) {
 	if err := s.SavePublicDashboard(ctx, PublicDashboard{Title: "x", Introduction: strings.Repeat("i", 501)}, nil, AuditEntry{}); err == nil {
 		t.Fatal("overlong introduction was accepted")
 	}
+	if err := s.SavePublicDashboard(ctx, PublicDashboard{Title: strings.Repeat("🙂", 120), Introduction: strings.Repeat("é", 500)}, nil, AuditEntry{}); err != nil {
+		t.Fatalf("unicode text at the character limit was rejected: %v", err)
+	}
+	if err := s.SavePublicDashboard(ctx, PublicDashboard{Title: strings.Repeat("🙂", 121)}, nil, AuditEntry{}); err == nil {
+		t.Fatal("unicode title beyond the character limit was accepted")
+	}
 	if err := s.SavePublicDashboard(ctx, PublicDashboard{Title: "x"}, []PublicDashboardHost{{Address: "192.0.2.1"}}, AuditEntry{}); err == nil {
 		t.Fatal("host without job was accepted")
 	}

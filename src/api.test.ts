@@ -36,11 +36,13 @@ describe('API pagination contract', () => {
   it('signals session expiry for authenticated requests without redirecting login failures', async () => {
     const dispatchEvent = vi.fn()
     vi.stubGlobal('window', { dispatchEvent })
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'authentication required' } }), { status: 401, headers: { 'Content-Type': 'application/json' } }))
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'authentication required' } }), { status: 401, headers: { 'Content-Type': 'application/json' } }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'login_failed', message: 'invalid credentials' } }), { status: 401, headers: { 'Content-Type': 'application/json' } }))
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(api('/status')).rejects.toMatchObject({ code: 'unauthorized' })
-    await expect(api('/auth/login', { method: 'POST', body: '{}' })).rejects.toMatchObject({ code: 'unauthorized' })
+    await expect(api('/auth/login', { method: 'POST', body: '{}' })).rejects.toMatchObject({ code: 'login_failed' })
 
     expect(dispatchEvent).toHaveBeenCalledTimes(1)
     expect(dispatchEvent.mock.calls[0][0].type).toBe('edgewatch:unauthorized')
@@ -53,6 +55,16 @@ describe('API pagination contract', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(api('/notifications/destinations/dest-1', { method: 'PUT', body: '{}' })).rejects.toMatchObject({ code: 'invalid_password' })
+    expect(dispatchEvent).not.toHaveBeenCalled()
+  })
+
+  it('keeps the session when step-up TOTP confirmation is rejected', async () => {
+    const dispatchEvent = vi.fn()
+    vi.stubGlobal('window', { dispatchEvent })
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ error: { code: 'totp_required', message: 'the current authenticator code is required' } }), { status: 401, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(api('/auth/security/totp', { method: 'PUT', body: '{}' })).rejects.toMatchObject({ code: 'totp_required' })
     expect(dispatchEvent).not.toHaveBeenCalled()
   })
 })

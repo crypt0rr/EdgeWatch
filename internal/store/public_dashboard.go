@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
@@ -139,7 +140,7 @@ func (s *Store) SavePublicDashboard(ctx context.Context, dashboard PublicDashboa
 	if strings.TrimSpace(dashboard.Title) == "" {
 		dashboard.Title = "EdgeWatch public status"
 	}
-	if len(dashboard.Title) > 120 || len(dashboard.Introduction) > 500 {
+	if utf8.RuneCountInString(dashboard.Title) > 120 || utf8.RuneCountInString(dashboard.Introduction) > 500 {
 		return errors.New("public dashboard text is too long")
 	}
 	now := time.Now().UTC()

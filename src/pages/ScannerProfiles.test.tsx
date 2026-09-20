@@ -51,7 +51,7 @@ describe('scanner profiles', () => {
     fireEvent.change(screen.getByLabelText('Password confirmation'), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Validate & preview' }))
     await waitFor(() => expect(validateScannerProfile).toHaveBeenCalled())
-    expect(screen.getByRole('region', { name: 'Effective command preview' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Effective command preview' })).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Create profile' }))
     await waitFor(() => expect(createScannerProfile).toHaveBeenCalledWith(expect.objectContaining({ name: 'Full scan', engine: 'naabu_nmap', password: 'administrator-password' })))
     expect(screen.getByText('Scanner profile saved. Jobs keep their pinned revision until explicitly upgraded.')).toBeInTheDocument()

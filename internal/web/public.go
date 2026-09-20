@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/rdap"
@@ -288,7 +289,7 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 	if input.Title == "" {
 		input.Title = "EdgeWatch public status"
 	}
-	if len(input.Title) > 120 || len(input.Introduction) > 500 || strings.ContainsAny(input.Title+input.Introduction, "\r\n") {
+	if utf8.RuneCountInString(input.Title) > 120 || utf8.RuneCountInString(input.Introduction) > 500 || strings.ContainsAny(input.Title+input.Introduction, "\r\n") {
 		writeError(w, http.StatusBadRequest, "validation_failed", "public dashboard text is invalid or too long", map[string]string{"title": "use at most 120 characters", "introduction": "use at most 500 characters and no line breaks"})
 		return
 	}
@@ -327,7 +328,7 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 		if s.writeAuditUnavailable(w, err, "public_dashboard.updated") {
 			return
 		}
-		writeError(w, http.StatusBadRequest, "save_failed", err.Error(), nil)
+		s.writeInternalError(w, r, "save_failed", err)
 		return
 	}
 	s.invalidatePublicDashboardCache()

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, getPublicDashboard, getPublicDashboardConfig, listHosts, savePublicDashboardConfig } from '../api'
 import type { PublicDashboard, PublicDashboardConfig } from '../api'
 import type { GlobalHostsResponse } from '../types'
-import { PublicDashboard as PublicDashboardView, PublicDashboardAdmin } from './PublicDashboard'
+import { limitUnicode, PublicDashboard as PublicDashboardView, PublicDashboardAdmin } from './PublicDashboard'
 
 vi.mock('../api', () => ({
   APIError: class APIError extends Error {
@@ -113,6 +113,13 @@ describe('public dashboard pages', () => {
     expect(container.querySelector('h1')?.textContent).toBe('Public status unavailable')
     expect(container.textContent).toContain('temporarily rate limited')
     expect(container.querySelector('a[href="/login"]')).toBeTruthy()
+  })
+
+  it('limits public text by Unicode code points rather than UTF-16 units', () => {
+    const emoji = '🙂'.repeat(120)
+    expect(Array.from(limitUnicode(`${emoji}x`, 120))).toHaveLength(120)
+    expect(limitUnicode(`${emoji}x`, 120)).toBe(emoji)
+    expect(limitUnicode('é'.repeat(121), 120)).toBe('é'.repeat(120))
   })
 
   it('separates archived and legacy hosts and saves checkbox changes', async () => {

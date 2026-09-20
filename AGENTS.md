@@ -101,7 +101,8 @@ Report the checks you ran and any failures or checks you could not run.
 
 For container changes, read [docs/container-hardening.md](docs/container-hardening.md).
 Preserve the default capability limits and the explicit SYN override.
-For release changes, preserve the immutable candidate build described in the README and `.github/workflows/release.yml`.
+For release changes, preserve the immutable candidate build implemented in
+`.github/workflows/release.yml`.
 
 ## Change scope and pull requests
 

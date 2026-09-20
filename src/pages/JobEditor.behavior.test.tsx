@@ -93,4 +93,79 @@ describe('job editor workflow coverage', () => {
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="button"]')!)
     expect(screen.getByText('Scope change cancelled.')).toBeInTheDocument()
   })
+
+  it('restores server notification routing when reloading a newer revision', async () => {
+    const saved = {
+      id: 'job-1', revision: 4, enabled: true, archived: false, security_hash: 'old',
+      job: { name: 'Existing', schedule: '0 */6 * * *', timezone: 'UTC', targets: ['198.51.100.10'], max_expanded_hosts: 256, tcp: { ports: '22', mode: 'connect', service_detection: false, engine: 'nmap' }, timing: 'balanced', timeout: '1h', resume_window: '8d', baseline_samples: 1, change_confirmations: 1, notification_destinations: ['notify-1'] },
+      baseline: { status: 'complete', samples: 1, attempts: 1 },
+    }
+    const remote = { ...saved, revision: 5, job: { ...saved.job, notification_destinations: ['notify-2'] } }
+    vi.mocked(listNotificationDestinations).mockResolvedValue({
+      ...destinationResponse,
+      destinations: [
+        ...destinationResponse.destinations,
+        { id: 'notify-2', name: 'Backup alerts', provider: 'generic', source: 'web', enabled: true, locked: false, revision: 1 },
+      ],
+    } as never)
+    vi.mocked(getJob).mockResolvedValue(saved as never)
+    const { client } = renderWithProviders(<Routes><Route path="/jobs/:id/edit" element={<JobEditor />} /></Routes>, { route: ['/jobs/job-1/edit'] })
+
+    await waitFor(() => expect(screen.getByDisplayValue('Existing')).toBeInTheDocument())
+    const original = screen.getByRole('checkbox', { name: /Mattermost/ }) as HTMLInputElement
+    const replacement = screen.getByRole('checkbox', { name: /Backup alerts/ }) as HTMLInputElement
+    expect(original).toBeChecked()
+    expect(replacement).not.toBeChecked()
+    fireEvent.click(original)
+    expect(original).not.toBeChecked()
+
+    vi.mocked(getJob).mockResolvedValue(remote as never)
+    await client.invalidateQueries({ queryKey: ['job', 'job-1'] })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload saved version' })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Reload saved version' }))
+
+    await waitFor(() => expect(replacement).toBeChecked())
+    expect(original).not.toBeChecked()
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(updateJob).toHaveBeenCalled())
+    expect(vi.mocked(updateJob).mock.calls.at(-1)?.[2]).toMatchObject({ notification_destinations: ['notify-2'] })
+  })
+
+  it('covers the TCP/UDP scanner controls and capability warning', async () => {
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+
+    const engine = screen.getByLabelText(/^TCP engine/) as HTMLSelectElement
+    fireEvent.change(engine, { target: { value: 'nmap' } })
+    expect(screen.getByLabelText(/^Ports/)).not.toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Connection mode'), { target: { value: 'syn' } })
+    fireEvent.change(engine, { target: { value: 'naabu_nmap' } })
+    expect(screen.getByLabelText(/^Ports/)).toHaveValue('1-65535')
+    fireEvent.change(screen.getByLabelText('Discovery type'), { target: { value: 'syn' } })
+    expect(screen.getByRole('alert')).toHaveTextContent('SYN discovery is unavailable')
+    fireEvent.change(screen.getByLabelText('Discovery type'), { target: { value: 'connect' } })
+    expect(screen.queryByText('SYN discovery is unavailable')).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Rate'), { target: { value: '2500' } })
+    fireEvent.change(screen.getByLabelText('Workers'), { target: { value: '40' } })
+    fireEvent.click(screen.getByRole('checkbox', { name: /Verify discoveries/ }))
+
+    fireEvent.click(screen.getByLabelText(/UDP scan/))
+    expect(screen.getByLabelText(/^UDP scan/)).toBeChecked()
+    expect(screen.getByDisplayValue('53')).toBeInTheDocument()
+    fireEvent.click(screen.getByLabelText(/^UDP scan/))
+    expect(screen.getByLabelText(/^UDP scan/)).not.toBeChecked()
+  })
+
+  it('renders form validation errors without sending a mutation', async () => {
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Create job' }))
+    await waitFor(() => expect(screen.getAllByText('A name is required.').length).toBeGreaterThan(0))
+    expect(createJob).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByPlaceholderText('Production edge'), { target: { value: 'Valid name' } })
+    fireEvent.change(screen.getByRole('spinbutton', { name: /Maximum expanded hosts/ }), { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create job' }))
+    await waitFor(() => expect(screen.getByText('Use at least one host.')).toBeInTheDocument())
+    expect(createJob).not.toHaveBeenCalled()
+  })
 })

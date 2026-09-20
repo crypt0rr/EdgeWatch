@@ -109,6 +109,16 @@ export function JobEditor() {
     setTargets(data.job.targets)
     setTCP(data.job.tcp)
     setUDP(data.job.udp)
+    // A server revision reload must also replace the notification-routing
+    // draft.  Leaving the local selection untouched allows a stale edit to
+    // silently overwrite the value that was just saved in another tab.
+    setNotificationSelectionTouched(false)
+    if (data.job.notification_destinations !== undefined) {
+      setSelectedNotificationIDs([...data.job.notification_destinations])
+    } else {
+      const destinations = notificationDestinations.data?.destinations ?? []
+      setSelectedNotificationIDs(destinations.filter(isActiveDestination).map(destination => destination.id))
+    }
     setScheduleEnabled(data.enabled)
     loadedRevision.current = { id, revision: data.revision }
     setRemoteRevision(null)

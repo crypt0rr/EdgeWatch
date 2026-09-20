@@ -527,6 +527,21 @@ func TestSafeSendRedactsProviderErrors(t *testing.T) {
 	}
 }
 
+func TestSafeSendRedactsProviderPanics(t *testing.T) {
+	oldSend := notificationProviderSend
+	notificationProviderSend = func(string, string) error { panic("provider URL leaked") }
+	defer func() { notificationProviderSend = oldSend }()
+
+	rawURL := "generic://secret-token@example.invalid/path"
+	err := safeSend(rawURL, "test")
+	if !errors.Is(err, store.ErrDeliveryProviderPanic) {
+		t.Fatalf("panic error = %v, want provider panic", err)
+	}
+	if strings.Contains(err.Error(), rawURL) || strings.Contains(err.Error(), "secret-token") || !strings.Contains(err.Error(), hashURL(rawURL)[:12]) {
+		t.Fatalf("provider panic was not safely redacted: %v", err)
+	}
+}
+
 func TestSafeSendContextWaitsForInFlightSendAfterCancellation(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})

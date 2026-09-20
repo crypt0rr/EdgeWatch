@@ -289,14 +289,15 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "login_failed", "invalid credentials", nil)
 		return
 	}
-	auth.SetSessionCookie(w, raw)
+	secureCookie := sessionCookieSecure(r)
+	auth.SetSessionCookie(w, raw, secureCookie)
 	session, sessionErr := s.Store.GetSession(r.Context(), digest(raw))
 	if sessionErr != nil || strings.TrimSpace(session.CSRFToken) == "" {
 		// A successful password check without a readable session would leave the
 		// browser with a cookie that cannot pass CSRF validation. Clear it and
 		// return a generic server error rather than issuing a partially usable
 		// login response.
-		auth.ClearSessionCookie(w)
+		auth.ClearSessionCookie(w, secureCookie)
 		writeError(w, http.StatusInternalServerError, "session_unavailable", "login session could not be established", nil)
 		return
 	}
@@ -305,7 +306,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request, session store.Session) {
 	err := s.Auth.LogoutSession(r.Context(), r, session)
-	auth.ClearSessionCookie(w)
+	auth.ClearSessionCookie(w, sessionCookieSecure(r))
 	if err != nil {
 		if errors.Is(err, store.ErrAuditUnavailable) {
 			action := "user.logout"

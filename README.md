@@ -1,6 +1,7 @@
 # EdgeWatch
 
 [![CI](https://github.com/crypt0rr/EdgeWatch/actions/workflows/ci.yml/badge.svg)](https://github.com/crypt0rr/EdgeWatch/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/crypt0rr/EdgeWatch/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/crypt0rr/EdgeWatch/actions/workflows/github-code-scanning/codeql)
 [![Latest release](https://img.shields.io/github/v/release/crypt0rr/EdgeWatch?sort=semver)](https://github.com/crypt0rr/EdgeWatch/releases)
 [![Container](https://img.shields.io/badge/container-GHCR-2496ED?logo=docker&logoColor=white)](https://github.com/crypt0rr/EdgeWatch/pkgs/container/edgewatch)
 [![Go version](https://img.shields.io/github/go-mod/go-version/crypt0rr/EdgeWatch)](go.mod)
@@ -104,7 +105,8 @@ This recovery action is refused after an administrator has been created.
 ### Tailscale Serve and reverse proxies
 
 Keep EdgeWatch bound to loopback when exposing it through Tailscale Serve or a
-reverse proxy. Add the hostname that users open to `web.allowed_hosts`:
+reverse proxy. Serve the public hostname over HTTPS and add the hostname that
+users open to `web.allowed_hosts`:
 
 ```yaml
 web:
@@ -117,7 +119,9 @@ Replace `edgewatch.example.ts.net` with your tailnet or proxy hostname. Use the
 bare hostname only; do not include `https://`, a path, or a port. EdgeWatch
 checks the forwarded `Host` value before authentication, so an unlisted proxy
 hostname is rejected with `421 Misdirected Request` even when the loopback
-listener is healthy.
+listener is healthy. Approved non-loopback hostnames receive Secure session
+cookies; direct loopback HTTP remains available for local administration and
+SSH tunnels.
 
 After changing the bind-mounted configuration, recreate the container:
 

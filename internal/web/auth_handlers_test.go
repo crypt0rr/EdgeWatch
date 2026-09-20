@@ -38,6 +38,40 @@ func TestLogoutHandlerClearsCookieAndRevokesSession(t *testing.T) {
 	}
 }
 
+func TestAuthenticationCookiesAreSecureForProxyHosts(t *testing.T) {
+	ctx := context.Background()
+	server, db, _ := newUsersTestServer(t)
+	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(`{"username":"admin","password":"administrator password"}`))
+	loginRequest.Header.Set("Content-Type", "application/json")
+	loginRequest.Host = "console.example.test:8443"
+	loginRequest.RemoteAddr = "198.51.100.10:4010"
+	loginRecorder := httptest.NewRecorder()
+	server.login(loginRecorder, loginRequest)
+	if loginRecorder.Code != http.StatusOK {
+		t.Fatalf("proxy login status = %d: %s", loginRecorder.Code, loginRecorder.Body.String())
+	}
+	cookies := loginRecorder.Result().Cookies()
+	if len(cookies) != 1 || !cookies[0].Secure {
+		t.Fatalf("proxy login cookie = %#v, want Secure", cookies)
+	}
+	session, err := db.GetSession(ctx, digest(cookies[0].Value))
+	if err != nil {
+		t.Fatal(err)
+	}
+	logoutRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/logout", nil)
+	logoutRequest.Host = "console.example.test:8443"
+	logoutRequest.AddCookie(cookies[0])
+	logoutRecorder := httptest.NewRecorder()
+	server.logout(logoutRecorder, logoutRequest, session)
+	if logoutRecorder.Code != http.StatusNoContent {
+		t.Fatalf("proxy logout status = %d: %s", logoutRecorder.Code, logoutRecorder.Body.String())
+	}
+	cleared := logoutRecorder.Result().Cookies()
+	if len(cleared) != 1 || !cleared[0].Secure || cleared[0].MaxAge != -1 {
+		t.Fatalf("proxy logout cookie = %#v, want Secure deletion", cleared)
+	}
+}
+
 func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)

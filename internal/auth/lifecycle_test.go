@@ -50,16 +50,28 @@ func TestCookieHelpersLogoutAndPasswordRequirements(t *testing.T) {
 	}
 
 	cookieRecorder := httptest.NewRecorder()
-	SetSessionCookie(cookieRecorder, "raw-token")
+	SetSessionCookie(cookieRecorder, "raw-token", false)
 	setCookie := cookieRecorder.Result().Cookies()[0]
-	if !setCookie.HttpOnly || setCookie.SameSite != http.SameSiteStrictMode || setCookie.Path != "/" || setCookie.MaxAge != int(SessionTTL/time.Second) {
+	if !setCookie.HttpOnly || setCookie.Secure || setCookie.SameSite != http.SameSiteStrictMode || setCookie.Path != "/" || setCookie.MaxAge != int(SessionTTL/time.Second) {
 		t.Fatalf("session cookie = %#v", setCookie)
 	}
+	secureRecorder := httptest.NewRecorder()
+	SetSessionCookie(secureRecorder, "secure-token", true)
+	secureCookie := secureRecorder.Result().Cookies()[0]
+	if !secureCookie.Secure || !secureCookie.HttpOnly || secureCookie.SameSite != http.SameSiteStrictMode || secureCookie.Path != "/" || secureCookie.MaxAge != int(SessionTTL/time.Second) {
+		t.Fatalf("secure session cookie = %#v", secureCookie)
+	}
 	clearRecorder := httptest.NewRecorder()
-	ClearSessionCookie(clearRecorder)
+	ClearSessionCookie(clearRecorder, false)
 	clearCookie := clearRecorder.Result().Cookies()[0]
-	if !clearCookie.HttpOnly || clearCookie.SameSite != http.SameSiteStrictMode || clearCookie.MaxAge != -1 || clearCookie.Value != "" {
+	if !clearCookie.HttpOnly || clearCookie.Secure || clearCookie.SameSite != http.SameSiteStrictMode || clearCookie.MaxAge != -1 || clearCookie.Value != "" {
 		t.Fatalf("clear cookie = %#v", clearCookie)
+	}
+	secureClearRecorder := httptest.NewRecorder()
+	ClearSessionCookie(secureClearRecorder, true)
+	secureClearCookie := secureClearRecorder.Result().Cookies()[0]
+	if !secureClearCookie.Secure || !secureClearCookie.HttpOnly || secureClearCookie.SameSite != http.SameSiteStrictMode || secureClearCookie.MaxAge != -1 || secureClearCookie.Value != "" {
+		t.Fatalf("secure clear cookie = %#v", secureClearCookie)
 	}
 	requirements := PasswordRequirements()
 	if requirements["minimum_length"] != PasswordMin || requirements["algorithm"] != "argon2id" {

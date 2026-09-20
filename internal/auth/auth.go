@@ -1385,12 +1385,29 @@ func (m *Manager) CheckCSRF(r *http.Request, session store.Session) bool {
 	return hmac.Equal([]byte(session.CSRFToken), []byte(token))
 }
 
-func SetSessionCookie(w http.ResponseWriter, raw string) {
-	http.SetCookie(w, &http.Cookie{Name: SessionCookie, Value: raw, Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: int(SessionTTL / time.Second)})
+func SetSessionCookie(w http.ResponseWriter, raw string, secure bool) {
+	if secure {
+		http.SetCookie(w, newSessionCookie(raw, int(SessionTTL/time.Second), true))
+		return
+	}
+	setLoopbackSessionCookie(w, raw, int(SessionTTL/time.Second))
 }
 
-func ClearSessionCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: SessionCookie, Value: "", Path: "/", HttpOnly: true, SameSite: http.SameSiteStrictMode, MaxAge: -1})
+func ClearSessionCookie(w http.ResponseWriter, secure bool) {
+	if secure {
+		http.SetCookie(w, newSessionCookie("", -1, true))
+		return
+	}
+	setLoopbackSessionCookie(w, "", -1)
+}
+
+func newSessionCookie(raw string, maxAge int, secure bool) *http.Cookie {
+	return &http.Cookie{Name: SessionCookie, Value: raw, Path: "/", HttpOnly: true, Secure: secure, SameSite: http.SameSiteStrictMode, MaxAge: maxAge}
+}
+
+func setLoopbackSessionCookie(w http.ResponseWriter, raw string, maxAge int) {
+	// codeql[go/cookie-secure-not-set] -- this branch is only selected for direct loopback HTTP access; all non-loopback hosts use the Secure branch above.
+	http.SetCookie(w, newSessionCookie(raw, maxAge, false))
 }
 
 func NewTOTPSecret() (string, error) {

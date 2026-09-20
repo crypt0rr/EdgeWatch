@@ -101,6 +101,44 @@ docker compose exec edgewatch edgewatch admin setup-token \
 
 This recovery action is refused after an administrator has been created.
 
+### Tailscale Serve and reverse proxies
+
+Keep EdgeWatch bound to loopback when exposing it through Tailscale Serve or a
+reverse proxy. Add the hostname that users open to `web.allowed_hosts`:
+
+```yaml
+web:
+  listen: 127.0.0.1:8080
+  allowed_hosts:
+    - edgewatch.example.ts.net
+```
+
+Replace `edgewatch.example.ts.net` with your tailnet or proxy hostname. Use the
+bare hostname only; do not include `https://`, a path, or a port. EdgeWatch
+checks the forwarded `Host` value before authentication, so an unlisted proxy
+hostname is rejected with `421 Misdirected Request` even when the loopback
+listener is healthy.
+
+After changing the bind-mounted configuration, recreate the container:
+
+```console
+docker compose up -d --force-recreate edgewatch
+```
+
+You can verify both paths from the Docker host (replace the example hostname
+with the one configured above):
+
+```console
+curl -i http://127.0.0.1:8080/api/v1/setup/status
+curl -i -H 'Host: edgewatch.example.ts.net:8443' \
+  http://127.0.0.1:8080/api/v1/setup/status
+```
+
+Both requests should return a successful response. If the direct request works
+but the request with the proxy `Host` returns `421`, correct
+`web.allowed_hosts`. The listener remains loopback-only; this setting approves
+the public name, not a new network bind address.
+
 ## The first five minutes
 
 1. Create the administrator with the setup token.

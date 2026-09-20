@@ -67,33 +67,3 @@ notifications:
 # Jobs are created and scheduled from the web interface. YAML jobs from older
 # releases are intentionally not imported; they remain inactive with a
 # startup warning so they can be recreated and reviewed explicitly.
-# The commented examples below document the available scope settings only.
-#
-# jobs:
-#   - name: public-tcp
-#     schedule: "0 */6 * * *"
-#     timezone: Europe/Amsterdam
-#     run_on_start: false
-#     assume_alive: true # set false to use Nmap host discovery
-#     targets: ["192.0.2.10", "edge.example.com"]
-#     max_expanded_hosts: 256
-#     allow_high_cost: false # override the scheduler probe budget deliberately
-#     tcp: {ports: "1-65535", mode: syn, service_detection: false}
-#     timing: balanced
-#     timeout: 1h
-#     resume_window: 8d # retain paused broad-scan progress for up to 30d
-#     baseline: {samples: 2}
-#     change: {confirmations: 1}
-#
-#   - name: common-udp
-#     schedule: "0 3 * * 0"
-#     timezone: Europe/Amsterdam
-#     run_on_start: false
-#     assume_alive: true # set false to use Nmap host discovery
-#     targets: ["192.0.2.10"]
-#     udp: {ports: "53,123,161", service_detection: true}
-#     timing: conservative
-#     timeout: 6h
-#     resume_window: 8d
-#     baseline: {samples: 3}
-#     change: {confirmations: 2}

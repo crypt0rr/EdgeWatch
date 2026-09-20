@@ -426,4 +426,6 @@ guidance is in [docs/container-hardening.md](docs/container-hardening.md).
 
 ## License
 
-EdgeWatch is released under the [MIT License](LICENSE).
+EdgeWatch is released under the [MIT License](LICENSE). Licenses for bundled
+third-party components are listed in
+[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).

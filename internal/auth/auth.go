@@ -1409,7 +1409,8 @@ func setLoopbackSessionCookie(w http.ResponseWriter, raw string, maxAge int) {
 	// This is the only intentionally insecure-cookie branch: it is selected
 	// exclusively for direct loopback HTTP access; all non-loopback hosts use
 	// the Secure branch above.
-	http.SetCookie(w, newSessionCookie(raw, maxAge, false)) // lgtm[go/cookie-secure-not-set]
+	// codeql[go/cookie-secure-not-set]
+	http.SetCookie(w, newSessionCookie(raw, maxAge, false))
 }
 
 func NewTOTPSecret() (string, error) {

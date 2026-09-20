@@ -529,7 +529,7 @@ func TestSafeSendRedactsProviderErrors(t *testing.T) {
 
 func TestSafeSendRedactsProviderPanics(t *testing.T) {
 	oldSend := notificationProviderSend
-	notificationProviderSend = func(string, string) error { panic("provider URL leaked") }
+	notificationProviderSend = func(context.Context, string, string) error { panic("provider URL leaked") }
 	defer func() { notificationProviderSend = oldSend }()
 
 	rawURL := "generic://secret-token@example.invalid/path"
@@ -585,7 +585,7 @@ func TestSafeSendContextBoundsProviderThatIgnoresCancellation(t *testing.T) {
 	notificationProviderTimeout = 10 * time.Millisecond
 	entered := make(chan struct{})
 	release := make(chan struct{})
-	notificationProviderSend = func(string, string) error {
+	notificationProviderSend = func(context.Context, string, string) error {
 		close(entered)
 		<-release
 		return nil

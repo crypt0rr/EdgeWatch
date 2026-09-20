@@ -405,7 +405,9 @@ means the process is idle.
 
 ## Development
 
-The project uses Go 1.27.1 or newer and Node.js 24.21.0. From the repository
+The project uses Go 1.27.1 or newer and Node.js 24.16.0 or newer within the
+Node 24 release line. CI and the container build are pinned to 24.21.0; local
+version managers can use [.node-version](.node-version). From the repository
 root:
 
 ```console

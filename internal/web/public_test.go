@@ -313,6 +313,46 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	}
 }
 
+func TestPublicDashboardSaveFailureDoesNotExposeStoreDetails(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := app.New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, err := db.DB.ExecContext(ctx, `CREATE TRIGGER fail_public_dashboard_update BEFORE UPDATE ON public_dashboard BEGIN SELECT RAISE(ABORT, 'sqlite leaked details'); END`); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","hosts":[]}`))
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.publicDashboardRoute(recorder, request, store.Session{UserID: store.LegacyAdminUserID, Username: "admin", Role: store.RoleAdministrator})
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("save failure status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "sqlite leaked details") {
+		t.Fatalf("store detail leaked in response: %s", recorder.Body.String())
+	}
+	var payload struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Error.Code != "save_failed" || payload.Error.Message != "internal server error" {
+		t.Fatalf("save failure payload = %#v", payload.Error)
+	}
+}
+
 func TestLatestLegacyPublicHostsLimitsEachJobIndependently(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -28,40 +29,64 @@ func TestRunSendChildRejectsMalformedRequest(t *testing.T) {
 
 func TestNotificationProcessFailureIsRedactedAndSendUsesIsolation(t *testing.T) {
 	originalIsTestBinary := notificationIsTestBinary
-	originalCommand := notificationCommand
+	originalCommand := notificationCommandContext
 	defer func() {
 		notificationIsTestBinary = originalIsTestBinary
-		notificationCommand = originalCommand
+		notificationCommandContext = originalCommand
 	}()
 	notificationIsTestBinary = func() bool { return false }
-	notificationCommand = func(_ string, _ ...string) *exec.Cmd {
+	notificationCommandContext = func(_ context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.Command("/bin/false")
 	}
-	if err := runNotificationProcess("generic://127.0.0.1/no-listener", "test"); !errors.Is(err, store.ErrDeliveryProvider) {
+	if err := runNotificationProcess(context.Background(), "generic://127.0.0.1/no-listener", "test"); !errors.Is(err, store.ErrDeliveryProvider) {
 		t.Fatalf("isolated process error = %v, want provider error", err)
 	}
-	if err := send("generic://127.0.0.1/no-listener", "test"); !errors.Is(err, store.ErrDeliveryProvider) {
+	if err := send(context.Background(), "generic://127.0.0.1/no-listener", "test"); !errors.Is(err, store.ErrDeliveryProvider) {
 		t.Fatalf("isolated send error = %v, want provider error", err)
 	}
 }
 
 func TestNotificationProcessUsesSafeExecutableAndCommand(t *testing.T) {
 	originalExecutable := notificationExecutable
-	originalCommand := notificationCommand
+	originalCommand := notificationCommandContext
 	defer func() {
 		notificationExecutable = originalExecutable
-		notificationCommand = originalCommand
+		notificationCommandContext = originalCommand
 	}()
 	notificationExecutable = func() (string, error) { return "", errors.New("executable unavailable") }
-	if err := runNotificationProcess("generic://example.invalid", "test"); !errors.Is(err, store.ErrDeliveryProvider) {
+	if err := runNotificationProcess(context.Background(), "generic://example.invalid", "test"); !errors.Is(err, store.ErrDeliveryProvider) {
 		t.Fatalf("executable lookup error = %v, want provider error", err)
 	}
 	notificationExecutable = func() (string, error) { return "/usr/local/bin/edgewatch", nil }
-	notificationCommand = func(_ string, _ ...string) *exec.Cmd {
+	notificationCommandContext = func(_ context.Context, _ string, _ ...string) *exec.Cmd {
 		return exec.Command("/bin/true")
 	}
-	if err := runNotificationProcess("generic://example.invalid", "test"); err != nil {
+	if err := runNotificationProcess(context.Background(), "generic://example.invalid", "test"); err != nil {
 		t.Fatalf("successful isolated process = %v", err)
+	}
+}
+
+func TestNotificationProcessTimeoutTerminatesAndReapsChild(t *testing.T) {
+	originalExecutable := notificationExecutable
+	originalCommand := notificationCommandContext
+	defer func() {
+		notificationExecutable = originalExecutable
+		notificationCommandContext = originalCommand
+	}()
+	notificationExecutable = func() (string, error) { return "/usr/local/bin/edgewatch", nil }
+	notificationCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		return exec.CommandContext(ctx, "/bin/sh", "-c", "exec sleep 30")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	err := runNotificationProcess(ctx, "generic://example.invalid", "test")
+	if !errors.Is(err, ErrNotificationSendIndeterminate) {
+		t.Fatalf("timed-out process error = %v, want indeterminate", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("timed-out process took %s; child was not reaped promptly", elapsed)
 	}
 }
 

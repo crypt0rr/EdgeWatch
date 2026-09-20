@@ -2,6 +2,7 @@ package notify
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -25,13 +26,20 @@ type notificationProcessRequest struct {
 // These indirections keep the process boundary deterministic in unit tests
 // without ever starting the test binary recursively.
 var notificationExecutable = os.Executable
-var notificationCommand = exec.Command
+var notificationCommandContext = exec.CommandContext
 
 // runNotificationProcess executes provider code in a short-lived child. A
 // provider panic can therefore terminate only this child instead of the
-// daemon's notification worker or process. The caller already bounds the
-// operation and converts child failures into a redacted delivery error.
-func runNotificationProcess(rawURL, message string) error {
+// daemon's notification worker or process. The caller supplies the hard
+// timeout/cancellation context; CommandContext kills and reaps the child
+// before returning, and ordinary failures are converted into a redacted
+// delivery error.
+//
+//nolint:contextcheck // this low-level process boundary intentionally accepts the caller's lifecycle context.
+func runNotificationProcess(ctx context.Context, rawURL, message string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	executable, err := notificationExecutable()
 	if err != nil {
 		return errors.Join(store.ErrDeliveryProvider, err)
@@ -40,11 +48,16 @@ func runNotificationProcess(rawURL, message string) error {
 	if err != nil {
 		return errors.Join(store.ErrDeliveryProvider, err)
 	}
-	command := notificationCommand(executable, "notify-send")
+	childCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	command := notificationCommandContext(childCtx, executable, "notify-send")
 	command.Stdin = bytes.NewReader(payload)
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	if err := command.Run(); err != nil {
+		if childCtx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return errors.Join(ErrNotificationSendIndeterminate, err)
+		}
 		return errors.Join(store.ErrDeliveryProvider, errors.New("isolated notification provider failed"))
 	}
 	return nil

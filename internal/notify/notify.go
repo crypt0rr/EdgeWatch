@@ -1046,15 +1046,17 @@ func deliveryResultContext(ctx context.Context) (context.Context, context.Cancel
 	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 }
 
-func send(rawURL, message string) error {
+type notificationSendFunc func(context.Context, string, string) error
+
+func send(ctx context.Context, rawURL, message string) error {
 	if notificationIsTestBinary() {
 		return sendInProcess(rawURL, message)
 	}
-	return notificationProcessRunner(rawURL, message)
+	return notificationProcessRunner(ctx, rawURL, message)
 }
 
 var notificationIsTestBinary = isTestBinary
-var notificationProcessRunner = runNotificationProcess
+var notificationProcessRunner notificationSendFunc = runNotificationProcess
 
 func sendInProcess(rawURL, message string) error {
 	sender, err := shoutrrr.CreateSender(rawURL)
@@ -1069,7 +1071,7 @@ func sendInProcess(rawURL, message string) error {
 // notificationProviderSend is isolated behind one function so timeout and
 // panic paths can be tested without contacting a real notification service.
 // Production code always points it at send.
-var notificationProviderSend = send
+var notificationProviderSend notificationSendFunc = send
 
 // safeSend deliberately strips provider errors before they reach logs, the
 // outbox, or the CLI. Shoutrrr providers may echo a destination URL (and its
@@ -1100,7 +1102,7 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	providerCtx, cancelProvider := context.WithTimeout(context.WithoutCancel(ctx), notificationProviderTimeout)
+	providerCtx, cancelProvider := context.WithTimeout(ctx, notificationProviderTimeout)
 	defer cancelProvider()
 	result := make(chan error, 1)
 	go func() {
@@ -1112,7 +1114,7 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 				result <- store.ErrDeliveryProviderPanic
 			}
 		}()
-		result <- notificationProviderSend(rawURL, message)
+		result <- notificationProviderSend(providerCtx, rawURL, message)
 	}()
 	select {
 	case err := <-result:
@@ -1128,8 +1130,8 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 		}
 	case <-providerCtx.Done():
 		// The provider has not reported a definitive result within the hard
-		// caller-side bound. Do not immediately retry: the provider may still
-		// complete its request after this goroutine returns.
+		// bound. Do not immediately retry: an external provider may already
+		// have accepted the request even while its child is being terminated.
 		return ErrNotificationSendIndeterminate
 	}
 }

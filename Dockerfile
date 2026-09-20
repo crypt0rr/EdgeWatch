@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.27@sha256:bde3983e9c939224420ddaf6b784cc30e09b035a4dea01f581230c50809f372e
-FROM --platform=$BUILDPLATFORM node:24.16.0-alpine3.22@sha256:191c9f0080fcbbc6547a85dc0ff7988072214a355aabdc1d2ec55a7dae5eea8a AS frontend
+FROM --platform=$BUILDPLATFORM node:24.21.0-alpine3.24@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS frontend
 WORKDIR /src
 ARG PREBUILT_FRONTEND=0
 COPY package.json package-lock.json ./
@@ -7,6 +7,7 @@ RUN npm ci
 COPY index.html tsconfig.json tsconfig.node.json vite.config.ts ./
 COPY src ./src
 COPY scripts/build-frontend.mjs ./scripts/build-frontend.mjs
+COPY scripts/check-node-runtime.mjs ./scripts/check-node-runtime.mjs
 COPY internal/webui/dist ./prebuilt-dist
 # Release builds pass the candidate frontend artifact through the Docker
 # context. Local builds retain the self-contained Node build fallback.

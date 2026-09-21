@@ -336,6 +336,63 @@ func TestUnreachableHostObservationDoesNotChangeBaseline(t *testing.T) {
 	}
 }
 
+func TestIncompleteDNSScanKeepsHealthySiblingAdditions(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "dns-partial.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := Engine{Store: db}
+	job := config.Job{Name: "dns-siblings", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "80,443", ServiceDetection: true}},
+		DNS:    map[string][]string{"edge.example": {"192.0.2.1", "192.0.2.2"}},
+		Units: []model.Unit{{
+			Target: "edge.example", Protocol: "tcp", Addresses: []string{"192.0.2.1", "192.0.2.2"},
+			Ports: []model.PortState{{Port: 443, State: "open", Evidence: []string{"192.0.2.1", "192.0.2.2"}}},
+		}},
+	}
+	baseline.Normalize()
+	if events, err := e.Success(ctx, job, scan("dns-baseline", baseline)); err != nil || len(events) != 1 || events[0].Type != "baseline-complete" {
+		t.Fatalf("baseline setup: %#v, %v", events, err)
+	}
+
+	partial := model.Snapshot{
+		Scopes: baseline.Scopes,
+		DNS:    baseline.DNS,
+		Units: []model.Unit{{
+			Target: "edge.example", Protocol: "tcp", Addresses: []string{"192.0.2.1", "192.0.2.2"},
+			Ports: []model.PortState{{Port: 80, State: "open", Service: "http", Evidence: []string{"192.0.2.1"}}},
+		}},
+		Hosts: []model.HostObservation{{Address: "192.0.2.2", Status: "down", StatusReason: "no-response"}},
+	}
+	partial.Normalize()
+	events, err := e.Success(ctx, job, scan("dns-partial", partial))
+	if err != nil || len(events) != 2 || events[0].Type != "changes-detected" || events[1].Type != "scan-incomplete" {
+		t.Fatalf("partial DNS scan events: %#v, err=%v", events, err)
+	}
+	if len(events[0].Changes) != 1 || events[0].Changes[0].Key != "port|edge.example|tcp|80" {
+		t.Fatalf("partial DNS changes = %#v, want only healthy port addition", events[0].Changes)
+	}
+	state, err := db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Incidents["port|edge.example|tcp|80"]; !ok {
+		t.Fatalf("healthy sibling addition did not open an incident: %#v", state.Incidents)
+	}
+	if _, ok := state.Incidents["port|edge.example|tcp|443"]; ok {
+		t.Fatal("removal protected by incomplete DNS sibling was reported")
+	}
+	if _, ok := state.Incidents["service|edge.example|tcp|80"]; ok {
+		t.Fatal("service change with merged/incomplete evidence was reported")
+	}
+	if state.Baseline == nil || state.Baseline.Units[0].Ports[0].Port != 443 {
+		t.Fatalf("partial DNS scan advanced baseline: %#v", state.Baseline)
+	}
+}
+
 func TestEveryUnsuccessfulScanEmitsAnOutcomeEvent(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "db"))

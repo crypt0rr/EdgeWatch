@@ -172,6 +172,16 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 			}
 			return true, model.Snapshot{}, planErr
 		}
+		// The plan is the first point at which DNS names and CIDRs have been
+		// expanded into concrete addresses. Enforce the probe budgets here,
+		// before a one-unit plan can fall back to the legacy scanner path or a
+		// multi-unit plan can be persisted for execution.
+		discoveryProbes, nmapProbes := resolvedPlanProbeTotals(plan)
+		if budgetErr := a.checkResolvedProbeBudget(job, discoveryProbes, nmapProbes); budgetErr != nil {
+			scan.Status = "failed"
+			scan.Error = budgetErr.Error()
+			return true, model.Snapshot{}, budgetErr
+		}
 		// Ordinary one-unit plans are cheaper through the legacy Scanner path,
 		// preserving compatibility with lightweight scanner implementations. A
 		// single Naabu pipeline unit still represents a complete 1–65535 pass;

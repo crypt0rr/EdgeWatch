@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"runtime/debug"
 	"sort"
@@ -138,6 +139,84 @@ func (e *ScanWorkBudgetError) Error() string {
 
 func (e *ScanWorkBudgetError) Unwrap() error { return ErrScanWorkBudget }
 
+// resolvedPlanProbeTotals derives the actual work represented by a pinned
+// scanner plan. Unlike the preflight estimate, this count is based on the
+// resolved addresses and concrete work units, so DNS expansion cannot bypass
+// the deployment safety rails. A plan's declared total is treated as a
+// conservative lower bound only when it exceeds the unit sum; the difference
+// is charged to Nmap because it is the less permissive budget.
+func resolvedPlanProbeTotals(plan scanner.WorkPlan) (discovery, nmapProbes int64) {
+	var unitTotal int64
+	for _, unit := range plan.Units {
+		probes := unit.Probes
+		if probes < 0 {
+			probes = 0
+		}
+		unitTotal = saturatingProbeAdd(unitTotal, probes)
+		if unit.Phase == "discovery" {
+			discovery = saturatingProbeAdd(discovery, probes)
+		} else {
+			nmapProbes = saturatingProbeAdd(nmapProbes, probes)
+		}
+	}
+	if len(plan.Units) == 0 {
+		// Custom resumable scanners may provide only a declared total. Treat it
+		// as Nmap work so a missing phase cannot make a plan appear free.
+		return 0, maxNonNegative(plan.TotalProbes)
+	}
+	if declared := maxNonNegative(plan.TotalProbes); declared > unitTotal {
+		nmapProbes = saturatingProbeAdd(nmapProbes, declared-unitTotal)
+	}
+	return discovery, nmapProbes
+}
+
+func maxNonNegative(value int64) int64 {
+	if value < 0 {
+		return 0
+	}
+	return value
+}
+
+func saturatingProbeAdd(a, b int64) int64 {
+	if b <= 0 || a >= math.MaxInt64-b {
+		if b > 0 {
+			return math.MaxInt64
+		}
+		return a
+	}
+	return a + b
+}
+
+func (a *App) checkResolvedProbeBudget(job config.Job, discovery, nmapProbes int64) error {
+	discovery = maxNonNegative(discovery)
+	nmapProbes = maxNonNegative(nmapProbes)
+	total := saturatingProbeAdd(discovery, nmapProbes)
+	estimate := config.WorkEstimate{Probes: total, NaabuProbes: discovery, NmapProbes: nmapProbes}
+	// The absolute ceiling applies to each engine and to the combined run. A
+	// high-cost opt-in can bypass deployment budgets, never this hard limit.
+	if discovery > config.MaxProbeCountLimit || nmapProbes > config.MaxProbeCountLimit || total > config.MaxProbeCountLimit {
+		return &ScanWorkBudgetError{Estimate: estimate, Budget: config.MaxProbeCountLimit}
+	}
+	if job.AllowHighCost {
+		return nil
+	}
+	naabuBudget := a.Config.Scheduler.MaxNaabuProbeCount
+	if naabuBudget <= 0 {
+		naabuBudget = config.DefaultNaabuMaxProbeCount
+	}
+	nmapBudget := a.Config.Scheduler.MaxProbeCount
+	if nmapBudget <= 0 {
+		nmapBudget = config.DefaultMaxProbeCount
+	}
+	if discovery > naabuBudget {
+		return &ScanWorkBudgetError{Estimate: estimate, Budget: naabuBudget}
+	}
+	if nmapProbes > nmapBudget {
+		return &ScanWorkBudgetError{Estimate: estimate, Budget: nmapBudget}
+	}
+	return nil
+}
+
 func (a *App) CheckScanWorkBudget(job config.Job) (config.WorkEstimate, error) {
 	estimate, err := config.EstimateJobWork(job)
 	if err != nil {
@@ -174,40 +253,16 @@ func (a *App) CheckScanWorkBudget(job config.Job) (config.WorkEstimate, error) {
 	return estimate, nil
 }
 
-// CheckScanCycleProbeBudget applies the same split safety rails after a
-// Naabu discovery checkpoint creates data-dependent Nmap enrichment work.
-// The preflight estimate cannot know how many ports Naabu will find, so this
-// durable check prevents a broad discovery result from silently growing past
-// either engine's configured budget before the next process starts.
+// CheckScanCycleProbeBudget applies the same safety rails to durable work
+// totals before the next process starts. For Naabu cycles this covers the
+// data-dependent Nmap enrichment phase; for ordinary Nmap/UDP cycles it also
+// keeps resolved DNS/CIDR work within the same deployment budgets.
 func (a *App) CheckScanCycleProbeBudget(ctx context.Context, cycle store.ScanCycleRecord, job config.Job) error {
-	if job.TCP == nil || job.TCP.Engine != config.EngineNaabuNmap {
-		return nil
-	}
 	discovery, nmapProbes, err := a.Store.ScanCycleProbeTotals(ctx, cycle.ID)
 	if err != nil {
 		return err
 	}
-	if discovery > config.MaxProbeCountLimit || nmapProbes > config.MaxProbeCountLimit || discovery > config.MaxProbeCountLimit-nmapProbes {
-		return &ScanWorkBudgetError{Estimate: config.WorkEstimate{Probes: config.MaxProbeCountLimit + 1, NaabuProbes: discovery, NmapProbes: nmapProbes}, Budget: config.MaxProbeCountLimit}
-	}
-	if job.AllowHighCost {
-		return nil
-	}
-	naabuBudget := a.Config.Scheduler.MaxNaabuProbeCount
-	if naabuBudget <= 0 {
-		naabuBudget = config.DefaultNaabuMaxProbeCount
-	}
-	nmapBudget := a.Config.Scheduler.MaxProbeCount
-	if nmapBudget <= 0 {
-		nmapBudget = config.DefaultMaxProbeCount
-	}
-	if discovery > naabuBudget {
-		return &ScanWorkBudgetError{Estimate: config.WorkEstimate{Probes: discovery + nmapProbes, NaabuProbes: discovery, NmapProbes: nmapProbes}, Budget: naabuBudget}
-	}
-	if nmapProbes > nmapBudget {
-		return &ScanWorkBudgetError{Estimate: config.WorkEstimate{Probes: discovery + nmapProbes, NaabuProbes: discovery, NmapProbes: nmapProbes}, Budget: nmapBudget}
-	}
-	return nil
+	return a.checkResolvedProbeBudget(job, discovery, nmapProbes)
 }
 
 // Scanner is the small boundary used by the application. Production uses
@@ -577,12 +632,29 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		}
 	}
 	if !resumableRun {
-		if progressScanner, ok := a.Scanner.(ProgressScanner); ok {
-			snapshot, scanErr = progressScanner.ScanWithProgress(scanCtx, job, func(progress scanner.Progress) {
-				a.updateActiveProgress(scan.ID, progress)
-			})
-		} else {
-			snapshot, scanErr = a.Scanner.Scan(scanCtx, job)
+		// File-managed jobs do not persist resumable cycles, but production
+		// scanners still expose a planner. Validate its resolved work before the
+		// ordinary scan path so DNS expansion cannot bypass probe budgets merely
+		// because the job is not web-managed.
+		if !managed {
+			if resumableScanner, ok := a.Scanner.(scanner.ResumableScanner); ok {
+				plan, planErr := resumableScanner.Plan(scanCtx, job)
+				if planErr != nil {
+					scanErr = planErr
+				} else {
+					discoveryProbes, nmapProbes := resolvedPlanProbeTotals(plan)
+					scanErr = a.checkResolvedProbeBudget(job, discoveryProbes, nmapProbes)
+				}
+			}
+		}
+		if scanErr == nil {
+			if progressScanner, ok := a.Scanner.(ProgressScanner); ok {
+				snapshot, scanErr = progressScanner.ScanWithProgress(scanCtx, job, func(progress scanner.Progress) {
+					a.updateActiveProgress(scan.ID, progress)
+				})
+			} else {
+				snapshot, scanErr = a.Scanner.Scan(scanCtx, job)
+			}
 		}
 	}
 	// Scanner progress carries phase timing for the optional Naabu pipeline.

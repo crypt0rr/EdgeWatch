@@ -2,12 +2,41 @@ package scanner
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
+
+func TestPlanCountsEveryResolvedDNSAddressForProbeTotals(t *testing.T) {
+	addresses := make([]net.IP, 0, 40)
+	for i := 1; i <= 40; i++ {
+		addresses = append(addresses, net.ParseIP(fmt.Sprintf("192.0.2.%d", i)))
+	}
+	n := New("nmap")
+	n.Resolver = fakeResolver{ips: addresses}
+	job := config.NormalizeJob(config.Job{
+		Name: "dns-budget", Targets: []string{"edge.example"}, MaxExpandedHosts: 64,
+		TCP: &config.Protocol{Ports: "1-65535", Mode: "connect"},
+	})
+	plan, err := n.Plan(context.Background(), job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := int64(40 * 65535)
+	if plan.TotalProbes != want {
+		t.Fatalf("resolved plan probes = %d, want %d", plan.TotalProbes, want)
+	}
+	preflight, err := config.EstimateJobWork(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preflight.Probes >= plan.TotalProbes {
+		t.Fatalf("preflight estimate %d unexpectedly accounts for all resolved DNS work %d", preflight.Probes, plan.TotalProbes)
+	}
+}
 
 func TestPlanPinsDNSAndChunksBroadPorts(t *testing.T) {
 	n := New("nmap")

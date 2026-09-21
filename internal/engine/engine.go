@@ -175,14 +175,27 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		clearTotalLossCandidate(state)
 		changes = Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
 		filtered := changes[:0]
+		allowedIncompleteAdditions := make(map[string]struct{})
 		for _, change := range changes {
 			if _, protected := protectedTargets[change.Target]; protected {
+				// A positive port addition can still be authoritative when its
+				// evidence names only effective addresses that completed. This is
+				// important for DNS targets: one timed-out sibling must not hide a
+				// newly open port on a healthy address. Removals and service changes
+				// remain protected because their aggregate evidence is ambiguous.
+				if incompletePositiveAddition(change, scan.Snapshot, incompleteAddresses) {
+					filtered = append(filtered, change)
+					allowedIncompleteAdditions[change.Key] = struct{}{}
+				}
 				continue
 			}
 			filtered = append(filtered, change)
 		}
 		changes = filtered
 		protectedKeys := protectedChangeKeys(state, *state.Baseline, scan.Snapshot, protectedTargets)
+		for key := range allowedIncompleteAdditions {
+			delete(protectedKeys, key)
+		}
 		events = append(events, applyChangesWithIncomplete(state, job.Name, scan.ID, changes, job.Change.Confirmations, scan.FinishedAt, protectedKeys)...)
 	}
 	message := incompleteScanError(scan.Snapshot)
@@ -191,6 +204,42 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		events = append(events, model.Event{Type: "baseline-stalled", Job: scan.Job, ScanID: scan.ID, Message: fmt.Sprintf("Baseline learning is stalled after %d incomplete scans", state.IncompleteCandidateAttempts), CreatedAt: scan.FinishedAt})
 	}
 	return events, changes, nil
+}
+
+// incompletePositiveAddition reports whether a port addition is attributable
+// exclusively to effective addresses that completed in a partial scan. Port
+// evidence was added after the original logical Unit model, so legacy
+// snapshots without it stay conservatively protected.
+func incompletePositiveAddition(change model.Change, snapshot model.Snapshot, incomplete []string) bool {
+	if change.Kind != "port" || !isPositivePortState(change.New) {
+		return false
+	}
+	incompleteSet := make(map[string]struct{}, len(incomplete))
+	for _, address := range incomplete {
+		incompleteSet[address] = struct{}{}
+	}
+	for _, unit := range snapshot.Units {
+		if unit.Target != change.Target || !strings.EqualFold(unit.Protocol, change.Protocol) {
+			continue
+		}
+		for _, port := range unit.Ports {
+			if port.Port != change.Port || !strings.EqualFold(port.State, change.New) || len(port.Evidence) == 0 {
+				continue
+			}
+			for _, address := range port.Evidence {
+				if _, missing := incompleteSet[address]; missing {
+					return false
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+func isPositivePortState(state string) bool {
+	state = strings.ToLower(strings.TrimSpace(state))
+	return state == "open" || state == "open|filtered"
 }
 
 func clearPendingTotalLoss(state *model.JobState) {

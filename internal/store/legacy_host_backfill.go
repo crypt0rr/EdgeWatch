@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
@@ -17,21 +19,79 @@ import (
 // so a large retained history never needs to be processed in one transaction.
 const legacyHostBackfillBatchSize = 100
 
-const maxLegacyHostBackfillSnapshotBytes = 8 << 20
+// A single legacy snapshot is capped independently. These batch limits keep
+// the migration from retaining one hundred full snapshots (and their decoded
+// host graphs) in one transaction. A single scan may exceed a batch boundary
+// when it cannot be split without losing the scan/projection atomicity.
+const (
+	maxLegacyHostBackfillSnapshotBytes   = 8 << 20
+	legacyHostBackfillBatchSnapshotBytes = 16 << 20
+	legacyHostBackfillBatchHostRows      = 10_000
+)
+
+type legacyHostBackfillLimits struct {
+	maxScans         int
+	maxSnapshotBytes int64
+	maxHostRows      int
+}
+
+var defaultLegacyHostBackfillLimits = legacyHostBackfillLimits{
+	maxScans:         legacyHostBackfillBatchSize,
+	maxSnapshotBytes: legacyHostBackfillBatchSnapshotBytes,
+	maxHostRows:      legacyHostBackfillBatchHostRows,
+}
 
 type legacyHostBackfillScan struct {
-	id         string
-	jobID      string
-	job        string
-	finishedAt time.Time
-	snapshot   []byte
+	id            string
+	jobID         string
+	job           string
+	finishedAt    time.Time
+	snapshotBytes int64
+	snapshot      []byte
 }
+
+type legacyHostBackfillDataError struct {
+	reason string
+}
+
+func (e *legacyHostBackfillDataError) Error() string { return e.reason }
 
 // backfillLegacyScanHostsContext converts each successful scan that predates
 // scan_hosts into the same indexed projections written for new scans. A
 // checkpoint is committed together with each batch, so interruption resumes
 // from the next legacy scan and never replays scanner work.
 func backfillLegacyScanHostsContext(ctx context.Context, db *sql.DB) error {
+	return backfillLegacyScanHostsContextWithLoggerAndProgress(ctx, db, slog.Default(), nil, defaultLegacyHostBackfillLimits)
+}
+
+func backfillLegacyScanHostsContextWithLogger(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
+	return backfillLegacyScanHostsContextWithLoggerAndProgress(ctx, db, logger, nil, defaultLegacyHostBackfillLimits)
+}
+
+// backfillLegacyScanHostsContextWithLoggerAndProgress is kept separate from
+// the migration wrapper so tests can use small limits to prove that the
+// resource boundaries split work across committed transactions.
+func backfillLegacyScanHostsContextWithLoggerAndProgress(ctx context.Context, db *sql.DB, logger *slog.Logger, progress func(processed, total int64), limits legacyHostBackfillLimits) error {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if limits.maxScans <= 0 {
+		limits.maxScans = legacyHostBackfillBatchSize
+	}
+	if limits.maxSnapshotBytes <= 0 {
+		limits.maxSnapshotBytes = legacyHostBackfillBatchSnapshotBytes
+	}
+	if limits.maxHostRows <= 0 {
+		limits.maxHostRows = legacyHostBackfillBatchHostRows
+	}
+	total, err := countLegacyHostBackfillCandidates(ctx, db)
+	if err != nil {
+		return err
+	}
+	var processed int64
+	if progress != nil {
+		progress(processed, total)
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -40,12 +100,12 @@ func backfillLegacyScanHostsContext(ctx context.Context, db *sql.DB) error {
 		if err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT s.id,COALESCE(s.job_id,''),s.job,s.finished_at,s.snapshot_json
+		rows, err := tx.QueryContext(ctx, `SELECT s.id,COALESCE(s.job_id,''),s.job,s.finished_at,COALESCE(length(s.snapshot_json),0)
 FROM scans s
 WHERE s.status='success'
   AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
   AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
-ORDER BY s.finished_at,s.id LIMIT ?`, legacyHostBackfillBatchSize)
+ORDER BY s.finished_at,s.id LIMIT ?`, limits.maxScans)
 		if err != nil {
 			_ = tx.Rollback()
 			return err
@@ -61,14 +121,74 @@ ORDER BY s.finished_at,s.id LIMIT ?`, legacyHostBackfillBatchSize)
 			}
 			return nil
 		}
+		var batchBytes int64
+		batchHostRows := 0
+		batchScans := 0
+		skipped := make([]legacyHostBackfillDataError, 0)
+		skippedScanIDs := make([]string, 0)
 		for _, item := range batch {
-			if err := indexLegacyScanTx(ctx, tx, item); err != nil {
+			if err := ctx.Err(); err != nil {
 				_ = tx.Rollback()
 				return err
 			}
+			// Oversized snapshots can be checkpointed without ever selecting the
+			// blob. This is the important distinction from the old batch reader,
+			// which loaded every snapshot before checking its size.
+			if item.snapshotBytes > maxLegacyHostBackfillSnapshotBytes {
+				if batchScans > 0 && (batchBytes >= limits.maxSnapshotBytes || batchBytes+item.snapshotBytes > limits.maxSnapshotBytes) {
+					break
+				}
+				if err := checkpointLegacyScanTx(ctx, tx, item.id); err != nil {
+					_ = tx.Rollback()
+					return err
+				}
+				batchBytes += item.snapshotBytes
+				batchScans++
+				processed++
+				skipped = append(skipped, legacyHostBackfillDataError{reason: fmt.Sprintf("snapshot exceeds %d-byte conversion limit", maxLegacyHostBackfillSnapshotBytes)})
+				skippedScanIDs = append(skippedScanIDs, item.id)
+				continue
+			}
+			if batchScans > 0 && (batchBytes >= limits.maxSnapshotBytes || batchBytes+item.snapshotBytes > limits.maxSnapshotBytes) {
+				break
+			}
+			if err := loadLegacyHostBackfillSnapshot(ctx, tx, &item); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			hosts, decodeErr := decodeLegacyHostBackfillHosts(item)
+			if decodeErr != nil {
+				if err := checkpointLegacyScanTx(ctx, tx, item.id); err != nil {
+					_ = tx.Rollback()
+					return err
+				}
+				batchBytes += item.snapshotBytes
+				batchScans++
+				processed++
+				skipped = append(skipped, *decodeErr)
+				skippedScanIDs = append(skippedScanIDs, item.id)
+				continue
+			}
+			if batchScans > 0 && (batchHostRows >= limits.maxHostRows || (batchHostRows > 0 && batchHostRows+len(hosts) > limits.maxHostRows)) {
+				break
+			}
+			if err := indexLegacyScanHostsTx(ctx, tx, item, hosts); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			batchBytes += item.snapshotBytes
+			batchHostRows += len(hosts)
+			batchScans++
+			processed++
 		}
 		if err := tx.Commit(); err != nil {
 			return err
+		}
+		if progress != nil {
+			progress(processed, total)
+		}
+		for index, dataErr := range skipped {
+			logger.Warn("legacy scan host indexing skipped", "scan_id", skippedScanIDs[index], "reason", dataErr.Error())
 		}
 	}
 }
@@ -79,7 +199,7 @@ func readLegacyHostBackfillBatch(rows *sql.Rows) ([]legacyHostBackfillScan, erro
 	for rows.Next() {
 		var item legacyHostBackfillScan
 		var finished string
-		if err := rows.Scan(&item.id, &item.jobID, &item.job, &finished, &item.snapshot); err != nil {
+		if err := rows.Scan(&item.id, &item.jobID, &item.job, &finished, &item.snapshotBytes); err != nil {
 			return nil, err
 		}
 		item.finishedAt = scanTime(finished)
@@ -89,26 +209,75 @@ func readLegacyHostBackfillBatch(rows *sql.Rows) ([]legacyHostBackfillScan, erro
 }
 
 func indexLegacyScanTx(ctx context.Context, tx *sql.Tx, item legacyHostBackfillScan) error {
-	var snapshot model.Snapshot
-	if len(item.snapshot) <= maxLegacyHostBackfillSnapshotBytes && json.Unmarshal(item.snapshot, &snapshot) == nil {
-		hosts := legacyHostObservations(snapshot)
-		if len(hosts) > 0 {
-			scan := model.Scan{ID: item.id, JobID: item.jobID, Job: item.job, FinishedAt: item.finishedAt, Status: "success", Snapshot: model.Snapshot{Hosts: hosts}}
-			if err := saveScanHostsExec(ctx, tx, scan); err != nil {
-				return err
-			}
-			// These observations were reconstructed from a legacy snapshot, so
-			// advertise their quality to API consumers even though the common
-			// projection writer uses the detailed default.
-			if _, err := tx.ExecContext(ctx, `UPDATE scan_hosts SET data_quality='legacy' WHERE scan_id=?`, item.id); err != nil {
-				return err
-			}
-			if _, err := tx.ExecContext(ctx, `UPDATE latest_scan_hosts SET data_quality='legacy' WHERE scan_id=?`, item.id); err != nil {
-				return err
-			}
+	if item.snapshotBytes == 0 && len(item.snapshot) > 0 {
+		item.snapshotBytes = int64(len(item.snapshot))
+	}
+	if item.snapshot == nil && item.snapshotBytes <= maxLegacyHostBackfillSnapshotBytes {
+		if err := loadLegacyHostBackfillSnapshot(ctx, tx, &item); err != nil {
+			return err
 		}
 	}
-	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO legacy_scan_host_backfill(scan_id,processed_at) VALUES(?,?)`, item.id, time.Now().UTC().Format(time.RFC3339Nano))
+	hosts, decodeErr := decodeLegacyHostBackfillHosts(item)
+	if decodeErr != nil {
+		return decodeErr
+	}
+	return indexLegacyScanHostsTx(ctx, tx, item, hosts)
+}
+
+func indexLegacyScanHostsTx(ctx context.Context, tx *sql.Tx, item legacyHostBackfillScan, hosts []model.HostObservation) error {
+	if len(hosts) > 0 {
+		scan := model.Scan{ID: item.id, JobID: item.jobID, Job: item.job, FinishedAt: item.finishedAt, Status: "success", Snapshot: model.Snapshot{Hosts: hosts}}
+		if err := saveScanHostsExec(ctx, tx, scan); err != nil {
+			return err
+		}
+		// These observations were reconstructed from a legacy snapshot, so
+		// advertise their quality to API consumers even though the common
+		// projection writer uses the detailed default.
+		if _, err := tx.ExecContext(ctx, `UPDATE scan_hosts SET data_quality='legacy' WHERE scan_id=?`, item.id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE latest_scan_hosts SET data_quality='legacy' WHERE scan_id=?`, item.id); err != nil {
+			return err
+		}
+	}
+	return checkpointLegacyScanTx(ctx, tx, item.id)
+}
+
+func loadLegacyHostBackfillSnapshot(ctx context.Context, tx *sql.Tx, item *legacyHostBackfillScan) error {
+	var snapshot []byte
+	if err := tx.QueryRowContext(ctx, `SELECT snapshot_json FROM scans WHERE id=?`, item.id).Scan(&snapshot); err != nil {
+		return err
+	}
+	item.snapshot = snapshot
+	if item.snapshotBytes == 0 {
+		item.snapshotBytes = int64(len(snapshot))
+	}
+	return nil
+}
+
+func decodeLegacyHostBackfillHosts(item legacyHostBackfillScan) ([]model.HostObservation, *legacyHostBackfillDataError) {
+	if item.snapshotBytes > maxLegacyHostBackfillSnapshotBytes || len(item.snapshot) > maxLegacyHostBackfillSnapshotBytes {
+		return nil, &legacyHostBackfillDataError{reason: fmt.Sprintf("snapshot exceeds %d-byte conversion limit", maxLegacyHostBackfillSnapshotBytes)}
+	}
+	var snapshot model.Snapshot
+	if err := json.Unmarshal(item.snapshot, &snapshot); err != nil {
+		return nil, &legacyHostBackfillDataError{reason: "snapshot JSON is malformed"}
+	}
+	return legacyHostObservations(snapshot), nil
+}
+
+func countLegacyHostBackfillCandidates(ctx context.Context, db *sql.DB) (int64, error) {
+	var total int64
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*)
+FROM scans s
+WHERE s.status='success'
+  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
+  AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)`).Scan(&total)
+	return total, err
+}
+
+func checkpointLegacyScanTx(ctx context.Context, tx *sql.Tx, scanID string) error {
+	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO legacy_scan_host_backfill(scan_id,processed_at) VALUES(?,?)`, scanID, time.Now().UTC().Format(time.RFC3339Nano))
 	return err
 }
 
@@ -117,7 +286,7 @@ func indexLegacyScanTx(ctx context.Context, tx *sql.Tx, item legacyHostBackfillS
 // once, without importing web or making every Hosts request decode snapshots.
 func legacyHostObservations(snapshot model.Snapshot) []model.HostObservation {
 	if len(snapshot.Hosts) > 0 {
-		hosts := append([]model.HostObservation(nil), snapshot.Hosts...)
+		hosts := legacyMergeHostsByAddress(snapshot.Hosts)
 		normalizeLegacyHosts(hosts)
 		return hosts
 	}
@@ -337,4 +506,132 @@ func legacyDedupeProtocol(protocol *model.ProtocolObservation) {
 		ports = append(ports, incoming)
 	}
 	protocol.Ports = ports
+}
+
+func legacyMergeHostsByAddress(input []model.HostObservation) []model.HostObservation {
+	byAddress := make(map[string]model.HostObservation, len(input))
+	for _, original := range input {
+		address := canonicalLegacyAddress(original.Address)
+		if net.ParseIP(address) == nil {
+			continue
+		}
+		addition := cloneLegacyHostObservation(original)
+		addition.Address = address
+		if addition.AddressFamily == "" {
+			addition.AddressFamily = legacyAddressFamily(address)
+		}
+		for index := range addition.Protocols {
+			addition.Protocols[index].Protocol = strings.ToLower(strings.TrimSpace(addition.Protocols[index].Protocol))
+		}
+		current, exists := byAddress[address]
+		if !exists {
+			byAddress[address] = addition
+			continue
+		}
+		current.SourceTargets = append(current.SourceTargets, addition.SourceTargets...)
+		current.DNSNames = append(current.DNSNames, addition.DNSNames...)
+		current.LinkAddresses = append(current.LinkAddresses, addition.LinkAddresses...)
+		current.Hostnames = append(current.Hostnames, addition.Hostnames...)
+		current.Status, current.StatusReason = legacyMergeHostStatus(current.Status, current.StatusReason, addition.Status, addition.StatusReason)
+		if current.ReasonTTL == 0 || addition.ReasonTTL > 0 && addition.ReasonTTL < current.ReasonTTL {
+			current.ReasonTTL = addition.ReasonTTL
+		}
+		if current.LatencyMS == 0 || addition.LatencyMS > 0 && addition.LatencyMS < current.LatencyMS {
+			current.LatencyMS = addition.LatencyMS
+		}
+		for _, protocol := range addition.Protocols {
+			legacyMergeProtocol(&current.Protocols, protocol)
+		}
+		byAddress[address] = current
+	}
+	result := make([]model.HostObservation, 0, len(byAddress))
+	for _, host := range byAddress {
+		result = append(result, host)
+	}
+	return result
+}
+
+func cloneLegacyHostObservation(host model.HostObservation) model.HostObservation {
+	cloned := host
+	cloned.SourceTargets = append([]string(nil), host.SourceTargets...)
+	cloned.DNSNames = append([]string(nil), host.DNSNames...)
+	cloned.LinkAddresses = append([]model.LinkAddress(nil), host.LinkAddresses...)
+	cloned.Hostnames = append([]model.Hostname(nil), host.Hostnames...)
+	cloned.Protocols = append([]model.ProtocolObservation(nil), host.Protocols...)
+	for protocolIndex := range cloned.Protocols {
+		protocol := &cloned.Protocols[protocolIndex]
+		protocol.Ports = cloneLegacyPortObservations(protocol.Ports)
+		protocol.DiscoveredPorts = cloneLegacyPortObservations(protocol.DiscoveredPorts)
+		protocol.UnconfirmedPorts = cloneLegacyPortObservations(protocol.UnconfirmedPorts)
+		protocol.StateSummaries = append([]model.StateSummary(nil), protocol.StateSummaries...)
+		for summaryIndex := range protocol.StateSummaries {
+			protocol.StateSummaries[summaryIndex].Reasons = append([]model.StateReason(nil), protocol.StateSummaries[summaryIndex].Reasons...)
+		}
+		protocol.NSEOutput = append([]string(nil), protocol.NSEOutput...)
+		if protocol.NSEArgs != nil {
+			protocol.NSEArgs = make(map[string]string, len(host.Protocols[protocolIndex].NSEArgs))
+			for key, value := range host.Protocols[protocolIndex].NSEArgs {
+				protocol.NSEArgs[key] = value
+			}
+		}
+	}
+	return cloned
+}
+
+func cloneLegacyPortObservations(ports []model.PortObservation) []model.PortObservation {
+	cloned := append([]model.PortObservation(nil), ports...)
+	for index := range cloned {
+		if cloned[index].Service != nil {
+			service := *cloned[index].Service
+			service.CPEs = append([]string(nil), service.CPEs...)
+			cloned[index].Service = &service
+		}
+	}
+	return cloned
+}
+
+func legacyMergeHostStatus(currentStatus, currentReason, additionStatus, additionReason string) (string, string) {
+	currentStatus = strings.ToLower(strings.TrimSpace(currentStatus))
+	additionStatus = strings.ToLower(strings.TrimSpace(additionStatus))
+	currentReason = strings.TrimSpace(currentReason)
+	additionReason = strings.TrimSpace(additionReason)
+	currentIncomplete := legacyIncompleteHostStatus(currentStatus)
+	additionIncomplete := legacyIncompleteHostStatus(additionStatus)
+	if currentIncomplete || additionIncomplete {
+		if currentIncomplete && !additionIncomplete {
+			return "unreachable", currentReason
+		}
+		if additionIncomplete && !currentIncomplete {
+			return "unreachable", additionReason
+		}
+		return "unreachable", legacyChooseStatusReason(currentReason, additionReason)
+	}
+	if currentStatus == "" || currentStatus == "unknown" {
+		if additionStatus != "" {
+			return additionStatus, legacyChooseStatusReason(currentReason, additionReason)
+		}
+	}
+	return currentStatus, legacyChooseStatusReason(currentReason, additionReason)
+}
+
+func legacyIncompleteHostStatus(status string) bool {
+	switch status {
+	case "unreachable", "down", "timedout", "timed-out", "timeout":
+		return true
+	default:
+		return false
+	}
+}
+
+func legacyChooseStatusReason(current, addition string) string {
+	if current == "" {
+		return addition
+	}
+	if addition == "" || current == addition {
+		return current
+	}
+	if addition < current {
+		return addition
+	}
+	return current
 }

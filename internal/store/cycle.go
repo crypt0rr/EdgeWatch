@@ -64,6 +64,7 @@ type ScanCycleUnit struct {
 	Unit       scanner.WorkUnit
 	Status     string
 	Attempts   int
+	Failures   int
 	Snapshot   model.Snapshot
 	StartedAt  time.Time
 	FinishedAt time.Time
@@ -85,6 +86,7 @@ type ScanCycleUnitSummary struct {
 	Probes     int64     `json:"probes"`
 	Status     string    `json:"status"`
 	Attempts   int       `json:"attempts"`
+	Failures   int       `json:"failures"`
 	StartedAt  time.Time `json:"started_at"`
 	FinishedAt time.Time `json:"finished_at"`
 	LastError  string    `json:"last_error,omitempty"`
@@ -798,7 +800,7 @@ func (s *Store) ScanCycleHasScan(ctx context.Context, cycleID string) (bool, err
 }
 
 func (s *Store) ListScanCycleUnitSummaries(ctx context.Context, cycleID string) ([]ScanCycleUnitSummary, error) {
-	rows, err := s.reader().QueryContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? ORDER BY sequence`, cycleID)
+	rows, err := s.reader().QueryContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,failures,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? ORDER BY sequence`, cycleID)
 	if err != nil {
 		return nil, err
 	}
@@ -808,7 +810,7 @@ func (s *Store) ListScanCycleUnitSummaries(ctx context.Context, cycleID string) 
 		var item ScanCycleUnitSummary
 		var raw []byte
 		var started, finished string
-		if err := rows.Scan(&item.CycleID, &item.Sequence, &raw, &item.Status, &item.Attempts, &started, &finished, &item.LastError); err != nil {
+		if err := rows.Scan(&item.CycleID, &item.Sequence, &raw, &item.Status, &item.Attempts, &item.Failures, &started, &finished, &item.LastError); err != nil {
 			return nil, err
 		}
 		var unit scanner.WorkUnit
@@ -836,7 +838,7 @@ func (s *Store) ListScanCycleUnitSummariesPage(ctx context.Context, cycleID stri
 	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycle_units WHERE cycle_id=?`, cycleID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? ORDER BY sequence LIMIT ? OFFSET ?`, cycleID, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,failures,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? ORDER BY sequence LIMIT ? OFFSET ?`, cycleID, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -845,7 +847,7 @@ func (s *Store) ListScanCycleUnitSummariesPage(ctx context.Context, cycleID stri
 		var item ScanCycleUnitSummary
 		var raw []byte
 		var started, finished string
-		if err := rows.Scan(&item.CycleID, &item.Sequence, &raw, &item.Status, &item.Attempts, &started, &finished, &item.LastError); err != nil {
+		if err := rows.Scan(&item.CycleID, &item.Sequence, &raw, &item.Status, &item.Attempts, &item.Failures, &started, &finished, &item.LastError); err != nil {
 			return page, err
 		}
 		var unit scanner.WorkUnit
@@ -932,8 +934,8 @@ func (s *Store) NextScanCycleUnit(ctx context.Context, cycleID string) (ScanCycl
 		}
 		return unit, ErrCycleNotResumable
 	}
-	err := s.reader().QueryRowContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,snapshot_json,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? AND status='pending' ORDER BY sequence LIMIT 1`, cycleID).
-		Scan(&unit.CycleID, &unit.Sequence, &raw, &unit.Status, &unit.Attempts, &snapshot, &started, &finished, &unit.LastError)
+	err := s.reader().QueryRowContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,failures,snapshot_json,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? AND status='pending' ORDER BY sequence LIMIT 1`, cycleID).
+		Scan(&unit.CycleID, &unit.Sequence, &raw, &unit.Status, &unit.Attempts, &unit.Failures, &snapshot, &started, &finished, &unit.LastError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return unit, ErrNoPendingUnit
 	}
@@ -994,8 +996,8 @@ func (s *Store) getScanCycleUnit(ctx context.Context, cycleID string, sequence i
 	var unit ScanCycleUnit
 	var raw, snapshot []byte
 	var started, finished string
-	err := s.reader().QueryRowContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,snapshot_json,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? AND sequence=?`, cycleID, sequence).
-		Scan(&unit.CycleID, &unit.Sequence, &raw, &unit.Status, &unit.Attempts, &snapshot, &started, &finished, &unit.LastError)
+	err := s.reader().QueryRowContext(ctx, `SELECT cycle_id,sequence,work_unit_json,status,attempts,failures,snapshot_json,started_at,finished_at,last_error FROM scan_cycle_units WHERE cycle_id=? AND sequence=?`, cycleID, sequence).
+		Scan(&unit.CycleID, &unit.Sequence, &raw, &unit.Status, &unit.Attempts, &unit.Failures, &snapshot, &started, &finished, &unit.LastError)
 	if err != nil {
 		return unit, err
 	}
@@ -1060,7 +1062,23 @@ func (s *Store) CompleteScanCycleUnit(ctx context.Context, cycleID string, seque
 }
 
 func (s *Store) RetryScanCycleUnit(ctx context.Context, cycleID string, sequence int, lastError string) error {
-	result, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET status='pending',last_error=? WHERE cycle_id=? AND sequence=? AND status='running' AND EXISTS (SELECT 1 FROM scan_cycles WHERE id=? AND status='running')`, trimCycleError(lastError), cycleID, sequence, cycleID)
+	return s.retryScanCycleUnit(ctx, cycleID, sequence, lastError, false)
+}
+
+// RetryScanCycleUnitAfterFailure returns a claimed unit to pending and records
+// one completed retryable scanner failure. Claims and process-recovery counts
+// are intentionally kept separate from this counter: a unit can be claimed
+// more than once without ever completing a failed execution.
+func (s *Store) RetryScanCycleUnitAfterFailure(ctx context.Context, cycleID string, sequence int, lastError string) error {
+	return s.retryScanCycleUnit(ctx, cycleID, sequence, lastError, true)
+}
+
+func (s *Store) retryScanCycleUnit(ctx context.Context, cycleID string, sequence int, lastError string, countFailure bool) error {
+	failureIncrement := 0
+	if countFailure {
+		failureIncrement = 1
+	}
+	result, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET status='pending',failures=failures+?,last_error=? WHERE cycle_id=? AND sequence=? AND status='running' AND EXISTS (SELECT 1 FROM scan_cycles WHERE id=? AND status='running')`, failureIncrement, trimCycleError(lastError), cycleID, sequence, cycleID)
 	if err != nil {
 		return err
 	}
@@ -1126,10 +1144,10 @@ func (s *Store) SplitScanCycleUnit(ctx context.Context, cycleID string, sequence
 	if err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=?,identity=?,phase=?,probes=?,status='pending',attempts=?,last_error=? WHERE cycle_id=? AND sequence=?`, firstRaw, scanCycleUnitIdentity(first), first.Phase, first.Probes, parentAttempts, trimCycleError(lastError), cycleID, sequence); err != nil {
+	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=?,identity=?,phase=?,probes=?,status='pending',attempts=?,failures=0,last_error=? WHERE cycle_id=? AND sequence=?`, firstRaw, scanCycleUnitIdentity(first), first.Phase, first.Probes, parentAttempts, trimCycleError(lastError), cycleID, sequence); err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,phase,probes,status,attempts,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, cycleID, next, secondRaw, scanCycleUnitIdentity(second), second.Phase, second.Probes, "pending", parentAttempts, []byte(`{}`), "", "", ""); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity,phase,probes,status,attempts,failures,snapshot_json,started_at,finished_at,last_error) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, cycleID, next, secondRaw, scanCycleUnitIdentity(second), second.Phase, second.Probes, "pending", parentAttempts, 0, []byte(`{}`), "", "", ""); err != nil {
 		return err
 	}
 	probeDelta := first.Probes + second.Probes - original.Probes
@@ -1232,8 +1250,16 @@ func (s *Store) DiscardScanCycle(ctx context.Context, cycleID string) error {
 		}
 	}
 	stamp := sqliteTimestamp(time.Now())
-	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded',updated_at=?,finished_at=?,last_error='discarded by administrator' WHERE id=? AND status IN ('paused','stalled','completed')`, stamp, stamp, cycleID); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded',updated_at=?,finished_at=?,last_error='discarded by administrator',completed_units=0,total_units=0,completed_probes=0,total_probes=0 WHERE id=? AND status IN ('running','paused','stalled','completed')`, stamp, stamp, cycleID)
+	if err != nil {
 		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return ErrCycleNotResumable
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM scan_cycle_units WHERE cycle_id=?`, cycleID); err != nil {
 		return err

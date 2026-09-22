@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 44
+const schemaVersion = 45
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -1099,6 +1099,14 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
 			"UPDATE job_runtime_meta SET baseline_epoch=1 WHERE baseline_epoch=0 AND (baseline_scan_id<>'' OR baseline_modified<>0)",
 			"CREATE INDEX IF NOT EXISTS scan_cycles_job_epoch_status ON scan_cycles(job_id,baseline_epoch,status)",
 		},
+		45: {
+			// Claims are useful execution telemetry, but a process restart or a
+			// timeout can claim the same unit without completing a failed scanner
+			// execution. Keep a separate counter for genuine retryable failures so
+			// retry budgets cannot be consumed by recovery alone. Split children
+			// start with zero failures and are initialized by the cycle store.
+			"ALTER TABLE scan_cycle_units ADD COLUMN failures INTEGER NOT NULL DEFAULT 0",
+		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an
@@ -1163,7 +1171,15 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
 		markMigrationFailed(ctx, db, err)
 		return err
 	}
-	if err := backfillLegacyScanHostsContext(ctx, db); err != nil {
+	if err := backfillLegacyScanHostsContextWithLoggerAndProgress(ctx, db, logger, func(processed, total int64) {
+		// Progress bookkeeping is diagnostic only. Never make an otherwise
+		// healthy migration fail because a status write was interrupted. The
+		// callback runs after each bounded transaction has committed, so the
+		// persisted counter never claims work that can still be rolled back.
+		statusCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		_ = updateMigrationStatus(statusCtx, db, "legacy-host-index", processed, total)
+		cancel()
+	}, defaultLegacyHostBackfillLimits); err != nil {
 		markMigrationFailed(ctx, db, err)
 		return err
 	}

@@ -21,6 +21,30 @@ func (r failingResolver) LookupIP(context.Context, string, string) ([]net.IP, er
 	return nil, r.err
 }
 
+func TestRunScannerVersionProbeKillsChildWhenOutputLimitExceeded(t *testing.T) {
+	for _, stream := range []string{"stdout", "stderr"} {
+		t.Run(stream, func(t *testing.T) {
+			marker := filepath.Join(t.TempDir(), "finished")
+			redirect := ""
+			if stream == "stderr" {
+				redirect = " >&2"
+			}
+			script := "i=0\nwhile [ \"$i\" -lt 2 ]; do\n  printf '%65536s' x" + redirect + "\n  i=$((i + 1))\ndone\nsleep 1\ntouch " + marker + "\n"
+			path := filepath.Join(t.TempDir(), "scanner")
+			if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			_, err := runScannerVersionProbe(context.Background(), path, "--version")
+			if err == nil || !strings.Contains(err.Error(), "scanner version output exceeded") {
+				t.Fatalf("oversized %s error = %v", stream, err)
+			}
+			if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+				t.Fatalf("version-probe child reached post-output marker (stat error %v)", statErr)
+			}
+		})
+	}
+}
+
 func TestNmapTargetExclusionsAndVersions(t *testing.T) {
 	n := New("missing-nmap")
 	if err := n.SetTargetExclusions(nil); err != nil {

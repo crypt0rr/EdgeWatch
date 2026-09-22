@@ -337,7 +337,7 @@ func TestIncompleteScanLearningStallAndServiceFiltering(t *testing.T) {
 	if !strings.Contains(incompleteScanError(partial.Snapshot), "+1 more") {
 		t.Fatalf("bounded incomplete error = %q", incompleteScanError(partial.Snapshot))
 	}
-	if got := incompleteScanError(model.Snapshot{}); got != "Scan incomplete: host discovery did not complete" {
+	if got := incompleteScanError(model.Snapshot{}); got != "Scan incomplete: scan coverage did not complete" {
 		t.Fatalf("empty incomplete error = %q", got)
 	}
 

@@ -68,7 +68,7 @@ const host: HostObservation = {
       state_summaries: [{ state: 'closed', count: 65533, reasons: [{ reason: 'reset', count: 65533 }] }],
       nse_profile: 'banner',
     },
-    { protocol: 'udp', scan_type: 'udp', scanned_ports: '53', scanned_port_count: 1, service_detection: false, ports: [], state_summaries: [{ state: 'filtered', count: 1 }] },
+    { protocol: 'udp', status: 'unreachable', status_reason: 'nmap-host-timeout', scan_type: 'udp', scanned_ports: '53', scanned_port_count: 1, service_detection: false, ports: [], state_summaries: [{ state: 'filtered', count: 1 }] },
   ],
 }
 
@@ -116,6 +116,8 @@ describe('host detail', () => {
     expect(container.textContent).toContain('Example Network')
     expect(container.textContent).toContain('NET-1')
     expect(container.textContent).toContain('Naabu discovery → Nmap confirmation')
+    expect(container.textContent).toContain('UDP scan coverage: unreachable')
+    expect(container.textContent).toContain('nmap-host-timeout')
     expect(container.textContent).toContain('nginx · 1.25')
     expect(container.textContent).toContain('confidence 10')
     expect(container.textContent).toContain('cpe:/a:nginx:nginx:1.25')

@@ -533,10 +533,10 @@ func (a *App) recoverCompletedCycle(ctx context.Context, scan *model.Scan, run *
 		scan.Error = err.Error()
 		return true, model.Snapshot{}, err
 	}
-	if cycle.CompletedUnits != cycle.TotalUnits || len(fragments) != cycle.TotalUnits {
+	if err := missingScanCycleCheckpointError(cycle, len(fragments)); err != nil {
 		scan.Status = "failed"
-		scan.Error = "completed scan cycle is missing one or more checkpoints"
-		return true, model.Snapshot{}, errors.New(scan.Error)
+		scan.Error = err.Error()
+		return true, model.Snapshot{}, err
 	}
 	snapshot := scanner.MergeWorkSnapshots(plan, fragments)
 	// Preserve the scope and revision that produced the cycle. If the current
@@ -579,6 +579,16 @@ func (a *App) finishResumableCycle(ctx context.Context, scan *model.Scan, run *a
 		}
 		return true, model.Snapshot{}, err
 	}
+	if err := missingScanCycleCheckpointError(cycle, len(fragments)); err != nil {
+		scan.Status = "failed"
+		scan.Error = err.Error()
+		if stalled, stallErr := a.Store.MarkScanCycleStalled(ctx, cycle.ID, err.Error()); stallErr == nil {
+			setScanCycleMetadata(scan, stalled)
+		} else {
+			scan.CycleStatus = "stalled"
+		}
+		return true, model.Snapshot{}, err
+	}
 	snapshot := scanner.MergeWorkSnapshots(plan, fragments)
 	cycleID := cycle.ID
 	cycle, err = a.Store.CompleteScanCycle(ctx, cycleID)
@@ -597,6 +607,13 @@ func (a *App) finishResumableCycle(ctx context.Context, scan *model.Scan, run *a
 	setScanCycleMetadata(scan, cycle)
 	setActiveCycle(run, cycle, "complete", cycle.TotalUnits)
 	return true, snapshot, nil
+}
+
+func missingScanCycleCheckpointError(cycle store.ScanCycleRecord, fragmentCount int) error {
+	if cycle.CompletedUnits == cycle.TotalUnits && fragmentCount == cycle.TotalUnits {
+		return nil
+	}
+	return fmt.Errorf("completed scan cycle is missing one or more checkpoints: %d of %d units available", fragmentCount, cycle.TotalUnits)
 }
 
 func setScanCycleMetadata(scan *model.Scan, cycle store.ScanCycleRecord) {

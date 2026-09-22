@@ -77,9 +77,12 @@ func (a *App) checkJobSilence(ctx context.Context, now time.Time) {
 			destinations, err = a.Notifier.QueueDestinationsForJob(ctx, record.Job)
 			if err != nil {
 				a.silenceLogger().Warn("job silence notification destinations unavailable", "job", record.Job.Name, "error", err)
-				// Retain the event even if destinations are temporarily unavailable;
-				// the next window can retry after configuration is repaired.
-				destinations = nil
+				// Do not advance the durable watchdog state when destinations
+				// cannot be resolved. Recording the event would also advance its
+				// exponential backoff without creating an outbox row, delaying
+				// delivery long after the notifier is repaired. The next heartbeat
+				// retries the same overdue window.
+				continue
 			}
 		}
 		event, created, err := a.Store.RecordJobSilenceAlert(ctx, record.ID, record.Job.Name, record.CreatedAt, now, threshold, destinations)

@@ -388,9 +388,12 @@ jobs:
           test "$(docker run --rm "$IMAGE" version)" = "$expected"
           smoke_dir="$(mktemp -d)"
           mkdir -p "$smoke_dir/data"
-          # The disposable directory must also work on rootless Docker
-          # runners, where container UID 0 is mapped away from the host user.
-          chmod 0777 "$smoke_dir/data"
+          ./scripts/prepare-container-smoke-data.sh "$IMAGE" "$smoke_dir/data"
+          cleanup_smoke() {
+            docker run --rm --volume "$smoke_dir/data:/data" --entrypoint /bin/sh "$IMAGE" -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
+            rm -rf "$smoke_dir"
+          }
+          trap cleanup_smoke EXIT
           printf '%s\n' \
             'database: /var/lib/edgewatch/edgewatch.db' \
             'retention: 24h' \
@@ -401,7 +404,8 @@ jobs:
             '  max_probe_count: 1000' \
             'notifications:' \
             '  urls: []' > "$smoke_dir/config.yaml"
-          docker run --rm \
+          docker run --rm --read-only --tmpfs /tmp:size=128m,mode=1777 \
+            --cap-drop ALL --cap-add NET_RAW --security-opt no-new-privileges:true \
             -v "$smoke_dir/config.yaml:/etc/edgewatch/config.yaml:ro" \
             -v "$smoke_dir/data:/var/lib/edgewatch" \
             "$IMAGE" config validate --config /etc/edgewatch/config.yaml --output json
@@ -409,7 +413,17 @@ jobs:
         run: |
           smoke_dir="$(mktemp -d)"
           mkdir -p "$smoke_dir/data"
-          chmod 0777 "$smoke_dir/data"
+          ./scripts/prepare-container-smoke-data.sh "$IMAGE" "$smoke_dir/data"
+          container=""
+          cleanup_smoke() {
+            if [ -n "$container" ]; then
+              docker stop "$container" >/dev/null 2>&1 || true
+              docker rm "$container" >/dev/null 2>&1 || true
+            fi
+            docker run --rm --volume "$smoke_dir/data:/data" --entrypoint /bin/sh "$IMAGE" -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
+            rm -rf "$smoke_dir"
+          }
+          trap cleanup_smoke EXIT
           printf '%s\n' \
             'database: /var/lib/edgewatch/edgewatch.db' \
             'retention: 24h' \
@@ -420,11 +434,11 @@ jobs:
             '  max_probe_count: 1000' \
             'notifications:' \
             '  urls: []' > "$smoke_dir/config.yaml"
-          container="$(docker run -d --network host \
+          container="$(docker run -d --network host --read-only --tmpfs /tmp:size=128m,mode=1777 \
+            --cap-drop ALL --cap-add NET_RAW --security-opt no-new-privileges:true \
             -v "$smoke_dir/config.yaml:/etc/edgewatch/config.yaml:ro" \
             -v "$smoke_dir/data:/var/lib/edgewatch" \
             "$IMAGE" daemon --config /etc/edgewatch/config.yaml)"
-          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
           for attempt in $(seq 1 30); do
             if curl --fail --silent --max-time 2 http://127.0.0.1:18080/ | grep -q 'EdgeWatch'; then
               break
@@ -436,12 +450,12 @@ jobs:
             fi
           done
           docker exec "$container" edgewatch health --config /etc/edgewatch/config.yaml
-          test -s "$smoke_dir/data/edgewatch.db"
+          docker exec "$container" /bin/sh -c 'test -s /var/lib/edgewatch/edgewatch.db'
       - name: Verify disposable Compose deployment
         run: |
           smoke_dir="$(mktemp -d)"
           mkdir -p "$smoke_dir/data"
-          chmod 0777 "$smoke_dir/data"
+          ./scripts/prepare-container-smoke-data.sh "$IMAGE" "$smoke_dir/data"
           printf '%s\n' \
             'database: /var/lib/edgewatch/edgewatch.db' \
             'retention: 24h' \
@@ -472,6 +486,8 @@ jobs:
           project="edgewatch-smoke-${GITHUB_RUN_ID}"
           cleanup() {
             docker compose -p "$project" -f "$smoke_dir/compose.yaml" down --volumes --remove-orphans >/dev/null 2>&1 || true
+            docker run --rm --volume "$smoke_dir/data:/data" --entrypoint /bin/sh "$IMAGE" -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
+            rm -rf "$smoke_dir"
           }
           trap cleanup EXIT
           docker compose -p "$project" -f "$smoke_dir/compose.yaml" up -d --quiet-pull
@@ -486,9 +502,9 @@ jobs:
             fi
           done
           docker compose -p "$project" -f "$smoke_dir/compose.yaml" exec -T edgewatch edgewatch health --config /etc/edgewatch/config.yaml
+          docker compose -p "$project" -f "$smoke_dir/compose.yaml" exec -T edgewatch /bin/sh -c "test -s /var/lib/edgewatch/edgewatch.db"
           cleanup
           trap - EXIT
-          test -s "$smoke_dir/data/edgewatch.db"
 
   publish-release:
     name: Publish verified GitHub release

@@ -44,31 +44,34 @@ enrichment:
     enabled: false
 EOF
 mkdir -p "$root/data"
-# The daemon runs as UID 0 with all Linux capabilities dropped. A bind mount
-# owned by the host runner therefore needs an explicit write bit for the
-# container process, just like a freshly-created Compose data directory.
-chmod 0777 "$root/data"
+./scripts/prepare-container-smoke-data.sh "$image" "$root/data"
 
 container_id=""
 cleanup() {
   if [[ -n "$container_id" ]]; then
-    docker rm -f "$container_id" >/dev/null 2>&1 || true
+    docker stop "$container_id" >/dev/null 2>&1 || true
+    docker rm "$container_id" >/dev/null 2>&1 || true
+  fi
+  if [[ -d "$root/data" ]]; then
+    docker run --rm --volume "$root/data:/data" --entrypoint /bin/sh "$image" \
+      -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
   fi
   rm -rf "$root"
 }
 trap cleanup EXIT
 
-container_id="$(docker run -d --rm --platform "$platform" --network host --read-only \
-  --tmpfs /tmp:size=128m,mode=1777 --cap-drop ALL --security-opt no-new-privileges:true \
+container_id="$(docker run -d --platform "$platform" --network host --read-only \
+  --tmpfs /tmp:size=128m,mode=1777 --cap-drop ALL --cap-add NET_RAW --security-opt no-new-privileges:true \
   -v "$root/config.yaml:/etc/edgewatch/config.yaml:ro" \
   -v "$root/data:/var/lib/edgewatch" \
   "$image" daemon --config /etc/edgewatch/config.yaml)"
 
 for _ in {1..30}; do
-  if curl --fail --silent --show-error "http://127.0.0.1:${port}/" > "$root/index.html"; then
+  if curl --fail --silent "http://127.0.0.1:${port}/" > "$root/index.html"; then
     break
   fi
   if [[ "$(docker inspect --format '{{.State.Running}}' "$container_id" 2>/dev/null || true)" != "true" ]]; then
+    docker inspect --format 'container state={{.State.Status}} exit={{.State.ExitCode}} error={{.State.Error}}' "$container_id" >&2 || true
     docker logs "$container_id" >&2 || true
     exit 1
   fi
@@ -76,4 +79,4 @@ for _ in {1..30}; do
 done
 
 grep -Fq 'EdgeWatch' "$root/index.html"
-test -s "$root/data/edgewatch.db"
+docker exec "$container_id" /bin/sh -c 'test -s /var/lib/edgewatch/edgewatch.db'

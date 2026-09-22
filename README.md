@@ -261,6 +261,11 @@ Important defaults:
   trusted proxy controls that header, or none to ignore forwarded client IPs.
   EdgeWatch never combines the two conventions, so configure the header that
   your proxy sanitizes or constructs for the trusted proxy chain.
+- If a tunnel or reverse proxy is not listed in web.trusted_proxies, every
+  client may appear as the same loopback peer. EdgeWatch keeps known-account
+  login recovery available under that shared identity while still bounding
+  concurrent password work. Configure the proxy network and forwarding header
+  when you need per-client hard lockouts and audit identities.
 - Loopback, link-local, and cloud metadata addresses are excluded by default.
   Change scanner.target_exclusions only when you understand the host-network
   exposure.

@@ -972,29 +972,52 @@ func (m *Manager) allowScoped(source, account string) bool {
 	now := m.now()
 	m.ensureScopedLimiterMapsLocked()
 	m.sweepLimiterLocked(now)
-	if legacy := legacySourceScope(source); legacy != "" {
-		if until, ok := m.blocked[legacy]; ok && now.Before(until) {
+	// A loopback peer is not a trustworthy client identity when EdgeWatch is
+	// behind an unconfigured tunnel or reverse proxy: every remote client can
+	// collapse to 127.0.0.1 or ::1. Do not turn that shared identity into a
+	// hard lockout for a known login account. The Argon2 admission semaphore and
+	// the in-flight caps below still bound concurrent work. Once a proxy is
+	// explicitly trusted, ClientIP resolves the forwarded address and this
+	// exception no longer applies, so the normal hard source/account limits are
+	// retained for trustworthy client identities.
+	sharedLoopbackLogin := sharedLoopbackLoginSource(source, account)
+	if !sharedLoopbackLogin {
+		if legacy := legacySourceScope(source); legacy != "" {
+			if until, ok := m.blocked[legacy]; ok && now.Before(until) {
+				return false
+			}
+		}
+		if until, ok := m.blocked[source]; ok && now.Before(until) {
 			return false
 		}
-	}
-	if until, ok := m.blocked[source]; ok && now.Before(until) {
-		return false
-	}
-	if account != "" {
-		if until, ok := m.accountBlocked[scopedAccountKey(source, account)]; ok && now.Before(until) {
-			return false
+		if account != "" {
+			if until, ok := m.accountBlocked[scopedAccountKey(source, account)]; ok && now.Before(until) {
+				return false
+			}
 		}
 	}
 	// Reserve the bounded admission while the caller performs Argon2 or a
 	// storage lookup. Without this compare-and-reserve step a burst of
 	// concurrent requests could all pass the check before any failure was
 	// recorded, defeating the account/source thresholds.
-	if len(m.fails[source])+m.sourceInFlight[source] >= authSourceFailureThreshold {
-		return false
-	}
 	accountKey := scopedAccountKey(source, account)
-	if accountKey != "" && len(m.accountFails[accountKey])+m.accountInFlight[accountKey] >= authFailureThreshold {
-		return false
+	if sharedLoopbackLogin {
+		// Keep a small per-peer admission ceiling for an untrusted shared
+		// identity. Sequential attempts remain subject to the Argon2 work factor,
+		// while a burst cannot consume every authentication worker.
+		if m.sourceInFlight[source] >= authArgon2MaxConcurrent {
+			return false
+		}
+		if accountKey != "" && m.accountInFlight[accountKey] >= authArgon2MaxConcurrent {
+			return false
+		}
+	} else {
+		if len(m.fails[source])+m.sourceInFlight[source] >= authSourceFailureThreshold {
+			return false
+		}
+		if accountKey != "" && len(m.accountFails[accountKey])+m.accountInFlight[accountKey] >= authFailureThreshold {
+			return false
+		}
 	}
 	m.sourceInFlight[source]++
 	if accountKey != "" {
@@ -1136,6 +1159,15 @@ func scopedAccountKey(source, account string) string {
 		return ""
 	}
 	return strings.TrimSpace(source) + "\x00" + strings.TrimSpace(account)
+}
+
+func sharedLoopbackLoginSource(source, account string) bool {
+	if !strings.HasPrefix(strings.TrimSpace(account), "login:") {
+		return false
+	}
+	address := legacySourceScope(source)
+	ip := net.ParseIP(address)
+	return ip != nil && ip.IsLoopback()
 }
 
 func legacySourceScope(source string) string {

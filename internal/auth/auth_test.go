@@ -233,7 +233,7 @@ func TestSetupAndLoginRateLimitsReturnTypedError(t *testing.T) {
 		t.Fatalf("setup rate-limit error = %v", err)
 	}
 
-	request.RemoteAddr = "127.0.0.1:3211"
+	request.RemoteAddr = "10.0.0.31:3211"
 	for i := 0; i < authFailureThreshold; i++ {
 		m.failed(request.RemoteAddr)
 	}
@@ -622,6 +622,45 @@ func TestLoginFailuresDoNotLockOutSameAccountFromAnotherSource(t *testing.T) {
 	raw, user, err := m.LoginAs(ctx, legitimate, "admin", "administrator password", "", "")
 	if err != nil || raw == "" || user.Username != "admin" {
 		t.Fatalf("valid login was blocked by another source's account failures: session=%q user=%#v err=%v", raw, user, err)
+	}
+}
+
+func TestSharedLoopbackLoginCanRecoverFromAccountAndSourceLockouts(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := NewManager(s)
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "127.0.0.1:443"
+	for attempt := 0; attempt < authFailureThreshold; attempt++ {
+		if _, _, err := m.LoginAs(ctx, request, "admin", "wrong administrator password", "", ""); err == nil {
+			t.Fatal("wrong administrator password was accepted")
+		}
+	}
+
+	// Simulate the shared legacy source bucket being blocked as well. A
+	// loopback peer cannot identify which tunnel client caused either bucket.
+	legacy := legacySourceScope(m.sourceScopeFor(request, "login"))
+	m.mu.Lock()
+	now := m.now()
+	m.fails[legacy] = make([]time.Time, authSourceFailureThreshold)
+	m.blocked[legacy] = now.Add(authBlockDuration)
+	m.mu.Unlock()
+
+	raw, user, err := m.LoginAs(ctx, request, "admin", "administrator password", "", "")
+	if err != nil || raw == "" || user.Username != "admin" {
+		t.Fatalf("valid login was blocked by shared loopback state: session=%q user=%#v err=%v", raw, user, err)
 	}
 }
 

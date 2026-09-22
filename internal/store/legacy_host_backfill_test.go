@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -235,6 +236,92 @@ func TestLegacyHostObservationsNormalizeAndMergeLegacyUnits(t *testing.T) {
 	legacyDedupeProtocol(&deduped)
 	if len(deduped.Ports) != 2 || deduped.Ports[0].State != "open" || deduped.Ports[0].Service == nil {
 		t.Fatalf("deduped ports = %#v", deduped.Ports)
+	}
+}
+
+func TestIndexLegacyScanRejectsOversizedSnapshot(t *testing.T) {
+	err := indexLegacyScanTx(context.Background(), nil, legacyHostBackfillScan{snapshot: make([]byte, maxLegacyHostBackfillSnapshotBytes+1)})
+	var dataErr *legacyHostBackfillDataError
+	if !errors.As(err, &dataErr) || !strings.Contains(dataErr.Error(), "conversion limit") {
+		t.Fatalf("oversized snapshot error = %v", err)
+	}
+}
+
+func TestLegacyHostStatusMerge(t *testing.T) {
+	tests := []struct {
+		name, currentStatus, currentReason, additionStatus, additionReason string
+		wantStatus, wantReason                                             string
+	}{
+		{name: "incomplete addition wins", currentStatus: "up", currentReason: "arp", additionStatus: "down", additionReason: "no-response", wantStatus: "unreachable", wantReason: "no-response"},
+		{name: "incomplete current is sticky", currentStatus: "down", currentReason: "nmap-host-down", additionStatus: "up", additionReason: "arp-response", wantStatus: "unreachable", wantReason: "nmap-host-down"},
+		{name: "two incomplete reasons normalize", currentStatus: "timeout", currentReason: "timeout", additionStatus: "down", additionReason: "no-response", wantStatus: "unreachable", wantReason: "no-response"},
+		{name: "unknown adopts known status", currentStatus: "unknown", additionStatus: "up", additionReason: "host-response", wantStatus: "up", wantReason: "host-response"},
+		{name: "known status retains deterministic reason", currentStatus: "up", currentReason: "z-reason", additionStatus: "up", additionReason: "a-reason", wantStatus: "up", wantReason: "a-reason"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status, reason := legacyMergeHostStatus(test.currentStatus, test.currentReason, test.additionStatus, test.additionReason)
+			if status != test.wantStatus || reason != test.wantReason {
+				t.Fatalf("merged status/reason = %q/%q, want %q/%q", status, reason, test.wantStatus, test.wantReason)
+			}
+		})
+	}
+	if legacyIncompleteHostStatus(" ") || !legacyIncompleteHostStatus("timed-out") {
+		t.Fatal("incomplete host status classification is incorrect")
+	}
+	if got := legacyChooseStatusReason("same", "same"); got != "same" {
+		t.Fatalf("identical status reason = %q", got)
+	}
+	if got := legacyChooseStatusReason("present", ""); got != "present" {
+		t.Fatalf("empty incoming status reason = %q", got)
+	}
+}
+
+func TestLegacyHostBackfillNilLogger(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "nil-logger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := backfillLegacyScanHostsContextWithLogger(context.Background(), store.DB, nil); err != nil {
+		t.Fatalf("backfill with default logger failed: %v", err)
+	}
+}
+
+func TestLegacyHostBackfillStorageFailureIsFatal(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "storage-error.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	when := time.Now().UTC().Add(-time.Hour)
+	scan := model.Scan{ID: "legacy-storage-error", Job: "legacy-job", StartedAt: when, FinishedAt: when, Status: "success"}
+	if err := store.SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := json.Marshal(model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.10", Status: "up"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.ExecContext(ctx, `UPDATE scans SET snapshot_json=? WHERE id=?`, snapshot, scan.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.ExecContext(ctx, `CREATE TRIGGER fail_legacy_host_projection BEFORE INSERT ON scan_hosts BEGIN SELECT RAISE(ABORT, 'injected projection failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillLegacyScanHostsContext(ctx, store.DB); err == nil {
+		t.Fatal("projection storage failure was treated as malformed legacy data")
+	}
+	var checkpoints int
+	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_scan_host_backfill WHERE scan_id=?`, scan.ID).Scan(&checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	if checkpoints != 0 {
+		t.Fatalf("failed scan has %d backfill checkpoints, want none", checkpoints)
 	}
 }
 

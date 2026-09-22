@@ -419,9 +419,6 @@ func legacyMergeHostsByAddress(input []model.HostObservation) []model.HostObserv
 		current.DNSNames = append(current.DNSNames, addition.DNSNames...)
 		current.LinkAddresses = append(current.LinkAddresses, addition.LinkAddresses...)
 		current.Hostnames = append(current.Hostnames, addition.Hostnames...)
-		if current.AddressFamily == "" {
-			current.AddressFamily = addition.AddressFamily
-		}
 		current.Status, current.StatusReason = legacyMergeHostStatus(current.Status, current.StatusReason, addition.Status, addition.StatusReason)
 		if current.ReasonTTL == 0 || addition.ReasonTTL > 0 && addition.ReasonTTL < current.ReasonTTL {
 			current.ReasonTTL = addition.ReasonTTL

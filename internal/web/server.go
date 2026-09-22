@@ -168,6 +168,9 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 		if err := v.Auth.SetTrustedProxies(a.Config.Web.TrustedProxies); err != nil {
 			logger.Error("trusted proxy configuration rejected", "error", err)
 		}
+		if err := v.Auth.SetForwardedHeader(a.Config.Web.ForwardedHeader); err != nil {
+			logger.Error("trusted proxy forwarding header configuration rejected", "error", err)
+		}
 	}
 	if s != nil {
 		if token, err := v.Auth.EnsureSetupToken(context.Background()); err != nil {

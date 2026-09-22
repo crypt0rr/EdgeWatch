@@ -197,7 +197,7 @@ validated schema.
 | Configuration | Managed in | Purpose |
 | --- | --- | --- |
 | database, retention | YAML | SQLite location and history retention. |
-| web.listen, web.allowed_hosts, web.trusted_proxies | YAML | Loopback listener, approved tunnel/proxy host names, and explicitly trusted proxy networks. |
+| web.listen, web.allowed_hosts, web.trusted_proxies, web.forwarded_header | YAML | Loopback listener, approved proxy host names, trusted proxy networks, and the single forwarding header used for client IPs. |
 | scheduler.* | YAML | Concurrent scans and probe budgets. |
 | scanner.target_exclusions | YAML | Addresses that may never be scanned. |
 | enrichment.rdap.enabled | YAML | Enable or disable on-demand public network-registration lookups. |
@@ -217,7 +217,11 @@ Important defaults:
   Host headers are rejected before authentication. Keep this list limited to
   names you control.
 - Forwarding headers are ignored unless the connecting proxy addresses are
-  explicitly listed in web.trusted_proxies.
+  explicitly listed in web.trusted_proxies. By default, EdgeWatch reads only
+  web.forwarded_header: x-forwarded-for; set it to forwarded only when your
+  trusted proxy controls that header, or none to ignore forwarded client IPs.
+  EdgeWatch never combines the two conventions, so configure the header that
+  your proxy sanitizes or constructs for the trusted proxy chain.
 - Loopback, link-local, and cloud metadata addresses are excluded by default.
   Change scanner.target_exclusions only when you understand the host-network
   exposure.

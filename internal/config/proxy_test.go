@@ -21,6 +21,25 @@ func TestTrustedProxyConfigurationDefaultsToIgnoreHeaders(t *testing.T) {
 	if len(cfg.Web.TrustedProxies) != 0 {
 		t.Fatalf("trusted proxies default = %#v", cfg.Web.TrustedProxies)
 	}
+	if cfg.Web.ForwardedHeader != "x-forwarded-for" {
+		t.Fatalf("forwarded header default = %q, want x-forwarded-for", cfg.Web.ForwardedHeader)
+	}
+}
+
+func TestForwardedHeaderConfigurationNormalizesExplicitPolicy(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	contents := "database: " + filepath.Join(dir, "edgewatch.db") + "\nretention: 24h\nweb:\n  forwarded_header: FORWARDED\n"
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Web.ForwardedHeader != "forwarded" {
+		t.Fatalf("forwarded header = %q, want normalized forwarded", cfg.Web.ForwardedHeader)
+	}
 }
 
 func TestTrustedProxyConfigurationValidatesAddresses(t *testing.T) {
@@ -35,6 +54,22 @@ func TestTrustedProxyConfigurationValidatesAddresses(t *testing.T) {
 	base.Web.TrustedProxies = []string{""}
 	if err := base.ValidateDeployment(); err == nil {
 		t.Fatal("empty trusted proxy was accepted")
+	}
+	base.Web.TrustedProxies = []string{"127.0.0.1/32"}
+	for _, header := range []string{"x-forwarded-for", "forwarded", "none", " Forwarded "} {
+		base.Web.ForwardedHeader = header
+		if err := base.ValidateDeployment(); err != nil {
+			t.Errorf("valid forwarded header %q rejected: %v", header, err)
+		}
+	}
+	for _, header := range []string{"x-real-ip", "x-forwarded-for,forwarded", ""} {
+		if header == "" {
+			continue // Empty means the default after config decoding.
+		}
+		base.Web.ForwardedHeader = header
+		if err := base.ValidateDeployment(); err == nil {
+			t.Errorf("invalid forwarded header %q was accepted", header)
+		}
 	}
 }
 

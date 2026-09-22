@@ -242,21 +242,25 @@ func TestForwardedAddressAndLimiterHelpers(t *testing.T) {
 	}
 	request = httptest.NewRequest(http.MethodGet, "/", nil)
 	request.Header.Set("Forwarded", `for="[2001:db8::12]:443";proto=https,for=unknown`)
-	if got := forwardedCandidates(request); len(got) != 2 || got[0] != "2001:db8::12" || got[1] != "" {
+	if got := forwardedCandidatesFor(request, forwardedHeaderForwarded); len(got) != 2 || got[0] != "2001:db8::12" || got[1] != "" {
 		t.Fatalf("RFC forwarded candidates = %#v", got)
 	}
 	request.Header.Set("X-Forwarded-For", "198.51.100.99")
-	if got := forwardedCandidates(request); len(got) != 2 || got[0] != "2001:db8::12" {
-		t.Fatalf("mixed forwarding conventions were not canonicalized: %#v", got)
+	if got := forwardedCandidatesFor(request, forwardedHeaderForwarded); len(got) != 2 || got[0] != "2001:db8::12" {
+		t.Fatalf("configured Forwarded header did not remain authoritative: %#v", got)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/", nil)
 	request.Header.Set("Forwarded", "proto=https;host=edgewatch.example")
-	if got := forwardedCandidates(request); len(got) != 0 {
+	if got := forwardedCandidatesFor(request, forwardedHeaderForwarded); len(got) != 0 {
 		t.Fatalf("Forwarded entries without a for parameter = %#v", got)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/", nil)
 	if got := forwardedCandidates(request); got != nil {
 		t.Fatalf("request without forwarding headers = %#v", got)
+	}
+	request.Header.Set("Forwarded", "for=198.51.100.99")
+	if got := forwardedCandidatesFor(request, forwardedHeaderNone); got != nil {
+		t.Fatalf("disabled forwarding policy returned candidates = %#v", got)
 	}
 	if forwardedCandidates(nil) != nil {
 		t.Fatal("nil request returned forwarded candidates")

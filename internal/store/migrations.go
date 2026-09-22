@@ -1163,7 +1163,13 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
 		markMigrationFailed(ctx, db, err)
 		return err
 	}
-	if err := backfillLegacyScanHostsContextWithLogger(ctx, db, logger); err != nil {
+	if err := backfillLegacyScanHostsContextWithLoggerAndProgress(ctx, db, logger, func(processed, total int64) {
+		// Progress bookkeeping is diagnostic only. Never make an otherwise
+		// healthy migration fail because a status write was interrupted.
+		statusCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		_ = updateMigrationStatus(statusCtx, db, "legacy-host-index", processed, total)
+		cancel()
+	}, defaultLegacyHostBackfillLimits); err != nil {
 		markMigrationFailed(ctx, db, err)
 		return err
 	}

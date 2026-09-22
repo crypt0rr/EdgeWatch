@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -521,4 +522,119 @@ func TestLegacyHostBackfillSkipsMalformedScanAndContinues(t *testing.T) {
 	if output := logs.String(); !strings.Contains(output, "legacy scan host indexing skipped") || !strings.Contains(output, "scan_id="+bad.ID) || !strings.Contains(output, "snapshot JSON is malformed") {
 		t.Fatalf("malformed scan was not logged with bounded context: %q", output)
 	}
+}
+
+func TestLegacyHostBackfillSplitsBySnapshotBytesAndHostRows(t *testing.T) {
+	ctx := context.Background()
+
+	for _, test := range []struct {
+		name  string
+		limit legacyHostBackfillLimits
+	}{
+		{
+			name: "snapshot bytes",
+			limit: legacyHostBackfillLimits{
+				maxScans:         100,
+				maxSnapshotBytes: 1,
+				maxHostRows:      100,
+			},
+		},
+		{
+			name: "host rows",
+			limit: legacyHostBackfillLimits{
+				maxScans:         100,
+				maxSnapshotBytes: 1 << 20,
+				maxHostRows:      1,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, scans := seedLegacyHostBackfillScans(ctx, t, 3)
+			defer store.Close()
+
+			var progress [][2]int64
+			if err := backfillLegacyScanHostsContextWithLoggerAndProgress(ctx, store.DB, nil, func(processed, total int64) {
+				progress = append(progress, [2]int64{processed, total})
+			}, test.limit); err != nil {
+				t.Fatalf("bounded backfill failed: %v", err)
+			}
+			if len(progress) < 4 || progress[0] != [2]int64{0, int64(len(scans))} || progress[len(progress)-1] != [2]int64{int64(len(scans)), int64(len(scans))} {
+				t.Fatalf("progress callbacks = %#v, want initial and at least one callback per committed batch", progress)
+			}
+			for index := 1; index < len(progress); index++ {
+				if progress[index][0] < progress[index-1][0] {
+					t.Fatalf("progress moved backwards: %#v", progress)
+				}
+			}
+
+			var hosts, checkpoints int
+			if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts`).Scan(&hosts); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_scan_host_backfill`).Scan(&checkpoints); err != nil {
+				t.Fatal(err)
+			}
+			if hosts != len(scans) || checkpoints != len(scans) {
+				t.Fatalf("bounded backfill projections hosts=%d checkpoints=%d, want %d", hosts, checkpoints, len(scans))
+			}
+		})
+	}
+}
+
+func TestLegacyHostBackfillCheckpointsOversizedWithoutDecoding(t *testing.T) {
+	ctx := context.Background()
+	store, scans := seedLegacyHostBackfillScans(ctx, t, 1)
+	defer store.Close()
+
+	oversized := bytes.Repeat([]byte("x"), maxLegacyHostBackfillSnapshotBytes+1)
+	if _, err := store.DB.ExecContext(ctx, `UPDATE scans SET snapshot_json=? WHERE id=?`, oversized, scans[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backfillLegacyScanHostsContext(ctx, store.DB); err != nil {
+		t.Fatalf("oversized legacy snapshot prevented backfill progress: %v", err)
+	}
+	var checkpoints, hosts int
+	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_scan_host_backfill WHERE scan_id=?`, scans[0].ID).Scan(&checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, scans[0].ID).Scan(&hosts); err != nil {
+		t.Fatal(err)
+	}
+	if checkpoints != 1 || hosts != 0 {
+		t.Fatalf("oversized snapshot checkpoint=%d hosts=%d, want checkpoint=1 hosts=0", checkpoints, hosts)
+	}
+}
+
+func seedLegacyHostBackfillScans(ctx context.Context, t *testing.T, count int) (*Store, []model.Scan) {
+	t.Helper()
+	store, err := openWithOptionsContext(ctx, filepath.Join(t.TempDir(), "bounded-legacy-hosts.db"), openOptions{create: true, migrate: true, configureWAL: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Hour)
+	scans := make([]model.Scan, 0, count)
+	for index := 0; index < count; index++ {
+		scan := model.Scan{
+			ID:         fmt.Sprintf("bounded-legacy-scan-%d", index),
+			Job:        "legacy-job",
+			StartedAt:  base.Add(time.Duration(index) * time.Minute),
+			FinishedAt: base.Add(time.Duration(index) * time.Minute),
+			Status:     "success",
+			Snapshot: model.Snapshot{Hosts: []model.HostObservation{{
+				Address: fmt.Sprintf("192.0.2.%d", index+10),
+				Status:  "up",
+			}}},
+		}
+		if err := store.SaveScan(ctx, scan); err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+		scans = append(scans, scan)
+	}
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill`); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	return store, scans
 }

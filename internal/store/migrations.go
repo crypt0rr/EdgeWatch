@@ -1163,7 +1163,7 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
 		markMigrationFailed(ctx, db, err)
 		return err
 	}
-	if err := backfillLegacyScanHostsContext(ctx, db); err != nil {
+	if err := backfillLegacyScanHostsContextWithLogger(ctx, db, logger); err != nil {
 		markMigrationFailed(ctx, db, err)
 		return err
 	}

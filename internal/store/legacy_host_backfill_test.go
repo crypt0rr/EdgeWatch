@@ -1,10 +1,13 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -271,5 +274,164 @@ func TestLegacyHostBackfillFailureBoundaries(t *testing.T) {
 	}
 	if err := backfillLegacyScanHostsContext(context.Background(), broken.DB); err == nil {
 		t.Fatal("backfill with missing checkpoint table unexpectedly succeeded")
+	}
+}
+
+func TestLegacyHostBackfillDeduplicatesCanonicalAddresses(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-duplicate-hosts.db")
+	initial, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().UTC().Add(-time.Hour)
+	scan := model.Scan{ID: "legacy-duplicate-host-scan", Job: "legacy-job", StartedAt: when, FinishedAt: when, Status: "success"}
+	if err := initial.SaveScan(ctx, scan); err != nil {
+		initial.Close()
+		t.Fatal(err)
+	}
+	if err := initial.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := model.Snapshot{Hosts: []model.HostObservation{
+		{
+			Address:       "2001:0db8:0:0:0:0:0:1",
+			SourceTargets: []string{"one.example"},
+			DNSNames:      []string{"one.example"},
+			Protocols: []model.ProtocolObservation{{
+				Protocol: "TCP",
+				Ports:    []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https"}}},
+			}},
+		},
+		{
+			Address:       "2001:db8::1",
+			SourceTargets: []string{"two.example"},
+			DNSNames:      []string{"two.example"},
+			Protocols: []model.ProtocolObservation{{
+				Protocol: "udp",
+				Ports:    []model.PortObservation{{Port: 53, State: "open", Service: &model.ServiceObservation{Name: "domain"}}},
+			}},
+		},
+	}}
+	snapshotJSON, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE scans SET snapshot_json=? WHERE id=?`, snapshotJSON, scan.ID); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill; PRAGMA user_version=38`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	var count int
+	if err := upgraded.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, scan.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("canonical IPv6 host row count = %d, want 1", count)
+	}
+	var address string
+	var hostJSON []byte
+	if err := upgraded.DB.QueryRowContext(ctx, `SELECT address,host_json FROM scan_hosts WHERE scan_id=?`, scan.ID).Scan(&address, &hostJSON); err != nil {
+		t.Fatal(err)
+	}
+	var host model.HostObservation
+	if err := json.Unmarshal(hostJSON, &host); err != nil {
+		t.Fatal(err)
+	}
+	if address != "2001:db8::1" || host.Address != address || len(host.Protocols) != 2 {
+		t.Fatalf("canonical merged host = address %q, %#v", address, host)
+	}
+	if len(host.SourceTargets) != 2 || len(host.DNSNames) != 2 {
+		t.Fatalf("merged target relationships = targets %#v DNS %#v", host.SourceTargets, host.DNSNames)
+	}
+	portsByProtocol := map[string]int{}
+	for _, protocol := range host.Protocols {
+		portsByProtocol[protocol.Protocol] = len(protocol.Ports)
+	}
+	if portsByProtocol["tcp"] != 1 || portsByProtocol["udp"] != 1 {
+		t.Fatalf("merged protocol evidence = %#v", host.Protocols)
+	}
+}
+
+func TestLegacyHostBackfillSkipsMalformedScanAndContinues(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-malformed-hosts.db")
+	initial, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Hour)
+	bad := model.Scan{ID: "bad-legacy-scan", Job: "legacy-job", StartedAt: base, FinishedAt: base, Status: "success"}
+	good := model.Scan{ID: "good-legacy-scan", Job: "legacy-job", StartedAt: base.Add(time.Minute), FinishedAt: base.Add(time.Minute), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.42", Status: "up"}}}}
+	for _, scan := range []model.Scan{bad, good} {
+		if err := initial.SaveScan(ctx, scan); err != nil {
+			initial.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := initial.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE scans SET snapshot_json='{' WHERE id=?`, bad.ID); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill; PRAGMA user_version=38`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	upgraded, err := OpenWithLogger(path, logger)
+	if err != nil {
+		t.Fatalf("migration failed with one malformed legacy scan: %v", err)
+	}
+	defer upgraded.Close()
+	var badHosts, goodHosts, badCheckpoints int
+	if err := upgraded.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, bad.ID).Scan(&badHosts); err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, good.ID).Scan(&goodHosts); err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_scan_host_backfill WHERE scan_id=?`, bad.ID).Scan(&badCheckpoints); err != nil {
+		t.Fatal(err)
+	}
+	if badHosts != 0 || goodHosts != 1 || badCheckpoints != 1 {
+		t.Fatalf("backfill results malformed hosts=%d valid hosts=%d malformed checkpoints=%d", badHosts, goodHosts, badCheckpoints)
+	}
+	legacyExists, err := upgraded.LegacySuccessfulScanExists(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyExists {
+		t.Fatal("skipped malformed scan prevented legacy backfill from completing")
+	}
+	if output := logs.String(); !strings.Contains(output, "legacy scan host indexing skipped") || !strings.Contains(output, "scan_id="+bad.ID) || !strings.Contains(output, "snapshot JSON is malformed") {
+		t.Fatalf("malformed scan was not logged with bounded context: %q", output)
 	}
 }

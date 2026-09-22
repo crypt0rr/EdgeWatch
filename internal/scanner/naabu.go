@@ -890,7 +890,7 @@ func parseNaabuJSON(data []byte) ([]naabuResult, error) {
 }
 
 type cappedBuffer struct {
-	bytes.Buffer
+	buffer     bytes.Buffer
 	limit      int
 	exceeded   bool
 	onExceeded func()
@@ -902,7 +902,7 @@ func (b *cappedBuffer) Write(data []byte) (int, error) {
 	if b.limit > 0 && b.Len()+len(data) > b.limit {
 		remaining := b.limit - b.Len()
 		if remaining > 0 {
-			_, _ = b.Buffer.Write(data[:remaining])
+			_, _ = b.buffer.Write(data[:remaining])
 		}
 		if !b.exceeded {
 			trigger = true
@@ -913,7 +913,19 @@ func (b *cappedBuffer) Write(data []byte) (int, error) {
 		}
 		return len(data), errors.New("output limit exceeded")
 	}
-	return b.Buffer.Write(data)
+	return b.buffer.Write(data)
+}
+
+func (b *cappedBuffer) Len() int {
+	return b.buffer.Len()
+}
+
+func (b *cappedBuffer) String() string {
+	return b.buffer.String()
+}
+
+func (b *cappedBuffer) Bytes() []byte {
+	return b.buffer.Bytes()
 }
 
 func uniqueAddresses(targets []resolvedTarget) []string {

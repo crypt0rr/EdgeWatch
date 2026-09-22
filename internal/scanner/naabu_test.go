@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -161,6 +162,42 @@ func TestCappedBufferInvokesOnExceededOnce(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Fatalf("onExceeded called %d times, want once", calls)
+	}
+}
+
+func TestCappedBufferBoundsIOCopyFromPipe(t *testing.T) {
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(writer, strings.Repeat("x", 8<<10))
+		_ = writer.Close()
+		writeDone <- err
+	}()
+
+	buffer := cappedBuffer{limit: 1024}
+	_, err := io.Copy(&buffer, reader)
+	if err == nil || !strings.Contains(err.Error(), "output limit exceeded") {
+		t.Fatalf("pipe copy error = %v, want output limit error", err)
+	}
+	if buffer.Len() != 1024 || !buffer.exceeded {
+		t.Fatalf("pipe copy retained %d bytes, exceeded=%v; want exactly 1024 and exceeded", buffer.Len(), buffer.exceeded)
+	}
+	if writeErr := <-writeDone; writeErr != nil {
+		t.Fatalf("pipe writer error = %v", writeErr)
+	}
+}
+
+func TestRunNaabuKillsChildWhenJSONOutputLimitExceeded(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "finished")
+	script := "i=0\nwhile [ \"$i\" -lt 17 ]; do\n  printf '%1048576s' x\n  i=$((i + 1))\ndone\nsleep 1\ntouch " + marker + "\n"
+	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, script))
+	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	if err == nil || !strings.Contains(err.Error(), "naabu JSON output exceeded") {
+		t.Fatalf("Naabu oversized output error = %v", err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("Naabu child reached post-output marker (stat error %v)", statErr)
 	}
 }
 

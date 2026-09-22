@@ -244,12 +244,59 @@ func (s *Store) completeRuntimeSummary(ctx context.Context, jobID string, summar
 	}
 	if projected {
 		summary.BaselineHostCount = projectedCount
-	} else if summary.BaselineScanID != "" {
+		return summary, nil
+	}
+	if summary.BaselineScanID != "" {
 		if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, summary.BaselineScanID).Scan(&summary.BaselineHostCount); err != nil {
 			return summary, err
 		}
+		if summary.BaselineHostCount > 0 {
+			return summary, nil
+		}
+	}
+	// Migration 40 can create current runtime metadata for a legacy baseline
+	// before the resumable scan-host backfill has populated scan_hosts. Keep the
+	// fast path bounded to this job while recovering the host count from the
+	// JSON baseline instead of reporting zero until backfill catches up.
+	if count, present, err := s.legacyRuntimeBaselineHostCount(ctx, jobID); err != nil {
+		return summary, err
+	} else if present {
+		summary.BaselineHostCount = count
 	}
 	return summary, nil
+}
+
+// legacyRuntimeBaselineHostCount returns the host count from the current job's
+// JSON runtime state when indexed host projections have not been populated.
+// It intentionally reads no scan snapshots or rows for other jobs. A valid
+// baseline object with no hosts is present=true and therefore remains an
+// authoritative zero rather than falling through to a stale unit count.
+func (s *Store) legacyRuntimeBaselineHostCount(ctx context.Context, jobID string) (count int, present bool, err error) {
+	var baselineType sql.NullString
+	var hostArrayCount, unitAddressCount sql.NullInt64
+	err = s.reader().QueryRowContext(ctx, `SELECT
+CASE WHEN json_valid(state_json) THEN json_type(state_json,'$.baseline') ELSE '' END,
+CASE WHEN json_valid(state_json) AND json_type(state_json,'$.baseline')='object' THEN json_array_length(state_json,'$.baseline.hosts') END,
+CASE WHEN json_valid(state_json) AND json_type(state_json,'$.baseline')='object' THEN COALESCE((SELECT COUNT(DISTINCT addresses.value)
+  FROM json_each(state_json,'$.baseline.units') AS units
+  JOIN json_each(units.value,'$.addresses') AS addresses),0) ELSE 0 END
+FROM job_runtime WHERE job_id=?`, jobID).Scan(&baselineType, &hostArrayCount, &unitAddressCount)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	if !baselineType.Valid || baselineType.String != "object" {
+		return 0, false, nil
+	}
+	if hostArrayCount.Valid && hostArrayCount.Int64 >= 0 {
+		return int(hostArrayCount.Int64), true, nil
+	}
+	if unitAddressCount.Valid && unitAddressCount.Int64 >= 0 {
+		return int(unitAddressCount.Int64), true, nil
+	}
+	return 0, true, nil
 }
 
 // RuntimeBaselineMeta retains the small compatibility API used by callers

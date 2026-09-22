@@ -46,12 +46,16 @@ type naabuResult struct {
 // path. The compact Units returned by this method contain Nmap-confirmed
 // states only; richer discovery evidence is kept on HostObservation.
 func (n *Nmap) scanNaabuPipeline(ctx context.Context, job config.Job, report ProgressReporter) (model.Snapshot, error) {
+	return n.scanNaabuPipelineWithBudget(ctx, job, report, nil)
+}
+
+func (n *Nmap) scanNaabuPipelineWithBudget(ctx context.Context, job config.Job, report ProgressReporter, budgetCheck func(discoveryProbes, nmapProbes int64) error) (model.Snapshot, error) {
 	job = config.NormalizeJob(job)
 	targets, err := n.resolve(ctx, job)
 	if err != nil {
 		return model.Snapshot{}, err
 	}
-	return n.scanNaabuPipelineResolved(ctx, job, targets, report)
+	return n.scanNaabuPipelineResolvedWithBudget(ctx, job, targets, report, budgetCheck)
 }
 
 // scanNaabuDiscoveryResolved executes only the first, full-range phase of a
@@ -193,6 +197,10 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 // pass the immutable subset stored in their cycle plan so a restart cannot
 // observe a different DNS answer.
 func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, targets []resolvedTarget, report ProgressReporter) (model.Snapshot, error) {
+	return n.scanNaabuPipelineResolvedWithBudget(ctx, job, targets, report, nil)
+}
+
+func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job config.Job, targets []resolvedTarget, report ProgressReporter, budgetCheck func(discoveryProbes, nmapProbes int64) error) (model.Snapshot, error) {
 	started := time.Now().UTC()
 	job = config.NormalizeJob(job)
 	snapshot := model.Snapshot{DNS: map[string][]string{}}
@@ -357,6 +365,11 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 		groupScopes = append(groupScopes, scope)
 	}
 	sort.Strings(groupScopes)
+	enrichmentProbes := int64(0)
+	udpProbes := int64(0)
+	if job.UDP != nil {
+		udpProbes, _ = protocolProgressTotals(targets, *job.UDP, nil)
+	}
 	for _, scope := range groupScopes {
 		group := append([]string(nil), groups[scope]...)
 		ports := portsByGroup[scope]
@@ -396,6 +409,13 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 		if len(enrichmentArgs) == 0 {
 			enrichmentArgs = pc.NmapArgs
 		}
+		groupProbes, _ := protocolProgressTotals(groupTargets, pc, enrichmentArgs)
+		if budgetCheck != nil {
+			if err := budgetCheck(discoveryTotal, enrichmentProbes+groupProbes+udpProbes); err != nil {
+				return partialSnapshot(), err
+			}
+		}
+		enrichmentProbes += groupProbes
 		result, err := n.scanProtocolBatchDetailedProgressWithTemplate(ctx, groupTargets, "tcp", pc, job.Timing, job.AssumesAlive(), enrichmentArgs, nil, func(update invocationProgress) {
 			if report == nil {
 				return
@@ -501,6 +521,11 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 	}
 	snapshot.Hosts = mapHosts(discoveryHosts)
 	if job.UDP != nil {
+		if budgetCheck != nil && len(groupScopes) == 0 {
+			if err := budgetCheck(discoveryTotal, enrichmentProbes+udpProbes); err != nil {
+				return partialSnapshot(), err
+			}
+		}
 		return n.scanUDPAfterNaabu(ctx, job, targets, snapshot, started, discoveryTotal, discoveryInvocations, report)
 	}
 	snapshot.Normalize()

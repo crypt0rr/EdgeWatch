@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -185,6 +186,76 @@ func TestNaabuPipelineResolvedReportsEmptyDiscoveryAndUDPFallback(t *testing.T) 
 	noTCP, err := n.scanNaabuPipelineResolved(context.Background(), config.Job{}, targets, nil)
 	if err != nil || len(noTCP.Units) != 0 || len(noTCP.Hosts) != 0 {
 		t.Fatalf("no-TCP pipeline fallback = %#v, %v", noTCP, err)
+	}
+}
+
+func TestNaabuPipelineBudgetAllowsEnrichmentAtLimit(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "nmap-ran")
+	naabuPath := filepath.Join(dir, "naabu")
+	if err := os.WriteFile(naabuPath, []byte("#!/bin/sh\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nmapPath := filepath.Join(dir, "nmap")
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\ntouch "+marker+"\nprintf '%s' '"+sampleXML+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := NewWithNaabu(nmapPath, naabuPath)
+	job := config.NormalizeJob(config.Job{
+		Name: "budget-at-limit", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{ScanType: "connect"}},
+	})
+	var checks [][2]int64
+	snapshot, err := n.ScanWithProgressBudget(context.Background(), job, nil, func(discovery, enrichment int64) error {
+		checks = append(checks, [2]int64{discovery, enrichment})
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("budgeted pipeline at limit = %v", err)
+	}
+	if len(snapshot.Units) != 1 || len(checks) != 1 || checks[0] != [2]int64{65535, 1} {
+		t.Fatalf("budget checks = %#v, snapshot units = %#v", checks, snapshot.Units)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("Nmap enrichment was not invoked at the budget limit: %v", err)
+	}
+}
+
+func TestNaabuPipelineBudgetRejectsEnrichmentBeforeNmap(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "nmap-ran")
+	naabuPath := filepath.Join(dir, "naabu")
+	naabuScript := "#!/bin/sh\nprintf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}' '{\"ip\":\"192.0.2.2\",\"port\":22,\"protocol\":\"tcp\"}'\n"
+	if err := os.WriteFile(naabuPath, []byte(naabuScript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	nmapPath := filepath.Join(dir, "nmap")
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\ntouch "+marker+"\nexit 99\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := NewWithNaabu(nmapPath, naabuPath)
+	n.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("192.0.2.2"), net.ParseIP("192.0.2.1")}}
+	job := config.NormalizeJob(config.Job{
+		Name: "budget-over", Targets: []string{"edge.example"}, MaxExpandedHosts: 2,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{ScanType: "connect"}},
+	})
+	budgetErr := errors.New("enrichment budget exceeded")
+	var checks [][2]int64
+	_, err := n.ScanWithProgressBudget(context.Background(), job, nil, func(discovery, enrichment int64) error {
+		checks = append(checks, [2]int64{discovery, enrichment})
+		if enrichment > 1 {
+			return budgetErr
+		}
+		return nil
+	})
+	if !errors.Is(err, budgetErr) {
+		t.Fatalf("over-budget pipeline error = %v", err)
+	}
+	if len(checks) != 1 || checks[0] != [2]int64{2 * 65535, 2} {
+		t.Fatalf("over-budget checks = %#v", checks)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("Nmap enrichment started despite budget rejection (stat error %v)", statErr)
 	}
 }
 

@@ -1232,8 +1232,16 @@ func (s *Store) DiscardScanCycle(ctx context.Context, cycleID string) error {
 		}
 	}
 	stamp := sqliteTimestamp(time.Now())
-	if _, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded',updated_at=?,finished_at=?,last_error='discarded by administrator' WHERE id=? AND status IN ('paused','stalled','completed')`, stamp, stamp, cycleID); err != nil {
+	result, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded',updated_at=?,finished_at=?,last_error='discarded by administrator',completed_units=0,total_units=0,completed_probes=0,total_probes=0 WHERE id=? AND status IN ('running','paused','stalled','completed')`, stamp, stamp, cycleID)
+	if err != nil {
 		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return ErrCycleNotResumable
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM scan_cycle_units WHERE cycle_id=?`, cycleID); err != nil {
 		return err

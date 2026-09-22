@@ -220,7 +220,14 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		return true, model.Snapshot{}, ErrScanCycleStalled
 	}
 	if cycle.BaselineEpoch != baselineEpoch {
-		_ = a.Store.DiscardScanCycle(stateCtx, cycle.ID)
+		if discardErr := a.Store.DiscardScanCycle(stateCtx, cycle.ID); discardErr != nil {
+			scan.Resumable = true
+			scan.CycleID = cycle.ID
+			scan.CycleStatus = cycle.Status
+			scan.Status = "failed"
+			scan.Error = fmt.Sprintf("discard stale scan cycle: %v", discardErr)
+			return true, model.Snapshot{}, fmt.Errorf("discard stale scan cycle: %w", discardErr)
+		}
 		scan.Resumable = true
 		scan.CycleID = cycle.ID
 		scan.CycleStatus = "discarded"

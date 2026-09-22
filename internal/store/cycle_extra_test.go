@@ -90,6 +90,62 @@ func TestScanCycleExpiryAndDiscardRespectLiveJobLease(t *testing.T) {
 		t.Fatalf("cycle status = %q, want expired", updated.Status)
 	}
 }
+func TestDiscardRunningScanCycleAtomicallyClearsProgress(t *testing.T) {
+	cases := []struct {
+		name           string
+		completedUnits int
+	}{
+		{"partial", 1},
+		{"all", 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, s, job, plan := cycleFixture(t)
+			defer s.Close()
+			second := plan.Units[0]
+			second.Sequence, second.Ports = 1, "2"
+			plan.Units = append(plan.Units, second)
+			cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+				JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
+				ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+				t.Fatal(err)
+			}
+			for sequence := 0; sequence < tc.completedUnits; sequence++ {
+				if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, sequence); err != nil {
+					t.Fatal(err)
+				}
+				if err := s.CompleteScanCycleUnit(ctx, cycle.ID, sequence, model.Snapshot{}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.DiscardScanCycle(ctx, cycle.ID); err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.GetScanCycle(ctx, cycle.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != "discarded" || got.FinishedAt.IsZero() {
+				t.Fatalf("discarded cycle state = status %q finished_at %v", got.Status, got.FinishedAt)
+			}
+			if got.CompletedUnits != 0 || got.TotalUnits != 0 || got.CompletedProbes != 0 || got.TotalProbes != 0 {
+				t.Fatalf("discarded cycle retained progress: completed=%d/%d probes=%d/%d", got.CompletedUnits, got.TotalUnits, got.CompletedProbes, got.TotalProbes)
+			}
+			var units int
+			if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycle_units WHERE cycle_id=?`, cycle.ID).Scan(&units); err != nil {
+				t.Fatal(err)
+			}
+			if units != 0 {
+				t.Fatalf("discarded cycle retained %d work units", units)
+			}
+		})
+	}
+}
 
 func TestScanCyclePhaseAndProbeMetadataUsesIndexedColumns(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)

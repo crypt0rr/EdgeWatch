@@ -38,7 +38,7 @@ export type ServiceObservation = {
 }
 export type PortObservation = { port: number; state: string; reason?: string; reason_ttl?: number; verification?: 'discovered' | 'confirmed' | 'unconfirmed' | string; service?: ServiceObservation }
 export type ProtocolObservation = {
-  protocol: string; scan_type?: string; scanned_ports: string; scanned_port_count: number
+  protocol: string; status?: string; status_reason?: string; scan_type?: string; scanned_ports: string; scanned_port_count: number
   service_detection: boolean; discovery_engine?: string; discovered_ports?: PortObservation[]; unconfirmed_ports?: PortObservation[]
   ports?: PortObservation[]; state_summaries?: StateSummary[]; nse_profile?: string; nse_args?: Record<string, string>
   nse_output?: string[]; command_fingerprint?: string

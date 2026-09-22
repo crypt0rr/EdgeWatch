@@ -96,9 +96,9 @@ func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]m
 func processSuccessWithChanges(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, []model.Change, error) {
 	incomplete := snapshotHasUnreachableHost(scan.Snapshot)
 	if incomplete {
-		// The scanner has complete evidence for some targets, so compare those
-		// targets now, but keep missing-address removals and baseline learning
-		// deferred until a later scan observes every address again.
+		// The scanner has complete evidence for some address/protocol pairs, so
+		// compare those now while deferring changes that depend on missing coverage
+		// and all baseline learning until a later complete scan.
 		return processIncompleteSuccess(state, job, scan)
 	}
 	state.IncompleteCandidateAttempts = 0
@@ -154,8 +154,8 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 	if state.Baseline == nil {
 		state.IncompleteCandidateAttempts++
 	}
-	incompleteAddresses := incompleteHostAddresses(scan.Snapshot)
-	protectedTargets := incompleteTargets(state.Baseline, scan.Snapshot, incompleteAddresses)
+	incompleteProtocols := incompleteProtocolCoverage(scan.Snapshot)
+	protectedTargetProtocols, protectedTargets := incompleteTargets(state.Baseline, scan.Snapshot, incompleteProtocols)
 	var changes []model.Change
 	var events []model.Event
 	if state.Baseline != nil {
@@ -177,13 +177,13 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		filtered := changes[:0]
 		allowedIncompleteAdditions := make(map[string]struct{})
 		for _, change := range changes {
-			if _, protected := protectedTargets[change.Target]; protected {
+			if incompleteChange(change, protectedTargetProtocols, protectedTargets) {
 				// A positive port addition can still be authoritative when its
 				// evidence names only effective addresses that completed. This is
 				// important for DNS targets: one timed-out sibling must not hide a
 				// newly open port on a healthy address. Removals and service changes
 				// remain protected because their aggregate evidence is ambiguous.
-				if incompletePositiveAddition(change, scan.Snapshot, incompleteAddresses) {
+				if incompletePositiveAddition(change, scan.Snapshot, incompleteProtocols) {
 					filtered = append(filtered, change)
 					allowedIncompleteAdditions[change.Key] = struct{}{}
 				}
@@ -192,7 +192,7 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 			filtered = append(filtered, change)
 		}
 		changes = filtered
-		protectedKeys := protectedChangeKeys(state, *state.Baseline, scan.Snapshot, protectedTargets)
+		protectedKeys := protectedChangeKeys(state, *state.Baseline, scan.Snapshot, protectedTargetProtocols, protectedTargets)
 		for key := range allowedIncompleteAdditions {
 			delete(protectedKeys, key)
 		}
@@ -206,17 +206,12 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 	return events, changes, nil
 }
 
-// incompletePositiveAddition reports whether a port addition is attributable
-// exclusively to effective addresses that completed in a partial scan. Port
-// evidence was added after the original logical Unit model, so legacy
-// snapshots without it stay conservatively protected.
-func incompletePositiveAddition(change model.Change, snapshot model.Snapshot, incomplete []string) bool {
+// incompletePositiveAddition reports whether a positive port addition is
+// attributable only to effective addresses whose coverage completed for that
+// protocol. Legacy evidence without addresses remains conservatively blocked.
+func incompletePositiveAddition(change model.Change, snapshot model.Snapshot, incomplete incompleteCoverage) bool {
 	if change.Kind != "port" || !isPositivePortState(change.New) {
 		return false
-	}
-	incompleteSet := make(map[string]struct{}, len(incomplete))
-	for _, address := range incomplete {
-		incompleteSet[address] = struct{}{}
 	}
 	for _, unit := range snapshot.Units {
 		if unit.Target != change.Target || !strings.EqualFold(unit.Protocol, change.Protocol) {
@@ -227,7 +222,7 @@ func incompletePositiveAddition(change model.Change, snapshot model.Snapshot, in
 				continue
 			}
 			for _, address := range port.Evidence {
-				if _, missing := incompleteSet[address]; missing {
+				if incompleteCoverageHas(incomplete, address, change.Protocol) {
 					return false
 				}
 			}
@@ -322,27 +317,136 @@ func snapshotHasUnreachableHost(snapshot model.Snapshot) bool {
 func incompleteScanError(snapshot model.Snapshot) string {
 	addresses := incompleteHostAddresses(snapshot)
 	if len(addresses) == 0 {
-		return "Scan incomplete: host discovery did not complete"
+		return "Scan incomplete: scan coverage did not complete"
 	}
 	const previewLimit = 8
 	if len(addresses) > previewLimit {
-		return fmt.Sprintf("Scan incomplete: host discovery did not complete for %s (+%d more)", strings.Join(addresses[:previewLimit], ", "), len(addresses)-previewLimit)
+		return fmt.Sprintf("Scan incomplete: scan coverage did not complete for %s (+%d more)", strings.Join(addresses[:previewLimit], ", "), len(addresses)-previewLimit)
 	}
-	return "Scan incomplete: host discovery did not complete for " + strings.Join(addresses, ", ")
+	return "Scan incomplete: scan coverage did not complete for " + strings.Join(addresses, ", ")
+}
+
+type incompleteCoverage map[string]map[string]struct{}
+
+func incompleteProtocolCoverage(snapshot model.Snapshot) incompleteCoverage {
+	coverage := incompleteCoverage{}
+	mark := func(address, protocol string) {
+		address = strings.TrimSpace(address)
+		protocol = strings.ToLower(strings.TrimSpace(protocol))
+		if address == "" {
+			return
+		}
+		if protocol == "" {
+			protocol = "*"
+		}
+		if coverage[address] == nil {
+			coverage[address] = make(map[string]struct{})
+		}
+		coverage[address][protocol] = struct{}{}
+	}
+	expected := make(map[string]map[string]struct{})
+	addExpected := func(address, protocol string) {
+		address = strings.TrimSpace(address)
+		protocol = strings.ToLower(strings.TrimSpace(protocol))
+		if address == "" || protocol == "" {
+			return
+		}
+		if expected[address] == nil {
+			expected[address] = make(map[string]struct{})
+		}
+		expected[address][protocol] = struct{}{}
+	}
+	addressesFor := func(target string, addresses []string) []string {
+		if len(addresses) > 0 {
+			return addresses
+		}
+		if resolved := snapshot.DNS[target]; len(resolved) > 0 {
+			return resolved
+		}
+		return []string{target}
+	}
+	for _, scope := range snapshot.Scopes {
+		for _, address := range addressesFor(scope.Target, nil) {
+			addExpected(address, scope.Protocol)
+		}
+	}
+	for _, unit := range snapshot.Units {
+		for _, address := range addressesFor(unit.Target, unit.Addresses) {
+			addExpected(address, unit.Protocol)
+		}
+	}
+	for _, host := range snapshot.Hosts {
+		statuses := make(map[string]string, len(host.Protocols))
+		for _, protocol := range host.Protocols {
+			name := strings.ToLower(strings.TrimSpace(protocol.Protocol))
+			status := strings.ToLower(strings.TrimSpace(protocol.Status))
+			if name == "" {
+				continue
+			}
+			// Protocol failures are sticky even if a duplicate fragment reports
+			// the address as healthy later. A blank status is retained only until
+			// explicit evidence for the same protocol is available.
+			if isIncompleteCoverageStatus(status) || statuses[name] == "" {
+				statuses[name] = status
+			}
+			if isIncompleteCoverageStatus(status) {
+				mark(host.Address, name)
+			}
+		}
+		if !isIncompleteCoverageStatus(host.Status) {
+			continue
+		}
+		protocols := make(map[string]struct{}, len(expected[host.Address])+len(statuses))
+		for protocol := range expected[host.Address] {
+			protocols[protocol] = struct{}{}
+		}
+		for protocol := range statuses {
+			protocols[protocol] = struct{}{}
+		}
+		if len(protocols) == 0 {
+			mark(host.Address, "*")
+			continue
+		}
+		marked := false
+		for protocol := range protocols {
+			status, observed := statuses[protocol]
+			if !observed || status != "up" {
+				mark(host.Address, protocol)
+				marked = true
+			}
+		}
+		// If an address summary says coverage failed but every known protocol
+		// explicitly completed, retain the legacy conservative behavior rather
+		// than silently trusting an unexplained host-level failure.
+		if !marked {
+			mark(host.Address, "*")
+		}
+	}
+	return coverage
+}
+
+func isIncompleteCoverageStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "unreachable", "down", "timedout", "timed-out", "timeout", "unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+func incompleteCoverageHas(coverage incompleteCoverage, address, protocol string) bool {
+	protocols := coverage[strings.TrimSpace(address)]
+	if _, ok := protocols["*"]; ok {
+		return true
+	}
+	_, ok := protocols[strings.ToLower(strings.TrimSpace(protocol))]
+	return ok
 }
 
 func incompleteHostAddresses(snapshot model.Snapshot) []string {
-	seen := make(map[string]struct{})
-	for _, host := range snapshot.Hosts {
-		switch strings.ToLower(strings.TrimSpace(host.Status)) {
-		case "unreachable", "down", "timedout", "timed-out", "timeout":
-			if address := strings.TrimSpace(host.Address); address != "" {
-				seen[address] = struct{}{}
-			}
-		}
-	}
-	addresses := make([]string, 0, len(seen))
-	for address := range seen {
+	coverage := incompleteProtocolCoverage(snapshot)
+	addresses := make([]string, 0, len(coverage))
+	for address := range coverage {
 		addresses = append(addresses, address)
 	}
 	sort.Strings(addresses)
@@ -362,59 +466,79 @@ func MarkIncompleteScan(scan *model.Scan) bool {
 	return true
 }
 
-func incompleteTargets(baseline *model.Snapshot, current model.Snapshot, addresses []string) map[string]struct{} {
-	protected := make(map[string]struct{}, len(addresses))
-	for _, address := range addresses {
-		protected[address] = struct{}{}
+func incompleteTargets(baseline *model.Snapshot, current model.Snapshot, coverage incompleteCoverage) (map[string]struct{}, map[string]struct{}) {
+	protectedProtocols := make(map[string]struct{})
+	protectedTargets := make(map[string]struct{})
+	addTarget := func(target, protocol string) {
+		protocol = strings.ToLower(strings.TrimSpace(protocol))
+		protectedProtocols[target+"\x00"+protocol] = struct{}{}
+		protectedTargets[target] = struct{}{}
 	}
 	for _, snapshot := range []*model.Snapshot{baseline, &current} {
 		if snapshot == nil {
 			continue
 		}
-		for target, values := range snapshot.DNS {
-			for _, address := range values {
-				if _, ok := protected[address]; ok {
-					protected[target] = struct{}{}
+		for _, scope := range snapshot.Scopes {
+			addresses := snapshot.DNS[scope.Target]
+			if len(addresses) == 0 {
+				addresses = []string{scope.Target}
+			}
+			for _, address := range addresses {
+				if incompleteCoverageHas(coverage, address, scope.Protocol) {
+					addTarget(scope.Target, scope.Protocol)
 					break
 				}
 			}
 		}
 		for _, unit := range snapshot.Units {
-			for _, address := range unit.Addresses {
-				if _, ok := protected[address]; ok {
-					protected[unit.Target] = struct{}{}
+			addresses := unit.Addresses
+			if len(addresses) == 0 {
+				addresses = []string{unit.Target}
+			}
+			for _, address := range addresses {
+				if incompleteCoverageHas(coverage, address, unit.Protocol) {
+					addTarget(unit.Target, unit.Protocol)
 					break
 				}
 			}
 		}
 	}
-	return protected
+	return protectedProtocols, protectedTargets
 }
 
-func protectedChangeKeys(state *model.JobState, baseline, current model.Snapshot, targets map[string]struct{}) map[string]bool {
+func incompleteChange(change model.Change, protocols, targets map[string]struct{}) bool {
+	if strings.TrimSpace(change.Protocol) == "" {
+		_, ok := targets[change.Target]
+		return ok
+	}
+	_, ok := protocols[change.Target+"\x00"+strings.ToLower(strings.TrimSpace(change.Protocol))]
+	return ok
+}
+
+func protectedChangeKeys(state *model.JobState, baseline, current model.Snapshot, protocols, targets map[string]struct{}) map[string]bool {
 	protected := make(map[string]bool)
 	for key, value := range items(baseline) {
-		if _, ok := targets[value.Target]; ok {
+		if incompleteChange(model.Change{Target: value.Target, Protocol: value.Protocol}, protocols, targets) {
 			protected[key] = true
 		}
 	}
 	for key, value := range items(current) {
-		if _, ok := targets[value.Target]; ok {
+		if incompleteChange(model.Change{Target: value.Target, Protocol: value.Protocol}, protocols, targets) {
 			protected[key] = true
 		}
 	}
 	for _, pending := range state.Pending {
-		if _, ok := targets[pending.Change.Target]; ok {
+		if incompleteChange(pending.Change, protocols, targets) {
 			protected[pending.Change.Key] = true
 		}
 	}
 	for _, incident := range state.Incidents {
-		if _, ok := targets[incident.Change.Target]; ok {
+		if incompleteChange(incident.Change, protocols, targets) {
 			protected[incident.Change.Key] = true
 		}
 	}
 	for key, change := range state.SuppressedChanges {
-		if _, ok := targets[change.Target]; ok {
+		if incompleteChange(change, protocols, targets) {
 			protected[key] = true
 		}
 	}

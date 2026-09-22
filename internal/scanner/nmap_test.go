@@ -118,11 +118,11 @@ func TestParseXMLCapturesHostEvidenceAndSummaries(t *testing.T) {
 func TestMergeHostObservationKeepsIncompleteStatusRegardlessOfOrder(t *testing.T) {
 	up := model.HostObservation{
 		Address: "192.0.2.10", Status: "up", StatusReason: "arp-response",
-		Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443"}},
+		Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", ScannedPorts: "443"}},
 	}
 	omitted := model.HostObservation{
 		Address: "192.0.2.10", Status: "unreachable", StatusReason: "nmap-omitted",
-		Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443"}},
+		Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "nmap-omitted", ScannedPorts: "443"}},
 	}
 	for _, test := range []struct {
 		name          string
@@ -136,8 +136,41 @@ func TestMergeHostObservationKeepsIncompleteStatusRegardlessOfOrder(t *testing.T
 			mergeHostObservationMap(hosts, test.first.Address, test.first)
 			mergeHostObservationMap(hosts, test.second.Address, test.second)
 			got := hosts["192.0.2.10"]
+			dedupeHostObservation(&got)
 			if got.Status != "unreachable" || got.StatusReason != "nmap-omitted" {
 				t.Fatalf("merged status = %q/%q, want unreachable/nmap-omitted", got.Status, got.StatusReason)
+			}
+			if len(got.Protocols) != 1 || got.Protocols[0].Status != "unreachable" || got.Protocols[0].StatusReason != "nmap-omitted" {
+				t.Fatalf("merged TCP coverage = %#v, want sticky unreachable/nmap-omitted", got.Protocols)
+			}
+		})
+	}
+}
+
+func TestMergeProtocolObservationKeepsNoResponseStickyRegardlessOfOrder(t *testing.T) {
+	noResponse := model.HostObservation{
+		Address: "192.0.2.12", Status: "unknown", StatusReason: "no-response",
+		Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unknown", StatusReason: "no-response", ScannedPorts: "1-65535"}},
+	}
+	up := model.HostObservation{
+		Address: "192.0.2.12", Status: "up", StatusReason: "syn-ack",
+		Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", StatusReason: "syn-ack", ScannedPorts: "443"}},
+	}
+	for _, test := range []struct {
+		name          string
+		first, second model.HostObservation
+	}{
+		{name: "no-response then up", first: noResponse, second: up},
+		{name: "up then no-response", first: up, second: noResponse},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			hosts := map[string]model.HostObservation{}
+			mergeHostObservationMap(hosts, test.first.Address, test.first)
+			mergeHostObservationMap(hosts, test.second.Address, test.second)
+			got := hosts["192.0.2.12"]
+			dedupeHostObservation(&got)
+			if len(got.Protocols) != 1 || got.Protocols[0].Status != "unknown" || got.Protocols[0].StatusReason != "no-response" {
+				t.Fatalf("merged TCP coverage = %#v, want sticky unknown/no-response", got.Protocols)
 			}
 		})
 	}
@@ -147,15 +180,25 @@ func TestMergeHostObservationMarksAddressIncompleteAcrossProtocols(t *testing.T)
 	hosts := map[string]model.HostObservation{}
 	mergeHostObservationMap(hosts, "192.0.2.11", model.HostObservation{
 		Address: "192.0.2.11", Status: "up",
-		Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443"}},
+		Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", StatusReason: "syn-ack", ScannedPorts: "443"}},
 	})
 	mergeHostObservationMap(hosts, "192.0.2.11", model.HostObservation{
 		Address: "192.0.2.11", Status: "unreachable", StatusReason: "nmap-host-timeout",
-		Protocols: []model.ProtocolObservation{{Protocol: "udp", ScannedPorts: "53"}},
+		Protocols: []model.ProtocolObservation{{Protocol: "udp", Status: "unreachable", StatusReason: "nmap-host-timeout", ScannedPorts: "53"}},
 	})
 	got := hosts["192.0.2.11"]
+	dedupeHostObservation(&got)
 	if got.Status != "unreachable" || got.StatusReason != "nmap-host-timeout" {
 		t.Fatalf("cross-protocol status = %q/%q, want unreachable/nmap-host-timeout", got.Status, got.StatusReason)
+	}
+	if len(got.Protocols) != 2 {
+		t.Fatalf("cross-protocol observations = %#v, want TCP and UDP", got.Protocols)
+	}
+	if got.Protocols[0].Protocol != "tcp" || got.Protocols[0].Status != "up" || got.Protocols[0].StatusReason != "syn-ack" {
+		t.Fatalf("healthy TCP coverage was contaminated by UDP failure: %#v", got.Protocols[0])
+	}
+	if got.Protocols[1].Protocol != "udp" || got.Protocols[1].Status != "unreachable" || got.Protocols[1].StatusReason != "nmap-host-timeout" {
+		t.Fatalf("UDP failure evidence was not retained: %#v", got.Protocols[1])
 	}
 }
 
@@ -204,6 +247,9 @@ func TestParseXMLRetainsTimedOutHost(t *testing.T) {
 	host, ok := run.Hosts["192.0.2.10"]
 	if !ok || host.Status != "unreachable" || host.StatusReason != "nmap-host-timeout" {
 		t.Fatalf("timed-out host observation = %#v", host)
+	}
+	if len(host.Protocols) != 1 || host.Protocols[0].Status != "unreachable" || host.Protocols[0].StatusReason != "nmap-host-timeout" {
+		t.Fatalf("timed-out protocol coverage = %#v, want unreachable/nmap-host-timeout", host.Protocols)
 	}
 }
 

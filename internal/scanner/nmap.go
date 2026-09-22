@@ -1716,7 +1716,7 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 				hostObservation.LinkAddresses = append(hostObservation.LinkAddresses, model.LinkAddress{Address: strings.TrimSpace(a.Addr), Type: a.Type, Vendor: strings.TrimSpace(a.Vendor)})
 			}
 		}
-		observation := model.ProtocolObservation{Protocol: protocol, ScanType: scanType(protocol, pc), ScannedPorts: pc.Ports, ServiceDetection: pc.ServiceDetection, NSEProfile: strings.TrimSpace(pc.NSEProfile), NSEArgs: cloneStringMap(pc.NSEArgs)}
+		observation := model.ProtocolObservation{Protocol: protocol, Status: status, StatusReason: strings.TrimSpace(host.Status.Reason), ScanType: scanType(protocol, pc), ScannedPorts: pc.Ports, ServiceDetection: pc.ServiceDetection, NSEProfile: strings.TrimSpace(pc.NSEProfile), NSEArgs: cloneStringMap(pc.NSEArgs)}
 		if ports, err := config.ParsePorts(pc.Ports); err == nil {
 			observation.ScannedPortCount = len(ports)
 		}
@@ -1729,6 +1729,8 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 			if strings.TrimSpace(hostObservation.StatusReason) == "" {
 				hostObservation.StatusReason = "nmap-host-down"
 			}
+			observation.Status = "unreachable"
+			observation.StatusReason = hostObservation.StatusReason
 			count := observation.ScannedPortCount
 			if count == 0 {
 				count = 1
@@ -1821,6 +1823,8 @@ func unreachableHostObservation(address, protocol string, pc config.Protocol, re
 	}
 	observation := model.ProtocolObservation{
 		Protocol:         protocol,
+		Status:           "unreachable",
+		StatusReason:     reason,
 		ScanType:         scanType(protocol, pc),
 		ScannedPorts:     pc.Ports,
 		ScannedPortCount: count,
@@ -1955,11 +1959,10 @@ func mergeHostObservationMap(hosts map[string]model.HostObservation, address str
 	}
 	// Naabu discovery creates an address inventory before Nmap enrichment. It
 	// can mark the host up without carrying Nmap's reason/latency fields, while
-	// a later Nmap fragment can prove that the address was not covered. Treat
-	// incomplete coverage as sticky: once any protocol/fragment is unreachable,
-	// the merged address must remain incomplete so the engine protects its
-	// expected ports. This is intentionally independent of merge order because
-	// batches and protocol results can complete in either order.
+	// a later Nmap fragment can prove that part of the address was not covered.
+	// Keep the address summary incomplete regardless of merge order; individual
+	// ProtocolObservations retain their own status so the engine can protect only
+	// the affected protocol.
 	current.Status, current.StatusReason = mergeHostStatus(current.Status, current.StatusReason, addition.Status, addition.StatusReason)
 	if current.ReasonTTL == 0 && addition.ReasonTTL != 0 {
 		current.ReasonTTL = addition.ReasonTTL
@@ -1976,9 +1979,9 @@ func mergeHostStatus(currentStatus, currentReason, additionStatus, additionReaso
 	currentReason = strings.TrimSpace(currentReason)
 	additionReason = strings.TrimSpace(additionReason)
 
-	// An explicit incomplete state outranks an up/unknown discovery result. A
-	// host that is unreachable for one protocol is not safe to compare for any
-	// ports from that address, even if another protocol observed it as up.
+	// An explicit incomplete state outranks an up/unknown discovery result.
+	// This value summarizes the address for display and scan-completion status;
+	// per-protocol comparisons use the corresponding ProtocolObservation.
 	currentIncomplete := isIncompleteHostStatus(currentStatus)
 	additionIncomplete := isIncompleteHostStatus(additionStatus)
 	switch {
@@ -1993,6 +1996,9 @@ func mergeHostStatus(currentStatus, currentReason, additionStatus, additionReaso
 	case currentIncomplete:
 		return "unreachable", chooseHostStatusReason(currentReason, additionReason)
 	case currentStatus == "" || currentStatus == "unknown":
+		// Unknown discovery is not sticky: a later protocol can provide
+		// positive reachability evidence. The engine still treats a persisted
+		// unknown/no-response protocol observation as incomplete coverage.
 		if additionStatus != "" {
 			return additionStatus, chooseHostStatusReason(currentReason, additionReason)
 		}
@@ -2006,6 +2012,37 @@ func isIncompleteHostStatus(status string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// mergeProtocolStatus keeps every incomplete fragment sticky, including
+// unknown/no-response. Unlike the address summary, a later positive result for
+// the same protocol cannot prove that an earlier fragment covered its scope.
+func mergeProtocolStatus(currentStatus, currentReason, additionStatus, additionReason string) (string, string) {
+	currentStatus = strings.ToLower(strings.TrimSpace(currentStatus))
+	additionStatus = strings.ToLower(strings.TrimSpace(additionStatus))
+	currentReason = strings.TrimSpace(currentReason)
+	additionReason = strings.TrimSpace(additionReason)
+	currentIncomplete := isIncompleteHostStatus(currentStatus) || currentStatus == "unknown"
+	additionIncomplete := isIncompleteHostStatus(additionStatus) || additionStatus == "unknown"
+	switch {
+	case currentIncomplete:
+		if !additionIncomplete {
+			if currentReason == "" {
+				currentReason = "incomplete"
+			}
+			return currentStatus, currentReason
+		}
+		return currentStatus, chooseHostStatusReason(currentReason, additionReason)
+	case additionIncomplete:
+		if additionReason == "" {
+			additionReason = "incomplete"
+		}
+		return additionStatus, additionReason
+	case currentStatus == "":
+		return additionStatus, chooseHostStatusReason(currentReason, additionReason)
+	default:
+		return currentStatus, chooseHostStatusReason(currentReason, additionReason)
 	}
 }
 
@@ -2089,6 +2126,7 @@ func dedupeHostObservation(host *model.HostObservation) {
 			continue
 		}
 		protocol := &mergedProtocols[index]
+		protocol.Status, protocol.StatusReason = mergeProtocolStatus(protocol.Status, protocol.StatusReason, incoming.Status, incoming.StatusReason)
 		protocol.Ports = append(protocol.Ports, incoming.Ports...)
 		protocol.DiscoveredPorts = append(protocol.DiscoveredPorts, incoming.DiscoveredPorts...)
 		protocol.UnconfirmedPorts = append(protocol.UnconfirmedPorts, incoming.UnconfirmedPorts...)

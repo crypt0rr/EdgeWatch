@@ -8,8 +8,11 @@ web:
   # Optional host names accepted when the UI is reached through a reverse
   # proxy or tunnel. Loopback addresses and localhost are always accepted.
   # allowed_hosts: [edgewatch.example.com]
-  # Forwarding headers are ignored by default. Add only the proxy addresses
-  # or networks that directly connect to EdgeWatch before trusting client IPs.
+  # Trust only proxy addresses or networks that directly connect to EdgeWatch.
+  # Only this one client-IP header is read; other forwarding headers are ignored.
+  # The default is x-forwarded-for. Use forwarded only if your proxy controls it,
+  # or none to ignore forwarding headers even when trusted proxies are configured.
+  forwarded_header: x-forwarded-for
   # trusted_proxies: ["127.0.0.1/32"]
   # Optional separate key for encrypting the TOTP seed. The default is
   # ./data/auth.key; an explicit file must contain 32 raw bytes or 64 hex

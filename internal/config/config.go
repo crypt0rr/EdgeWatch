@@ -105,13 +105,16 @@ type RDAP struct {
 	Enabled *bool `yaml:"enabled"`
 }
 
+const defaultForwardedHeader = "x-forwarded-for"
+
 // Web contains the local administrative HTTP listener settings. The v0.3
 // appliance deliberately only permits loopback listeners; users who need
 // remote access should put a TLS reverse proxy or an SSH tunnel in front of it.
 type Web struct {
-	Listen         string   `yaml:"listen"`
-	AuthKeyFile    string   `yaml:"auth_key_file"`
-	TrustedProxies []string `yaml:"trusted_proxies"`
+	Listen          string   `yaml:"listen"`
+	AuthKeyFile     string   `yaml:"auth_key_file"`
+	TrustedProxies  []string `yaml:"trusted_proxies"`
+	ForwardedHeader string   `yaml:"forwarded_header"`
 	// AllowedHosts contains the host names (without a scheme) that may be used
 	// to reach the authenticated web API through a tunnel or reverse proxy.
 	// Loopback IP literals and localhost are always accepted.
@@ -557,6 +560,11 @@ func applyDefaults(c *Config) {
 	if c.Web.Listen == "" {
 		c.Web.Listen = "127.0.0.1:8080"
 	}
+	if strings.TrimSpace(c.Web.ForwardedHeader) == "" {
+		c.Web.ForwardedHeader = defaultForwardedHeader
+	} else {
+		c.Web.ForwardedHeader = strings.ToLower(strings.TrimSpace(c.Web.ForwardedHeader))
+	}
 	if c.Enrichment.RDAP.Enabled == nil {
 		enabled := true
 		c.Enrichment.RDAP.Enabled = &enabled
@@ -872,6 +880,13 @@ func (c Config) ValidateDeployment() error {
 	}
 	if level := strings.ToLower(strings.TrimSpace(c.Log.Level)); level != "" && level != "debug" && level != "info" && level != "warn" && level != "error" {
 		return fmt.Errorf("log.level must be one of debug, info, warn, or error")
+	}
+	forwardedHeader := strings.ToLower(strings.TrimSpace(c.Web.ForwardedHeader))
+	if forwardedHeader == "" {
+		forwardedHeader = defaultForwardedHeader
+	}
+	if forwardedHeader != "x-forwarded-for" && forwardedHeader != "forwarded" && forwardedHeader != "none" {
+		return fmt.Errorf("web.forwarded_header must be one of x-forwarded-for, forwarded, or none")
 	}
 	for index, raw := range c.Web.TrustedProxies {
 		value := strings.TrimSpace(raw)

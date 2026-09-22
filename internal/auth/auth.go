@@ -75,6 +75,12 @@ var dummyPasswordHash = func() string {
 	return hash
 }()
 
+const (
+	forwardedHeaderXForwardedFor = "x-forwarded-for"
+	forwardedHeaderForwarded     = "forwarded"
+	forwardedHeaderNone          = "none"
+)
+
 type Manager struct {
 	Store *store.Store
 	Now   func() time.Time
@@ -94,13 +100,15 @@ type Manager struct {
 	unknownInFlight      map[string]int
 	rateAudit            map[string]time.Time
 	trustedProxies       []*net.IPNet
+	forwardedHeader      string
 	argon2Sem            chan struct{}
 }
 
 func NewManager(s *store.Store) *Manager {
 	return &Manager{
 		Store: s, Now: time.Now,
-		fails: map[string][]time.Time{}, blocked: map[string]time.Time{},
+		forwardedHeader: forwardedHeaderXForwardedFor,
+		fails:           map[string][]time.Time{}, blocked: map[string]time.Time{},
 		accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{},
 		unknownSourceFails: map[string][]time.Time{}, unknownSourceBlocked: map[string]time.Time{},
 		sourceInFlight: map[string]int{}, accountInFlight: map[string]int{}, unknownInFlight: map[string]int{},
@@ -165,6 +173,26 @@ func (m *Manager) SetTrustedProxies(values []string) error {
 	return nil
 }
 
+// SetForwardedHeader selects the single forwarding header trusted proxies use
+// to report the original client address. Headers are never merged because a
+// proxy that appends one convention while a client controls another could
+// otherwise let the client choose its rate-limit and audit identity.
+func (m *Manager) SetForwardedHeader(value string) error {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = forwardedHeaderXForwardedFor
+	}
+	switch value {
+	case forwardedHeaderXForwardedFor, forwardedHeaderForwarded, forwardedHeaderNone:
+	default:
+		return fmt.Errorf("forwarded header must be one of %q, %q, or %q", forwardedHeaderXForwardedFor, forwardedHeaderForwarded, forwardedHeaderNone)
+	}
+	m.mu.Lock()
+	m.forwardedHeader = value
+	m.mu.Unlock()
+	return nil
+}
+
 // ClientIP resolves the request identity for rate limiting and audit records.
 // Forwarding headers are considered only when the directly connected peer is
 // in the configured trusted-proxy set. The chain is walked from right to left
@@ -178,12 +206,16 @@ func (m *Manager) ClientIP(request *http.Request) string {
 	}
 	m.mu.Lock()
 	trusted := append([]*net.IPNet(nil), m.trustedProxies...)
+	forwardedHeader := m.forwardedHeader
 	m.mu.Unlock()
 	if !ipInNetworks(peer, trusted) {
 		return peer.String()
 	}
+	if forwardedHeader == "" {
+		forwardedHeader = forwardedHeaderXForwardedFor
+	}
 	current := peer
-	candidates := forwardedCandidates(request)
+	candidates := forwardedCandidatesFor(request, forwardedHeader)
 	for index := len(candidates) - 1; index >= 0; index-- {
 		if !ipInNetworks(current, trusted) {
 			break
@@ -207,14 +239,16 @@ func ipInNetworks(ip net.IP, networks []*net.IPNet) bool {
 }
 
 func forwardedCandidates(request *http.Request) []string {
+	return forwardedCandidatesFor(request, forwardedHeaderXForwardedFor)
+}
+
+func forwardedCandidatesFor(request *http.Request, header string) []string {
 	if request == nil {
 		return nil
 	}
-	// RFC 7239 Forwarded is the canonical convention whenever a trusted proxy
-	// supplies it. Do not merge it with X-Forwarded-For: accepting whichever
-	// header happens to win would let a client-controlled second header change
-	// the identity used by both throttling and audit records.
-	if values := request.Header.Values("Forwarded"); len(values) > 0 {
+	// Parse only the configured convention; an alternate header must not
+	// override or suppress the trusted proxy's selected client identity.
+	if values := request.Header.Values("Forwarded"); len(values) > 0 && strings.EqualFold(header, forwardedHeaderForwarded) {
 		var candidates []string
 		for _, value := range values {
 			for _, element := range strings.Split(value, ",") {
@@ -230,7 +264,7 @@ func forwardedCandidates(request *http.Request) []string {
 		}
 		return candidates
 	}
-	if values := request.Header.Values("X-Forwarded-For"); len(values) > 0 {
+	if values := request.Header.Values("X-Forwarded-For"); len(values) > 0 && strings.EqualFold(header, forwardedHeaderXForwardedFor) {
 		var candidates []string
 		for _, value := range values {
 			for _, item := range strings.Split(value, ",") {

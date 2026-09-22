@@ -451,6 +451,11 @@ func TestFinishResumableCycleStallsWhenCheckpointRowsAreMissing(t *testing.T) {
 			if len(fragments) != test.wantFragments {
 				t.Fatalf("remaining fragments = %d, want %d", len(fragments), test.wantFragments)
 			}
+			var recovered model.Scan
+			recoveredHandled, recoveredSnapshot, recoveredErr := a.recoverCompletedCycle(ctx, &recovered, nil, cycle)
+			if !recoveredHandled || recoveredErr == nil || recoveredSnapshot.Units != nil || recovered.Status != "failed" || !strings.Contains(recovered.Error, "missing one or more checkpoints") {
+				t.Fatalf("missing checkpoint recovery = handled %v snapshot %#v scan %#v err %v", recoveredHandled, recoveredSnapshot, recovered, recoveredErr)
+			}
 
 			var scan model.Scan
 			handled, snapshot, finishErr := a.finishResumableCycle(ctx, &scan, nil, cycle)

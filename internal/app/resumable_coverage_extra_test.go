@@ -390,6 +390,96 @@ func TestResumableRecoveryAndFinishPersistenceFailures(t *testing.T) {
 	}
 }
 
+func TestFinishResumableCycleStallsWhenCheckpointRowsAreMissing(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		rowsToDelete  int
+		wantFragments int
+	}{
+		{name: "one missing", rowsToDelete: 1, wantFragments: 1},
+		{name: "all missing", rowsToDelete: 2, wantFragments: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := store.Open(filepath.Join(t.TempDir(), "missing-checkpoint.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+			a, err := New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := config.NormalizeJob(config.Job{Name: "missing-checkpoint", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour)})
+			record, err := db.CreateJob(ctx, job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan := scanner.WorkPlan{Units: []scanner.WorkUnit{
+				{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1},
+				{Sequence: 1, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "2", PortCount: 1, Probes: 1},
+			}, TotalUnits: 2, TotalProbes: 2}
+			cycle, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: job.Name, JobRevision: record.Revision, ConfigHash: job.SecurityHash(), ExecutionHash: job.ExecutionHash(), Plan: plan})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+				t.Fatal(err)
+			}
+			for sequence := 0; sequence < 2; sequence++ {
+				if _, err := db.ClaimScanCycleUnit(ctx, cycle.ID, sequence); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.CompleteScanCycleUnit(ctx, cycle.ID, sequence, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: sequence + 1, State: "open"}}}}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cycle, err = db.GetScanCycle(ctx, cycle.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for sequence := 2 - test.rowsToDelete; sequence < 2; sequence++ {
+				if _, err := db.DB.ExecContext(ctx, `DELETE FROM scan_cycle_units WHERE cycle_id=? AND sequence=?`, cycle.ID, sequence); err != nil {
+					t.Fatal(err)
+				}
+			}
+			_, fragments, err := db.LoadScanCycleFragments(ctx, cycle.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(fragments) != test.wantFragments {
+				t.Fatalf("remaining fragments = %d, want %d", len(fragments), test.wantFragments)
+			}
+			var recovered model.Scan
+			recoveredHandled, recoveredSnapshot, recoveredErr := a.recoverCompletedCycle(ctx, &recovered, nil, cycle)
+			if !recoveredHandled || recoveredErr == nil || recoveredSnapshot.Units != nil || recovered.Status != "failed" || !strings.Contains(recovered.Error, "missing one or more checkpoints") {
+				t.Fatalf("missing checkpoint recovery = handled %v snapshot %#v scan %#v err %v", recoveredHandled, recoveredSnapshot, recovered, recoveredErr)
+			}
+
+			var scan model.Scan
+			handled, snapshot, finishErr := a.finishResumableCycle(ctx, &scan, nil, cycle)
+			if !handled || finishErr == nil || snapshot.Units != nil || scan.Status != "failed" || scan.CycleStatus != "stalled" || !strings.Contains(scan.Error, "missing one or more checkpoints") {
+				t.Fatalf("missing checkpoint finish = handled %v snapshot %#v scan %#v err %v", handled, snapshot, scan, finishErr)
+			}
+			stalled, err := db.GetScanCycle(ctx, cycle.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stalled.Status != "stalled" {
+				t.Fatalf("cycle status = %q, want stalled", stalled.Status)
+			}
+			scans, err := db.ListJobScans(ctx, record.ID, 10)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(scans) != 0 {
+				t.Fatalf("missing checkpoint promoted %d scans", len(scans))
+			}
+		})
+	}
+}
+
 func TestResumableAttemptHandlesUnitFailuresAndNoProgressStalls(t *testing.T) {
 	ctx := context.Background()
 	newApp := func(t *testing.T, name string) (*App, *store.Store, config.Job, store.JobRecord) {

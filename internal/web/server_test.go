@@ -585,6 +585,9 @@ func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 	if !ok || sessionA.UserID != sessionB.UserID || sessionA.IDHash == sessionB.IDHash {
 		t.Fatalf("login sessions are not distinct sessions for one account: A=%#v B=%#v", sessionA, sessionB)
 	}
+	server.sseAuthMu.Lock()
+	server.sseAuthCache = nil
+	server.sseAuthMu.Unlock()
 
 	requestA, cancelA := streamRequest(rawA)
 	responseA, err := http.DefaultClient.Do(requestA)

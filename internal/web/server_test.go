@@ -552,7 +552,7 @@ func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 
 	h := httptest.NewServer(server.Handler())
 	defer h.Close()
-	openStream := func(raw string) (*http.Response, context.CancelFunc) {
+	streamRequest := func(raw string) (*http.Request, context.CancelFunc) {
 		t.Helper()
 		streamCtx, cancel := context.WithCancel(ctx)
 		request, err := http.NewRequestWithContext(streamCtx, http.MethodGet, h.URL+"/api/v1/stream", nil)
@@ -561,12 +561,7 @@ func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 			t.Fatal(err)
 		}
 		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
-		response, err := http.DefaultClient.Do(request)
-		if err != nil {
-			cancel()
-			t.Fatal(err)
-		}
-		return response, cancel
+		return request, cancel
 	}
 
 	// Log in twice so the account has two independent server-side sessions.
@@ -591,10 +586,22 @@ func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 		t.Fatalf("login sessions are not distinct sessions for one account: A=%#v B=%#v", sessionA, sessionB)
 	}
 
-	responseA, cancelA := openStream(rawA)
+	requestA, cancelA := streamRequest(rawA)
+	responseA, err := http.DefaultClient.Do(requestA)
+	if err != nil {
+		cancelA()
+		t.Fatal(err)
+	}
 	defer cancelA()
-	responseB, cancelB := openStream(rawB)
+	defer responseA.Body.Close()
+	requestB, cancelB := streamRequest(rawB)
+	responseB, err := http.DefaultClient.Do(requestB)
+	if err != nil {
+		cancelB()
+		t.Fatal(err)
+	}
 	defer cancelB()
+	defer responseB.Body.Close()
 	waitForSSESubscribers(t, server, 2)
 	deadline := time.Now().Add(time.Second)
 	for {
@@ -620,14 +627,16 @@ func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 	time.Sleep(defaultSSEAuthCacheTTL + 50*time.Millisecond)
 
 	closedA := make(chan string, 1)
-	go func() {
-		body, _ := io.ReadAll(responseA.Body)
+	go func(response *http.Response) {
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
 		closedA <- string(body)
-	}()
+	}(responseA)
 	dataB := make(chan string, 1)
-	go func() {
+	go func(response *http.Response) {
+		defer response.Body.Close()
 		var body strings.Builder
-		scanner := bufio.NewScanner(responseB.Body)
+		scanner := bufio.NewScanner(response.Body)
 		for scanner.Scan() {
 			line := scanner.Text()
 			body.WriteString(line)
@@ -638,7 +647,7 @@ func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 			}
 		}
 		dataB <- body.String()
-	}()
+	}(responseB)
 	server.broadcast(map[string]any{"type": "test", "token": "session-still-valid"})
 	select {
 	case body := <-closedA:
@@ -657,8 +666,6 @@ func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 		t.Fatal("valid same-account session did not receive its event")
 	}
 	cancelB()
-	_ = responseA.Body.Close()
-	_ = responseB.Body.Close()
 }
 
 func TestSSEAuthorizationCacheDoesNotCrossSessionsOrMissingCookie(t *testing.T) {

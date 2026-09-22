@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/robfig/cron/v3"
 )
@@ -53,6 +54,70 @@ func TestJobSilenceWatchdogAlertsOncePerScheduleWindow(t *testing.T) {
 	}
 	if got := page.Items[0]; got.Type != "job-silent" || got.JobID != record.ID || got.Job != job.Name {
 		t.Fatalf("silence event = %#v", got)
+	}
+}
+
+func TestJobSilenceWatchdogRetriesWhenDestinationsCannotBeResolved(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	job := config.NormalizeJob(config.Job{
+		Name:     "temporarily-unroutable",
+		Schedule: "0 * * * *",
+		Timezone: "UTC",
+		Targets:  []string{"192.0.2.3"},
+		TCP:      &config.Protocol{Ports: "443", Mode: "connect"},
+	})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notifier, err := notify.New(db, []string{"generic://127.0.0.1:9/edgewatch?disabletls=yes&template=json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.January, 1, 4, 30, 0, 0, time.UTC)
+	created := now.Add(-3 * time.Hour)
+	if _, err := db.DB.ExecContext(ctx, `UPDATE jobs SET created_at=? WHERE id=?`, created.Format(time.RFC3339Nano), record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=? WHERE job_id=?`, created.Format(time.RFC3339Nano), record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `ALTER TABLE managed_notifications RENAME TO managed_notifications_unavailable`); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Store: db, Notifier: notifier, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), clock: func() time.Time { return now }}
+	a.checkJobSilence(ctx, now)
+	var eventCount, outboxCount, backoff int
+	var nextAlert string
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE type='job-silent' AND job_id=?`, record.ID).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox`).Scan(&outboxCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRowContext(ctx, `SELECT backoff_level,next_alert_at FROM job_silence_state WHERE job_id=?`, record.ID).Scan(&backoff, &nextAlert); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 0 || outboxCount != 0 || backoff != 0 || nextAlert != "" {
+		t.Fatalf("unroutable silence alert changed durable state: events=%d outbox=%d backoff=%d next=%q", eventCount, outboxCount, backoff, nextAlert)
+	}
+	if _, err := db.DB.ExecContext(ctx, `ALTER TABLE managed_notifications_unavailable RENAME TO managed_notifications`); err != nil {
+		t.Fatal(err)
+	}
+	a.checkJobSilence(ctx, now)
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE type='job-silent' AND job_id=?`, record.ID).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox`).Scan(&outboxCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount != 1 || outboxCount != 1 {
+		t.Fatalf("repaired silence alert did not queue delivery: events=%d outbox=%d", eventCount, outboxCount)
 	}
 }
 

@@ -37,23 +37,28 @@ published:
 | UID 65532, experimental probe | none effective | Nmap SYN or UDP, Naabu SYN | rejected by the scanner or unavailable |
 
 The matrix also runs the image with a disposable read-only root filesystem and
-a writable data bind mount. It verifies that the normal root deployment can
-create SQLite state and that scanner capability checks fail closed instead of
-guessing from the UID.
+a writable data bind mount owned by the identity mapped to container UID 0. It
+verifies that the normal root deployment can create SQLite state without
+world-writable permissions and that scanner capability checks fail closed
+instead of guessing from the UID.
 
 ## Data ownership and upgrades
 
-`./data` is intentionally written by the container's runtime UID. Keep the
-directory and its SQLite sidecars together when backing up or upgrading. The
-same UID is retained across image versions, so existing databases, WAL files,
-authentication keys, and notification keys remain writable without an
-ownership migration. Do not change the Compose `user:` setting on an existing
-installation unless you have tested ownership and every configured scan mode
-with a copy of the data directory.
+`./data` must be owned by the host identity mapped to container UID 0 and
+should use mode `0750`; the container runs as UID 0 but drops filesystem
+capabilities, so it cannot bypass directory ownership and permission checks.
+For standard rootful Docker this is host UID 0. For rootless Docker it is the
+invoking host user. With user-namespace remapping, it is the host-side UID
+mapped to container UID 0. Confirm this mapping before creating or repairing
+the bind mount.
 
-Rootless Docker remains supported: in that mode container UID 0 is mapped to
-the invoking host user. A normal rootful Docker host should not make `./data`
-world-writable just to simulate rootless behavior.
+Keep the directory and its SQLite sidecars together when backing up or
+upgrading. The same container UID is retained across image versions, so data
+owned by the mapped identity remains writable without an ownership migration.
+Do not change the Compose `user:` setting on an existing installation unless
+you have tested ownership and every configured scan mode with a copy of the
+data directory. Never use mode `0777` as a workaround; it masks ownership
+errors and weakens protection for databases and encryption keys.
 
 ## Reconsidering a non-root default
 

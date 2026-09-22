@@ -51,20 +51,23 @@ workdir=$(mktemp -d)
 daemon_container=
 cleanup() {
   if [ -n "$daemon_container" ]; then
-    docker rm -f "$daemon_container" >/dev/null 2>&1 || true
+    docker stop "$daemon_container" >/dev/null 2>&1 || true
+    docker rm "$daemon_container" >/dev/null 2>&1 || true
+  fi
+  if [ -d "$workdir/data" ]; then
+    docker run --rm --volume "$workdir/data:/data" --entrypoint /bin/sh "$image" \
+      -c 'rm -rf /data/* /data/.[!.]* /data/..?*' >/dev/null 2>&1 || true
   fi
   rm -rf "$workdir"
 }
 trap cleanup EXIT
 install -d -m 0750 "$workdir/data"
-install -m 0600 /dev/null "$workdir/notification-urls.txt"
-install -m 0600 /dev/null "$workdir/notification-urls-unreadable.txt"
+./scripts/prepare-container-smoke-data.sh "$image" "$workdir/data"
+install -d -m 0733 "$workdir/secret-fixtures"
 secret_marker=edgewatch-secret-read-smoke
-printf '%s\n' "$secret_marker" >"$workdir/notification-urls.txt"
-printf '%s\n' "$secret_marker" >"$workdir/notification-urls-unreadable.txt"
+docker run --rm $runtime_args --cap-drop ALL -v "$workdir/secret-fixtures:/fixtures:rw" --entrypoint /bin/sh "$image" -c 'umask 077 && printf "%s\n" "$1" > /fixtures/notification-urls.txt' sh "$secret_marker"
+docker run --rm $runtime_args --user 65532:65532 --cap-drop ALL -v "$workdir/secret-fixtures:/fixtures:rw" --entrypoint /bin/sh "$image" -c 'umask 077 && printf "%s\n" "$1" > /fixtures/notification-urls-unreadable.txt' sh "$secret_marker"
 test "$(stat -c '%a' "$workdir/data")" = 750
-test "$(stat -c '%a' "$workdir/notification-urls.txt")" = 600
-test "$(stat -c '%a' "$workdir/notification-urls-unreadable.txt")" = 600
 cat >"$workdir/config.yaml" <<'EOF'
 database: /var/lib/edgewatch/edgewatch.db
 retention: 24h
@@ -79,10 +82,6 @@ EOF
 # database. Bootstrap the disposable fixture through the daemon, which is the
 # sole owner of migrations and startup reconciliation, before checking status
 # and the persisted SQLite file.
-# Docker user namespaces can map container root away from the host owner of a
-# bind-mounted directory. Temporarily relax only this disposable directory for
-# bootstrap and diagnostics, then restore and assert the hardened mode below.
-chmod 0777 "$workdir/data"
 daemon_container=$(docker run -d $network_args $runtime_args \
   --cap-drop ALL --cap-add NET_RAW \
   -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
@@ -103,35 +102,33 @@ for attempt in $(seq 1 30); do
     exit 1
   fi
 done
-docker rm -f "$daemon_container" >/dev/null
+docker exec "$daemon_container" /bin/sh -c 'test -s /var/lib/edgewatch/edgewatch.db'
+docker stop "$daemon_container" >/dev/null
+docker rm "$daemon_container" >/dev/null
 daemon_container=
-docker run --rm $runtime_args \
+docker run --rm $runtime_args --cap-drop ALL --cap-add NET_RAW \
   -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
   -v "$workdir/data:/var/lib/edgewatch:rw" "$image" status --config /etc/edgewatch/config.yaml
-chmod 0750 "$workdir/data"
-test -s "$workdir/data/edgewatch.db"
+
 test "$(stat -c '%a' "$workdir/data")" = 750
 
-# Model the documented rootful Compose ownership explicitly: the process is
-# UID 0, so the owner-only secret must be owned by host root. A second fixture
-# owned by an unrelated UID proves root cannot bypass mode 0600 after Docker
-# drops all capabilities except the Compose NET_RAW capability.
-docker run --rm $runtime_args \
-  -v "$workdir:/fixtures:rw" \
+# Model the container's effective UID 0 ownership (host root in standard
+# rootful Docker, or its mapped host identity in rootless/userns deployments).
+# A second fixture owned by an unrelated UID proves restricted UID 0 cannot
+# bypass mode 0600 after Docker drops filesystem capabilities.
+docker run --rm $runtime_args --cap-drop ALL \
+  -v "$workdir/secret-fixtures:/fixtures:ro" \
   --entrypoint /bin/sh "$image" \
-  -c 'chown 0:0 "$1" && chmod 0600 "$1" && chown 65532:65532 "$2" && chmod 0600 "$2"' \
-  sh /fixtures/notification-urls.txt /fixtures/notification-urls-unreadable.txt
-test "$(stat -c '%u:%g' "$workdir/notification-urls.txt")" = 0:0
-test "$(stat -c '%u:%g' "$workdir/notification-urls-unreadable.txt")" = 65532:65532
+  -c 'test "$(stat -c %u:%g /fixtures/notification-urls.txt)" = 0:0 && test "$(stat -c %a /fixtures/notification-urls.txt)" = 600 && test "$(stat -c %u:%g /fixtures/notification-urls-unreadable.txt)" = 65532:65532 && test "$(stat -c %a /fixtures/notification-urls-unreadable.txt)" = 600'
 
 secret_output=$(docker run --rm $runtime_args --cap-drop ALL --cap-add NET_RAW \
-  -v "$workdir/notification-urls.txt:/run/secrets/edgewatch-test:ro" \
+  -v "$workdir/secret-fixtures/notification-urls.txt:/run/secrets/edgewatch-test:ro" \
   --entrypoint /bin/sh "$image" \
   -c 'cat /run/secrets/edgewatch-test')
 test "$secret_output" = "$secret_marker"
 
 if docker run --rm $runtime_args --cap-drop ALL --cap-add NET_RAW \
-  -v "$workdir/notification-urls-unreadable.txt:/run/secrets/edgewatch-test:ro" \
+  -v "$workdir/secret-fixtures/notification-urls-unreadable.txt:/run/secrets/edgewatch-test:ro" \
   --entrypoint /bin/sh "$image" \
   -c 'cat /run/secrets/edgewatch-test' >/dev/null 2>&1; then
   echo "restricted container unexpectedly read a secret owned by another UID" >&2

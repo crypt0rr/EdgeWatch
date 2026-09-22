@@ -55,7 +55,13 @@ type Hostname struct {
 }
 
 type ProtocolObservation struct {
-	Protocol         string            `json:"protocol"`
+	Protocol string `json:"protocol"`
+	// Status and StatusReason retain coverage failures independently for TCP
+	// and UDP. HostObservation.Status remains a summary for display, while
+	// change detection uses these per-protocol values to avoid treating missing
+	// evidence in one protocol as missing evidence in every protocol.
+	Status           string            `json:"status,omitempty"`
+	StatusReason     string            `json:"status_reason,omitempty"`
 	ScanType         string            `json:"scan_type,omitempty"`
 	ScannedPorts     string            `json:"scanned_ports"`
 	ScannedPortCount int               `json:"scanned_port_count"`

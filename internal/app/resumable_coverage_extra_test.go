@@ -103,13 +103,32 @@ func TestResumableScanRetriesTransientUnitFailure(t *testing.T) {
 		t.Fatalf("paused transient cycle = %#v, %v", cycle, err)
 	}
 	summaries, err := db.ListScanCycleUnitSummaries(ctx, cycle.ID)
-	if err != nil || len(summaries) != 2 || summaries[1].Sequence != 1 || summaries[1].Status != "pending" || summaries[1].Attempts != 1 {
+	if err != nil || len(summaries) != 2 || summaries[1].Sequence != 1 || summaries[1].Status != "pending" || summaries[1].Attempts != 1 || summaries[1].Failures != 1 {
 		t.Fatalf("retried unit summaries = %#v, %v", summaries, err)
+	}
+	if _, err := db.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DiscardScanCycle(ctx, cycle.ID); err != nil {
+		t.Fatalf("discard running transient cycle: %v", err)
+	}
+	discarded, err := db.GetScanCycle(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discarded.Status != "discarded" || discarded.CompletedUnits != 0 || discarded.TotalUnits != 0 || discarded.CompletedProbes != 0 || discarded.TotalProbes != 0 {
+		t.Fatalf("discarded transient cycle retained state: %#v", discarded)
+	}
+	if summaries, err := db.ListScanCycleUnitSummaries(ctx, cycle.ID); err != nil || len(summaries) != 0 {
+		t.Fatalf("discarded transient cycle retained work: %#v, %v", summaries, err)
 	}
 
 	second, _, secondErr := a.RunJobRecord(ctx, record)
 	if secondErr != nil || second.Status != "success" || second.CycleStatus != "completed" || second.CompletedUnits != 2 {
 		t.Fatalf("recovered transient cycle = %#v, err=%v", second, secondErr)
+	}
+	if second.CycleID == cycle.ID {
+		t.Fatalf("run reused discarded cycle %q", cycle.ID)
 	}
 }
 
@@ -147,6 +166,10 @@ func TestResumableScanStallsAfterRetryBudget(t *testing.T) {
 		}
 		if cycle.Status != wantStatus {
 			t.Fatalf("retry attempt %d cycle status = %q, want %q", attempt, cycle.Status, wantStatus)
+		}
+		summaries, summaryErr := db.ListScanCycleUnitSummaries(ctx, cycle.ID)
+		if summaryErr != nil || len(summaries) != 2 || summaries[1].Failures != attempt {
+			t.Fatalf("retry attempt %d failure count = %#v, %v", attempt, summaries, summaryErr)
 		}
 	}
 	if _, _, err := a.runJobRecord(ctx, record, false); !errors.Is(err, ErrScanCycleStalled) {
@@ -288,9 +311,52 @@ func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := db.StartScanCycleAttempt(ctx, oldEpoch.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ClaimScanCycleUnit(ctx, oldEpoch.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.CompleteScanCycleUnit(ctx, oldEpoch.ID, 0, model.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
 	var epochScan model.Scan
 	if handled, _, err := a.runResumableAttempt(ctx, ctx, epochJob, epochRecord.ID, &epochScan, nil, coverageResumableScanner{plan: cyclePlan}, false); !handled || err == nil || epochScan.CycleID != oldEpoch.ID || epochScan.CycleStatus != "discarded" {
 		t.Fatalf("stale epoch cycle = handled %v scan %#v err %v", handled, epochScan, err)
+	}
+	discardedEpoch, err := db.GetScanCycle(ctx, oldEpoch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discardedEpoch.Status != "discarded" || discardedEpoch.FinishedAt.IsZero() || discardedEpoch.CompletedUnits != 0 || discardedEpoch.TotalUnits != 0 || discardedEpoch.CompletedProbes != 0 || discardedEpoch.TotalProbes != 0 {
+		t.Fatalf("stale epoch cycle retained state: %#v", discardedEpoch)
+	}
+	if summaries, err := db.ListScanCycleUnitSummaries(ctx, oldEpoch.ID); err != nil || len(summaries) != 0 {
+		t.Fatalf("stale epoch cycle retained work: %#v, %v", summaries, err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `CREATE TRIGGER reject_scan_cycle_discard BEFORE UPDATE OF status ON scan_cycles WHEN NEW.status='discarded' BEGIN SELECT RAISE(ABORT, 'discard unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	blockedEpoch, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: epochRecord.ID, Job: epochJob.Name, JobRevision: epochRecord.Revision, BaselineEpoch: 0, ConfigHash: epochJob.SecurityHash(), Plan: cyclePlan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.StartScanCycleAttempt(ctx, blockedEpoch.ID); err != nil {
+		t.Fatal(err)
+	}
+	var blockedScan model.Scan
+	if handled, _, err := a.runResumableAttempt(ctx, ctx, epochJob, epochRecord.ID, &blockedScan, nil, coverageResumableScanner{plan: cyclePlan}, false); !handled || err == nil || blockedScan.Status != "failed" || blockedScan.CycleStatus != "running" || !strings.Contains(blockedScan.Error, "discard stale scan cycle") {
+		t.Fatalf("failed stale-cycle discard = handled %v scan %#v err %v", handled, blockedScan, err)
+	}
+	persistedEpoch, err := db.GetScanCycle(ctx, blockedEpoch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persistedEpoch.Status != "running" {
+		t.Fatalf("failed discard changed persisted cycle state to %q", persistedEpoch.Status)
+	}
+	if summaries, err := db.ListScanCycleUnitSummaries(ctx, blockedEpoch.ID); err != nil || len(summaries) != 2 {
+		t.Fatalf("failed discard removed cycle work: %#v, %v", summaries, err)
 	}
 }
 

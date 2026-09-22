@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -542,6 +543,171 @@ func TestSSEStopsDeliveringAfterSessionRevocation(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("revoked SSE stream did not close")
+	}
+}
+
+func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
+	server, db, _ := newUsersTestServer(t)
+	ctx := context.Background()
+
+	h := httptest.NewServer(server.Handler())
+	defer h.Close()
+	streamRequest := func(raw string) (*http.Request, context.CancelFunc) {
+		t.Helper()
+		streamCtx, cancel := context.WithCancel(ctx)
+		request, err := http.NewRequestWithContext(streamCtx, http.MethodGet, h.URL+"/api/v1/stream", nil)
+		if err != nil {
+			cancel()
+			t.Fatal(err)
+		}
+		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+		return request, cancel
+	}
+
+	// Log in twice so the account has two independent server-side sessions.
+	rawA, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawB, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestA := httptest.NewRequest(http.MethodGet, "/", nil)
+	requestA.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: rawA})
+	sessionA, ok := server.Auth.AuthenticateReadOnly(ctx, requestA)
+	if !ok {
+		t.Fatal("first login session was not authenticated")
+	}
+	requestB := httptest.NewRequest(http.MethodGet, "/", nil)
+	requestB.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: rawB})
+	sessionB, ok := server.Auth.AuthenticateReadOnly(ctx, requestB)
+	if !ok || sessionA.UserID != sessionB.UserID || sessionA.IDHash == sessionB.IDHash {
+		t.Fatalf("login sessions are not distinct sessions for one account: A=%#v B=%#v", sessionA, sessionB)
+	}
+	server.sseAuthMu.Lock()
+	server.sseAuthCache = nil
+	server.sseAuthMu.Unlock()
+
+	requestA, cancelA := streamRequest(rawA)
+	responseA, err := http.DefaultClient.Do(requestA)
+	if err != nil {
+		cancelA()
+		t.Fatal(err)
+	}
+	defer cancelA()
+	defer responseA.Body.Close()
+	requestB, cancelB := streamRequest(rawB)
+	responseB, err := http.DefaultClient.Do(requestB)
+	if err != nil {
+		cancelB()
+		t.Fatal(err)
+	}
+	defer cancelB()
+	defer responseB.Body.Close()
+	waitForSSESubscribers(t, server, 2)
+	deadline := time.Now().Add(time.Second)
+	for {
+		server.sseAuthMu.Lock()
+		cacheContainsA := false
+		cacheContainsB := false
+		for _, entry := range server.sseAuthCache {
+			cacheContainsA = cacheContainsA || entry.session.IDHash == sessionA.IDHash
+			cacheContainsB = cacheContainsB || entry.session.IDHash == sessionB.IDHash
+		}
+		server.sseAuthMu.Unlock()
+		if cacheContainsA && cacheContainsB {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("each browser session did not seed an independent SSE authorization cache entry")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := db.DeleteSession(ctx, sessionA.IDHash); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(defaultSSEAuthCacheTTL + 50*time.Millisecond)
+
+	closedA := make(chan string, 1)
+	go func(response *http.Response) {
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		closedA <- string(body)
+	}(responseA)
+	dataB := make(chan string, 1)
+	go func(response *http.Response) {
+		defer response.Body.Close()
+		var body strings.Builder
+		scanner := bufio.NewScanner(response.Body)
+		for scanner.Scan() {
+			line := scanner.Text()
+			body.WriteString(line)
+			body.WriteByte('\n')
+			if strings.Contains(line, "session-still-valid") {
+				dataB <- body.String()
+				return
+			}
+		}
+		dataB <- body.String()
+	}(responseB)
+	server.broadcast(map[string]any{"type": "test", "token": "session-still-valid"})
+	select {
+	case body := <-closedA:
+		if strings.Contains(body, "session-still-valid") {
+			t.Fatalf("revoked session received a live event: %s", body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("revoked session stream remained open after authorization re-check")
+	}
+	select {
+	case body := <-dataB:
+		if !strings.Contains(body, "session-still-valid") {
+			t.Fatalf("valid session did not receive its event: %s", body)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("valid same-account session did not receive its event")
+	}
+	cancelB()
+}
+
+func TestSSEAuthorizationCacheDoesNotCrossSessionsOrMissingCookie(t *testing.T) {
+	server, db, _ := newUsersTestServer(t)
+	ctx := context.Background()
+	login := func() (string, store.Session) {
+		t.Helper()
+		raw, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+		session, ok := server.Auth.AuthenticateReadOnly(ctx, request)
+		if !ok {
+			t.Fatal("login session was not authenticated")
+		}
+		return raw, session
+	}
+	rawA, sessionA := login()
+	rawB, sessionB := login()
+	if sessionA.UserID != sessionB.UserID || sessionA.IDHash == sessionB.IDHash {
+		t.Fatalf("login sessions are not distinct sessions for one account: A=%#v B=%#v", sessionA, sessionB)
+	}
+	requestB := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil)
+	requestB.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: rawB})
+	if !server.streamAuthorized(ctx, requestB, sseAuthorizationCacheKey(sessionB)) {
+		t.Fatal("valid second session was not authorized")
+	}
+	if err := db.DeleteSession(ctx, sessionA.IDHash); err != nil {
+		t.Fatal(err)
+	}
+	requestA := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil)
+	requestA.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: rawA})
+	if server.streamAuthorized(ctx, requestA, sseAuthorizationCacheKey(sessionA)) {
+		t.Fatal("revoked session reused another session's authorization cache entry")
+	}
+	if server.streamAuthorized(ctx, httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil), "") {
+		t.Fatal("request without a session cookie reused a cached authorization grant")
 	}
 }
 

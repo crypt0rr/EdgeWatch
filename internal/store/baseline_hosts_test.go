@@ -64,12 +64,116 @@ func TestRuntimeStateSummaryUsesProjectionCounts(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scan_hosts(scan_id,address,host_json) VALUES('scan-1','198.51.100.1','{}')`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "summary-job", 1, "scan-1", "hash", 0, 1, 2, 3, 0, 1, "now"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO runtime_incidents(job_id,key,incident_json) VALUES(?,?,?)`, "summary-job", "one", `{}`); err != nil {
+		t.Fatal(err)
+	}
 	summary, err := s.RuntimeStateSummary(ctx, "summary-job")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !summary.HasBaseline || summary.BaselineHostCount != 1 || summary.IncidentCount != 1 || summary.PendingCount != 1 || summary.CandidateCount != 2 || summary.CandidateAttempts != 3 {
 		t.Fatalf("summary = %#v", summary)
+	}
+}
+
+func TestRuntimeStateSummaryUsesBaselineProjectionCounts(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('projected-summary','projected-summary','{}',1,0,1,'now','now')`); err != nil {
+		t.Fatal(err)
+	}
+	state := []byte(`{"baseline":{"hosts":[{"address":"198.51.100.20"}]},"baseline_scan_id":"projected-baseline"}`)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?)`, "projected-summary", state, "now"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "projected-summary", 1, "projected-baseline", "", 0, 1, 0, 0, 0, 0, "now"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceBaselineHostProjection(ctx, "projected-summary", model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.20"}, {Address: "198.51.100.21"}}}); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := s.RuntimeStateSummary(ctx, "projected-summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.BaselineHostCount != 2 {
+		t.Fatalf("projected summary = %#v", summary)
+	}
+}
+
+func TestRuntimeStateSummaryFallsBackToLegacyUnitsWithMetadata(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('unit-metadata-summary','unit-metadata-summary','{}',1,0,1,'now','now')`); err != nil {
+		t.Fatal(err)
+	}
+	state := []byte(`{"baseline":{"units":[{"addresses":["198.51.100.30","198.51.100.31"]}]}}`)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?)`, "unit-metadata-summary", state, "now"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "unit-metadata-summary", 1, "", "", 0, 1, 0, 0, 0, 0, "now"); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := s.RuntimeStateSummary(ctx, "unit-metadata-summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.BaselineHostCount != 2 {
+		t.Fatalf("unit metadata summary = %#v", summary)
+	}
+}
+
+func TestRuntimeStateSummaryHandlesMetadataWithoutLegacyBaseline(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	for _, jobID := range []string{"metadata-no-runtime", "metadata-no-baseline"} {
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?,?,1,0,1,'now','now')`, jobID, jobID, `{}`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, jobID, 1, "", "", 0, 0, 0, 0, 0, 0, "now"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?)`, "metadata-no-baseline", []byte(`{"candidate_count":1}`), "now"); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, jobID := range []string{"metadata-no-runtime", "metadata-no-baseline"} {
+		summary, err := s.RuntimeStateSummary(ctx, jobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if summary.HasBaseline || summary.BaselineHostCount != 0 {
+			t.Fatalf("metadata-only summary for %s = %#v", jobID, summary)
+		}
+	}
+}
+
+func TestRuntimeStateSummaryPreservesLegacyHostsOnMetadataFastPath(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('legacy-metadata-summary','legacy-metadata-summary','{}',1,0,1,'now','now')`); err != nil {
+		t.Fatal(err)
+	}
+	state := []byte(`{"baseline":{"hosts":[{"address":"198.51.100.10"},{"address":"198.51.100.11"}]},"baseline_scan_id":"legacy-baseline","baseline_config_hash":"hash"}`)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?)`, "legacy-metadata-summary", state, "now"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "legacy-metadata-summary", 1, "legacy-baseline", "hash", 0, 1, 0, 0, 0, 0, "now"); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := s.RuntimeStateSummary(ctx, "legacy-metadata-summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !summary.HasBaseline || summary.BaselineHostCount != 2 {
+		t.Fatalf("legacy metadata summary = %#v", summary)
 	}
 }
 

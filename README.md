@@ -39,8 +39,27 @@ From a checkout of this repository:
 
 ```console
 cp config.example.yaml config.yaml
-# Keep the bind-mounted runtime state private without making it world-writable.
+```
+
+Choose the data-directory owner for your Docker mode. The container runs as
+UID 0 with filesystem capabilities dropped, so mode `0750` must be owned by the
+host identity mapped to container UID 0.
+
+For standard rootful Docker:
+
+```console
+sudo install -d -m 0750 -o 0 -g 0 ./data
+```
+
+For rootless Docker:
+
+```console
 install -d -m 0750 ./data
+```
+
+Start EdgeWatch:
+
+```console
 docker compose pull
 docker compose up -d
 ```
@@ -49,28 +68,48 @@ The container uses host networking so scanners can reach the same networks as
 the Docker host. Runtime state, the SQLite database, and generated encryption
 keys are stored in ./data.
 
-The published image runs as UID 0 in a rootful Docker installation, so a
-`0750` data directory is sufficient and avoids weakening host permissions. With
-rootless Docker, container UID 0 maps to the invoking host user; if you prepare
-the directory as another account, change its owner to the rootless Docker user
-instead of using `chmod 777`. The same ownership rule applies to mounted secret
-files. Keep notification and authentication key files owner-readable only:
+The container runs as UID 0 with filesystem capabilities dropped. The `0750`
+data directory must be owned by the host identity mapped to container UID 0:
+host root for standard rootful Docker, the invoking host user for rootless
+Docker, or the mapped host UID when user-namespace remapping is enabled.
+
+For an existing rootful deployment whose data directory was created by another
+user, stop EdgeWatch before correcting ownership:
 
 ```console
-install -m 0600 notification-urls.example.txt ./notification-urls.txt
+docker compose down
+sudo chown -R 0:0 ./data
+sudo chmod 0750 ./data
+docker compose up -d
 ```
 
-After enabling the corresponding secret mount in `compose.yaml`, you can check
-the permissions before starting the daemon:
+For a rootful installation, create notification and authentication secret files
+as host root with mode `0600`:
+
+```console
+sudo install -m 0600 -o 0 -g 0 notification-urls.example.txt ./notification-urls.txt
+```
+
+For rootless Docker, run the install command without `sudo` or ownership flags
+so the file belongs to the invoking user.
+
+Before starting, this preflight performs real reads and writes; `test -r` or
+`test -w` alone can be misleading for UID 0:
 
 ```console
 docker compose run --rm --no-deps --entrypoint /bin/sh edgewatch \
-  -c 'test -r /etc/edgewatch/config.yaml && test -w /var/lib/edgewatch && echo "runtime paths ready"'
+  -c 'cat /etc/edgewatch/config.yaml >/dev/null && touch /var/lib/edgewatch/.edgewatch-permission-check && rm /var/lib/edgewatch/.edgewatch-permission-check'
 ```
 
-If this check reports `Permission denied`, fix the host ownership for the
-rootful or rootless mode you selected. Do not make the database or secret files
-world-readable to work around the error.
+If this check fails with `Permission denied`, inspect `docker compose logs edgewatch` and correct the host ownership described above. Do not make the data directory or secret files world-readable or world-writable.
+
+If you enabled a secret mount, verify the mounted file itself is readable using
+its path, for example:
+
+```console
+docker compose run --rm --no-deps --entrypoint /bin/sh edgewatch \
+  -c 'cat /run/secrets/edgewatch-notification-urls >/dev/null'
+```
 
 If you are upgrading from a deployment that used the old named
 edgewatch-data volume, the bind mount starts with fresh state. That volume is
@@ -222,6 +261,11 @@ Important defaults:
   trusted proxy controls that header, or none to ignore forwarded client IPs.
   EdgeWatch never combines the two conventions, so configure the header that
   your proxy sanitizes or constructs for the trusted proxy chain.
+- If a tunnel or reverse proxy is not listed in web.trusted_proxies, every
+  client may appear as the same loopback peer. EdgeWatch keeps known-account
+  login recovery available under that shared identity while still bounding
+  concurrent password work. Configure the proxy network and forwarding header
+  when you need per-client hard lockouts and audit identities.
 - Loopback, link-local, and cloud metadata addresses are excluded by default.
   Change scanner.target_exclusions only when you understand the host-network
   exposure.
@@ -366,7 +410,7 @@ docker compose run --rm --no-deps -T edgewatch edgewatch verify \
 docker compose up -d edgewatch
 ```
 
-The current schema is version 44. Database migrations are forward-only. An
+The current schema is version 45. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. Keep encryption keys with the database or encrypted web-managed

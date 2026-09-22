@@ -1,10 +1,15 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -235,6 +240,92 @@ func TestLegacyHostObservationsNormalizeAndMergeLegacyUnits(t *testing.T) {
 	}
 }
 
+func TestIndexLegacyScanRejectsOversizedSnapshot(t *testing.T) {
+	err := indexLegacyScanTx(context.Background(), nil, legacyHostBackfillScan{snapshot: make([]byte, maxLegacyHostBackfillSnapshotBytes+1)})
+	var dataErr *legacyHostBackfillDataError
+	if !errors.As(err, &dataErr) || !strings.Contains(dataErr.Error(), "conversion limit") {
+		t.Fatalf("oversized snapshot error = %v", err)
+	}
+}
+
+func TestLegacyHostStatusMerge(t *testing.T) {
+	tests := []struct {
+		name, currentStatus, currentReason, additionStatus, additionReason string
+		wantStatus, wantReason                                             string
+	}{
+		{name: "incomplete addition wins", currentStatus: "up", currentReason: "arp", additionStatus: "down", additionReason: "no-response", wantStatus: "unreachable", wantReason: "no-response"},
+		{name: "incomplete current is sticky", currentStatus: "down", currentReason: "nmap-host-down", additionStatus: "up", additionReason: "arp-response", wantStatus: "unreachable", wantReason: "nmap-host-down"},
+		{name: "two incomplete reasons normalize", currentStatus: "timeout", currentReason: "timeout", additionStatus: "down", additionReason: "no-response", wantStatus: "unreachable", wantReason: "no-response"},
+		{name: "unknown adopts known status", currentStatus: "unknown", additionStatus: "up", additionReason: "host-response", wantStatus: "up", wantReason: "host-response"},
+		{name: "known status retains deterministic reason", currentStatus: "up", currentReason: "z-reason", additionStatus: "up", additionReason: "a-reason", wantStatus: "up", wantReason: "a-reason"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			status, reason := legacyMergeHostStatus(test.currentStatus, test.currentReason, test.additionStatus, test.additionReason)
+			if status != test.wantStatus || reason != test.wantReason {
+				t.Fatalf("merged status/reason = %q/%q, want %q/%q", status, reason, test.wantStatus, test.wantReason)
+			}
+		})
+	}
+	if legacyIncompleteHostStatus(" ") || !legacyIncompleteHostStatus("timed-out") {
+		t.Fatal("incomplete host status classification is incorrect")
+	}
+	if got := legacyChooseStatusReason("same", "same"); got != "same" {
+		t.Fatalf("identical status reason = %q", got)
+	}
+	if got := legacyChooseStatusReason("present", ""); got != "present" {
+		t.Fatalf("empty incoming status reason = %q", got)
+	}
+}
+
+func TestLegacyHostBackfillNilLogger(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "nil-logger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := backfillLegacyScanHostsContextWithLogger(context.Background(), store.DB, nil); err != nil {
+		t.Fatalf("backfill with default logger failed: %v", err)
+	}
+}
+
+func TestLegacyHostBackfillStorageFailureIsFatal(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(filepath.Join(t.TempDir(), "storage-error.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	when := time.Now().UTC().Add(-time.Hour)
+	scan := model.Scan{ID: "legacy-storage-error", Job: "legacy-job", StartedAt: when, FinishedAt: when, Status: "success"}
+	if err := store.SaveScan(ctx, scan); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := json.Marshal(model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.10", Status: "up"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.ExecContext(ctx, `UPDATE scans SET snapshot_json=? WHERE id=?`, snapshot, scan.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB.ExecContext(ctx, `CREATE TRIGGER fail_legacy_host_projection BEFORE INSERT ON scan_hosts BEGIN SELECT RAISE(ABORT, 'injected projection failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillLegacyScanHostsContext(ctx, store.DB); err == nil {
+		t.Fatal("projection storage failure was treated as malformed legacy data")
+	}
+	var checkpoints int
+	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_scan_host_backfill WHERE scan_id=?`, scan.ID).Scan(&checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	if checkpoints != 0 {
+		t.Fatalf("failed scan has %d backfill checkpoints, want none", checkpoints)
+	}
+}
+
 func TestLegacyHostBackfillFailureBoundaries(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -272,4 +363,278 @@ func TestLegacyHostBackfillFailureBoundaries(t *testing.T) {
 	if err := backfillLegacyScanHostsContext(context.Background(), broken.DB); err == nil {
 		t.Fatal("backfill with missing checkpoint table unexpectedly succeeded")
 	}
+}
+
+func TestLegacyHostBackfillDeduplicatesCanonicalAddresses(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-duplicate-hosts.db")
+	initial, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	when := time.Now().UTC().Add(-time.Hour)
+	scan := model.Scan{ID: "legacy-duplicate-host-scan", Job: "legacy-job", StartedAt: when, FinishedAt: when, Status: "success"}
+	if err := initial.SaveScan(ctx, scan); err != nil {
+		initial.Close()
+		t.Fatal(err)
+	}
+	if err := initial.Close(); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := model.Snapshot{Hosts: []model.HostObservation{
+		{
+			Address:       "2001:0db8:0:0:0:0:0:1",
+			SourceTargets: []string{"one.example"},
+			DNSNames:      []string{"one.example"},
+			Protocols: []model.ProtocolObservation{{
+				Protocol: "TCP",
+				Ports:    []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https"}}},
+			}},
+		},
+		{
+			Address:       "2001:db8::1",
+			SourceTargets: []string{"two.example"},
+			DNSNames:      []string{"two.example"},
+			Protocols: []model.ProtocolObservation{{
+				Protocol: "udp",
+				Ports:    []model.PortObservation{{Port: 53, State: "open", Service: &model.ServiceObservation{Name: "domain"}}},
+			}},
+		},
+	}}
+	snapshotJSON, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE scans SET snapshot_json=? WHERE id=?`, snapshotJSON, scan.ID); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill; PRAGMA user_version=38`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	upgraded, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	var count int
+	if err := upgraded.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, scan.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("canonical IPv6 host row count = %d, want 1", count)
+	}
+	var address string
+	var hostJSON []byte
+	if err := upgraded.DB.QueryRowContext(ctx, `SELECT address,host_json FROM scan_hosts WHERE scan_id=?`, scan.ID).Scan(&address, &hostJSON); err != nil {
+		t.Fatal(err)
+	}
+	var host model.HostObservation
+	if err := json.Unmarshal(hostJSON, &host); err != nil {
+		t.Fatal(err)
+	}
+	if address != "2001:db8::1" || host.Address != address || len(host.Protocols) != 2 {
+		t.Fatalf("canonical merged host = address %q, %#v", address, host)
+	}
+	if len(host.SourceTargets) != 2 || len(host.DNSNames) != 2 {
+		t.Fatalf("merged target relationships = targets %#v DNS %#v", host.SourceTargets, host.DNSNames)
+	}
+	portsByProtocol := map[string]int{}
+	for _, protocol := range host.Protocols {
+		portsByProtocol[protocol.Protocol] = len(protocol.Ports)
+	}
+	if portsByProtocol["tcp"] != 1 || portsByProtocol["udp"] != 1 {
+		t.Fatalf("merged protocol evidence = %#v", host.Protocols)
+	}
+}
+
+func TestLegacyHostBackfillSkipsMalformedScanAndContinues(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "legacy-malformed-hosts.db")
+	initial, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Hour)
+	bad := model.Scan{ID: "bad-legacy-scan", Job: "legacy-job", StartedAt: base, FinishedAt: base, Status: "success"}
+	good := model.Scan{ID: "good-legacy-scan", Job: "legacy-job", StartedAt: base.Add(time.Minute), FinishedAt: base.Add(time.Minute), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.42", Status: "up"}}}}
+	for _, scan := range []model.Scan{bad, good} {
+		if err := initial.SaveScan(ctx, scan); err != nil {
+			initial.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := initial.Close(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`UPDATE scans SET snapshot_json='{' WHERE id=?`, bad.ID); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill; PRAGMA user_version=38`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	upgraded, err := OpenWithLogger(path, logger)
+	if err != nil {
+		t.Fatalf("migration failed with one malformed legacy scan: %v", err)
+	}
+	defer upgraded.Close()
+	var badHosts, goodHosts, badCheckpoints int
+	if err := upgraded.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, bad.ID).Scan(&badHosts); err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, good.ID).Scan(&goodHosts); err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_scan_host_backfill WHERE scan_id=?`, bad.ID).Scan(&badCheckpoints); err != nil {
+		t.Fatal(err)
+	}
+	if badHosts != 0 || goodHosts != 1 || badCheckpoints != 1 {
+		t.Fatalf("backfill results malformed hosts=%d valid hosts=%d malformed checkpoints=%d", badHosts, goodHosts, badCheckpoints)
+	}
+	legacyExists, err := upgraded.LegacySuccessfulScanExists(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyExists {
+		t.Fatal("skipped malformed scan prevented legacy backfill from completing")
+	}
+	if output := logs.String(); !strings.Contains(output, "legacy scan host indexing skipped") || !strings.Contains(output, "scan_id="+bad.ID) || !strings.Contains(output, "snapshot JSON is malformed") {
+		t.Fatalf("malformed scan was not logged with bounded context: %q", output)
+	}
+}
+
+func TestLegacyHostBackfillSplitsBySnapshotBytesAndHostRows(t *testing.T) {
+	ctx := context.Background()
+
+	for _, test := range []struct {
+		name  string
+		limit legacyHostBackfillLimits
+	}{
+		{
+			name: "snapshot bytes",
+			limit: legacyHostBackfillLimits{
+				maxScans:         100,
+				maxSnapshotBytes: 1,
+				maxHostRows:      100,
+			},
+		},
+		{
+			name: "host rows",
+			limit: legacyHostBackfillLimits{
+				maxScans:         100,
+				maxSnapshotBytes: 1 << 20,
+				maxHostRows:      1,
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, scans := seedLegacyHostBackfillScans(ctx, t, 3)
+			defer store.Close()
+
+			var progress [][2]int64
+			if err := backfillLegacyScanHostsContextWithLoggerAndProgress(ctx, store.DB, nil, func(processed, total int64) {
+				progress = append(progress, [2]int64{processed, total})
+			}, test.limit); err != nil {
+				t.Fatalf("bounded backfill failed: %v", err)
+			}
+			if len(progress) < 4 || progress[0] != [2]int64{0, int64(len(scans))} || progress[len(progress)-1] != [2]int64{int64(len(scans)), int64(len(scans))} {
+				t.Fatalf("progress callbacks = %#v, want initial and at least one callback per committed batch", progress)
+			}
+			for index := 1; index < len(progress); index++ {
+				if progress[index][0] < progress[index-1][0] {
+					t.Fatalf("progress moved backwards: %#v", progress)
+				}
+			}
+
+			var hosts, checkpoints int
+			if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts`).Scan(&hosts); err != nil {
+				t.Fatal(err)
+			}
+			if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_scan_host_backfill`).Scan(&checkpoints); err != nil {
+				t.Fatal(err)
+			}
+			if hosts != len(scans) || checkpoints != len(scans) {
+				t.Fatalf("bounded backfill projections hosts=%d checkpoints=%d, want %d", hosts, checkpoints, len(scans))
+			}
+		})
+	}
+}
+
+func TestLegacyHostBackfillCheckpointsOversizedWithoutDecoding(t *testing.T) {
+	ctx := context.Background()
+	store, scans := seedLegacyHostBackfillScans(ctx, t, 1)
+	defer store.Close()
+
+	oversized := bytes.Repeat([]byte("x"), maxLegacyHostBackfillSnapshotBytes+1)
+	if _, err := store.DB.ExecContext(ctx, `UPDATE scans SET snapshot_json=? WHERE id=?`, oversized, scans[0].ID); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := backfillLegacyScanHostsContext(ctx, store.DB); err != nil {
+		t.Fatalf("oversized legacy snapshot prevented backfill progress: %v", err)
+	}
+	var checkpoints, hosts int
+	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM legacy_scan_host_backfill WHERE scan_id=?`, scans[0].ID).Scan(&checkpoints); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, scans[0].ID).Scan(&hosts); err != nil {
+		t.Fatal(err)
+	}
+	if checkpoints != 1 || hosts != 0 {
+		t.Fatalf("oversized snapshot checkpoint=%d hosts=%d, want checkpoint=1 hosts=0", checkpoints, hosts)
+	}
+}
+
+func seedLegacyHostBackfillScans(ctx context.Context, t *testing.T, count int) (*Store, []model.Scan) {
+	t.Helper()
+	store, err := openWithOptionsContext(ctx, filepath.Join(t.TempDir(), "bounded-legacy-hosts.db"), openOptions{create: true, migrate: true, configureWAL: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Now().UTC().Add(-time.Hour)
+	scans := make([]model.Scan, 0, count)
+	for index := 0; index < count; index++ {
+		scan := model.Scan{
+			ID:         fmt.Sprintf("bounded-legacy-scan-%d", index),
+			Job:        "legacy-job",
+			StartedAt:  base.Add(time.Duration(index) * time.Minute),
+			FinishedAt: base.Add(time.Duration(index) * time.Minute),
+			Status:     "success",
+			Snapshot: model.Snapshot{Hosts: []model.HostObservation{{
+				Address: fmt.Sprintf("192.0.2.%d", index+10),
+				Status:  "up",
+			}}},
+		}
+		if err := store.SaveScan(ctx, scan); err != nil {
+			store.Close()
+			t.Fatal(err)
+		}
+		scans = append(scans, scan)
+	}
+	if _, err := store.DB.ExecContext(ctx, `DELETE FROM scan_hosts; DELETE FROM latest_scan_hosts; DELETE FROM legacy_scan_host_backfill`); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	return store, scans
 }

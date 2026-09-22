@@ -220,6 +220,8 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Verify prebuilt AMD64 image
         run: bash ./scripts/test-prebuilt-image.sh edgewatch:prebuilt-amd64 linux/amd64 v0.0.0-ci
+      - name: Verify container runtime capability matrix
+        run: ./scripts/verify-container-runtime.sh edgewatch:prebuilt-amd64
       - name: Build prebuilt ARM64 image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:

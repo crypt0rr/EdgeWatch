@@ -103,7 +103,7 @@ func TestResumableScanRetriesTransientUnitFailure(t *testing.T) {
 		t.Fatalf("paused transient cycle = %#v, %v", cycle, err)
 	}
 	summaries, err := db.ListScanCycleUnitSummaries(ctx, cycle.ID)
-	if err != nil || len(summaries) != 2 || summaries[1].Sequence != 1 || summaries[1].Status != "pending" || summaries[1].Attempts != 1 {
+	if err != nil || len(summaries) != 2 || summaries[1].Sequence != 1 || summaries[1].Status != "pending" || summaries[1].Attempts != 1 || summaries[1].Failures != 1 {
 		t.Fatalf("retried unit summaries = %#v, %v", summaries, err)
 	}
 	if _, err := db.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
@@ -166,6 +166,10 @@ func TestResumableScanStallsAfterRetryBudget(t *testing.T) {
 		}
 		if cycle.Status != wantStatus {
 			t.Fatalf("retry attempt %d cycle status = %q, want %q", attempt, cycle.Status, wantStatus)
+		}
+		summaries, summaryErr := db.ListScanCycleUnitSummaries(ctx, cycle.ID)
+		if summaryErr != nil || len(summaries) != 2 || summaries[1].Failures != attempt {
+			t.Fatalf("retry attempt %d failure count = %#v, %v", attempt, summaries, summaryErr)
 		}
 	}
 	if _, _, err := a.runJobRecord(ctx, record, false); !errors.Is(err, ErrScanCycleStalled) {

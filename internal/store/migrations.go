@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 44
+const schemaVersion = 45
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -1098,6 +1098,14 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
 			"ALTER TABLE job_runtime_meta ADD COLUMN baseline_epoch INTEGER NOT NULL DEFAULT 0",
 			"UPDATE job_runtime_meta SET baseline_epoch=1 WHERE baseline_epoch=0 AND (baseline_scan_id<>'' OR baseline_modified<>0)",
 			"CREATE INDEX IF NOT EXISTS scan_cycles_job_epoch_status ON scan_cycles(job_id,baseline_epoch,status)",
+		},
+		45: {
+			// Claims are useful execution telemetry, but a process restart or a
+			// timeout can claim the same unit without completing a failed scanner
+			// execution. Keep a separate counter for genuine retryable failures so
+			// retry budgets cannot be consumed by recovery alone. Split children
+			// start with zero failures and are initialized by the cycle store.
+			"ALTER TABLE scan_cycle_units ADD COLUMN failures INTEGER NOT NULL DEFAULT 0",
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

@@ -51,6 +51,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 			subscriberKey = "unknown"
 		}
 	}
+	authKey := sseAuthorizationCacheKey(session)
 	lastID := parseSSELastEventID(r.Header.Get("Last-Event-ID"))
 	ch := make(chan sseMessage, 64)
 	s.mu.Lock()
@@ -92,10 +93,12 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	s.sseWG.Add(1)
 	s.mu.Unlock()
 	s.sseAuthMu.Lock()
-	if s.sseAuthCache == nil {
-		s.sseAuthCache = map[string]sseAuthCacheEntry{}
+	if authKey != "" {
+		if s.sseAuthCache == nil {
+			s.sseAuthCache = map[string]sseAuthCacheEntry{}
+		}
+		s.sseAuthCache[authKey] = sseAuthCacheEntry{session: session, checked: s.streamNow()}
 	}
-	s.sseAuthCache[subscriberKey] = sseAuthCacheEntry{session: session, checked: s.streamNow()}
 	s.sseAuthMu.Unlock()
 	defer func() {
 		s.mu.Lock()
@@ -110,7 +113,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 		close(ch)
 		s.mu.Unlock()
 		s.sseAuthMu.Lock()
-		delete(s.sseAuthCache, subscriberKey)
+		if authKey != "" {
+			delete(s.sseAuthCache, authKey)
+		}
 		s.sseAuthMu.Unlock()
 		s.sseWG.Done()
 	}()
@@ -142,7 +147,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 			// EventSource open. The short authorization cache bounds exposure for
 			// a disabled or demoted principal, and the heartbeat below refreshes
 			// that decision when the stream is otherwise quiet.
-			if !s.streamAuthorized(streamCtx, r, subscriberKey) {
+			if !s.streamAuthorized(streamCtx, r, authKey) {
 				return
 			}
 			if !writeSSEMessage(w, message) {
@@ -150,7 +155,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 			}
 			flusher.Flush()
 		case <-heartbeat.C:
-			if !s.streamAuthorized(streamCtx, r, subscriberKey) {
+			if !s.streamAuthorized(streamCtx, r, authKey) {
 				return
 			}
 			if _, err := w.Write([]byte(": heartbeat\n\n")); err != nil {
@@ -219,37 +224,52 @@ func (s *Server) waitForSSEShutdown(ctx context.Context) {
 
 // streamAuthorized avoids a storage read for every event while bounding the
 // time a revoked or demoted account can continue receiving updates. The
-// initial authenticated request seeds the cache; subsequent checks refresh it
-// at most once per TTL (two seconds in production).
+// initial authenticated request seeds a cache entry tied to that session;
+// subsequent checks refresh it at most once per TTL (two seconds in production).
 func (s *Server) streamAuthorized(ctx context.Context, r *http.Request, key string) bool {
 	now := s.streamNow()
 	ttl := s.sseAuthTTL
 	if ttl <= 0 {
 		ttl = defaultSSEAuthCacheTTL
 	}
-	s.sseAuthMu.Lock()
-	if entry, ok := s.sseAuthCache[key]; ok && now.Sub(entry.checked) < ttl {
+	if key != "" {
+		s.sseAuthMu.Lock()
+		entry, ok := s.sseAuthCache[key]
 		s.sseAuthMu.Unlock()
-		return auth.HasPermission(entry.session, auth.PermissionStreamRead)
+		if ok && now.Sub(entry.checked) < ttl {
+			return auth.HasPermission(entry.session, auth.PermissionStreamRead)
+		}
 	}
-	s.sseAuthMu.Unlock()
 	if s.Auth == nil {
 		return false
 	}
 	current, authorized := s.Auth.AuthenticateReadOnly(ctx, r)
 	if !authorized || !auth.HasPermission(current, auth.PermissionStreamRead) {
-		s.sseAuthMu.Lock()
-		delete(s.sseAuthCache, key)
-		s.sseAuthMu.Unlock()
+		if key != "" {
+			s.sseAuthMu.Lock()
+			delete(s.sseAuthCache, key)
+			s.sseAuthMu.Unlock()
+		}
 		return false
 	}
-	s.sseAuthMu.Lock()
-	if s.sseAuthCache == nil {
-		s.sseAuthCache = map[string]sseAuthCacheEntry{}
+	if key != "" {
+		s.sseAuthMu.Lock()
+		if s.sseAuthCache == nil {
+			s.sseAuthCache = map[string]sseAuthCacheEntry{}
+		}
+		s.sseAuthCache[key] = sseAuthCacheEntry{session: current, checked: now}
+		s.sseAuthMu.Unlock()
 	}
-	s.sseAuthCache[key] = sseAuthCacheEntry{session: current, checked: now}
-	s.sseAuthMu.Unlock()
 	return true
+}
+
+func sseAuthorizationCacheKey(session store.Session) string {
+	if idHash := strings.TrimSpace(session.IDHash); idHash != "" {
+		return "session:" + idHash
+	}
+	// A missing stable session identity must never fall back to a shared account
+	// key: re-authenticate each time instead of reusing another stream's grant.
+	return ""
 }
 
 func (s *Server) streamNow() time.Time {

@@ -88,7 +88,9 @@ daemon_container=$(docker run -d $network_args $runtime_args \
   -v "$workdir/config.yaml:/etc/edgewatch/config.yaml:ro" \
   -v "$workdir/data:/var/lib/edgewatch:rw" "$image" daemon --config /etc/edgewatch/config.yaml)
 for attempt in $(seq 1 30); do
-  if test -s "$workdir/data/edgewatch.db"; then
+  # The database file appears before schema migrations finish; wait until the
+  # daemon is serving requests so the following read-only check cannot race it.
+  if curl --fail --silent "http://127.0.0.1:18080/" >/dev/null; then
     break
   fi
   if [ -z "$(docker ps -q --filter "id=$daemon_container")" ]; then

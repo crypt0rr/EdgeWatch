@@ -21,6 +21,25 @@ func TestClientIPIgnoresUntrustedForwardingHeaders(t *testing.T) {
 	}
 }
 
+func TestIsTrustedProxyOnlyConsidersDirectPeer(t *testing.T) {
+	m := NewManager(nil)
+	if err := m.SetTrustedProxies([]string{"127.0.0.1/32"}); err != nil {
+		t.Fatal(err)
+	}
+	trusted := httptest.NewRequest("GET", "/", nil)
+	trusted.RemoteAddr = "127.0.0.1:8080"
+	trusted.Header.Set("X-Forwarded-For", "198.51.100.10")
+	if !m.IsTrustedProxy(trusted) {
+		t.Fatal("configured proxy peer was not trusted")
+	}
+	untrusted := httptest.NewRequest("GET", "/", nil)
+	untrusted.RemoteAddr = "198.51.100.10:8080"
+	untrusted.Header.Set("X-Forwarded-For", "127.0.0.1")
+	if m.IsTrustedProxy(untrusted) {
+		t.Fatal("forwarded header changed trust decision")
+	}
+}
+
 func TestClientIPResolvesConfiguredProxyChain(t *testing.T) {
 	m := NewManager(nil)
 	if err := m.SetTrustedProxies([]string{"127.0.0.1/32", "10.0.0.0/8"}); err != nil {

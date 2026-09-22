@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -20,14 +19,35 @@ import (
 // so a large retained history never needs to be processed in one transaction.
 const legacyHostBackfillBatchSize = 100
 
-const maxLegacyHostBackfillSnapshotBytes = 8 << 20
+// A single legacy snapshot is capped independently. These batch limits keep
+// the migration from retaining one hundred full snapshots (and their decoded
+// host graphs) in one transaction. A single scan may exceed a batch boundary
+// when it cannot be split without losing the scan/projection atomicity.
+const (
+	maxLegacyHostBackfillSnapshotBytes   = 8 << 20
+	legacyHostBackfillBatchSnapshotBytes = 16 << 20
+	legacyHostBackfillBatchHostRows      = 10_000
+)
+
+type legacyHostBackfillLimits struct {
+	maxScans         int
+	maxSnapshotBytes int64
+	maxHostRows      int
+}
+
+var defaultLegacyHostBackfillLimits = legacyHostBackfillLimits{
+	maxScans:         legacyHostBackfillBatchSize,
+	maxSnapshotBytes: legacyHostBackfillBatchSnapshotBytes,
+	maxHostRows:      legacyHostBackfillBatchHostRows,
+}
 
 type legacyHostBackfillScan struct {
-	id         string
-	jobID      string
-	job        string
-	finishedAt time.Time
-	snapshot   []byte
+	id            string
+	jobID         string
+	job           string
+	finishedAt    time.Time
+	snapshotBytes int64
+	snapshot      []byte
 }
 
 type legacyHostBackfillDataError struct {
@@ -41,12 +61,36 @@ func (e *legacyHostBackfillDataError) Error() string { return e.reason }
 // checkpoint is committed together with each batch, so interruption resumes
 // from the next legacy scan and never replays scanner work.
 func backfillLegacyScanHostsContext(ctx context.Context, db *sql.DB) error {
-	return backfillLegacyScanHostsContextWithLogger(ctx, db, slog.Default())
+	return backfillLegacyScanHostsContextWithLoggerAndProgress(ctx, db, slog.Default(), nil, defaultLegacyHostBackfillLimits)
 }
 
 func backfillLegacyScanHostsContextWithLogger(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
+	return backfillLegacyScanHostsContextWithLoggerAndProgress(ctx, db, logger, nil, defaultLegacyHostBackfillLimits)
+}
+
+// backfillLegacyScanHostsContextWithLoggerAndProgress is kept separate from
+// the migration wrapper so tests can use small limits to prove that the
+// resource boundaries split work across committed transactions.
+func backfillLegacyScanHostsContextWithLoggerAndProgress(ctx context.Context, db *sql.DB, logger *slog.Logger, progress func(processed, total int64), limits legacyHostBackfillLimits) error {
 	if logger == nil {
 		logger = slog.Default()
+	}
+	if limits.maxScans <= 0 {
+		limits.maxScans = legacyHostBackfillBatchSize
+	}
+	if limits.maxSnapshotBytes <= 0 {
+		limits.maxSnapshotBytes = legacyHostBackfillBatchSnapshotBytes
+	}
+	if limits.maxHostRows <= 0 {
+		limits.maxHostRows = legacyHostBackfillBatchHostRows
+	}
+	total, err := countLegacyHostBackfillCandidates(ctx, db)
+	if err != nil {
+		return err
+	}
+	var processed int64
+	if progress != nil {
+		progress(processed, total)
 	}
 	for {
 		if err := ctx.Err(); err != nil {
@@ -56,12 +100,12 @@ func backfillLegacyScanHostsContextWithLogger(ctx context.Context, db *sql.DB, l
 		if err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT s.id,COALESCE(s.job_id,''),s.job,s.finished_at,s.snapshot_json
+		rows, err := tx.QueryContext(ctx, `SELECT s.id,COALESCE(s.job_id,''),s.job,s.finished_at,COALESCE(length(s.snapshot_json),0)
 FROM scans s
 WHERE s.status='success'
   AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
   AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
-ORDER BY s.finished_at,s.id LIMIT ?`, legacyHostBackfillBatchSize)
+ORDER BY s.finished_at,s.id LIMIT ?`, limits.maxScans)
 		if err != nil {
 			_ = tx.Rollback()
 			return err
@@ -77,43 +121,71 @@ ORDER BY s.finished_at,s.id LIMIT ?`, legacyHostBackfillBatchSize)
 			}
 			return nil
 		}
+		var batchBytes int64
+		batchHostRows := 0
+		batchScans := 0
 		skipped := make([]legacyHostBackfillDataError, 0)
 		skippedScanIDs := make([]string, 0)
 		for _, item := range batch {
-			if _, err := tx.ExecContext(ctx, `SAVEPOINT legacy_host_backfill_scan`); err != nil {
+			if err := ctx.Err(); err != nil {
 				_ = tx.Rollback()
 				return err
 			}
-			indexErr := indexLegacyScanTx(ctx, tx, item)
-			if indexErr != nil {
-				var dataErr *legacyHostBackfillDataError
-				if !errors.As(indexErr, &dataErr) {
-					_ = tx.Rollback()
-					return indexErr
-				}
-				if _, err := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT legacy_host_backfill_scan`); err != nil {
-					_ = tx.Rollback()
-					return err
-				}
-				if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT legacy_host_backfill_scan`); err != nil {
-					_ = tx.Rollback()
-					return err
+			// Oversized snapshots can be checkpointed without ever selecting the
+			// blob. This is the important distinction from the old batch reader,
+			// which loaded every snapshot before checking its size.
+			if item.snapshotBytes > maxLegacyHostBackfillSnapshotBytes {
+				if batchScans > 0 && (batchBytes >= limits.maxSnapshotBytes || batchBytes+item.snapshotBytes > limits.maxSnapshotBytes) {
+					break
 				}
 				if err := checkpointLegacyScanTx(ctx, tx, item.id); err != nil {
 					_ = tx.Rollback()
 					return err
 				}
-				skipped = append(skipped, *dataErr)
+				batchBytes += item.snapshotBytes
+				batchScans++
+				processed++
+				skipped = append(skipped, legacyHostBackfillDataError{reason: fmt.Sprintf("snapshot exceeds %d-byte conversion limit", maxLegacyHostBackfillSnapshotBytes)})
 				skippedScanIDs = append(skippedScanIDs, item.id)
 				continue
 			}
-			if _, err := tx.ExecContext(ctx, `RELEASE SAVEPOINT legacy_host_backfill_scan`); err != nil {
+			if batchScans > 0 && (batchBytes >= limits.maxSnapshotBytes || batchBytes+item.snapshotBytes > limits.maxSnapshotBytes) {
+				break
+			}
+			if err := loadLegacyHostBackfillSnapshot(ctx, tx, &item); err != nil {
 				_ = tx.Rollback()
 				return err
 			}
+			hosts, decodeErr := decodeLegacyHostBackfillHosts(item)
+			if decodeErr != nil {
+				if err := checkpointLegacyScanTx(ctx, tx, item.id); err != nil {
+					_ = tx.Rollback()
+					return err
+				}
+				batchBytes += item.snapshotBytes
+				batchScans++
+				processed++
+				skipped = append(skipped, *decodeErr)
+				skippedScanIDs = append(skippedScanIDs, item.id)
+				continue
+			}
+			if batchScans > 0 && (batchHostRows >= limits.maxHostRows || (batchHostRows > 0 && batchHostRows+len(hosts) > limits.maxHostRows)) {
+				break
+			}
+			if err := indexLegacyScanHostsTx(ctx, tx, item, hosts); err != nil {
+				_ = tx.Rollback()
+				return err
+			}
+			batchBytes += item.snapshotBytes
+			batchHostRows += len(hosts)
+			batchScans++
+			processed++
 		}
 		if err := tx.Commit(); err != nil {
 			return err
+		}
+		if progress != nil {
+			progress(processed, total)
 		}
 		for index, dataErr := range skipped {
 			logger.Warn("legacy scan host indexing skipped", "scan_id", skippedScanIDs[index], "reason", dataErr.Error())
@@ -127,7 +199,7 @@ func readLegacyHostBackfillBatch(rows *sql.Rows) ([]legacyHostBackfillScan, erro
 	for rows.Next() {
 		var item legacyHostBackfillScan
 		var finished string
-		if err := rows.Scan(&item.id, &item.jobID, &item.job, &finished, &item.snapshot); err != nil {
+		if err := rows.Scan(&item.id, &item.jobID, &item.job, &finished, &item.snapshotBytes); err != nil {
 			return nil, err
 		}
 		item.finishedAt = scanTime(finished)
@@ -137,14 +209,22 @@ func readLegacyHostBackfillBatch(rows *sql.Rows) ([]legacyHostBackfillScan, erro
 }
 
 func indexLegacyScanTx(ctx context.Context, tx *sql.Tx, item legacyHostBackfillScan) error {
-	var snapshot model.Snapshot
-	if len(item.snapshot) > maxLegacyHostBackfillSnapshotBytes {
-		return &legacyHostBackfillDataError{reason: fmt.Sprintf("snapshot exceeds %d-byte conversion limit", maxLegacyHostBackfillSnapshotBytes)}
+	if item.snapshotBytes == 0 && len(item.snapshot) > 0 {
+		item.snapshotBytes = int64(len(item.snapshot))
 	}
-	if err := json.Unmarshal(item.snapshot, &snapshot); err != nil {
-		return &legacyHostBackfillDataError{reason: "snapshot JSON is malformed"}
+	if item.snapshot == nil && item.snapshotBytes <= maxLegacyHostBackfillSnapshotBytes {
+		if err := loadLegacyHostBackfillSnapshot(ctx, tx, &item); err != nil {
+			return err
+		}
 	}
-	hosts := legacyHostObservations(snapshot)
+	hosts, decodeErr := decodeLegacyHostBackfillHosts(item)
+	if decodeErr != nil {
+		return decodeErr
+	}
+	return indexLegacyScanHostsTx(ctx, tx, item, hosts)
+}
+
+func indexLegacyScanHostsTx(ctx context.Context, tx *sql.Tx, item legacyHostBackfillScan, hosts []model.HostObservation) error {
 	if len(hosts) > 0 {
 		scan := model.Scan{ID: item.id, JobID: item.jobID, Job: item.job, FinishedAt: item.finishedAt, Status: "success", Snapshot: model.Snapshot{Hosts: hosts}}
 		if err := saveScanHostsExec(ctx, tx, scan); err != nil {
@@ -161,6 +241,39 @@ func indexLegacyScanTx(ctx context.Context, tx *sql.Tx, item legacyHostBackfillS
 		}
 	}
 	return checkpointLegacyScanTx(ctx, tx, item.id)
+}
+
+func loadLegacyHostBackfillSnapshot(ctx context.Context, tx *sql.Tx, item *legacyHostBackfillScan) error {
+	var snapshot []byte
+	if err := tx.QueryRowContext(ctx, `SELECT snapshot_json FROM scans WHERE id=?`, item.id).Scan(&snapshot); err != nil {
+		return err
+	}
+	item.snapshot = snapshot
+	if item.snapshotBytes == 0 {
+		item.snapshotBytes = int64(len(snapshot))
+	}
+	return nil
+}
+
+func decodeLegacyHostBackfillHosts(item legacyHostBackfillScan) ([]model.HostObservation, *legacyHostBackfillDataError) {
+	if item.snapshotBytes > maxLegacyHostBackfillSnapshotBytes || len(item.snapshot) > maxLegacyHostBackfillSnapshotBytes {
+		return nil, &legacyHostBackfillDataError{reason: fmt.Sprintf("snapshot exceeds %d-byte conversion limit", maxLegacyHostBackfillSnapshotBytes)}
+	}
+	var snapshot model.Snapshot
+	if err := json.Unmarshal(item.snapshot, &snapshot); err != nil {
+		return nil, &legacyHostBackfillDataError{reason: "snapshot JSON is malformed"}
+	}
+	return legacyHostObservations(snapshot), nil
+}
+
+func countLegacyHostBackfillCandidates(ctx context.Context, db *sql.DB) (int64, error) {
+	var total int64
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*)
+FROM scans s
+WHERE s.status='success'
+  AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=s.id)
+  AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)`).Scan(&total)
+	return total, err
 }
 
 func checkpointLegacyScanTx(ctx context.Context, tx *sql.Tx, scanID string) error {

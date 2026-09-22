@@ -160,7 +160,12 @@ checks the forwarded `Host` value before authentication, so an unlisted proxy
 hostname is rejected with `421 Misdirected Request` even when the loopback
 listener is healthy. Approved non-loopback hostnames receive Secure session
 cookies; direct loopback HTTP remains available for local administration and
-SSH tunnels.
+SSH tunnels. If a TLS-terminating proxy rewrites the upstream `Host` to a
+loopback address, list the proxy address or network in `web.trusted_proxies`
+so EdgeWatch can trust its `X-Forwarded-Proto: https` (or RFC 7239
+`Forwarded: ...;proto=https`) signal and keep the session cookie Secure. Do
+not enable this for untrusted peers, because those headers must be sanitized by
+the configured proxy.
 
 After changing the bind-mounted configuration, recreate the container:
 
@@ -261,6 +266,10 @@ Important defaults:
   trusted proxy controls that header, or none to ignore forwarded client IPs.
   EdgeWatch never combines the two conventions, so configure the header that
   your proxy sanitizes or constructs for the trusted proxy chain.
+- Session cookies use the same trusted-proxy boundary for forwarded HTTPS
+  protocol headers. A trusted TLS-terminating proxy must send
+  X-Forwarded-Proto: https or Forwarded: ...;proto=https when it forwards a
+  loopback Host; otherwise EdgeWatch keeps the direct-loopback HTTP behavior.
 - If a tunnel or reverse proxy is not listed in web.trusted_proxies, every
   client may appear as the same loopback peer. EdgeWatch keeps known-account
   login recovery available under that shared identity while still bounding

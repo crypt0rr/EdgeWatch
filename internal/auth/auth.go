@@ -193,6 +193,24 @@ func (m *Manager) SetForwardedHeader(value string) error {
 	return nil
 }
 
+// IsTrustedProxy reports whether the directly connected peer belongs to the
+// explicitly configured proxy networks. It is intentionally limited to the
+// peer address and never considers forwarded headers; callers can therefore
+// use it as the gate before trusting another proxy-controlled header.
+func (m *Manager) IsTrustedProxy(request *http.Request) bool {
+	if m == nil || request == nil {
+		return false
+	}
+	peer := net.ParseIP(strings.TrimSpace(limiterKey(requestRemote(request))))
+	if peer == nil {
+		return false
+	}
+	m.mu.Lock()
+	trusted := append([]*net.IPNet(nil), m.trustedProxies...)
+	m.mu.Unlock()
+	return ipInNetworks(peer, trusted)
+}
+
 // ClientIP resolves the request identity for rate limiting and audit records.
 // Forwarding headers are considered only when the directly connected peer is
 // in the configured trusted-proxy set. The chain is walked from right to left
@@ -1473,8 +1491,8 @@ func newSessionCookie(raw string, maxAge int, secure bool) *http.Cookie {
 
 func setLoopbackSessionCookie(w http.ResponseWriter, raw string, maxAge int) {
 	// This is the only intentionally insecure-cookie branch: it is selected
-	// exclusively for direct loopback HTTP access; all non-loopback hosts use
-	// the Secure branch above.
+	// exclusively for direct loopback HTTP access when no trusted proxy has
+	// supplied HTTPS evidence; all externally served requests use Secure.
 	// codeql[go/cookie-secure-not-set]
 	http.SetCookie(w, newSessionCookie(raw, maxAge, false))
 }

@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/app"
+	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 )
 
@@ -149,5 +150,35 @@ func TestSessionCookieSecureKeepsOnlyLoopbackHTTPUnsecured(t *testing.T) {
 				t.Fatalf("sessionCookieSecure(%q) = %v, want %v", test.host, got, test.want)
 			}
 		})
+	}
+}
+
+func TestServerSessionCookieSecureHonorsTrustedProxyProtocol(t *testing.T) {
+	server := &Server{Auth: auth.NewManager(nil)}
+	if err := server.Auth.SetTrustedProxies([]string{"127.0.0.1/32"}); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/v1/auth/login", nil)
+	request.Host = "127.0.0.1:8080"
+	request.RemoteAddr = "127.0.0.1:9000"
+	request.Header.Set("X-Forwarded-Proto", "https")
+	if !server.sessionCookieSecure(request) {
+		t.Fatal("trusted X-Forwarded-Proto did not secure loopback cookie")
+	}
+
+	request.Header.Del("X-Forwarded-Proto")
+	if server.sessionCookieSecure(request) {
+		t.Fatal("loopback HTTP without protocol forwarding became Secure")
+	}
+
+	request.Header.Set("Forwarded", `for=198.51.100.10;proto=https`)
+	if !server.sessionCookieSecure(request) {
+		t.Fatal("trusted Forwarded proto did not secure loopback cookie")
+	}
+
+	request.RemoteAddr = "198.51.100.20:9000"
+	request.Header.Set("X-Forwarded-Proto", "https")
+	if server.sessionCookieSecure(request) {
+		t.Fatal("untrusted peer changed the cookie security decision")
 	}
 }

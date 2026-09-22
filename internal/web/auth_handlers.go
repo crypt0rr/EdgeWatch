@@ -289,7 +289,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "login_failed", "invalid credentials", nil)
 		return
 	}
-	secureCookie := sessionCookieSecure(r)
+	secureCookie := s.sessionCookieSecure(r)
 	auth.SetSessionCookie(w, raw, secureCookie)
 	session, sessionErr := s.Store.GetSession(r.Context(), digest(raw))
 	if sessionErr != nil || strings.TrimSpace(session.CSRFToken) == "" {
@@ -306,7 +306,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request, session store.Session) {
 	err := s.Auth.LogoutSession(r.Context(), r, session)
-	auth.ClearSessionCookie(w, sessionCookieSecure(r))
+	auth.ClearSessionCookie(w, s.sessionCookieSecure(r))
 	if err != nil {
 		if errors.Is(err, store.ErrAuditUnavailable) {
 			action := "user.logout"

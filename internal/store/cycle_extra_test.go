@@ -147,6 +147,63 @@ func TestDiscardRunningScanCycleAtomicallyClearsProgress(t *testing.T) {
 	}
 }
 
+func TestDiscardScanCycleRollsBackWhenTransitionOrCleanupFails(t *testing.T) {
+	cases := []struct {
+		name        string
+		trigger     string
+		wantErr     error
+		wantMessage string
+	}{
+		{name: "update error", trigger: `CREATE TRIGGER reject_discard BEFORE UPDATE OF status ON scan_cycles WHEN NEW.status='discarded' BEGIN SELECT RAISE(ABORT, 'update unavailable'); END`, wantMessage: "update unavailable"},
+		{name: "ignored update", trigger: `CREATE TRIGGER ignore_discard BEFORE UPDATE OF status ON scan_cycles WHEN NEW.status='discarded' BEGIN SELECT RAISE(IGNORE); END`, wantErr: ErrCycleNotResumable},
+		{name: "delete error", trigger: `CREATE TRIGGER reject_cycle_unit_delete BEFORE DELETE ON scan_cycle_units BEGIN SELECT RAISE(ABORT, 'delete unavailable'); END`, wantMessage: "delete unavailable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, s, job, plan := cycleFixture(t)
+			defer s.Close()
+			cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), Plan: plan})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, 0); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DB.ExecContext(ctx, tc.trigger); err != nil {
+				t.Fatal(err)
+			}
+			discardErr := s.DiscardScanCycle(ctx, cycle.ID)
+			if tc.wantErr != nil {
+				if !errors.Is(discardErr, tc.wantErr) {
+					t.Fatalf("discard error = %v, want %v", discardErr, tc.wantErr)
+				}
+			} else if discardErr == nil || !strings.Contains(discardErr.Error(), tc.wantMessage) {
+				t.Fatalf("discard error = %v, want message %q", discardErr, tc.wantMessage)
+			}
+			got, err := s.GetScanCycle(ctx, cycle.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Status != "running" || got.CompletedUnits != 1 || got.TotalUnits != 1 || got.CompletedProbes != 1 || got.TotalProbes != 1 {
+				t.Fatalf("failed discard mutated cycle: %#v", got)
+			}
+			var units int
+			if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycle_units WHERE cycle_id=?`, cycle.ID).Scan(&units); err != nil {
+				t.Fatal(err)
+			}
+			if units != len(plan.Units) {
+				t.Fatalf("failed discard removed work: got %d units, want %d", units, len(plan.Units))
+			}
+		})
+	}
+}
+
 func TestScanCyclePhaseAndProbeMetadataUsesIndexedColumns(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()

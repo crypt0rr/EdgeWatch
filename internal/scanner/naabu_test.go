@@ -262,10 +262,13 @@ func TestNaabuPipelineRejectsOmittedNmapConfirmation(t *testing.T) {
 		t.Fatalf("omitted confirmation host evidence = %#v", snapshot.Hosts)
 	}
 	host := snapshot.Hosts[0]
-	if host.Status != "unknown" || host.StatusReason != "nmap-enrichment-failed" {
+	if host.Status != "unreachable" || host.StatusReason != "nmap-omitted" {
 		t.Fatalf("omitted confirmation host status = %q/%q", host.Status, host.StatusReason)
 	}
-	if len(host.Protocols) != 1 || len(host.Protocols[0].UnconfirmedPorts) != 1 || host.Protocols[0].UnconfirmedPorts[0].Port != 22 {
+	if len(host.Protocols) != 1 || host.Protocols[0].Status != "unreachable" || host.Protocols[0].StatusReason != "nmap-omitted" {
+		t.Fatalf("omitted confirmation protocol coverage = %#v", host.Protocols)
+	}
+	if len(host.Protocols[0].UnconfirmedPorts) != 1 || host.Protocols[0].UnconfirmedPorts[0].Port != 22 {
 		t.Fatalf("discovered port was not retained as unconfirmed evidence: %#v", host.Protocols)
 	}
 }
@@ -339,7 +342,17 @@ func TestNaabuPipelineWithNoDiscoveriesCompletesFullCoverage(t *testing.T) {
 	if len(snapshot.Units) != 1 || len(snapshot.Units[0].Ports) != 0 || len(snapshot.Hosts) != 1 {
 		t.Fatalf("empty full-range scan was not successful: %#v", snapshot)
 	}
-	protocol := snapshot.Hosts[0].Protocols[0]
+	host := snapshot.Hosts[0]
+	if host.Status != "unknown" || host.StatusReason != "no-response" {
+		t.Fatalf("empty discovery host status = %q/%q, want unknown/no-response", host.Status, host.StatusReason)
+	}
+	if len(host.Protocols) != 1 {
+		t.Fatalf("empty discovery protocol evidence = %#v", host.Protocols)
+	}
+	protocol := host.Protocols[0]
+	if protocol.Status != "unknown" || protocol.StatusReason != "no-response" {
+		t.Fatalf("empty discovery protocol status = %q/%q, want unknown/no-response", protocol.Status, protocol.StatusReason)
+	}
 	if protocol.ScannedPortCount != 65535 || len(protocol.StateSummaries) != 1 || protocol.StateSummaries[0].Count != 65535 {
 		t.Fatalf("full-range non-open summary missing: %#v", protocol)
 	}
@@ -364,10 +377,13 @@ func TestNaabuEnrichmentFailureMarksDiscoveryEvidenceUnconfirmed(t *testing.T) {
 		},
 	}
 	markNaabuEnrichmentFailure(&host, []int{22, 80, 443})
-	if host.Status != "unknown" || host.StatusReason != "nmap-enrichment-failed" {
+	if host.Status != "unreachable" || host.StatusReason != "nmap-enrichment-failed" {
 		t.Fatalf("failed host status = %#v", host)
 	}
 	protocol := host.Protocols[0]
+	if protocol.Status != "unreachable" || protocol.StatusReason != "nmap-enrichment-failed" {
+		t.Fatalf("failed TCP coverage = %q/%q", protocol.Status, protocol.StatusReason)
+	}
 	if len(protocol.UnconfirmedPorts) != 3 || len(protocol.StateSummaries) != 1 {
 		t.Fatalf("unconfirmed discovery evidence = %#v", protocol)
 	}
@@ -376,6 +392,26 @@ func TestNaabuEnrichmentFailureMarksDiscoveryEvidenceUnconfirmed(t *testing.T) {
 	}
 	if got := failedNmapAddresses(nil, []string{"192.0.2.10"}); len(got) != 1 || got[0] != "192.0.2.10" {
 		t.Fatalf("failed address fallback = %#v", got)
+	}
+}
+
+func TestNaabuEnrichmentFailurePreservesEarlierIncompleteStatus(t *testing.T) {
+	host := model.HostObservation{
+		Address: "192.0.2.11", Status: "unreachable", StatusReason: "nmap-host-down",
+		Protocols: []model.ProtocolObservation{{
+			Protocol: "tcp", Status: "unreachable", StatusReason: "nmap-host-down",
+			DiscoveryEngine: "naabu", UnconfirmedPorts: []model.PortObservation{{Port: 22, State: "unconfirmed"}},
+		}},
+	}
+	markNaabuEnrichmentFailure(&host, []int{22, 80})
+	if host.Status != "unreachable" || host.StatusReason != "nmap-host-down" {
+		t.Fatalf("prior host failure was overwritten: %q/%q", host.Status, host.StatusReason)
+	}
+	if len(host.Protocols) != 1 || host.Protocols[0].Status != "unreachable" || host.Protocols[0].StatusReason != "nmap-host-down" {
+		t.Fatalf("prior protocol failure was overwritten: %#v", host.Protocols)
+	}
+	if len(host.Protocols[0].UnconfirmedPorts) != 2 || host.Protocols[0].UnconfirmedPorts[1].Port != 80 {
+		t.Fatalf("failure diagnostics were not retained: %#v", host.Protocols[0].UnconfirmedPorts)
 	}
 }
 

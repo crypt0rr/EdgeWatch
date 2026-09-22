@@ -222,7 +222,7 @@ func TestFormatEventUsesOutcomeIndicators(t *testing.T) {
 	if !strings.HasPrefix(anomaly, "⚠️ EdgeWatch: ") {
 		t.Fatalf("anomaly notification = %q", anomaly)
 	}
-	incomplete := FormatEvent(model.Event{Type: "scan-incomplete", Message: "Scan incomplete: host discovery did not complete for 192.0.2.9", Job: "test"})
+	incomplete := FormatEvent(model.Event{Type: "scan-incomplete", Message: "Scan incomplete: scan coverage did not complete for 192.0.2.9", Job: "test"})
 	if !strings.HasPrefix(incomplete, "⚠️ EdgeWatch: ") || !strings.Contains(incomplete, "192.0.2.9") {
 		t.Fatalf("incomplete notification = %q", incomplete)
 	}
@@ -333,6 +333,112 @@ func TestUnreachableHostObservationDoesNotChangeBaseline(t *testing.T) {
 	events, err := e.Success(ctx, job, scan("complete", complete))
 	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Target != "192.0.2.2" {
 		t.Fatalf("complete scan did not report deferred unreachable-host removal: %#v, %v", events, err)
+	}
+}
+
+func TestUnknownNoResponseEvidenceCannotLearnOrRemoveBaselinePorts(t *testing.T) {
+	job := config.Job{Name: "no-response", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	current := model.Snapshot{
+		Scopes: []model.Scope{{Target: "192.0.2.30", Protocol: "tcp", Ports: "443"}},
+		Units:  []model.Unit{{Target: "192.0.2.30", Protocol: "tcp", Addresses: []string{"192.0.2.30"}}},
+		Hosts: []model.HostObservation{{
+			Address: "192.0.2.30", Status: "unknown", StatusReason: "no-response",
+			Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unknown", StatusReason: "no-response", ScannedPorts: "1-65535"}},
+		}},
+	}
+
+	learningState := model.JobState{}
+	learningScan := scan("no-response-learning", current)
+	if !MarkIncompleteScan(&learningScan) {
+		t.Fatal("unknown/no-response scan was not marked incomplete")
+	}
+	events, changes, err := processSuccessWithChanges(&learningState, job, learningScan)
+	if err != nil || len(changes) != 0 || learningState.Baseline != nil || learningState.CandidateAttempts != 0 || learningState.IncompleteCandidateAttempts != 1 {
+		t.Fatalf("incomplete no-response scan advanced baseline learning: events=%#v changes=%#v state=%#v err=%v", events, changes, learningState, err)
+	}
+
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{{Target: "192.0.2.30", Protocol: "tcp", Ports: "443"}},
+		Units:  []model.Unit{{Target: "192.0.2.30", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}}}},
+	}
+	state := model.JobState{Baseline: &baseline, BaselineConfigHash: "hash", Incidents: map[string]model.Incident{}, Pending: map[string]model.Pending{}}
+	removalScan := scan("no-response-removal", current)
+	removalScan.ConfigHash = "hash"
+	if !MarkIncompleteScan(&removalScan) {
+		t.Fatal("unknown/no-response removal scan was not marked incomplete")
+	}
+	events, changes, err = processSuccessWithChanges(&state, job, removalScan)
+	if err != nil || len(changes) != 0 || len(events) != 1 || events[0].Type != "scan-incomplete" {
+		t.Fatalf("incomplete no-response scan confirmed removals: events=%#v changes=%#v err=%v", events, changes, err)
+	}
+	if state.Baseline == nil || len(state.Baseline.Units) != 1 || len(state.Baseline.Units[0].Ports) != 1 || len(state.Incidents) != 0 {
+		t.Fatalf("incomplete no-response scan changed expected state: %#v", state)
+	}
+}
+
+func TestIncompleteProtocolDoesNotSuppressCompleteProtocolChanges(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "protocol-partial.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := Engine{Store: db}
+	job := config.Job{Name: "protocol-partial", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{
+			{Target: "192.0.2.20", Protocol: "tcp", Ports: "80,443"},
+			{Target: "192.0.2.20", Protocol: "udp", Ports: "53"},
+		},
+		Units: []model.Unit{
+			{Target: "192.0.2.20", Protocol: "tcp", Addresses: []string{"192.0.2.20"}, Ports: []model.PortState{{Port: 80, State: "open"}, {Port: 443, State: "open"}}},
+			{Target: "192.0.2.20", Protocol: "udp", Addresses: []string{"192.0.2.20"}, Ports: []model.PortState{{Port: 53, State: "open"}}},
+		},
+	}
+	if events, err := e.Success(ctx, job, scan("protocol-baseline", baseline)); err != nil || len(events) != 1 || events[0].Type != "baseline-complete" {
+		t.Fatalf("baseline setup: %#v, %v", events, err)
+	}
+
+	partial := model.Snapshot{
+		Scopes: baseline.Scopes,
+		Units: []model.Unit{{
+			Target: "192.0.2.20", Protocol: "tcp", Addresses: []string{"192.0.2.20"},
+			Ports: []model.PortState{{Port: 80, State: "open"}},
+		}},
+		Hosts: []model.HostObservation{{
+			Address: "192.0.2.20", Status: "up", StatusReason: "syn-ack",
+			Protocols: []model.ProtocolObservation{
+				{Protocol: "tcp", Status: "up", StatusReason: "syn-ack", ScannedPorts: "80,443"},
+				{Protocol: "udp", Status: "unreachable", StatusReason: "nmap-host-timeout", ScannedPorts: "53"},
+			},
+		}},
+	}
+	partialScan := scan("protocol-partial", partial)
+	if !MarkIncompleteScan(&partialScan) || partialScan.Status != "incomplete" {
+		t.Fatalf("partial scan was not marked incomplete: %#v", partialScan)
+	}
+	events, err := e.Success(ctx, job, partialScan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 2 || events[0].Type != "changes-detected" || events[1].Type != "scan-incomplete" {
+		t.Fatalf("partial scan events = %#v", events)
+	}
+	if len(events[0].Changes) != 1 || events[0].Changes[0].Key != "port|192.0.2.20|tcp|443" {
+		t.Fatalf("partial scan changes = %#v, want only complete TCP removal", events[0].Changes)
+	}
+	state, err := db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Incidents["port|192.0.2.20|tcp|443"]; !ok {
+		t.Fatalf("complete TCP change did not open incident: %#v", state.Incidents)
+	}
+	if _, ok := state.Incidents["port|192.0.2.20|udp|53"]; ok {
+		t.Fatal("incomplete UDP removal created an incident")
+	}
+	if state.Baseline == nil || len(state.Baseline.Units) != 2 || len(state.Baseline.Units[0].Ports) != 2 || len(state.Baseline.Units[1].Ports) != 1 {
+		t.Fatalf("incomplete protocol evidence changed the baseline: %#v", state.Baseline)
 	}
 }
 

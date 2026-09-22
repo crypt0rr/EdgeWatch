@@ -318,7 +318,7 @@ func (n *Nmap) scanNaabuPipelineResolved(ctx context.Context, job config.Job, ta
 			host.StatusReason = "no-response"
 		}
 		fingerprintArgs := naabuArgsWithTemplate(options, "<targets-file>", job.AssumesAlive(), job.TCP.NaabuArgs)
-		protocol := model.ProtocolObservation{Protocol: "tcp", ScanType: "naabu", ScannedPorts: naabuFullPortExpression, ScannedPortCount: 65535, ServiceDetection: job.TCP.ServiceDetection, DiscoveryEngine: "naabu", NSEProfile: job.TCP.NSEProfile, NSEArgs: cloneStringMap(job.TCP.NSEArgs), CommandFingerprint: commandFingerprint(fingerprintArgs)}
+		protocol := model.ProtocolObservation{Protocol: "tcp", Status: strings.ToLower(host.Status), StatusReason: host.StatusReason, ScanType: "naabu", ScannedPorts: naabuFullPortExpression, ScannedPortCount: 65535, ServiceDetection: job.TCP.ServiceDetection, DiscoveryEngine: "naabu", NSEProfile: job.TCP.NSEProfile, NSEArgs: cloneStringMap(job.TCP.NSEArgs), CommandFingerprint: commandFingerprint(fingerprintArgs)}
 		for port := range discovered[address] {
 			protocol.DiscoveredPorts = append(protocol.DiscoveredPorts, model.PortObservation{Port: port, State: "open", Reason: "naabu", Verification: "discovered"})
 		}
@@ -572,7 +572,7 @@ func materializeNaabuDiscoveryHosts(targets []resolvedTarget, addresses []string
 			host.Status = "unknown"
 			host.StatusReason = "no-response"
 		}
-		protocol := model.ProtocolObservation{Protocol: "tcp", ScanType: "naabu", ScannedPorts: naabuFullPortExpression, ScannedPortCount: 65535, ServiceDetection: job.TCP.ServiceDetection, DiscoveryEngine: "naabu", NSEProfile: job.TCP.NSEProfile, NSEArgs: cloneStringMap(job.TCP.NSEArgs), CommandFingerprint: commandFingerprint(fingerprintArgs)}
+		protocol := model.ProtocolObservation{Protocol: "tcp", Status: strings.ToLower(host.Status), StatusReason: host.StatusReason, ScanType: "naabu", ScannedPorts: naabuFullPortExpression, ScannedPortCount: 65535, ServiceDetection: job.TCP.ServiceDetection, DiscoveryEngine: "naabu", NSEProfile: job.TCP.NSEProfile, NSEArgs: cloneStringMap(job.TCP.NSEArgs), CommandFingerprint: commandFingerprint(fingerprintArgs)}
 		for port := range discovered[address] {
 			protocol.DiscoveredPorts = append(protocol.DiscoveredPorts, model.PortObservation{Port: port, State: "open", Reason: "naabu", Verification: "discovered"})
 		}
@@ -1023,13 +1023,13 @@ func markNaabuEnrichmentFailure(host *model.HostObservation, discovered []int) {
 	if host == nil {
 		return
 	}
-	host.Status = "unknown"
-	host.StatusReason = "nmap-enrichment-failed"
+	host.Status, host.StatusReason = mergeHostStatus(host.Status, host.StatusReason, "unreachable", "nmap-enrichment-failed")
 	for index := range host.Protocols {
 		protocol := &host.Protocols[index]
 		if !strings.EqualFold(protocol.Protocol, "tcp") || !strings.EqualFold(protocol.DiscoveryEngine, "naabu") {
 			continue
 		}
+		protocol.Status, protocol.StatusReason = mergeHostStatus(protocol.Status, protocol.StatusReason, "unreachable", "nmap-enrichment-failed")
 		seen := make(map[int]struct{}, len(protocol.UnconfirmedPorts))
 		for _, port := range protocol.UnconfirmedPorts {
 			seen[port.Port] = struct{}{}

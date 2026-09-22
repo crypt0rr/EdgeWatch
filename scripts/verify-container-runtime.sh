@@ -58,8 +58,13 @@ cleanup() {
 trap cleanup EXIT
 install -d -m 0750 "$workdir/data"
 install -m 0600 /dev/null "$workdir/notification-urls.txt"
+install -m 0600 /dev/null "$workdir/notification-urls-unreadable.txt"
+secret_marker=edgewatch-secret-read-smoke
+printf '%s\n' "$secret_marker" >"$workdir/notification-urls.txt"
+printf '%s\n' "$secret_marker" >"$workdir/notification-urls-unreadable.txt"
 test "$(stat -c '%a' "$workdir/data")" = 750
 test "$(stat -c '%a' "$workdir/notification-urls.txt")" = 600
+test "$(stat -c '%a' "$workdir/notification-urls-unreadable.txt")" = 600
 cat >"$workdir/config.yaml" <<'EOF'
 database: /var/lib/edgewatch/edgewatch.db
 retention: 24h
@@ -105,11 +110,30 @@ chmod 0750 "$workdir/data"
 test -s "$workdir/data/edgewatch.db"
 test "$(stat -c '%a' "$workdir/data")" = 750
 
-# Verify the same rootful, restricted-capability container can read an
-# owner-only mounted secret without relaxing the host file permissions.
+# Model the documented rootful Compose ownership explicitly: the process is
+# UID 0, so the owner-only secret must be owned by host root. A second fixture
+# owned by an unrelated UID proves root cannot bypass mode 0600 after Docker
+# drops all capabilities except the Compose NET_RAW capability.
 docker run --rm $runtime_args \
+  -v "$workdir:/fixtures:rw" \
+  --entrypoint /bin/sh "$image" \
+  -c 'chown 0:0 "$1" && chmod 0600 "$1" && chown 65532:65532 "$2" && chmod 0600 "$2"' \
+  sh /fixtures/notification-urls.txt /fixtures/notification-urls-unreadable.txt
+test "$(stat -c '%u:%g' "$workdir/notification-urls.txt")" = 0:0
+test "$(stat -c '%u:%g' "$workdir/notification-urls-unreadable.txt")" = 65532:65532
+
+secret_output=$(docker run --rm $runtime_args --cap-drop ALL --cap-add NET_RAW \
   -v "$workdir/notification-urls.txt:/run/secrets/edgewatch-test:ro" \
   --entrypoint /bin/sh "$image" \
-  -c 'test -r /run/secrets/edgewatch-test'
+  -c 'cat /run/secrets/edgewatch-test')
+test "$secret_output" = "$secret_marker"
+
+if docker run --rm $runtime_args --cap-drop ALL --cap-add NET_RAW \
+  -v "$workdir/notification-urls-unreadable.txt:/run/secrets/edgewatch-test:ro" \
+  --entrypoint /bin/sh "$image" \
+  -c 'cat /run/secrets/edgewatch-test' >/dev/null 2>&1; then
+  echo "restricted container unexpectedly read a secret owned by another UID" >&2
+  exit 1
+fi
 
 echo "container runtime compatibility matrix passed for $image"

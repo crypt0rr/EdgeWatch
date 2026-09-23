@@ -45,6 +45,14 @@ func readTimestampBatch(ctx context.Context, tx *sql.Tx, query string, cursor in
 // retained database is processed in short transactions and the completion
 // marker prevents this compatibility work from recurring on every startup.
 func normalizePersistedTimestampsContext(ctx context.Context, db *sql.DB) error {
+	return normalizePersistedTimestampsContextWithProgress(ctx, db, nil)
+}
+
+// normalizePersistedTimestampsContextWithProgress is the resumable timestamp
+// normalizer with an optional post-commit observer. The observer is used by
+// startup migration health reporting; it must not be able to make a healthy
+// data migration fail when the diagnostic write is interrupted.
+func normalizePersistedTimestampsContextWithProgress(ctx context.Context, db *sql.DB, observer func(timestampColumn, int64)) error {
 	var complete int
 	if err := db.QueryRowContext(ctx, `SELECT complete FROM timestamp_normalization_state WHERE id=1`).Scan(&complete); err != nil {
 		// Minimal historical fixtures may have the migration table without its
@@ -85,6 +93,7 @@ func normalizePersistedTimestampsContext(ctx context.Context, db *sql.DB) error 
 			continue
 		}
 		var cursor int64
+		var processed int64
 		for {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -118,6 +127,10 @@ func normalizePersistedTimestampsContext(ctx context.Context, db *sql.DB) error 
 			}
 			if err := tx.Commit(); err != nil {
 				return err
+			}
+			processed += int64(len(batch))
+			if observer != nil {
+				observer(target, processed)
 			}
 		}
 	}

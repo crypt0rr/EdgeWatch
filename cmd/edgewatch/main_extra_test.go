@@ -104,6 +104,42 @@ func TestRunVersionHelpAndConfigValidation(t *testing.T) {
 	}
 }
 
+func TestRunRejectsUnexpectedOperandsBeforeDestructiveActions(t *testing.T) {
+	dir := t.TempDir()
+	sourcePath := filepath.Join(dir, "source.db")
+	destinationPath := filepath.Join(dir, "destination.db")
+	configPath := filepath.Join(dir, "config.yaml")
+	for _, path := range []string{sourcePath, destinationPath} {
+		s, err := store.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(configPath, []byte("database: "+destinationPath+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	before := snapshotCLIFile(t, destinationPath)
+	err := run([]string{"restore", "--from", sourcePath, "--config", configPath, "unexpected", "--dry-run"})
+	if err == nil || !strings.Contains(err.Error(), `unexpected argument "unexpected"`) {
+		t.Fatalf("stray restore operand error = %v", err)
+	}
+	assertCLIFileUnchanged(t, destinationPath, before)
+
+	for _, args := range [][]string{
+		{"admin", "disable-totp", "--config", configPath, "unexpected"},
+		{"backup", "--config", configPath, "unexpected"},
+		{"health", "--config", configPath, "unexpected"},
+		{"baseline", "export", "--config", configPath, "unexpected"},
+	} {
+		if err := run(args); err == nil || !strings.Contains(err.Error(), `unexpected argument "unexpected"`) {
+			t.Fatalf("args %v error = %v", args, err)
+		}
+	}
+}
+
 func TestHealthDoesNotConstructScannerApplication(t *testing.T) {
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")

@@ -65,7 +65,12 @@ func (p PruneStats) Total() int64 {
 // the whole retained history.
 func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStats, error) {
 	var stats PruneStats
-	cutoff := before.UTC().Format(time.RFC3339Nano)
+	// Retained timestamps are stored with sqliteTimestamp's fixed-width
+	// fractional seconds. Keep the cutoff in that same representation so
+	// SQLite's text ordering remains chronological when a value has trailing
+	// zeroes (RFC3339Nano would trim them and make a newer row sort before the
+	// cutoff).
+	cutoff := sqliteTimestamp(before)
 	// NOT EXISTS avoids SQL's NULL semantics: most state rows do not yet have a
 	// baseline_scan_id, and a NOT IN subquery containing NULL would protect every
 	// old scan from pruning.
@@ -132,7 +137,7 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	// RDAP registration data is a short-lived enrichment cache rather than
 	// retained scan history. Remove rows once their seven-day stale window has
 	// elapsed, even when the deployment retains scans for much longer.
-	rdapCutoff := time.Now().UTC().Format(time.RFC3339Nano)
+	rdapCutoff := sqliteTimestamp(time.Now())
 	stats.RDAPCache, err = s.deleteRetentionBatches(ctx, `DELETE FROM rdap_cache WHERE rowid IN (SELECT rowid FROM rdap_cache WHERE stale_until < ? ORDER BY stale_until,rowid LIMIT ?)`, rdapCutoff)
 	if err != nil {
 		return stats, err

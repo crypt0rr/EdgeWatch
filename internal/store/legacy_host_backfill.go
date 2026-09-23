@@ -27,6 +27,7 @@ const (
 	maxLegacyHostBackfillSnapshotBytes   = 8 << 20
 	legacyHostBackfillBatchSnapshotBytes = 16 << 20
 	legacyHostBackfillBatchHostRows      = 10_000
+	maxLegacyHostBackfillErrorBytes      = 512
 )
 
 type legacyHostBackfillLimits struct {
@@ -138,7 +139,7 @@ ORDER BY s.finished_at,s.id LIMIT ?`, limits.maxScans)
 				if batchScans > 0 && (batchBytes >= limits.maxSnapshotBytes || batchBytes+item.snapshotBytes > limits.maxSnapshotBytes) {
 					break
 				}
-				if err := checkpointLegacyScanTx(ctx, tx, item.id); err != nil {
+				if err := quarantineLegacyScanTx(ctx, tx, item.id, fmt.Sprintf("snapshot exceeds %d-byte conversion limit", maxLegacyHostBackfillSnapshotBytes)); err != nil {
 					_ = tx.Rollback()
 					return err
 				}
@@ -158,7 +159,7 @@ ORDER BY s.finished_at,s.id LIMIT ?`, limits.maxScans)
 			}
 			hosts, decodeErr := decodeLegacyHostBackfillHosts(item)
 			if decodeErr != nil {
-				if err := checkpointLegacyScanTx(ctx, tx, item.id); err != nil {
+				if err := quarantineLegacyScanTx(ctx, tx, item.id, decodeErr.Error()); err != nil {
 					_ = tx.Rollback()
 					return err
 				}
@@ -277,7 +278,24 @@ WHERE s.status='success'
 }
 
 func checkpointLegacyScanTx(ctx context.Context, tx *sql.Tx, scanID string) error {
-	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO legacy_scan_host_backfill(scan_id,processed_at) VALUES(?,?)`, scanID, time.Now().UTC().Format(time.RFC3339Nano))
+	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO legacy_scan_host_backfill(scan_id,processed_at,status,error,attempts) VALUES(?,?,?,?,?)`, scanID, sqliteTimestamp(time.Now()), "complete", "", 1)
+	return err
+}
+
+// quarantineLegacyScanTx records a bounded conversion failure separately from
+// a successful (including valid-empty) projection. Quarantined rows are still
+// considered processed by the backfill predicate, so a bad historical blob
+// cannot make every startup retry the same decode forever.
+func quarantineLegacyScanTx(ctx context.Context, tx *sql.Tx, scanID, reason string) error {
+	reason = strings.TrimSpace(reason)
+	if len(reason) > maxLegacyHostBackfillErrorBytes {
+		reason = reason[:maxLegacyHostBackfillErrorBytes]
+	}
+	if reason == "" {
+		reason = "legacy snapshot could not be converted"
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO legacy_scan_host_backfill(scan_id,processed_at,status,error,attempts) VALUES(?,?,?,?,1)
+ON CONFLICT(scan_id) DO UPDATE SET processed_at=excluded.processed_at,status='quarantined',error=excluded.error,attempts=legacy_scan_host_backfill.attempts+1`, scanID, sqliteTimestamp(time.Now()), "quarantined", reason)
 	return err
 }
 
@@ -287,12 +305,20 @@ func checkpointLegacyScanTx(ctx context.Context, tx *sql.Tx, scanID string) erro
 func legacyHostObservations(snapshot model.Snapshot) []model.HostObservation {
 	if len(snapshot.Hosts) > 0 {
 		hosts := legacyMergeHostsByAddress(snapshot.Hosts)
+		restoreLegacyHostScopes(hosts, snapshot.Scopes)
 		normalizeLegacyHosts(hosts)
 		return hosts
 	}
 	scopeByKey := make(map[string]model.Scope, len(snapshot.Scopes))
+	scopesByProtocol := make(map[string][]model.Scope)
 	for _, scope := range snapshot.Scopes {
-		scopeByKey[strings.ToLower(scope.Target)+"\x00"+strings.ToLower(scope.Protocol)] = scope
+		target := strings.ToLower(strings.TrimSpace(scope.Target))
+		protocol := strings.ToLower(strings.TrimSpace(scope.Protocol))
+		if protocol == "" {
+			continue
+		}
+		scopeByKey[target+"\x00"+protocol] = scope
+		scopesByProtocol[protocol] = append(scopesByProtocol[protocol], scope)
 	}
 	byAddress := make(map[string]*model.HostObservation)
 	for _, unit := range snapshot.Units {
@@ -312,7 +338,11 @@ func legacyHostObservations(snapshot model.Snapshot) []model.HostObservation {
 				portsByAddress[canonicalLegacyAddress(address)] = append(portsByAddress[canonicalLegacyAddress(address)], port)
 			}
 		}
-		scope, hasScope := scopeByKey[strings.ToLower(unit.Target)+"\x00"+strings.ToLower(unit.Protocol)]
+		protocolName := strings.ToLower(strings.TrimSpace(unit.Protocol))
+		scope, hasScope := scopeByKey[strings.ToLower(strings.TrimSpace(unit.Target))+"\x00"+protocolName]
+		if !hasScope && len(scopesByProtocol[protocolName]) == 1 {
+			scope, hasScope = scopesByProtocol[protocolName][0], true
+		}
 		if !hasScope {
 			scope = model.Scope{Target: unit.Target, Protocol: unit.Protocol}
 		}
@@ -358,6 +388,35 @@ func legacyHostObservations(snapshot model.Snapshot) []model.HostObservation {
 	}
 	normalizeLegacyHosts(result)
 	return result
+}
+
+// restoreLegacyHostScopes mirrors the web compatibility reader for snapshots
+// that already contain HostObservation records but predate scope fields on
+// each protocol. A legacy host projection must retain the original scan
+// expression and coverage even when its positive-port evidence is empty.
+func restoreLegacyHostScopes(hosts []model.HostObservation, scopes []model.Scope) {
+	byProtocol := make(map[string]model.Scope)
+	for _, scope := range scopes {
+		protocol := strings.ToLower(strings.TrimSpace(scope.Protocol))
+		if protocol == "" {
+			continue
+		}
+		if _, exists := byProtocol[protocol]; !exists {
+			byProtocol[protocol] = scope
+		}
+	}
+	for hostIndex := range hosts {
+		for protocolIndex := range hosts[hostIndex].Protocols {
+			protocol := &hosts[hostIndex].Protocols[protocolIndex]
+			scope, exists := byProtocol[strings.ToLower(strings.TrimSpace(protocol.Protocol))]
+			if !exists {
+				continue
+			}
+			protocol.ScannedPorts = scope.Ports
+			protocol.ScannedPortCount = legacyPortCount(scope.Ports)
+			protocol.ServiceDetection = scope.ServiceDetection
+		}
+	}
 }
 
 func normalizeLegacyHosts(hosts []model.HostObservation) {

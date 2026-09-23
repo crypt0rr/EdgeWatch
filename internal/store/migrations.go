@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 46
+const schemaVersion = 47
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -1113,6 +1113,18 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
 			// retained event ordering, silence deduplication, and retention ranges
 			// are repaired on existing installations as well as new databases.
 			"UPDATE timestamp_normalization_state SET complete=0,updated_at=datetime('now') WHERE id=1",
+		},
+		47: {
+			// Legacy host conversion can encounter retained snapshots that are
+			// malformed or exceed the bounded decoder budget. Keep those rows in
+			// an explicit quarantine state instead of making a processed checkpoint
+			// indistinguishable from a valid empty snapshot. The error is bounded
+			// and restart-safe so operators can diagnose the affected scan without
+			// re-running the conversion on every startup.
+			"ALTER TABLE legacy_scan_host_backfill ADD COLUMN status TEXT NOT NULL DEFAULT 'complete'",
+			"ALTER TABLE legacy_scan_host_backfill ADD COLUMN error TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE legacy_scan_host_backfill ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1",
+			"CREATE INDEX IF NOT EXISTS legacy_scan_host_backfill_status ON legacy_scan_host_backfill(status,processed_at)",
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

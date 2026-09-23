@@ -190,6 +190,8 @@ jobs:
         run: ./scripts/verify-naabu-pin.sh
       - name: Verify release artifact contract
         run: ./scripts/test-release-artifacts.sh
+      - name: Verify release workflow promotion contract
+        run: node --test scripts/release-workflow.test.mjs
       - name: Build release-style prebuilt inputs
         run: |
           npm ci

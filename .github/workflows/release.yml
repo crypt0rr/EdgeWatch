@@ -15,6 +15,10 @@ env:
   # Docker image references must be lowercase even though GitHub repository
   # names may contain uppercase characters.
   REGISTRY_IMAGE: ghcr.io/crypt0rr/edgewatch
+  # Each release attempt gets a unique staging tag. This keeps retries after a
+  # failed smoke run independent while the public semver tag remains absent
+  # until the candidate has passed every verification step.
+  CANDIDATE_IMAGE: ghcr.io/crypt0rr/edgewatch:candidate-${{ github.run_id }}-${{ github.run_attempt }}
   NODE_VERSION: 24.21.0
   GORELEASER_VERSION: v2.18.0
 
@@ -78,6 +82,8 @@ jobs:
         env:
           GOLANGCI_LINT_BASE: ${{ steps.release-lint-base.outputs.base }}
         run: make security
+      - name: Verify release workflow promotion contract
+        run: node --test scripts/release-workflow.test.mjs
       - name: Ensure frontend build leaves no TypeScript artifacts
         run: |
           for artifact in vite.config.js vite.config.d.ts tsconfig.tsbuildinfo tsconfig.node.tsbuildinfo; do
@@ -190,12 +196,24 @@ jobs:
           path: .
       - name: Verify downloaded candidate
         run: ./scripts/verify-release-artifacts.sh dist dist/release-manifest.json "$GITHUB_REF_NAME" "$GITHUB_SHA"
-      - name: Refuse mixed or duplicate release publication
+      - name: Remove an abandoned draft from a previous attempt
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $GITHUB_REF_NAME already exists; refusing to publish a mixed rerun" >&2
+          release_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.tag_name == env.RELEASE_TAG) | .id' | head -n 1)"
+          if [ -z "$release_id" ]; then
+            exit 0
+          fi
+          release_json="$(gh api "repos/$GITHUB_REPOSITORY/releases/$release_id")"
+          if [ "$(jq -r '.draft' <<<"$release_json")" = true ]; then
+            # A smoke-failed attempt leaves only its private draft behind. It
+            # is safe to replace that draft with the newly verified candidate;
+            # a published release remains immutable and blocks the rerun.
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/releases/$release_id"
+          else
+            echo "release $GITHUB_REF_NAME is already published; refusing a mixed rerun" >&2
             exit 1
           fi
       - name: Stage the verified release assets as a draft
@@ -219,7 +237,7 @@ jobs:
           subject-checksums: dist/checksums.txt
 
   image:
-    name: Publish GHCR image
+    name: Publish candidate GHCR image
     needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -254,12 +272,10 @@ jobs:
         id: meta
         with:
           images: ${{ env.REGISTRY_IMAGE }}
-          # Publish only the immutable full semantic version. Major/minor
-          # aliases would be overwritten by every patch release and make a
-          # rerun indistinguishable from an accidental replacement. The
-          # verified highest stable release is promoted to :latest below.
+          # Candidate tags are attempt-scoped and are promoted to the
+          # immutable semver tag only after the smoke job succeeds.
           tags: |
-            type=semver,pattern={{version}}
+            type=raw,value=candidate-${{ github.run_id }}-${{ github.run_attempt }}
           flavor: |
             latest=false
           labels: |
@@ -269,18 +285,6 @@ jobs:
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
-      - name: Refuse existing immutable semver tags
-        env:
-          TAGS: ${{ steps.meta.outputs.tags }}
-        run: |
-          set -euo pipefail
-          while IFS= read -r tag; do
-            [ -n "$tag" ] || continue
-            if docker buildx imagetools inspect "$tag" >/dev/null 2>&1; then
-              echo "image tag already exists; refusing to overwrite $tag" >&2
-              exit 1
-            fi
-          done <<< "$TAGS"
       - name: Build and push image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         id: push
@@ -288,7 +292,7 @@ jobs:
           context: .
           push: true
           platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ env.CANDIDATE_IMAGE }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
@@ -369,10 +373,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Pull and inspect the semver image
+      - name: Pull and inspect the candidate image
         run: |
-          image_tag="${GITHUB_REF_NAME#v}"
-          image="${{ env.REGISTRY_IMAGE }}:${image_tag}"
+          image="${{ env.CANDIDATE_IMAGE }}"
           echo "IMAGE=$image" >> "$GITHUB_ENV"
           docker pull "$image"
           docker buildx imagetools inspect "$image" | tee image-manifest.txt
@@ -546,10 +549,42 @@ jobs:
             -F prerelease="$prerelease" \
             -f make_latest="$make_latest" >/dev/null
 
+  promote-semver:
+    name: Promote verified image to semver
+    needs: [smoke, publish-release]
+    if: ${{ needs.smoke.result == 'success' && needs.publish-release.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Promote candidate after smoke verification
+        env:
+          CANDIDATE: ${{ env.CANDIDATE_IMAGE }}
+          IMAGE: ${{ env.REGISTRY_IMAGE }}
+        run: |
+          set -euo pipefail
+          image_tag="${GITHUB_REF_NAME#v}"
+          semver_image="$IMAGE:$image_tag"
+          docker buildx imagetools inspect "$CANDIDATE" >/dev/null
+          if docker buildx imagetools inspect "$semver_image" >/dev/null 2>&1; then
+            echo "image tag already exists; refusing to overwrite $semver_image" >&2
+            exit 1
+          fi
+          docker buildx imagetools create --tag "$semver_image" "$CANDIDATE"
+
   promote-latest:
     name: Promote verified image to latest
-    needs: [smoke, publish-release]
-    if: ${{ needs.smoke.result == 'success' && needs.publish-release.result == 'success' && !contains(github.ref_name, '-') }}
+    needs: [promote-semver, publish-release]
+    if: ${{ needs.promote-semver.result == 'success' && needs.publish-release.result == 'success' && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

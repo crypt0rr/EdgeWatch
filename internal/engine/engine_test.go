@@ -499,6 +499,106 @@ func TestIncompleteDNSScanKeepsHealthySiblingAdditions(t *testing.T) {
 	}
 }
 
+func TestIncompleteDNSScanPreservesPendingHealthyAdditionUntilCompleteConfirmation(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "dns-pending.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := Engine{Store: db}
+	job := config.Job{Name: "dns-pending", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 2}}
+
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "80,443"}},
+		DNS:    map[string][]string{"edge.example": {"192.0.2.1", "192.0.2.2"}},
+		Units: []model.Unit{{
+			Target: "edge.example", Protocol: "tcp", Addresses: []string{"192.0.2.1", "192.0.2.2"},
+			Ports: []model.PortState{{Port: 443, State: "open", Evidence: []string{"192.0.2.1", "192.0.2.2"}}},
+		}},
+	}
+	baseline.Normalize()
+	if events, err := e.Success(ctx, job, scan("dns-pending-baseline", baseline)); err != nil || len(events) != 1 || events[0].Type != "baseline-complete" {
+		t.Fatalf("baseline setup: %#v, %v", events, err)
+	}
+
+	// The first complete scan observes a new port only on the healthy address.
+	// With two confirmations it must remain pending rather than opening an
+	// incident immediately.
+	first := baseline
+	first.Units = []model.Unit{{
+		Target: "edge.example", Protocol: "tcp", Addresses: []string{"192.0.2.1", "192.0.2.2"},
+		Ports: []model.PortState{
+			{Port: 80, State: "open", Evidence: []string{"192.0.2.1"}},
+			{Port: 443, State: "open", Evidence: []string{"192.0.2.1", "192.0.2.2"}},
+		},
+	}}
+	first.Normalize()
+	if events, err := e.Success(ctx, job, scan("dns-pending-first", first)); err != nil {
+		t.Fatalf("first complete scan: %v", err)
+	} else if len(events) != 0 {
+		t.Fatalf("first confirmation emitted events before the threshold: %#v", events)
+	}
+	state, err := db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, ok := state.Pending["port|edge.example|tcp|80"]
+	if !ok || pending.Count != 1 {
+		t.Fatalf("pending healthy addition = %#v, want one confirmation", state.Pending)
+	}
+
+	// The sibling address is now incomplete and the pending port is absent from
+	// the partial evidence. The pending addition must survive this scan, while
+	// the baseline port remains protected from a false removal.
+	partial := model.Snapshot{
+		Scopes: baseline.Scopes,
+		DNS:    baseline.DNS,
+		Units: []model.Unit{{
+			Target: "edge.example", Protocol: "tcp", Addresses: []string{"192.0.2.1", "192.0.2.2"},
+			Ports: []model.PortState{{Port: 443, State: "open", Evidence: []string{"192.0.2.1"}}},
+		}},
+		Hosts: []model.HostObservation{{Address: "192.0.2.2", Status: "down", StatusReason: "no-response"}},
+	}
+	partial.Normalize()
+	if events, err := e.Success(ctx, job, scan("dns-pending-partial", partial)); err != nil || len(events) != 1 || events[0].Type != "scan-incomplete" {
+		t.Fatalf("partial DNS scan: %#v, %v", events, err)
+	}
+	state, err = db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pending, ok = state.Pending["port|edge.example|tcp|80"]; !ok || pending.Count != 1 {
+		t.Fatalf("partial scan changed pending addition = %#v, want one confirmation", state.Pending)
+	}
+	if _, ok := state.Incidents["port|edge.example|tcp|443"]; ok {
+		t.Fatal("partial sibling loss opened a removal incident")
+	}
+
+	// A later complete observation of the same healthy addition supplies the
+	// second confirmation and opens exactly one incident.
+	final := first
+	final.Units = append([]model.Unit(nil), first.Units...)
+	final.Normalize()
+	events, err := e.Success(ctx, job, scan("dns-pending-final", final))
+	if err != nil {
+		t.Fatalf("final complete scan: %v", err)
+	}
+	if len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != "port|edge.example|tcp|80" {
+		t.Fatalf("final confirmation events = %#v, want one port change", events)
+	}
+	state, err = db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Pending["port|edge.example|tcp|80"]; ok {
+		t.Fatal("confirmed addition remained pending")
+	}
+	if _, ok := state.Incidents["port|edge.example|tcp|80"]; !ok {
+		t.Fatal("confirmed healthy addition did not open an incident")
+	}
+}
+
 func TestEveryUnsuccessfulScanEmitsAnOutcomeEvent(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "db"))

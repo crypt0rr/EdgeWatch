@@ -1097,6 +1097,11 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
 			"ALTER TABLE scan_cycles ADD COLUMN baseline_epoch INTEGER NOT NULL DEFAULT 0",
 			"ALTER TABLE job_runtime_meta ADD COLUMN baseline_epoch INTEGER NOT NULL DEFAULT 0",
 			"UPDATE job_runtime_meta SET baseline_epoch=1 WHERE baseline_epoch=0 AND (baseline_scan_id<>'' OR baseline_modified<>0)",
+			// Existing cycle rows predate the epoch column and therefore default
+			// to zero. Adopt the job's current epoch for resumable lifecycle states
+			// so an upgrade does not discard paused or stalled work that belongs to
+			// the still-current baseline.
+			"UPDATE scan_cycles SET baseline_epoch=COALESCE((SELECT baseline_epoch FROM job_runtime_meta WHERE job_runtime_meta.job_id=scan_cycles.job_id),0) WHERE status IN ('running','paused','stalled','completed')",
 			"CREATE INDEX IF NOT EXISTS scan_cycles_job_epoch_status ON scan_cycles(job_id,baseline_epoch,status)",
 		},
 		45: {

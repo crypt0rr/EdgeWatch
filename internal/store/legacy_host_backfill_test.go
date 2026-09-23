@@ -127,9 +127,13 @@ func TestLegacyHostObservationsNormalizeAndMergeLegacyUnits(t *testing.T) {
 	detailed := legacyHostObservations(model.Snapshot{Hosts: []model.HostObservation{{
 		Address:       " 192.0.2.20 ",
 		SourceTargets: []string{"z-target", "a-target"},
-	}}})
+		Protocols:     []model.ProtocolObservation{{Protocol: "TCP"}},
+	}}, Scopes: []model.Scope{{Target: "ignored-by-host-index", Protocol: "tcp", Ports: "1-1024", ServiceDetection: true}}})
 	if len(detailed) != 1 || detailed[0].Address != "192.0.2.20" || detailed[0].SourceTargets[0] != "a-target" {
 		t.Fatalf("normalized detailed host = %#v", detailed)
+	}
+	if len(detailed[0].Protocols) != 1 || detailed[0].Protocols[0].ScannedPorts != "1-1024" || detailed[0].Protocols[0].ScannedPortCount != 1024 || !detailed[0].Protocols[0].ServiceDetection {
+		t.Fatalf("legacy detailed scope was not restored = %#v", detailed[0].Protocols)
 	}
 
 	legacy := model.Snapshot{Units: []model.Unit{
@@ -512,6 +516,13 @@ func TestLegacyHostBackfillSkipsMalformedScanAndContinues(t *testing.T) {
 	if badHosts != 0 || goodHosts != 1 || badCheckpoints != 1 {
 		t.Fatalf("backfill results malformed hosts=%d valid hosts=%d malformed checkpoints=%d", badHosts, goodHosts, badCheckpoints)
 	}
+	var status, reason string
+	if err := upgraded.DB.QueryRowContext(ctx, `SELECT status,error FROM legacy_scan_host_backfill WHERE scan_id=?`, bad.ID).Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != "quarantined" || reason != "snapshot JSON is malformed" {
+		t.Fatalf("malformed scan quarantine = %q/%q", status, reason)
+	}
 	legacyExists, err := upgraded.LegacySuccessfulScanExists(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -603,6 +614,72 @@ func TestLegacyHostBackfillCheckpointsOversizedWithoutDecoding(t *testing.T) {
 	}
 	if checkpoints != 1 || hosts != 0 {
 		t.Fatalf("oversized snapshot checkpoint=%d hosts=%d, want checkpoint=1 hosts=0", checkpoints, hosts)
+	}
+	var status, reason string
+	if err := store.DB.QueryRowContext(ctx, `SELECT status,error FROM legacy_scan_host_backfill WHERE scan_id=?`, scans[0].ID).Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != "quarantined" || !strings.Contains(reason, "conversion limit") {
+		t.Fatalf("oversized snapshot quarantine = %q/%q", status, reason)
+	}
+	// A quarantined row is terminal for the automatic migration pass. A
+	// second invocation must not decode or checkpoint the same oversized blob.
+	var progress [][2]int64
+	if err := backfillLegacyScanHostsContextWithLoggerAndProgress(ctx, store.DB, nil, func(processed, total int64) {
+		progress = append(progress, [2]int64{processed, total})
+	}, defaultLegacyHostBackfillLimits); err != nil {
+		t.Fatalf("quarantined snapshot was retried on restart: %v", err)
+	}
+	if len(progress) != 1 || progress[0] != [2]int64{0, 0} {
+		t.Fatalf("quarantined restart progress = %#v, want no candidates", progress)
+	}
+}
+
+func TestLegacyHostBackfillDistinguishesValidEmptySnapshots(t *testing.T) {
+	ctx := context.Background()
+	store, scans := seedLegacyHostBackfillScans(ctx, t, 1)
+	defer store.Close()
+	if _, err := store.DB.ExecContext(ctx, `UPDATE scans SET snapshot_json=? WHERE id=?`, []byte(`{"scopes":[],"units":[]}`), scans[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := backfillLegacyScanHostsContext(ctx, store.DB); err != nil {
+		t.Fatalf("valid empty snapshot failed backfill: %v", err)
+	}
+	var status, reason string
+	if err := store.DB.QueryRowContext(ctx, `SELECT status,error FROM legacy_scan_host_backfill WHERE scan_id=?`, scans[0].ID).Scan(&status, &reason); err != nil {
+		t.Fatal(err)
+	}
+	if status != "complete" || reason != "" {
+		t.Fatalf("valid empty snapshot checkpoint = %q/%q", status, reason)
+	}
+}
+
+func TestLegacyHostBackfillSchemaIncludesQuarantineMetadata(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	rows, err := store.DB.Query(`PRAGMA table_info(legacy_scan_host_backfill)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull, primaryKey int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"status", "error", "attempts"} {
+		if !columns[name] {
+			t.Fatalf("legacy backfill quarantine column %q is missing", name)
+		}
 	}
 }
 

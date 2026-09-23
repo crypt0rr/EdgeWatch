@@ -19,6 +19,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/creack/pty"
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -52,6 +53,20 @@ const maxProgressOutput = 4 << 20
 const maxNmapOutput = 16 << 20
 
 var errNmapProgressOutputExceeded = fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput)
+
+// Scanner metadata is descriptive evidence, not scan scope. Keep each
+// target-controlled value small enough that a single hostile response cannot
+// inflate a snapshot or its compact service fingerprint. The item limits also
+// bound repeated XML elements while retaining enough evidence for normal
+// Nmap output.
+const (
+	maxScannerMetadataBytes = 512
+	maxScannerCPEs          = 32
+	maxScannerHostnames     = 32
+	maxScannerLinkAddresses = 32
+	maxScannerNSEOutputs    = 32
+	maxScannerStateReasons  = 32
+)
 
 // scannerProbeEnv keeps version probes deterministic and prevents a scanner
 // binary from reading user configuration or credentials from the daemon's
@@ -1682,13 +1697,13 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 			}
 			observation := unreachableHostObservation(address, protocol, pc, reason)
 			observation.ReasonTTL = host.Status.TTL
-			observation.StatusReason = reason
+			observation.StatusReason = boundScannerMetadata(reason)
 			for _, hostname := range host.Hostnames {
-				observation.Hostnames = append(observation.Hostnames, model.Hostname{Name: strings.TrimSpace(hostname.Name), Type: strings.TrimSpace(hostname.Type)})
+				observation.Hostnames = append(observation.Hostnames, model.Hostname{Name: boundScannerMetadata(hostname.Name), Type: boundScannerMetadata(hostname.Type)})
 			}
 			for _, candidate := range host.Addresses {
 				if candidate.Type == "mac" {
-					observation.LinkAddresses = append(observation.LinkAddresses, model.LinkAddress{Address: strings.TrimSpace(candidate.Addr), Type: candidate.Type, Vendor: strings.TrimSpace(candidate.Vendor)})
+					observation.LinkAddresses = append(observation.LinkAddresses, model.LinkAddress{Address: boundScannerMetadata(candidate.Addr), Type: boundScannerMetadata(candidate.Type), Vendor: boundScannerMetadata(candidate.Vendor)})
 				}
 			}
 			dedupeHostObservation(&observation)
@@ -1705,7 +1720,7 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 					family = map[string]string{"ipv4": "IPv4", "ipv6": "IPv6"}[a.Type]
 				}
 			} else if strings.TrimSpace(a.Addr) != "" {
-				links = append(links, model.LinkAddress{Address: strings.TrimSpace(a.Addr), Type: strings.TrimSpace(a.Type), Vendor: strings.TrimSpace(a.Vendor)})
+				links = append(links, model.LinkAddress{Address: boundScannerMetadata(a.Addr), Type: boundScannerMetadata(a.Type), Vendor: boundScannerMetadata(a.Vendor)})
 			}
 		}
 		if address == "" {
@@ -1715,9 +1730,9 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 		if status == "" {
 			status = "unknown"
 		}
-		hostObservation := model.HostObservation{Address: address, AddressFamily: family, Status: status, StatusReason: host.Status.Reason, ReasonTTL: host.Status.TTL, LinkAddresses: links}
+		hostObservation := model.HostObservation{Address: address, AddressFamily: family, Status: status, StatusReason: boundScannerMetadata(host.Status.Reason), ReasonTTL: host.Status.TTL, LinkAddresses: links}
 		for _, hostname := range host.Hostnames {
-			hostObservation.Hostnames = append(hostObservation.Hostnames, model.Hostname{Name: strings.TrimSpace(hostname.Name), Type: strings.TrimSpace(hostname.Type)})
+			hostObservation.Hostnames = append(hostObservation.Hostnames, model.Hostname{Name: boundScannerMetadata(hostname.Name), Type: boundScannerMetadata(hostname.Type)})
 		}
 		if host.Times.SRTT != "" {
 			if srtt, err := strconv.ParseFloat(host.Times.SRTT, 64); err == nil {
@@ -1727,10 +1742,10 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 		}
 		for _, a := range host.Addresses {
 			if a.Type == "mac" {
-				hostObservation.LinkAddresses = append(hostObservation.LinkAddresses, model.LinkAddress{Address: strings.TrimSpace(a.Addr), Type: a.Type, Vendor: strings.TrimSpace(a.Vendor)})
+				hostObservation.LinkAddresses = append(hostObservation.LinkAddresses, model.LinkAddress{Address: boundScannerMetadata(a.Addr), Type: boundScannerMetadata(a.Type), Vendor: boundScannerMetadata(a.Vendor)})
 			}
 		}
-		observation := model.ProtocolObservation{Protocol: protocol, Status: status, StatusReason: strings.TrimSpace(host.Status.Reason), ScanType: scanType(protocol, pc), ScannedPorts: pc.Ports, ServiceDetection: pc.ServiceDetection, NSEProfile: strings.TrimSpace(pc.NSEProfile), NSEArgs: cloneStringMap(pc.NSEArgs)}
+		observation := model.ProtocolObservation{Protocol: protocol, Status: status, StatusReason: boundScannerMetadata(host.Status.Reason), ScanType: scanType(protocol, pc), ScannedPorts: pc.Ports, ServiceDetection: pc.ServiceDetection, NSEProfile: strings.TrimSpace(pc.NSEProfile), NSEArgs: cloneStringMap(pc.NSEArgs)}
 		if ports, err := config.ParsePorts(pc.Ports); err == nil {
 			observation.ScannedPortCount = len(ports)
 		}
@@ -1757,38 +1772,44 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 		}
 		unit := model.Unit{Target: address, Protocol: protocol, Addresses: []string{address}}
 		for _, script := range host.HostScripts {
-			if summary := summarizeNSEOutput(script.ID, script.Output); summary != "" {
-				observation.NSEOutput = append(observation.NSEOutput, summary)
-			}
+			observation.NSEOutput = appendNSESummary(observation.NSEOutput, script.ID, script.Output)
 		}
 		for _, p := range host.Ports {
 			if p.Protocol != protocol {
 				continue
 			}
-			addStateSummary(&observation, p.State.State, p.State.Reason, 1)
+			reason := boundScannerMetadata(p.State.Reason)
+			addStateSummary(&observation, p.State.State, reason, 1)
 			if p.State.State != "open" && p.State.State != "open|filtered" {
 				continue
 			}
 			for _, script := range p.Scripts {
-				if summary := summarizeNSEOutput(script.ID, script.Output); summary != "" {
-					observation.NSEOutput = append(observation.NSEOutput, summary)
-				}
+				observation.NSEOutput = appendNSESummary(observation.NSEOutput, script.ID, script.Output)
 			}
+			serviceName := boundScannerMetadata(p.Service.Name)
+			serviceProduct := boundScannerMetadata(p.Service.Product)
+			serviceVersion := boundScannerMetadata(p.Service.Version)
+			serviceExtra := boundScannerMetadata(p.Service.Extra)
+			serviceMethod := boundScannerMetadata(p.Service.Method)
+			serviceTunnel := boundScannerMetadata(p.Service.Tunnel)
+			serviceOSType := boundScannerMetadata(p.Service.OSType)
+			serviceDeviceType := boundScannerMetadata(p.Service.DeviceType)
+			serviceCPES := boundedScannerStrings(p.Service.CPES, maxScannerCPEs)
 			state := model.PortState{Port: p.PortID, State: p.State.State, Evidence: []string{address}}
 			if pc.ServiceDetection && p.Service.Method == "probed" {
-				state.Service = model.Fingerprint(p.Service.Name, p.Service.Product, p.Service.Version, p.Service.Extra, p.Service.CPES)
+				state.Service = boundScannerMetadata(model.Fingerprint(serviceName, serviceProduct, serviceVersion, serviceExtra, serviceCPES))
 			}
 			unit.Ports = append(unit.Ports, state)
-			port := model.PortObservation{Port: p.PortID, State: p.State.State, Reason: p.State.Reason, ReasonTTL: p.State.TTL, Verification: "confirmed"}
+			port := model.PortObservation{Port: p.PortID, State: p.State.State, Reason: reason, ReasonTTL: p.State.TTL, Verification: "confirmed"}
 			if pc.ServiceDetection && hasServiceEvidence(p.Service) {
-				port.Service = &model.ServiceObservation{Name: p.Service.Name, Product: p.Service.Product, Version: p.Service.Version, ExtraInfo: p.Service.Extra, Method: p.Service.Method, Confidence: p.Service.Confidence, Tunnel: p.Service.Tunnel, OSType: p.Service.OSType, DeviceType: p.Service.DeviceType, CPEs: append([]string(nil), p.Service.CPES...)}
+				port.Service = &model.ServiceObservation{Name: serviceName, Product: serviceProduct, Version: serviceVersion, ExtraInfo: serviceExtra, Method: serviceMethod, Confidence: p.Service.Confidence, Tunnel: serviceTunnel, OSType: serviceOSType, DeviceType: serviceDeviceType, CPEs: serviceCPES}
 			}
 			observation.Ports = append(observation.Ports, port)
 		}
 		for _, extra := range host.ExtraPorts {
 			addStateSummary(&observation, extra.State, "", extra.Count)
 			for _, reason := range extra.Reasons {
-				addStateReason(&observation, extra.State, reason.Reason, reason.Count)
+				addStateReason(&observation, extra.State, boundScannerMetadata(reason.Reason), reason.Count)
 			}
 		}
 		hostObservation.Protocols = append(hostObservation.Protocols, observation)
@@ -1871,22 +1892,73 @@ func hasServiceEvidence(service struct {
 	return service.Name != "" || service.Product != "" || service.Version != "" || service.Extra != "" || service.Method != "" || len(service.CPES) > 0
 }
 
+// boundScannerMetadata trims and clips scanner-supplied descriptive text by
+// UTF-8 byte length. The terminating ellipsis makes truncation visible while
+// keeping the returned string valid UTF-8 and within the documented bound.
+func boundScannerMetadata(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= maxScannerMetadataBytes {
+		return value
+	}
+	const ellipsis = "…"
+	limit := maxScannerMetadataBytes - len(ellipsis)
+	end, used := 0, 0
+	for end < len(value) {
+		_, size := utf8.DecodeRuneInString(value[end:])
+		if used+size > limit {
+			break
+		}
+		end += size
+		used += size
+	}
+	return value[:end] + ellipsis
+}
+
+func boundedScannerStrings(values []string, maxItems int) []string {
+	if len(values) == 0 || maxItems <= 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	bounded := make([]string, 0, min(len(values), maxItems))
+	for _, value := range values {
+		if value = boundScannerMetadata(value); value != "" {
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			seen[value] = struct{}{}
+			bounded = append(bounded, value)
+		}
+	}
+	sort.Strings(bounded)
+	if len(bounded) > maxItems {
+		bounded = bounded[:maxItems]
+	}
+	return bounded
+}
+
+func appendNSESummary(values []string, id, output string) []string {
+	if len(values) >= maxScannerNSEOutputs {
+		return values
+	}
+	if summary := summarizeNSEOutput(id, output); summary != "" {
+		return append(values, summary)
+	}
+	return values
+}
+
 func summarizeNSEOutput(id, output string) string {
-	id = strings.TrimSpace(id)
+	id = boundScannerMetadata(id)
 	output = strings.Join(strings.Fields(strings.TrimSpace(output)), " ")
 	if id == "" && output == "" {
 		return ""
 	}
-	if len(output) > 512 {
-		output = output[:512] + "…"
-	}
 	if id == "" {
-		return output
+		return boundScannerMetadata(output)
 	}
 	if output == "" {
 		return id
 	}
-	return id + ": " + output
+	return boundScannerMetadata(id + ": " + output)
 }
 
 func cloneStringMap(values map[string]string) map[string]string {
@@ -2117,16 +2189,42 @@ func dedupeHostObservation(host *model.HostObservation) {
 	}
 	host.LinkAddresses = host.LinkAddresses[:0]
 	for _, link := range seenLinks {
+		link.Address = boundScannerMetadata(link.Address)
+		link.Type = boundScannerMetadata(link.Type)
+		link.Vendor = boundScannerMetadata(link.Vendor)
 		host.LinkAddresses = append(host.LinkAddresses, link)
+	}
+	sort.Slice(host.LinkAddresses, func(i, j int) bool {
+		if host.LinkAddresses[i].Type == host.LinkAddresses[j].Type {
+			return host.LinkAddresses[i].Address < host.LinkAddresses[j].Address
+		}
+		return host.LinkAddresses[i].Type < host.LinkAddresses[j].Type
+	})
+	if len(host.LinkAddresses) > maxScannerLinkAddresses {
+		host.LinkAddresses = host.LinkAddresses[:maxScannerLinkAddresses]
 	}
 	seenNames := map[string]model.Hostname{}
 	for _, name := range host.Hostnames {
+		name.Name = boundScannerMetadata(name.Name)
+		name.Type = boundScannerMetadata(name.Type)
 		seenNames[name.Type+"\x00"+name.Name] = name
 	}
 	host.Hostnames = host.Hostnames[:0]
 	for _, name := range seenNames {
 		host.Hostnames = append(host.Hostnames, name)
 	}
+	sort.Slice(host.Hostnames, func(i, j int) bool {
+		if host.Hostnames[i].Name == host.Hostnames[j].Name {
+			return host.Hostnames[i].Type < host.Hostnames[j].Type
+		}
+		return host.Hostnames[i].Name < host.Hostnames[j].Name
+	})
+	if len(host.Hostnames) > maxScannerHostnames {
+		host.Hostnames = host.Hostnames[:maxScannerHostnames]
+	}
+	host.Address = boundScannerMetadata(host.Address)
+	host.Status = boundScannerMetadata(host.Status)
+	host.StatusReason = boundScannerMetadata(host.StatusReason)
 	// A host can be encountered more than once when callers merge batches or
 	// combine protocol results. Collapse those observations into one TCP and
 	// one UDP record before normalizing the nested evidence.
@@ -2198,6 +2296,14 @@ func dedupeHostObservation(host *model.HostObservation) {
 	host.Protocols = mergedProtocols
 	for i := range host.Protocols {
 		protocol := &host.Protocols[i]
+		protocol.Protocol = boundScannerMetadata(protocol.Protocol)
+		protocol.Status = boundScannerMetadata(protocol.Status)
+		protocol.StatusReason = boundScannerMetadata(protocol.StatusReason)
+		protocol.ScanType = boundScannerMetadata(protocol.ScanType)
+		protocol.ScannedPorts = boundScannerMetadata(protocol.ScannedPorts)
+		protocol.NSEProfile = boundScannerMetadata(protocol.NSEProfile)
+		protocol.NSEOutput = boundedScannerStrings(protocol.NSEOutput, maxScannerNSEOutputs)
+		sort.Strings(protocol.NSEOutput)
 		portIndex := map[int]int{}
 		mergedPorts := make([]model.PortObservation, 0, len(protocol.Ports))
 		for _, incoming := range protocol.Ports {
@@ -2266,9 +2372,35 @@ func dedupeHostObservation(host *model.HostObservation) {
 			}
 			*field = merged
 		}
-		for j := range protocol.Ports {
-			if protocol.Ports[j].Service != nil {
-				protocol.Ports[j].Service.CPEs = uniqueStrings(protocol.Ports[j].Service.CPEs)
+		for _, ports := range []*[]model.PortObservation{&protocol.Ports, &protocol.DiscoveredPorts, &protocol.UnconfirmedPorts} {
+			for j := range *ports {
+				port := &(*ports)[j]
+				port.State = boundScannerMetadata(port.State)
+				port.Reason = boundScannerMetadata(port.Reason)
+				port.Verification = boundScannerMetadata(port.Verification)
+				if port.Service != nil {
+					port.Service.Name = boundScannerMetadata(port.Service.Name)
+					port.Service.Product = boundScannerMetadata(port.Service.Product)
+					port.Service.Version = boundScannerMetadata(port.Service.Version)
+					port.Service.ExtraInfo = boundScannerMetadata(port.Service.ExtraInfo)
+					port.Service.Method = boundScannerMetadata(port.Service.Method)
+					port.Service.Tunnel = boundScannerMetadata(port.Service.Tunnel)
+					port.Service.OSType = boundScannerMetadata(port.Service.OSType)
+					port.Service.DeviceType = boundScannerMetadata(port.Service.DeviceType)
+					port.Service.CPEs = boundedScannerStrings(port.Service.CPEs, maxScannerCPEs)
+				}
+			}
+		}
+		for j := range protocol.StateSummaries {
+			protocol.StateSummaries[j].State = boundScannerMetadata(protocol.StateSummaries[j].State)
+			for k := range protocol.StateSummaries[j].Reasons {
+				protocol.StateSummaries[j].Reasons[k].Reason = boundScannerMetadata(protocol.StateSummaries[j].Reasons[k].Reason)
+			}
+			sort.Slice(protocol.StateSummaries[j].Reasons, func(a, b int) bool {
+				return protocol.StateSummaries[j].Reasons[a].Reason < protocol.StateSummaries[j].Reasons[b].Reason
+			})
+			if len(protocol.StateSummaries[j].Reasons) > maxScannerStateReasons {
+				protocol.StateSummaries[j].Reasons = protocol.StateSummaries[j].Reasons[:maxScannerStateReasons]
 			}
 		}
 	}

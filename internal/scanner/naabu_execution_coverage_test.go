@@ -178,7 +178,7 @@ func TestNaabuPipelineResolvedReportsEmptyDiscoveryAndUDPFallback(t *testing.T) 
 		t.Fatalf("pipeline progress = %#v", progress)
 	}
 	for _, host := range snapshot.Hosts {
-		if host.Status != "unknown" || host.StatusReason != "no-response" || len(host.Protocols) != 1 || host.Protocols[0].ScannedPortCount != 65535 {
+		if host.Status != "unknown" || host.StatusReason != "scan-complete" || len(host.Protocols) != 1 || host.Protocols[0].ScannedPortCount != 65535 {
 			t.Fatalf("empty discovery host = %#v", host)
 		}
 	}

@@ -328,6 +328,19 @@ func incompleteScanError(snapshot model.Snapshot) string {
 
 type incompleteCoverage map[string]map[string]struct{}
 
+// scanCompleteCoverageReason is emitted by the Naabu full-range discovery
+// phase when every port was examined but no positive JSONL records were
+// produced. The host remains unknown for display, but this reason means the
+// scan covered its configured scope and must not be treated as a partial
+// result. Other unknown observations (for example unknown/no-response from a
+// failed or legacy scan) remain conservatively incomplete.
+const scanCompleteCoverageReason = "scan-complete"
+
+type protocolCoverageStatus struct {
+	status string
+	reason string
+}
+
 func incompleteProtocolCoverage(snapshot model.Snapshot) incompleteCoverage {
 	coverage := incompleteCoverage{}
 	mark := func(address, protocol string) {
@@ -376,24 +389,27 @@ func incompleteProtocolCoverage(snapshot model.Snapshot) incompleteCoverage {
 		}
 	}
 	for _, host := range snapshot.Hosts {
-		statuses := make(map[string]string, len(host.Protocols))
+		statuses := make(map[string]protocolCoverageStatus, len(host.Protocols))
 		for _, protocol := range host.Protocols {
 			name := strings.ToLower(strings.TrimSpace(protocol.Protocol))
 			status := strings.ToLower(strings.TrimSpace(protocol.Status))
+			reason := strings.TrimSpace(protocol.StatusReason)
 			if name == "" {
 				continue
 			}
+			observed := protocolCoverageStatus{status: status, reason: reason}
 			// Protocol failures are sticky even if a duplicate fragment reports
 			// the address as healthy later. A blank status is retained only until
 			// explicit evidence for the same protocol is available.
-			if isIncompleteCoverageStatus(status) || statuses[name] == "" {
-				statuses[name] = status
+			existing := statuses[name]
+			if isIncompleteCoverageObservation(status, reason) || existing.status == "" || (existing.status == "unknown" && strings.EqualFold(existing.reason, scanCompleteCoverageReason) && status == "up") {
+				statuses[name] = observed
 			}
-			if isIncompleteCoverageStatus(status) {
+			if isIncompleteCoverageObservation(status, reason) {
 				mark(host.Address, name)
 			}
 		}
-		if !isIncompleteCoverageStatus(host.Status) {
+		if !isIncompleteCoverageObservation(host.Status, host.StatusReason) {
 			continue
 		}
 		protocols := make(map[string]struct{}, len(expected[host.Address])+len(statuses))
@@ -410,7 +426,7 @@ func incompleteProtocolCoverage(snapshot model.Snapshot) incompleteCoverage {
 		marked := false
 		for protocol := range protocols {
 			status, observed := statuses[protocol]
-			if !observed || status != "up" {
+			if !observed || status.status != "up" {
 				mark(host.Address, protocol)
 				marked = true
 			}
@@ -432,6 +448,13 @@ func isIncompleteCoverageStatus(status string) bool {
 	default:
 		return false
 	}
+}
+
+func isIncompleteCoverageObservation(status, reason string) bool {
+	if strings.EqualFold(strings.TrimSpace(status), "unknown") && strings.EqualFold(strings.TrimSpace(reason), scanCompleteCoverageReason) {
+		return false
+	}
+	return isIncompleteCoverageStatus(status)
 }
 
 func incompleteCoverageHas(coverage incompleteCoverage, address, protocol string) bool {

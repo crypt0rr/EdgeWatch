@@ -144,6 +144,29 @@ describe('host detail', () => {
     expect(container.querySelector('a[href="/hosts"]')).toBeTruthy()
   })
 
+  it('shows completed full-range coverage without an incomplete warning', async () => {
+    const tcpProtocol = host.protocols?.[0]
+    if (!tcpProtocol) throw new Error('test host is missing TCP evidence')
+    const completedHost: HostObservation = {
+      ...host,
+      status: 'unknown',
+      status_reason: 'scan-complete',
+      protocols: [{
+        ...tcpProtocol,
+        status: 'unknown',
+        status_reason: 'scan-complete',
+        ports: [],
+        discovered_ports: [],
+        unconfirmed_ports: [],
+      }],
+    }
+    vi.mocked(baselineHost).mockResolvedValue({ ...detail, host: completedHost })
+    await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')
+    expect(container.textContent).toContain('TCP scan coverage: complete')
+    expect(container.textContent).toContain('full-range scan complete')
+    expect(container.textContent).not.toContain('TCP scan coverage: unknown')
+  })
+
   it('renders a not-found state when host evidence is unavailable', async () => {
     vi.mocked(baselineHost).mockRejectedValue(Object.assign(new Error('missing'), { code: 'not_found' }))
     await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')

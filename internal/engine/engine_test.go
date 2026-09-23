@@ -376,6 +376,44 @@ func TestUnknownNoResponseEvidenceCannotLearnOrRemoveBaselinePorts(t *testing.T)
 	}
 }
 
+func TestCompletedNaabuNoDiscoveryCanEstablishBaseline(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := Engine{Store: db}
+	job := config.Job{Name: "completed-empty-naabu", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	address := "192.0.2.31"
+	current := model.Snapshot{
+		Scopes: []model.Scope{{Target: address, Protocol: "tcp", Ports: "1-65535"}},
+		Units:  []model.Unit{{Target: address, Protocol: "tcp", Addresses: []string{address}}},
+		Hosts: []model.HostObservation{{
+			Address: address, Status: "unknown", StatusReason: "scan-complete",
+			Protocols: []model.ProtocolObservation{{
+				Protocol: "tcp", Status: "unknown", StatusReason: "scan-complete",
+				ScannedPorts: "1-65535", ScannedPortCount: 65535,
+			}},
+		}},
+	}
+	completed := scan("completed-empty-naabu", current)
+	if MarkIncompleteScan(&completed) {
+		t.Fatal("completed full-range Naabu discovery was marked incomplete")
+	}
+	events, err := e.Success(ctx, job, completed)
+	if err != nil || len(events) != 1 || events[0].Type != "baseline-complete" {
+		t.Fatalf("completed empty Naabu scan did not establish baseline: events=%#v err=%v", events, err)
+	}
+	state, err := db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Baseline == nil || len(state.Baseline.Units) != 1 || len(state.Baseline.Units[0].Ports) != 0 {
+		t.Fatalf("completed empty Naabu scan baseline = %#v", state.Baseline)
+	}
+}
+
 func TestIncompleteProtocolDoesNotSuppressCompleteProtocolChanges(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "protocol-partial.db"))

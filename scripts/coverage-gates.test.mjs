@@ -142,6 +142,20 @@ test('diff coverage gates pass covered changes and reject uncovered changes', as
   })
 })
 
+test('required diff coverage bases reject empty and unresolvable refs', async () => {
+  await withTempDirectory(async (directory) => {
+    await createDiffFixture(directory)
+    const frontendPath = join(directory, 'frontend.json')
+    await writeFile(frontendPath, JSON.stringify({ 'src/example.ts': { statementMap: { 0: { start: { line: 1 }, end: { line: 1 } } }, s: { 0: 1 } } }))
+    const required = ['--language', 'frontend', '--coverage', frontendPath, '--base', '', '--require-base']
+    assert.notEqual(runScript('check-diff-coverage.mjs', required, directory).status, 0)
+    const missing = ['--language', 'frontend', '--coverage', frontendPath, '--base', 'does-not-exist', '--require-base']
+    assert.notEqual(runScript('check-diff-coverage.mjs', missing, directory).status, 0)
+    const legacyFallback = ['--language', 'frontend', '--coverage', frontendPath, '--base', 'does-not-exist']
+    assert.equal(runScript('check-diff-coverage.mjs', legacyFallback, directory).status, 0)
+  })
+})
+
 test('coverage gate fixture remains self-contained', async () => {
   const packageJSON = JSON.parse(await readFile(join(repoRoot, 'package.json'), 'utf8'))
   assert.match(packageJSON.scripts['test:coverage'], /coverage-gates\.test\.mjs/)

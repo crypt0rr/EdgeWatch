@@ -90,6 +90,27 @@ describe('security settings', () => {
     expect(logout).not.toHaveBeenCalled()
   })
 
+  it('allows an enabled authenticator to be replaced after step-up confirmation', async () => {
+    vi.mocked(getSession).mockResolvedValue({ ...administrator, totp_enabled: true })
+    vi.mocked(api).mockImplementation(async (path: string) => path === '/auth/totp/setup' ? { secret: 'REPLACEMENTSECRET', otpauth: 'otpauth://totp/EdgeWatch' } as never : { recovery_codes: ['replacement-one'] } as never)
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Replace authenticator' })).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Replace authenticator' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(screen.getByLabelText('Account password'), { target: { value: 'correct-password' } })
+    fireEvent.change(screen.getByLabelText('Current authenticator code or recovery code'), { target: { value: '123456' } })
+    fireEvent.click(dialog.querySelector('button[type="submit"]')!)
+    await waitFor(() => expect(screen.getByText('REPLACEMENTSECRET')).toBeInTheDocument())
+    expect(api).toHaveBeenCalledWith('/auth/totp/setup', expect.objectContaining({ body: JSON.stringify({ password: 'correct-password', code: '123456', recovery_code: '' }) }))
+
+    fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '654321' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Replace authenticator' }))
+    await waitFor(() => expect(screen.getByText('replacement-one')).toBeInTheDocument())
+    expect(api).toHaveBeenCalledWith('/auth/totp/enable', expect.objectContaining({ body: JSON.stringify({ code: '654321' }) }))
+    expect(screen.getByRole('button', { name: 'Disable TOTP' })).toBeInTheDocument()
+  })
+
   it('regenerates recovery codes after the current factor and surfaces failures', async () => {
     vi.mocked(getSession).mockResolvedValue({ ...administrator, totp_enabled: true })
     vi.mocked(api).mockRejectedValueOnce(new Error('registry unavailable'))

@@ -28,6 +28,21 @@ if service.get("read_only") is not True:
     raise SystemExit("runtime root filesystem must be read-only")
 if "ALL" not in service.get("cap_drop", []):
     raise SystemExit("all Linux capabilities must be dropped by default")
+security_options = service.get("security_opt", [])
+if "no-new-privileges:true" not in security_options:
+    raise SystemExit("no-new-privileges must be enabled")
+tmpfs_entries = service.get("tmpfs", [])
+bounded_tmpfs = False
+for entry in tmpfs_entries:
+    if isinstance(entry, str):
+        target, _, options = entry.partition(":")
+        if target == "/tmp" and any(option.startswith("size=") and len(option) > 5 for option in options.split(",")):
+            bounded_tmpfs = True
+            break
+if not bounded_tmpfs:
+    raise SystemExit("/tmp must be backed by a bounded tmpfs")
+if service.get("network_mode") != "host":
+    raise SystemExit("host networking is required for scanner reachability")
 caps = set(service.get("cap_add", []))
 if "NET_RAW" not in caps:
     raise SystemExit("NET_RAW is required for Nmap and Naabu")

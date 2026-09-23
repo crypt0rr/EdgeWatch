@@ -273,7 +273,16 @@ func (n *Notifier) ensureKey(ctx context.Context) ([]byte, error) {
 	}
 	if errors.Is(err, ErrKeyInvalid) && n.autoCreateKey {
 		// Recover the only failure mode that can be caused by an interrupted
-		// first-start creation. Never replace a non-empty invalid key.
+		// first-start creation. Once encrypted destinations exist, even an
+		// empty invalid key must remain a hard lock: replacing it would split
+		// the key used by the existing ciphertext from the newly generated key.
+		records, listErr := n.Store.ListManagedNotifications(ctx)
+		if listErr != nil {
+			return nil, listErr
+		}
+		if len(records) > 0 {
+			return nil, ErrKeyInvalid
+		}
 		if removeErr := removeInterruptedKey(n.keyPath, 0); removeErr == nil {
 			key, err = createKey(n.keyPath)
 			if errors.Is(err, os.ErrExist) {

@@ -68,7 +68,7 @@ func (s *Store) UpdateState(ctx context.Context, job string, fn func(*model.JobS
 		}
 		events[i] = bounded
 		event := events[i]
-		if _, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at) VALUES(?,?,?,?,?)`, event.Type, event.Job, event.ScanID, payload, event.CreatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at) VALUES(?,?,?,?,?)`, event.Type, event.Job, event.ScanID, payload, sqliteTimestamp(event.CreatedAt)); err != nil {
 			return nil, err
 		}
 	}
@@ -493,7 +493,7 @@ func insertTerminalDeliveryEventTx(ctx context.Context, tx *sql.Tx, destination 
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at) VALUES(?,?,?,?,?)`, bounded.Type, "", "", payload, now.Format(time.RFC3339Nano))
+	_, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at) VALUES(?,?,?,?,?)`, bounded.Type, "", "", payload, sqliteTimestamp(now))
 	return err
 }
 

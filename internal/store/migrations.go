@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 45
+const schemaVersion = 46
 
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
@@ -1106,6 +1106,13 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
 			// retry budgets cannot be consumed by recovery alone. Split children
 			// start with zero failures and are initialized by the cycle store.
 			"ALTER TABLE scan_cycle_units ADD COLUMN failures INTEGER NOT NULL DEFAULT 0",
+		},
+		46: {
+			// Event timestamps were written in the historical variable-width
+			// RFC3339Nano form until schema 46. Re-run the resumable normalizer so
+			// retained event ordering, silence deduplication, and retention ranges
+			// are repaired on existing installations as well as new databases.
+			"UPDATE timestamp_normalization_state SET complete=0,updated_at=datetime('now') WHERE id=1",
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

@@ -56,7 +56,7 @@ func (s *Store) RecordJobSilenceAlert(ctx context.Context, jobID, job string, cr
 	if err != nil {
 		return model.Event{}, false, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO events(type,job,job_id,scan_id,payload_json,created_at) VALUES(?,?,?,?,?,?)`, bounded.Type, bounded.Job, bounded.JobID, bounded.ScanID, payload, now.Format(time.RFC3339Nano)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO events(type,job,job_id,scan_id,payload_json,created_at) VALUES(?,?,?,?,?,?)`, bounded.Type, bounded.Job, bounded.JobID, bounded.ScanID, payload, sqliteTimestamp(now)); err != nil {
 		return model.Event{}, false, err
 	}
 	if err := queueEventsTx(ctx, tx, []model.Event{bounded}, destinations); err != nil {

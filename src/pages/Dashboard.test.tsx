@@ -196,6 +196,24 @@ describe('dashboard', () => {
     })
     await vi.waitFor(() => expect(container.textContent).toContain('Could not load jobs.'), { timeout: 1000 })
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('Could not load jobs.')
+    await act(async () => {
+      ;(container.querySelector('[role="alert"] button') as HTMLButtonElement).click()
+      await Promise.resolve()
+    })
+  })
+
+  it('shows a loading surface before the jobs query resolves', async () => {
+    let resolveJobs!: (value: unknown) => void
+    vi.mocked(listJobs).mockImplementation(() => new Promise(resolve => { resolveJobs = resolve }))
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Dashboard /></MemoryRouter></QueryClientProvider>)
+    })
+    expect(container.querySelector('.skeleton-list')).toBeTruthy()
+    await act(async () => {
+      resolveJobs({ jobs: [job] })
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.textContent).toContain('demo'), { timeout: 1000 })
   })
 
   it('keeps failed metric queries unavailable instead of showing zero', async () => {

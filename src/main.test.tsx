@@ -159,6 +159,24 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByText('No jobs configured')).toBeInTheDocument())
   })
 
+  it('shows the viewer empty state without a creation action', async () => {
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [] } as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<Jobs />)
+    await waitFor(() => expect(screen.getByText('No jobs configured')).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: /New job/ })).not.toBeInTheDocument()
+  })
+
+  it('shows the administrator empty state with a creation action', async () => {
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [] } as never)
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.write'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    renderWithProviders(<Jobs />)
+    await waitFor(() => expect(screen.getByText('No jobs yet')).toBeInTheDocument())
+    const create = screen.getByRole('button', { name: /Create a job/ })
+    expect(create).toBeInTheDocument()
+    fireEvent.click(create)
+  })
+
   it('accepts and suppresses incidents, refreshes conflicts, and disables legacy actions', async () => {
     const incident = { job_id: 'job-1', job: 'TCP monitor', incident: { change: { key: 'tcp:198.51.100.10:443', kind: 'port', target: '198.51.100.10', protocol: 'tcp', port: 443, old: 'closed', new: 'open', severity: 'critical' }, opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:01:00Z' } }
     const legacy = { ...incident, job_id: 'job-2', incident: { ...incident.incident, change: { ...incident.incident.change, key: undefined, old: undefined, new: undefined } } }

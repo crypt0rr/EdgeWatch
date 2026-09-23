@@ -11,10 +11,12 @@ export default defineConfig({
       include: ['src/**/*.{ts,tsx}'],
       exclude: ['src/**/*.test.{ts,tsx}', 'src/test/**'],
       thresholds: {
-        statements: 65,
-        lines: 65,
-        branches: 55,
-        functions: 60,
+        // Ratcheted 2026-09-23 to two points below the measured main-branch
+        // coverage. Lowering these floors requires a written justification.
+        statements: 86,
+        lines: 89,
+        branches: 73,
+        functions: 83,
       },
     },
   },

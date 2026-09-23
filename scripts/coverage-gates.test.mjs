@@ -22,6 +22,13 @@ const runScript = (script, args, cwd = repoRoot) => {
 const percentage = (pct) => ({ total: 1, covered: pct === 100 ? 1 : 0, skipped: 0, pct })
 const frontendReport = (overrides = {}) => {
   const files = [
+    'src/api.ts',
+    'src/baseline.ts',
+    'src/components/ActionDialog.tsx',
+    'src/components/Pagination.tsx',
+    'src/components/PortScopeDetails.tsx',
+    'src/components/SurfaceUnitList.tsx',
+    'src/format.ts',
     'src/main.tsx',
     'src/pages/Auth.tsx',
     'src/pages/BaselineHosts.tsx',
@@ -36,6 +43,9 @@ const frontendReport = (overrides = {}) => {
     'src/pages/ScannerProfiles.tsx',
     'src/pages/Security.tsx',
     'src/pages/Users.tsx',
+    'src/target.ts',
+    'src/types.ts',
+    'src/useDebouncedValue.ts',
   ]
   const report = { total: Object.fromEntries(['statements', 'lines', 'branches', 'functions'].map((metric) => [metric, percentage(100)])) }
   for (const file of files) {
@@ -89,6 +99,17 @@ test('frontend coverage gates reject low aggregate and missing critical entries'
     await writeFile(reportPath, JSON.stringify(missingDefaultPage))
     assert.notEqual(runScript('check-frontend-coverage.mjs', [reportPath]).status, 0)
 
+    const missingSource = frontendReport()
+    delete missingSource['src/baseline.ts']
+    await writeFile(reportPath, JSON.stringify(missingSource))
+    assert.notEqual(runScript('check-frontend-coverage.mjs', [reportPath]).status, 0)
+
+    const sourceRegression = frontendReport({
+      'src/api.ts': { lines: percentage(100), branches: percentage(59), functions: percentage(100) },
+    })
+    await writeFile(reportPath, JSON.stringify(sourceRegression))
+    assert.notEqual(runScript('check-frontend-coverage.mjs', [reportPath]).status, 0)
+
     const criticalRegression = frontendReport({
       'src/pages/JobDetail.tsx': { lines: percentage(69), branches: percentage(54) },
     })
@@ -112,6 +133,12 @@ test('Go coverage gates reject aggregate, package, and missing-package regressio
 
     await writeFile(profilePath, await goProfile(directory))
     await writeFile(summaryPath, goSummary({ 'github.com/crypt0rr/edgewatch/internal/app': 74 }))
+    assert.notEqual(runScript('check-go-coverage.sh', [profilePath, summaryPath]).status, 0)
+
+    await writeFile(summaryPath, goSummary({ 'github.com/crypt0rr/edgewatch/internal/config': 90 }))
+    assert.notEqual(runScript('check-go-coverage.sh', [profilePath, summaryPath]).status, 0)
+
+    await writeFile(summaryPath, goSummary({ 'github.com/crypt0rr/edgewatch/internal/webui': 83 }))
     assert.notEqual(runScript('check-go-coverage.sh', [profilePath, summaryPath]).status, 0)
 
     const missing = requiredPackages.slice(1).map((pkg) => `ok   ${pkg}   coverage: 100.0% of statements`).join('\n') + '\n'

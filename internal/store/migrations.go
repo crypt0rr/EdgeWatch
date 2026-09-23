@@ -1137,7 +1137,11 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
 		markMigrationFailed(ctx, db, err)
 		return err
 	}
-	if err := normalizePersistedTimestampsContext(ctx, db); err != nil {
+	if err := normalizePersistedTimestampsContextWithProgress(ctx, db, func(column timestampColumn, processed int64) {
+		statusCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		_ = updateMigrationStatus(statusCtx, db, "timestamp-normalization:"+column.table+"."+column.column, processed, 0)
+		cancel()
+	}); err != nil {
 		markMigrationFailed(ctx, db, err)
 		return fmt.Errorf("normalize persisted timestamps: %w", err)
 	}
@@ -1149,7 +1153,11 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
 		markMigrationFailed(ctx, db, err)
 		return err
 	}
-	if err := backfillScanCycleUnitIdentitiesContext(ctx, db); err != nil {
+	if err := backfillScanCycleUnitIdentitiesContextWithProgress(ctx, db, func(processed int64) {
+		statusCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		_ = updateMigrationStatus(statusCtx, db, "scan-cycle-identities", processed, 0)
+		cancel()
+	}); err != nil {
 		markMigrationFailed(ctx, db, err)
 		return err
 	}
@@ -1276,6 +1284,14 @@ func migrationColumnExists(tx *sql.Tx, table, column string) (bool, error) {
 // marker is committed: if a process stops midway, the next open resumes from
 // the remaining empty identities without replaying any scanner work.
 func backfillScanCycleUnitIdentitiesContext(ctx context.Context, db *sql.DB) error {
+	return backfillScanCycleUnitIdentitiesContextWithProgress(ctx, db, nil)
+}
+
+// backfillScanCycleUnitIdentitiesContextWithProgress keeps the legacy wrapper
+// available for callers and tests while allowing startup to refresh its
+// migration heartbeat after each committed bounded batch.
+func backfillScanCycleUnitIdentitiesContextWithProgress(ctx context.Context, db *sql.DB, observer func(int64)) error {
+	var processed int64
 	for {
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
@@ -1340,6 +1356,10 @@ func backfillScanCycleUnitIdentitiesContext(ctx context.Context, db *sql.DB) err
 		}
 		if err := tx.Commit(); err != nil {
 			return err
+		}
+		processed += int64(len(batch))
+		if observer != nil {
+			observer(processed)
 		}
 	}
 }

@@ -21,10 +21,25 @@ const runScript = (script, args, cwd = repoRoot) => {
 
 const percentage = (pct) => ({ total: 1, covered: pct === 100 ? 1 : 0, skipped: 0, pct })
 const frontendReport = (overrides = {}) => {
-  const files = ['src/main.tsx', 'src/pages/Security.tsx', 'src/pages/Users.tsx', 'src/pages/ScannerProfiles.tsx', 'src/pages/JobEditor.tsx', 'src/pages/JobDetail.tsx', 'src/pages/Notifications.tsx']
+  const files = [
+    'src/main.tsx',
+    'src/pages/Auth.tsx',
+    'src/pages/BaselineHosts.tsx',
+    'src/pages/Dashboard.tsx',
+    'src/pages/HostDetail.tsx',
+    'src/pages/Hosts.tsx',
+    'src/pages/JobDetail.tsx',
+    'src/pages/JobEditor.tsx',
+    'src/pages/Notifications.tsx',
+    'src/pages/PublicDashboard.tsx',
+    'src/pages/ScanDetail.tsx',
+    'src/pages/ScannerProfiles.tsx',
+    'src/pages/Security.tsx',
+    'src/pages/Users.tsx',
+  ]
   const report = { total: Object.fromEntries(['statements', 'lines', 'branches', 'functions'].map((metric) => [metric, percentage(100)])) }
   for (const file of files) {
-    report[file] = { lines: percentage(100), branches: percentage(100) }
+    report[file] = { lines: percentage(100), branches: percentage(100), functions: percentage(100) }
   }
   return Object.assign(report, overrides)
 }
@@ -67,6 +82,11 @@ test('frontend coverage gates reject low aggregate and missing critical entries'
     const missing = frontendReport()
     delete missing['src/pages/Users.tsx']
     await writeFile(reportPath, JSON.stringify(missing))
+    assert.notEqual(runScript('check-frontend-coverage.mjs', [reportPath]).status, 0)
+
+    const missingDefaultPage = frontendReport()
+    delete missingDefaultPage['src/pages/Auth.tsx']
+    await writeFile(reportPath, JSON.stringify(missingDefaultPage))
     assert.notEqual(runScript('check-frontend-coverage.mjs', [reportPath]).status, 0)
 
     const criticalRegression = frontendReport({

@@ -464,6 +464,80 @@ func TestDaemonReturnsWhenLeaseIsLost(t *testing.T) {
 	}
 }
 
+func TestDaemonStopsSharedManagedRunWhenLeaseIsLost(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.heartbeatInterval = 10 * time.Millisecond
+	scanner := &blockingScanner{started: make(chan struct{}), release: make(chan struct{})}
+	a.Scanner = scanner
+	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "shared-lease-loss-shutdown", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"},
+		Timeout: config.Duration(time.Minute), Timing: "balanced",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundCtx, owned := a.BeginRun(ctx)
+	if !owned {
+		t.Fatal("expected test to own the shared run context")
+	}
+	done := make(chan error, 1)
+	go func() { done <- a.Daemon(boundCtx) }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		var owner string
+		if scanErr := s.DB.QueryRowContext(ctx, `SELECT owner FROM daemon_lease WHERE id=1`).Scan(&owner); scanErr == nil && owner != "" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("daemon did not acquire its lease")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	completed := make(chan error, 1)
+	if err := a.StartManagedRun(record.ID, func(_ model.Scan, _ []model.Event, runErr error) { completed <- runErr }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-scanner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("managed scan did not start")
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE daemon_lease SET owner='other' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "daemon lease lost") {
+			t.Fatalf("daemon returned unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("daemon did not stop the shared managed run after losing its lease")
+	}
+	select {
+	case <-completed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("managed scan callback did not run after daemon shutdown")
+	}
+	var owner string
+	if err := s.DB.QueryRowContext(ctx, `SELECT owner FROM daemon_lease WHERE id=1`).Scan(&owner); err != nil {
+		t.Fatal(err)
+	}
+	if owner != "other" {
+		t.Fatalf("daemon shutdown released another owner's lease: %q", owner)
+	}
+}
+
 func TestDaemonStartupPreservesLiveJobLease(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

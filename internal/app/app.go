@@ -1007,11 +1007,12 @@ func (a *App) Daemon(ctx context.Context) error {
 		// Release the daemon lease only after all tracked scans have stopped.
 		// Otherwise another process can acquire the lease while an in-flight
 		// scan still owns the old daemon's resources and writes state.
-		if owned {
-			a.StopRun()
-		} else {
-			a.wg.Wait()
-		}
+		// StopRun is required even when this Daemon call joined an existing
+		// application lifecycle. In production runDaemon binds the lifecycle
+		// before starting Daemon, so owned is false; waiting on the wait group
+		// directly would leave web-triggered scans on the shared run context and
+		// could block shutdown forever after a lease or heartbeat failure.
+		a.StopRun()
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = a.Store.ReleaseLease(releaseCtx, owner)

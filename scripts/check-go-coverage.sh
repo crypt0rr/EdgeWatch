@@ -65,11 +65,22 @@ while IFS= read -r package; do
 		continue
 	fi
 	packages_seen=$((packages_seen + 1))
-	threshold=80
+	# Keep the aggregate floor stable while ratcheting package floors according
+	# to the measured risk and headroom of the main branch.
+	threshold=84
 	case "$package" in
 		*/cmd/edgewatch) threshold=70 ;;
-		*/internal/app|*/internal/web) threshold=75 ;;
-		*/internal/store) threshold=78 ;;
+		*/internal/app) threshold=78 ;;
+		*/internal/auth) threshold=85 ;;
+		*/internal/config) threshold=91 ;;
+		*/internal/engine) threshold=93 ;;
+		*/internal/model) threshold=93 ;;
+		*/internal/notify) threshold=86 ;;
+		*/internal/rdap) threshold=84 ;;
+		*/internal/scanner) threshold=87 ;;
+		*/internal/store) threshold=79 ;;
+		*/internal/updatecheck) threshold=88 ;;
+		*/internal/web) threshold=80 ;;
 	esac
 	if awk -v value="$coverage" -v minimum="$threshold" 'BEGIN { exit !(value < minimum) }'; then
 		echo "$package coverage ${coverage}% is below the required ${threshold}%" >&2

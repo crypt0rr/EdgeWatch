@@ -31,23 +31,17 @@ awk -v value="$total" 'BEGIN { if (value < 82) exit 1 }' || {
 failures=0
 packages_seen=0
 
-# Keep the production package contract explicit. Deriving this list from the
-# test output lets an accidentally removed package disappear from the gate
-# without changing the aggregate profile, which is exactly the failure mode
-# this check is meant to prevent.
-required_packages='github.com/crypt0rr/edgewatch/cmd/edgewatch
-github.com/crypt0rr/edgewatch/internal/app
-github.com/crypt0rr/edgewatch/internal/auth
-github.com/crypt0rr/edgewatch/internal/config
-github.com/crypt0rr/edgewatch/internal/engine
-github.com/crypt0rr/edgewatch/internal/model
-github.com/crypt0rr/edgewatch/internal/notify
-github.com/crypt0rr/edgewatch/internal/rdap
-github.com/crypt0rr/edgewatch/internal/scanner
-github.com/crypt0rr/edgewatch/internal/store
-github.com/crypt0rr/edgewatch/internal/updatecheck
-github.com/crypt0rr/edgewatch/internal/web
-github.com/crypt0rr/edgewatch/internal/webui'
+# Derive the production package contract from the module instead of keeping a
+# second hand-maintained list in this script. A newly added package therefore
+# has to appear in the summary and meet its threshold before the gate passes.
+required_packages=$(go list -f '{{if .GoFiles}}{{.ImportPath}}{{end}}' ./... 2>/dev/null | awk 'NF') || {
+	echo "could not enumerate production Go packages" >&2
+	exit 1
+}
+if [ -z "$required_packages" ]; then
+	echo "production Go package inventory is empty" >&2
+	exit 1
+fi
 
 while IFS= read -r package; do
 	[ -n "$package" ] || continue

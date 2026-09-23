@@ -29,21 +29,10 @@ const frontendReport = (overrides = {}) => {
   return Object.assign(report, overrides)
 }
 
-const requiredPackages = [
-  'github.com/crypt0rr/edgewatch/cmd/edgewatch',
-  'github.com/crypt0rr/edgewatch/internal/app',
-  'github.com/crypt0rr/edgewatch/internal/auth',
-  'github.com/crypt0rr/edgewatch/internal/config',
-  'github.com/crypt0rr/edgewatch/internal/engine',
-  'github.com/crypt0rr/edgewatch/internal/model',
-  'github.com/crypt0rr/edgewatch/internal/notify',
-  'github.com/crypt0rr/edgewatch/internal/rdap',
-  'github.com/crypt0rr/edgewatch/internal/scanner',
-  'github.com/crypt0rr/edgewatch/internal/store',
-  'github.com/crypt0rr/edgewatch/internal/updatecheck',
-  'github.com/crypt0rr/edgewatch/internal/web',
-  'github.com/crypt0rr/edgewatch/internal/webui',
-]
+const requiredPackages = execFileSync('go', ['list', '-f', '{{if .GoFiles}}{{.ImportPath}}{{end}}', './...'], { cwd: repoRoot, encoding: 'utf8' })
+  .split('\n')
+  .map((packageName) => packageName.trim())
+  .filter(Boolean)
 
 const goProfile = async (directory, count = 1) => {
   const entries = []
@@ -94,7 +83,9 @@ test('Go coverage gates reject aggregate, package, and missing-package regressio
     const summaryPath = join(directory, 'summary.txt')
     await writeFile(profilePath, await goProfile(directory))
     await writeFile(summaryPath, goSummary())
-    assert.equal(runScript('check-go-coverage.sh', [profilePath, summaryPath]).status, 0)
+    const passing = runScript('check-go-coverage.sh', [profilePath, summaryPath])
+    assert.equal(passing.status, 0)
+    assert.match(passing.stdout, new RegExp(`${requiredPackages.length} production packages checked`))
 
     await writeFile(profilePath, await goProfile(directory, 0))
     assert.notEqual(runScript('check-go-coverage.sh', [profilePath, summaryPath]).status, 0)

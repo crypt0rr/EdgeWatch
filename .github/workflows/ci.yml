@@ -177,6 +177,7 @@ jobs:
         run: |
           ./scripts/verify-compose-policy.sh base
           ./scripts/verify-compose-policy.sh syn
+          node --test scripts/verify-compose-policy.test.mjs
       - name: Verify pinned Naabu release
         run: ./scripts/verify-naabu-pin.sh
       - name: Verify release artifact contract

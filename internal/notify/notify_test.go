@@ -809,6 +809,54 @@ func TestManagedNotificationWrongKeyIsReportedAsDecryptFailure(t *testing.T) {
 	}
 }
 
+func TestNotifierDoesNotReplaceInvalidKeyWhenManagedDestinationsExist(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	keyPath := filepath.Join(t.TempDir(), "notification.key")
+	creator, err := newWithKeyFile(db, nil, keyPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := creator.CreateManaged(ctx, "Protected", "generic://localhost/protected?disabletls=yes&template=json", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	locked, err := newWithKeyFile(db, nil, keyPath, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status := locked.Status(); status["key_state"] != "key_invalid" || status["locked"] != 1 {
+		t.Fatalf("invalid-key status = %#v", status)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := locked.ensureKey(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("invalid-key store lookup error = %v, want context.Canceled", err)
+	}
+	if _, err := locked.UpdateManaged(ctx, created.ID, created.Revision, "Protected", nil, boolPtr(true)); !errors.Is(err, ErrKeyInvalid) {
+		t.Fatalf("update with invalid key error = %v, want ErrKeyInvalid", err)
+	}
+	if _, err := locked.CreateManaged(ctx, "Another", "generic://localhost/another?disabletls=yes&template=json", true); !errors.Is(err, ErrKeyInvalid) {
+		t.Fatalf("create with invalid key error = %v, want ErrKeyInvalid", err)
+	}
+	info, err := os.Stat(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("invalid key was replaced with %d bytes", info.Size())
+	}
+}
+
 func TestExplicitKeyPathIsNotGenerated(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

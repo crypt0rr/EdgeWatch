@@ -26,8 +26,10 @@ describe('SurfaceUnitList', () => {
       protocol: 'tcp',
       addresses: ['198.51.100.10', '198.51.100.11'],
       ports: [
-        { port: 443, state: 'open', service: 'https', evidence: ['reason ttl 64', 'nmap', 'verified'] },
-        { port: 8443, state: 'open|filtered', evidence: ['udp-response'] },
+        // This mirrors the backend wire shape: model.PortState.Evidence is
+        // emitted under the JSON key `addresses`.
+        { port: 443, state: 'open', service: 'https', addresses: ['reason ttl 64', 'nmap', 'verified'] },
+        { port: 8443, state: 'open|filtered', addresses: ['udp-response'] },
         { port: 22, state: 'closed' },
       ],
     }]} />))

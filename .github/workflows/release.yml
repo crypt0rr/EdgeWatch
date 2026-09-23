@@ -88,7 +88,7 @@ jobs:
           EDGEWATCH_REPORT_ACT_WARNINGS: '1'
         run: npm run test:coverage
       - name: Frontend diff coverage
-        run: node scripts/check-diff-coverage.mjs --language frontend --coverage coverage/coverage-final.json --base "${{ steps.release-lint-base.outputs.base }}"
+        run: node scripts/check-diff-coverage.mjs --language frontend --coverage coverage/coverage-final.json --base "${{ steps.release-lint-base.outputs.base }}" --require-base
       - name: Upload frontend coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -122,7 +122,7 @@ jobs:
       - name: Check Go coverage
         run: ./scripts/check-go-coverage.sh coverage.out go-coverage-summary.txt
       - name: Go diff coverage
-        run: node scripts/check-diff-coverage.mjs --language go --coverage coverage.out --base "${{ steps.release-lint-base.outputs.base }}"
+        run: node scripts/check-diff-coverage.mjs --language go --coverage coverage.out --base "${{ steps.release-lint-base.outputs.base }}" --require-base
       - name: Upload Go coverage
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

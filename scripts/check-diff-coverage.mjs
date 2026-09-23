@@ -4,15 +4,22 @@ import { readFile } from 'node:fs/promises'
 const args = process.argv.slice(2)
 const valueFor = (name, fallback) => {
   const index = args.indexOf(name)
-  return index >= 0 && args[index + 1] ? args[index + 1] : fallback
+  if (index < 0) return fallback
+  if (index + 1 >= args.length || args[index + 1].startsWith('--')) return ''
+  return args[index + 1]
 }
 const language = valueFor('--language')
 const coveragePath = valueFor('--coverage', language === 'frontend' ? 'coverage/coverage-final.json' : 'coverage.out')
 const baseRequested = valueFor('--base', process.env.COVERAGE_BASE || 'origin/main')
+const requireBase = args.includes('--require-base')
 const minimum = 80
 
 if (!['frontend', 'go'].includes(language)) {
-  console.error('usage: node scripts/check-diff-coverage.mjs --language frontend|go [--coverage path] [--base ref]')
+  console.error('usage: node scripts/check-diff-coverage.mjs --language frontend|go [--coverage path] [--base ref] [--require-base]')
+  process.exit(2)
+}
+if (requireBase && !baseRequested) {
+  console.error('diff coverage: --require-base needs a non-empty --base ref')
   process.exit(2)
 }
 
@@ -20,6 +27,7 @@ function resolveBase() {
   try {
     return execFileSync('git', ['rev-parse', '--verify', `${baseRequested}^{commit}`], { encoding: 'utf8' }).trim()
   } catch {
+    if (requireBase) return ''
     try {
       return execFileSync('git', ['rev-parse', '--verify', 'HEAD^'], { encoding: 'utf8' }).trim()
     } catch {
@@ -30,6 +38,10 @@ function resolveBase() {
 
 const base = resolveBase()
 if (!base) {
+  if (requireBase) {
+    console.error(`diff coverage: unable to resolve required base ${baseRequested}`)
+    process.exit(1)
+  }
   console.log(`diff coverage: no merge base available for ${baseRequested}; skipped`)
   process.exit(0)
 }

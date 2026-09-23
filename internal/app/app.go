@@ -288,6 +288,16 @@ type ProgressScanner interface {
 	ScanWithProgress(context.Context, config.Job, scanner.ProgressReporter) (model.Snapshot, error)
 }
 
+// BudgetedProgressScanner can validate data-dependent work immediately before
+// a scanner launches it. Naabu discovers the TCP port set first, so the
+// direct path needs this optional hook to account for the subsequent Nmap
+// enrichment without changing the small Scanner contract used by test and
+// plugin implementations.
+type BudgetedProgressScanner interface {
+	ProgressScanner
+	ScanWithProgressBudget(context.Context, config.Job, scanner.ProgressReporter, func(discoveryProbes, nmapProbes int64) error) (model.Snapshot, error)
+}
+
 func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logger) (*App, error) {
 	return NewWithScannerPaths(cfg, s, nmapPath, "/usr/local/bin/naabu", logger)
 }
@@ -648,7 +658,13 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 			}
 		}
 		if scanErr == nil {
-			if progressScanner, ok := a.Scanner.(ProgressScanner); ok {
+			if budgetedScanner, ok := a.Scanner.(BudgetedProgressScanner); ok && job.TCP != nil && config.NormalizeJob(job).TCP != nil && config.NormalizeJob(job).TCP.Engine == config.EngineNaabuNmap {
+				snapshot, scanErr = budgetedScanner.ScanWithProgressBudget(scanCtx, job, func(progress scanner.Progress) {
+					a.updateActiveProgress(scan.ID, progress)
+				}, func(discoveryProbes, nmapProbes int64) error {
+					return a.checkResolvedProbeBudget(job, discoveryProbes, nmapProbes)
+				})
+			} else if progressScanner, ok := a.Scanner.(ProgressScanner); ok {
 				snapshot, scanErr = progressScanner.ScanWithProgress(scanCtx, job, func(progress scanner.Progress) {
 					a.updateActiveProgress(scan.ID, progress)
 				})

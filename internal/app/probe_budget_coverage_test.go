@@ -13,6 +13,62 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
+type budgetedProgressTestScanner struct {
+	called bool
+}
+
+func (s *budgetedProgressTestScanner) Version(context.Context) string { return "budgeted-test" }
+
+func (s *budgetedProgressTestScanner) Scan(ctx context.Context, job config.Job) (model.Snapshot, error) {
+	return s.ScanWithProgress(ctx, job, nil)
+}
+
+func (s *budgetedProgressTestScanner) ScanWithProgress(context.Context, config.Job, scanner.ProgressReporter) (model.Snapshot, error) {
+	return model.Snapshot{}, nil
+}
+
+func (s *budgetedProgressTestScanner) ScanWithProgressBudget(_ context.Context, _ config.Job, report scanner.ProgressReporter, check func(int64, int64) error) (model.Snapshot, error) {
+	s.called = true
+	if report != nil {
+		report(scanner.Progress{Phase: "budgeted"})
+	}
+	if err := check(65535, 1); err != nil {
+		return model.Snapshot{}, err
+	}
+	return model.Snapshot{}, nil
+}
+
+func TestRunJobUsesBudgetedScannerForDirectNaabuPipeline(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "budgeted-direct.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{
+		Version: 1, Database: db.Path, Retention: config.Duration(time.Hour),
+		Scheduler: config.Scheduler{MaxConcurrent: 1, MaxProbeCount: 10, MaxNaabuProbeCount: config.DefaultNaabuMaxProbeCount},
+		Web:       config.Web{Listen: "127.0.0.1:8080"},
+	}
+	a, err := New(cfg, db, "missing-nmap", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &budgetedProgressTestScanner{}
+	a.Scanner = fake
+	job := config.NormalizeJob(config.Job{
+		Name: "direct-naabu-budget", Targets: []string{"192.0.2.1"}, Timeout: config.Duration(time.Minute),
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{ScanType: "connect"}},
+	})
+	scan, _, err := a.RunJob(ctx, job)
+	if err != nil || scan.Status != "success" {
+		t.Fatalf("direct budgeted scan = %#v, err=%v", scan, err)
+	}
+	if !fake.called {
+		t.Fatal("direct Naabu run did not use the budgeted scanner hook")
+	}
+}
+
 func TestCheckScanCycleProbeBudgetCoversSplitAndHardLimits(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

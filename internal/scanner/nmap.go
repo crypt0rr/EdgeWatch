@@ -307,9 +307,23 @@ func weightedProcessPercent(completedInvocations, totalInvocations int64, fracti
 // console. The legacy Scan method delegates here so test and plugin scanners
 // do not need to implement progress reporting.
 func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report ProgressReporter) (model.Snapshot, error) {
+	return n.scanWithProgress(ctx, job, report, nil)
+}
+
+// ScanWithProgressBudget is the application entry point for scans whose work
+// is data-dependent. Naabu discovers the TCP ports before Nmap enrichment,
+// so the caller supplies a check that can reject the exact discovered Nmap
+// work before the child process is started. Keeping this as an optional
+// interface preserves the small Scanner contract used by deterministic test
+// scanners and integrations.
+func (n *Nmap) ScanWithProgressBudget(ctx context.Context, job config.Job, report ProgressReporter, check func(discoveryProbes, nmapProbes int64) error) (model.Snapshot, error) {
+	return n.scanWithProgress(ctx, job, report, check)
+}
+
+func (n *Nmap) scanWithProgress(ctx context.Context, job config.Job, report ProgressReporter, budgetCheck func(discoveryProbes, nmapProbes int64) error) (model.Snapshot, error) {
 	job = config.NormalizeJob(job)
 	if job.TCP != nil && job.TCP.Engine == config.EngineNaabuNmap {
-		return n.scanNaabuPipeline(ctx, job, report)
+		return n.scanNaabuPipelineWithBudget(ctx, job, report, budgetCheck)
 	}
 	started := time.Now().UTC()
 	emit := func(progress Progress) {

@@ -70,6 +70,7 @@ func normalizePersistedTimestampsContextWithProgress(ctx context.Context, db *sq
 		return nil
 	}
 	columns := []timestampColumn{
+		{table: "events", column: "created_at"},
 		{table: "scans", column: "started_at"},
 		{table: "scans", column: "finished_at"},
 		{table: "scan_cycles", column: "started_at"},

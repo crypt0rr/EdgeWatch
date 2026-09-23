@@ -837,6 +837,11 @@ func TestNotifierDoesNotReplaceInvalidKeyWhenManagedDestinationsExist(t *testing
 	if status := locked.Status(); status["key_state"] != "key_invalid" || status["locked"] != 1 {
 		t.Fatalf("invalid-key status = %#v", status)
 	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := locked.ensureKey(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("invalid-key store lookup error = %v, want context.Canceled", err)
+	}
 	if _, err := locked.UpdateManaged(ctx, created.ID, created.Revision, "Protected", nil, boolPtr(true)); !errors.Is(err, ErrKeyInvalid) {
 		t.Fatalf("update with invalid key error = %v, want ErrKeyInvalid", err)
 	}

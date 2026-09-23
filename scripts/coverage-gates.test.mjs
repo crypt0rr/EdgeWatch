@@ -142,6 +142,55 @@ test('diff coverage gates pass covered changes and reject uncovered changes', as
   })
 })
 
+test('diff coverage rejects partially covered changed lines with multiple executable blocks', async () => {
+  await withTempDirectory(async (directory) => {
+    await createDiffFixture(directory)
+    const frontendPath = join(directory, 'frontend.json')
+    const goPath = join(directory, 'go.out')
+
+    // Both statements overlap the changed source line. A weakened `.some()`
+    // predicate would incorrectly credit this line even though one block did
+    // not execute, so this assertion acts as a mutation guard for the gate.
+    await writeFile(frontendPath, JSON.stringify({
+      'src/example.ts': {
+        statementMap: {
+          0: { start: { line: 1 }, end: { line: 1 } },
+          1: { start: { line: 1 }, end: { line: 1 } },
+        },
+        s: { 0: 1, 1: 0 },
+      },
+    }))
+    await writeFile(goPath, [
+      'mode: atomic',
+      'internal/example.go:3.1,3.15 1 1',
+      'internal/example.go:3.1,3.15 1 0',
+      '',
+    ].join('\n'))
+
+    assert.notEqual(runScript('check-diff-coverage.mjs', ['--language', 'frontend', '--coverage', frontendPath, '--base', 'HEAD^'], directory).status, 0)
+    assert.notEqual(runScript('check-diff-coverage.mjs', ['--language', 'go', '--coverage', goPath, '--base', 'HEAD^'], directory).status, 0)
+
+    await writeFile(frontendPath, JSON.stringify({
+      'src/example.ts': {
+        statementMap: {
+          0: { start: { line: 1 }, end: { line: 1 } },
+          1: { start: { line: 1 }, end: { line: 1 } },
+        },
+        s: { 0: 1, 1: 1 },
+      },
+    }))
+    await writeFile(goPath, [
+      'mode: atomic',
+      'internal/example.go:3.1,3.15 1 1',
+      'internal/example.go:3.1,3.15 1 1',
+      '',
+    ].join('\n'))
+
+    assert.equal(runScript('check-diff-coverage.mjs', ['--language', 'frontend', '--coverage', frontendPath, '--base', 'HEAD^'], directory).status, 0)
+    assert.equal(runScript('check-diff-coverage.mjs', ['--language', 'go', '--coverage', goPath, '--base', 'HEAD^'], directory).status, 0)
+  })
+})
+
 test('required diff coverage bases reject empty and unresolvable refs', async () => {
   await withTempDirectory(async (directory) => {
     await createDiffFixture(directory)

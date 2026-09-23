@@ -75,6 +75,10 @@ type Server struct {
 	// It is configurable only for deterministic server tests; production uses
 	// the default below.
 	writeTimeout time.Duration
+	// sseWriteTimeout bounds each individual SSE write and flush. It is
+	// configurable only for deterministic server tests; production uses the
+	// default below.
+	sseWriteTimeout time.Duration
 	// These limits are configurable only for deterministic server tests;
 	// production uses the bounded defaults below.
 	sseMaxSubscribers        int
@@ -109,6 +113,7 @@ type pendingTOTP struct {
 }
 
 const defaultHTTPWriteTimeout = 60 * time.Second
+const defaultSSEWriteTimeout = 30 * time.Second
 
 const (
 	defaultMaxSSESubscribers        = 256

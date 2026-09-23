@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -51,10 +52,12 @@ func (l *pipeListener) Close() error {
 func (l *pipeListener) Addr() net.Addr { return l.addr }
 
 type deadlineTrackingWriter struct {
-	header   http.Header
-	body     bytes.Buffer
-	deadline time.Time
-	status   int
+	header    http.Header
+	body      bytes.Buffer
+	mu        sync.Mutex
+	deadline  time.Time
+	deadlines []time.Time
+	status    int
 }
 
 func (w *deadlineTrackingWriter) Header() http.Header { return w.header }
@@ -70,7 +73,62 @@ func (w *deadlineTrackingWriter) WriteHeader(status int) { w.status = status }
 func (w *deadlineTrackingWriter) Flush()                 {}
 
 func (w *deadlineTrackingWriter) SetWriteDeadline(deadline time.Time) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.deadline = deadline
+	w.deadlines = append(w.deadlines, deadline)
+	return nil
+}
+
+type blockingSSEWriter struct {
+	started         chan struct{}
+	deadlineMu      sync.Mutex
+	deadline        time.Time
+	deadlineChanged chan struct{}
+	status          int
+}
+
+func newBlockingSSEWriter() *blockingSSEWriter {
+	return &blockingSSEWriter{started: make(chan struct{}), deadlineChanged: make(chan struct{})}
+}
+
+func (w *blockingSSEWriter) Header() http.Header { return make(http.Header) }
+
+func (w *blockingSSEWriter) Write(data []byte) (int, error) {
+	select {
+	case <-w.started:
+	default:
+		close(w.started)
+	}
+	for {
+		w.deadlineMu.Lock()
+		deadline, changed := w.deadline, w.deadlineChanged
+		w.deadlineMu.Unlock()
+		var timer <-chan time.Time
+		if !deadline.IsZero() {
+			t := time.NewTimer(time.Until(deadline))
+			defer t.Stop()
+			timer = t.C
+		}
+		select {
+		case <-changed:
+			continue
+		case <-timer:
+			return 0, os.ErrDeadlineExceeded
+		}
+	}
+}
+
+func (w *blockingSSEWriter) WriteHeader(status int) { w.status = status }
+func (w *blockingSSEWriter) Flush()                 {}
+
+func (w *blockingSSEWriter) SetWriteDeadline(deadline time.Time) error {
+	w.deadlineMu.Lock()
+	old := w.deadlineChanged
+	w.deadline = deadline
+	w.deadlineChanged = make(chan struct{})
+	close(old)
+	w.deadlineMu.Unlock()
 	return nil
 }
 
@@ -128,16 +186,90 @@ func TestServeListenerWriteDeadlineReleasesStalledReader(t *testing.T) {
 	}
 }
 
-func TestStreamClearsServerWriteDeadline(t *testing.T) {
+func TestStreamAppliesBoundedWriteDeadline(t *testing.T) {
 	server, _, session := newUsersTestServer(t)
 	writer := &deadlineTrackingWriter{header: make(http.Header)}
 	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	defer cancel()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(ctx)
-	server.stream(writer, request, session)
-	if !writer.deadline.IsZero() {
-		t.Fatalf("SSE write deadline = %v, want cleared", writer.deadline)
+	done := make(chan struct{})
+	go func() {
+		server.stream(writer, request, session)
+		close(done)
+	}()
+	deadlineAt := time.Now().Add(time.Second)
+	for time.Now().Before(deadlineAt) {
+		writer.mu.Lock()
+		count := len(writer.deadlines)
+		writer.mu.Unlock()
+		if count >= 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
 	}
+	writer.mu.Lock()
+	deadlines := append([]time.Time(nil), writer.deadlines...)
+	deadline := writer.deadline
+	writer.mu.Unlock()
+	if len(deadlines) < 2 || !deadlines[0].IsZero() {
+		t.Fatalf("SSE deadlines = %#v, want an initial clear", deadlines)
+	}
+	if deadline.IsZero() || !deadline.After(time.Now()) {
+		t.Fatalf("SSE final write deadline = %v, want a future bounded deadline", deadline)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SSE stream did not close after cancellation")
+	}
+}
+
+func TestSSEWriteDeadlineReleasesStalledReader(t *testing.T) {
+	server, _, session := newUsersTestServer(t)
+	server.sseWriteTimeout = 25 * time.Millisecond
+	writer := newBlockingSSEWriter()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil)
+	done := make(chan struct{})
+	go func() {
+		server.stream(writer, request, session)
+		close(done)
+	}()
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("SSE stream did not attempt its first write")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SSE stream did not release a stalled write")
+	}
+	waitForSSESubscribers(t, server, 0)
+}
+
+func TestSSEShutdownInterruptsStalledWrite(t *testing.T) {
+	server, _, session := newUsersTestServer(t)
+	server.sseWriteTimeout = time.Minute
+	writer := newBlockingSSEWriter()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil)
+	done := make(chan struct{})
+	go func() {
+		server.stream(writer, request, session)
+		close(done)
+	}()
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("SSE stream did not attempt its first write")
+	}
+	server.signalShutdown()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SSE shutdown did not interrupt the stalled write")
+	}
+	waitForSSESubscribers(t, server, 0)
 }
 
 func waitForSSESubscribers(t *testing.T, server *Server, want int) {
@@ -345,8 +477,8 @@ func TestServerStaticSSEAndAuditHelpers(t *testing.T) {
 
 	server.broadcast(map[string]any{"type": "first"})
 	server.broadcast(map[string]any{"type": "second"})
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(ctx)
 	request.Header.Set("Last-Event-ID", "1")
 	streamResponse := httptest.NewRecorder()

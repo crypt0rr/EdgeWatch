@@ -25,10 +25,25 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	streamCtx, streamCancel := context.WithCancel(r.Context())
 	defer streamCancel()
 	// http.Server.WriteTimeout protects every ordinary response. SSE is the
-	// one intentional exception: it stays open and sends periodic heartbeats,
-	// so remove the per-request deadline only after the handler has established
-	// that the writer supports streaming.
-	_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
+	// one intentional exception: it stays open and sends periodic heartbeats.
+	// Remove the server deadline, then apply a fresh bounded deadline to every
+	// individual write and flush below. The cancellation hook makes shutdown
+	// and request cancellation interrupt a write immediately.
+	responseController := http.NewResponseController(w)
+	_ = responseController.SetWriteDeadline(time.Time{})
+	writeCancellationDone := make(chan struct{})
+	stopWriteCancellation := context.AfterFunc(streamCtx, func() {
+		defer close(writeCancellationDone)
+		_ = responseController.SetWriteDeadline(time.Now())
+	})
+	defer func() {
+		if !stopWriteCancellation() {
+			// Stop does not wait when the callback has already started. Do so
+			// before returning the handler so the response controller cannot be
+			// used after ServeHTTP has ended.
+			<-writeCancellationDone
+		}
+	}()
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -77,11 +92,13 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	}
 	if len(s.subscribers) >= maxSubscribers {
 		s.mu.Unlock()
+		s.setSSEWriteDeadline(w)
 		writeSSELimit(w, flusher, "too many live streams")
 		return
 	}
 	if s.subscriberUse[subscriberKey] >= maxSubscribersPerUser {
 		s.mu.Unlock()
+		s.setSSEWriteDeadline(w)
 		writeSSELimit(w, flusher, "too many live streams for this session")
 		return
 	}
@@ -119,17 +136,21 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 		s.sseAuthMu.Unlock()
 		s.sseWG.Done()
 	}()
-	if _, err := w.Write([]byte(": connected\nretry: 5000\n\n")); err != nil {
+	if !s.writeSSE(streamCtx, w, []byte(": connected\nretry: 5000\n\n")) {
 		return
 	}
-	flusher.Flush()
+	if !s.flushSSE(streamCtx, w, flusher) {
+		return
+	}
 	for _, message := range replay {
-		if !writeSSEMessage(w, message) {
+		if !s.writeSSEMessage(streamCtx, w, message) {
 			return
 		}
 	}
 	if len(replay) > 0 {
-		flusher.Flush()
+		if !s.flushSSE(streamCtx, w, flusher) {
+			return
+		}
 	}
 	heartbeat := time.NewTicker(25 * time.Second)
 	defer heartbeat.Stop()
@@ -150,20 +171,70 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 			if !s.streamAuthorized(streamCtx, r, authKey) {
 				return
 			}
-			if !writeSSEMessage(w, message) {
+			if !s.writeSSEMessage(streamCtx, w, message) {
 				return
 			}
-			flusher.Flush()
+			if !s.flushSSE(streamCtx, w, flusher) {
+				return
+			}
 		case <-heartbeat.C:
 			if !s.streamAuthorized(streamCtx, r, authKey) {
 				return
 			}
-			if _, err := w.Write([]byte(": heartbeat\n\n")); err != nil {
+			if !s.writeSSE(streamCtx, w, []byte(": heartbeat\n\n")) {
 				return
 			}
-			flusher.Flush()
+			if !s.flushSSE(streamCtx, w, flusher) {
+				return
+			}
 		}
 	}
+}
+
+func (s *Server) sseWriteTimeoutValue() time.Duration {
+	if s.sseWriteTimeout > 0 {
+		return s.sseWriteTimeout
+	}
+	return defaultSSEWriteTimeout
+}
+
+func (s *Server) setSSEWriteDeadline(w http.ResponseWriter) {
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(s.sseWriteTimeoutValue()))
+}
+
+func (s *Server) prepareSSEWrite(ctx context.Context, w http.ResponseWriter) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	s.setSSEWriteDeadline(w)
+	if ctx != nil && ctx.Err() != nil {
+		_ = http.NewResponseController(w).SetWriteDeadline(time.Now())
+		return false
+	}
+	return true
+}
+
+func (s *Server) writeSSE(ctx context.Context, w http.ResponseWriter, data []byte) bool {
+	if !s.prepareSSEWrite(ctx, w) {
+		return false
+	}
+	_, err := w.Write(data)
+	return err == nil
+}
+
+func (s *Server) writeSSEMessage(ctx context.Context, w http.ResponseWriter, message sseMessage) bool {
+	if !s.prepareSSEWrite(ctx, w) {
+		return false
+	}
+	return writeSSEMessage(w, message)
+}
+
+func (s *Server) flushSSE(ctx context.Context, w http.ResponseWriter, flusher http.Flusher) bool {
+	if !s.prepareSSEWrite(ctx, w) {
+		return false
+	}
+	flusher.Flush()
+	return true
 }
 
 // writeSSELimit deliberately returns a successful event-stream response. A

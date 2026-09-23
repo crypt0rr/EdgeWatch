@@ -26,6 +26,13 @@ type Store struct {
 	Path        string
 	authKeyPath string
 	authAutoKey bool
+	// queryOnly records a read-only inspection store so Close can remove only
+	// empty SQLite sidecars that this connection created. Existing companions
+	// are deliberately left untouched because they may contain live or foreign
+	// state that restore must inspect.
+	queryOnly     bool
+	artifactPath  string
+	probeSidecars map[string]bool
 	// targetExclusions is configured once during daemon startup. A nil slice
 	// means the caller did not provide deployment policy (kept for embedded
 	// library compatibility); a non-nil empty slice is an explicit allow-all
@@ -106,8 +113,8 @@ func OpenExistingContext(ctx context.Context, path string) (*Store, error) {
 // mode. It never changes database content, journal mode, repairs permissions,
 // or runs migrations, making it safe for health, verification, and export
 // reads. SQLite may still initialize transient WAL/SHM coordination files
-// while attaching to a live database; callers must not treat those companions
-// as content mutations.
+// while attaching to a live database; Store.Close removes only empty
+// companions created by this inspection connection.
 func OpenReadOnlyExisting(path string) (*Store, error) {
 	return openWithOptions(path, openOptions{requireExisting: true, queryOnly: true})
 }
@@ -115,7 +122,8 @@ func OpenReadOnlyExisting(path string) (*Store, error) {
 // OpenReadOnlyExistingContext is the context-aware variant used by
 // long-running host-side checks. It never changes database content, journal
 // mode, permissions, or schema. SQLite may initialize transient coordination
-// sidecars while opening a live WAL database.
+// sidecars while opening a live WAL database. Store.Close removes only empty
+// companions created by this inspection connection.
 func OpenReadOnlyExistingContext(ctx context.Context, path string) (*Store, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -143,6 +151,7 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 	dsn := path
 	memoryDatabase := isSQLiteMemoryPath(path)
 	artifactPath := path
+	var probeSidecars map[string]bool
 	if !memoryDatabase {
 		var err error
 		artifactPath, err = sqliteArtifactPath(path)
@@ -190,6 +199,11 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 		if options.queryOnly {
 			dsn = readOnlySQLiteDSN(artifactPath)
 		}
+	}
+	if options.queryOnly && !memoryDatabase {
+		// Capture the companion files before SQLite opens the live-safe
+		// read-only connection; it may initialize an empty WAL/SHM pair.
+		probeSidecars = snapshotSQLiteSidecars(artifactPath)
 	}
 	connector, err := sqlite.NewConnector(dsn)
 	if err != nil {
@@ -266,7 +280,12 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 				return nil, err
 			}
 		}
-		return &Store{DB: db, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true}, nil
+		store := &Store{DB: db, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true, queryOnly: true}
+		if !memoryDatabase {
+			store.artifactPath = artifactPath
+			store.probeSidecars = probeSidecars
+		}
+		return store, nil
 	}
 	var readDB *sql.DB
 	if !memoryDatabase && walEnabled {
@@ -489,10 +508,20 @@ func (s *Store) SetAuthKeyPath(path string) {
 	s.authAutoKey = false
 }
 func (s *Store) Close() error {
+	var closeErr error
 	if s.ReadDB == nil || s.ReadDB == s.DB {
-		return s.DB.Close()
+		closeErr = s.DB.Close()
+	} else {
+		closeErr = errors.Join(s.ReadDB.Close(), s.DB.Close())
 	}
-	return errors.Join(s.ReadDB.Close(), s.DB.Close())
+	if s.queryOnly && s.artifactPath != "" {
+		// The read-only DSN is intentionally live-safe and may cause SQLite to
+		// create an empty WAL/SHM pair. Remove only companions that were absent
+		// before this probe and only while the WAL is empty; never hide existing
+		// or non-empty recovery evidence.
+		cleanupSQLiteProbeSidecars(s.artifactPath, s.probeSidecars)
+	}
+	return closeErr
 }
 
 func (s *Store) reader() *sql.DB {

@@ -483,6 +483,42 @@ func TestVerifyDoesNotChangeReadOnlyDatabaseBytesOrMode(t *testing.T) {
 	}
 }
 
+func TestReadOnlyVerificationCleansProbeSidecarsForSafeRestore(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "destination.db")
+	createRestoreFixture(t, source, "source")
+	createRestoreFixture(t, destination, "destination")
+
+	reader, err := OpenReadOnlyExisting(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Verify(context.Background()); err != nil {
+		_ = reader.Close()
+		t.Fatalf("verify: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close read-only verifier: %v", err)
+	}
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := os.Stat(source + suffix); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("read-only verifier left %s: %v", suffix, err)
+		}
+	}
+
+	preflight, err := PreflightRestore(context.Background(), source, destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preflight.Safe || len(preflight.SourceSidecars) != 0 || len(preflight.DestinationSidecars) != 0 {
+		t.Fatalf("preflight after read-only verification = %#v", preflight)
+	}
+	if _, err := Restore(context.Background(), source, destination, RestoreOptions{}); err != nil {
+		t.Fatalf("restore after read-only verification: %v", err)
+	}
+}
+
 func TestPreflightRestoreAcceptsReadOnlySource(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "readonly-source.db")

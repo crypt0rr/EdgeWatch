@@ -272,6 +272,22 @@ func TestSSEShutdownInterruptsStalledWrite(t *testing.T) {
 	waitForSSESubscribers(t, server, 0)
 }
 
+func TestSSEWriteHelpersRejectCanceledContext(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	writer := &deadlineTrackingWriter{header: make(http.Header)}
+	if server.writeSSE(ctx, writer, []byte("event")) {
+		t.Fatal("writeSSE accepted a canceled context")
+	}
+	if server.writeSSEMessage(ctx, writer, sseMessage{id: 1, payload: []byte(`{"type":"test"}`)}) {
+		t.Fatal("writeSSEMessage accepted a canceled context")
+	}
+	if server.flushSSE(ctx, writer, writer) {
+		t.Fatal("flushSSE accepted a canceled context")
+	}
+}
+
 func waitForSSESubscribers(t *testing.T, server *Server, want int) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

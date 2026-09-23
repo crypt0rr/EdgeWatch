@@ -995,3 +995,7 @@
   flex: 0 0 auto;
   white-space: nowrap;
 }
+
+.baseline.stalled {
+  color: var(--red);
+}

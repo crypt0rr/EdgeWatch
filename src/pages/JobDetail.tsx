@@ -35,6 +35,7 @@ import { ActionDialog } from '../components/ActionDialog'
 import { PortScopeDetails } from '../components/PortScopeDetails'
 import { SurfaceUnitList } from '../components/SurfaceUnitList'
 import type { WorkEstimate } from '../types'
+import { baselinePresentation } from '../baseline'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 
@@ -318,6 +319,7 @@ export function JobDetail() {
     </div>
   ) : null
   const selectedScanIsVisible = Boolean(selectedScan && scans.data?.scans.some((scan) => scan.id === selectedScan))
+  const baselineStatus = baselinePresentation(value.baseline)
 
   return (
     <section className="page">
@@ -347,7 +349,7 @@ export function JobDetail() {
       <div className="detail-summary">
         <div className="summary-card">
           <span className="summary-label">Baseline</span>
-          <strong>{value.baseline.status === 'complete' ? 'Ready' : value.baseline.status === 'stalled' ? 'Stalled' : 'Learning'}</strong>
+          <strong>{baselineStatus.label}</strong>
           <span className="muted">
             {value.baseline.status === 'complete'
               ? `Established from ${value.baseline.scan_id?.slice(0, 8) ?? 'scan'}`

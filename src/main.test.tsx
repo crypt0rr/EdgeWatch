@@ -141,10 +141,11 @@ describe('application shell', () => {
   })
 
   it('renders job lists, archived states, and creation controls across loading, error, and empty paths', async () => {
-    vi.mocked(listJobs).mockResolvedValue({ jobs: [{ id: 'job-1', revision: 2, enabled: true, archived: false, job: { name: 'TCP monitor', targets: ['198.51.100.10'], tcp: { ports: '22-23' }, baseline: { status: 'complete' }, schedule: '* * * * *' }, baseline: { status: 'complete', baseline_samples: 1 } }, { id: 'job-2', revision: 1, enabled: false, archived: true, job: { name: 'Old monitor', targets: ['198.51.100.11'], udp: { ports: '53' }, schedule: '0 * * * *' }, baseline: { status: 'learning', samples: 0 } }] } as never)
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [{ id: 'job-1', revision: 2, enabled: true, archived: false, job: { name: 'TCP monitor', targets: ['198.51.100.10'], tcp: { ports: '22-23' }, baseline: { status: 'complete' }, schedule: '* * * * *' }, baseline: { status: 'complete', baseline_samples: 1 } }, { id: 'job-2', revision: 1, enabled: false, archived: true, job: { name: 'Old monitor', targets: ['198.51.100.11'], udp: { ports: '53' }, schedule: '0 * * * *' }, baseline: { status: 'learning', samples: 0 } }, { id: 'job-3', revision: 1, enabled: true, archived: false, job: { name: 'Stalled monitor', targets: ['198.51.100.12'], tcp: { ports: '443' }, schedule: '30 * * * *' }, baseline: { status: 'stalled', incomplete_attempts: 2 } }] } as never)
     renderWithProviders(<Jobs />)
     await waitFor(() => expect(screen.getByRole('heading', { name: 'TCP monitor' })).toBeInTheDocument())
     expect(screen.getByText('Archived')).toBeInTheDocument()
+    expect(screen.getByText('⚠ Baseline stalled')).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: /New job/ }))
 
     cleanup()

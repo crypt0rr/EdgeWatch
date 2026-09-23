@@ -52,7 +52,7 @@ export function SurfaceUnitList({ units, emptyLabel = 'No expected results.' }: 
                       <code>{port.port}/{unit.protocol.toLowerCase()}</code>
                       <span>{port.state}</span>
                       {port.service && <small>{port.service}</small>}
-                      {port.evidence?.length && <small className="surface-port-evidence">{evidenceSummary(port.evidence)}</small>}
+                      {port.addresses?.length && <small className="surface-port-evidence">{evidenceSummary(port.addresses)}</small>}
                     </span>
                   ))}
                 </div>

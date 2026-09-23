@@ -25,7 +25,9 @@ export type ActiveScan = {
 }
 export type ScanCycleUnit = { cycle_id: string; sequence: number; engine?: string; phase?: string; protocol: string; family: number; ports: string; port_count: number; addresses: number; probes: number; status: string; attempts: number; started_at?: string; finished_at?: string; last_error?: string }
 export type ScanCycle = { id: string; job_id: string; job_revision: number; status: string; attempt_count: number; no_progress_attempts: number; total_units: number; completed_units: number; total_probes: number; completed_probes: number; started_at: string; updated_at: string; expires_at: string; finished_at?: string; last_error?: string; units?: ScanCycleUnit[] }
-export type Unit = { target: string; protocol: string; addresses?: string[]; ports?: { port: number; state: string; service?: string; evidence?: string[] }[] }
+// Port evidence is serialized as `addresses` by the Go model. These are the
+// effective addresses on which the positive port was observed.
+export type Unit = { target: string; protocol: string; addresses?: string[]; ports?: { port: number; state: string; service?: string; addresses?: string[] }[] }
 export type Scope = { target: string; protocol: string; ports: string; service_detection: boolean }
 export type Incident = { job_id: string; job: string; incident: { change: { key?: string; kind: string; target: string; protocol?: string; port?: number; old?: string; new?: string; severity: string }; scan_id?: string; opened_at: string; last_seen_at: string; recovery_count?: number } }
 export type Change = { key?: string; kind: string; target: string; protocol?: string; port?: number; old?: string; new?: string; severity: string }

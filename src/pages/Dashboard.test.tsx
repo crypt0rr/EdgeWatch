@@ -203,8 +203,8 @@ describe('dashboard', () => {
   })
 
   it('shows a loading surface before the jobs query resolves', async () => {
-    let resolveJobs!: (value: unknown) => void
-    vi.mocked(listJobs).mockImplementation(() => new Promise(resolve => { resolveJobs = resolve }))
+    let resolveJobs!: (value: { jobs: Job[] }) => void
+    vi.mocked(listJobs).mockImplementation(() => new Promise<{ jobs: Job[] }>(resolve => { resolveJobs = resolve }))
     await act(async () => {
       root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Dashboard /></MemoryRouter></QueryClientProvider>)
     })

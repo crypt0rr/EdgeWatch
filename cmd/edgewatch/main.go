@@ -80,6 +80,9 @@ func run(args []string) error {
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q; flags must precede operands", fs.Arg(0))
+	}
 	if cmd == "help" {
 		return usage()
 	}

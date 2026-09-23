@@ -115,6 +115,114 @@ func TestParseXMLCapturesHostEvidenceAndSummaries(t *testing.T) {
 	}
 }
 
+func TestParseXMLBoundsTargetControlledMetadata(t *testing.T) {
+	huge := strings.Repeat("x", maxScannerMetadataBytes*4)
+	var data strings.Builder
+	data.WriteString(`<?xml version="1.0"?><nmaprun><host><status state="up" reason="`)
+	data.WriteString(huge)
+	data.WriteString(`"/><address addr="198.51.100.20" addrtype="ipv4"/>`)
+	data.WriteString(`<hostnames>`)
+	for i := 0; i < maxScannerHostnames+8; i++ {
+		fmt.Fprintf(&data, `<hostname name="%s-%d" type="%s"/>`, huge, i, huge)
+	}
+	data.WriteString(`</hostnames><address addr="`)
+	data.WriteString(huge)
+	data.WriteString(`" addrtype="mac" vendor="`)
+	data.WriteString(huge)
+	data.WriteString(`"/><ports><port protocol="tcp" portid="443"><state state="open" reason="`)
+	data.WriteString(huge)
+	data.WriteString(`"/><service name="`)
+	data.WriteString(huge)
+	data.WriteString(`" product="`)
+	data.WriteString(huge)
+	data.WriteString(`" version="`)
+	data.WriteString(huge)
+	data.WriteString(`" extrainfo="`)
+	data.WriteString(huge)
+	data.WriteString(`" method="probed" tunnel="`)
+	data.WriteString(huge)
+	data.WriteString(`" ostype="`)
+	data.WriteString(huge)
+	data.WriteString(`" devicetype="`)
+	data.WriteString(huge)
+	data.WriteString(`" conf="9">`)
+	for i := 0; i < maxScannerCPEs+8; i++ {
+		data.WriteString(`<cpe>`)
+		data.WriteString(huge)
+		data.WriteString(`</cpe>`)
+	}
+	data.WriteString(`</service></port></ports><hostscript>`)
+	for i := 0; i < maxScannerNSEOutputs+8; i++ {
+		data.WriteString(`<script id="`)
+		data.WriteString(huge)
+		data.WriteString(`" output="`)
+		data.WriteString(huge)
+		data.WriteString(`"/>`)
+	}
+	data.WriteString(`</hostscript></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+
+	run, err := parseXMLWithConfig([]byte(data.String()), "tcp", config.Protocol{Ports: "443", Mode: "connect", ServiceDetection: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := run.Hosts["198.51.100.20"]
+	if len(host.Hostnames) > maxScannerHostnames || len(host.LinkAddresses) > maxScannerLinkAddresses || len(host.Hostnames) == 0 || len(host.LinkAddresses) == 0 {
+		t.Fatalf("bounded host metadata counts = hostnames %d, links %d", len(host.Hostnames), len(host.LinkAddresses))
+	}
+	if len(host.StatusReason) > maxScannerMetadataBytes {
+		t.Fatalf("host reason length = %d", len(host.StatusReason))
+	}
+	for _, hostname := range host.Hostnames {
+		if len(hostname.Name) > maxScannerMetadataBytes || len(hostname.Type) > maxScannerMetadataBytes {
+			t.Fatalf("hostname metadata escaped bound: %#v", hostname)
+		}
+	}
+	for _, link := range host.LinkAddresses {
+		if len(link.Address) > maxScannerMetadataBytes || len(link.Type) > maxScannerMetadataBytes || len(link.Vendor) > maxScannerMetadataBytes {
+			t.Fatalf("link metadata escaped bound: %#v", link)
+		}
+	}
+	if len(run.Units["198.51.100.20"].Ports) != 1 || len(run.Units["198.51.100.20"].Ports[0].Service) > maxScannerMetadataBytes {
+		t.Fatalf("compact service fingerprint was not bounded: %#v", run.Units["198.51.100.20"].Ports)
+	}
+	protocol := host.Protocols[0]
+	if len(protocol.NSEOutput) > maxScannerNSEOutputs {
+		t.Fatalf("NSE output count = %d", len(protocol.NSEOutput))
+	}
+	for _, output := range protocol.NSEOutput {
+		if len(output) > maxScannerMetadataBytes {
+			t.Fatalf("NSE output length = %d", len(output))
+		}
+	}
+	if len(protocol.Ports) != 1 || protocol.Ports[0].Service == nil {
+		t.Fatalf("service evidence missing: %#v", protocol.Ports)
+	}
+	service := protocol.Ports[0].Service
+	for _, value := range []string{service.Name, service.Product, service.Version, service.ExtraInfo, service.Method, service.Tunnel, service.OSType, service.DeviceType, protocol.Ports[0].Reason} {
+		if len(value) > maxScannerMetadataBytes {
+			t.Fatalf("service or port metadata length = %d", len(value))
+		}
+	}
+	if len(service.CPEs) > maxScannerCPEs {
+		t.Fatalf("CPE count = %d", len(service.CPEs))
+	}
+	for _, cpe := range service.CPEs {
+		if len(cpe) > maxScannerMetadataBytes {
+			t.Fatalf("CPE length = %d", len(cpe))
+		}
+	}
+	for _, summary := range protocol.StateSummaries {
+		if len(summary.State) > maxScannerMetadataBytes || len(summary.Reasons) > maxScannerStateReasons {
+			t.Fatalf("state summary escaped bounds: %#v", summary)
+		}
+		for _, reason := range summary.Reasons {
+			if len(reason.Reason) > maxScannerMetadataBytes {
+				t.Fatalf("state reason length = %d", len(reason.Reason))
+			}
+		}
+	}
+}
+
 func TestMergeHostObservationKeepsIncompleteStatusRegardlessOfOrder(t *testing.T) {
 	up := model.HostObservation{
 		Address: "192.0.2.10", Status: "up", StatusReason: "arp-response",

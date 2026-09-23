@@ -250,7 +250,7 @@ func TestNmapServiceAndNSESummaryHelpers(t *testing.T) {
 			t.Errorf("summarizeNSEOutput(%q,%q) = %q, want %q", test.id, test.output, got, test.want)
 		}
 	}
-	if got := summarizeNSEOutput("long", strings.Repeat("x", 600)); len(got) != 512+len("long: ")+len("…") || !strings.HasSuffix(got, "…") {
+	if got := summarizeNSEOutput("long", strings.Repeat("x", 600)); len(got) != maxScannerMetadataBytes || !strings.HasSuffix(got, "…") {
 		t.Fatalf("long NSE summary length = %d (%q)", len(got), got)
 	}
 }

@@ -162,7 +162,7 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 			host.AddressFamily = addressFamily(address)
 			host.Status = "up"
 			if result.MacAddress != "" {
-				host.LinkAddresses = append(host.LinkAddresses, model.LinkAddress{Address: result.MacAddress, Type: "mac"})
+				host.LinkAddresses = append(host.LinkAddresses, model.LinkAddress{Address: boundScannerMetadata(result.MacAddress), Type: "mac"})
 			}
 			discoveryHosts[address] = host
 		}
@@ -299,7 +299,7 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 			host.AddressFamily = addressFamily(address)
 			host.Status = "up"
 			if result.MacAddress != "" {
-				host.LinkAddresses = append(host.LinkAddresses, model.LinkAddress{Address: result.MacAddress, Type: "mac"})
+				host.LinkAddresses = append(host.LinkAddresses, model.LinkAddress{Address: boundScannerMetadata(result.MacAddress), Type: "mac"})
 			}
 			discoveryHosts[address] = host
 		}

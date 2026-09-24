@@ -673,6 +673,18 @@ func (s *Store) TouchSession(ctx context.Context, idHash string, lastSeen, expir
 	return err
 }
 
+// TouchSessionIfStale advances a session's idle timestamp only when its
+// current timestamp is at or before staleBefore. The predicate makes refreshes
+// from multiple tabs coalesce to one writer operation per activity interval.
+func (s *Store) TouchSessionIfStale(ctx context.Context, idHash string, lastSeen, expires, staleBefore time.Time) (bool, error) {
+	result, err := s.DB.ExecContext(ctx, `UPDATE sessions SET last_seen_at=?,expires_at=? WHERE id_hash=? AND julianday(last_seen_at) <= julianday(?)`, lastSeen.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano), idHash, staleBefore.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows > 0, err
+}
+
 func (s *Store) DeleteSession(ctx context.Context, idHash string) error {
 	return s.DeleteSessionWithAuditEntry(ctx, idHash, AuditEntry{})
 }

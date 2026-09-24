@@ -427,18 +427,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The live-update stream is long-lived and may reconnect automatically when
-	// the server is at its subscriber limit. Treat both successful connections
-	// and rejected attempts as read-only authentication so reconnects cannot
-	// keep an otherwise idle session alive. Ordinary API requests continue to
-	// refresh the idle timestamp as normal activity.
-	var session store.Session
-	var ok bool
-	if path == "/stream" && r.Method == http.MethodGet {
-		session, ok = s.Auth.AuthenticateReadOnly(r.Context(), r)
-	} else {
-		session, ok = s.Auth.Authenticate(r.Context(), r)
-	}
+	// Authentication and ordinary reads are read-only. Background polling and
+	// EventSource reconnects must not keep idle sessions alive or contend for
+	// SQLite's single writer connection. Real interactions are recorded below,
+	// after CSRF and route authorization have succeeded.
+	session, ok := s.Auth.AuthenticateReadOnly(r.Context(), r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required", nil)
 		return
@@ -459,8 +452,17 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "your account is not allowed to perform this action", details)
 		return
 	}
+	if isMutation(r.Method) {
+		if err := s.Auth.RecordActivity(r.Context(), session); err != nil {
+			// Activity persistence is opportunistic and bounded. It must never
+			// delay or fail the user's actual authorized operation.
+			s.Log.Debug("session activity timestamp could not be refreshed", "error", err)
+		}
+	}
 
 	switch {
+	case path == "/auth/activity" && r.Method == http.MethodPost:
+		writeJSON(w, http.StatusNoContent, nil)
 	case path == "/auth/logout" && r.Method == http.MethodPost:
 		s.logout(w, r, session)
 	case path == "/auth/display-name" && r.Method == http.MethodPut:

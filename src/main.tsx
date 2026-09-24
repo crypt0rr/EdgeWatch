@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { Activity, ArrowUp, Bell, Boxes, ClipboardList, Code2, Gauge, Globe2, LogOut, Menu, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
-import { acceptIncident, adminStatus, APIError, getSession, listIncidents, listJobs, setCSRF, setupStatus, suppressIncident, logout as apiLogout } from './api'
+import { acceptIncident, adminStatus, APIError, getSession, listIncidents, listJobs, recordActivity, setCSRF, setupStatus, suppressIncident, logout as apiLogout } from './api'
 import { Dashboard } from './pages/Dashboard'
 import { JobEditor } from './pages/JobEditor'
 import { JobDetail } from './pages/JobDetail'
@@ -90,6 +90,22 @@ export function Shell({ displayName, version, role, permissions, onLogout }: { d
     }
     wasOpenRef.current = open
   }, [isMobile, open])
+  useEffect(() => {
+    let lastSentAt = Number.NEGATIVE_INFINITY
+    const noteActivity = () => {
+      const now = Date.now()
+      if (now - lastSentAt < 60_000) return
+      lastSentAt = now
+      // Activity refresh is best-effort; normal API reads remain independent
+      // of this short, coalesced session write.
+      void recordActivity().catch(() => undefined)
+    }
+    const activityEvents = ['pointerdown', 'click', 'keydown', 'wheel'] as const
+    activityEvents.forEach(event => document.addEventListener(event, noteActivity, { passive: true }))
+    return () => {
+      activityEvents.forEach(event => document.removeEventListener(event, noteActivity))
+    }
+  }, [])
   useEffect(() => {
     if (!isMobile || !open) return
     const drawer = drawerRef.current

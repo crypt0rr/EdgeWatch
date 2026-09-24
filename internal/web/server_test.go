@@ -632,6 +632,215 @@ func TestSSEConnectionsAndLimitResponsesDoNotRefreshIdleSession(t *testing.T) {
 	}
 }
 
+func TestBackgroundStatusPollingDoesNotRefreshIdleSession(t *testing.T) {
+	ctx := context.Background()
+	server, db, _ := newUsersTestServer(t)
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	server.Auth.Now = func() time.Time { return now }
+	raw, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	authRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	session, ok := server.Auth.AuthenticateReadOnly(ctx, authRequest)
+	if !ok {
+		t.Fatal("login session was not authenticated")
+	}
+	initial, err := db.GetSession(ctx, session.IDHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := httptest.NewServer(server.Handler())
+	defer h.Close()
+	for i := 0; i < 3; i++ {
+		now = now.Add(7 * time.Hour)
+		request, err := http.NewRequestWithContext(ctx, http.MethodGet, h.URL+"/api/v1/status", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+		response, err := http.DefaultClient.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		if response.StatusCode != http.StatusOK {
+			t.Fatalf("status polling %d returned %d", i+1, response.StatusCode)
+		}
+	}
+	afterPolling, err := db.GetSession(ctx, session.IDHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterPolling.LastSeenAt.Equal(initial.LastSeenAt) {
+		t.Fatalf("background status polling refreshed idle timestamp: before=%s after=%s", initial.LastSeenAt, afterPolling.LastSeenAt)
+	}
+	invalidActivity, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL+"/api/v1/auth/activity", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidActivity.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	invalidResponse, err := http.DefaultClient.Do(invalidActivity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = invalidResponse.Body.Close()
+	if invalidResponse.StatusCode != http.StatusForbidden {
+		t.Fatalf("activity without CSRF token status = %d, want %d", invalidResponse.StatusCode, http.StatusForbidden)
+	}
+	afterInvalidActivity, err := db.GetSession(ctx, session.IDHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterInvalidActivity.LastSeenAt.Equal(initial.LastSeenAt) {
+		t.Fatalf("activity without CSRF token refreshed session: before=%s after=%s", initial.LastSeenAt, afterInvalidActivity.LastSeenAt)
+	}
+	activityRequest, err := http.NewRequestWithContext(ctx, http.MethodPost, h.URL+"/api/v1/auth/activity", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activityRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	activityRequest.Header.Set("X-CSRF-Token", session.CSRFToken)
+	activityResponse, err := http.DefaultClient.Do(activityRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = activityResponse.Body.Close()
+	if activityResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("activity status = %d, want %d", activityResponse.StatusCode, http.StatusNoContent)
+	}
+	afterActivity, err := db.GetSession(ctx, session.IDHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterActivity.LastSeenAt.Equal(now) {
+		t.Fatalf("user activity did not refresh idle timestamp: got=%s want=%s", afterActivity.LastSeenAt, now)
+	}
+	now = now.Add(time.Minute)
+	activityRequest, err = http.NewRequestWithContext(ctx, http.MethodPost, h.URL+"/api/v1/auth/activity", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	activityRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	activityRequest.Header.Set("X-CSRF-Token", session.CSRFToken)
+	activityResponse, err = http.DefaultClient.Do(activityRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = activityResponse.Body.Close()
+	if activityResponse.StatusCode != http.StatusNoContent {
+		t.Fatalf("coalesced activity status = %d, want %d", activityResponse.StatusCode, http.StatusNoContent)
+	}
+	afterCoalescedActivity, err := db.GetSession(ctx, session.IDHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterCoalescedActivity.LastSeenAt.Equal(afterActivity.LastSeenAt) {
+		t.Fatalf("recent activity was not coalesced: before=%s after=%s", afterActivity.LastSeenAt, afterCoalescedActivity.LastSeenAt)
+	}
+	now = afterActivity.LastSeenAt.Add(auth.IdleTTL - time.Minute)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, h.URL+"/api/v1/auth/session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("active session status near idle deadline = %d, want %d", response.StatusCode, http.StatusOK)
+	}
+	now = now.Add(2 * time.Minute)
+	request, err = http.NewRequestWithContext(ctx, http.MethodGet, h.URL+"/api/v1/auth/session", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	response, err = http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unattended session status after idle deadline = %d, want %d", response.StatusCode, http.StatusUnauthorized)
+	}
+}
+
+func TestIdleActivityWriteDoesNotBlockAuthenticatedReads(t *testing.T) {
+	ctx := context.Background()
+	server, db, _ := newUsersTestServer(t)
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	server.Auth.Now = func() time.Time { return now }
+	raw, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authRequest := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	authRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	session, ok := server.Auth.AuthenticateReadOnly(ctx, authRequest)
+	if !ok {
+		t.Fatal("login session was not authenticated")
+	}
+	now = now.Add(6 * time.Minute)
+	tx, err := db.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET display_name='uncommitted' WHERE id=?`, store.LegacyAdminUserID); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	h := httptest.NewServer(server.Handler())
+	defer h.Close()
+	requestContext, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	readRequest, err := http.NewRequestWithContext(requestContext, http.MethodGet, h.URL+"/api/v1/auth/session", nil)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	readRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	readResponse, err := http.DefaultClient.Do(readRequest)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("read-only authentication blocked by writer transaction: %v", err)
+	}
+	_ = readResponse.Body.Close()
+	if readResponse.StatusCode != http.StatusOK {
+		_ = tx.Rollback()
+		t.Fatalf("read-only authentication status = %d", readResponse.StatusCode)
+	}
+	activityRequest, err := http.NewRequestWithContext(requestContext, http.MethodPost, h.URL+"/api/v1/auth/activity", nil)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	activityRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	activityRequest.Header.Set("X-CSRF-Token", session.CSRFToken)
+	started := time.Now()
+	activityResponse, err := http.DefaultClient.Do(activityRequest)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("bounded activity request blocked on writer transaction: %v", err)
+	}
+	_ = activityResponse.Body.Close()
+	if activityResponse.StatusCode != http.StatusNoContent {
+		_ = tx.Rollback()
+		t.Fatalf("activity response under writer contention = %d", activityResponse.StatusCode)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		_ = tx.Rollback()
+		t.Fatalf("activity refresh exceeded its short write budget: %s", elapsed)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 	server, db, _ := newUsersTestServer(t)
 	ctx := context.Background()

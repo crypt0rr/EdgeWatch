@@ -21,6 +21,7 @@ func requiredPermission(path, method string) string {
 	if strings.HasPrefix(path, "/auth/") {
 		switch {
 		case path == "/auth/logout" && method == http.MethodPost,
+			path == "/auth/activity" && method == http.MethodPost,
 			path == "/auth/display-name" && method == http.MethodPut,
 			path == "/auth/password" && method == http.MethodPut,
 			path == "/auth/totp/setup" && method == http.MethodPost,

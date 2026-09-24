@@ -17,7 +17,7 @@ import (
 )
 
 func (s *Server) withAuth(w http.ResponseWriter, r *http.Request, fn func(http.ResponseWriter, *http.Request, store.Session)) {
-	session, ok := s.Auth.Authenticate(r.Context(), r)
+	session, ok := s.Auth.AuthenticateReadOnly(r.Context(), r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required", nil)
 		return

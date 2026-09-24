@@ -3,13 +3,13 @@
 import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { APIError, adminStatus, acceptIncident, getSession, listIncidents, listJobs, login, logout, setupStatus, suppressIncident } from './api'
+import { APIError, adminStatus, acceptIncident, getSession, listIncidents, listJobs, login, logout, recordActivity, setupStatus, suppressIncident } from './api'
 import { AppContent, AuthRoutes, Incidents, Jobs, Shell } from './main'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, acceptIncident: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), login: vi.fn(), logout: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), suppressIncident: vi.fn() }
+  return { ...actual, acceptIncident: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), login: vi.fn(), logout: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), suppressIncident: vi.fn() }
 })
 
 class EventSourceStub {
@@ -30,6 +30,7 @@ describe('application shell', () => {
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'incidents.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
     vi.mocked(login).mockResolvedValue({ role: 'administrator', username: 'admin', permissions: ['jobs.write'], csrf_token: '', totp_required: false } as never)
     vi.mocked(logout).mockResolvedValue(undefined)
+    vi.mocked(recordActivity).mockResolvedValue(undefined)
     vi.mocked(setupStatus).mockResolvedValue({ configured: true, version: 'v0.18.70' } as never)
     EventSourceStub.instances = []
     vi.stubGlobal('EventSource', EventSourceStub)
@@ -60,6 +61,14 @@ describe('application shell', () => {
     expect(screen.queryByRole('link', { name: 'Notifications' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Update available' })).not.toBeInTheDocument()
     expect(adminStatus).not.toHaveBeenCalled()
+  })
+
+  it('records real user activity and coalesces rapid pointer and keyboard events', async () => {
+    renderWithProviders(<Shell displayName="Admin" version="dev" role="administrator" permissions={['jobs.read']} onLogout={vi.fn()} />)
+    fireEvent.pointerDown(document)
+    fireEvent.keyDown(document, { key: 'a' })
+    fireEvent.pointerDown(document)
+    await waitFor(() => expect(recordActivity).toHaveBeenCalledOnce())
   })
 
   it('invalidates the affected queries for live events and falls back on malformed events', async () => {

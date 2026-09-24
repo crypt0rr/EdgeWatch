@@ -110,6 +110,7 @@ export type AdminStatus = { configured: boolean; username: string; display_name?
 export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; public_dashboard_enabled?: boolean; version: string; password_requirements: { minimum_length: number } }>('/setup/status')
 export const adminStatus = () => api<AdminStatus>('/status')
 export const getSession = () => api<SessionUser>('/auth/session')
+export const recordActivity = () => api<void>('/auth/activity', { method: 'POST' })
 export const login = (password: string, otp?: string, recovery_code?: string, username = 'admin') => api<{ username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_required: boolean }>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password, otp, recovery_code }) })
 export const setup = (token: string, password: string) => api('/setup', { method: 'POST', body: JSON.stringify({ token, password }) })
 export const activate = (token: string, password: string) => api('/auth/activate', { method: 'POST', body: JSON.stringify({ token, password }) })

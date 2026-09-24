@@ -104,6 +104,34 @@ func TestRunVersionHelpAndConfigValidation(t *testing.T) {
 	}
 }
 
+func TestDaemonSurfacesAdministratorCompatibilityMigrationFailure(t *testing.T) {
+	dir := t.TempDir()
+	databasePath := filepath.Join(dir, "edgewatch.db")
+	configPath := filepath.Join(dir, "config.yaml")
+	seed, err := store.Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := seed.SaveAdmin(context.Background(), store.Admin{Username: "admin", DisplayName: "Admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
+		seed.Close()
+		t.Fatal(err)
+	}
+	if _, err := seed.DB.ExecContext(context.Background(), `UPDATE users SET totp_secret=?,totp_enabled=1 WHERE id=?`, "ew2:malformed", store.LegacyAdminUserID); err != nil {
+		seed.Close()
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("database: "+databasePath+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"daemon", "--config", configPath}); err == nil || !strings.Contains(err.Error(), "migrate administrator compatibility state") {
+		t.Fatalf("daemon administrator migration failure = %v", err)
+	}
+}
+
 func TestRunRejectsUnexpectedOperandsBeforeDestructiveActions(t *testing.T) {
 	dir := t.TempDir()
 	sourcePath := filepath.Join(dir, "source.db")

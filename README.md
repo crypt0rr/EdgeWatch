@@ -152,6 +152,10 @@ web:
   listen: 127.0.0.1:8080
   allowed_hosts:
     - edgewatch.example.ts.net
+  forwarded_header: x-forwarded-for
+  trusted_proxies:
+    - 127.0.0.1/32
+    - ::1/128
 ```
 
 Replace `edgewatch.example.ts.net` with your tailnet or proxy hostname. Use the
@@ -160,12 +164,14 @@ checks the forwarded `Host` value before authentication, so an unlisted proxy
 hostname is rejected with `421 Misdirected Request` even when the loopback
 listener is healthy. Approved non-loopback hostnames receive Secure session
 cookies; direct loopback HTTP remains available for local administration and
-SSH tunnels. If a TLS-terminating proxy rewrites the upstream `Host` to a
-loopback address, list the proxy address or network in `web.trusted_proxies`
-so EdgeWatch can trust its `X-Forwarded-Proto: https` (or RFC 7239
-`Forwarded: ...;proto=https`) signal and keep the session cookie Secure. Do
-not enable this for untrusted peers, because those headers must be sanitized by
-the configured proxy.
+SSH tunnels. The example trusts a local proxy and its sanitized
+`X-Forwarded-For` client address; replace these networks with the addresses that
+actually connect to EdgeWatch when the proxy runs elsewhere. If a
+TLS-terminating proxy rewrites the upstream `Host` to a loopback address, list
+the proxy address or network in `web.trusted_proxies` so EdgeWatch can trust its
+`X-Forwarded-Proto: https` (or RFC 7239 `Forwarded: ...;proto=https`) signal
+and keep the session cookie Secure. Do not trust untrusted peers: the configured
+proxy must sanitize the forwarding headers.
 
 After changing the bind-mounted configuration, recreate the container:
 
@@ -271,10 +277,13 @@ Important defaults:
   X-Forwarded-Proto: https or Forwarded: ...;proto=https when it forwards a
   loopback Host; otherwise EdgeWatch keeps the direct-loopback HTTP behavior.
 - If a tunnel or reverse proxy is not listed in web.trusted_proxies, every
-  client may appear as the same loopback peer. EdgeWatch keeps known-account
-  login recovery available under that shared identity while still bounding
-  concurrent password work. Configure the proxy network and forwarding header
-  when you need per-client hard lockouts and audit identities.
+  client may appear as the same loopback peer. After five failed login or TOTP
+  attempts within five minutes, all logins through that shared peer receive a
+  short two-second cooldown instead of a five-minute lockout. Applying the same
+  cooldown to known and unknown usernames avoids revealing account existence.
+  Configure the proxy network and forwarding header when you need per-client
+  rate limits and audit identities. EdgeWatch logs a startup warning when
+  approved proxy hosts lack trusted client-IP forwarding.
 - Loopback, link-local, and cloud metadata addresses are excluded by default.
   Change scanner.target_exclusions only when you understand the host-network
   exposure.

@@ -1,7 +1,9 @@
 package web
 
 import (
+	"bytes"
 	"crypto/tls"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +13,23 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 )
+
+func TestNewServerWarnsWhenApprovedProxyHostsShareLoopbackIdentity(t *testing.T) {
+	var logs bytes.Buffer
+	application := &app.App{Config: &config.Config{Web: config.Web{AllowedHosts: []string{"console.example.test"}}}}
+	NewServer(application, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+	if !strings.Contains(logs.String(), "remote clients share the loopback login cooldown and audit identity") {
+		t.Fatalf("missing shared-proxy identity warning: %s", logs.String())
+	}
+
+	logs.Reset()
+	application.Config.Web.TrustedProxies = []string{"127.0.0.1/32"}
+	application.Config.Web.ForwardedHeader = "x-forwarded-for"
+	NewServer(application, nil, slog.New(slog.NewTextHandler(&logs, nil)))
+	if strings.Contains(logs.String(), "remote clients share the loopback login cooldown and audit identity") {
+		t.Fatalf("warning emitted despite trusted client-IP forwarding: %s", logs.String())
+	}
+}
 
 func TestValidateRequestHostAllowsLoopbackAndConfiguredProxyNames(t *testing.T) {
 	server := &Server{App: &app.App{Config: &config.Config{Web: config.Web{

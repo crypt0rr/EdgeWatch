@@ -24,6 +24,17 @@ reconsideration criteria are maintained in
 The administration console is bound to a loopback address by default and uses
 server-side sessions, CSRF protection, and Argon2id password storage. Keep the
 Docker host and any SSH tunnel access restricted to trusted administrators.
+When an untrusted tunnel or reverse proxy makes every remote client appear as
+the same loopback peer, all login attempts are throttled after five failed
+password or TOTP attempts in five minutes with a short two-second retry delay.
+The shared response avoids both a long lockout and revealing account existence,
+but cannot provide per-client attribution. For per-client rate limits and audit
+identities, configure only the actual proxy addresses in `web.trusted_proxies`
+and the sanitized `web.forwarded_header`.
+EdgeWatch logs a startup warning when proxy hostnames are approved without
+trusted client-IP forwarding. Failed login and TOTP attempts, along with
+rate-limit events, are written to the security audit log; they do not currently
+send notification-channel alerts.
 
 ## Live-update streams and session revocation
 

@@ -17,7 +17,7 @@ func (s *Store) MigrateAdminCompatibility(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("begin administrator compatibility migration: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var username, displayName, passwordHash, stored, created, updated string
 	var totpEnabled int

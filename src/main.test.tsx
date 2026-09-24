@@ -3,8 +3,9 @@
 import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocation } from 'react-router-dom'
 import { APIError, adminStatus, acceptIncident, getSession, listIncidents, listJobs, login, logout, recordActivity, setupStatus, suppressIncident } from './api'
-import { AppContent, AuthRoutes, Incidents, Jobs, Shell } from './main'
+import { AppContent, AuthRoutes, Incidents, Jobs, ProtectedApp, Shell } from './main'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
@@ -20,6 +21,10 @@ class EventSourceStub {
   close = vi.fn()
   constructor() { EventSourceStub.instances.push(this) }
   emit(type: string, job_id?: string) { this.onmessage?.({ data: JSON.stringify({ type, job_id }) } as MessageEvent) }
+}
+
+function CurrentPath() {
+  return <output data-testid="current-path">{useLocation().pathname}</output>
 }
 
 describe('application shell', () => {
@@ -62,6 +67,31 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByText('EdgeWatch v0.18.70')).toBeInTheDocument())
     expect(screen.getByRole('link', { name: /Update available/ })).toBeInTheDocument()
     expect(adminStatus).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the protected shell loading while the authenticated session is still pending', async () => {
+    vi.mocked(setupStatus).mockResolvedValueOnce({ configured: true } as never)
+    let resolveSession!: (session: unknown) => void
+    vi.mocked(getSession).mockReturnValueOnce(new Promise(resolve => { resolveSession = resolve }) as never)
+    renderWithProviders(<ProtectedApp onLogout={async () => {}} />)
+
+    await waitFor(() => expect(screen.getByText('Loading EdgeWatch…')).toBeInTheDocument())
+    await act(async () => resolveSession({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } }))
+    await waitFor(() => expect(screen.getByText('EdgeWatch v0.18.70')).toBeInTheDocument())
+  })
+
+  it('redirects protected-app setup and expired-session states without a public version', async () => {
+    vi.mocked(setupStatus).mockResolvedValueOnce({ configured: false } as never)
+    vi.mocked(getSession).mockResolvedValueOnce({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    const onLogout = async () => {}
+    const setupView = renderWithProviders(<><ProtectedApp onLogout={onLogout} /><CurrentPath /></>, { route: ['/console'] })
+    await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent('/setup'))
+    setupView.unmount()
+
+    vi.mocked(setupStatus).mockResolvedValueOnce({ configured: true } as never)
+    vi.mocked(getSession).mockRejectedValueOnce(new Error('unauthenticated'))
+    renderWithProviders(<><ProtectedApp onLogout={onLogout} /><CurrentPath /></>, { route: ['/console'] })
+    await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent('/login'))
   })
 
   it('records real user activity and coalesces rapid pointer and keyboard events', async () => {

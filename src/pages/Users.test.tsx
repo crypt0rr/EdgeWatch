@@ -17,8 +17,8 @@ const pending = { ...user, id: 'user-3', username: 'new-user', display_name: 'Ne
 describe('user administration', () => {
   beforeEach(() => {
     vi.mocked(listUsers).mockResolvedValue({ users: [user, pending] })
-    vi.mocked(createUser).mockResolvedValue({ user, activation_token: 'token-123', activation_path: '/activate?token=token-123' })
-    vi.mocked(issueUserActivation).mockResolvedValue({ activation_token: 'renewed-token', activation_path: '/activate?token=renewed-token', expires_at: '2026-01-01T01:00:00Z' })
+    vi.mocked(createUser).mockResolvedValue({ user, activation_token: 'token-123', activation_path: '/activate#token=token-123' })
+    vi.mocked(issueUserActivation).mockResolvedValue({ activation_token: 'renewed-token', activation_path: '/activate#token=renewed-token', expires_at: '2026-01-01T01:00:00Z' })
     vi.mocked(revokeUserActivation).mockResolvedValue(undefined)
     vi.mocked(updateUser).mockResolvedValue({ ...user, enabled: false, revision: 5 })
   })

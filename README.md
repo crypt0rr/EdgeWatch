@@ -378,6 +378,12 @@ The first account is an administrator. Administrators can invite additional
 accounts with single-use activation links. Every user can manage their own
 display name, password, and optional TOTP protection.
 
+New activation and password-reset links keep their one-time token in the URL
+fragment, which is not sent in the HTTP request to EdgeWatch or a reverse proxy.
+EdgeWatch removes it from the browser address bar as soon as the activation page
+opens. Previously issued query-string links remain usable only until their
+existing 30-minute expiry and are also removed from browser history on arrival.
+
 | Role | Access |
 | --- | --- |
 | Administrator | Full administration, users, destinations, profiles, jobs, baselines, incidents, and public status. |

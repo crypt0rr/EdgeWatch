@@ -1,8 +1,24 @@
-import { FormEvent, useState } from 'react'
+import { FormEvent, useLayoutEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Eye, EyeOff, LockKeyhole, Wifi } from 'lucide-react'
 import { activate, login, setCSRF, setup, setupStatus } from '../api'
+
+function activationTokenFromLocation(search: string, hash: string) {
+  const fragment = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : hash)
+  return fragment.get('token') ?? new URLSearchParams(search).get('token') ?? ''
+}
+
+function activationLocationWithoutToken(pathname: string, search: string, hash: string) {
+  const query = new URLSearchParams(search)
+  const fragment = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : hash)
+  if (!query.has('token') && !fragment.has('token')) return null
+  query.delete('token')
+  fragment.delete('token')
+  const cleanSearch = query.toString()
+  const cleanHash = fragment.toString()
+  return `${pathname}${cleanSearch ? `?${cleanSearch}` : ''}${cleanHash ? `#${cleanHash}` : ''}`
+}
 
 export function Login() {
   const navigate = useNavigate(); const location = useLocation(); const queryClient = useQueryClient(); const publicStatus = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus, staleTime: 30_000 }); const [username, setUsername] = useState('admin'); const [password, setPassword] = useState(''); const [otp, setOtp] = useState(''); const [recovery, setRecovery] = useState(''); const [showRecovery, setShowRecovery] = useState(false); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [notice, setNotice] = useState(() => (location.state as { message?: string } | null)?.message ?? '')
@@ -17,7 +33,11 @@ export function Setup() {
 }
 
 export function Activate() {
-  const navigate = useNavigate(); const location = useLocation(); const [token, setToken] = useState(() => new URLSearchParams(location.search).get('token') ?? ''); const [password, setPassword] = useState(''); const [confirm, setConfirm] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
+  const navigate = useNavigate(); const location = useLocation(); const [token, setToken] = useState(() => activationTokenFromLocation(location.search, location.hash)); const [password, setPassword] = useState(''); const [confirm, setConfirm] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
+  useLayoutEffect(() => {
+    const cleanLocation = activationLocationWithoutToken(location.pathname, location.search, location.hash)
+    if (cleanLocation !== null) navigate(cleanLocation, { replace: true, state: location.state })
+  }, [location.hash, location.pathname, location.search, location.state, navigate])
   async function submit(event: FormEvent) { event.preventDefault(); setError(''); if (password !== confirm) { setError('Passwords do not match.'); return }; setBusy(true); try { await activate(token.trim(), password); navigate('/login', { replace: true, state: { message: 'Account activated. Sign in with your new password.' } }) } catch (err) { setError(err instanceof Error ? err.message : 'Activation failed') } finally { setBusy(false) } }
   return <AuthFrame eyebrow="Activate account" title="Choose your password" subtitle="This activation link is single-use and expires shortly."><form onSubmit={submit} className="auth-form"><label>Activation token<input autoFocus value={token} onChange={e => setToken(e.target.value)} autoComplete="one-time-code" required /></label><label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="new-password" minLength={12} required /><small>At least 12 characters.</small></label><label>Confirm password<input type="password" value={confirm} onChange={e => setConfirm(e.target.value)} autoComplete="new-password" required /></label>{error && <div className="form-error" role="alert">{error}</div>}<button disabled={busy} className="button primary wide" type="submit">{busy ? 'Activating…' : 'Activate account'}</button></form></AuthFrame>
 }

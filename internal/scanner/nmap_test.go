@@ -395,8 +395,8 @@ func TestResolveHostnameAndCIDRLimit(t *testing.T) {
 		t.Fatalf("unexpected %#v", got)
 	}
 	job = config.Job{Targets: []string{"192.0.2.0/30"}, MaxExpandedHosts: 3}
-	if _, err := n.resolve(context.Background(), job); err == nil {
-		t.Fatal("CIDR limit not enforced")
+	if _, err := n.resolve(context.Background(), job); err == nil || !IsConfigurationError(err) {
+		t.Fatalf("CIDR limit error = %v, want typed configuration failure", err)
 	}
 }
 
@@ -406,12 +406,12 @@ func TestResolveRejectsExcludedAddresses(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, target := range []string{"127.0.0.1", "169.254.169.254", "::1"} {
-		if _, err := n.resolve(context.Background(), config.Job{Targets: []string{target}, MaxExpandedHosts: 4}); err == nil || !strings.Contains(err.Error(), "excluded") {
+		if _, err := n.resolve(context.Background(), config.Job{Targets: []string{target}, MaxExpandedHosts: 4}); err == nil || !strings.Contains(err.Error(), "excluded") || !IsConfigurationError(err) {
 			t.Fatalf("excluded target %q resolved without error: %v", target, err)
 		}
 	}
 	n.Resolver = fakeResolver{[]net.IP{net.ParseIP("192.0.2.1"), net.ParseIP("127.0.0.1")}}
-	if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"edge.example"}, MaxExpandedHosts: 4}); err == nil || !strings.Contains(err.Error(), "resolved to excluded") {
+	if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"edge.example"}, MaxExpandedHosts: 4}); err == nil || !strings.Contains(err.Error(), "resolved to excluded") || !IsConfigurationError(err) {
 		t.Fatalf("DNS result containing excluded address was accepted: %v", err)
 	}
 	for _, address := range []string{"0.0.0.0", "::"} {
@@ -431,6 +431,33 @@ func TestResolveRejectsExcludedAddresses(t *testing.T) {
 		if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"override.example"}, MaxExpandedHosts: 1}); err == nil || !strings.Contains(err.Error(), "resolved to excluded") || !strings.Contains(err.Error(), "unspecified") {
 			t.Fatalf("explicit empty exclusion override accepted unspecified address %q: %v", address, err)
 		}
+	}
+}
+
+func TestResolveTypesStaticExpansionAndEmptyDNSFailures(t *testing.T) {
+	n := New("nmap")
+	if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"1.1.1.1", "8.8.8.8"}, MaxExpandedHosts: 1}); err == nil || !IsConfigurationError(err) {
+		t.Fatalf("expanded IP target limit error = %v, want typed configuration failure", err)
+	}
+
+	if err := n.SetTargetExclusions(config.DefaultTargetExclusions()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"127.0.0.0/30"}, MaxExpandedHosts: 4}); err == nil || !IsConfigurationError(err) {
+		t.Fatalf("CIDR containing excluded address error = %v, want typed configuration failure", err)
+	}
+
+	if err := n.SetTargetExclusions([]string{}); err != nil {
+		t.Fatal(err)
+	}
+	n.Resolver = fakeResolver{}
+	if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"empty.example"}, MaxExpandedHosts: 1}); err == nil || !IsConfigurationError(err) {
+		t.Fatalf("empty DNS response error = %v, want typed configuration failure", err)
+	}
+
+	n.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("1.1.1.1"), net.ParseIP("8.8.8.8")}}
+	if _, err := n.resolve(context.Background(), config.Job{Targets: []string{"many.example"}, MaxExpandedHosts: 1}); err == nil || !IsConfigurationError(err) {
+		t.Fatalf("expanded DNS target limit error = %v, want typed configuration failure", err)
 	}
 }
 

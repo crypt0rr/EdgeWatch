@@ -65,24 +65,34 @@ func TestRunNaabuRejectsInvalidProfileAndStartFailures(t *testing.T) {
 	}
 
 	n.NaabuPath = filepath.Join(t.TempDir(), "does-not-exist")
-	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil {
-		t.Fatal("missing Naabu executable unexpectedly succeeded")
+	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil || !IsConfigurationError(err) {
+		t.Fatalf("missing Naabu executable error = %v, want typed configuration failure", err)
 	}
 	// An empty path uses the fixed image path rather than the ambient PATH.
 	n.NaabuPath = ""
-	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil {
-		t.Fatal("empty Naabu path unexpectedly found an ambient executable")
+	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil || !IsConfigurationError(err) {
+		t.Fatalf("empty Naabu path error = %v, want typed configuration failure", err)
+	}
+}
+
+func TestNaabuTemporaryTargetFileFailureRemainsRetryable(t *testing.T) {
+	missingDirectory := filepath.Join(t.TempDir(), "missing")
+	t.Setenv("TMPDIR", missingDirectory)
+	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, "exit 0\n"))
+	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	if err == nil || IsConfigurationError(err) {
+		t.Fatalf("temporary target-file error = %v, want untyped retryable failure", err)
 	}
 }
 
 func TestRunNaabuProcessAndJSONFailures(t *testing.T) {
 	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, "printf '%s\\n' 'not-json'\n"))
-	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil || !strings.Contains(err.Error(), "parse naabu JSON") {
+	if _, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil || !strings.Contains(err.Error(), "parse naabu JSON") || IsConfigurationError(err) {
 		t.Fatalf("malformed JSON error = %v", err)
 	}
 
 	n.NaabuPath = writeNaabuFixture(t, "printf '%s\\n' 'scanner failed' >&2\nexit 7\n")
-	if _, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil || !strings.Contains(stderr, "scanner failed") {
+	if _, stderr, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true); err == nil || !strings.Contains(stderr, "scanner failed") || IsConfigurationError(err) {
 		t.Fatalf("process failure = %v (stderr %q)", err, stderr)
 	}
 
@@ -155,6 +165,11 @@ func TestNaabuDiscoveryValidationAndPartialResults(t *testing.T) {
 			}
 		})
 	}
+
+	failingScanner := NewWithNaabu("missing-nmap", writeNaabuFixture(t, "printf '%s\\n' 'scanner failed' >&2\nexit 7\n"))
+	if _, err := failingScanner.scanNaabuDiscoveryResolved(context.Background(), job, []resolvedTarget{validTarget}, nil); err == nil || IsConfigurationError(err) {
+		t.Fatalf("Naabu discovery process failure = %v, want retryable error", err)
+	}
 }
 
 func TestNaabuPipelineResolvedReportsEmptyDiscoveryAndUDPFallback(t *testing.T) {
@@ -186,6 +201,33 @@ func TestNaabuPipelineResolvedReportsEmptyDiscoveryAndUDPFallback(t *testing.T) 
 	noTCP, err := n.scanNaabuPipelineResolved(context.Background(), config.Job{}, targets, nil)
 	if err != nil || len(noTCP.Units) != 0 || len(noTCP.Hosts) != 0 {
 		t.Fatalf("no-TCP pipeline fallback = %#v, %v", noTCP, err)
+	}
+}
+
+func TestNaabuPipelineProcessFailureRemainsRetryable(t *testing.T) {
+	job := config.NormalizeJob(config.Job{
+		Name: "failed-pipeline", Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{ScanType: "connect"}},
+	})
+	targets := []resolvedTarget{{Name: "192.0.2.1", Addresses: []string{"192.0.2.1"}}}
+	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, "printf '%s\\n' 'scanner failed' >&2\nexit 7\n"))
+	if _, err := n.scanNaabuPipelineResolved(context.Background(), job, targets, nil); err == nil || IsConfigurationError(err) {
+		t.Fatalf("Naabu pipeline process failure = %v, want retryable error", err)
+	}
+}
+
+func TestNaabuPipelinePlanningTypesConfigurationFailures(t *testing.T) {
+	n := New("missing-nmap")
+	if _, err := n.planNaabuPipeline(context.Background(), config.Job{}, nil); err == nil || !IsConfigurationError(err) {
+		t.Fatalf("missing TCP Naabu plan error = %v", err)
+	}
+	invalidOptions := config.Job{TCP: &config.Protocol{Naabu: &config.NaabuOptions{ScanType: "connect", Rate: 100_001}}}
+	if _, err := n.planNaabuPipeline(context.Background(), invalidOptions, []resolvedTarget{{Name: "192.0.2.1", Addresses: []string{"192.0.2.1"}}}); err == nil || !IsConfigurationError(err) {
+		t.Fatalf("invalid Naabu options plan error = %v", err)
+	}
+	noTargets := config.Job{TCP: &config.Protocol{Naabu: &config.NaabuOptions{ScanType: "connect"}}}
+	if _, err := n.planNaabuPipeline(context.Background(), noTargets, []resolvedTarget{{Name: "empty"}}); err == nil || !IsConfigurationError(err) {
+		t.Fatalf("empty Naabu target plan error = %v", err)
 	}
 }
 

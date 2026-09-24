@@ -62,9 +62,10 @@ func TestRetryableResumableErrorsAreBoundedAndConfigurationErrorsStall(t *testin
 		retryable bool
 	}{
 		{name: "process failure", err: errors.New("nmap failed: connection reset"), retryable: true},
-		{name: "profile validation", err: errors.New("scanner profile arguments: invalid template"), retryable: false},
-		{name: "missing binary", err: errors.New("exec: executable file not found in $PATH"), retryable: false},
-		{name: "target resolution", err: errors.New("resolve host: no A or AAAA records"), retryable: false},
+		{name: "profile text alone is not authoritative", err: errors.New("scanner profile arguments: invalid template"), retryable: true},
+		{name: "profile validation", err: scanner.ConfigurationError(errors.New("scanner profile arguments: invalid template")), retryable: false},
+		{name: "missing binary", err: scanner.ConfigurationError(errors.New("exec: executable file not found in $PATH")), retryable: false},
+		{name: "target resolution", err: scanner.ConfigurationError(errors.New("resolve host: no A or AAAA records")), retryable: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := retryableResumableError(test.err); got != test.retryable {
@@ -510,7 +511,7 @@ func TestResumableAttemptHandlesUnitFailuresAndNoProgressStalls(t *testing.T) {
 	a, db, job, record := newApp(t, "unit-error")
 	defer db.Close()
 	var failed model.Scan
-	if handled, _, err := a.runResumableAttempt(ctx, ctx, job, record.ID, &failed, nil, coverageResumableScanner{plan: twoUnits, scanErr: errors.New("scanner profile arguments: invalid template")}, false); !handled || err == nil || failed.Status != "failed" || failed.CycleStatus != "stalled" {
+	if handled, _, err := a.runResumableAttempt(ctx, ctx, job, record.ID, &failed, nil, coverageResumableScanner{plan: twoUnits, scanErr: scanner.ConfigurationError(errors.New("scanner profile arguments: invalid template"))}, false); !handled || err == nil || failed.Status != "failed" || failed.CycleStatus != "stalled" {
 		t.Fatalf("unit failure = handled %v scan %#v err %v", handled, failed, err)
 	}
 

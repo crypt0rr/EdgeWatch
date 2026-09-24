@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -26,43 +25,13 @@ const scanCycleMaxUnitAttempts = 3
 // malformed output, and network-level failures are retryable. Validation and
 // deployment errors are surfaced immediately so they do not produce repeated
 // scheduled no-op scans. The scanner deliberately returns sanitized, human
-// readable errors, so keep this classifier conservative and prefix-oriented.
+// readable errors, so classification must rely on the typed marker rather than
+// parsing messages that may also describe transient runtime failures.
 func retryableResumableError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if scanner.IsConfigurationError(err) {
-		return false
-	}
-	message := strings.ToLower(strings.TrimSpace(err.Error()))
-	permanent := []string{
-		"scanner profile arguments",
-		"unsupported naabu work-unit phase",
-		" scan is not enabled",
-		"requires tcp",
-		"requires net_raw",
-		"requires net_admin",
-		"no effective targets",
-		"invalid address",
-		"unexpected address",
-		"invalid port",
-		"non-tcp protocol",
-		"resolve ",
-		"expanded targets exceed",
-		"is excluded by scanner.target_exclusions",
-		"resolved to excluded address",
-		"overlaps excluded network",
-		"executable file not found",
-		"no such file or directory",
-		"permission denied",
-		"configuration",
-	}
-	for _, marker := range permanent {
-		if strings.Contains(message, marker) {
-			return false
-		}
-	}
-	return true
+	return !scanner.IsConfigurationError(err)
 }
 
 // runResumableAttempt executes one time-bounded portion of a broad scan. It

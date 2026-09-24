@@ -121,7 +121,7 @@ func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 		}
 		ports, err := config.ParsePorts(item.Ports)
 		if err != nil {
-			return WorkPlan{}, fmt.Errorf("%s: %w", item.protocol, err)
+			return WorkPlan{}, ConfigurationError(fmt.Errorf("%s: %w", item.protocol, err))
 		}
 		for _, target := range targets {
 			plan.Scopes = append(plan.Scopes, model.Scope{Target: target.Name, Protocol: item.protocol, Ports: item.Ports, ServiceDetection: item.ServiceDetection})
@@ -199,16 +199,16 @@ func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 // discovery pass.
 func (n *Nmap) planNaabuPipeline(ctx context.Context, job config.Job, targets []resolvedTarget) (WorkPlan, error) {
 	if job.TCP == nil {
-		return WorkPlan{}, fmt.Errorf("naabu pipeline requires tcp")
+		return WorkPlan{}, ConfigurationError(errors.New("naabu pipeline requires tcp"))
 	}
 	options := *job.TCP.Naabu
 	config.ApplyNaabuDefaultsForScanner(&options)
 	if err := config.ValidateNaabuOptions(options); err != nil {
-		return WorkPlan{}, fmt.Errorf("tcp naabu: %w", err)
+		return WorkPlan{}, ConfigurationError(fmt.Errorf("tcp naabu: %w", err))
 	}
 	addresses := uniqueAddresses(targets)
 	if len(addresses) == 0 {
-		return WorkPlan{}, errors.New("no effective targets")
+		return WorkPlan{}, ConfigurationError(errors.New("no effective targets"))
 	}
 	if err := ctx.Err(); err != nil {
 		return WorkPlan{}, err

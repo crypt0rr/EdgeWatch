@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -100,6 +101,56 @@ func TestNmapTargetExclusionsAndVersions(t *testing.T) {
 	}
 	if got := n.Version(context.Background()); got != "unknown" {
 		t.Fatalf("missing Nmap version = %q", got)
+	}
+}
+
+func TestNmapMissingExecutableIsTypedConfigurationFailure(t *testing.T) {
+	n := New(filepath.Join(t.TempDir(), "missing-nmap"))
+	_, err := n.scanProtocolBatchDetailedProgress(context.Background(), []resolvedTarget{{Name: "192.0.2.1", Addresses: []string{"192.0.2.1"}}}, "tcp", config.Protocol{Ports: "443", Mode: "connect"}, "balanced", true, nil)
+	if err == nil || !IsConfigurationError(err) {
+		t.Fatalf("missing Nmap executable error = %v, want typed configuration failure", err)
+	}
+}
+
+func TestExecutableStartErrorTypesOnlyPermanentCommandFailures(t *testing.T) {
+	const executable = "/usr/bin/nmap"
+	if got := ExecutableStartError(executable, nil); got != nil {
+		t.Fatalf("ExecutableStartError(nil) = %v, want nil", got)
+	}
+	for _, test := range []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "permission denied for executable", err: &os.PathError{Op: "fork/exec", Path: executable, Err: syscall.EACCES}, want: true},
+		{name: "temporary process resource failure", err: &os.PathError{Op: "fork/exec", Path: executable, Err: syscall.EAGAIN}, want: false},
+		{name: "permission failure for another path", err: &os.PathError{Op: "open", Path: "/dev/ptmx", Err: syscall.EACCES}, want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := IsConfigurationError(ExecutableStartError(executable, test.err)); got != test.want {
+				t.Fatalf("ExecutableStartError(%v) typed = %t, want %t", test.err, got, test.want)
+			}
+		})
+	}
+}
+
+func TestScannerPlanTypesStaticValidationButNotResolverFailures(t *testing.T) {
+	n := New("missing-nmap")
+	invalidPorts := config.Job{Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1, TCP: &config.Protocol{Ports: "70000", Mode: "connect"}}
+	if _, err := n.Plan(context.Background(), invalidPorts); err == nil || !IsConfigurationError(err) {
+		t.Fatalf("invalid port plan error = %v, want typed configuration failure", err)
+	}
+
+	n.Resolver = failingResolver{err: errors.New("permission denied by upstream resolver")}
+	dnsFailure := config.Job{Targets: []string{"scan.example"}, MaxExpandedHosts: 1, TCP: &config.Protocol{Ports: "443", Mode: "connect"}}
+	if _, err := n.Plan(context.Background(), dnsFailure); err == nil || IsConfigurationError(err) {
+		t.Fatalf("resolver runtime error = %v, want untyped retryable failure", err)
+	}
+}
+
+func TestMalformedNmapOutputIsNotTypedConfigurationFailure(t *testing.T) {
+	if _, err := parseXML([]byte("<nmaprun>"), "tcp", false); err == nil || IsConfigurationError(err) {
+		t.Fatalf("malformed Nmap output error = %v, want untyped parse failure", err)
 	}
 }
 

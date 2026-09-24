@@ -543,11 +543,11 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 		raw := config.CanonicalTarget(input)
 		if ip := net.ParseIP(raw); ip != nil {
 			if exclusion := n.excludedNetwork(ip); exclusion != "" {
-				return nil, fmt.Errorf("target %s is excluded by scanner.target_exclusions (%s)", raw, exclusion)
+				return nil, ConfigurationError(fmt.Errorf("target %s is excluded by scanner.target_exclusions (%s)", raw, exclusion))
 			}
 			count++
 			if count > job.MaxExpandedHosts {
-				return nil, fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts)
+				return nil, ConfigurationError(fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts))
 			}
 			out = append(out, resolvedTarget{Name: ip.String(), ConfiguredTarget: raw, Addresses: []string{ip.String()}})
 			continue
@@ -558,11 +558,11 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 					return nil, err
 				}
 				if exclusion := n.excludedNetwork(current); exclusion != "" {
-					return nil, fmt.Errorf("target %s includes excluded address %s (%s)", raw, current.String(), exclusion)
+					return nil, ConfigurationError(fmt.Errorf("target %s includes excluded address %s (%s)", raw, current.String(), exclusion))
 				}
 				count++
 				if count > job.MaxExpandedHosts {
-					return nil, fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts)
+					return nil, ConfigurationError(fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts))
 				}
 				value := current.String()
 				out = append(out, resolvedTarget{Name: value, ConfiguredTarget: raw, Addresses: []string{value}})
@@ -577,7 +577,7 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 		var addresses []string
 		for _, ip := range ips {
 			if exclusion := n.excludedNetwork(ip); exclusion != "" {
-				return nil, fmt.Errorf("target %s resolved to excluded address %s (%s)", raw, ip.String(), exclusion)
+				return nil, ConfigurationError(fmt.Errorf("target %s resolved to excluded address %s (%s)", raw, ip.String(), exclusion))
 			}
 			value := ip.String()
 			if !set[value] {
@@ -586,11 +586,11 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 			}
 		}
 		if len(addresses) == 0 {
-			return nil, fmt.Errorf("resolve %s: no A or AAAA records", raw)
+			return nil, ConfigurationError(fmt.Errorf("resolve %s: no A or AAAA records", raw))
 		}
 		count += len(addresses)
 		if count > job.MaxExpandedHosts {
-			return nil, fmt.Errorf("resolved targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts)
+			return nil, ConfigurationError(fmt.Errorf("resolved targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts))
 		}
 		sort.Strings(addresses)
 		out = append(out, resolvedTarget{Name: strings.ToLower(raw), ConfiguredTarget: strings.ToLower(raw), Addresses: addresses, Aggregate: true, Hostname: true})
@@ -733,7 +733,7 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 				if status != nil {
 					status(invocationProgress{Protocol: protocol, Invocation: localInvocation, BatchProbes: batchProbes, Output: lastOutput, Fraction: lastFraction, Alive: false})
 				}
-				return protocolScanResult{Units: unitsFromMap(all), Hosts: allHosts}, fmt.Errorf("nmap failed: %v: %s", err, sanitizeStderr(stderr))
+				return protocolScanResult{Units: unitsFromMap(all), Hosts: allHosts}, fmt.Errorf("nmap failed: %w: %s", err, sanitizeStderr(stderr))
 			}
 			if status != nil {
 				status(invocationProgress{Protocol: protocol, Invocation: localInvocation, BatchProbes: batchProbes, Fraction: 1, Output: lastOutput, Alive: false})
@@ -1160,8 +1160,11 @@ func runNmapInvocation(ctx context.Context, cmd *exec.Cmd, onOutput func(string,
 		cmd.Stdout = stdout
 		cmd.Stdin = originalStdin
 		cmd.SysProcAttr = originalSysProcAttr
+		if startErr := ExecutableStartError(cmd.Path, ptyErr); IsConfigurationError(startErr) {
+			return nil, "", startErr
+		}
 		if err := cmd.Start(); err != nil {
-			return nil, "", err
+			return nil, "", ExecutableStartError(cmd.Path, err)
 		}
 	}
 

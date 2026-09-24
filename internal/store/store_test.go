@@ -479,17 +479,15 @@ func TestSQLiteConnectionScopedPragmasReapplyAfterConnectionRecycle(t *testing.T
 	// must receive the same connection-scoped settings as the first one.
 	s.DB.SetMaxOpenConns(1)
 	s.DB.SetMaxIdleConns(0)
-	rows, err := s.DB.QueryContext(ctx, `SELECT 1`)
-	if err != nil {
+	var probe int
+	if err := s.DB.QueryRowContext(ctx, `SELECT 1`).Scan(&probe); err != nil {
 		t.Fatal(err)
 	}
-	if !rows.Next() {
-		_ = rows.Close()
-		t.Fatal("connection-recycling probe returned no row")
+	if probe != 1 {
+		t.Fatalf("connection-recycling probe = %d, want 1", probe)
 	}
-	_ = rows.Close()
-	// With no idle connections allowed, closing the rows recycles the physical
-	// connection. The following query opens a fresh one under the connector.
+	// With no idle connections allowed, completing QueryRow releases and
+	// recycles the physical connection. The following query opens a fresh one.
 	var foreignKeys, busyTimeout int
 	if err := s.DB.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
 		t.Fatal(err)
@@ -498,7 +496,7 @@ func TestSQLiteConnectionScopedPragmasReapplyAfterConnectionRecycle(t *testing.T
 		t.Fatal(err)
 	}
 	if foreignKeys != 1 || busyTimeout != 5000 {
-		t.Fatalf("connection pragmas after recycle = foreign_keys=%d busy_timeout=%d (query error %v)", foreignKeys, busyTimeout, err)
+		t.Fatalf("connection pragmas after recycle = foreign_keys=%d busy_timeout=%d", foreignKeys, busyTimeout)
 	}
 }
 

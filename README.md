@@ -480,7 +480,8 @@ The production image embeds the frontend and does not include Node.js. Use
 controlled listeners for integration scans and never commit notification URLs,
 passwords, setup tokens, database files, or encryption keys.
 
-More security detail is in [SECURITY.md](SECURITY.md); container capability
+More security detail, including the live-update session-revocation and
+isolation bounds, is in [SECURITY.md](SECURITY.md); container capability
 guidance is in [docs/container-hardening.md](docs/container-hardening.md).
 
 ## License

@@ -63,14 +63,20 @@ type deadlineTrackingWriter struct {
 func (w *deadlineTrackingWriter) Header() http.Header { return w.header }
 
 func (w *deadlineTrackingWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	if w.status == 0 {
 		w.status = http.StatusOK
 	}
 	return w.body.Write(data)
 }
 
-func (w *deadlineTrackingWriter) WriteHeader(status int) { w.status = status }
-func (w *deadlineTrackingWriter) Flush()                 {}
+func (w *deadlineTrackingWriter) WriteHeader(status int) {
+	w.mu.Lock()
+	w.status = status
+	w.mu.Unlock()
+}
+func (w *deadlineTrackingWriter) Flush() {}
 
 func (w *deadlineTrackingWriter) SetWriteDeadline(deadline time.Time) error {
 	w.mu.Lock()

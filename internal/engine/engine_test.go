@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,97 @@ func snapshot(state string) model.Snapshot {
 	}
 	s.Normalize()
 	return s
+}
+
+func TestEquivalentPortCanonicalizationDoesNotInvalidateExistingBaseline(t *testing.T) {
+	legacy := config.NormalizeStoredJob(config.Job{
+		Name: "legacy-ports", Targets: []string{"192.0.2.1"},
+		TCP: &config.Protocol{Ports: "443, 22", Mode: "connect"},
+	})
+	baseline := model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{
+		{Port: 22, State: "open"}, {Port: 443, State: "open"},
+	}}}}
+	state := model.JobState{
+		Baseline: &baseline, BaselineScanID: "legacy-baseline", BaselineConfigHash: legacy.LegacySecurityHash(),
+		Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{},
+		Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{},
+		FingerprintCandidates: map[string]model.ValueCount{},
+	}
+	scan := model.Scan{
+		Job: legacy.Name, Status: "success", ConfigHash: legacy.SecurityHash(),
+		FinishedAt: time.Now().UTC(), Snapshot: baseline,
+	}
+	events, changes, err := processSuccessWithChanges(&state, legacy, scan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changes) != 0 || len(events) != 0 {
+		t.Fatalf("canonicalization created changes or events: changes=%#v events=%#v", changes, events)
+	}
+	if state.BaselineConfigHash != scan.ConfigHash || state.BaselineScanID != "legacy-baseline" || state.Baseline == nil {
+		t.Fatalf("legacy baseline was not preserved and rehashed safely: %#v", state)
+	}
+}
+
+func TestManagedScanMigratesLegacyPortHashWithoutResettingBaseline(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	created, err := db.CreateJob(ctx, config.Job{
+		Name: "legacy-managed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
+		TCP: &config.Protocol{Ports: "1-2", Mode: "connect"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyDefinition := created.Job
+	legacyDefinition.TCP.Ports = "2, 1"
+	legacyHash := config.NormalizeStoredJob(legacyDefinition).LegacySecurityHash()
+	definition, err := json.Marshal(legacyDefinition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE jobs SET definition_json=? WHERE id=?`, definition, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE job_revisions SET definition_json=?,security_hash=? WHERE job_id=? AND revision=?`, definition, legacyHash, created.ID, created.Revision); err != nil {
+		t.Fatal(err)
+	}
+	baseline := snapshotWithOpenPorts(1, 2)
+	if _, err := db.UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &baseline
+		state.BaselineScanID = "legacy-baseline"
+		state.BaselineConfigHash = legacyHash
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := db.GetJob(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scan := model.Scan{
+		ID: "canonical-scan", JobID: created.ID, Job: current.Job.Name, JobRevision: current.Revision,
+		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "success",
+		ConfigHash: current.Job.SecurityHash(), Snapshot: baseline,
+	}
+	e := Engine{Store: db}
+	if events, err := e.FinalizeManagedScan(ctx, created.ID, current.Job, &scan, nil); err != nil || len(events) != 0 {
+		t.Fatalf("finalize = events %#v, err %v", events, err)
+	}
+	state, err := db.RuntimeState(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Baseline == nil || state.BaselineScanID != "legacy-baseline" || state.BaselineConfigHash != scan.ConfigHash {
+		t.Fatalf("scan invalidated legacy baseline instead of safely migrating its hash: %#v", state)
+	}
+	if len(scan.Changes) != 0 {
+		t.Fatalf("representation-only port change created scan changes: %#v", scan.Changes)
+	}
 }
 
 func snapshotWithOpenPorts(ports ...int) model.Snapshot {

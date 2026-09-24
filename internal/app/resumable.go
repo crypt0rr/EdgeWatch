@@ -237,7 +237,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		return true, model.Snapshot{}, errors.New(scan.Error)
 	}
 
-	if cycle.ConfigHash != job.SecurityHash() {
+	if cycle.ConfigHash != job.SecurityHash() && cycle.ConfigHash != job.LegacySecurityHash() {
 		message := "scan cycle settings changed; discard the paused cycle before retrying"
 		_, _ = a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, message)
 		scan.Resumable = true

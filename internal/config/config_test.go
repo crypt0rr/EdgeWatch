@@ -323,6 +323,50 @@ func TestSecurityHashIncludesAssumeAlive(t *testing.T) {
 	}
 }
 
+func TestPortExpressionsNormalizeToTheSameSecurityScope(t *testing.T) {
+	base := NormalizeJob(Job{Targets: []string{"192.0.2.1"}, TCP: &Protocol{Ports: "22,443", Mode: "connect"}})
+	equivalent := NormalizeJob(Job{Targets: []string{"192.0.2.1"}, TCP: &Protocol{Ports: "443, 22,22", Mode: "connect"}})
+	if base.TCP.Ports != "22,443" || equivalent.TCP.Ports != "22,443" {
+		t.Fatalf("normalized port expressions = %q and %q, want both 22,443", base.TCP.Ports, equivalent.TCP.Ports)
+	}
+	if base.SecurityHash() != equivalent.SecurityHash() {
+		t.Fatal("equivalent port expressions produced different security hashes")
+	}
+	changed := NormalizeJob(Job{Targets: []string{"192.0.2.1"}, TCP: &Protocol{Ports: "22,444", Mode: "connect"}})
+	if base.SecurityHash() == changed.SecurityHash() {
+		t.Fatal("a real port-set change did not alter the security hash")
+	}
+	ranged := NormalizeJob(Job{Targets: []string{"192.0.2.1"}, TCP: &Protocol{Ports: "1-3,2,4", Mode: "connect"}})
+	if ranged.TCP.Ports != "1-4" {
+		t.Fatalf("adjacent and duplicate ranges normalized to %q, want 1-4", ranged.TCP.Ports)
+	}
+}
+
+func TestNormalizeStoredJobRetainsLegacyPortScopeHash(t *testing.T) {
+	legacy := Job{Targets: []string{"192.0.2.1"}, TCP: &Protocol{Ports: "443, 22", Mode: "connect"}}
+	stored := NormalizeStoredJob(legacy)
+	oldHash := stored.LegacySecurityHash()
+	if oldHash == "" {
+		t.Fatal("stored job did not retain its old raw-expression hash")
+	}
+	if stored.TCP.Ports != "22,443" {
+		t.Fatalf("stored ports = %q, want canonical 22,443", stored.TCP.Ports)
+	}
+	if stored.LegacySecurityHash() != oldHash {
+		t.Fatalf("legacy hash = %q, want %q", stored.LegacySecurityHash(), oldHash)
+	}
+	if stored.SecurityHash() == oldHash {
+		t.Fatal("canonical scope hash unexpectedly equals legacy raw-expression hash")
+	}
+	if got := NormalizeStoredJob(stored).LegacySecurityHash(); got != "" {
+		t.Fatalf("already-normalized stored job retained a stale legacy hash %q", got)
+	}
+	legacyNaabu := NormalizeStoredJob(Job{TCP: &Protocol{Engine: EngineNaabuNmap, Ports: "443"}})
+	if legacyNaabu.TCP.Ports != NaabuFullPortExpression || legacyNaabu.LegacySecurityHash() != "" {
+		t.Fatalf("legacy Naabu normalization = ports %q, legacy hash %q", legacyNaabu.TCP.Ports, legacyNaabu.LegacySecurityHash())
+	}
+}
+
 func TestNaabuPipelineDefaultsConfirmationToConnect(t *testing.T) {
 	job := NormalizeJob(Job{TCP: &Protocol{Engine: EngineNaabuNmap, Naabu: &NaabuOptions{ScanType: "connect"}}})
 	if job.TCP == nil || job.TCP.Mode != "connect" {
@@ -380,6 +424,26 @@ func TestNormalizeJobCanonicalizesTargets(t *testing.T) {
 	want := []string{"192.168.1.0/24", "2001:db8::1", "router.example"}
 	if !reflect.DeepEqual(job.Targets, want) {
 		t.Fatalf("canonical targets = %#v, want %#v", job.Targets, want)
+	}
+}
+
+func TestNormalizeJobDoesNotMutateCallerOwnedValues(t *testing.T) {
+	targets := []string{"  192.0.2.1/32 "}
+	naabu := &NaabuOptions{}
+	tcp := &Protocol{Engine: EngineNaabuNmap, Ports: "443", Naabu: naabu}
+	job := Job{Targets: targets, TCP: tcp}
+
+	_ = job.SecurityHash()
+	if targets[0] != "  192.0.2.1/32 " || tcp.Ports != "443" || tcp.Mode != "" || naabu.Rate != 0 {
+		t.Fatalf("SecurityHash mutated caller-owned job: targets=%q tcp=%+v naabu=%+v", targets, tcp, naabu)
+	}
+
+	normalized := NormalizeJob(job)
+	if normalized.Targets[0] != "192.0.2.1" || normalized.TCP.Ports != NaabuFullPortExpression || normalized.TCP.Naabu.Rate == 0 {
+		t.Fatalf("normalized values = targets %q protocol %+v, want canonical copies with defaults", normalized.Targets, normalized.TCP)
+	}
+	if &normalized.Targets[0] == &targets[0] || normalized.TCP == tcp || normalized.TCP.Naabu == naabu {
+		t.Fatal("normalization reused caller-owned slices or protocol pointers")
 	}
 }
 

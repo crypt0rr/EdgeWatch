@@ -94,6 +94,16 @@ func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]m
 // events prevents immutable scan history from diverging when service
 // fingerprints are learned as part of the same transaction.
 func processSuccessWithChanges(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, []model.Change, error) {
+	// Port-expression normalization changes the representation but not the
+	// effective monitored set. When a persisted legacy job still matches its
+	// old raw-expression hash, advance only the baseline's scope marker to the
+	// canonical hash; do not generate a scope-change diff or relearn the
+	// baseline.
+	if state.Baseline != nil && state.BaselineConfigHash != "" &&
+		job.LegacySecurityHash() != "" && state.BaselineConfigHash == job.LegacySecurityHash() &&
+		scan.ConfigHash == job.SecurityHash() {
+		state.BaselineConfigHash = scan.ConfigHash
+	}
 	incomplete := snapshotHasUnreachableHost(scan.Snapshot)
 	if incomplete {
 		// The scanner has complete evidence for some address/protocol pairs, so

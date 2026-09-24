@@ -429,6 +429,39 @@ func (s *Store) UpdateRuntimeForScanWithOutbox(ctx context.Context, jobID, secur
 	return s.updateRuntime(ctx, jobID, securityHash, destinations, fn)
 }
 
+// migrateLegacyScopeHashTx updates only the scope marker written by the old
+// raw-port-expression hash. It is called only after canonical hashes prove the
+// monitored scope is unchanged, so persisted baselines and paused scan cycles
+// remain valid across the representation-only upgrade.
+func migrateLegacyScopeHashTx(ctx context.Context, tx *sql.Tx, jobID, legacyHash, canonicalHash string) error {
+	if legacyHash == "" || canonicalHash == "" || legacyHash == canonicalHash {
+		return nil
+	}
+	state, err := loadRuntimeTx(ctx, tx, jobID)
+	if err != nil {
+		return err
+	}
+	if state.Baseline != nil && state.BaselineConfigHash == legacyHash {
+		state.BaselineConfigHash = canonicalHash
+		raw, marshalErr := json.Marshal(state)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		now := time.Now().UTC()
+		if _, err := tx.ExecContext(ctx, `UPDATE job_runtime SET state_json=?,updated_at=? WHERE job_id=?`, raw, sqliteTimestamp(now), jobID); err != nil {
+			return err
+		}
+		if err := upsertRuntimeBaselineMetaTx(ctx, tx, jobID, state, 0, now); err != nil {
+			return err
+		}
+	}
+	// A cycle's plan remains pinned to the same effective port set. Advancing
+	// its config hash keeps interrupted work resumable without changing its
+	// checkpoints or baseline epoch.
+	_, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET config_hash=? WHERE job_id=? AND config_hash=? AND status NOT IN ('completed','discarded','expired')`, canonicalHash, jobID, legacyHash)
+	return err
+}
+
 // FinalizeManagedScan persists a managed scan and its runtime transition on the
 // same SQLite transaction. The runtime state is read while the transaction's
 // database connection is held, so baseline reset/approval cannot slip between
@@ -504,6 +537,11 @@ func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID
 	state, err := loadRuntimeTx(ctx, tx, jobID)
 	if err != nil {
 		return nil, err
+	}
+	if state.Baseline != nil && state.BaselineConfigHash != "" &&
+		job.LegacySecurityHash() != "" && state.BaselineConfigHash == job.LegacySecurityHash() &&
+		securityHash == job.SecurityHash() {
+		state.BaselineConfigHash = securityHash
 	}
 	baselineModifiedBefore := state.BaselineModified
 	baselineBefore, err := marshalBaselineForProjection(state.Baseline)

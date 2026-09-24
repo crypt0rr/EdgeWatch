@@ -205,6 +205,7 @@ type Job struct {
 	// deliberately silent job, so persistence must not let encoding/json's
 	// omitempty collapse the two states.
 	NotificationDestinations []string `yaml:"notification_destinations,omitempty" json:"notification_destinations"`
+	legacySecurityHash       string
 }
 type Protocol struct {
 	Ports            string `yaml:"ports"`
@@ -988,12 +989,38 @@ func ValidateJobWithTargetExclusions(j Job, exclusions []string) error {
 
 // NormalizeJob applies the same defaults used when loading YAML.
 func NormalizeJob(j Job) Job {
+	// applyDefaults and port canonicalization modify protocol defaults and
+	// expressions. Copy pointer-backed values so normalizing a candidate does
+	// not mutate the caller's job (or obscure the original persisted spelling).
+	j.Targets = append([]string(nil), j.Targets...)
+	if j.TCP != nil {
+		protocol := *j.TCP
+		if protocol.Naabu != nil {
+			naabu := *protocol.Naabu
+			protocol.Naabu = &naabu
+		}
+		j.TCP = &protocol
+	}
+	if j.UDP != nil {
+		protocol := *j.UDP
+		if protocol.Naabu != nil {
+			naabu := *protocol.Naabu
+			protocol.Naabu = &naabu
+		}
+		j.UDP = &protocol
+	}
 	c := Config{Jobs: []Job{j}}
 	applyDefaults(&c)
 	j = c.Jobs[0]
 	j.Name = strings.TrimSpace(j.Name)
 	j.Schedule = strings.TrimSpace(j.Schedule)
 	j.Timezone = strings.TrimSpace(j.Timezone)
+	if j.TCP != nil {
+		j.TCP.Ports = CanonicalPortExpression(j.TCP.Ports)
+	}
+	if j.UDP != nil {
+		j.UDP.Ports = CanonicalPortExpression(j.UDP.Ports)
+	}
 	for i := range j.Targets {
 		j.Targets[i] = CanonicalTarget(j.Targets[i])
 	}
@@ -1020,6 +1047,86 @@ func NormalizeJob(j Job) Job {
 		j.NotificationDestinations = selected
 	}
 	return j
+}
+
+// NormalizeStoredJob normalizes a job definition loaded from persistent
+// storage while retaining its pre-normalization scope hash for one-time
+// compatibility with baselines and resumable cycles written by older
+// versions. The alias is process-local and is never serialized.
+func NormalizeStoredJob(j Job) Job {
+	j.legacySecurityHash = ""
+	legacyHash := j.securityHashBeforePortCanonicalization()
+	j = NormalizeJob(j)
+	if legacyHash != j.securityHashNormalized() {
+		j.legacySecurityHash = legacyHash
+	}
+	return j
+}
+
+// LegacySecurityHash returns the old raw-port-expression hash when this job
+// was loaded from storage and canonicalization changed its representation.
+// It is used only to migrate matching baseline/cycle metadata safely.
+func (j Job) LegacySecurityHash() string { return j.legacySecurityHash }
+
+// CanonicalPortExpression returns a deterministic compact spelling of a valid
+// port set. It sorts and merges duplicate, overlapping, and adjacent ranges
+// without expanding broad ranges into individual ports. Invalid expressions
+// are left trimmed so normal validation remains responsible for reporting the
+// error without normalization accidentally making them valid.
+func CanonicalPortExpression(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return raw
+	}
+	type portRange struct{ first, last int }
+	ranges := make([]portRange, 0, strings.Count(raw, ",")+1)
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		parts := strings.Split(item, "-")
+		if len(parts) > 2 || len(parts) == 0 {
+			return raw
+		}
+		first, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return raw
+		}
+		last := first
+		if len(parts) == 2 {
+			last, err = strconv.Atoi(parts[1])
+			if err != nil {
+				return raw
+			}
+		}
+		if first < 1 || last > 65535 || last < first {
+			return raw
+		}
+		ranges = append(ranges, portRange{first: first, last: last})
+	}
+	sort.Slice(ranges, func(i, j int) bool {
+		if ranges[i].first == ranges[j].first {
+			return ranges[i].last < ranges[j].last
+		}
+		return ranges[i].first < ranges[j].first
+	})
+	merged := ranges[:0]
+	for _, current := range ranges {
+		if len(merged) == 0 || current.first > merged[len(merged)-1].last+1 {
+			merged = append(merged, current)
+			continue
+		}
+		if current.last > merged[len(merged)-1].last {
+			merged[len(merged)-1].last = current.last
+		}
+	}
+	parts := make([]string, 0, len(merged))
+	for _, item := range merged {
+		if item.first == item.last {
+			parts = append(parts, strconv.Itoa(item.first))
+		} else {
+			parts = append(parts, strconv.Itoa(item.first)+"-"+strconv.Itoa(item.last))
+		}
+	}
+	return strings.Join(parts, ",")
 }
 
 // CanonicalTarget gives semantically equivalent IP and network inputs one
@@ -1532,6 +1639,31 @@ func (j Job) SecurityHash() string {
 	// tooling and scheduler fixtures may construct a value directly. Treat an
 	// omitted engine/default as the same scope as its explicit default.
 	j = NormalizeJob(j)
+	return j.securityHashNormalized()
+}
+
+func (j Job) securityHashBeforePortCanonicalization() string {
+	var tcpPorts, udpPorts string
+	if j.TCP != nil {
+		tcpPorts = j.TCP.Ports
+	}
+	if j.UDP != nil {
+		udpPorts = j.UDP.Ports
+	}
+	j = NormalizeJob(j)
+	// Naabu jobs have always normalized their TCP discovery scope to the full
+	// range before hashing. Preserve that historical behavior when deriving a
+	// compatibility alias from legacy persisted input.
+	if j.TCP != nil && j.TCP.Engine != EngineNaabuNmap {
+		j.TCP.Ports = tcpPorts
+	}
+	if j.UDP != nil {
+		j.UDP.Ports = udpPorts
+	}
+	return j.securityHashNormalized()
+}
+
+func (j Job) securityHashNormalized() string {
 	type securityJob struct {
 		Targets     []string
 		Max         int

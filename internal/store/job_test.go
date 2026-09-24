@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/scanner"
 	_ "modernc.org/sqlite"
 )
 
@@ -165,6 +167,75 @@ func TestManagedJobRevisionAndScopeConfirmation(t *testing.T) {
 	}
 	if err := s.AcquireJobLeaseForRevision(ctx, record.ID, "stale-scan", 1, time.Now().Add(time.Minute)); !errors.Is(err, ErrJobRevisionChanged) {
 		t.Fatalf("stale revision acquired a lease: %v", err)
+	}
+}
+
+func TestEquivalentPortEditPreservesLegacyBaselineWithoutConfirmation(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("legacy-port-scope"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := record.Job
+	legacy.TCP.Ports = "2, 1"
+	legacyHash := config.NormalizeStoredJob(legacy).LegacySecurityHash()
+	if legacyHash == "" {
+		t.Fatal("legacy test definition did not produce a compatibility hash")
+	}
+	definition, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE jobs SET definition_json=? WHERE id=?`, definition, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE job_revisions SET definition_json=?,security_hash=? WHERE job_id=? AND revision=?`, definition, legacyHash, record.ID, record.Revision); err != nil {
+		t.Fatal(err)
+	}
+	baseline := model.Snapshot{Units: []model.Unit{{Target: "127.0.0.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}, {Port: 2, State: "open"}}}}}
+	if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &baseline
+		state.BaselineScanID = "legacy-baseline"
+		state.BaselineConfigHash = legacyHash
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := s.GetJob(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Job.TCP.Ports != "1-2" || current.Job.LegacySecurityHash() != legacyHash {
+		t.Fatalf("stored legacy job = ports %q, compatibility hash %q; want 1-2 and %q", current.Job.TCP.Ports, current.Job.LegacySecurityHash(), legacyHash)
+	}
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+		ID: "legacy-cycle", JobID: current.ID, Job: current.Job.Name, JobRevision: current.Revision,
+		ConfigHash: legacyHash, ExecutionHash: current.Job.ExecutionHash(),
+		Plan: scanner.WorkPlan{Job: current.Job, Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Addresses: []string{"127.0.0.1"}, Ports: "1-2", PortCount: 2, Probes: 2}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := current.Job
+	changed.TCP.Ports = "1,2"
+	updated, scopeChanged, err := s.UpdateJob(ctx, record.ID, current.Revision, changed, true, false, false)
+	if err != nil || scopeChanged {
+		t.Fatalf("equivalent port edit = %#v, scopeChanged=%v, err=%v", updated, scopeChanged, err)
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Baseline == nil || state.BaselineScanID != "legacy-baseline" || state.BaselineConfigHash != updated.Job.SecurityHash() {
+		t.Fatalf("equivalent edit did not preserve and safely rehash the baseline: %#v", state)
+	}
+	if updated.Job.TCP.Ports != "1-2" {
+		t.Fatalf("persisted ports = %q, want canonical 1-2", updated.Job.TCP.Ports)
+	}
+	cycle, err = s.GetScanCycle(ctx, cycle.ID)
+	if err != nil || cycle.ConfigHash != updated.Job.SecurityHash() {
+		t.Fatalf("paused scan cycle scope hash = %q, err=%v; want canonical %q", cycle.ConfigHash, err, updated.Job.SecurityHash())
 	}
 }
 

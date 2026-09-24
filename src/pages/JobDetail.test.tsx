@@ -156,6 +156,16 @@ describe('job surface overview', () => {
     expect(jobScans).not.toHaveBeenCalled()
   })
 
+  it('shows a safe scan-progress notice and does not surface storage errors', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, scan_cycle_error: 'cycle_status_unavailable' })
+    vi.mocked(scanCycle).mockRejectedValue(new Error('SQL logic error: sensitive store detail'))
+    await renderPage()
+
+    await vi.waitFor(() => expect(container.textContent).toContain('Saved scan progress could not be loaded.'), { timeout: 1000 })
+    expect(container.textContent).toContain('EdgeWatch will retry automatically')
+    expect(container.textContent).not.toContain('sensitive store detail')
+  })
+
   it('renders the selected scan detail directly beneath its row with accessible expansion state', async () => {
     await renderPage()
     await vi.waitFor(() => expect(container.querySelector('.scan-row')).not.toBeNull(), { timeout: 1000 })

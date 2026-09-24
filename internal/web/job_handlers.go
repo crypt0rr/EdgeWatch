@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"strconv"
@@ -194,7 +195,19 @@ func (s *Server) addJobCycleAndProfile(ctx context.Context, record store.JobReco
 		return value
 	}
 	if err != nil {
-		value["scan_cycle_error"] = err.Error()
+		logger := s.Log
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.ErrorContext(ctx, "active scan cycle lookup failed",
+			"request_id", RequestID(ctx),
+			"job_id", record.ID,
+			"error", err,
+		)
+		// Keep implementation details in the correlated server log. Job payloads
+		// are visible to every role with jobs.read, so expose only a stable marker
+		// that the UI can translate into a safe, actionable message.
+		value["scan_cycle_error"] = "cycle_status_unavailable"
 		return value
 	}
 	value["scan_cycle"] = cycleJSON(cycle)

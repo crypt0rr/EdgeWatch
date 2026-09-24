@@ -682,6 +682,14 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 	if templateContains(template, config.PlaceholderAddress) {
 		batchLimit = 1
 	}
+	ports, err := config.ParsePorts(pc.Ports)
+	if err != nil {
+		return protocolScanResult{}, ConfigurationError(fmt.Errorf("invalid %s ports: %w", protocol, err))
+	}
+	probesPerHost := int64(len(ports))
+	if pc.ServiceDetection {
+		probesPerHost *= 2
+	}
 	for _, family := range []int{4, 6} {
 		addresses := byFamily[family]
 		for start := 0; start < len(addresses); start += batchLimit {
@@ -694,13 +702,7 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 			// variables from changing the fixed scanner contract. Browser/API input
 			// never controls this environment; only the validated argv template does.
 			cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent", "NMAPDIR=/usr/share/nmap", "XDG_CONFIG_HOME=/nonexistent", "LANG=C"}
-			batchProbes := int64(len(batch))
-			ports, _ := config.ParsePorts(pc.Ports)
-			factor := int64(1)
-			if pc.ServiceDetection {
-				factor = 2
-			}
-			batchProbes *= int64(len(ports)) * factor
+			batchProbes := int64(len(batch)) * probesPerHost
 			localInvocation := int64(start/batchLimit) + 1
 			if family == 6 && len(byFamily[4]) > 0 {
 				localInvocation += int64((len(byFamily[4]) + batchLimit - 1) / batchLimit)
@@ -780,7 +782,7 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 				mergeHostObservationMap(allHosts, address, host)
 			}
 			if report != nil {
-				report(1, int64(len(batch))*int64(len(ports))*factor)
+				report(1, int64(len(batch))*probesPerHost)
 			}
 		}
 	}
@@ -1064,11 +1066,7 @@ func timingArg(profile string) string {
 	return "-T3"
 }
 func sanitizeStderr(v string) string {
-	v = strings.TrimSpace(v)
-	if len(v) > 500 {
-		v = v[:500] + "…"
-	}
-	return v
+	return boundScannerText(v, 500)
 }
 
 // runNmapInvocation keeps XML available to the parser while consuming Nmap's
@@ -1544,11 +1542,7 @@ func waitErrWithContext(ctx context.Context, waitErr error) error {
 }
 
 func trimProgressOutput(line string) string {
-	line = strings.TrimSpace(line)
-	if len(line) > 240 {
-		line = line[:240] + "…"
-	}
-	return line
+	return boundScannerText(line, 240)
 }
 
 func looksLikeNmapXML(line string) bool {
@@ -1884,22 +1878,37 @@ func hasServiceEvidence(service struct {
 // UTF-8 byte length. The terminating ellipsis makes truncation visible while
 // keeping the returned string valid UTF-8 and within the documented bound.
 func boundScannerMetadata(value string) string {
-	value = strings.TrimSpace(value)
-	if len(value) <= maxScannerMetadataBytes {
+	return boundScannerText(value, maxScannerMetadataBytes)
+}
+
+// boundScannerText trims scanner-supplied text and clips it at a UTF-8 rune
+// boundary. The maximum includes the visible ellipsis, so callers can safely
+// persist or display the returned value without splitting a multi-byte rune.
+func boundScannerText(value string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	value = strings.TrimSpace(strings.ToValidUTF8(value, "�"))
+	if len(value) <= maxBytes {
 		return value
 	}
 	const ellipsis = "…"
-	limit := maxScannerMetadataBytes - len(ellipsis)
+	suffix := ""
+	limit := maxBytes
+	if maxBytes >= len(ellipsis) {
+		suffix = ellipsis
+		limit -= len(suffix)
+	}
 	end, used := 0, 0
-	for end < len(value) {
-		_, size := utf8.DecodeRuneInString(value[end:])
+	for index, r := range value {
+		size := utf8.RuneLen(r)
 		if used+size > limit {
 			break
 		}
-		end += size
+		end = index + size
 		used += size
 	}
-	return value[:end] + ellipsis
+	return value[:end] + suffix
 }
 
 func boundedScannerStrings(values []string, maxItems int) []string {

@@ -585,12 +585,40 @@ func validateScannerFlagOperand(label, flag, operand string) error {
 		"--max-rtt-timeout":     {min: time.Millisecond, max: time.Minute},
 	}
 	if bounds, ok := durationBounds[flag]; ok {
-		value, err := time.ParseDuration(operand)
+		value, err := parseNmapDuration(operand)
 		if err != nil || value < bounds.min || value > bounds.max {
 			return fmt.Errorf("%s flag %q operand must be a duration between %s and %s", label, flag, bounds.min, bounds.max)
 		}
 	}
 	return nil
+}
+
+// parseNmapDuration accepts Go-style unit-bearing durations and Nmap's
+// documented unitless seconds form. Keep unitless input decimal-only so
+// exponent notation and non-finite values cannot bypass the profile bounds.
+func parseNmapDuration(value string) (time.Duration, error) {
+	if parsed, err := time.ParseDuration(value); err == nil {
+		return parsed, nil
+	}
+	digits, decimalPoints := 0, 0
+	for _, r := range value {
+		switch {
+		case r >= '0' && r <= '9':
+			digits++
+		case r == '.':
+			decimalPoints++
+		default:
+			return 0, fmt.Errorf("invalid Nmap duration %q", value)
+		}
+	}
+	if digits == 0 || decimalPoints > 1 {
+		return 0, fmt.Errorf("invalid Nmap duration %q", value)
+	}
+	seconds, err := strconv.ParseFloat(value, 64)
+	if err != nil || seconds > float64(24*time.Hour)/float64(time.Second) {
+		return 0, fmt.Errorf("invalid Nmap duration %q", value)
+	}
+	return time.Duration(seconds * float64(time.Second)), nil
 }
 
 // The profile editor is intentionally an allow-list rather than a general

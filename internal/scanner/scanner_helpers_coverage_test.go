@@ -139,7 +139,7 @@ func TestScannerOutputSanitizationAndFingerprint(t *testing.T) {
 	if got := sanitizeStderr("  short message  "); got != "short message" {
 		t.Fatalf("sanitized stderr = %q", got)
 	}
-	if got := sanitizeStderr(strings.Repeat("x", 600)); !strings.HasPrefix(got, strings.Repeat("x", 500)) || !strings.HasSuffix(got, "…") {
+	if got := sanitizeStderr(strings.Repeat("x", 600)); len(got) != 500 || !strings.HasPrefix(got, strings.Repeat("x", 497)) || !strings.HasSuffix(got, "…") {
 		t.Fatalf("long stderr = %q", got)
 	}
 	first := commandFingerprint([]string{"-p", "22", "192.0.2.1"})

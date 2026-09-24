@@ -157,11 +157,11 @@ func TestPublicAPIDisabledEnabledAndRateLimited(t *testing.T) {
 	}
 	server.publicHits = map[string][]time.Time{}
 	for i := 0; i < 120; i++ {
-		if !server.allowPublicRequest(httptest.NewRequest(http.MethodGet, "/", nil)) {
+		if !server.allowAnonymousRequest(httptest.NewRequest(http.MethodGet, "/", nil), "public-dashboard") {
 			t.Fatalf("request %d unexpectedly rate limited", i+1)
 		}
 	}
-	if server.allowPublicRequest(httptest.NewRequest(http.MethodGet, "/", nil)) {
+	if server.allowAnonymousRequest(httptest.NewRequest(http.MethodGet, "/", nil), "public-dashboard") {
 		t.Fatal("121st request was not rate limited")
 	}
 	old := time.Now().UTC().Add(-2 * time.Minute)
@@ -171,7 +171,7 @@ func TestPublicAPIDisabledEnabledAndRateLimited(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodGet, "/", nil)
 	request.RemoteAddr = "new-client:1234"
-	if !server.allowPublicRequest(request) {
+	if !server.allowAnonymousRequest(request, "public-dashboard") {
 		t.Fatal("new client was unexpectedly rate limited")
 	}
 	if len(server.publicHits) != 1 {

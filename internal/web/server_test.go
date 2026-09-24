@@ -394,7 +394,7 @@ func TestSetupStatusDoesNotExposeOperationalDetails(t *testing.T) {
 
 	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	loginRequest.RemoteAddr = "127.0.0.1:1234"
-	sessionToken, _, err := auth.NewManager(s).Login(ctx, loginRequest, "correct horse battery staple", "", "")
+	sessionToken, _, err := auth.NewManager(s).LoginAs(ctx, loginRequest, "admin", "correct horse battery staple", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +493,7 @@ func TestSSEPayloadAndHistoryAreByteBounded(t *testing.T) {
 func TestSSEStopsDeliveringAfterSessionRevocation(t *testing.T) {
 	server, db, _ := newUsersTestServer(t)
 	ctx := context.Background()
-	raw, _, err := auth.NewManager(db).Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "admin")
+	raw, _, err := auth.NewManager(db).LoginAs(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", "administrator password", "", "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,7 +551,7 @@ func TestSSEConnectionsAndLimitResponsesDoNotRefreshIdleSession(t *testing.T) {
 	ctx := context.Background()
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	server.Auth.Now = func() time.Time { return now }
-	raw, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+	raw, _, err := server.Auth.LoginAs(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", "administrator password", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -637,7 +637,7 @@ func TestBackgroundStatusPollingDoesNotRefreshIdleSession(t *testing.T) {
 	server, db, _ := newUsersTestServer(t)
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	server.Auth.Now = func() time.Time { return now }
-	raw, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+	raw, _, err := server.Auth.LoginAs(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", "administrator password", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -775,7 +775,7 @@ func TestIdleActivityWriteDoesNotBlockAuthenticatedReads(t *testing.T) {
 	server, db, _ := newUsersTestServer(t)
 	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
 	server.Auth.Now = func() time.Time { return now }
-	raw, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+	raw, _, err := server.Auth.LoginAs(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", "administrator password", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -860,11 +860,11 @@ func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 	}
 
 	// Log in twice so the account has two independent server-side sessions.
-	rawA, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+	rawA, _, err := server.Auth.LoginAs(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", "administrator password", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	rawB, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+	rawB, _, err := server.Auth.LoginAs(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", "administrator password", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -971,7 +971,7 @@ func TestSSEAuthorizationCacheDoesNotCrossSessionsOrMissingCookie(t *testing.T) 
 	ctx := context.Background()
 	login := func() (string, store.Session) {
 		t.Helper()
-		raw, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+		raw, _, err := server.Auth.LoginAs(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", "administrator password", "", "")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1040,7 +1040,7 @@ func TestAPIRequiresSessionCSRFAndRejectsUnvalidatedOptions(t *testing.T) {
 	resp.Body.Close()
 	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	loginRequest.RemoteAddr = "127.0.0.1:1234"
-	raw, _, err := auth.NewManager(s).Login(ctx, loginRequest, "correct horse battery staple", "", "")
+	raw, _, err := auth.NewManager(s).LoginAs(ctx, loginRequest, "admin", "correct horse battery staple", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1106,7 +1106,7 @@ func TestSensitiveJobMutationFailsClosedWhenAuditUnavailable(t *testing.T) {
 	}
 	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	loginRequest.RemoteAddr = "127.0.0.1:1234"
-	raw, _, err := auth.NewManager(s).Login(ctx, loginRequest, "correct horse battery staple", "", "")
+	raw, _, err := auth.NewManager(s).LoginAs(ctx, loginRequest, "admin", "correct horse battery staple", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

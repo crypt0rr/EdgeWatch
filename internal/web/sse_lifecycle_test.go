@@ -69,7 +69,7 @@ func waitForSSEBody(t *testing.T, writer *deadlineTrackingWriter, want string) {
 func TestSSEAuthorizationCacheLifecycleThroughStreams(t *testing.T) {
 	server, db, _ := newUsersTestServer(t)
 	ctx := context.Background()
-	raw, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+	raw, _, err := server.Auth.LoginAs(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "admin", "administrator password", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

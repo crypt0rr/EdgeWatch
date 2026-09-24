@@ -1,6 +1,10 @@
 package auth
 
-import "github.com/crypt0rr/edgewatch/internal/store"
+import (
+	"slices"
+
+	"github.com/crypt0rr/edgewatch/internal/store"
+)
 
 const (
 	// PermissionDenied is returned by the web route matrix for paths that are
@@ -77,13 +81,8 @@ func PermissionsForRole(role string) []string {
 	for permission := range values {
 		result = append(result, permission)
 	}
-	// The list is an API response and should be deterministic. Avoid importing
-	// a second sorting helper into callers.
-	for i := 1; i < len(result); i++ {
-		for j := i; j > 0 && result[j] < result[j-1]; j-- {
-			result[j], result[j-1] = result[j-1], result[j]
-		}
-	}
+	// The list is an API response and should be deterministic.
+	slices.Sort(result)
 	return result
 }
 

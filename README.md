@@ -337,7 +337,7 @@ changes confirm an incident. When a security-impacting job setting changes,
 EdgeWatch shows the affected scope and asks for explicit rebaselining. Schedule
 and execution-tuning changes do not reset the baseline.
 
-From **Incidents**, an administrator can:
+From **Incidents**, administrators and operators can:
 
 - **Accept change** to make the current observation expected while preserving
   the original scan history.
@@ -387,7 +387,7 @@ existing 30-minute expiry and are also removed from browser history on arrival.
 | Role | Access |
 | --- | --- |
 | Administrator | Full administration, users, destinations, profiles, jobs, baselines, incidents, and public status. |
-| Operator | Configure and run jobs, review evidence and incidents, and select existing destinations for jobs; cannot manage destinations or users. |
+| Operator | Configure and run jobs; approve or reset baselines; accept or suppress incidents; review evidence; and select existing destinations for jobs. Cannot manage destinations, users, or scanner profiles. |
 | Viewer | Read-only jobs and baseline information. |
 
 An administrator can enable **Public status** and explicitly publish selected

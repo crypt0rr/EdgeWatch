@@ -30,7 +30,7 @@ func TestAuthenticateReadOnlyDoesNotTouchIdleTimestamp(t *testing.T) {
 	}
 	loginRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	loginRequest.RemoteAddr = "192.0.2.10:8080"
-	raw, _, err := m.Login(ctx, loginRequest, "administrator password", "", "")
+	raw, _, err := m.LoginAs(ctx, loginRequest, "admin", "administrator password", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestAuthenticateReadOnlyRejectsDisabledAccount(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	request.RemoteAddr = "192.0.2.20:8080"
-	raw, _, err := m.Login(ctx, request, "administrator password", "", "")
+	raw, _, err := m.LoginAs(ctx, request, "admin", "administrator password", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestRecordActivityCoalescesAndBoundsSessionRefresh(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	request.RemoteAddr = "192.0.2.30:8080"
-	raw, _, err := m.Login(ctx, request, "administrator password", "", "")
+	raw, _, err := m.LoginAs(ctx, request, "admin", "administrator password", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

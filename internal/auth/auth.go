@@ -576,17 +576,7 @@ func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, to
 	return nil
 }
 
-func (m *Manager) Login(ctx context.Context, request *http.Request, password, otp, recovery string) (string, store.Admin, error) {
-	raw, user, err := m.LoginAs(ctx, request, "admin", password, otp, recovery)
-	if err != nil {
-		return "", store.Admin{}, err
-	}
-	return raw, store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt}, nil
-}
-
-// LoginAs authenticates any enabled EdgeWatch user. The legacy Login method
-// above intentionally remains as a compatibility wrapper for CLI and tests
-// that always sign in as the original administrator.
+// LoginAs authenticates any enabled EdgeWatch user.
 func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, password, otp, recovery string) (string, store.User, error) {
 	identity := normalizeLoginIdentity(username)
 	source := m.sourceScopeFor(request, "login")
@@ -996,18 +986,6 @@ func normalizeLoginIdentity(username string) string {
 	return identity
 }
 
-func (m *Manager) allow(remote string) bool {
-	key := limiterKey(remote)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := m.now()
-	m.sweepLimiterLocked(now)
-	if until, ok := m.blocked[key]; ok && now.Before(until) {
-		return false
-	}
-	return true
-}
-
 // allowScoped checks the source backstop for an authentication operation.
 // Account and token failure state is scoped to the operation, account, and
 // resolved source. A single client behind a trusted proxy can be throttled
@@ -1145,35 +1123,6 @@ func (m *Manager) releaseUnknownSource(scope string) {
 	}
 }
 
-func (m *Manager) failed(remote string) {
-	key := limiterKey(remote)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	now := m.now()
-	m.sweepLimiterLocked(now)
-	if _, exists := m.fails[key]; !exists {
-		if _, exists := m.blocked[key]; !exists {
-			m.evictLimiterEntryLocked(now)
-		}
-	}
-	values := m.fails[key]
-	cut := now.Add(-authFailureWindow)
-	var kept []time.Time
-	for _, v := range values {
-		if v.After(cut) {
-			kept = append(kept, v)
-		}
-	}
-	kept = append(kept, now)
-	if len(kept) > authFailureThreshold {
-		kept = kept[len(kept)-authFailureThreshold:]
-	}
-	m.fails[key] = kept
-	if len(kept) >= authFailureThreshold {
-		m.blocked[key] = now.Add(authBlockDuration)
-	}
-}
-
 func (m *Manager) failedScoped(source, account, unknownSource string, unknown bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1199,14 +1148,6 @@ func (m *Manager) failedScoped(source, account, unknownSource string, unknown bo
 		// known-account and unknown-account failures.
 		m.blocked[source] = now.Add(authSharedLoopbackRetryDelay)
 	}
-}
-
-func (m *Manager) clear(remote string) {
-	key := limiterKey(remote)
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.fails, key)
-	delete(m.blocked, key)
 }
 
 func (m *Manager) clearScoped(source, account, unknownSource string) {
@@ -1398,43 +1339,6 @@ func sweepFailureBucketLocked(now time.Time, fails map[string][]time.Time, block
 		if !now.Before(until) {
 			delete(blocked, key)
 		}
-	}
-}
-
-func (m *Manager) limiterEntryCountLocked() int {
-	count := len(m.fails)
-	for key := range m.blocked {
-		if _, present := m.fails[key]; !present {
-			count++
-		}
-	}
-	return count
-}
-
-func (m *Manager) evictLimiterEntryLocked(now time.Time) {
-	if m.limiterEntryCountLocked() < authLimiterMaxEntries {
-		return
-	}
-	oldestKey := ""
-	oldestAt := now
-	for key, values := range m.fails {
-		if len(values) == 0 {
-			continue
-		}
-		activity := values[len(values)-1]
-		if oldestKey == "" || activity.Before(oldestAt) {
-			oldestKey, oldestAt = key, activity
-		}
-	}
-	for key, until := range m.blocked {
-		activity := until.Add(-authBlockDuration)
-		if oldestKey == "" || activity.Before(oldestAt) {
-			oldestKey, oldestAt = key, activity
-		}
-	}
-	if oldestKey != "" {
-		delete(m.fails, oldestKey)
-		delete(m.blocked, oldestKey)
 	}
 }
 

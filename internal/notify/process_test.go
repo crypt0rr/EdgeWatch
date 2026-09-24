@@ -66,6 +66,61 @@ func TestNotificationProcessUsesSafeExecutableAndCommand(t *testing.T) {
 	}
 }
 
+func TestNotificationProcessPassesOnlyRequiredProviderEnvironment(t *testing.T) {
+	t.Setenv("EDGEWATCH_TEST_SECRET", "must-not-reach-provider")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "also-must-not-reach-provider")
+	t.Setenv("PATH", "/tmp/untrusted-bin")
+	t.Setenv("HOME", "/tmp/private-home")
+	t.Setenv("HTTPS_PROXY", "https://proxy-user:proxy-password@proxy.example:8443")
+	t.Setenv("NO_PROXY", "localhost,127.0.0.1")
+	t.Setenv("SSL_CERT_FILE", "/etc/edgewatch/test-ca.pem")
+	t.Setenv("TZ", "Europe/Amsterdam")
+
+	originalExecutable := notificationExecutable
+	originalCommand := notificationCommandContext
+	defer func() {
+		notificationExecutable = originalExecutable
+		notificationCommandContext = originalCommand
+	}()
+	notificationExecutable = func() (string, error) { return "/usr/local/bin/edgewatch", nil }
+	var child *exec.Cmd
+	notificationCommandContext = func(ctx context.Context, _ string, _ ...string) *exec.Cmd {
+		child = exec.CommandContext(ctx, "/usr/bin/env")
+		return child
+	}
+	if err := runNotificationProcess(context.Background(), "generic://example.invalid", "test"); err != nil {
+		t.Fatalf("run isolated child: %v", err)
+	}
+	if child == nil {
+		t.Fatal("notification child command was not created")
+	}
+	environment := make(map[string]string, len(child.Env))
+	for _, entry := range child.Env {
+		key, value, ok := strings.Cut(entry, "=")
+		if ok {
+			environment[key] = value
+		}
+	}
+	if environment["PATH"] != notificationChildPath {
+		t.Errorf("child PATH did not use the fixed provider path")
+	}
+	for _, key := range []string{"EDGEWATCH_TEST_SECRET", "AWS_SECRET_ACCESS_KEY", "HOME"} {
+		if _, ok := environment[key]; ok {
+			t.Errorf("unrelated parent variable %q reached the provider child", key)
+		}
+	}
+	for key, want := range map[string]string{
+		"HTTPS_PROXY":   "https://proxy-user:proxy-password@proxy.example:8443",
+		"NO_PROXY":      "localhost,127.0.0.1",
+		"SSL_CERT_FILE": "/etc/edgewatch/test-ca.pem",
+		"TZ":            "Europe/Amsterdam",
+	} {
+		if environment[key] != want {
+			t.Errorf("provider environment did not preserve %s", key)
+		}
+	}
+}
+
 func TestNotificationProcessTimeoutTerminatesAndReapsChild(t *testing.T) {
 	originalExecutable := notificationExecutable
 	originalCommand := notificationCommandContext

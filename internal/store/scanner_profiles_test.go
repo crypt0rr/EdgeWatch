@@ -68,9 +68,9 @@ func TestBuiltinScannerProfilesForwardUpgrade(t *testing.T) {
 }
 
 func TestCurrentScannerProfileRevisionsReturnsCurrentRowsAndReportsFailures(t *testing.T) {
-	ctx := context.Background()
 	t.Run("current revisions", func(t *testing.T) {
 		s := openTestStore(t)
+		ctx := context.Background()
 		revisions, err := s.CurrentScannerProfileRevisions(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -86,6 +86,7 @@ func TestCurrentScannerProfileRevisionsReturnsCurrentRowsAndReportsFailures(t *t
 	})
 	t.Run("query failure", func(t *testing.T) {
 		s := openTestStore(t)
+		ctx := context.Background()
 		if _, err := s.DB.ExecContext(ctx, `DROP TABLE scanner_profiles`); err != nil {
 			t.Fatal(err)
 		}
@@ -95,6 +96,7 @@ func TestCurrentScannerProfileRevisionsReturnsCurrentRowsAndReportsFailures(t *t
 	})
 	t.Run("scan failure", func(t *testing.T) {
 		s := openTestStore(t)
+		ctx := context.Background()
 		if _, err := s.DB.ExecContext(ctx, `UPDATE scanner_profiles SET revision='not-a-number' WHERE id=?`, BuiltinNmapProfileID); err != nil {
 			t.Fatal(err)
 		}

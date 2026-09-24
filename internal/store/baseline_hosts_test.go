@@ -332,9 +332,9 @@ func TestRuntimeStateSummariesReportsInvalidLegacyRuntimeJSON(t *testing.T) {
 }
 
 func TestRuntimeStateSummariesReportsQueryAndScanErrors(t *testing.T) {
-	ctx := context.Background()
 	t.Run("query", func(t *testing.T) {
 		s := openTestStore(t)
+		ctx := context.Background()
 		if _, err := s.DB.ExecContext(ctx, `DROP TABLE job_runtime_meta`); err != nil {
 			t.Fatal(err)
 		}
@@ -344,6 +344,7 @@ func TestRuntimeStateSummariesReportsQueryAndScanErrors(t *testing.T) {
 	})
 	t.Run("scan", func(t *testing.T) {
 		s := openTestStore(t)
+		ctx := context.Background()
 		if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('bad-count','bad-count','{}',1,0,1,'now','now')`); err != nil {
 			t.Fatal(err)
 		}

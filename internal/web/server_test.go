@@ -383,8 +383,8 @@ func TestSetupStatusDoesNotExposeOperationalDetails(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("setup status returned %d", resp.StatusCode)
 	}
-	if public["version"] != "v0.7.0" {
-		t.Fatalf("setup status version = %#v", public["version"])
+	if _, ok := public["version"]; ok {
+		t.Fatalf("unauthenticated setup status exposed version: %#v", public["version"])
 	}
 	for _, key := range []string{"notifications", "notification_destinations", "retention", "max_concurrent_scans", "legacy_yaml_jobs"} {
 		if _, ok := public[key]; ok {

@@ -49,7 +49,6 @@ describe('authentication pages', () => {
       configured: true,
       setup_available: false,
       public_dashboard_enabled: true,
-      version: 'v0.13.3',
       password_requirements: { minimum_length: 12 },
     })
     vi.mocked(login).mockResolvedValue({

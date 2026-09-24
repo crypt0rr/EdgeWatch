@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setup, suppressIncident, updateNotificationDestination, updateUser } from './api'
+import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setup, setupStatus, suppressIncident, updateNotificationDestination, updateUser } from './api'
 import * as apiRoutes from './api'
 
 afterEach(() => {
@@ -66,6 +66,16 @@ describe('API pagination contract', () => {
 
     await expect(api('/auth/security/totp', { method: 'PUT', body: '{}' })).rejects.toMatchObject({ code: 'totp_required' })
     expect(dispatchEvent).not.toHaveBeenCalled()
+  })
+})
+
+describe('setup status API contract', () => {
+  it('loads only the public setup metadata', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ configured: true, password_requirements: { minimum_length: 12 } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(setupStatus()).resolves.toMatchObject({ configured: true, password_requirements: { minimum_length: 12 } })
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/setup/status')
   })
 })
 

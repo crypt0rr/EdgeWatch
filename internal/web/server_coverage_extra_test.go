@@ -235,7 +235,7 @@ func TestServerSetupStatusAndRouteGuards(t *testing.T) {
 	ctx := context.Background()
 	status := httptest.NewRecorder()
 	server.setupStatus(status, httptest.NewRequest(http.MethodGet, "/api/v1/setup/status", nil))
-	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"configured":true`) || !strings.Contains(status.Body.String(), server.Version) {
+	if status.Code != http.StatusOK || !strings.Contains(status.Body.String(), `"configured":true`) || strings.Contains(status.Body.String(), `"version"`) {
 		t.Fatalf("setup status = %d %s", status.Code, status.Body.String())
 	}
 	for _, rest := range []string{"", "/unknown", "job/unknown"} {

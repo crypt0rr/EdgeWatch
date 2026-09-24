@@ -3,8 +3,9 @@
 import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useLocation } from 'react-router-dom'
 import { APIError, adminStatus, acceptIncident, getSession, listIncidents, listJobs, login, logout, recordActivity, setupStatus, suppressIncident } from './api'
-import { AppContent, AuthRoutes, Incidents, Jobs, Shell } from './main'
+import { AppContent, AuthRoutes, Incidents, Jobs, ProtectedApp, Shell } from './main'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
@@ -22,6 +23,10 @@ class EventSourceStub {
   emit(type: string, job_id?: string) { this.onmessage?.({ data: JSON.stringify({ type, job_id }) } as MessageEvent) }
 }
 
+function CurrentPath() {
+  return <output data-testid="current-path">{useLocation().pathname}</output>
+}
+
 describe('application shell', () => {
   beforeEach(() => {
     vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.18.70', updates: { available: true, status: 'update_available', latest_version: 'v0.19.0', release_url: 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.19.0' } } as never)
@@ -31,7 +36,7 @@ describe('application shell', () => {
     vi.mocked(login).mockResolvedValue({ role: 'administrator', username: 'admin', permissions: ['jobs.write'], csrf_token: '', totp_required: false } as never)
     vi.mocked(logout).mockResolvedValue(undefined)
     vi.mocked(recordActivity).mockResolvedValue(undefined)
-    vi.mocked(setupStatus).mockResolvedValue({ configured: true, version: 'v0.18.70' } as never)
+    vi.mocked(setupStatus).mockResolvedValue({ configured: true } as never)
     EventSourceStub.instances = []
     vi.stubGlobal('EventSource', EventSourceStub)
   })
@@ -41,7 +46,7 @@ describe('application shell', () => {
   it('renders permission-aware navigation, update indicator, and incident count', async () => {
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { limit: 1, offset: 0, total: 3, has_more: true, next_offset: 1 } })
     const onLogout = vi.fn()
-    renderWithProviders(<Shell displayName="Alice" version="v0.18.70" role="administrator" permissions={['overview.read', 'jobs.read', 'hosts.read', 'incidents.read', 'stream.read']} onLogout={onLogout} />)
+    renderWithProviders(<Shell displayName="Alice" role="administrator" permissions={['overview.read', 'jobs.read', 'hosts.read', 'incidents.read', 'stream.read']} onLogout={onLogout} />)
 
     expect(screen.getByText('Alice')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Overview' })).toBeInTheDocument()
@@ -52,19 +57,45 @@ describe('application shell', () => {
     expect(onLogout).toHaveBeenCalledOnce()
   })
 
-  it('limits viewer navigation to jobs and security', () => {
-    renderWithProviders(<Shell displayName="Viewer" version="dev" role="viewer" permissions={['jobs.read']} onLogout={vi.fn()} />)
+  it('limits viewer navigation while showing the authenticated version and update indicator', async () => {
+    renderWithProviders(<Shell displayName="Viewer" role="viewer" permissions={['jobs.read']} onLogout={vi.fn()} />)
     expect(screen.getByRole('link', { name: 'Jobs' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Security' })).toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Overview' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Incidents' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Notifications' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('link', { name: 'Update available' })).not.toBeInTheDocument()
-    expect(adminStatus).not.toHaveBeenCalled()
+    await waitFor(() => expect(screen.getByText('EdgeWatch v0.18.70')).toBeInTheDocument())
+    expect(screen.getByRole('link', { name: /Update available/ })).toBeInTheDocument()
+    expect(adminStatus).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the protected shell loading while the authenticated session is still pending', async () => {
+    vi.mocked(setupStatus).mockResolvedValueOnce({ configured: true } as never)
+    let resolveSession!: (session: unknown) => void
+    vi.mocked(getSession).mockReturnValueOnce(new Promise(resolve => { resolveSession = resolve }) as never)
+    renderWithProviders(<ProtectedApp onLogout={async () => {}} />)
+
+    await waitFor(() => expect(screen.getByText('Loading EdgeWatch…')).toBeInTheDocument())
+    await act(async () => resolveSession({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } }))
+    await waitFor(() => expect(screen.getByText('EdgeWatch v0.18.70')).toBeInTheDocument())
+  })
+
+  it('redirects protected-app setup and expired-session states without a public version', async () => {
+    vi.mocked(setupStatus).mockResolvedValueOnce({ configured: false } as never)
+    vi.mocked(getSession).mockResolvedValueOnce({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['jobs.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
+    const onLogout = async () => {}
+    const setupView = renderWithProviders(<><ProtectedApp onLogout={onLogout} /><CurrentPath /></>, { route: ['/console'] })
+    await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent('/setup'))
+    setupView.unmount()
+
+    vi.mocked(setupStatus).mockResolvedValueOnce({ configured: true } as never)
+    vi.mocked(getSession).mockRejectedValueOnce(new Error('unauthenticated'))
+    renderWithProviders(<><ProtectedApp onLogout={onLogout} /><CurrentPath /></>, { route: ['/console'] })
+    await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent('/login'))
   })
 
   it('records real user activity and coalesces rapid pointer and keyboard events', async () => {
-    renderWithProviders(<Shell displayName="Admin" version="dev" role="administrator" permissions={['jobs.read']} onLogout={vi.fn()} />)
+    renderWithProviders(<Shell displayName="Admin" role="administrator" permissions={['jobs.read']} onLogout={vi.fn()} />)
     fireEvent.pointerDown(document)
     fireEvent.keyDown(document, { key: 'a' })
     fireEvent.pointerDown(document)
@@ -72,7 +103,7 @@ describe('application shell', () => {
   })
 
   it('invalidates the affected queries for live events and falls back on malformed events', async () => {
-    const { client } = renderWithProviders(<Shell displayName="Admin" version="v0.18.70" role="administrator" permissions={['overview.read', 'stream.read']} onLogout={vi.fn()} />)
+    const { client } = renderWithProviders(<Shell displayName="Admin" role="administrator" permissions={['overview.read', 'jobs.read', 'stream.read']} onLogout={vi.fn()} />)
     const invalidate = vi.spyOn(client, 'invalidateQueries')
     await waitFor(() => expect(EventSourceStub.instances).toHaveLength(1))
     const stream = EventSourceStub.instances[0]
@@ -100,7 +131,7 @@ describe('application shell', () => {
   it('shows unavailable incident counts and handles status failures without hiding navigation', async () => {
     vi.mocked(listIncidents).mockRejectedValue(new Error('incident service unavailable'))
     vi.mocked(adminStatus).mockRejectedValue(new Error('status unavailable'))
-    renderWithProviders(<Shell displayName="Operator" version="v0.18.70" role="operator" permissions={['overview.read', 'incidents.read', 'jobs.read']} onLogout={vi.fn()} />)
+    renderWithProviders(<Shell displayName="Operator" role="operator" permissions={['overview.read', 'incidents.read', 'jobs.read']} onLogout={vi.fn()} />)
     await waitFor(() => expect(screen.getByLabelText('Active incident count unavailable; retrying')).toBeInTheDocument())
     expect(screen.getByRole('link', { name: 'Incidents' })).toHaveClass('nav-link-alert')
     expect(screen.getByRole('link', { name: 'Jobs' })).toBeInTheDocument()
@@ -109,7 +140,7 @@ describe('application shell', () => {
 
   it('supports keyboard focus and escape handling for the mobile drawer', async () => {
     vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }))
-    renderWithProviders(<Shell displayName="Admin" version="dev" role="administrator" permissions={['jobs.read']} onLogout={vi.fn()} />)
+    renderWithProviders(<Shell displayName="Admin" role="administrator" permissions={['jobs.read']} onLogout={vi.fn()} />)
     const open = screen.getByRole('button', { name: 'Open navigation' })
     fireEvent.click(open)
     await waitFor(() => expect(screen.getAllByRole('button', { name: 'Close navigation' }).length).toBeGreaterThan(0))
@@ -119,7 +150,7 @@ describe('application shell', () => {
 
   it('traps focus at both ends of the mobile drawer and closes from the backdrop', async () => {
     vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }))
-    renderWithProviders(<Shell displayName="Admin" version="dev" role="administrator" permissions={['jobs.read', 'incidents.read']} onLogout={vi.fn()} />)
+    renderWithProviders(<Shell displayName="Admin" role="administrator" permissions={['jobs.read', 'incidents.read']} onLogout={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: 'Open navigation' }))
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
     const drawer = screen.getByRole('dialog')
@@ -138,7 +169,7 @@ describe('application shell', () => {
   it('supports legacy matchMedia listeners and closes an open drawer when switching to desktop', async () => {
     const listeners: Array<() => void> = []
     vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: true, addListener: (listener: () => void) => listeners.push(listener), removeListener: vi.fn() }))
-    renderWithProviders(<Shell displayName="Admin" version="dev" role="administrator" permissions={['jobs.read']} onLogout={vi.fn()} />)
+    renderWithProviders(<Shell displayName="Admin" role="administrator" permissions={['jobs.read']} onLogout={vi.fn()} />)
     fireEvent.click(screen.getByRole('button', { name: 'Open navigation' }))
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument())
     expect(document.body.style.overflow).toBe('hidden')
@@ -229,7 +260,7 @@ describe('application shell', () => {
     renderWithProviders(<AppContent />, { route: ['/'] })
     await waitFor(() => expect(screen.getByText('Unable to contact EdgeWatch. Retry when the service is available.')).toBeInTheDocument())
     cleanup()
-    vi.mocked(setupStatus).mockResolvedValueOnce({ configured: true, version: 'v0.18.70' } as never)
+    vi.mocked(setupStatus).mockResolvedValueOnce({ configured: true } as never)
     vi.mocked(getSession).mockRejectedValueOnce(new Error('unauthenticated'))
     renderWithProviders(<AppContent />, { route: ['/'] })
     await waitFor(() => expect(screen.getByRole('heading', { name: /Sign in to EdgeWatch/ })).toBeInTheDocument())

@@ -37,11 +37,6 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	status := map[string]any{"configured": configured, "username": "admin", "password_requirements": auth.PasswordRequirements()}
-	if configured {
-		// Keep the pre-setup endpoint useful without advertising the exact
-		// installed release to unauthenticated callers.
-		status["version"] = s.Version
-	}
 	if dashboard, dashboardErr := s.Store.GetPublicDashboard(r.Context()); dashboardErr == nil {
 		status["public_dashboard_enabled"] = dashboard.Enabled
 	}
@@ -60,6 +55,15 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	user, err := s.Store.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "user_missing", "account could not be loaded", nil)
+		return
+	}
+	if !auth.HasPermission(session, auth.PermissionOverviewRead) {
+		// Viewers are authenticated users too, but must not inherit operational
+		// overview data just to show the product version and release indicator.
+		writeJSON(w, http.StatusOK, map[string]any{
+			"version": s.Version,
+			"updates": s.applicationUpdateStatus(r.Context()),
+		})
 		return
 	}
 	if reloadErr := s.App.Notifier.Reload(r.Context()); reloadErr != nil {

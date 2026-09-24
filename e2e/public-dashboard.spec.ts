@@ -26,7 +26,7 @@ test('public status controls remain interactive and navigation leaves the page',
     const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
 
     if (path === '/stream') return route.abort()
-    if (path === '/setup/status') return json({ configured: true, version: 'v0.11.2', public_dashboard_enabled: false })
+    if (path === '/setup/status') return json({ configured: true, public_dashboard_enabled: false })
     if (path === '/auth/session') return json({ username: 'admin', display_name: 'admin', role: 'administrator', permissions: adminPermissions, csrf_token: 'public-csrf', totp_enabled: false })
     if (path === '/status') return json({ configured: true, version: 'v0.11.2', updates: {} })
     if (path === '/incidents') return json({ incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })

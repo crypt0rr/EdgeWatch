@@ -52,7 +52,7 @@ function useIsMobile() {
  * makes the entrypoint side-effect free in tests while preserving the single
  * embedded SPA bundle in production.
  */
-export function Shell({ displayName, version, role, permissions, onLogout }: { displayName: string; version: string; role: Role; permissions: string[]; onLogout: () => void }) {
+export function Shell({ displayName, role, permissions, onLogout }: { displayName: string; role: Role; permissions: string[]; onLogout: () => void }) {
   const [open, setOpen] = useState(false)
   const [liveState, setLiveState] = useState<'connecting' | 'live' | 'reconnecting'>('connecting')
   const isMobile = useIsMobile()
@@ -62,7 +62,8 @@ export function Shell({ displayName, version, role, permissions, onLogout }: { d
   const location = useLocation()
   const client = useQueryClient()
   const hasPermission = (permission: string) => permissions.includes(permission)
-  const updateStatus = useQuery({ queryKey: ['admin-status'], queryFn: adminStatus, refetchInterval: 60_000, enabled: hasPermission('overview.read') })
+  const updateStatus = useQuery({ queryKey: ['admin-status'], queryFn: adminStatus, refetchInterval: 60_000, enabled: hasPermission('jobs.read') })
+  const version = updateStatus.data?.version ?? 'dev'
   const update = updateStatus.data?.updates
   const updateAvailable = !!update && (update.available === true || update.status === 'update_available')
   const incidentSummary = useQuery({ queryKey: ['incidents', 'navigation'], queryFn: () => listIncidents(0, 1), refetchInterval: 15000, enabled: hasPermission('incidents.read') })
@@ -329,7 +330,7 @@ function IncidentActions({ row, busy, acceptID, suppressID, onAction }: { row: I
   return <div className="incident-actions"><button className="button secondary" type="button" onClick={() => onAction(row, 'accept')} disabled={!key || !!busy}>{busy === acceptID ? 'Accepting…' : 'Accept change'}</button><button className="button ghost" type="button" onClick={() => onAction(row, 'suppress')} disabled={!key || !!busy}>{busy === suppressID ? 'Suppressing…' : 'Suppress 1 scan'}</button></div>
 }
 
-export function ProtectedApp({ version, onLogout }: { version: string; onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate]); if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; return <Shell displayName={session.data?.display_name ?? session.data?.username ?? 'admin'} role={session.data?.role ?? 'viewer'} permissions={session.data?.permissions ?? []} version={version} onLogout={onLogout} /> }
+export function ProtectedApp({ onLogout }: { onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate]); if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; return <Shell displayName={session.data?.display_name ?? session.data?.username ?? 'admin'} role={session.data?.role ?? 'viewer'} permissions={session.data?.permissions ?? []} onLogout={onLogout} /> }
 
 export function AuthRoutes({ configured }: { configured: boolean }) { const location = useLocation(); return <Routes><Route path="/setup" element={<Setup />} /><Route path="/activate" element={<Activate />} /><Route path="/login" element={<Login />} /><Route path="*" element={configured ? <Navigate to="/login" replace state={{ from: { pathname: location.pathname, search: location.search } }} /> : <Navigate to="/setup" replace />} /></Routes> }
 
@@ -367,7 +368,7 @@ export function AppContent() {
   if (isPublic) return <PublicDashboard />
   if (status.isLoading || session.isLoading) return <Loading />
   if (status.error) return <ErrorCard message="Unable to contact EdgeWatch. Retry when the service is available." />
-  return status.data?.configured && authenticated ? <ProtectedApp version={status.data.version ?? 'dev'} onLogout={handleLogout} /> : <AuthGate statusConfigured={!!status.data?.configured} />
+  return status.data?.configured && authenticated ? <ProtectedApp onLogout={handleLogout} /> : <AuthGate statusConfigured={!!status.data?.configured} />
 }
 
 function AuthGate({ statusConfigured }: { statusConfigured: boolean }) { return <AuthRoutes configured={statusConfigured} /> }

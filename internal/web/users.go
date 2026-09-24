@@ -106,11 +106,13 @@ func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session stor
 		}
 		if err := s.Store.DeleteUserSessionsWithAudit(r.Context(), id, store.AuditEntry{Action: "user.sessions_revoked", Detail: "user sessions revoked", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
 			if s.writeAuditUnavailable(w, err, "user.sessions_revoked") {
+				s.revokeSSEUser(id)
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "store", "user sessions could not be revoked", nil)
 			return
 		}
+		s.revokeSSEUser(id)
 		writeJSON(w, http.StatusNoContent, nil)
 		return
 	}
@@ -299,6 +301,9 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 		return
 	}
 	user.Revision++
+	if revokeSessions {
+		s.revokeSSEUser(user.ID)
+	}
 	writeJSON(w, http.StatusOK, user.Summary())
 }
 

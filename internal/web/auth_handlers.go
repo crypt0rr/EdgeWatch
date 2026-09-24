@@ -307,6 +307,12 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 func (s *Server) logout(w http.ResponseWriter, r *http.Request, session store.Session) {
 	err := s.Auth.LogoutSession(r.Context(), r, session)
 	auth.ClearSessionCookie(w, s.sessionCookieSecure(r))
+	// Logout deletes the session even when the audit write reports its
+	// deliberate degraded-but-safe error. Drop any matching in-process stream
+	// in both successful cases rather than waiting for its next heartbeat.
+	if err == nil || errors.Is(err, store.ErrAuditUnavailable) {
+		s.revokeSSESession(session.IDHash)
+	}
 	if err != nil {
 		if errors.Is(err, store.ErrAuditUnavailable) {
 			action := "user.logout"
@@ -438,6 +444,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 		writeSecurityMutationError(w, err, "save_failed", "password could not be changed")
 		return
 	}
+	s.revokeSSEUser(session.UserID)
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -535,6 +542,7 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 		writeSecurityMutationError(w, err, "totp_failed", "TOTP could not be enabled")
 		return
 	}
+	s.revokeSSEUserExcept(session.UserID, preserveSessionHash)
 	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": plain})
 }
 
@@ -583,6 +591,7 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 		writeSecurityMutationError(w, err, "totp_failed", "TOTP could not be disabled")
 		return
 	}
+	s.revokeSSEUser(session.UserID)
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -643,6 +652,7 @@ func (s *Server) totpRecoveryCodes(w http.ResponseWriter, r *http.Request, sessi
 		writeSecurityMutationError(w, saveErr, "totp_failed", "recovery codes could not be saved")
 		return
 	}
+	s.revokeSSEUserExcept(session.UserID, preserve)
 	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": plain})
 }
 

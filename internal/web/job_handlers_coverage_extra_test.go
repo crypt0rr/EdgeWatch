@@ -183,7 +183,7 @@ func TestJobListAndAPIDispatchCoverage(t *testing.T) {
 	for _, path := range []string{
 		"/api/v1/setup/status", "/api/v1/status", "/api/v1/jobs", "/api/v1/jobs/schedule-suggestion?schedule=0+*+*+*+*&timezone=UTC",
 		"/api/v1/scans", "/api/v1/hosts", "/api/v1/scans/active", "/api/v1/incidents", "/api/v1/events", "/api/v1/notifications/options",
-		"/api/v1/jobs/missing", "/api/v1/jobs/missing/baseline", "/api/v1/jobs/missing/scans", "/api/v1/jobs/missing/incidents", "/api/v1/jobs/missing/events",
+		"/api/v1/jobs/missing", "/api/v1/jobs/missing/baseline", "/api/v1/jobs/missing/scans", "/api/v1/jobs/missing/incidents", "/api/v1/jobs/missing/events", "/api/v1/scans/missing/summary",
 	} {
 		rec := callAPI(http.MethodGet, path, "")
 		if rec.Code != http.StatusOK && rec.Code != http.StatusNotFound {

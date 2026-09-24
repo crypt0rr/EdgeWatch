@@ -250,6 +250,9 @@ func requiredScanPermission(path, method string) string {
 		if parts[1] == "cancel" && method == http.MethodPost {
 			return auth.PermissionJobsRun
 		}
+		if parts[1] == "summary" && method == http.MethodGet {
+			return auth.PermissionScansRead
+		}
 		if parts[1] == "hosts" && method == http.MethodGet {
 			return auth.PermissionHostsRead
 		}

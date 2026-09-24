@@ -546,6 +546,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		value := strings.TrimPrefix(path, "/scans/")
 		parts := strings.SplitN(value, "/hosts/", 2)
 		s.scanHostRoute(w, r, parts[0], parts[1])
+	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/summary") && r.Method == http.MethodGet:
+		s.getScanSummary(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/summary"))
 	case strings.HasPrefix(path, "/scans/") && r.Method == http.MethodGet:
 		s.getScan(w, r, strings.TrimPrefix(path, "/scans/"))
 	case path == "/incidents" && r.Method == http.MethodGet:

@@ -749,6 +749,22 @@ func (s *Server) getScan(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusOK, map[string]any{"scan": scan})
 }
 
+// getScanSummary serves metadata for historical scan views without decoding
+// or returning the potentially large snapshot and change payloads. The legacy
+// /scans/{id} endpoint remains the full-result compatibility endpoint.
+func (s *Server) getScanSummary(w http.ResponseWriter, r *http.Request, id string) {
+	summary, err := s.Store.GetScanSummary(r.Context(), id)
+	if err != nil {
+		if hostStoreNotFound(err) {
+			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
+		} else {
+			s.writeInternalError(w, r, "store", err)
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"scan": summary})
+}
+
 func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request) {
 	offset, limit := queryOffset(r), queryLimit(r)
 	incidentPage, err := s.Store.ListIncidentsPage(r.Context(), limit, offset)

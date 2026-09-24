@@ -80,6 +80,35 @@ func TestListActiveScanCycleSummariesFiltersArchiveAndOmitsPlan(t *testing.T) {
 	assertCycle(all[archivedJob.ID], archivedCycle)
 }
 
+func TestListActiveScanCycleSummariesReportsQueryAndScanErrors(t *testing.T) {
+	t.Run("query failure", func(t *testing.T) {
+		ctx := context.Background()
+		s := openTestStore(t)
+		if _, err := s.DB.ExecContext(ctx, `DROP TABLE scan_cycles`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ListActiveScanCycleSummaries(ctx, false); err == nil {
+			t.Fatal("expected missing scan cycle table to fail")
+		}
+	})
+	t.Run("row scan failure", func(t *testing.T) {
+		ctx, s, job, plan := cycleFixture(t)
+		cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET attempt_count='not-a-number' WHERE id=?`, cycle.ID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.ListActiveScanCycleSummaries(ctx, false); err == nil {
+			t.Fatal("expected malformed scan cycle counter to fail scanning")
+		}
+	})
+}
+
 func TestScanCycleCheckpointsAndCompletes(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})

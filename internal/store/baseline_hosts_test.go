@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"reflect"
 	"testing"
@@ -240,6 +241,17 @@ func TestRuntimeStateSummariesMatchSingleJobSummariesAndArchiveScope(t *testing.
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO runtime_incidents(job_id,key,incident_json) VALUES(?,?,?)`, "projected", "incident", `{}`); err != nil {
 		t.Fatal(err)
 	}
+	insertScan("metadata-source-scan", "198.51.100.40")
+	insertJob("metadata-source", false)
+	insertRuntime("metadata-source", `{"baseline":{"hosts":[]},"baseline_scan_id":"metadata-source-scan"}`)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "metadata-source", 1, "metadata-source-scan", "hash", 0, 1, 0, 0, 0, 0, "now"); err != nil {
+		t.Fatal(err)
+	}
+	insertJob("legacy-modified", false)
+	insertRuntime("legacy-modified", `{"baseline":{"hosts":[{"address":"198.51.100.41"}]},"baseline_modified":true}`)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO baseline_hosts(job_id,address,host_json) VALUES(?,?,?)`, "legacy-modified", "198.51.100.41", `{}`); err != nil {
+		t.Fatal(err)
+	}
 	insertJob("empty", false)
 	insertJob("archived", true)
 	insertRuntime("archived", `{"baseline":{"hosts":[{"address":"198.51.100.7"}]}}`)
@@ -277,7 +289,7 @@ func TestRuntimeStateSummariesMatchSingleJobSummariesAndArchiveScope(t *testing.
 		if err != nil {
 			t.Fatalf("RuntimeStateSummaries(includeArchived=%t): %v", includeArchived, err)
 		}
-		wantIDs := []string{"legacy-hosts", "legacy-units", "projected", "empty", "projected-invalid-runtime", "metadata-empty-source", "stale-metadata-source"}
+		wantIDs := []string{"legacy-hosts", "legacy-units", "projected", "metadata-source", "legacy-modified", "empty", "projected-invalid-runtime", "metadata-empty-source", "stale-metadata-source"}
 		wantIDs = append(wantIDs, seededIDs...)
 		if includeArchived {
 			wantIDs = append(wantIDs, "archived")
@@ -299,5 +311,53 @@ func TestRuntimeStateSummariesMatchSingleJobSummariesAndArchiveScope(t *testing.
 				t.Fatal("archived job appeared in default summary list")
 			}
 		}
+	}
+}
+
+func TestRuntimeStateSummariesReportsInvalidLegacyRuntimeJSON(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('invalid-json','invalid-json','{}',1,0,1,'now','now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES('invalid-json','{invalid','2')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,updated_at) VALUES('invalid-json',1,'1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RuntimeStateSummaries(ctx, false); err == nil {
+		t.Fatal("expected invalid stale runtime JSON to fail the batch summary")
+	}
+}
+
+func TestRuntimeStateSummariesReportsQueryAndScanErrors(t *testing.T) {
+	ctx := context.Background()
+	t.Run("query", func(t *testing.T) {
+		s := openTestStore(t)
+		if _, err := s.DB.ExecContext(ctx, `DROP TABLE job_runtime_meta`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.RuntimeStateSummaries(ctx, false); err == nil {
+			t.Fatal("expected missing runtime metadata table to fail")
+		}
+	})
+	t.Run("scan", func(t *testing.T) {
+		s := openTestStore(t)
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('bad-count','bad-count','{}',1,0,1,'now','now')`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,candidate_count,updated_at) VALUES('bad-count',1,'not-a-number','now')`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.RuntimeStateSummaries(ctx, false); err == nil {
+			t.Fatal("expected invalid runtime metadata integer to fail scanning")
+		}
+	})
+}
+
+func TestLegacyRuntimeHostCountFallsBackToZero(t *testing.T) {
+	if got := legacyRuntimeHostCount(sql.NullInt64{}, sql.NullInt64{}); got != 0 {
+		t.Fatalf("empty legacy host counts = %d, want 0", got)
 	}
 }

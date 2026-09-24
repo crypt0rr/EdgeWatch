@@ -392,3 +392,39 @@ func TestJobListBatchesProfileAndActiveCycleSummaries(t *testing.T) {
 		t.Fatalf("active cycle summary = %#v", listed.ScanCycle)
 	}
 }
+
+func TestJobListKeepsReadableResponseWhenCycleAndProfileReadsFail(t *testing.T) {
+	ctx := context.Background()
+	server, db, _ := newUsersTestServer(t)
+	server.Log = nil
+	if _, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "read-failure-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.21"},
+		TCP: &config.Protocol{Ports: "22", Mode: "syn"},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `ALTER TABLE scan_cycles RENAME TO unavailable_scan_cycles`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `ALTER TABLE scanner_profiles RENAME TO unavailable_scanner_profiles`); err != nil {
+		t.Fatal(err)
+	}
+
+	response := httptest.NewRecorder()
+	server.listJobs(response, httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("job list with optional projection failures = %d: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Jobs) != 1 || result.Jobs[0]["scan_cycle_error"] != "cycle_status_unavailable" {
+		t.Fatalf("job list did not preserve its safe cycle error marker: %#v", result.Jobs)
+	}
+	if strings.Contains(response.Body.String(), "no such table") {
+		t.Fatal("job list exposed an internal database error")
+	}
+}

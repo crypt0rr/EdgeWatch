@@ -135,7 +135,7 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 			if ctx.Err() != nil {
 				return partialSnapshot(), fmt.Errorf("naabu discovery canceled or timed out: %w", ctx.Err())
 			}
-			return partialSnapshot(), fmt.Errorf("naabu discovery failed: %v: %s", err, sanitizeStderr(stderr))
+			return partialSnapshot(), fmt.Errorf("naabu discovery failed: %w: %s", err, sanitizeStderr(stderr))
 		}
 		for _, result := range results {
 			address := normalizeAddress(result.IP)
@@ -273,7 +273,7 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 			if ctx.Err() != nil {
 				return partialSnapshot(), fmt.Errorf("naabu discovery canceled or timed out: %w", ctx.Err())
 			}
-			return partialSnapshot(), fmt.Errorf("naabu discovery failed: %v: %s", err, sanitizeStderr(stderr))
+			return partialSnapshot(), fmt.Errorf("naabu discovery failed: %w: %s", err, sanitizeStderr(stderr))
 		}
 		for _, result := range results {
 			address := normalizeAddress(result.IP)
@@ -765,7 +765,7 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	cmd.Stdout = &stdout
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
-		return nil, stderr.String(), err
+		return nil, stderr.String(), ExecutableStartError(cmd.Path, err)
 	}
 	heartbeatStop := make(chan struct{})
 	heartbeatDone := make(chan struct{})

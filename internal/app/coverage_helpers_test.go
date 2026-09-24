@@ -48,8 +48,10 @@ func TestRetryableResumableErrorClassifiesNilAndConfigurationMarkers(t *testing.
 	}{
 		{name: "nil", err: nil, want: false},
 		{name: "transient", err: errors.New("connection reset"), want: true},
-		{name: "invalid port", err: errors.New("invalid port expression"), want: false},
-		{name: "permission", err: errors.New("permission denied"), want: false},
+		{name: "configuration marker in text is not authoritative", err: errors.New("scanner configuration unavailable"), want: true},
+		{name: "permission text is not authoritative", err: errors.New("permission denied by remote host"), want: true},
+		{name: "missing file text is not authoritative", err: errors.New("no such file or directory"), want: true},
+		{name: "typed configuration error", err: scanner.ConfigurationError(errors.New("invalid port expression")), want: false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -53,7 +53,9 @@ func TestRBACSeparatesViewerReadsAndOperatorNotificationManagement(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := httptest.NewServer(NewServer(a, s, slog.New(slog.NewTextHandler(io.Discard, nil))).Handler())
+	server := NewServer(a, s, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	server.Version = "v0.18.138"
+	h := httptest.NewServer(server.Handler())
 	defer h.Close()
 
 	login := func(username, password string) (string, store.Session) {
@@ -123,11 +125,22 @@ func TestRBACSeparatesViewerReadsAndOperatorNotificationManagement(t *testing.T)
 	}
 	resp.Body.Close()
 	resp = request(viewerRaw, viewerSession, http.MethodGet, "/api/v1/status", "")
-	if resp.StatusCode != http.StatusForbidden {
-		resp.Body.Close()
-		t.Fatalf("viewer status endpoint = %d", resp.StatusCode)
-	}
+	statusBody, readErr := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("viewer status endpoint = %d: %s", resp.StatusCode, statusBody)
+	}
+	if !strings.Contains(string(statusBody), `"version":"v0.18.138"`) || !strings.Contains(string(statusBody), `"updates"`) {
+		t.Fatalf("viewer status omitted authenticated release details: %s", statusBody)
+	}
+	for _, field := range []string{"notifications", "retention", "telemetry", "legacy_yaml_jobs"} {
+		if strings.Contains(string(statusBody), `"`+field+`"`) {
+			t.Fatalf("viewer status exposed %q: %s", field, statusBody)
+		}
+	}
 	for _, path := range []string{"/api/v1/jobs/unknown/scans", "/api/v1/jobs/unknown/scans/scan-id", "/api/v1/jobs/unknown/events", "/api/v1/jobs/unknown/scan-cycle", "/api/v1/jobs/unknown/not-a-route", "/api/v1/auth/not-a-route"} {
 		resp = request(viewerRaw, viewerSession, http.MethodGet, path, "")
 		if resp.StatusCode != http.StatusForbidden {

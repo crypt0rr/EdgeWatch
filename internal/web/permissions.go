@@ -35,7 +35,9 @@ func requiredPermission(path, method string) string {
 	switch {
 	case path == "/status":
 		if method == http.MethodGet {
-			return auth.PermissionOverviewRead
+			// Every authenticated console role needs the small version status;
+			// adminStatus returns only version/update fields to viewers.
+			return auth.PermissionJobsRead
 		}
 	case path == "/scanner/capabilities":
 		if method == http.MethodGet {

@@ -18,7 +18,7 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 	cases := []struct {
 		path, method, want string
 	}{
-		{"/status", http.MethodGet, "overview.read"},
+		{"/status", http.MethodGet, "jobs.read"},
 		{"/stream", http.MethodGet, "stream.read"},
 		{"/notifications/destinations", http.MethodGet, "notification_options.read"},
 		{"/notifications/destinations", http.MethodPost, "notifications.manage"},

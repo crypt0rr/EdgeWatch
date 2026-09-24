@@ -37,7 +37,7 @@ func TestApplicationUpdateStatusIsAuthenticatedAndRedactsSetupState(t *testing.T
 	}
 	public := httptest.NewRecorder()
 	server.setupStatus(public, httptest.NewRequest(http.MethodGet, "/api/v1/setup/status", nil))
-	if public.Code != http.StatusOK || strings.Contains(public.Body.String(), "latest_version") || strings.Contains(public.Body.String(), "release_url") {
+	if public.Code != http.StatusOK || strings.Contains(public.Body.String(), `"version"`) || strings.Contains(public.Body.String(), "latest_version") || strings.Contains(public.Body.String(), "release_url") {
 		t.Fatalf("setup status leaked release state: %s", public.Body.String())
 	}
 	enabled := false

@@ -73,6 +73,16 @@ func TestRecoverableCycleSelectionAndDeadlineGuards(t *testing.T) {
 func TestDiscardCompletedCycleRequiresUnpromotedState(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
+	// Exercise deployments where WAL is unavailable: reads then share the
+	// single writer pool, so a store query from inside the discard transaction
+	// would wait for the connection held by that transaction.
+	readDB := s.ReadDB
+	s.ReadDB = nil
+	if readDB != nil {
+		defer readDB.Close()
+	}
+	discardCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
 	complete := func(id string) ScanCycleRecord {
 		t.Helper()
 		cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{ID: id, JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
@@ -98,7 +108,7 @@ func TestDiscardCompletedCycleRequiresUnpromotedState(t *testing.T) {
 		return cycle
 	}
 	unpromoted := complete("discard-unpromoted")
-	if err := s.DiscardScanCycle(ctx, unpromoted.ID); err != nil {
+	if err := s.DiscardScanCycle(discardCtx, unpromoted.ID); err != nil {
 		t.Fatalf("discard unpromoted completed cycle = %v", err)
 	}
 	promoted := complete("discard-promoted")
@@ -106,8 +116,47 @@ func TestDiscardCompletedCycleRequiresUnpromotedState(t *testing.T) {
 	if err := s.SaveScan(ctx, model.Scan{ID: "discard-promoted-scan", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", CycleID: promoted.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DiscardScanCycle(ctx, promoted.ID); !errors.Is(err, ErrCycleNotResumable) {
+	if err := s.DiscardScanCycle(discardCtx, promoted.ID); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("discard promoted completed cycle = %v", err)
+	}
+}
+
+func TestDiscardCompletedCycleReturnsScanLookupError(t *testing.T) {
+	ctx, s, job, plan := cycleFixture(t)
+	defer s.Close()
+	readDB := s.ReadDB
+	s.ReadDB = nil
+	if readDB != nil {
+		defer readDB.Close()
+	}
+
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{ID: "discard-scan-lookup-error", JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CompleteScanCycle(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE scans RENAME TO scans_unavailable_for_discard_test`); err != nil {
+		t.Fatal(err)
+	}
+	discardCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	if err := s.DiscardScanCycle(discardCtx, cycle.ID); err == nil || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("discard with failed scan lookup = %v, want database lookup error", err)
 	}
 }
 

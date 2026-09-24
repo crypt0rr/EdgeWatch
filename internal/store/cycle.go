@@ -1241,11 +1241,11 @@ func (s *Store) DiscardScanCycle(ctx context.Context, cycleID string) error {
 		}
 	}
 	if status == "completed" {
-		promoted, scanErr := s.ScanCycleHasScan(ctx, cycleID)
-		if scanErr != nil {
-			return scanErr
+		var promoted int
+		if err := tx.QueryRowContext(ctx, scanCycleHasScanQuery, cycleID).Scan(&promoted); err != nil {
+			return err
 		}
-		if promoted {
+		if promoted > 0 {
 			return ErrCycleNotResumable
 		}
 	}

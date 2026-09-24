@@ -33,6 +33,10 @@ const (
 	PasswordMin   = 12
 	SessionTTL    = 30 * 24 * time.Hour
 	IdleTTL       = 24 * time.Hour
+	// Session activity writes are coalesced across tabs so a user can keep a
+	// session alive without turning every keypress or click into a SQLite write.
+	sessionActivityTouchInterval = 5 * time.Minute
+	sessionActivityWriteTimeout  = 250 * time.Millisecond
 
 	// Argon2id parameters are kept in one place so newly-created passwords
 	// and the login-time upgrade path always agree on the current work factor.
@@ -1447,13 +1451,26 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (store.Sess
 }
 
 // AuthenticateReadOnly validates a session without refreshing its idle
-// timestamp. Long-lived SSE connections use this path for the initial request,
-// heartbeats, and event delivery so a quiet stream (or an automatic reconnect)
-// does not turn every update into a SQLite writer operation. An active stream
-// therefore expires with the same idle policy as any other session when there
-// is no ordinary browser activity.
+// timestamp. It is used for API reads, including background polling, and for
+// long-lived SSE connections so automated requests cannot keep an otherwise
+// idle session alive or contend for SQLite's writer connection.
 func (m *Manager) AuthenticateReadOnly(ctx context.Context, r *http.Request) (store.Session, bool) {
 	return m.authenticate(ctx, r, false)
+}
+
+// RecordActivity advances the idle deadline after real user activity. It is
+// intentionally separate from authentication so background GET polling stays
+// read-only. The store performs a conditional update, which coalesces activity
+// across concurrent browser tabs as well as within one tab.
+func (m *Manager) RecordActivity(ctx context.Context, session store.Session) error {
+	now := m.now()
+	if now.Sub(session.LastSeenAt) < sessionActivityTouchInterval {
+		return nil
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, sessionActivityWriteTimeout)
+	defer cancel()
+	_, err := m.Store.TouchSessionIfStale(writeCtx, session.IDHash, now, session.ExpiresAt, now.Add(-sessionActivityTouchInterval))
+	return err
 }
 
 func (m *Manager) authenticate(ctx context.Context, r *http.Request, touch bool) (store.Session, bool) {
@@ -1474,7 +1491,10 @@ func (m *Manager) authenticate(ctx context.Context, r *http.Request, touch bool)
 	}
 	now := m.now()
 	if !now.Before(session.ExpiresAt) || now.Sub(session.LastSeenAt) > IdleTTL {
-		_ = m.Store.DeleteSession(ctx, session.IDHash)
+		// Expired sessions are rejected immediately, but do not synchronously
+		// delete them here: authentication is on the request path and SQLite may
+		// be busy with a long-running writer. Absolute-expiry cleanup removes old
+		// rows in the background.
 		return store.Session{}, false
 	}
 	// Keep the trusted-browser lifetime absolute from the original login. The

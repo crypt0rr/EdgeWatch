@@ -60,6 +60,16 @@ host recovery tooling) use the bounded revalidation fallback. Server shutdown
 closes all live streams. These bounds are a security property, not a
 replacement for revoking a compromised account or session.
 
+Other authenticated API reads, including the status and page-polling requests,
+also validate sessions without refreshing their idle timestamp. Actual browser
+pointer, keyboard, click, or scroll input and authorized state-changing
+requests refresh the idle timestamp through a CSRF-protected activity path.
+Refreshes are coalesced to at most one database write per session every five
+minutes. The activity write has a short timeout so SQLite writer contention
+cannot delay normal read-only requests. A session with no real activity expires
+after 24 hours; polling in an unattended tab does not keep it alive. The
+absolute session lifetime remains 30 days.
+
 Web-managed Shoutrrr destinations are write-only through the API. Their URLs
 are encrypted at rest with AES-256-GCM; the key is stored in
 `./data/notification.key` unless `notifications.encryption_key_file` is

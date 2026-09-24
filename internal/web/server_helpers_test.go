@@ -67,6 +67,7 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 		{"/auth/login", http.MethodPost, ""},
 		{"/auth/activate", http.MethodPost, ""},
 		{"/auth/session", http.MethodGet, ""},
+		{"/auth/activity", http.MethodPost, auth.PermissionAccountSelf},
 		{"/auth/logout", http.MethodPost, auth.PermissionAccountSelf},
 		{"/auth/display-name", http.MethodPut, auth.PermissionAccountSelf},
 		{"/auth/password", http.MethodPut, auth.PermissionAccountSelf},

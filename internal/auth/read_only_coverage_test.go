@@ -91,3 +91,53 @@ func TestAuthenticateReadOnlyRejectsDisabledAccount(t *testing.T) {
 		t.Fatal("disabled account authenticated through read-only path")
 	}
 }
+
+func TestRecordActivityCoalescesAndBoundsSessionRefresh(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	m := NewManager(db)
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	m.Now = func() time.Time { return now }
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "192.0.2.30:8080"
+	raw, _, err := m.Login(ctx, request, "administrator password", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := db.GetSession(ctx, digest(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.RecordActivity(ctx, session); err != nil {
+		t.Fatalf("recent activity should be coalesced: %v", err)
+	}
+	unchanged, err := db.GetSession(ctx, session.IDHash)
+	if err != nil || !unchanged.LastSeenAt.Equal(session.LastSeenAt) {
+		t.Fatalf("coalesced activity changed session timestamp: %#v, %v", unchanged, err)
+	}
+	now = now.Add(sessionActivityTouchInterval + time.Minute)
+	if err := m.RecordActivity(ctx, session); err != nil {
+		t.Fatalf("stale user activity was not recorded: %v", err)
+	}
+	refreshed, err := db.GetSession(ctx, session.IDHash)
+	if err != nil || !refreshed.LastSeenAt.Equal(now) {
+		t.Fatalf("stale activity timestamp = %s, want %s (err %v)", refreshed.LastSeenAt, now, err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	now = now.Add(sessionActivityTouchInterval + time.Minute)
+	if err := m.RecordActivity(canceled, session); err == nil {
+		t.Fatal("canceled activity write unexpectedly succeeded")
+	}
+}

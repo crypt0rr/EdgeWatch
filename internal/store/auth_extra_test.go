@@ -53,6 +53,38 @@ func TestSetupTokenAndAdministratorCompatibilityLifecycle(t *testing.T) {
 	}
 }
 
+func TestTouchSessionIfStaleCoalescesActivity(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	created := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	expires := created.Add(30 * 24 * time.Hour)
+	if err := s.CreateSession(ctx, "activity-session", "csrf", created, expires); err != nil {
+		t.Fatal(err)
+	}
+	refreshed := created.Add(6 * time.Minute)
+	touched, err := s.TouchSessionIfStale(ctx, "activity-session", refreshed, expires, created.Add(time.Minute))
+	if err != nil || !touched {
+		t.Fatalf("stale session touch = %v, %v", touched, err)
+	}
+	updated, err := s.GetSession(ctx, "activity-session")
+	if err != nil || !updated.LastSeenAt.Equal(refreshed) {
+		t.Fatalf("refreshed session = %#v, %v", updated, err)
+	}
+	touched, err = s.TouchSessionIfStale(ctx, "activity-session", refreshed.Add(time.Minute), expires, refreshed.Add(-time.Minute))
+	if err != nil || touched {
+		t.Fatalf("recent session touch = %v, %v; want false, nil", touched, err)
+	}
+	touched, err = s.TouchSessionIfStale(ctx, "missing-session", refreshed, expires, refreshed.Add(-time.Minute))
+	if err != nil || touched {
+		t.Fatalf("missing session touch = %v, %v; want false, nil", touched, err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := s.TouchSessionIfStale(canceled, "activity-session", refreshed.Add(10*time.Minute), expires, refreshed.Add(5*time.Minute)); err == nil {
+		t.Fatal("canceled session touch unexpectedly succeeded")
+	}
+}
+
 func TestSaveAdminRollsBackLegacyRowWhenUserSyncFails(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

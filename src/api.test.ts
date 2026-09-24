@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, revokeUserSessions, scheduleSuggestion, setCSRF, setup, suppressIncident, updateNotificationDestination, updateUser } from './api'
+import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setup, suppressIncident, updateNotificationDestination, updateUser } from './api'
 import * as apiRoutes from './api'
 
 afterEach(() => {
@@ -245,6 +245,7 @@ describe('API route helpers', () => {
 		const form = {} as Parameters<typeof apiRoutes.createJob>[0]
 		const profile = { name: 'profile', engine: 'nmap' } as Parameters<typeof apiRoutes.createScannerProfile>[0]
 		await apiRoutes.getSession()
+		await recordActivity()
 		await apiRoutes.logout()
 		await apiRoutes.logoutAllSessions()
 		await apiRoutes.updateDisplayName('Operator')

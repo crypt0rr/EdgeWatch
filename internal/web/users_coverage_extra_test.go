@@ -127,6 +127,9 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	if badToken.Code != http.StatusBadRequest {
 		t.Fatalf("invalid activation token = %d: %s", badToken.Code, badToken.Body.String())
 	}
+	if strings.Contains(badToken.Body.String(), "does-not-exist") {
+		t.Fatalf("invalid activation token was echoed: %s", badToken.Body.String())
+	}
 
 	disabled, err := db.CreateUser(context.Background(), store.User{Username: "disabled-user", DisplayName: "Disabled", Role: store.RoleViewer, PasswordHash: hash, Enabled: false}, store.AuditEntry{})
 	if err != nil {

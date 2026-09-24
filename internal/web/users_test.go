@@ -65,12 +65,16 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 	var createResponse struct {
 		User            store.UserSummary `json:"user"`
 		ActivationToken string            `json:"activation_token"`
+		ActivationPath  string            `json:"activation_path"`
 	}
 	if err := json.Unmarshal(created.Body.Bytes(), &createResponse); err != nil {
 		t.Fatal(err)
 	}
 	if createResponse.User.ID == "" || createResponse.User.DisplayName != "Ops" || createResponse.User.Role != store.RoleOperator || createResponse.User.Enabled || !createResponse.User.Pending || createResponse.ActivationToken == "" {
 		t.Fatalf("created user = %#v", createResponse)
+	}
+	if !strings.HasPrefix(createResponse.ActivationPath, "/activate#token=") || !strings.Contains(createResponse.ActivationPath, createResponse.ActivationToken) || strings.Contains(createResponse.ActivationPath, "?token=") {
+		t.Fatalf("new invite activation path = %q", createResponse.ActivationPath)
 	}
 	if strings.Contains(created.Body.String(), "password_hash") || strings.Contains(created.Body.String(), "token_hash") {
 		t.Fatalf("secret material leaked from create response: %s", created.Body.String())
@@ -119,10 +123,14 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 		t.Fatalf("password reset issue status = %d: %s", reset.Code, reset.Body.String())
 	}
 	var resetResponse struct {
-		Token string `json:"activation_token"`
+		Token          string `json:"activation_token"`
+		ActivationPath string `json:"activation_path"`
 	}
 	if err := json.Unmarshal(reset.Body.Bytes(), &resetResponse); err != nil || resetResponse.Token == "" {
 		t.Fatalf("password reset response = %s (%v)", reset.Body.String(), err)
+	}
+	if !strings.HasPrefix(resetResponse.ActivationPath, "/activate#token=") || !strings.Contains(resetResponse.ActivationPath, resetResponse.Token) || strings.Contains(resetResponse.ActivationPath, "?token=") {
+		t.Fatalf("password reset activation path = %q", resetResponse.ActivationPath)
 	}
 	resetReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/activate", strings.NewReader(`{"token":"`+resetResponse.Token+`","password":"new operator password"}`))
 	resetReq.Header.Set("Content-Type", "application/json")
@@ -131,6 +139,20 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 	server.activateUser(resetRecorder, resetReq)
 	if resetRecorder.Code != http.StatusOK {
 		t.Fatalf("password reset status = %d: %s", resetRecorder.Code, resetRecorder.Body.String())
+	}
+	renewed := request(http.MethodPost, "/"+operatorID+"/activation", `{"password":"administrator password"}`)
+	if renewed.Code != http.StatusOK {
+		t.Fatalf("activation renewal status = %d: %s", renewed.Code, renewed.Body.String())
+	}
+	var renewalResponse struct {
+		Token          string `json:"activation_token"`
+		ActivationPath string `json:"activation_path"`
+	}
+	if err := json.Unmarshal(renewed.Body.Bytes(), &renewalResponse); err != nil || renewalResponse.Token == "" {
+		t.Fatalf("activation renewal response = %s (%v)", renewed.Body.String(), err)
+	}
+	if !strings.HasPrefix(renewalResponse.ActivationPath, "/activate#token=") || !strings.Contains(renewalResponse.ActivationPath, renewalResponse.Token) || strings.Contains(renewalResponse.ActivationPath, "?token=") {
+		t.Fatalf("activation renewal path = %q", renewalResponse.ActivationPath)
 	}
 }
 

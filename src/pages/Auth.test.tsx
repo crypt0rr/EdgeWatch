@@ -3,7 +3,7 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter, useLocation } from 'react-router-dom'
+import { BrowserRouter, MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { activate, login, setCSRF, setup, setupStatus } from '../api'
 import { Activate, Login, Setup } from './Auth'
@@ -32,7 +32,7 @@ function submitForm(form: HTMLFormElement) {
 
 function LocationProbe() {
   const location = useLocation()
-  return <output data-testid="location">{location.pathname}</output>
+  return <output data-testid="location">{location.pathname}{location.search}{location.hash}</output>
 }
 
 describe('authentication pages', () => {
@@ -68,6 +68,7 @@ describe('authentication pages', () => {
     act(() => root.unmount())
     queryClient.clear()
     container.remove()
+    window.history.replaceState({}, '', '/')
     vi.clearAllMocks()
   })
 
@@ -79,6 +80,22 @@ describe('authentication pages', () => {
             {element}
             <LocationProbe />
           </MemoryRouter>
+        </QueryClientProvider>,
+      )
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+  }
+
+  async function renderBrowserPage(element: React.ReactNode, initialEntry: string) {
+    window.history.replaceState({}, '', initialEntry)
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <BrowserRouter>
+            {element}
+            <LocationProbe />
+          </BrowserRouter>
         </QueryClientProvider>,
       )
       await Promise.resolve()
@@ -157,10 +174,13 @@ describe('authentication pages', () => {
     expect(container.querySelector('[data-testid="location"]')?.textContent).toBe('/login')
   })
 
-  it('prefills activation tokens, validates confirmation, and activates the account', async () => {
-    await renderPage(<Activate />, '/activate?token=%20invite-token%20')
+  it('prefills a fragment activation token, removes it from browser history, and activates the account', async () => {
+    await renderBrowserPage(<Activate />, '/activate?source=invite#token=%20invite-token%20')
     const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
     expect(inputs[0].value).toBe(' invite-token ')
+    expect(window.location.pathname).toBe('/activate')
+    expect(window.location.search).toBe('?source=invite')
+    expect(window.location.hash).toBe('')
     setInputValue(inputs[0], ' invite-token ')
     setInputValue(inputs[1], 'correct horse battery staple')
     setInputValue(inputs[2], 'different password')
@@ -176,6 +196,26 @@ describe('authentication pages', () => {
     })
     expect(activate).toHaveBeenCalledWith('invite-token', 'correct horse battery staple')
     expect(container.querySelector('[data-testid="location"]')?.textContent).toBe('/login')
+  })
+
+  it('accepts and immediately scrubs a legacy query activation token', async () => {
+    vi.mocked(activate).mockRejectedValueOnce(new Error('activation could not be completed; the token may be invalid or expired'))
+    await renderBrowserPage(<Activate />, '/activate?source=legacy&token=old-token')
+    const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
+    expect(inputs[0].value).toBe('old-token')
+    expect(window.location.search).toBe('?source=legacy')
+    expect(window.location.hash).toBe('')
+
+    setInputValue(inputs[1], 'correct horse battery staple')
+    setInputValue(inputs[2], 'correct horse battery staple')
+    await act(async () => {
+      submitForm(container.querySelector('form') as HTMLFormElement)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(activate).toHaveBeenCalledWith('old-token', 'correct horse battery staple')
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('invalid or expired')
+    expect(window.location.href).not.toContain('old-token')
   })
 
   it('announces setup and activation failures accessibly', async () => {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -28,6 +29,10 @@ type userUpdatePayload struct {
 
 type userPasswordPayload struct {
 	Password string `json:"password"`
+}
+
+func activationPath(token string) string {
+	return "/activate#token=" + url.QueryEscape(token)
 }
 
 // confirmUserMutation applies an administrator's fresh-password requirement
@@ -199,7 +204,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, session stor
 		writeError(w, http.StatusInternalServerError, "create_failed", "user could not be created", nil)
 		return
 	}
-	writeJSON(w, http.StatusCreated, map[string]any{"user": created.Summary(), "activation_token": plain, "activation_path": "/activate?token=" + plain})
+	writeJSON(w, http.StatusCreated, map[string]any{"user": created.Summary(), "activation_token": plain, "activation_path": activationPath(plain)})
 }
 
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.Session, id string) {
@@ -347,7 +352,7 @@ func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor s
 		writeError(w, http.StatusInternalServerError, "invite_failed", "activation token could not be stored", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"activation_token": plain, "activation_path": "/activate?token=" + plain, "expires_at": createdAt.Add(30 * time.Minute)})
+	writeJSON(w, http.StatusOK, map[string]any{"activation_token": plain, "activation_path": activationPath(plain), "expires_at": createdAt.Add(30 * time.Minute)})
 }
 
 func (s *Server) revokeActivation(w http.ResponseWriter, r *http.Request, actor store.Session, id string) {

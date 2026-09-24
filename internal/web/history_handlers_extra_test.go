@@ -102,6 +102,39 @@ func TestHistoryAndIncidentHandlersExposeScopedPages(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &detail); err != nil || detail["scan"] == nil {
 		t.Fatalf("scan detail payload = %#v, %v", detail, err)
 	}
+	if _, ok := detail["scan"].(map[string]any)["snapshot"]; !ok {
+		t.Fatal("legacy scan endpoint no longer includes the full snapshot")
+	}
+	if _, ok := detail["scan"].(map[string]any)["changes"]; !ok {
+		t.Fatal("legacy scan endpoint no longer includes the full change list")
+	}
+
+	// Make the stored snapshot intentionally large after confirming the legacy
+	// endpoint still returns full results. The summary endpoint must stay small
+	// and must not decode either stored evidence payload.
+	largeSnapshot := []byte(`{"padding":"` + strings.Repeat("x", 2<<20) + `","units":[]}`)
+	if _, err := db.DB.ExecContext(ctx, `UPDATE scans SET snapshot_json=?,changes_json=? WHERE id=?`, largeSnapshot, []byte(`not-json`), scan.ID); err != nil {
+		t.Fatal(err)
+	}
+	recorder = httptest.NewRecorder()
+	server.getScanSummary(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/"+scan.ID+"/summary", nil), scan.ID)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("scan summary = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder.Body.Len() > 16<<10 || strings.Contains(recorder.Body.String(), "padding") || strings.Contains(recorder.Body.String(), `"snapshot"`) || strings.Contains(recorder.Body.String(), `"changes"`) {
+		t.Fatalf("scan summary unexpectedly includes evidence payloads (%d bytes)", recorder.Body.Len())
+	}
+	var summaryEnvelope struct {
+		Scan model.ScanSummary `json:"scan"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &summaryEnvelope); err != nil || summaryEnvelope.Scan.ID != scan.ID {
+		t.Fatalf("scan summary payload = %#v, %v", summaryEnvelope, err)
+	}
+	recorder = httptest.NewRecorder()
+	server.getScanSummary(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/missing/summary", nil), "missing")
+	if recorder.Code != http.StatusNotFound {
+		t.Fatalf("missing scan summary status = %d: %s", recorder.Code, recorder.Body.String())
+	}
 
 	recorder = httptest.NewRecorder()
 	server.listEvents(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/events?job_id="+record.ID, nil), "")
@@ -135,6 +168,9 @@ func TestHistoryAndIncidentHandlersExposeScopedPages(t *testing.T) {
 		},
 		func(w *httptest.ResponseRecorder) {
 			server.getScan(w, httptest.NewRequest(http.MethodGet, "/", nil), "missing")
+		},
+		func(w *httptest.ResponseRecorder) {
+			server.getScanSummary(w, httptest.NewRequest(http.MethodGet, "/", nil), "missing")
 		},
 		func(w *httptest.ResponseRecorder) {
 			server.jobEvents(w, httptest.NewRequest(http.MethodGet, "/", nil), "missing")

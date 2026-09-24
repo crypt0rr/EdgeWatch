@@ -492,6 +492,8 @@ passwords, setup tokens, database files, or encryption keys.
 More security detail, including the live-update session-revocation and
 isolation bounds, is in [SECURITY.md](SECURITY.md); container capability
 guidance is in [docs/container-hardening.md](docs/container-hardening.md).
+The historical scan API's metadata and full-result endpoints are documented in
+[docs/api-compatibility.md](docs/api-compatibility.md).
 
 ## License
 

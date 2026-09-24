@@ -5,12 +5,12 @@ import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getScan, historicalScanHosts } from '../api'
+import { getScanSummary, historicalScanHosts } from '../api'
 import type { Scan, ScanSummary } from '../types'
 import { ScanDetail } from './ScanDetail'
 
 vi.mock('../api', () => ({
-  getScan: vi.fn(),
+  getScanSummary: vi.fn(),
   historicalScanHosts: vi.fn(),
 }))
 
@@ -39,7 +39,7 @@ describe('historical scan detail', () => {
     document.body.appendChild(container)
     root = createRoot(container)
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    vi.mocked(getScan).mockResolvedValue(scan)
+    vi.mocked(getScanSummary).mockResolvedValue({ scan: summary })
     vi.mocked(historicalScanHosts).mockResolvedValue({
       job: scan.job,
       scan: summary,
@@ -84,19 +84,19 @@ describe('historical scan detail', () => {
   })
 
   it('shows a not-found state when the historical scan cannot be loaded', async () => {
-    vi.mocked(getScan).mockRejectedValue(Object.assign(new Error('missing'), { code: 'not_found' }))
+    vi.mocked(getScanSummary).mockRejectedValue(Object.assign(new Error('missing'), { code: 'not_found' }))
     await renderPage()
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('could not be found')
     expect(container.querySelector('h1')).toBeNull()
   })
 
   it('offers retry for transient historical scan failures', async () => {
-    vi.mocked(getScan).mockRejectedValue(new Error('scan service unavailable'))
+    vi.mocked(getScanSummary).mockRejectedValue(new Error('scan service unavailable'))
     await renderPage()
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('could not be loaded')
     const retry = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Retry') as HTMLButtonElement
     expect(retry).toBeTruthy()
-    vi.mocked(getScan).mockResolvedValueOnce(scan)
+    vi.mocked(getScanSummary).mockResolvedValueOnce({ scan: summary })
     await act(async () => retry.click())
     await vi.waitFor(() => expect(container.querySelector('h1')).toBeTruthy(), { timeout: 1000 })
   })

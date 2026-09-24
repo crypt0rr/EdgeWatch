@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setup, suppressIncident, updateNotificationDestination, updateUser } from './api'
+import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setup, suppressIncident, updateNotificationDestination, updateUser } from './api'
 import * as apiRoutes from './api'
 
 afterEach(() => {
@@ -80,6 +80,14 @@ describe('historical scan API contract', () => {
     await expect(getScan('scan-2')).resolves.toMatchObject({ id: 'scan-2', job: 'legacy' })
     expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/scans/scan-1')
     expect(String(fetchMock.mock.calls[1][0])).toBe('/api/v1/scans/scan-2')
+  })
+
+  it('loads metadata from the additive summary route', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ scan: { id: 'large-scan', job: 'inventory', status: 'success' } }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(getScanSummary('large/scan')).resolves.toMatchObject({ scan: { id: 'large-scan', job: 'inventory' } })
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/scans/large%2Fscan/summary')
   })
 })
 

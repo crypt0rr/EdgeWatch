@@ -114,6 +114,9 @@ func TestNmapMissingExecutableIsTypedConfigurationFailure(t *testing.T) {
 
 func TestExecutableStartErrorTypesOnlyPermanentCommandFailures(t *testing.T) {
 	const executable = "/usr/bin/nmap"
+	if got := ExecutableStartError(executable, nil); got != nil {
+		t.Fatalf("ExecutableStartError(nil) = %v, want nil", got)
+	}
 	for _, test := range []struct {
 		name string
 		err  error

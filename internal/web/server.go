@@ -48,6 +48,8 @@ type Server struct {
 	sseWG            sync.WaitGroup
 	handlerWG        sync.WaitGroup
 	sseCancels       map[chan sseMessage]context.CancelFunc
+	sseSessionKey    map[chan sseMessage]string
+	sseUserKey       map[chan sseMessage]string
 	sseAuthMu        sync.Mutex
 	sseAuthCache     map[string]sseAuthCacheEntry
 	sseAuthTTL       time.Duration
@@ -146,7 +148,7 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	rdapClient.OnCacheWriteError = func(err error) {
 		logger.Warn("rdap cache write failed", "error", err)
 	}
-	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, shutdown: make(chan struct{}), sseCancels: map[chan sseMessage]context.CancelFunc{}, sseAuthCache: map[string]sseAuthCacheEntry{}, sseAuthTTL: defaultSSEAuthCacheTTL, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
+	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, shutdown: make(chan struct{}), sseCancels: map[chan sseMessage]context.CancelFunc{}, sseSessionKey: map[chan sseMessage]string{}, sseUserKey: map[chan sseMessage]string{}, sseAuthCache: map[string]sseAuthCacheEntry{}, sseAuthTTL: defaultSSEAuthCacheTTL, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
 	if s != nil {
 		if start, end, err := s.ReserveSSEEventIDs(context.Background(), sseEventIDBlockSize); err != nil {
 			logger.Warn("SSE event cursor could not be reserved", "error", err)
@@ -477,6 +479,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		}
 		if err := s.Auth.Store.DeleteUserSessionsWithAudit(r.Context(), session.UserID, actorAudit(session, action, "all sessions revoked")); err != nil {
 			if errors.Is(err, store.ErrAuditUnavailable) {
+				s.revokeSSEUser(session.UserID)
 				s.auditFailure(err, action)
 				writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "sessions were revoked, but the security audit is temporarily unavailable", nil)
 				return
@@ -484,6 +487,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "store", "sessions could not be revoked", nil)
 			return
 		}
+		s.revokeSSEUser(session.UserID)
 		writeJSON(w, http.StatusNoContent, nil)
 	case path == "/status" && r.Method == http.MethodGet:
 		s.adminStatus(w, r, session)

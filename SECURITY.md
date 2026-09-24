@@ -41,8 +41,13 @@ quiet stream can remain connected until its next heartbeat, while activity
 causes a revoked stream to close within the two-second authorization-cache
 bound. Stream connections, reconnects, heartbeats, and subscriber-limit
 responses use read-only authentication and do not extend the session's idle
-timeout. Server shutdown closes all live streams. These bounds are a security
-property, not a replacement for revoking a compromised account or session.
+timeout. Security mutations handled by the running web process cancel matching
+streams immediately and invalidate their cached authorization; a TOTP change
+that deliberately preserves the current browser session leaves only that
+session's stream connected. Revocations performed by another process (such as
+host recovery tooling) use the bounded revalidation fallback. Server shutdown
+closes all live streams. These bounds are a security property, not a
+replacement for revoking a compromised account or session.
 
 Web-managed Shoutrrr destinations are write-only through the API. Their URLs
 are encrypted at rest with AES-256-GCM; the key is stored in

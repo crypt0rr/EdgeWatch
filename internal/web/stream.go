@@ -86,6 +86,12 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	if s.sseCancels == nil {
 		s.sseCancels = map[chan sseMessage]context.CancelFunc{}
 	}
+	if s.sseSessionKey == nil {
+		s.sseSessionKey = map[chan sseMessage]string{}
+	}
+	if s.sseUserKey == nil {
+		s.sseUserKey = map[chan sseMessage]string{}
+	}
 	if channelClosed(shutdown) {
 		s.mu.Unlock()
 		return
@@ -107,6 +113,8 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	s.subscriberKey[ch] = subscriberKey
 	s.subscriberUse[subscriberKey]++
 	s.sseCancels[ch] = streamCancel
+	s.sseSessionKey[ch] = strings.TrimSpace(session.IDHash)
+	s.sseUserKey[ch] = strings.TrimSpace(session.UserID)
 	s.sseWG.Add(1)
 	s.mu.Unlock()
 	s.sseAuthMu.Lock()
@@ -122,6 +130,8 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 		delete(s.subscribers, ch)
 		delete(s.subscriberKey, ch)
 		delete(s.sseCancels, ch)
+		delete(s.sseSessionKey, ch)
+		delete(s.sseUserKey, ch)
 		if use := s.subscriberUse[subscriberKey]; use <= 1 {
 			delete(s.subscriberUse, subscriberKey)
 		} else {
@@ -197,6 +207,67 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 			}
 		}
 	}
+}
+
+// revokeSSEStreams immediately withdraws in-process authorization after a
+// session or account mutation commits. The store remains the source of truth;
+// this index only makes already-open handlers react without waiting for the
+// next heartbeat or the short authorization-cache TTL. Cancellation callbacks
+// are collected while the subscriber mutex is held and invoked afterwards so
+// the stream defer can safely remove its own indexes.
+func (s *Server) revokeSSEStreams(sessionID, userID, exceptSessionID string) {
+	sessionID = strings.TrimSpace(sessionID)
+	userID = strings.TrimSpace(userID)
+	exceptSessionID = strings.TrimSpace(exceptSessionID)
+	if sessionID == "" && userID == "" {
+		return
+	}
+
+	s.sseAuthMu.Lock()
+	for key, entry := range s.sseAuthCache {
+		matchesSession := sessionID != "" && strings.TrimSpace(entry.session.IDHash) == sessionID
+		matchesUser := userID != "" && strings.TrimSpace(entry.session.UserID) == userID
+		if !matchesSession && !matchesUser {
+			continue
+		}
+		if exceptSessionID != "" && strings.TrimSpace(entry.session.IDHash) == exceptSessionID {
+			continue
+		}
+		delete(s.sseAuthCache, key)
+	}
+	s.sseAuthMu.Unlock()
+
+	s.mu.Lock()
+	cancels := make([]context.CancelFunc, 0)
+	for ch, cancel := range s.sseCancels {
+		streamSession := strings.TrimSpace(s.sseSessionKey[ch])
+		streamUser := strings.TrimSpace(s.sseUserKey[ch])
+		matchesSession := sessionID != "" && streamSession == sessionID
+		matchesUser := userID != "" && streamUser == userID
+		if !matchesSession && !matchesUser {
+			continue
+		}
+		if exceptSessionID != "" && streamSession == exceptSessionID {
+			continue
+		}
+		cancels = append(cancels, cancel)
+	}
+	s.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+func (s *Server) revokeSSESession(sessionID string) {
+	s.revokeSSEStreams(sessionID, "", "")
+}
+
+func (s *Server) revokeSSEUser(userID string) {
+	s.revokeSSEStreams("", userID, "")
+}
+
+func (s *Server) revokeSSEUserExcept(userID, exceptSessionID string) {
+	s.revokeSSEStreams("", userID, exceptSessionID)
 }
 
 func (s *Server) sseWriteTimeoutValue() time.Duration {

@@ -98,6 +98,9 @@ func normalizeUsername(username string) (string, error) {
 	return strings.ToLower(username), nil
 }
 
+// GetUser returns the persisted user and decrypted TOTP projection without
+// upgrading ciphertext or otherwise mutating the database. Legacy secret
+// upgrades are handled by the explicit startup migration.
 func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
 	var u User
 	var totp, enabled int
@@ -113,17 +116,11 @@ func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
 	u.TOTPEnabled = totp != 0
 	u.Enabled = enabled != 0
 	u.CreatedAt, u.UpdatedAt, u.LastLoginAt = scanTime(created), scanTime(updated), scanTime(lastLogin)
-	secret, migrate, secretErr := s.openTOTPSecretForOwner(u.ID, u.TOTPSecretStored)
+	secret, _, secretErr := s.openTOTPSecretForOwner(u.ID, u.TOTPSecretStored)
 	if secretErr != nil {
 		u.TOTPSecretError = secretErr
 	} else {
 		u.TOTPSecret = secret
-		if u.TOTPEnabled && secret != "" && migrate {
-			if encrypted, encryptErr := s.sealTOTPSecretForOwner(u.ID, secret); encryptErr == nil {
-				_, _ = s.DB.ExecContext(ctx, `UPDATE users SET totp_secret=?,updated_at=? WHERE id=? AND totp_secret=?`, encrypted, time.Now().UTC().Format(time.RFC3339Nano), u.ID, u.TOTPSecretStored)
-				u.TOTPSecretStored = encrypted
-			}
-		}
 	}
 	if strings.TrimSpace(u.DisplayName) == "" {
 		u.DisplayName = u.Username

@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -247,6 +249,112 @@ func TestGetAdminFallsBackToAuthoritativeUserWhenCompatibilityRowMissing(t *test
 	}
 	if admin.Username != "admin" || admin.PasswordHash != "hash" || admin.Revision == 0 {
 		t.Fatalf("unexpected authoritative administrator: %#v", admin)
+	}
+}
+
+func TestGetAdminWorksWithReadOnlyDatabase(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "readonly-admin.db")
+	writer, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := writer.SaveAdmin(ctx, Admin{Username: "admin", DisplayName: "Administrator", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
+		writer.Close()
+		t.Fatal(err)
+	}
+	if _, err := writer.DB.ExecContext(ctx, `UPDATE users SET totp_secret=?,totp_enabled=1 WHERE id=?`, "legacy-seed", LegacyAdminUserID); err != nil {
+		writer.Close()
+		t.Fatal(err)
+	}
+	if _, err := writer.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=?,totp_enabled=1 WHERE id=1`, "legacy-seed"); err != nil {
+		writer.Close()
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reader, err := OpenReadOnlyExisting(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	admin, err := reader.GetAdmin(ctx)
+	if err != nil || admin.Username != "admin" || admin.PasswordHash != "hash" || admin.TOTPSecret != "legacy-seed" {
+		t.Fatalf("read-only GetAdmin = %#v, %v", admin, err)
+	}
+	user, err := reader.GetUser(ctx, LegacyAdminUserID)
+	if err != nil || user.TOTPSecret != "legacy-seed" {
+		t.Fatalf("read-only GetUser = %#v, %v", user, err)
+	}
+	if _, err := os.Stat(reader.authKeyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("read-only authentication read created a key file: stat err=%v", err)
+	}
+}
+
+func TestMigrateAdminCompatibilityUpgradesSecretAndSynchronizesAtomically(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	if err := s.SaveAdmin(ctx, Admin{Username: "admin", DisplayName: "Old name", PasswordHash: "old-hash", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET display_name=?,password_hash=?,totp_secret=?,totp_enabled=1 WHERE id=?`, "Current name", "current-hash", "JBSWY3DPEHPK3PXP", LegacyAdminUserID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MigrateAdminCompatibility(ctx); err != nil {
+		t.Fatalf("migrate administrator compatibility: %v", err)
+	}
+
+	var userSecret, legacyName, legacyPassword, legacySecret string
+	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret FROM users WHERE id=?`, LegacyAdminUserID).Scan(&userSecret); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(userSecret, authCiphertextV2) {
+		t.Fatalf("administrator secret was not upgraded: %q", userSecret)
+	}
+	secret, migrate, err := s.openTOTPSecretForOwner(LegacyAdminUserID, userSecret)
+	if err != nil || migrate || secret != "JBSWY3DPEHPK3PXP" {
+		t.Fatalf("upgraded secret = %q, migrate=%v, err=%v", secret, migrate, err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT display_name,password_hash,totp_secret FROM admins WHERE id=1`).Scan(&legacyName, &legacyPassword, &legacySecret); err != nil {
+		t.Fatal(err)
+	}
+	if legacyName != "Current name" || legacyPassword != "current-hash" || legacySecret != userSecret {
+		t.Fatalf("legacy compatibility row remains stale: name=%q password=%q secret-matches=%v", legacyName, legacyPassword, legacySecret == userSecret)
+	}
+}
+
+func TestMigrateAdminCompatibilityRollsBackOnSecretWriteFailure(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	now := time.Now().UTC()
+	if err := s.SaveAdmin(ctx, Admin{Username: "admin", DisplayName: "Old name", PasswordHash: "old-hash", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET display_name=?,totp_secret=?,totp_enabled=1 WHERE id=?`, "Current name", "JBSWY3DPEHPK3PXP", LegacyAdminUserID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER reject_totp_migration BEFORE UPDATE OF totp_secret ON users BEGIN SELECT RAISE(ABORT,'migration blocked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MigrateAdminCompatibility(ctx); err == nil {
+		t.Fatal("TOTP migration write failure was ignored")
+	}
+	var stored, legacyName string
+	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret,display_name FROM users WHERE id=?`, LegacyAdminUserID).Scan(&stored, &legacyName); err != nil {
+		t.Fatal(err)
+	}
+	if stored != "JBSWY3DPEHPK3PXP" || legacyName != "Current name" {
+		t.Fatalf("failed migration partially changed authoritative row: secret=%q name=%q", stored, legacyName)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT display_name FROM admins WHERE id=1`).Scan(&legacyName); err != nil {
+		t.Fatal(err)
+	}
+	if legacyName != "Old name" {
+		t.Fatalf("failed migration partially changed compatibility row: %q", legacyName)
 	}
 }
 

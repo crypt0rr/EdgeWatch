@@ -87,6 +87,9 @@ type SetupToken struct {
 	Used      bool
 }
 
+// GetAdmin returns the legacy administrator projection without mutating either
+// authentication table. Compatibility synchronization and ciphertext upgrades
+// are performed by MigrateAdminCompatibility during daemon startup.
 func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	var a Admin
 	var stored string
@@ -125,27 +128,11 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	} else {
 		return a, userErr
 	}
-	secret, migrate, secretErr := s.openTOTPSecretForOwner(LegacyAdminUserID, stored)
+	secret, _, secretErr := s.openTOTPSecretForOwner(LegacyAdminUserID, stored)
 	if secretErr != nil {
 		a.TOTPSecretError = secretErr
 	} else {
 		a.TOTPSecret = secret
-		if a.TOTPEnabled && secret != "" && migrate {
-			if encrypted, encryptErr := s.sealTOTPSecretForOwner(LegacyAdminUserID, secret); encryptErr == nil {
-				if authoritative {
-					_, _ = s.DB.ExecContext(ctx, `UPDATE users SET totp_secret=?,updated_at=? WHERE id=? AND totp_secret=?`, encrypted, time.Now().UTC().Format(time.RFC3339Nano), LegacyAdminUserID, stored)
-				} else {
-					_, _ = s.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=?,updated_at=? WHERE id=1 AND totp_secret=?`, encrypted, time.Now().UTC().Format(time.RFC3339Nano), stored)
-				}
-				a.TOTPSecretStored = encrypted
-			}
-		}
-	}
-	if authoritative {
-		// Keep the compatibility row synchronized with the authoritative users
-		// record. This also upgrades a stale legacy/plaintext TOTP value on a
-		// normal administrator read without allowing it to overwrite users.
-		_, _ = s.DB.ExecContext(ctx, `UPDATE admins SET username=?,display_name=?,password_hash=?,totp_secret=?,totp_enabled=?,created_at=?,updated_at=? WHERE id=1`, a.Username, a.DisplayName, a.PasswordHash, a.TOTPSecretStored, boolInt(a.TOTPEnabled), a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano))
 	}
 	return a, nil
 }

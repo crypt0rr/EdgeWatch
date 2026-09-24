@@ -269,6 +269,30 @@ func (s *Store) GetScannerProfile(ctx context.Context, id string) (ScannerProfil
 	return profile, err
 }
 
+// CurrentScannerProfileRevisions returns the latest revision number for all
+// profiles without decoding their argument templates. Job-list consumers use
+// it to flag pinned profiles that have a newer revision with one bounded read.
+func (s *Store) CurrentScannerProfileRevisions(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.reader().QueryContext(ctx, `SELECT id,revision FROM scanner_profiles`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]int64)
+	for rows.Next() {
+		var id string
+		var revision int64
+		if err := rows.Scan(&id, &revision); err != nil {
+			return nil, err
+		}
+		out[id] = revision
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // GetScannerProfileRevision returns an immutable historical definition. Jobs
 // pin a profile revision, so updating or archiving the current profile must
 // not make an otherwise valid job impossible to edit or run. The current

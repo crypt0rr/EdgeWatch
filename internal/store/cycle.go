@@ -57,6 +57,27 @@ type ScanCycleRecord struct {
 	LastError          string
 }
 
+// ScanCycleSummary is the bounded active-cycle projection included in the
+// polled job list. Unlike ScanCycleRecord it does not decode the potentially
+// large pinned work plan.
+type ScanCycleSummary struct {
+	ID                 string
+	JobID              string
+	JobRevision        int64
+	Status             string
+	AttemptCount       int
+	NoProgressAttempts int
+	TotalUnits         int
+	CompletedUnits     int
+	TotalProbes        int64
+	CompletedProbes    int64
+	StartedAt          time.Time
+	UpdatedAt          time.Time
+	ExpiresAt          time.Time
+	FinishedAt         time.Time
+	LastError          string
+}
+
 // ScanCycleUnit is one independently persisted Nmap invocation.
 type ScanCycleUnit struct {
 	CycleID    string
@@ -724,6 +745,33 @@ func (s *Store) GetActiveScanCycle(ctx context.Context, jobID string) (ScanCycle
 		return ScanCycleRecord{}, err
 	}
 	return s.GetScanCycle(ctx, id)
+}
+
+// ListActiveScanCycleSummaries returns the current active cycle for each
+// visible job in one query. The partial unique index on scan_cycles guarantees
+// at most one running, paused, or stalled cycle per job.
+func (s *Store) ListActiveScanCycleSummaries(ctx context.Context, includeArchived bool) (map[string]ScanCycleSummary, error) {
+	rows, err := s.reader().QueryContext(ctx, `SELECT c.id,c.job_id,c.job_revision,c.status,c.attempt_count,c.no_progress_attempts,c.total_units,c.completed_units,c.total_probes,c.completed_probes,c.started_at,c.updated_at,c.expires_at,c.finished_at,c.last_error
+ FROM scan_cycles c JOIN jobs j ON j.id=c.job_id
+ WHERE c.status IN ('running','paused','stalled') AND (?=1 OR j.archived=0)`, boolInt(includeArchived))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]ScanCycleSummary)
+	for rows.Next() {
+		var cycle ScanCycleSummary
+		var started, updated, expires, finished string
+		if err := rows.Scan(&cycle.ID, &cycle.JobID, &cycle.JobRevision, &cycle.Status, &cycle.AttemptCount, &cycle.NoProgressAttempts, &cycle.TotalUnits, &cycle.CompletedUnits, &cycle.TotalProbes, &cycle.CompletedProbes, &started, &updated, &expires, &finished, &cycle.LastError); err != nil {
+			return nil, err
+		}
+		cycle.StartedAt, cycle.UpdatedAt, cycle.ExpiresAt, cycle.FinishedAt = scanTime(started), scanTime(updated), scanTime(expires), scanTime(finished)
+		out[cycle.JobID] = cycle
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // GetLatestScanCycle returns the newest cycle for a job regardless of its

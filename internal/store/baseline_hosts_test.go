@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -193,5 +196,169 @@ func TestRuntimeStateSummaryCountsLegacyUnitAddresses(t *testing.T) {
 	}
 	if !summary.HasBaseline || summary.BaselineHostCount != 2 {
 		t.Fatalf("legacy summary = %#v", summary)
+	}
+}
+
+func TestRuntimeStateSummariesMatchSingleJobSummariesAndArchiveScope(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	insertScan := func(id string, addresses ...string) {
+		t.Helper()
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?, 'now','now','success','','Nmap','hash','{}')`, id, id); err != nil {
+			t.Fatal(err)
+		}
+		for _, address := range addresses {
+			if _, err := s.DB.ExecContext(ctx, `INSERT INTO scan_hosts(scan_id,address,host_json) VALUES(?,?,'{}')`, id, address); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	insertJob := func(id string, archived bool) {
+		t.Helper()
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?, '{}',1,?,1,'now','now')`, id, id, boolInt(archived)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertRuntime := func(id, state string) {
+		t.Helper()
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?)`, id, []byte(state), "now"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	insertJob("legacy-hosts", false)
+	insertRuntime("legacy-hosts", `{"baseline":{"hosts":[{"address":"198.51.100.1"},{"address":"198.51.100.2"}]},"candidate_count":2,"candidate_attempts":3,"incomplete_candidate_attempts":1,"incidents":{"one":{}},"pending":{"two":{}}}`)
+	insertJob("legacy-units", false)
+	insertRuntime("legacy-units", `{"baseline":{"units":[{"addresses":["198.51.100.3","198.51.100.4"]},{"addresses":["198.51.100.4"]}]},"baseline_scan_id":"","baseline_config_hash":"legacy","candidate_count":1}`)
+	insertJob("projected", false)
+	insertRuntime("projected", `{"baseline":{"hosts":[{"address":"198.51.100.5"}]},"baseline_scan_id":"","baseline_config_hash":"current"}`)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "projected", 1, "", "current", 0, 1, 4, 5, 1, 2, "now"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceBaselineHostProjection(ctx, "projected", model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.5"}, {Address: "198.51.100.6"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO runtime_incidents(job_id,key,incident_json) VALUES(?,?,?)`, "projected", "incident", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	insertScan("metadata-source-scan", "198.51.100.40")
+	insertJob("metadata-source", false)
+	insertRuntime("metadata-source", `{"baseline":{"hosts":[]},"baseline_scan_id":"metadata-source-scan"}`)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "metadata-source", 1, "metadata-source-scan", "hash", 0, 1, 0, 0, 0, 0, "now"); err != nil {
+		t.Fatal(err)
+	}
+	insertJob("legacy-modified", false)
+	insertRuntime("legacy-modified", `{"baseline":{"hosts":[{"address":"198.51.100.41"}]},"baseline_modified":true}`)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO baseline_hosts(job_id,address,host_json) VALUES(?,?,?)`, "legacy-modified", "198.51.100.41", `{}`); err != nil {
+		t.Fatal(err)
+	}
+	insertJob("empty", false)
+	insertJob("archived", true)
+	insertRuntime("archived", `{"baseline":{"hosts":[{"address":"198.51.100.7"}]}}`)
+	insertJob("projected-invalid-runtime", false)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?)`, "projected-invalid-runtime", `{invalid`, "1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "projected-invalid-runtime", 1, "", "", 0, 0, 0, 0, 0, 0, "2"); err != nil {
+		t.Fatal(err)
+	}
+	insertScan("json-source", "198.51.100.30")
+	insertScan("stale-metadata-source", "198.51.100.31", "198.51.100.32")
+	insertJob("metadata-empty-source", false)
+	insertRuntime("metadata-empty-source", `{"baseline":{"hosts":[]},"baseline_scan_id":"json-source"}`)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "metadata-empty-source", 1, "", "", 0, 0, 0, 0, 0, 0, "now"); err != nil {
+		t.Fatal(err)
+	}
+	insertJob("stale-metadata-source", false)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?)`, "stale-metadata-source", `{"baseline":{"units":[{"addresses":["198.51.100.30"]}]},"baseline_scan_id":"json-source"}`, "2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "stale-metadata-source", 1, "stale-metadata-source", "", 0, 0, 0, 0, 0, 0, "1"); err != nil {
+		t.Fatal(err)
+	}
+	const seededJobCount = 128
+	seededIDs := make([]string, 0, seededJobCount)
+	for index := 0; index < seededJobCount; index++ {
+		id := fmt.Sprintf("seeded-%03d", index)
+		insertJob(id, false)
+		seededIDs = append(seededIDs, id)
+	}
+
+	for _, includeArchived := range []bool{false, true} {
+		got, err := s.RuntimeStateSummaries(ctx, includeArchived)
+		if err != nil {
+			t.Fatalf("RuntimeStateSummaries(includeArchived=%t): %v", includeArchived, err)
+		}
+		wantIDs := []string{"legacy-hosts", "legacy-units", "projected", "metadata-source", "legacy-modified", "empty", "projected-invalid-runtime", "metadata-empty-source", "stale-metadata-source"}
+		wantIDs = append(wantIDs, seededIDs...)
+		if includeArchived {
+			wantIDs = append(wantIDs, "archived")
+		}
+		if len(got) != len(wantIDs) {
+			t.Fatalf("summary count with includeArchived=%t = %d, want %d (%#v)", includeArchived, len(got), len(wantIDs), got)
+		}
+		for _, id := range wantIDs {
+			want, err := s.RuntimeStateSummary(ctx, id)
+			if err != nil {
+				t.Fatalf("RuntimeStateSummary(%q): %v", id, err)
+			}
+			if !reflect.DeepEqual(got[id], want) {
+				t.Errorf("batched summary for %q = %#v, want %#v", id, got[id], want)
+			}
+		}
+		if !includeArchived {
+			if _, ok := got["archived"]; ok {
+				t.Fatal("archived job appeared in default summary list")
+			}
+		}
+	}
+}
+
+func TestRuntimeStateSummariesReportsInvalidLegacyRuntimeJSON(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('invalid-json','invalid-json','{}',1,0,1,'now','now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES('invalid-json','{invalid','2')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,updated_at) VALUES('invalid-json',1,'1')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.RuntimeStateSummaries(ctx, false); err == nil {
+		t.Fatal("expected invalid stale runtime JSON to fail the batch summary")
+	}
+}
+
+func TestRuntimeStateSummariesReportsQueryAndScanErrors(t *testing.T) {
+	t.Run("query", func(t *testing.T) {
+		s := openTestStore(t)
+		ctx := context.Background()
+		if _, err := s.DB.ExecContext(ctx, `DROP TABLE job_runtime_meta`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.RuntimeStateSummaries(ctx, false); err == nil {
+			t.Fatal("expected missing runtime metadata table to fail")
+		}
+	})
+	t.Run("scan", func(t *testing.T) {
+		s := openTestStore(t)
+		ctx := context.Background()
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('bad-count','bad-count','{}',1,0,1,'now','now')`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,candidate_count,updated_at) VALUES('bad-count',1,'not-a-number','now')`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.RuntimeStateSummaries(ctx, false); err == nil {
+			t.Fatal("expected invalid runtime metadata integer to fail scanning")
+		}
+	})
+}
+
+func TestLegacyRuntimeHostCountFallsBackToZero(t *testing.T) {
+	if got := legacyRuntimeHostCount(sql.NullInt64{}, sql.NullInt64{}); got != 0 {
+		t.Fatalf("empty legacy host counts = %d, want 0", got)
 	}
 }

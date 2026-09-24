@@ -479,16 +479,17 @@ func TestSQLiteConnectionScopedPragmasReapplyAfterConnectionRecycle(t *testing.T
 	// must receive the same connection-scoped settings as the first one.
 	s.DB.SetMaxOpenConns(1)
 	s.DB.SetMaxIdleConns(0)
-	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Millisecond)
-	rows, err := s.DB.QueryContext(queryCtx, `WITH RECURSIVE nums(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM nums WHERE n<2000) SELECT sum(a.n+b.n+c.n) FROM nums a CROSS JOIN nums b CROSS JOIN nums c`)
-	if rows != nil {
-		_ = rows.Next()
-		_ = rows.Close()
+	rows, err := s.DB.QueryContext(ctx, `SELECT 1`)
+	if err != nil {
+		t.Fatal(err)
 	}
-	cancel()
-	// The large query is expected to be interrupted, but a fast driver or a
-	// busy CI host may complete it before the deadline. Either way, the
-	// following query opens a fresh connection under the connector.
+	if !rows.Next() {
+		_ = rows.Close()
+		t.Fatal("connection-recycling probe returned no row")
+	}
+	_ = rows.Close()
+	// With no idle connections allowed, closing the rows recycles the physical
+	// connection. The following query opens a fresh one under the connector.
 	var foreignKeys, busyTimeout int
 	if err := s.DB.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
 		t.Fatal(err)

@@ -32,7 +32,7 @@ func unmarshalJob(raw []byte) (config.Job, error) {
 	if err := json.Unmarshal(raw, &job); err != nil {
 		return job, err
 	}
-	return config.NormalizeJob(job), nil
+	return config.NormalizeStoredJob(job), nil
 }
 
 func scanTime(raw string) time.Time {
@@ -273,6 +273,11 @@ func (s *Store) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context, id st
 		}
 		if scopeChanged && !confirmRebaseline {
 			return current, true, nil, ErrRebaselineRequired
+		}
+	}
+	if !scopeChanged && current.Job.LegacySecurityHash() != "" {
+		if err := migrateLegacyScopeHashTx(ctx, tx, id, current.Job.LegacySecurityHash(), job.SecurityHash()); err != nil {
+			return JobRecord{}, false, nil, err
 		}
 	}
 	now := time.Now().UTC()

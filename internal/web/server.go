@@ -422,7 +422,18 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, ok := s.Auth.Authenticate(r.Context(), r)
+	// The live-update stream is long-lived and may reconnect automatically when
+	// the server is at its subscriber limit. Treat both successful connections
+	// and rejected attempts as read-only authentication so reconnects cannot
+	// keep an otherwise idle session alive. Ordinary API requests continue to
+	// refresh the idle timestamp as normal activity.
+	var session store.Session
+	var ok bool
+	if path == "/stream" && r.Method == http.MethodGet {
+		session, ok = s.Auth.AuthenticateReadOnly(r.Context(), r)
+	} else {
+		session, ok = s.Auth.Authenticate(r.Context(), r)
+	}
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "authentication required", nil)
 		return

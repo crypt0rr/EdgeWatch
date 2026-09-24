@@ -136,6 +136,14 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 		s.sseAuthMu.Unlock()
 		s.sseWG.Done()
 	}()
+	// The API authenticates the request before registering the subscriber. A
+	// revocation can still race that check while the replay is being prepared,
+	// so perform one fresh read-only authorization before sending any bytes.
+	// Direct stream fixtures without a cookie retain their existing behavior;
+	// network requests always carry the cookie validated by api.
+	if _, err := r.Cookie(auth.SessionCookie); err == nil && !s.streamAuthorizedFresh(streamCtx, r, authKey) {
+		return
+	}
 	if !s.writeSSE(streamCtx, w, []byte(": connected\nretry: 5000\n\n")) {
 		return
 	}
@@ -298,12 +306,24 @@ func (s *Server) waitForSSEShutdown(ctx context.Context) {
 // initial authenticated request seeds a cache entry tied to that session;
 // subsequent checks refresh it at most once per TTL (two seconds in production).
 func (s *Server) streamAuthorized(ctx context.Context, r *http.Request, key string) bool {
+	return s.streamAuthorizedWithCache(ctx, r, key, false)
+}
+
+// streamAuthorizedFresh performs the same session and permission validation as
+// streamAuthorized but deliberately bypasses the short-lived cache. It is used
+// once before the initial connection/replay so a revocation that races stream
+// registration cannot grant the replay to a session that is no longer valid.
+func (s *Server) streamAuthorizedFresh(ctx context.Context, r *http.Request, key string) bool {
+	return s.streamAuthorizedWithCache(ctx, r, key, true)
+}
+
+func (s *Server) streamAuthorizedWithCache(ctx context.Context, r *http.Request, key string, force bool) bool {
 	now := s.streamNow()
 	ttl := s.sseAuthTTL
 	if ttl <= 0 {
 		ttl = defaultSSEAuthCacheTTL
 	}
-	if key != "" {
+	if !force && key != "" {
 		s.sseAuthMu.Lock()
 		entry, ok := s.sseAuthCache[key]
 		s.sseAuthMu.Unlock()

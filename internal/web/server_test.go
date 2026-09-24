@@ -546,6 +546,92 @@ func TestSSEStopsDeliveringAfterSessionRevocation(t *testing.T) {
 	}
 }
 
+func TestSSEConnectionsAndLimitResponsesDoNotRefreshIdleSession(t *testing.T) {
+	server, db, _ := newUsersTestServer(t)
+	ctx := context.Background()
+	now := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	server.Auth.Now = func() time.Time { return now }
+	raw, _, err := server.Auth.Login(ctx, httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil), "administrator password", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authRequest := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil)
+	authRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	session, ok := server.Auth.AuthenticateReadOnly(ctx, authRequest)
+	if !ok {
+		t.Fatal("login session was not authenticated")
+	}
+	before, err := db.GetSession(ctx, session.IDHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := httptest.NewServer(server.Handler())
+	defer h.Close()
+	streamCtx, cancelStream := context.WithCancel(ctx)
+	defer cancelStream()
+	request, err := http.NewRequestWithContext(streamCtx, http.MethodGet, h.URL+"/api/v1/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	waitForSSESubscribers(t, server, 1)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("stream status = %d", response.StatusCode)
+	}
+
+	now = now.Add(time.Hour)
+	afterConnect, err := db.GetSession(ctx, session.IDHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterConnect.LastSeenAt.Equal(before.LastSeenAt) {
+		t.Fatalf("SSE connection refreshed idle timestamp: before=%s after=%s", before.LastSeenAt, afterConnect.LastSeenAt)
+	}
+
+	server.sseMaxSubscribers = 1
+	limitedRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, h.URL+"/api/v1/stream", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limitedRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	limitedResponse, err := http.DefaultClient.Do(limitedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(limitedResponse.Body)
+	_ = limitedResponse.Body.Close()
+	if limitedResponse.StatusCode != http.StatusOK {
+		t.Fatalf("limited stream status = %d", limitedResponse.StatusCode)
+	}
+	afterLimit, err := db.GetSession(ctx, session.IDHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterLimit.LastSeenAt.Equal(before.LastSeenAt) {
+		t.Fatalf("SSE limit response refreshed idle timestamp: before=%s after=%s", before.LastSeenAt, afterLimit.LastSeenAt)
+	}
+
+	now = now.Add(time.Hour)
+	ordinaryRequest := httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil)
+	ordinaryRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	if _, ok := server.Auth.Authenticate(ctx, ordinaryRequest); !ok {
+		t.Fatal("ordinary authenticated request was rejected")
+	}
+	afterREST, err := db.GetSession(ctx, session.IDHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !afterREST.LastSeenAt.Equal(now) {
+		t.Fatalf("ordinary authenticated request did not refresh idle timestamp: got=%s want=%s", afterREST.LastSeenAt, now)
+	}
+}
+
 func TestSSESessionRevocationIsIsolatedBetweenBrowserSessions(t *testing.T) {
 	server, db, _ := newUsersTestServer(t)
 	ctx := context.Background()

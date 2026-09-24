@@ -1395,11 +1395,11 @@ func (m *Manager) Authenticate(ctx context.Context, r *http.Request) (store.Sess
 }
 
 // AuthenticateReadOnly validates a session without refreshing its idle
-// timestamp. Long-lived SSE connections use this path for heartbeats and
-// event delivery so a quiet stream does not turn every update into a SQLite
-// writer operation. The initial HTTP request still authenticates normally;
-// an active stream therefore expires with the same idle policy as any other
-// session when there is no ordinary browser activity.
+// timestamp. Long-lived SSE connections use this path for the initial request,
+// heartbeats, and event delivery so a quiet stream (or an automatic reconnect)
+// does not turn every update into a SQLite writer operation. An active stream
+// therefore expires with the same idle policy as any other session when there
+// is no ordinary browser activity.
 func (m *Manager) AuthenticateReadOnly(ctx context.Context, r *http.Request) (store.Session, bool) {
 	return m.authenticate(ctx, r, false)
 }

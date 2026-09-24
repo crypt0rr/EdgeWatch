@@ -2104,13 +2104,16 @@ func isIncompleteHostStatus(status string) bool {
 // mergeProtocolStatus keeps every incomplete fragment sticky, including
 // unknown/no-response. Unlike the address summary, a later positive result for
 // the same protocol cannot prove that an earlier fragment covered its scope.
+// The completed Naabu full-range marker is the one exception: unknown with
+// scan-complete means the entire scope was examined and no positive port was
+// emitted, so later fragments may replace it with authoritative evidence.
 func mergeProtocolStatus(currentStatus, currentReason, additionStatus, additionReason string) (string, string) {
 	currentStatus = strings.ToLower(strings.TrimSpace(currentStatus))
 	additionStatus = strings.ToLower(strings.TrimSpace(additionStatus))
 	currentReason = strings.TrimSpace(currentReason)
 	additionReason = strings.TrimSpace(additionReason)
-	currentIncomplete := isIncompleteHostStatus(currentStatus) || currentStatus == "unknown"
-	additionIncomplete := isIncompleteHostStatus(additionStatus) || additionStatus == "unknown"
+	currentIncomplete := isIncompleteProtocolStatus(currentStatus, currentReason)
+	additionIncomplete := isIncompleteProtocolStatus(additionStatus, additionReason)
 	switch {
 	case currentIncomplete:
 		if !additionIncomplete {
@@ -2125,11 +2128,23 @@ func mergeProtocolStatus(currentStatus, currentReason, additionStatus, additionR
 			additionReason = "incomplete"
 		}
 		return additionStatus, additionReason
+	case currentStatus == "unknown" && strings.EqualFold(currentReason, naabuFullRangeCompleteReason):
+		if additionStatus != "" {
+			return additionStatus, additionReason
+		}
+		return currentStatus, currentReason
 	case currentStatus == "":
 		return additionStatus, chooseHostStatusReason(currentReason, additionReason)
 	default:
 		return currentStatus, chooseHostStatusReason(currentReason, additionReason)
 	}
+}
+
+func isIncompleteProtocolStatus(status, reason string) bool {
+	if strings.EqualFold(strings.TrimSpace(status), "unknown") && strings.EqualFold(strings.TrimSpace(reason), naabuFullRangeCompleteReason) {
+		return false
+	}
+	return isIncompleteHostStatus(status) || strings.EqualFold(strings.TrimSpace(status), "unknown")
 }
 
 // chooseHostStatusReason keeps the most specific failure reason when several

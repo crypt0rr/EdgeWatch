@@ -25,6 +25,11 @@ import (
 
 const (
 	naabuFullPortExpression = config.NaabuFullPortExpression
+	// A completed full-range Naabu pass can legitimately produce no JSONL
+	// records. Keep the host status unknown (Naabu only reports positive
+	// ports), but use a distinct reason so the change engine can distinguish
+	// complete zero-positive coverage from a failed or partial discovery.
+	naabuFullRangeCompleteReason = "scan-complete"
 	// Naabu emits one JSON object per discovered port. A pathological target
 	// set can still produce a large response, so cap one invocation before it
 	// can exhaust the daemon's memory. The scan fails safely when the cap is
@@ -170,6 +175,7 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 	}
 	discoveryDuration := time.Since(discoveryStarted).Milliseconds()
 	discoveryHosts = materializeNaabuDiscoveryHosts(targets, addresses, discovered, discoveryHosts, options, job)
+	markCompletedNaabuDiscoveryHosts(discoveryHosts)
 	// Discovery units carry no authoritative ports. They preserve logical DNS
 	// aggregation and give MergeWorkSnapshots a stable address inventory while
 	// the follow-up enrichment units are generated from DiscoveredPorts.
@@ -323,7 +329,7 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 			// no records was still covered by the full-range pass, but its
 			// reachability is unknown (especially with assume_alive=true).
 			host.Status = "unknown"
-			host.StatusReason = "no-response"
+			host.StatusReason = naabuFullRangeCompleteReason
 		}
 		fingerprintArgs := naabuArgsWithTemplate(options, "<targets-file>", job.AssumesAlive(), job.TCP.NaabuArgs)
 		protocol := model.ProtocolObservation{Protocol: "tcp", Status: strings.ToLower(host.Status), StatusReason: host.StatusReason, ScanType: "naabu", ScannedPorts: naabuFullPortExpression, ScannedPortCount: 65535, ServiceDetection: job.TCP.ServiceDetection, DiscoveryEngine: "naabu", NSEProfile: job.TCP.NSEProfile, NSEArgs: cloneStringMap(job.TCP.NSEArgs), CommandFingerprint: commandFingerprint(fingerprintArgs)}
@@ -533,6 +539,25 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 		reportProgress(report, Progress{StartedAt: started, Phase: "complete", Protocol: "tcp", TotalProbes: discoveryTotal, CompletedProbes: discoveryTotal, TotalInvocations: progress.TotalInvocations, CompletedInvocations: progress.TotalInvocations, DiscoveryPortsFound: portsFound, DiscoveryAddresses: addressesFound, DiscoveryDurationMS: discoveryDuration, EnrichmentDurationMS: time.Since(enrichmentStarted).Milliseconds()})
 	}
 	return snapshot, nil
+}
+
+// markCompletedNaabuDiscoveryHosts changes only the successful discovery
+// checkpoint's empty-result marker. Error and cancellation snapshots continue
+// to use unknown/no-response and therefore remain protected from baseline and
+// change detection.
+func markCompletedNaabuDiscoveryHosts(hosts map[string]model.HostObservation) {
+	for address, host := range hosts {
+		if strings.EqualFold(host.Status, "unknown") && strings.EqualFold(host.StatusReason, "no-response") {
+			host.StatusReason = naabuFullRangeCompleteReason
+		}
+		for index := range host.Protocols {
+			protocol := &host.Protocols[index]
+			if strings.EqualFold(protocol.DiscoveryEngine, "naabu") && strings.EqualFold(protocol.Status, "unknown") && strings.EqualFold(protocol.StatusReason, "no-response") {
+				protocol.StatusReason = naabuFullRangeCompleteReason
+			}
+		}
+		hosts[address] = host
+	}
 }
 
 func unitsForAddresses(units map[string]model.Unit, addresses []string) map[string]model.Unit {

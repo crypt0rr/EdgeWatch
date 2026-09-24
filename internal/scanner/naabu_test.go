@@ -343,15 +343,15 @@ func TestNaabuPipelineWithNoDiscoveriesCompletesFullCoverage(t *testing.T) {
 		t.Fatalf("empty full-range scan was not successful: %#v", snapshot)
 	}
 	host := snapshot.Hosts[0]
-	if host.Status != "unknown" || host.StatusReason != "no-response" {
-		t.Fatalf("empty discovery host status = %q/%q, want unknown/no-response", host.Status, host.StatusReason)
+	if host.Status != "unknown" || host.StatusReason != "scan-complete" {
+		t.Fatalf("empty discovery host status = %q/%q, want unknown/scan-complete", host.Status, host.StatusReason)
 	}
 	if len(host.Protocols) != 1 {
 		t.Fatalf("empty discovery protocol evidence = %#v", host.Protocols)
 	}
 	protocol := host.Protocols[0]
-	if protocol.Status != "unknown" || protocol.StatusReason != "no-response" {
-		t.Fatalf("empty discovery protocol status = %q/%q, want unknown/no-response", protocol.Status, protocol.StatusReason)
+	if protocol.Status != "unknown" || protocol.StatusReason != "scan-complete" {
+		t.Fatalf("empty discovery protocol status = %q/%q, want unknown/scan-complete", protocol.Status, protocol.StatusReason)
 	}
 	if protocol.ScannedPortCount != 65535 || len(protocol.StateSummaries) != 1 || protocol.StateSummaries[0].Count != 65535 {
 		t.Fatalf("full-range non-open summary missing: %#v", protocol)

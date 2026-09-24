@@ -284,6 +284,25 @@ func TestMergeProtocolObservationKeepsNoResponseStickyRegardlessOfOrder(t *testi
 	}
 }
 
+func TestMergeProtocolObservationAllowsCompletedNaabuCoverage(t *testing.T) {
+	completed := model.HostObservation{
+		Address: "192.0.2.13", Status: "unknown", StatusReason: "scan-complete",
+		Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unknown", StatusReason: "scan-complete", ScannedPorts: "1-65535"}},
+	}
+	up := model.HostObservation{
+		Address: "192.0.2.13", Status: "up", StatusReason: "syn-ack",
+		Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", StatusReason: "syn-ack", ScannedPorts: "443"}},
+	}
+	hosts := map[string]model.HostObservation{}
+	mergeHostObservationMap(hosts, completed.Address, completed)
+	mergeHostObservationMap(hosts, up.Address, up)
+	got := hosts[completed.Address]
+	dedupeHostObservation(&got)
+	if len(got.Protocols) != 1 || got.Protocols[0].Status != "up" || got.Protocols[0].StatusReason != "syn-ack" {
+		t.Fatalf("completed Naabu coverage was not replaced by authoritative evidence: %#v", got.Protocols)
+	}
+}
+
 func TestMergeHostObservationMarksAddressIncompleteAcrossProtocols(t *testing.T) {
 	hosts := map[string]model.HostObservation{}
 	mergeHostObservationMap(hosts, "192.0.2.11", model.HostObservation{

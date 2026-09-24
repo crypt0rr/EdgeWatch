@@ -1,8 +1,10 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -249,6 +251,72 @@ func TestHighCostOverrideRequiresAdministrator(t *testing.T) {
 	server.createJob(adminRec, adminReq, admin)
 	if adminRec.Code != http.StatusCreated {
 		t.Fatalf("administrator high-cost create = %d: %s", adminRec.Code, adminRec.Body.String())
+	}
+}
+
+func TestJobResponsesRedactActiveScanCycleStoreFailures(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	job := config.NormalizeJob(config.Job{
+		Name: "cycle-error-redaction", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "22", Mode: "connect"},
+	})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	server.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	breakReadProjection(t, db, "scan_cycles")
+
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req = req.WithContext(context.WithValue(req.Context(), requestIDContextKey{}, "request-731-test"))
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		switch {
+		case path == "/api/v1/jobs" && method == http.MethodGet:
+			server.listJobs(rec, req)
+		case path == "/api/v1/jobs" && method == http.MethodPost:
+			server.createJob(rec, req, admin)
+		case path == "/api/v1/jobs/"+record.ID && method == http.MethodGet:
+			server.getJob(rec, req, record.ID)
+		case path == "/api/v1/jobs/"+record.ID && method == http.MethodPut:
+			server.updateJob(rec, req, admin, record.ID)
+		default:
+			t.Fatalf("unexpected request %s %s", method, path)
+		}
+		return rec
+	}
+
+	assertSafeCycleError := func(name string, response *httptest.ResponseRecorder, status int) {
+		t.Helper()
+		if response.Code != status {
+			t.Fatalf("%s status = %d, want %d: %s", name, response.Code, status, response.Body.String())
+		}
+		if strings.Contains(response.Body.String(), "no such table: scan_cycles") || !strings.Contains(response.Body.String(), `"scan_cycle_error":"cycle_status_unavailable"`) {
+			t.Errorf("%s did not return a safe cycle error marker: %s", name, response.Body.String())
+		}
+	}
+
+	assertSafeCycleError("list", request(http.MethodGet, "/api/v1/jobs", ""), http.StatusOK)
+	assertSafeCycleError("detail", request(http.MethodGet, "/api/v1/jobs/"+record.ID, ""), http.StatusOK)
+
+	createBody := `{"name":"created-cycle-error","schedule":"0 * * * *","timezone":"UTC","targets":["192.0.2.11"],"tcp":{"ports":"80","mode":"connect","service_detection":false,"engine":"nmap"}}`
+	assertSafeCycleError("create", request(http.MethodPost, "/api/v1/jobs", createBody), http.StatusCreated)
+
+	updatePayload := fromConfig(record.Job)
+	updatePayload.Revision = record.Revision
+	body, err := json.Marshal(updatePayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertSafeCycleError("update", request(http.MethodPut, "/api/v1/jobs/"+record.ID, string(body)), http.StatusOK)
+
+	if !strings.Contains(logs.String(), "request_id=request-731-test") || !strings.Contains(logs.String(), "no such table: scan_cycles") {
+		t.Errorf("server log should retain the correlated storage error, got %q", logs.String())
 	}
 }
 

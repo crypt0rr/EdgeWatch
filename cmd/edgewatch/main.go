@@ -165,6 +165,11 @@ func run(args []string) error {
 		return err
 	}
 	defer s.Close()
+	if cmd == "daemon" {
+		if err := s.MigrateAdminCompatibility(context.Background()); err != nil {
+			return fmt.Errorf("migrate administrator compatibility state: %w", err)
+		}
+	}
 	if cmd == "admin" {
 		return adminActionForUser(context.Background(), action, s, *passwordFile, *username, *force)
 	}

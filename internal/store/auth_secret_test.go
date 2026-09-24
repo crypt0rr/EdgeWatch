@@ -125,6 +125,12 @@ func TestTOTPSecretLegacyValuesMigrateToOwnerBoundCiphertext(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=? WHERE id=1`, legacy); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET totp_secret=? WHERE id=?`, legacy, LegacyAdminUserID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MigrateAdminCompatibility(ctx); err != nil {
+		t.Fatalf("legacy administrator secret migration failed: %v", err)
+	}
 	got, err := s.GetAdmin(ctx)
 	if err != nil || got.TOTPSecret != secret {
 		t.Fatalf("legacy admin secret = %#v, err=%v", got, err)

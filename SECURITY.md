@@ -25,6 +25,25 @@ The administration console is bound to a loopback address by default and uses
 server-side sessions, CSRF protection, and Argon2id password storage. Keep the
 Docker host and any SSH tunnel access restricted to trusted administrators.
 
+## Live-update streams and session revocation
+
+The authenticated live-update stream (`/api/v1/stream`) is authorized to the
+specific browser session that opened it. Two browser sessions for the same
+account are independent: revoking one session does not grant, revoke, or close
+the other. Disabling an account, changing its role, changing its password, or
+changing its TOTP settings revokes the affected sessions, and a stream stops
+delivering once its next authorization check observes that revocation.
+
+The stream rechecks its session before the initial response, before delivering
+events, and on its 25-second heartbeat. To avoid a database lookup for every
+event, successful checks are cached for at most two seconds. Consequently, a
+quiet stream can remain connected until its next heartbeat, while activity
+causes a revoked stream to close within the two-second authorization-cache
+bound. Stream connections, reconnects, heartbeats, and subscriber-limit
+responses use read-only authentication and do not extend the session's idle
+timeout. Server shutdown closes all live streams. These bounds are a security
+property, not a replacement for revoking a compromised account or session.
+
 Web-managed Shoutrrr destinations are write-only through the API. Their URLs
 are encrypted at rest with AES-256-GCM; the key is stored in
 `./data/notification.key` unless `notifications.encryption_key_file` is

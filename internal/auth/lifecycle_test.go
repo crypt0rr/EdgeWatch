@@ -30,7 +30,7 @@ func TestCookieHelpersLogoutAndPasswordRequirements(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	request.RemoteAddr = "127.0.0.1:7000"
-	raw, _, err := m.Login(ctx, request, "correct horse battery staple", "", "")
+	raw, _, err := m.LoginAs(ctx, request, "admin", "correct horse battery staple", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

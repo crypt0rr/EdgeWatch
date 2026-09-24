@@ -190,10 +190,6 @@ func (s *Server) cachedPublicDashboardResponse() ([]byte, bool) {
 	return append([]byte(nil), s.publicCache.payload...), true
 }
 
-func (s *Server) allowPublicRequest(r *http.Request) bool {
-	return s.allowAnonymousRequest(r, "public-dashboard")
-}
-
 func (s *Server) allowAnonymousRequest(r *http.Request, namespace string) bool {
 	namespace = strings.TrimSpace(namespace)
 	if namespace == "" {

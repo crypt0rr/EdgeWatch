@@ -165,7 +165,7 @@ func TestSessionAuthenticationAndCSRF(t *testing.T) {
 	}
 	r := httptest.NewRequest("POST", "/api/v1/auth/login", nil)
 	r.RemoteAddr = "127.0.0.1:1234"
-	raw, _, err := m.Login(context.Background(), r, "correct horse battery staple", "", "")
+	raw, _, err := m.LoginAs(context.Background(), r, "admin", "correct horse battery staple", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,16 +226,20 @@ func TestSetupAndLoginRateLimitsReturnTypedError(t *testing.T) {
 	m := NewManager(s)
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/setup", nil)
 	request.RemoteAddr = "127.0.0.1:3210"
+	setupSource := m.sourceScopeFor(request, "setup")
+	setupAccount := "setup:" + digest("invalid")
 	for i := 0; i < authFailureThreshold; i++ {
-		m.failed(request.RemoteAddr)
+		m.failedScoped(setupSource, setupAccount, "", false)
 	}
 	if err := m.SetupRequest(context.Background(), request, "invalid", "long enough password"); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("setup rate-limit error = %v", err)
 	}
 
 	request.RemoteAddr = "10.0.0.31:3211"
+	loginSource := m.sourceScopeFor(request, "login")
+	loginAccount := "login:" + normalizeLoginIdentity("admin")
 	for i := 0; i < authFailureThreshold; i++ {
-		m.failed(request.RemoteAddr)
+		m.failedScoped(loginSource, loginAccount, "", false)
 	}
 	if _, _, err := m.LoginAs(context.Background(), request, "admin", "long enough password", "", ""); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("login rate-limit error = %v", err)
@@ -310,22 +314,25 @@ func TestAuthLimiterBoundsRotatingSourcesAndExpiresEntries(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0).UTC()
 	m.Now = func() time.Time { return now }
 	for i := 0; i < authLimiterMaxEntries+500; i++ {
-		m.failed(fmt.Sprintf("rotating-source-%d", i))
+		source := "source:auth:" + limiterKey(fmt.Sprintf("rotating-source-%d", i))
+		m.failedScoped(source, "", "", false)
 	}
 	m.mu.Lock()
-	count := m.limiterEntryCountLocked()
+	count := len(m.fails)
 	m.mu.Unlock()
 	if count > authLimiterMaxEntries {
 		t.Fatalf("limiter grew beyond cap: %d", count)
 	}
 
 	now = now.Add(authFailureWindow + time.Second)
-	if !m.allow("rotating-source-0") {
+	expiredSource := "source:auth:" + limiterKey("rotating-source-0")
+	if !m.allowScoped(expiredSource, "") {
 		t.Fatal("expired limiter entry remained blocked")
 	}
+	m.releaseScoped(expiredSource, "")
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if got := m.limiterEntryCountLocked(); got != 0 {
+	if got := len(m.fails) + len(m.blocked); got != 0 {
 		t.Fatalf("expired limiter entries were not swept: %d", got)
 	}
 }
@@ -348,7 +355,7 @@ func TestSessionLifetimeRemainsAbsoluteWhenTouched(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	request.RemoteAddr = "127.0.0.1:1234"
-	raw, _, err := m.Login(context.Background(), request, "correct horse battery staple", "", "")
+	raw, _, err := m.LoginAs(context.Background(), request, "admin", "correct horse battery staple", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -441,12 +448,12 @@ func TestRecoveryCodeIsCaseInsensitiveAndSingleUse(t *testing.T) {
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	request.RemoteAddr = "127.0.0.1:1234"
-	if _, _, err := m.Login(ctx, request, "correct horse battery staple", "", strings.ToLower(plain[0])); err != nil {
+	if _, _, err := m.LoginAs(ctx, request, "admin", "correct horse battery staple", "", strings.ToLower(plain[0])); err != nil {
 		t.Fatalf("lowercase recovery code rejected: %v", err)
 	}
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	request.RemoteAddr = "127.0.0.1:1234"
-	if _, _, err := m.Login(ctx, request, "correct horse battery staple", "", plain[0]); err == nil {
+	if _, _, err := m.LoginAs(ctx, request, "admin", "correct horse battery staple", "", plain[0]); err == nil {
 		t.Fatal("recovery code was reusable")
 	}
 }

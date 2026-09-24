@@ -44,10 +44,6 @@ func TestScannerArgumentAndOrderingHelpers(t *testing.T) {
 		t.Fatalf("NSE profile without args = %v", got)
 	}
 
-	values := []string{config.PlaceholderAddress, config.PlaceholderAddresses, config.PlaceholderAddressFamily, config.PlaceholderHostDiscovery, config.PlaceholderScanType, config.PlaceholderPorts, config.PlaceholderStructuredOutput, config.PlaceholderServiceDetection, config.PlaceholderNSE, config.PlaceholderTargetsFile, "--verbose"}
-	if got := appendTemplateArgs([]string{"-n"}, values); !reflect.DeepEqual(got, []string{"-n", "--verbose"}) {
-		t.Fatalf("template placeholders were not omitted: %v", got)
-	}
 	for value, want := range map[string]string{"conservative": "-T2", "fast": "-T4", "balanced": "-T3"} {
 		if got := timingArg(value); got != want {
 			t.Errorf("timing %q = %q, want %q", value, got, want)

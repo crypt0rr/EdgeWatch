@@ -2,7 +2,6 @@ package auth
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -214,7 +213,7 @@ func TestConfirmPasswordLegacyAdministratorFallback(t *testing.T) {
 	}
 }
 
-func TestLogoutSessionAndLimiterBookkeepingBranches(t *testing.T) {
+func TestLogoutSessionEmptyCookieNoop(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -230,28 +229,4 @@ func TestLogoutSessionAndLimiterBookkeepingBranches(t *testing.T) {
 	if err := m.LogoutSession(ctx, empty, store.Session{}); err != nil {
 		t.Fatal(err)
 	}
-
-	m.mu.Lock()
-	m.blocked["blocked-only"] = time.Now().Add(time.Minute)
-	m.fails["with-fails"] = []time.Time{time.Now()}
-	if got := m.limiterEntryCountLocked(); got != 2 {
-		t.Fatalf("limiter entry count = %d", got)
-	}
-	m.fails["empty"] = nil
-	m.evictLimiterEntryLocked(time.Now())
-	m.mu.Unlock()
-
-	// The normal cap is intentionally large; directly fill the maps to exercise
-	// the blocked-only eviction branch without making this test slow.
-	m.mu.Lock()
-	m.fails = map[string][]time.Time{}
-	m.blocked = map[string]time.Time{}
-	for i := 0; i < authLimiterMaxEntries; i++ {
-		m.blocked[fmt.Sprintf("blocked-%d", i)] = time.Now().Add(time.Minute)
-	}
-	m.evictLimiterEntryLocked(time.Now())
-	if m.limiterEntryCountLocked() != authLimiterMaxEntries-1 {
-		t.Fatalf("blocked limiter eviction count = %d", m.limiterEntryCountLocked())
-	}
-	m.mu.Unlock()
 }

@@ -1054,21 +1054,6 @@ func commandFingerprint(args []string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func appendTemplateArgs(args, values []string) []string {
-	for _, value := range values {
-		switch value {
-		case config.PlaceholderTargetsFile, config.PlaceholderAddress, config.PlaceholderAddresses, config.PlaceholderAddressFamily, config.PlaceholderHostDiscovery, config.PlaceholderScanType, config.PlaceholderPorts, config.PlaceholderStructuredOutput, config.PlaceholderServiceDetection, config.PlaceholderNSE:
-			// Runtime-owned arguments are already rendered above. A placeholder
-			// in a profile is a declaration, not a second copy of a target or
-			// output argument.
-			continue
-		default:
-			args = append(args, value)
-		}
-	}
-	return args
-}
-
 func timingArg(profile string) string {
 	if profile == "conservative" {
 		return "-T2"

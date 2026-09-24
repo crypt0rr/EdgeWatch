@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -44,11 +45,15 @@ const (
 	authFailureThreshold = 5
 	// The source bucket is a backstop for high-volume abuse, not the primary
 	// login lockout: a reverse proxy or SSH tunnel may legitimately carry many
-	// administrators' requests. Account and token buckets are retained as
-	// bounded response-shaping/audit state, but never impose a shared hard
-	// lockout on a known account.
+	// administrators' requests. Logins through a shared loopback peer use one
+	// short source-wide cooldown instead of the normal hard lockout, keeping
+	// responses independent of whether a submitted account exists.
 	authSourceFailureThreshold = 100
 	authBlockDuration          = 5 * time.Minute
+	// A shared loopback peer cannot safely receive a hard source lockout. This
+	// short source-wide cooldown bounds guesses without making any account
+	// unavailable for five minutes or revealing whether a username exists.
+	authSharedLoopbackRetryDelay = 2 * time.Second
 	// The limiter is process-local by design, but it must remain bounded when
 	// an attacker rotates source addresses. Keys are evicted oldest-first once
 	// this ceiling is reached; expired entries are swept on every decision.
@@ -63,6 +68,25 @@ const (
 )
 
 var ErrRateLimited = errors.New("too many authentication attempts; try again later")
+
+type retryAfterRateLimit struct {
+	delay time.Duration
+}
+
+func (e *retryAfterRateLimit) Error() string { return ErrRateLimited.Error() }
+
+func (e *retryAfterRateLimit) Is(target error) bool { return target == ErrRateLimited }
+
+// RetryAfterHeaderValue returns the shared-loopback cooldown when applicable,
+// or the normal hard-lockout duration for other rate-limit errors.
+func RetryAfterHeaderValue(err error) string {
+	var limited *retryAfterRateLimit
+	if errors.As(err, &limited) && limited.delay > 0 {
+		seconds := int((limited.delay-1)/time.Second) + 1
+		return strconv.Itoa(seconds)
+	}
+	return strconv.Itoa(int(authBlockDuration / time.Second))
+}
 
 // dummyPasswordHash is used for unknown and disabled accounts so an invalid
 // login spends the same Argon2id work regardless of whether the username is
@@ -566,7 +590,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	unknownSource := "unknown-login:" + strings.TrimPrefix(source, "source:")
 	if !m.allowScoped(source, account) {
 		m.auditRateLimit(ctx, "login:"+identity, request)
-		return "", store.User{}, ErrRateLimited
+		return "", store.User{}, m.rateLimitError(source, account)
 	}
 	defer m.releaseScoped(source, account)
 	user, err := m.Store.GetUserByUsername(ctx, identity)
@@ -582,14 +606,17 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		err = nil
 	}
 	if err != nil {
-		if !m.allowUnknownSource(unknownSource) {
-			m.auditRateLimit(ctx, "unknown-login:"+identity, request)
-			return "", store.User{}, ErrRateLimited
+		if !sharedLoopbackLoginSource(source, account) {
+			if !m.allowUnknownSource(unknownSource) {
+				m.auditRateLimit(ctx, "unknown-login:"+identity, request)
+				return "", store.User{}, ErrRateLimited
+			}
+			defer m.releaseUnknownSource(unknownSource)
 		}
-		defer m.releaseUnknownSource(unknownSource)
-		// Unknown usernames still consume the failure budget. Otherwise an
-		// attacker could bypass the login limiter by rotating arbitrary account
-		// names while probing the endpoint for a real administrator or invitee.
+		// Unknown usernames consume the same failure budget as known accounts.
+		// Shared loopback peers use the source-wide cooldown so the response does
+		// not expose account existence; other peers retain the unknown-name
+		// source bucket to prevent bypass by rotating account names.
 		m.failedScoped(source, account, unknownSource, true)
 		if err := m.withArgon2(ctx, func() error {
 			_ = VerifyPassword(dummyPasswordHash, password)
@@ -979,11 +1006,11 @@ func (m *Manager) allow(remote string) bool {
 
 // allowScoped checks the source backstop for an authentication operation.
 // Account and token failure state is scoped to the operation, account, and
-// resolved source. A single client behind a tunnel or reverse proxy can be
-// throttled without being able to block a valid login for the same account
-// from another client. Unknown-login probing has a separate source bucket,
-// checked only after the username lookup so a proxy that carried invalid
-// traffic cannot lock out a real account.
+// resolved source. A single client behind a trusted proxy can be throttled
+// without blocking the same account from another client. Unknown-login probing
+// has a separate source bucket for trustworthy client identities. Shared
+// loopback login sources instead use the same brief source-wide cooldown for
+// existing and unknown usernames to prevent account enumeration.
 func (m *Manager) allowScoped(source, account string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -993,12 +1020,14 @@ func (m *Manager) allowScoped(source, account string) bool {
 	// A loopback peer is not a trustworthy client identity when EdgeWatch is
 	// behind an unconfigured tunnel or reverse proxy: every remote client can
 	// collapse to 127.0.0.1 or ::1. Do not turn that shared identity into a
-	// hard lockout for a known login account. The Argon2 admission semaphore and
-	// the in-flight caps below still bound concurrent work. Once a proxy is
-	// explicitly trusted, ClientIP resolves the forwarded address and this
-	// exception no longer applies, so the normal hard source/account limits are
-	// retained for trustworthy client identities.
+	// long hard lockout. A short source-wide cooldown still bounds sequential
+	// guesses and keeps rate-limit behavior the same for existing and unknown
+	// usernames. The Argon2 admission semaphore and in-flight caps below also
+	// bound concurrent work. Once a proxy is explicitly trusted, ClientIP
+	// resolves the forwarded address and this exception no longer applies, so
+	// normal hard source/account limits remain for trustworthy client identities.
 	sharedLoopbackLogin := sharedLoopbackLoginSource(source, account)
+	accountKey := scopedAccountKey(source, account)
 	if !sharedLoopbackLogin {
 		if legacy := legacySourceScope(source); legacy != "" {
 			if until, ok := m.blocked[legacy]; ok && now.Before(until) {
@@ -1013,12 +1042,13 @@ func (m *Manager) allowScoped(source, account string) bool {
 				return false
 			}
 		}
+	} else if until, ok := m.blocked[source]; ok && now.Before(until) {
+		return false
 	}
 	// Reserve the bounded admission while the caller performs Argon2 or a
 	// storage lookup. Without this compare-and-reserve step a burst of
 	// concurrent requests could all pass the check before any failure was
 	// recorded, defeating the account/source thresholds.
-	accountKey := scopedAccountKey(source, account)
 	if sharedLoopbackLogin {
 		// Keep a small per-peer admission ceiling for an untrusted shared
 		// identity. Sequential attempts remain subject to the Argon2 work factor,
@@ -1042,6 +1072,22 @@ func (m *Manager) allowScoped(source, account string) bool {
 		m.accountInFlight[accountKey]++
 	}
 	return true
+}
+
+func (m *Manager) rateLimitError(source, account string) error {
+	if !sharedLoopbackLoginSource(source, account) {
+		return ErrRateLimited
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	until, ok := m.blocked[source]
+	if !ok {
+		return &retryAfterRateLimit{delay: authSharedLoopbackRetryDelay}
+	}
+	if remaining := until.Sub(m.now()); remaining > 0 {
+		return &retryAfterRateLimit{delay: remaining}
+	}
+	return &retryAfterRateLimit{delay: authSharedLoopbackRetryDelay}
 }
 
 func (m *Manager) allowUnknownSource(scope string) bool {
@@ -1133,15 +1179,21 @@ func (m *Manager) failedScoped(source, account, unknownSource string, unknown bo
 	if source != "" {
 		recordFailureLocked(now, source, authSourceFailureThreshold, m.fails, m.blocked)
 	}
-	if account != "" {
-		// Keep the account response-shaping bucket source-scoped. A global
-		// account key would let one client behind a shared proxy deny service
-		// to every other client using that account.
+	if account != "" && !sharedLoopbackLoginSource(source, account) {
+		// Keep normal failure buckets source-scoped. Shared loopback logins use
+		// one short source-wide cooldown instead of account-specific blocks, so
+		// rate-limit responses do not disclose whether the account exists.
 		accountKey := scopedAccountKey(source, account)
 		recordFailureLocked(now, accountKey, authFailureThreshold, m.accountFails, m.accountBlocked)
 	}
-	if unknown && unknownSource != "" {
+	if unknown && unknownSource != "" && !sharedLoopbackLoginSource(source, account) {
 		recordFailureLocked(now, unknownSource, authFailureThreshold, m.unknownSourceFails, m.unknownSourceBlocked)
+	}
+	if sharedLoopbackLoginSource(source, account) && len(m.fails[source]) >= authFailureThreshold {
+		// The normal source backstop is five minutes at a much higher threshold.
+		// Replace it for a shared loopback login with the same brief cooldown for
+		// known-account and unknown-account failures.
+		m.blocked[source] = now.Add(authSharedLoopbackRetryDelay)
 	}
 }
 

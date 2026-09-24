@@ -178,6 +178,9 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 		if err := v.Auth.SetForwardedHeader(a.Config.Web.ForwardedHeader); err != nil {
 			logger.Error("trusted proxy forwarding header configuration rejected", "error", err)
 		}
+		if len(a.Config.Web.AllowedHosts) > 0 && (len(a.Config.Web.TrustedProxies) == 0 || strings.EqualFold(strings.TrimSpace(a.Config.Web.ForwardedHeader), "none")) {
+			logger.Warn("approved proxy hosts have no trusted client-IP forwarding; remote clients share the loopback login cooldown and audit identity", "hint", "configure web.trusted_proxies and the sanitized web.forwarded_header")
+		}
 	}
 	if s != nil {
 		if token, err := v.Auth.EnsureSetupToken(context.Background()); err != nil {

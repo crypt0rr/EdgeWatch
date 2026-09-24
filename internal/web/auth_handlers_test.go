@@ -72,6 +72,39 @@ func TestAuthenticationCookiesAreSecureForProxyHosts(t *testing.T) {
 	}
 }
 
+func TestLoopbackLoginCooldownExposesRetryAfterAndRecovers(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	fakeNow := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+	server.Auth.Now = func() time.Time { return fakeNow }
+	login := func(username, password string) *httptest.ResponseRecorder {
+		t.Helper()
+		body := `{"username":` + strconv.Quote(username) + `,"password":` + strconv.Quote(password) + `}`
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", strings.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		request.RemoteAddr = "127.0.0.1:8080"
+		recorder := httptest.NewRecorder()
+		server.login(recorder, request)
+		return recorder
+	}
+	for attempt := 0; attempt < 5; attempt++ {
+		if recorder := login("admin", "wrong administrator password"); recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("failed login %d status = %d, want unauthorized: %s", attempt+1, recorder.Code, recorder.Body.String())
+		}
+	}
+	knownAccountLimited := login("admin", "wrong administrator password")
+	if knownAccountLimited.Code != http.StatusTooManyRequests || knownAccountLimited.Header().Get("Retry-After") != "2" {
+		t.Fatalf("login cooldown = %d Retry-After %q, want 429 and 2 seconds", knownAccountLimited.Code, knownAccountLimited.Header().Get("Retry-After"))
+	}
+	unknownAccountLimited := login("not-an-account", "wrong administrator password")
+	if unknownAccountLimited.Code != http.StatusTooManyRequests || unknownAccountLimited.Header().Get("Retry-After") != "2" || unknownAccountLimited.Body.String() != knownAccountLimited.Body.String() {
+		t.Fatalf("unknown username cooldown = %d Retry-After %q body %q, want same response as known account: status %d Retry-After %q body %q", unknownAccountLimited.Code, unknownAccountLimited.Header().Get("Retry-After"), unknownAccountLimited.Body.String(), knownAccountLimited.Code, knownAccountLimited.Header().Get("Retry-After"), knownAccountLimited.Body.String())
+	}
+	fakeNow = fakeNow.Add(2 * time.Second)
+	if recorder := login("admin", "administrator password"); recorder.Code != http.StatusOK {
+		t.Fatalf("valid login after cooldown = %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestAuthenticationCookiesAreSecureWhenTrustedProxyRewritesLoopbackHost(t *testing.T) {
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)

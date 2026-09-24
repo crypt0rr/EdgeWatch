@@ -3,8 +3,10 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -153,6 +155,129 @@ func TestLoginRateLimitCannotBeBypassedByRotatingForwardedHeader(t *testing.T) {
 	request.Header.Set("Forwarded", "for=198.51.100.6")
 	if _, _, err := m.LoginAs(ctx, request, "admin", "wrong administrator password", "", ""); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("login after %d failures with rotating Forwarded values = %v, want rate limited", authFailureThreshold, err)
+	}
+}
+
+func TestSharedLoopbackLoginAttemptsAreCooledDownAndCanRecover(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := NewManager(s)
+	now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+	m.Now = func() time.Time { return now }
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "127.0.0.1:443"
+	for attempt := 0; attempt < authFailureThreshold; attempt++ {
+		if _, _, err := m.LoginAs(ctx, request, "admin", "wrong administrator password", "", ""); err == nil || errors.Is(err, ErrRateLimited) {
+			t.Fatalf("failure %d = %v, want invalid credentials before the cooldown", attempt+1, err)
+		}
+	}
+	if _, _, err := m.LoginAs(ctx, request, "admin", "wrong administrator password", "", ""); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("attempt during shared-loopback cooldown = %v, want rate limited", err)
+	} else if got := RetryAfterHeaderValue(err); got != "2" {
+		t.Fatalf("shared-loopback Retry-After = %q, want 2", got)
+	}
+	if _, _, err := m.LoginAs(ctx, request, "not-an-account", "wrong administrator password", "", ""); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("unknown username during shared-loopback cooldown = %v, want the same rate limit", err)
+	} else if got := RetryAfterHeaderValue(err); got != "2" {
+		t.Fatalf("unknown username Retry-After = %q, want same 2-second cooldown", got)
+	}
+
+	// A client behind the same tunnel can sign in as soon as the short cooldown
+	// expires; the shared proxy peer is never placed in a five-minute lockout.
+	now = now.Add(authSharedLoopbackRetryDelay)
+	raw, user, err := m.LoginAs(ctx, request, "admin", "administrator password", "", "")
+	if err != nil || raw == "" || user.Username != "admin" {
+		t.Fatalf("valid login after cooldown = session %q, user %#v, err %v", raw, user, err)
+	}
+}
+
+func TestRetryAfterHeaderValueUsesSharedLoopbackCooldown(t *testing.T) {
+	if got := RetryAfterHeaderValue(ErrRateLimited); got != "300" {
+		t.Fatalf("default rate-limit Retry-After = %q, want 300", got)
+	}
+	m := NewManager(nil)
+	sharedLimit := m.rateLimitError("source:login:127.0.0.1", "login:admin")
+	if !errors.Is(sharedLimit, ErrRateLimited) || sharedLimit.Error() != ErrRateLimited.Error() || RetryAfterHeaderValue(sharedLimit) != "2" {
+		t.Fatalf("shared loopback without a failure cooldown = %v, Retry-After %q", sharedLimit, RetryAfterHeaderValue(sharedLimit))
+	}
+	m.blocked["source:login:127.0.0.1"] = time.Now().Add(-time.Second)
+	if got := m.rateLimitError("source:login:127.0.0.1", "login:admin"); !errors.Is(got, ErrRateLimited) || RetryAfterHeaderValue(got) != "2" {
+		t.Fatalf("expired shared loopback cooldown = %v, Retry-After %q", got, RetryAfterHeaderValue(got))
+	}
+}
+
+func TestRotatingUnknownUsernamesRemainThrottledForRemotePeers(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := NewManager(s)
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "198.51.100.44:443"
+	for attempt := 0; attempt < authFailureThreshold; attempt++ {
+		username := "missing-user-" + strconv.Itoa(attempt)
+		if _, _, err := m.LoginAs(ctx, request, username, "wrong password", "", ""); err == nil || errors.Is(err, ErrRateLimited) {
+			t.Fatalf("unknown login %d = %v, want generic invalid credentials", attempt+1, err)
+		}
+	}
+	if _, _, err := m.LoginAs(ctx, request, "another-missing-user", "wrong password", "", ""); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("rotating unknown usernames bypassed the remote source budget: %v", err)
+	}
+}
+
+func TestSharedLoopbackTOTPFailuresAreCooledDown(t *testing.T) {
+	ctx := context.Background()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	m := NewManager(s)
+	now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+	m.Now = func() time.Time { return now }
+	token, err := m.EnsureSetupToken(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Setup(ctx, token, "administrator password"); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := s.GetAdmin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	admin.TOTPEnabled = true
+	admin.TOTPSecret = "JBSWY3DPEHPK3PXP"
+	if err := s.SaveAdmin(ctx, admin); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "[::1]:443"
+	for attempt := 0; attempt < authFailureThreshold; attempt++ {
+		if _, _, err := m.LoginAs(ctx, request, "admin", "administrator password", "000000", ""); err == nil || errors.Is(err, ErrRateLimited) {
+			t.Fatalf("wrong TOTP attempt %d = %v, want factor failure before the cooldown", attempt+1, err)
+		}
+	}
+	if _, _, err := m.LoginAs(ctx, request, "admin", "administrator password", "000000", ""); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("TOTP attempt during cooldown = %v, want rate limited", err)
+	}
+	now = now.Add(authSharedLoopbackRetryDelay)
+	code := totpCode(admin.TOTPSecret, now.Unix()/30)
+	if raw, user, err := m.LoginAs(ctx, request, "admin", "administrator password", code, ""); err != nil || raw == "" || user.Username != "admin" {
+		t.Fatalf("valid TOTP login after cooldown = session %q, user %#v, err %v", raw, user, err)
 	}
 }
 

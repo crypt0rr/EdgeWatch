@@ -625,7 +625,7 @@ func TestLoginFailuresDoNotLockOutSameAccountFromAnotherSource(t *testing.T) {
 	}
 }
 
-func TestSharedLoopbackLoginCanRecoverFromAccountAndSourceLockouts(t *testing.T) {
+func TestSharedLoopbackLoginRecoversAfterCooldownAndIgnoresLegacyLockout(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -633,6 +633,8 @@ func TestSharedLoopbackLoginCanRecoverFromAccountAndSourceLockouts(t *testing.T)
 	}
 	defer s.Close()
 	m := NewManager(s)
+	fakeNow := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+	m.Now = func() time.Time { return fakeNow }
 	token, err := m.EnsureSetupToken(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -649,15 +651,15 @@ func TestSharedLoopbackLoginCanRecoverFromAccountAndSourceLockouts(t *testing.T)
 		}
 	}
 
-	// Simulate the shared legacy source bucket being blocked as well. A
-	// loopback peer cannot identify which tunnel client caused either bucket.
+	// Simulate the legacy hard source bucket being blocked as well. A loopback
+	// peer cannot identify which tunnel client caused a shared source failure.
 	legacy := legacySourceScope(m.sourceScopeFor(request, "login"))
 	m.mu.Lock()
-	now := m.now()
 	m.fails[legacy] = make([]time.Time, authSourceFailureThreshold)
-	m.blocked[legacy] = now.Add(authBlockDuration)
+	m.blocked[legacy] = fakeNow.Add(authBlockDuration)
 	m.mu.Unlock()
 
+	fakeNow = fakeNow.Add(authSharedLoopbackRetryDelay)
 	raw, user, err := m.LoginAs(ctx, request, "admin", "administrator password", "", "")
 	if err != nil || raw == "" || user.Username != "admin" {
 		t.Fatalf("valid login was blocked by shared loopback state: session=%q user=%#v err=%v", raw, user, err)

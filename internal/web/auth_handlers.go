@@ -273,7 +273,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	raw, user, err := s.Auth.LoginAs(r.Context(), r, username, input.Password, input.OTP, input.Recovery)
 	if err != nil {
 		if errors.Is(err, auth.ErrRateLimited) {
-			w.Header().Set("Retry-After", "300")
+			w.Header().Set("Retry-After", auth.RetryAfterHeaderValue(err))
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many login attempts; try again later", nil)
 			return
 		}

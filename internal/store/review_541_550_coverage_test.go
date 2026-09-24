@@ -121,6 +121,45 @@ func TestDiscardCompletedCycleRequiresUnpromotedState(t *testing.T) {
 	}
 }
 
+func TestDiscardCompletedCycleReturnsScanLookupError(t *testing.T) {
+	ctx, s, job, plan := cycleFixture(t)
+	defer s.Close()
+	readDB := s.ReadDB
+	s.ReadDB = nil
+	if readDB != nil {
+		defer readDB.Close()
+	}
+
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{ID: "discard-scan-lookup-error", JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CompleteScanCycle(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE scans RENAME TO scans_unavailable_for_discard_test`); err != nil {
+		t.Fatal(err)
+	}
+	discardCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	if err := s.DiscardScanCycle(discardCtx, cycle.ID); err == nil || errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("discard with failed scan lookup = %v, want database lookup error", err)
+	}
+}
+
 func TestIndeterminateDeliveryTerminalDeferralsAreDurable(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

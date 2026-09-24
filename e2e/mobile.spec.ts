@@ -22,7 +22,7 @@ test('mobile navigation is modal and incident cards fit the viewport', async ({ 
       return
     }
     if (path === '/setup/status') {
-      await json({ configured: true, setup_available: false, version: 'v0.8.0', password_requirements: { minimum_length: 12 } })
+      await json({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 } })
       return
     }
     if (path === '/auth/session') {
@@ -57,7 +57,7 @@ test('mobile navigation is modal and incident cards fit the viewport', async ({ 
       return
     }
     if (path === '/status') {
-      await json({ configured: true, username: 'admin', notification_destinations: 0, retention: '90d', max_concurrent_scans: 1 })
+      await json({ configured: true, username: 'admin', version: 'v0.8.0', updates: { enabled: false, status: 'disabled', current_version: 'v0.8.0' }, notification_destinations: 0, retention: '90d', max_concurrent_scans: 1 })
       return
     }
     await json({ error: { code: 'not_found', message: `GET ${path}` } }, 404)
@@ -179,9 +179,9 @@ test('mobile job detail keeps recent scan rows inside the viewport', async ({ pa
     const path = new URL(request.url()).pathname.replace('/api/v1', '')
     const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/stream') { await route.abort(); return }
-    if (path === '/setup/status') { await json({ configured: true, setup_available: false, version: 'v0.18.74', password_requirements: { minimum_length: 12 } }); return }
+    if (path === '/setup/status') { await json({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 } }); return }
     if (path === '/auth/session') { await json({ username: 'admin', role: 'administrator', permissions: adminPermissions, csrf_token: 'mobile-csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } }); return }
-    if (path === '/status') { await json({ configured: true, username: 'admin', notification_destinations: 0, retention: '90d', max_concurrent_scans: 1 }); return }
+    if (path === '/status') { await json({ configured: true, username: 'admin', version: 'v0.18.74', updates: { enabled: false, status: 'disabled', current_version: 'v0.18.74' }, notification_destinations: 0, retention: '90d', max_concurrent_scans: 1 }); return }
     if (path === '/jobs/job-mobile') { await json(job); return }
     if (path === '/jobs/job-mobile/baseline') {
       await json({ job_id: 'job-mobile', job: job.job.name, revision: 1, security_hash: 'mobile-scope', baseline: job.baseline, snapshot: { units: [], scopes: [] }, pagination: { ...pagination, limit: 10 } })

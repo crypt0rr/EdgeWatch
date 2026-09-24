@@ -60,7 +60,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       return
     }
     if (path === '/setup/status' && method === 'GET') {
-      await json({ configured, setup_available: !configured, version: 'v0.7.0', password_requirements: { minimum_length: 12 } })
+      await json({ configured, setup_available: !configured, password_requirements: { minimum_length: 12 } })
       return
     }
     if (path === '/auth/session' && method === 'GET') {
@@ -69,7 +69,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
       return
     }
     if (path === '/status' && method === 'GET') {
-      await json({ configured: true, username: 'admin', display_name: displayName, notification_destinations: 0, notifications: { deployment: 0, managed: 0, active: 0, locked: 0, key_state: 'not_required' }, retention: '90d', max_concurrent_scans: 1 })
+      await json({ configured: true, username: 'admin', display_name: displayName, version: 'v0.7.0', notification_destinations: 0, notifications: { deployment: 0, managed: 0, active: 0, locked: 0, key_state: 'not_required' }, retention: '90d', max_concurrent_scans: 1 })
       return
     }
     if (path === '/scans/active' && method === 'GET') {
@@ -289,7 +289,8 @@ test('host explorer renders every RDAP state without exposing contact data', asy
     const method = request.method()
     const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
     if (path === '/stream') { await route.abort(); return }
-    if (path === '/setup/status' && method === 'GET') { await json({ configured: true, setup_available: false, version: 'v0.7.0', password_requirements: { minimum_length: 12 } }); return }
+    if (path === '/setup/status' && method === 'GET') { await json({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 } }); return }
+    if (path === '/status' && method === 'GET') { await json({ configured: true, version: 'v0.7.0', updates: { enabled: false, status: 'disabled', current_version: 'v0.7.0' } }); return }
     if (path === '/auth/session' && method === 'GET') { await json({ username: 'admin', role: 'administrator', permissions: adminPermissions, csrf_token: 'test-csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } }); return }
     if (path === '/incidents' && method === 'GET') { await json({ incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }); return }
     if (path === '/jobs/job-1/baseline/hosts' && method === 'GET') {

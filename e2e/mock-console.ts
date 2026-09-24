@@ -171,7 +171,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     }
 
     if (path === '/stream') { await route.abort(); return }
-    if (path === '/setup/status') { await json({ configured: true, setup_available: false, version: 'v0.18.65', password_requirements: { minimum_length: 12 } }); return }
+    if (path === '/setup/status') { await json({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 } }); return }
     if (path === '/auth/session') {
       await json({ user_id: `user-${role}`, username: role === 'administrator' ? 'admin' : role, display_name: role, role, permissions: rolePermissions[role], csrf_token: 'fixture-csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } })
       return
@@ -258,4 +258,3 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
 
   return controls
 }
-

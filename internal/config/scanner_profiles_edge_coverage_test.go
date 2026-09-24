@@ -86,14 +86,19 @@ func TestScannerProfileArgumentClassificationAndBounds(t *testing.T) {
 	}
 
 	valid := []struct{ flag, operand string }{
-		{"--scan-delay", "0s"}, {"--max-scan-delay", "1m"}, {"--initial-rtt-timeout", "1ms"}, {"--min-rtt-timeout", "1s"}, {"--max-rtt-timeout", "1m"},
+		{"--host-timeout", "1800"}, {"--host-timeout", "1.5"},
+		{"--scan-delay", "0"}, {"--scan-delay", "0s"}, {"--max-scan-delay", "1m"},
+		{"--initial-rtt-timeout", "1ms"}, {"--min-rtt-timeout", "1s"}, {"--max-rtt-timeout", "1m"},
 	}
 	for _, item := range valid {
 		if err := validateScannerFlagOperand("nmap", item.flag, item.operand); err != nil {
 			t.Errorf("valid %s %s rejected: %v", item.flag, item.operand, err)
 		}
 	}
-	for _, item := range []struct{ flag, operand string }{{"--scan-delay", "61s"}, {"--max-scan-delay", "-1s"}, {"--initial-rtt-timeout", "0s"}, {"--max-rtt-timeout", "61s"}} {
+	for _, item := range []struct{ flag, operand string }{
+		{"--host-timeout", "86401"}, {"--scan-delay", "61s"}, {"--max-scan-delay", "-1s"},
+		{"--initial-rtt-timeout", "0s"}, {"--max-rtt-timeout", "61s"}, {"--host-timeout", "1e3"}, {"--host-timeout", "NaN"},
+	} {
 		if err := validateScannerFlagOperand("nmap", item.flag, item.operand); err == nil {
 			t.Errorf("out-of-range %s %s accepted", item.flag, item.operand)
 		}

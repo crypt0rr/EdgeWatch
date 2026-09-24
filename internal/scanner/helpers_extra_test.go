@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -41,11 +42,27 @@ func TestScannerHelperFunctionsNormalizeAndBoundValues(t *testing.T) {
 	if got := sanitizeStderr("  warning  "); got != "warning" {
 		t.Fatalf("sanitized stderr = %q", got)
 	}
-	if got := sanitizeStderr(strings.Repeat("x", 501)); len([]rune(got)) != 501 || !strings.HasSuffix(got, "…") {
+	if got := sanitizeStderr(strings.Repeat("x", 501)); len(got) != 500 || !strings.HasSuffix(got, "…") {
 		t.Fatalf("long stderr = %q", got)
 	}
-	if got := trimProgressOutput(strings.Repeat("x", 241)); len([]rune(got)) != 241 || !strings.HasSuffix(got, "…") {
+	if got := trimProgressOutput(strings.Repeat("x", 241)); len(got) != 240 || !strings.HasSuffix(got, "…") {
 		t.Fatalf("long progress output = %q", got)
+	}
+	for _, tc := range []struct {
+		name string
+		got  string
+		max  int
+	}{
+		{name: "stderr multibyte", got: sanitizeStderr(strings.Repeat("界", 200)), max: 500},
+		{name: "progress multibyte", got: trimProgressOutput(strings.Repeat("🙂", 100)), max: 240},
+		{name: "metadata multibyte", got: boundScannerMetadata(strings.Repeat("é", 300)), max: maxScannerMetadataBytes},
+	} {
+		if !utf8.ValidString(tc.got) || len(tc.got) > tc.max || !strings.HasSuffix(tc.got, "…") {
+			t.Errorf("%s was not safely bounded: %d bytes, valid=%v, value=%q", tc.name, len(tc.got), utf8.ValidString(tc.got), tc.got)
+		}
+	}
+	if got := boundScannerText(string([]byte{'x', 0xff, 'y'}), 8); !utf8.ValidString(got) || got != "x�y" {
+		t.Fatalf("invalid UTF-8 normalization = %q", got)
 	}
 	for _, test := range []struct {
 		line string

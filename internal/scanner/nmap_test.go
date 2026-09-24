@@ -19,6 +19,37 @@ import (
 
 const sampleXML = `<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.1" addrtype="ipv4"/><ports><port protocol="tcp" portid="22"><state state="open"/><service name="ssh" product="OpenSSH" version="9.7" extrainfo="Ubuntu" method="probed"><cpe>cpe:/a:openbsd:openssh:9.7</cpe></service></port><port protocol="tcp" portid="23"><state state="closed"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`
 
+var nmapPortParseBenchmarkSink int64
+
+func BenchmarkNmapPortScopeExpansionAcrossBatches(b *testing.B) {
+	const expression = "1-65535"
+	const batchCount = 16 // representative multi-address scan split into 16-host batches
+	b.Run("once_per_scan", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			ports, err := config.ParsePorts(expression)
+			if err != nil {
+				b.Fatal(err)
+			}
+			nmapPortParseBenchmarkSink = int64(batchCount * 16 * len(ports))
+		}
+	})
+	b.Run("once_per_batch_regression", func(b *testing.B) {
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			var total int64
+			for batch := 0; batch < batchCount; batch++ {
+				ports, err := config.ParsePorts(expression)
+				if err != nil {
+					b.Fatal(err)
+				}
+				total += int64(16 * len(ports))
+			}
+			nmapPortParseBenchmarkSink = total
+		}
+	})
+}
+
 func TestWeightedProcessPercentClampsAndWeightsInvocations(t *testing.T) {
 	cases := []struct {
 		completed, total int64

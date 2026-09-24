@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -324,5 +326,69 @@ func TestBaselineJSONReportsStalledLearning(t *testing.T) {
 	result := baselineJSONFromSummary(store.RuntimeStateSummary{IncompleteCandidateAttempts: 3}, "")
 	if result["status"] != "stalled" || result["incomplete_attempts"] != 3 {
 		t.Fatalf("stalled baseline response = %#v", result)
+	}
+}
+
+func TestJobListBatchesProfileAndActiveCycleSummaries(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	profile, err := db.CreateScannerProfile(ctx, "List revision", "", config.ScannerProfile{Engine: config.EngineNmap}, admin.Username)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.UpdateScannerProfile(ctx, profile.ID, profile.Revision, profile.Name, "new revision", config.ScannerProfile{Engine: config.EngineNmap, Description: "new revision"}, admin.Username); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{
+		Name: "batched-job-list", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.20"},
+		TCP: &config.Protocol{Ports: "22", Mode: "syn", ProfileID: profile.ID, ProfileRevision: profile.Revision},
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := scanner.WorkPlan{
+		CreatedAt: time.Now().UTC(), Job: job.Job,
+		Scopes:     []model.Scope{{Target: "192.0.2.20", Protocol: "tcp", Ports: "22"}},
+		Units:      []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Family: 4, Addresses: []string{"192.0.2.20"}, Ports: "22", PortCount: 1, Probes: 1}},
+		TotalUnits: 1, TotalProbes: 1,
+	}
+	cycle, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cycle, err = db.StartScanCycleAttempt(ctx, cycle.ID); err != nil || cycle.Status != "running" {
+		t.Fatalf("start scan cycle = %#v, %v", cycle, err)
+	}
+
+	response := httptest.NewRecorder()
+	server.listJobs(response, httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("job list = %d: %s", response.Code, response.Body.String())
+	}
+	var result struct {
+		Jobs []struct {
+			Job struct {
+				TCP *protocolPayload `json:"tcp"`
+			} `json:"job"`
+			ScanCycle *struct {
+				ID             string `json:"id"`
+				Status         string `json:"status"`
+				TotalUnits     int    `json:"total_units"`
+				CompletedUnits int    `json:"completed_units"`
+			} `json:"scan_cycle"`
+		} `json:"jobs"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Jobs) != 1 {
+		t.Fatalf("listed jobs = %#v", result.Jobs)
+	}
+	listed := result.Jobs[0]
+	if listed.Job.TCP == nil || !listed.Job.TCP.ProfileUpdateAvailable || listed.Job.TCP.ProfileLatestRevision != profile.Revision+1 {
+		t.Fatalf("profile update metadata = %#v", listed.Job.TCP)
+	}
+	if listed.ScanCycle == nil || listed.ScanCycle.ID != cycle.ID || listed.ScanCycle.Status != "running" || listed.ScanCycle.TotalUnits != 1 || listed.ScanCycle.CompletedUnits != 0 {
+		t.Fatalf("active cycle summary = %#v", listed.ScanCycle)
 	}
 }

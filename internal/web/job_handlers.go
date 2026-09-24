@@ -171,11 +171,6 @@ func (s *Server) jobJSONWithCycle(ctx context.Context, record store.JobRecord, s
 	return s.addJobCycleAndProfile(ctx, record, value)
 }
 
-func (s *Server) jobJSONWithCycleSummary(ctx context.Context, record store.JobRecord, summary store.RuntimeStateSummary) map[string]any {
-	value := jobJSONFromStateSummary(record, summary)
-	return s.addJobCycleAndProfile(ctx, record, value)
-}
-
 func (s *Server) addJobCycleAndProfile(ctx context.Context, record store.JobRecord, value map[string]any) map[string]any {
 	// A profile edit is intentionally non-breaking: jobs retain their pinned
 	// revision until an operator explicitly applies the newer one. Surface the
@@ -215,6 +210,17 @@ func (s *Server) addJobCycleAndProfile(ctx context.Context, record store.JobReco
 }
 
 func cycleJSON(cycle store.ScanCycleRecord) map[string]any {
+	return cycleSummaryJSON(store.ScanCycleSummary{
+		ID: cycle.ID, JobID: cycle.JobID, JobRevision: cycle.JobRevision, Status: cycle.Status,
+		AttemptCount: cycle.AttemptCount, NoProgressAttempts: cycle.NoProgressAttempts,
+		TotalUnits: cycle.TotalUnits, CompletedUnits: cycle.CompletedUnits,
+		TotalProbes: cycle.TotalProbes, CompletedProbes: cycle.CompletedProbes,
+		StartedAt: cycle.StartedAt, UpdatedAt: cycle.UpdatedAt, ExpiresAt: cycle.ExpiresAt,
+		FinishedAt: cycle.FinishedAt, LastError: cycle.LastError,
+	})
+}
+
+func cycleSummaryJSON(cycle store.ScanCycleSummary) map[string]any {
 	return map[string]any{"id": cycle.ID, "job_id": cycle.JobID, "job_revision": cycle.JobRevision, "status": cycle.Status, "attempt_count": cycle.AttemptCount, "no_progress_attempts": cycle.NoProgressAttempts, "total_units": cycle.TotalUnits, "completed_units": cycle.CompletedUnits, "total_probes": cycle.TotalProbes, "completed_probes": cycle.CompletedProbes, "started_at": cycle.StartedAt, "updated_at": cycle.UpdatedAt, "expires_at": cycle.ExpiresAt, "finished_at": cycle.FinishedAt, "last_error": cycle.LastError}
 }
 
@@ -270,14 +276,46 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		s.writeInternalError(w, r, "store", err)
 		return
 	}
+	summaries, err := s.Store.RuntimeStateSummaries(r.Context(), include)
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
+	}
+	cycles, cycleErr := s.Store.ListActiveScanCycleSummaries(r.Context(), include)
+	if cycleErr != nil {
+		logger := s.Log
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.ErrorContext(r.Context(), "active scan cycle list lookup failed", "request_id", RequestID(r.Context()), "error", cycleErr)
+	}
+	profileRevisions, profileErr := s.Store.CurrentScannerProfileRevisions(r.Context())
+	if profileErr != nil {
+		logger := s.Log
+		if logger == nil {
+			logger = slog.Default()
+		}
+		logger.ErrorContext(r.Context(), "scanner profile revision list lookup failed", "request_id", RequestID(r.Context()), "error", profileErr)
+		profileRevisions = nil
+	}
 	out := make([]map[string]any, 0, len(jobs))
 	for _, j := range jobs {
-		summary, summaryErr := s.Store.RuntimeStateSummary(r.Context(), j.ID)
-		if summaryErr != nil {
-			s.writeInternalError(w, r, "store", summaryErr)
-			return
+		value := jobJSONFromStateSummary(j, summaries[j.ID])
+		if payload, ok := value["job"].(jobPayload); ok && payload.TCP != nil && payload.TCP.ProfileID != "" && profileErr == nil {
+			if revision := profileRevisions[payload.TCP.ProfileID]; revision > payload.TCP.ProfileRevision {
+				payload.TCP.ProfileUpdateAvailable = true
+				payload.TCP.ProfileLatestRevision = revision
+				value["job"] = payload
+			}
 		}
-		out = append(out, s.jobJSONWithCycleSummary(r.Context(), j, summary))
+		if cycleErr != nil {
+			value["scan_cycle_error"] = "cycle_status_unavailable"
+		} else if cycle, ok := cycles[j.ID]; ok {
+			value["scan_cycle"] = cycleSummaryJSON(cycle)
+		} else {
+			value["scan_cycle"] = nil
+		}
+		out = append(out, value)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": out})
 }

@@ -23,6 +23,63 @@ func cycleFixture(t *testing.T) (context.Context, *Store, JobRecord, scanner.Wor
 	return ctx, s, job, plan
 }
 
+func TestListActiveScanCycleSummariesFiltersArchiveAndOmitsPlan(t *testing.T) {
+	ctx, s, job, plan := cycleFixture(t)
+	active, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err = s.StartScanCycleAttempt(ctx, active.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	archivedJob, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "archived-cycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.2"}, TCP: &config.Protocol{Ports: "1", Mode: "syn"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	archivedPlan := plan
+	archivedPlan.Job = archivedJob.Job
+	archivedPlan.Scopes = []model.Scope{{Target: "192.0.2.2", Protocol: "tcp", Ports: "1"}}
+	archivedPlan.Units = []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Family: 4, Addresses: []string{"192.0.2.2"}, Ports: "1", PortCount: 1, Probes: 1}}
+	archivedCycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: archivedJob.ID, Job: archivedJob.Job.Name, JobRevision: archivedJob.Revision, ConfigHash: archivedJob.Job.SecurityHash(), ExecutionHash: archivedJob.Job.ExecutionHash(), Plan: archivedPlan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE jobs SET archived=1 WHERE id=?`, archivedJob.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	assertCycle := func(got ScanCycleSummary, want ScanCycleRecord) {
+		t.Helper()
+		if got.ID != want.ID || got.JobID != want.JobID || got.JobRevision != want.JobRevision || got.Status != want.Status || got.AttemptCount != want.AttemptCount || got.NoProgressAttempts != want.NoProgressAttempts || got.TotalUnits != want.TotalUnits || got.CompletedUnits != want.CompletedUnits || got.TotalProbes != want.TotalProbes || got.CompletedProbes != want.CompletedProbes || !got.StartedAt.Equal(want.StartedAt) || !got.UpdatedAt.Equal(want.UpdatedAt) || !got.ExpiresAt.Equal(want.ExpiresAt) || !got.FinishedAt.Equal(want.FinishedAt) || got.LastError != want.LastError {
+			t.Fatalf("cycle summary = %#v, want fields from %#v", got, want)
+		}
+	}
+
+	visible, err := s.ListActiveScanCycleSummaries(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visible) != 1 {
+		t.Fatalf("visible cycle summaries = %#v, want only the unarchived job", visible)
+	}
+	assertCycle(visible[job.ID], active)
+	if _, ok := visible[archivedJob.ID]; ok {
+		t.Fatal("archived job cycle appeared when archived jobs were excluded")
+	}
+
+	all, err := s.ListActiveScanCycleSummaries(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("all cycle summaries = %#v, want both active cycles", all)
+	}
+	assertCycle(all[job.ID], active)
+	assertCycle(all[archivedJob.ID], archivedCycle)
+}
+
 func TestScanCycleCheckpointsAndCompletes(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})

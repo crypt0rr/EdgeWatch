@@ -114,6 +114,14 @@ choice and a bounded count are recorded in a redacted audit event. Quarantined
 payloads remain in the restored database but are never claimed by the delivery
 worker.
 
+Host CLI commands that change state (`scan`, `baseline approve` and `reset`,
+`notify test`, `backup`, `restore`, and administrator recovery) record a
+security audit entry with the actor `host-cli`. The details are bounded to job
+IDs, file base names, and outcomes; they never include scan targets,
+notification URLs, or full paths. A CLI scan uses the same
+`scan.run_requested` action as a run started from the console. Read-only
+commands, including `restore --dry-run`, write no audit entries.
+
 By default, EdgeWatch checks the latest stable release on GitHub at startup and
 every three hours. This outbound request reveals the Docker host's public IP
 and the EdgeWatch user agent to GitHub; set `updates.enabled: false` for

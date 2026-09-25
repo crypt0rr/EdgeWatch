@@ -133,7 +133,9 @@ func (e *RestoreSidecarError) Unwrap() error { return ErrRestoreSidecars }
 
 // PreflightRestore inspects source, destination, and all SQLite sidecars
 // without opening either database. Existing sidecars are reported rather than
-// removed; this makes a dry-run safe even when the daemon was not stopped.
+// removed; this keeps the inspection safe even when the daemon was not
+// stopped. It is only the first restore check: use DryRunRestore to predict
+// whether Restore would proceed.
 func PreflightRestore(ctx context.Context, source, destination string) (RestorePreflight, error) {
 	result := RestorePreflight{SourceSidecars: []RestoreSidecar{}, DestinationSidecars: []RestoreSidecar{}}
 	if err := ctx.Err(); err != nil {
@@ -178,6 +180,63 @@ func PreflightRestore(ctx context.Context, source, destination string) (RestoreP
 	return result, nil
 }
 
+// RestoreDryRun reports what Restore would do with the same source,
+// destination, and options. It runs every refusal check and the staged-copy
+// validation and delivery policy on a private copy that is then discarded, so
+// it stops only before the destination is replaced.
+type RestoreDryRun struct {
+	RestorePreflight
+	// Safe reports whether Restore would replace the destination. It shadows
+	// the file-level RestorePreflight.Safe, which covers sidecars only.
+	Safe                      bool                  `json:"safe"`
+	Refusal                   string                `json:"refusal,omitempty"`
+	SourceSchemaVersion       int                   `json:"source_schema_version,omitempty"`
+	PendingDeliveriesPolicy   PendingDeliveryPolicy `json:"pending_deliveries_policy,omitempty"`
+	PendingDeliveriesAffected int                   `json:"pending_deliveries_affected"`
+}
+
+// DryRunRestore predicts Restore without replacing the destination. The
+// returned error is the refusal Restore would return; the report is filled in
+// as far as the checks progressed either way. Like Restore, it needs a
+// writable destination directory for the private staging copy.
+func DryRunRestore(ctx context.Context, source, destination string, options RestoreOptions) (RestoreDryRun, error) {
+	staged, err := stageRestore(ctx, source, destination, options)
+	staged.discard()
+	result := RestoreDryRun{
+		RestorePreflight:          staged.preflight,
+		Safe:                      err == nil,
+		SourceSchemaVersion:       staged.schemaVersion,
+		PendingDeliveriesPolicy:   staged.policy,
+		PendingDeliveriesAffected: staged.pending,
+	}
+	if err != nil {
+		result.Refusal = err.Error()
+	}
+	return result, err
+}
+
+// stagedRestore is a sanitized private copy of the restore source that has
+// passed every refusal check. Only Restore goes on to rename it over the
+// destination.
+type stagedRestore struct {
+	preflight     RestorePreflight
+	policy        PendingDeliveryPolicy
+	dir           string
+	path          string
+	bytes         int64
+	schemaVersion int
+	epoch         string
+	restoredAt    time.Time
+	pending       int
+}
+
+// discard removes the private staging directory and everything left in it.
+func (s stagedRestore) discard() {
+	if s.dir != "" {
+		_ = os.RemoveAll(s.dir)
+	}
+}
+
 // Restore replaces destination with a private, atomically copied source
 // database. The caller must stop EdgeWatch first. By default any WAL, SHM, or
 // rollback-journal companion on either path causes a refusal; allowing replay
@@ -186,129 +245,39 @@ func PreflightRestore(ctx context.Context, source, destination string) (RestoreP
 // new restore epoch; callers must explicitly select discard or preserve.
 func Restore(ctx context.Context, source, destination string, options RestoreOptions) (RestoreResult, error) {
 	var result RestoreResult
-	policy, err := ParsePendingDeliveryPolicy(string(options.PendingDeliveries))
+	staged, err := stageRestore(ctx, source, destination, options)
+	defer staged.discard()
 	if err != nil {
 		return result, err
 	}
-	preflight, err := PreflightRestore(ctx, source, destination)
-	if err != nil {
-		return result, err
-	}
-	// Surface an invalid source schema before reporting an unrelated sidecar
-	// refusal. This is intentionally limited to sources that already have
-	// SQLite companions: opening a sidecar-free source for validation could
-	// itself create WAL/SHM artifacts and change the very preflight state we
-	// are about to enforce.
-	if len(preflight.SourceSidecars) > 0 {
-		if err := validateRestoreSourceSchema(ctx, preflight.SourcePath); err != nil {
-			return result, err
-		}
-	}
-	if !preflight.Safe && !options.AllowSidecarReplay {
-		paths := make([]string, 0, len(preflight.SourceSidecars)+len(preflight.DestinationSidecars))
-		for _, sidecar := range preflight.SourceSidecars {
-			paths = append(paths, sidecar.Path)
-		}
-		for _, sidecar := range preflight.DestinationSidecars {
-			paths = append(paths, sidecar.Path)
-		}
-		sort.Strings(paths)
-		return result, &RestoreSidecarError{Paths: paths}
-	}
-	if preflight.DestinationExists && !options.AllowActiveDaemon {
-		if err := refuseActiveDaemon(ctx, preflight.DestinationPath); err != nil {
-			if !errors.Is(err, ErrRestoreDestinationUnreadable) || !options.AllowUnreadableDestination {
-				return result, err
-			}
-		}
-	}
-	if err := ctx.Err(); err != nil {
-		return result, err
-	}
-
-	parent := filepath.Dir(preflight.DestinationPath)
-	parentInfo, err := os.Stat(parent)
-	if err != nil {
-		return result, fmt.Errorf("restore destination directory: %w", err)
-	}
-	if !parentInfo.IsDir() {
-		return result, errors.New("restore destination parent is not a directory")
-	}
-	tempDir, err := os.MkdirTemp(parent, ".edgewatch-restore-")
-	if err != nil {
-		return result, fmt.Errorf("create restore staging directory: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
-	if err := os.Chmod(tempDir, 0o700); err != nil {
-		return result, err
-	}
-	tempPath := filepath.Join(tempDir, filepath.Base(preflight.DestinationPath))
-	bytes, err := copyRestoreFile(ctx, preflight.SourcePath, tempPath)
-	if err != nil {
-		return result, err
-	}
-	// Sidecar replay is an explicit recovery operation. Copy the complete
-	// SQLite artifact set into the private staging directory before opening it;
-	// copying only the main file would silently lose WAL-only transactions.
-	if options.AllowSidecarReplay {
-		for _, sidecar := range preflight.SourceSidecars {
-			// SQLite companions are tied to the database basename. Preserve the
-			// suffix (-wal, -shm, or -journal) while renaming them to the staged
-			// destination basename; copying the source basename would make SQLite
-			// ignore an otherwise valid WAL during validation and replay.
-			suffix := strings.TrimPrefix(sidecar.Path, preflight.SourcePath)
-			destinationSidecar := tempPath + suffix
-			if _, err := copyRestoreFile(ctx, sidecar.Path, destinationSidecar); err != nil {
-				return result, fmt.Errorf("copy restore source %s: %w", sidecar.Kind, err)
-			}
-		}
-	}
-	if err := validateStagedRestore(ctx, tempPath); err != nil {
-		return result, err
-	}
-	restoreEpoch := uuid.NewString()
-	restoredAt := time.Now().UTC()
-	pending, err := applyRestoreDeliveryPolicy(ctx, tempPath, policy, restoreEpoch, restoredAt)
-	if err != nil {
-		return result, err
-	}
-	// Re-check immediately before replacing the destination. This closes the
-	// normal window where a daemon could start while the source is being copied;
-	// the operator-facing escape hatch remains explicit for intentional recovery.
-	if preflight.DestinationExists && !options.AllowActiveDaemon {
-		if err := refuseActiveDaemon(ctx, preflight.DestinationPath); err != nil {
-			if !errors.Is(err, ErrRestoreDestinationUnreadable) || !options.AllowUnreadableDestination {
-				return result, err
-			}
-		}
-	}
+	preflight := staged.preflight
 	// Move destination sidecars out of the way only after every staged check and
 	// sanitization has succeeded. If the replacement itself fails, restore the
 	// sidecars in reverse order so a rejected restore leaves the destination
 	// artifact set unchanged.
-	movedSidecars, err := moveDestinationSidecars(preflight.DestinationSidecars, tempDir)
+	movedSidecars, err := moveDestinationSidecars(preflight.DestinationSidecars, staged.dir)
 	if err != nil {
 		return result, err
 	}
 	restoreMovedSidecars := true
 	defer restoreSidecarsOnFailure(&restoreMovedSidecars, movedSidecars)
-	if err := os.Rename(tempPath, preflight.DestinationPath); err != nil {
+	if err := os.Rename(staged.path, preflight.DestinationPath); err != nil {
 		return result, fmt.Errorf("replace restored database: %w", err)
 	}
 	restoreMovedSidecars = false
 	if err := os.Chmod(preflight.DestinationPath, 0o600); err != nil {
 		return result, err
 	}
-	if err := syncDirectory(parent); err != nil {
+	if err := syncDirectory(filepath.Dir(preflight.DestinationPath)); err != nil {
 		return result, fmt.Errorf("sync restored database directory: %w", err)
 	}
 	result = RestoreResult{
 		Path:                      preflight.DestinationPath,
-		Bytes:                     bytes,
-		RestoredAt:                restoredAt,
-		RestoreEpoch:              restoreEpoch,
-		PendingDeliveriesPolicy:   policy,
-		PendingDeliveriesAffected: pending,
+		Bytes:                     staged.bytes,
+		RestoredAt:                staged.restoredAt,
+		RestoreEpoch:              staged.epoch,
+		PendingDeliveriesPolicy:   staged.policy,
+		PendingDeliveriesAffected: staged.pending,
 	}
 	if !preflight.Safe {
 		for _, sidecar := range preflight.SourceSidecars {
@@ -322,6 +291,120 @@ func Restore(ctx context.Context, source, destination string, options RestoreOpt
 		result.SidecarsWarning = "SQLite source sidecars were replayed; old destination sidecars were removed"
 	}
 	return result, nil
+}
+
+// stageRestore runs every restore refusal check and prepares the sanitized
+// staged copy that Restore renames over the destination. Restore and
+// DryRunRestore share it, so a refusal added here applies to both. The staged
+// value carries the preflight report even on error, and its staging directory
+// must always be discarded by the caller.
+func stageRestore(ctx context.Context, source, destination string, options RestoreOptions) (stagedRestore, error) {
+	var staged stagedRestore
+	policy, err := ParsePendingDeliveryPolicy(string(options.PendingDeliveries))
+	if err != nil {
+		return staged, err
+	}
+	staged.policy = policy
+	staged.preflight, err = PreflightRestore(ctx, source, destination)
+	if err != nil {
+		return staged, err
+	}
+	preflight := staged.preflight
+	// Surface an invalid source schema before reporting an unrelated sidecar
+	// refusal. This is intentionally limited to sources that already have
+	// SQLite companions: opening a sidecar-free source for validation could
+	// itself create WAL/SHM artifacts and change the very preflight state we
+	// are about to enforce.
+	if len(preflight.SourceSidecars) > 0 {
+		if err := validateRestoreSourceSchema(ctx, preflight.SourcePath); err != nil {
+			return staged, err
+		}
+	}
+	if !preflight.Safe && !options.AllowSidecarReplay {
+		paths := make([]string, 0, len(preflight.SourceSidecars)+len(preflight.DestinationSidecars))
+		for _, sidecar := range preflight.SourceSidecars {
+			paths = append(paths, sidecar.Path)
+		}
+		for _, sidecar := range preflight.DestinationSidecars {
+			paths = append(paths, sidecar.Path)
+		}
+		sort.Strings(paths)
+		return staged, &RestoreSidecarError{Paths: paths}
+	}
+	if err := checkRestoreDestinationDaemon(ctx, preflight, options); err != nil {
+		return staged, err
+	}
+	if err := ctx.Err(); err != nil {
+		return staged, err
+	}
+
+	parent := filepath.Dir(preflight.DestinationPath)
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
+		return staged, fmt.Errorf("restore destination directory: %w", err)
+	}
+	if !parentInfo.IsDir() {
+		return staged, errors.New("restore destination parent is not a directory")
+	}
+	staged.dir, err = os.MkdirTemp(parent, ".edgewatch-restore-")
+	if err != nil {
+		return staged, fmt.Errorf("create restore staging directory: %w", err)
+	}
+	if err := os.Chmod(staged.dir, 0o700); err != nil {
+		return staged, err
+	}
+	staged.path = filepath.Join(staged.dir, filepath.Base(preflight.DestinationPath))
+	staged.bytes, err = copyRestoreFile(ctx, preflight.SourcePath, staged.path)
+	if err != nil {
+		return staged, err
+	}
+	// Sidecar replay is an explicit recovery operation. Copy the complete
+	// SQLite artifact set into the private staging directory before opening it;
+	// copying only the main file would silently lose WAL-only transactions.
+	if options.AllowSidecarReplay {
+		for _, sidecar := range preflight.SourceSidecars {
+			// SQLite companions are tied to the database basename. Preserve the
+			// suffix (-wal, -shm, or -journal) while renaming them to the staged
+			// destination basename; copying the source basename would make SQLite
+			// ignore an otherwise valid WAL during validation and replay.
+			suffix := strings.TrimPrefix(sidecar.Path, preflight.SourcePath)
+			destinationSidecar := staged.path + suffix
+			if _, err := copyRestoreFile(ctx, sidecar.Path, destinationSidecar); err != nil {
+				return staged, fmt.Errorf("copy restore source %s: %w", sidecar.Kind, err)
+			}
+		}
+	}
+	staged.schemaVersion, err = validateStagedRestore(ctx, staged.path)
+	if err != nil {
+		return staged, err
+	}
+	staged.epoch = uuid.NewString()
+	staged.restoredAt = time.Now().UTC()
+	staged.pending, err = applyRestoreDeliveryPolicy(ctx, staged.path, policy, staged.epoch, staged.restoredAt)
+	if err != nil {
+		return staged, err
+	}
+	// Re-check immediately before replacing the destination. This closes the
+	// normal window where a daemon could start while the source is being copied;
+	// the operator-facing escape hatch remains explicit for intentional recovery.
+	if err := checkRestoreDestinationDaemon(ctx, preflight, options); err != nil {
+		return staged, err
+	}
+	return staged, nil
+}
+
+// checkRestoreDestinationDaemon refuses a restore over a destination whose
+// daemon is still active or that cannot be inspected, unless the operator
+// passed the matching explicit recovery option.
+func checkRestoreDestinationDaemon(ctx context.Context, preflight RestorePreflight, options RestoreOptions) error {
+	if !preflight.DestinationExists || options.AllowActiveDaemon {
+		return nil
+	}
+	err := refuseActiveDaemon(ctx, preflight.DestinationPath)
+	if err != nil && errors.Is(err, ErrRestoreDestinationUnreadable) && options.AllowUnreadableDestination {
+		return nil
+	}
+	return err
 }
 
 func validateRestoreSourceSchema(ctx context.Context, path string) error {
@@ -374,16 +457,18 @@ func restoreDestinationSidecars(sidecars []movedRestoreSidecar) error {
 // validateStagedRestore performs all read-only checks before the staged file
 // can be sanitized or atomically renamed over the destination. This keeps a
 // corrupt, foreign, or newer-schema source from replacing a healthy database.
-func validateStagedRestore(ctx context.Context, path string) error {
+// It returns the staged schema version for the dry-run report.
+func validateStagedRestore(ctx context.Context, path string) (int, error) {
 	staged, err := OpenReadOnlyExistingContext(ctx, path)
 	if err != nil {
-		return fmt.Errorf("open staged restore database for validation: %w", err)
+		return 0, fmt.Errorf("open staged restore database for validation: %w", err)
 	}
 	defer staged.Close()
-	if _, err := staged.Verify(ctx); err != nil {
-		return fmt.Errorf("validate staged restore database: %w", err)
+	verification, err := staged.Verify(ctx)
+	if err != nil {
+		return verification.SchemaVersion, fmt.Errorf("validate staged restore database: %w", err)
 	}
-	return nil
+	return verification.SchemaVersion, nil
 }
 
 const restoreQuarantineSchema = `

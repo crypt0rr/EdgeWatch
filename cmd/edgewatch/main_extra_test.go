@@ -259,6 +259,11 @@ func TestStatusFallsBackToUTCForInvalidTimezone(t *testing.T) {
 	if err := status(context.Background(), s, cfg, "", "json"); err != nil {
 		t.Fatalf("status returned an error for an invalid timezone: %v", err)
 	}
+	// Only scheduled managed jobs compute a next run, and those zones are
+	// validated when saved; a zone the runtime no longer knows falls back to UTC.
+	if location := statusLocation("Not/AZone"); location != time.UTC {
+		t.Fatalf("invalid schedule timezone resolved to %v, want UTC", location)
+	}
 }
 
 func TestRunStatusHistoryAndBaselineForManagedJob(t *testing.T) {

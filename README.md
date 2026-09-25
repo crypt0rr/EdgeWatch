@@ -431,10 +431,23 @@ All runtime state lives in ./data, including:
 - optional backups and exported baselines.
 
 Back up the complete ./data directory together with config.yaml and any
-separately mounted secret files. For a live, consistent database snapshot:
+separately mounted secret files. The backup command does not create missing
+directories, so create the backup directory first with the same owner as
+./data. For standard rootful Docker:
 
 ```console
-mkdir -p ./data/backups
+sudo install -d -m 0750 -o 0 -g 0 ./data/backups
+```
+
+For rootless Docker:
+
+```console
+install -d -m 0750 ./data/backups
+```
+
+Then take a live, consistent database snapshot:
+
+```console
 docker compose exec edgewatch edgewatch backup \
   --config /etc/edgewatch/config.yaml \
   --out /var/lib/edgewatch/backups/edgewatch-backup.db \
@@ -446,18 +459,30 @@ docker compose exec edgewatch edgewatch verify \
 The backup command uses SQLite's online snapshot support. A raw directory copy
 must be made while EdgeWatch is stopped so the database and WAL sidecars stay
 consistent. Never replace a live database. Restore with the host-safe command,
-verify it, and only then start the service again:
+verify it, and only then start the service again. The image entrypoint is
+already `edgewatch`, so `docker compose run` takes the subcommand directly,
+while `docker compose exec` needs the `edgewatch` executable name:
 
 ```console
 docker compose stop edgewatch
-docker compose run --rm --no-deps -T edgewatch edgewatch restore \
+docker compose run --rm --no-deps -T edgewatch restore \
   --config /etc/edgewatch/config.yaml \
   --from /var/lib/edgewatch/backups/edgewatch-backup.db \
   --output json
-docker compose run --rm --no-deps -T edgewatch edgewatch verify \
+docker compose run --rm --no-deps -T edgewatch verify \
   --config /etc/edgewatch/config.yaml --output json
 docker compose up -d edgewatch
 ```
+
+To check a restore first, add `--dry-run` to the restore command. The dry run
+runs the same checks as the restore: SQLite sidecars, an active daemon
+heartbeat, and validation of a staged copy of the backup, which is made in a
+private directory next to the database and then removed. The destination is
+never changed. The report includes `safe`, a `refusal` reason when the restore
+would be refused, the backup's `source_schema_version`, and the number of
+pending deliveries the chosen `--pending-deliveries` policy would affect. The
+command exits non-zero when the restore would be refused, so scripts can act on
+its exit status.
 
 The current schema is version 47. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
@@ -497,6 +522,16 @@ docker compose exec edgewatch edgewatch history \
 docker compose exec edgewatch edgewatch notify test \
   --config /etc/edgewatch/config.yaml
 ```
+
+Each `status` row has a `state`: `scheduled`, `paused`, `archived`, or `legacy`
+for an inactive YAML job. Only scheduled jobs have a `next_run`. Commands print
+their result on stdout and write log lines to stderr, so `--output json` output
+can be piped straight into a JSON parser. Only the daemon logs to stdout.
+
+Commands that change state, such as `scan`, `baseline approve` and
+`baseline reset`, record a `host-cli` entry in the security audit log. A CLI
+scan is recorded as `scan.run_requested`, like a run started from the console,
+with the job ID and the scan outcome.
 
 For a scan that appears stuck, open its live details in the dashboard first.
 Broad jobs report scanner phase, process heartbeat, completed probes, and

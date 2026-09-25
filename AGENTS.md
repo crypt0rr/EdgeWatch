@@ -73,6 +73,9 @@ Documentation-only changes need a diff review and checks of referenced paths and
 
 Install Chromium before the first browser test with `npx playwright install --with-deps chromium`.
 The real-stack browser tests also require Go.
+Browser tests build the console and serve it on `127.0.0.1:4173`; set `PLAYWRIGHT_PORT` to use another port.
+If that port is already in use, the run stops before any test instead of testing whatever server is listening there.
+Set `PLAYWRIGHT_REUSE_SERVER=1` only to reuse a preview of the same checkout that you started yourself; CI always starts a fresh server.
 
 `make check` checks Go formatting, runs vet and race tests, checks frontend types, and runs `make security`.
 `make security` runs pinned Go lint, `govulncheck`, and the npm audit at the high-severity threshold.

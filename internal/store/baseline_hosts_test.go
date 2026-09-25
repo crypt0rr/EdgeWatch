@@ -51,6 +51,44 @@ func TestBaselineHostProjectionPaginatesAcceptedOverlay(t *testing.T) {
 	}
 }
 
+func TestBaselineHostProjectionSearchAcceptsShortQueries(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	snapshot := model.Snapshot{Hosts: []model.HostObservation{
+		{Address: "192.0.2.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 80, State: "open"}}}}},
+		{Address: "192.0.2.3", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open"}}}}},
+	}}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('short-search','short-search','{}',1,0,1,'now','now')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReplaceBaselineHostProjection(ctx, "short-search", snapshot); err != nil {
+		t.Fatal(err)
+	}
+	// Queries shorter than the FTS trigram length use the LIKE fallback. They
+	// must filter the accepted overlay the same way scan and inventory host
+	// searches do instead of failing on the escape clause.
+	for _, tc := range []struct {
+		query string
+		want  string
+	}{
+		{query: "8", want: "192.0.2.1"},
+		{query: "80", want: "192.0.2.1"},
+		{query: "44", want: "192.0.2.3"},
+	} {
+		page, err := s.ListBaselineHostsPage(ctx, "short-search", tc.query, "", nil, 10, 0)
+		if err != nil {
+			t.Fatalf("short baseline search %q: %v", tc.query, err)
+		}
+		if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Host.Address != tc.want {
+			t.Fatalf("short baseline search %q = %#v, want only %s", tc.query, page, tc.want)
+		}
+	}
+	page, err := s.ListBaselineHostsPage(ctx, "short-search", "7", "", nil, 10, 0)
+	if err != nil || page.Total != 0 || len(page.Items) != 0 {
+		t.Fatalf("unmatched short baseline search = %#v, %v", page, err)
+	}
+}
+
 func TestRuntimeStateSummaryUsesProjectionCounts(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

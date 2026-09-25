@@ -294,14 +294,20 @@ func (s *Store) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context, id st
 	}
 	var events []model.Event
 	if scopeChanged {
-		stateRaw, marshalErr := json.Marshal(emptyState())
+		reset := emptyState()
+		stateRaw, marshalErr := json.Marshal(reset)
 		if marshalErr != nil {
 			return JobRecord{}, false, nil, marshalErr
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?) ON CONFLICT(job_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at`, id, stateRaw, now.Format(time.RFC3339Nano)); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?) ON CONFLICT(job_id) DO UPDATE SET state_json=excluded.state_json,updated_at=excluded.updated_at`, id, stateRaw, sqliteTimestamp(now)); err != nil {
 			return JobRecord{}, false, nil, err
 		}
-		if err = upsertRuntimeBaselineMetaTx(ctx, tx, id, emptyState(), 0, now); err != nil {
+		if err = upsertRuntimeBaselineMetaTx(ctx, tx, id, reset, 0, now); err != nil {
+			return JobRecord{}, false, nil, err
+		}
+		// Incident pages and counts read this projection. Rebuild it from the
+		// reset state so they cannot show the previous scope's incidents.
+		if err = replaceRuntimeIncidentProjectionTx(ctx, tx, id, reset); err != nil {
 			return JobRecord{}, false, nil, err
 		}
 		if err = bumpRuntimeBaselineEpochTx(ctx, tx, id); err != nil {

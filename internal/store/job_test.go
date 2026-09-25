@@ -170,6 +170,112 @@ func TestManagedJobRevisionAndScopeConfirmation(t *testing.T) {
 	}
 }
 
+// createJobWithOpenIncident stores a job whose runtime has a baseline and one
+// open incident, as seen before a confirmed security-scope change.
+func createJobWithOpenIncident(ctx context.Context, t *testing.T, s *Store, name string) JobRecord {
+	t.Helper()
+	record, err := s.CreateJob(ctx, testJob(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	key := "port|127.0.0.1|tcp|1"
+	baseline := model.Snapshot{Units: []model.Unit{{Target: "127.0.0.1", Protocol: "tcp"}}}
+	if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &baseline
+		state.BaselineScanID = "old-scope-baseline"
+		state.BaselineConfigHash = record.Job.SecurityHash()
+		state.Incidents[key] = model.Incident{Change: model.Change{Key: key, Kind: "port", Target: "127.0.0.1", Protocol: "tcp", Port: 1, Old: "closed", New: "open", Severity: "critical"}, OpenedAt: now, LastSeenAt: now}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if page, err := s.ListJobIncidentsPage(ctx, record.ID, 10, 0); err != nil || page.Total != 1 {
+		t.Fatalf("incident fixture page = %#v, %v", page, err)
+	}
+	return record
+}
+
+func TestConfirmedRebaselineClearsIncidentProjection(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record := createJobWithOpenIncident(ctx, t, s, "rebaseline-incidents")
+	changed := record.Job
+	changed.Targets = []string{"127.0.0.2"}
+	if _, scopeChanged, _, err := s.UpdateJobWithEvents(ctx, record.ID, record.Revision, changed, true, false, true); err != nil || !scopeChanged {
+		t.Fatalf("confirmed rebaseline changed=%v err=%v", scopeChanged, err)
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil || len(state.Incidents) != 0 {
+		t.Fatalf("runtime incidents after rebaseline = %#v, %v", state.Incidents, err)
+	}
+	// Every incident view and count reads the projection, so it must be
+	// cleared with the runtime reset rather than at the next runtime write.
+	jobPage, err := s.ListJobIncidentsPage(ctx, record.ID, 10, 0)
+	if err != nil || jobPage.Total != 0 || len(jobPage.Items) != 0 {
+		t.Fatalf("job incident page after rebaseline = %#v, %v", jobPage, err)
+	}
+	globalPage, err := s.ListIncidentsPage(ctx, 10, 0)
+	if err != nil || globalPage.Total != 0 || len(globalPage.Items) != 0 {
+		t.Fatalf("global incident page after rebaseline = %#v, %v", globalPage, err)
+	}
+	// The runtime row and its metadata carry the same fixed-width timestamp,
+	// so the summaries below read the current projection.
+	var runtimeUpdated, metaUpdated string
+	if err := s.DB.QueryRowContext(ctx, `SELECT r.updated_at,m.updated_at FROM job_runtime r JOIN job_runtime_meta m ON m.job_id=r.job_id WHERE r.job_id=?`, record.ID).Scan(&runtimeUpdated, &metaUpdated); err != nil {
+		t.Fatal(err)
+	}
+	if canonical, ok := normalizeSQLiteTimestamp(runtimeUpdated); !ok || canonical != runtimeUpdated || runtimeUpdated != metaUpdated {
+		t.Fatalf("runtime updated_at = %q, metadata updated_at = %q; want the same fixed-width timestamp", runtimeUpdated, metaUpdated)
+	}
+	summary, err := s.RuntimeStateSummary(ctx, record.ID)
+	if err != nil || summary.IncidentCount != 0 || summary.HasBaseline {
+		t.Fatalf("job summary after rebaseline = %#v, %v", summary, err)
+	}
+	summaries, err := s.RuntimeStateSummaries(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed, ok := summaries[record.ID]; !ok || listed.IncidentCount != 0 || listed.HasBaseline {
+		t.Fatalf("job list summary after rebaseline = %#v (present=%v)", listed, ok)
+	}
+}
+
+func TestConfirmedRebaselineRollsBackWhenRuntimeResetFails(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		trigger string
+	}{
+		{name: "metadata", trigger: `CREATE TRIGGER fail_rebaseline_reset BEFORE UPDATE ON job_runtime_meta BEGIN SELECT RAISE(ABORT, 'runtime metadata unavailable'); END`},
+		{name: "incident projection", trigger: `CREATE TRIGGER fail_rebaseline_reset BEFORE DELETE ON runtime_incidents BEGIN SELECT RAISE(ABORT, 'incident projection unavailable'); END`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := openTestStore(t)
+			record := createJobWithOpenIncident(ctx, t, s, "rebaseline-rollback")
+			if _, err := s.DB.ExecContext(ctx, tc.trigger); err != nil {
+				t.Fatal(err)
+			}
+			changed := record.Job
+			changed.Targets = []string{"127.0.0.2"}
+			if _, _, _, err := s.UpdateJobWithEvents(ctx, record.ID, record.Revision, changed, true, false, true); err == nil {
+				t.Fatal("confirmed rebaseline committed despite a failed runtime reset")
+			}
+			current, err := s.GetJob(ctx, record.ID)
+			if err != nil || current.Revision != record.Revision {
+				t.Fatalf("job after failed rebaseline = %#v, %v", current, err)
+			}
+			state, err := s.RuntimeState(ctx, record.ID)
+			if err != nil || state.Baseline == nil || len(state.Incidents) != 1 {
+				t.Fatalf("runtime after failed rebaseline = %#v, %v", state, err)
+			}
+			if page, err := s.ListJobIncidentsPage(ctx, record.ID, 10, 0); err != nil || page.Total != 1 {
+				t.Fatalf("incident projection after failed rebaseline = %#v, %v", page, err)
+			}
+		})
+	}
+}
+
 func TestEquivalentPortEditPreservesLegacyBaselineWithoutConfirmation(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -236,6 +342,122 @@ func TestEquivalentPortEditPreservesLegacyBaselineWithoutConfirmation(t *testing
 	cycle, err = s.GetScanCycle(ctx, cycle.ID)
 	if err != nil || cycle.ConfigHash != updated.Job.SecurityHash() {
 		t.Fatalf("paused scan cycle scope hash = %q, err=%v; want canonical %q", cycle.ConfigHash, err, updated.Job.SecurityHash())
+	}
+}
+
+// createLegacyNotificationJob stores a job as an older version wrote it: a
+// non-canonical port expression, no notification selection, and a baseline
+// recorded under the legacy scope hash.
+func createLegacyNotificationJob(ctx context.Context, t *testing.T, s *Store, name string) (JobRecord, string) {
+	t.Helper()
+	record, err := s.CreateJob(ctx, testJob(name))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := record.Job
+	legacy.TCP.Ports = "2, 1"
+	legacy.NotificationDestinations = nil
+	legacyHash := config.NormalizeStoredJob(legacy).LegacySecurityHash()
+	if legacyHash == "" {
+		t.Fatal("legacy test definition did not produce a compatibility hash")
+	}
+	definition, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE jobs SET definition_json=? WHERE id=?`, definition, record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE job_revisions SET definition_json=?,security_hash=? WHERE job_id=? AND revision=?`, definition, legacyHash, record.ID, record.Revision); err != nil {
+		t.Fatal(err)
+	}
+	baseline := model.Snapshot{Units: []model.Unit{{Target: "127.0.0.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}}}}
+	if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &baseline
+		state.BaselineScanID = "legacy-baseline"
+		state.BaselineConfigHash = legacyHash
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	current, err := s.GetJob(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Job.NotificationDestinations != nil || current.Job.LegacySecurityHash() != legacyHash {
+		t.Fatalf("stored legacy job = destinations %#v, compatibility hash %q; want nil and %q", current.Job.NotificationDestinations, current.Job.LegacySecurityHash(), legacyHash)
+	}
+	return current, legacyHash
+}
+
+func TestLegacyNotificationMaterializationMigratesLegacyScopeHash(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	current, legacyHash := createLegacyNotificationJob(ctx, t, s, "legacy-notification-scope")
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+		ID: "legacy-notification-cycle", JobID: current.ID, Job: current.Job.Name, JobRevision: current.Revision,
+		ConfigHash: legacyHash, ExecutionHash: current.Job.ExecutionHash(),
+		Plan: scanner.WorkPlan{Job: current.Job, Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Addresses: []string{"127.0.0.1"}, Ports: "1-2", PortCount: 2, Probes: 2}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='paused' WHERE id=?`, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Daemon startup freezes the nil selection. The rewritten definition uses
+	// the canonical port spelling, so the baseline and paused cycle must move
+	// to the canonical scope hash with it.
+	count, err := s.MaterializeLegacyNotificationSelections(ctx, []string{})
+	if err != nil || count != 1 {
+		t.Fatalf("materialized job count = %d, %v", count, err)
+	}
+	stored, err := s.GetJob(ctx, current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	canonicalHash := stored.Job.SecurityHash()
+	if stored.Job.NotificationDestinations == nil || stored.Job.TCP.Ports != "1-2" || stored.Job.LegacySecurityHash() != "" || canonicalHash == legacyHash {
+		t.Fatalf("materialized job = destinations %#v, ports %q, compatibility hash %q", stored.Job.NotificationDestinations, stored.Job.TCP.Ports, stored.Job.LegacySecurityHash())
+	}
+	state, err := s.RuntimeState(ctx, current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Baseline == nil || state.BaselineScanID != "legacy-baseline" || state.BaselineConfigHash != canonicalHash {
+		t.Fatalf("materialization did not preserve and rehash the legacy baseline: %#v", state)
+	}
+	summary, err := s.RuntimeStateSummary(ctx, current.ID)
+	if err != nil || summary.BaselineConfigHash != canonicalHash {
+		t.Fatalf("baseline summary hash = %#v, %v; want %q", summary, err, canonicalHash)
+	}
+	cycle, err = s.GetScanCycle(ctx, cycle.ID)
+	if err != nil || cycle.Status != "paused" || cycle.ConfigHash != canonicalHash {
+		t.Fatalf("paused scan cycle = status %q, scope hash %q, err=%v; want paused with canonical %q", cycle.Status, cycle.ConfigHash, err, canonicalHash)
+	}
+}
+
+func TestLegacyNotificationMaterializationRollsBackWhenHashMigrationFails(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	current, legacyHash := createLegacyNotificationJob(ctx, t, s, "legacy-notification-rollback")
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER fail_scope_hash_migration BEFORE UPDATE ON job_runtime BEGIN SELECT RAISE(ABORT, 'runtime unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MaterializeLegacyNotificationSelections(ctx, []string{}); err == nil {
+		t.Fatal("materialization committed despite a failed scope hash migration")
+	}
+	stored, err := s.GetJob(ctx, current.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != current.Revision || stored.Job.NotificationDestinations != nil || stored.Job.LegacySecurityHash() != legacyHash {
+		t.Fatalf("job after failed materialization = revision %d, destinations %#v, compatibility hash %q", stored.Revision, stored.Job.NotificationDestinations, stored.Job.LegacySecurityHash())
+	}
+	state, err := s.RuntimeState(ctx, current.ID)
+	if err != nil || state.BaselineConfigHash != legacyHash {
+		t.Fatalf("runtime after failed materialization = %#v, %v", state, err)
 	}
 }
 

@@ -285,3 +285,83 @@ func TestAcceptServiceChangeOnOpenPortRemainsIndependent(t *testing.T) {
 		t.Fatal("unexpected port incident was created")
 	}
 }
+
+func TestAcceptServiceOnNewPortIncludesOpenPortIncident(t *testing.T) {
+	for _, portScanID := range []string{"scan-3", "scan-2"} {
+		t.Run("port-from-"+portScanID, func(t *testing.T) {
+			ctx := context.Background()
+			s := openTestStore(t)
+			record, err := s.CreateJob(ctx, testJob("accept-service-new-port-"+portScanID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			portKey := "port|192.0.2.14|tcp|8080"
+			serviceKey := "service|192.0.2.14|tcp|8080"
+			portChange := model.Change{Key: portKey, Kind: "port", Target: "192.0.2.14", Protocol: "tcp", Port: 8080, Old: "not-open", New: "open", Severity: "critical"}
+			serviceChange := model.Change{Key: serviceKey, Kind: "service", Target: "192.0.2.14", Protocol: "tcp", Port: 8080, Old: "not-open", New: "http", Severity: "warning"}
+			_, err = s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+				state.Baseline = &model.Snapshot{Units: []model.Unit{{Target: "192.0.2.14", Protocol: "tcp", Ports: []model.PortState{{Port: 22, State: "open", Service: "ssh"}}}}}
+				state.Incidents[portKey] = model.Incident{Change: portChange, ScanID: portScanID}
+				state.Incidents[serviceKey] = model.Incident{Change: serviceChange, ScanID: "scan-3"}
+				state.FingerprintCandidates[serviceKey] = model.ValueCount{Value: "http", Count: 1}
+				return nil, nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			events, err := s.AcceptIncidentWithExpectedOutboxAndAudit(ctx, record.ID, record.Job.Name, serviceKey, &IncidentExpectation{Change: serviceChange}, nil, AuditEntry{Action: "incident.accepted", Detail: record.ID + ":" + serviceKey})
+			if err != nil {
+				t.Fatalf("accept service on a new port: %v", err)
+			}
+			if len(events) != 1 || len(events[0].Changes) != 2 || events[0].Changes[0] != portChange || events[0].Changes[1] != serviceChange {
+				t.Fatalf("service acceptance did not include the port it depends on: %#v", events)
+			}
+			if _, err := s.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, portKey, AuditEntry{}); !errors.Is(err, ErrIncidentNotFound) {
+				t.Fatalf("port incident remained after its service was accepted: %v", err)
+			}
+			state, err := s.RuntimeState(ctx, record.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(state.Incidents) != 0 || len(state.FingerprintCandidates) != 0 || !state.BaselineModified {
+				t.Fatalf("accepted runtime state = %#v", state)
+			}
+			ports := state.Baseline.Units[0].Ports
+			if len(ports) != 2 || ports[1].Port != 8080 || ports[1].State != "open" || ports[1].Service != "http" {
+				t.Fatalf("accepted baseline ports = %#v", ports)
+			}
+		})
+	}
+}
+
+func TestAcceptServiceOnMissingPortWithoutPortIncidentIsRejected(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := s.CreateJob(ctx, testJob("accept-service-missing-port"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serviceKey := "service|192.0.2.15|tcp|8080"
+	portKey := "port|192.0.2.15|tcp|8080"
+	_, err = s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &model.Snapshot{Units: []model.Unit{{Target: "192.0.2.15", Protocol: "tcp", Ports: []model.PortState{{Port: 22, State: "open"}}}}}
+		state.Incidents[serviceKey] = model.Incident{Change: model.Change{Key: serviceKey, Kind: "service", Target: "192.0.2.15", Protocol: "tcp", Port: 8080, Old: "not-open", New: "http"}, ScanID: "scan-1"}
+		// A removal of the same port is not evidence that the port is open, so
+		// it must never be folded into a service appearance.
+		state.Incidents[portKey] = model.Incident{Change: model.Change{Key: portKey, Kind: "port", Target: "192.0.2.15", Protocol: "tcp", Port: 8080, Old: "open", New: "not-open"}, ScanID: "scan-1"}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, serviceKey, AuditEntry{}); !errors.Is(err, ErrUnsupportedIncidentChange) {
+		t.Fatalf("service acceptance without an open port = %v, want unsupported change", err)
+	}
+	state, err := s.RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Incidents) != 2 || len(state.Baseline.Units[0].Ports) != 1 {
+		t.Fatalf("rejected acceptance changed runtime state = %#v", state)
+	}
+}

@@ -348,7 +348,9 @@ and execution-tuning changes do not reset the baseline.
 From **Incidents**, administrators and operators can:
 
 - **Accept change** to make the current observation expected while preserving
-  the original scan history.
+  the original scan history. Accepting a service on a newly opened port also
+  accepts that port; accepting the port alone leaves its service for a
+  separate decision.
 - **Suppress 1 scan** to defer the alert for the next successful scan. If the
   change remains, it is reported again afterward.
 

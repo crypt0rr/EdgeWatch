@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 49
+const schemaVersion = 50
 
 // newerSchemaError is the refusal for a database that a newer release has
 // upgraded. Migrations are forward-only, so an older binary must not write to
@@ -1179,6 +1179,30 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 			"CREATE INDEX IF NOT EXISTS managed_notifications_enabled ON managed_notifications(enabled, name)",
 			"ALTER TABLE managed_notifications ADD COLUMN credential_revision INTEGER NOT NULL DEFAULT 1",
 			"UPDATE managed_notifications SET credential_revision=revision",
+		},
+		50: {
+			// Notification URLs from config.yaml are imported once as encrypted
+			// web-managed destinations. The deployment ID row of each URL
+			// records the destination it became, so a restart never imports a
+			// URL twice and a destination deleted after its import is not
+			// recreated. notification_config_import keeps the outcome of the
+			// latest daemon start for the read-only health command. The table
+			// guard keeps partially created recovery databases upgradeable.
+			`CREATE TABLE IF NOT EXISTS deployment_notification_ids (
+ legacy_hash TEXT PRIMARY KEY,
+ opaque_id TEXT NOT NULL UNIQUE,
+ created_at TEXT NOT NULL
+);`,
+			"ALTER TABLE deployment_notification_ids ADD COLUMN managed_notification_id TEXT NOT NULL DEFAULT ''",
+			"ALTER TABLE deployment_notification_ids ADD COLUMN imported_at TEXT NOT NULL DEFAULT ''",
+			`CREATE TABLE IF NOT EXISTS notification_config_import (
+ id INTEGER PRIMARY KEY CHECK(id=1),
+ status TEXT NOT NULL DEFAULT '',
+ configured_urls INTEGER NOT NULL DEFAULT 0,
+ imported_urls INTEGER NOT NULL DEFAULT 0,
+ error_code TEXT NOT NULL DEFAULT '',
+ updated_at TEXT NOT NULL DEFAULT ''
+);`,
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

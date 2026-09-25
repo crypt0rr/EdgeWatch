@@ -206,7 +206,10 @@ func run(args []string) error {
 	var application *app.App
 	needApplication := cmd == "daemon" || cmd == "scan" || cmd == "notify" || (cmd == "baseline" && action != "export")
 	if needApplication {
-		application, err = app.New(cfg, s, *nmapPath, logger)
+		// Only the daemon imports notification URLs from config.yaml, after
+		// the migrations above and before its notifier and delivery worker
+		// start. Host commands keep using the configured URLs until then.
+		application, err = app.NewWithOptions(cfg, s, *nmapPath, logger, app.Options{ImportNotificationURLs: cmd == "daemon"})
 		if err != nil {
 			return err
 		}

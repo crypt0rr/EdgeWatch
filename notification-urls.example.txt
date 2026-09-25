@@ -1,3 +1,6 @@
+# Deprecated: add notification destinations in the web console instead.
+# EdgeWatch imports the URLs in this file once as web-managed destinations; a
+# later release refuses to start while notifications.urls_file is set.
 # Add one Shoutrrr service URL per line. An empty file disables notifications.
 # Examples and supported services: https://containrrr.dev/shoutrrr/v0.8/services/overview/
 # ntfy://username:password@ntfy.sh/topic

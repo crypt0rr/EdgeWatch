@@ -30,7 +30,9 @@ services:
       - /tmp:size=128m,mode=1777
     volumes:
       - ./config.yaml:/etc/edgewatch/config.yaml:ro
-      # Uncomment after creating notification-urls.txt and enabling urls_file in config.yaml.
+      # Deprecated: only for deployments that still set notifications.urls_file.
+      # EdgeWatch imports those URLs once as web-managed destinations; remove
+      # this mount together with urls_file once the import has run.
       # - ./notification-urls.txt:/run/secrets/edgewatch-notification-urls:ro
       # Uncomment when using notifications.encryption_key_file in config.yaml.
       # - ./notification-encryption.key:/run/secrets/edgewatch-notification-key:ro

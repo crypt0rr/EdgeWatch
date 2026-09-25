@@ -25,7 +25,7 @@ storage.
 | TCP and UDP coverage | Use Nmap for both protocols, or Naabu full-range TCP discovery followed by Nmap confirmation. |
 | Baselines and incidents | Establish an expected surface and receive alerts for confirmed port, service, or DNS changes. |
 | Host evidence | Inspect effective IPs, positive ports, services, scan provenance, Nmap reasons, and summarized non-open results. |
-| Notifications | Deliver Shoutrrr alerts to deployment-managed or encrypted web-managed destinations. |
+| Notifications | Deliver Shoutrrr alerts to named, encrypted destinations managed in the console. |
 | Safe administration | Use administrator, operator, and viewer roles, optional TOTP, and an optional limited public-status page. |
 | Resumable broad scans | Continue large scans after timeouts or restarts without changing the monitored scope. |
 | Update monitoring | See and optionally notify on new stable EdgeWatch releases. |
@@ -83,15 +83,11 @@ sudo chmod 0750 ./data
 docker compose up -d
 ```
 
-For a rootful installation, create notification and authentication secret files
-as host root with mode `0600`:
-
-```console
-sudo install -m 0600 -o 0 -g 0 notification-urls.example.txt ./notification-urls.txt
-```
-
-For rootless Docker, run the install command without `sudo` or ownership flags
-so the file belongs to the invoking user.
+Notification destinations are added in the web console, so a new deployment
+needs no notification URL file. For a rootful installation, create any
+separately mounted secret file, such as the key for
+`notifications.encryption_key_file` or `web.auth_key_file`, as host root with
+mode `0600`. For rootless Docker, create it as the invoking user instead.
 
 Before starting, this preflight performs real reads and writes; `test -r` or
 `test -w` alone can be misleading for UID 0:
@@ -108,7 +104,7 @@ its path, for example:
 
 ```console
 docker compose run --rm --no-deps --entrypoint /bin/sh edgewatch \
-  -c 'cat /run/secrets/edgewatch-notification-urls >/dev/null'
+  -c 'cat /run/secrets/edgewatch-notification-key >/dev/null'
 ```
 
 If you are upgrading from a deployment that used the old named
@@ -196,8 +192,8 @@ the public name, not a new network bind address.
 ## The first five minutes
 
 1. Create the administrator with the setup token.
-2. Open **Notifications** and add Shoutrrr destinations, or confirm the
-   deployment-managed destinations from config.yaml.
+2. Open **Notifications** and add Shoutrrr destinations. URLs from an older
+   config.yaml appear there as imported destinations.
 3. Open **Scanner profiles** and keep the built-in profile or create an
    administrator-managed profile.
 4. Create a job with its targets, TCP/UDP options, schedule, and baseline
@@ -253,8 +249,9 @@ validated schema.
 | scanner.target_exclusions | YAML | Addresses that may never be scanned. |
 | enrichment.rdap.enabled | YAML | Enable or disable on-demand public network-registration lookups. |
 | updates.enabled | YAML | Enable or disable the three-hour stable-release check. |
-| notifications.urls, urls_file | YAML/secrets | Deployment-managed Shoutrrr destinations. |
-| Jobs, users, profiles, web destinations | Web console | Runtime administration stored in SQLite. |
+| notifications.encryption_key_file | YAML/secrets | Optional separate key for the encrypted notification destinations. |
+| notifications.urls, urls_file | YAML/secrets | Deprecated. Imported once as web-managed destinations; see [Notifications](#notifications). |
+| Jobs, users, profiles, notification destinations | Web console | Runtime administration stored in SQLite. |
 
 The YAML jobs section from older deployments is not imported into the scheduler.
 Such jobs remain inactive and EdgeWatch shows a startup warning so they can be
@@ -395,45 +392,91 @@ authoritative registry; raw responses and contact records are not retained.
 ## Notifications
 
 EdgeWatch uses [Shoutrrr](https://github.com/containrrr/shoutrrr) for delivery.
-Destinations can be supplied in config.yaml or a protected URL file, or added as
-named web-managed destinations. Web-managed URLs are write-only and encrypted
-at rest; their credentials are never returned by the API or written to logs.
+Destinations are named and managed on the **Notifications** page. Their URLs
+are write-only and encrypted at rest with `notification.key`; their
+credentials are never returned by the API or written to logs.
 
 Each job can select its own destinations. On the **Notifications** page,
 **Update alerts** is an independent toggle on each configured destination:
 
 - pausing a destination does not erase its update-alert selection;
-- deployment-managed destinations remain read-only for credentials but their
-  update-alert routing can still be changed;
 - saving an empty selection keeps update alerts silent while checks and the
   in-console indicator continue to work;
 - password confirmation is required for every routing or credential change.
 
-Routing stores destination IDs. A deployment destination's ID follows its exact
-URL, so changing any part of a URL in config.yaml or the URL file, such as a
-rotated webhook token, creates a new destination at the next restart. Jobs do
-not follow that change: open each affected job and select the new destination.
-Alerts still queued for the old URL are not delivered. After the restart,
-EdgeWatch logs a warning that names the jobs whose routing selects a
-destination that no longer exists, and each affected job shows a notice in the
-console. The job editor lists the missing selection, and saving removes it.
-If update alerts went to the old destination, turn on **Update alerts** for the
-new one on the **Notifications** page.
+Deleting a destination removes it from every job and from the update-alert
+routing in the same change. Each affected job gets a new revision and an
+audit record.
 
-Deleting a web-managed destination removes it from every job and from the
-update-alert routing in the same change. Each affected job gets a new revision
-and an audit record.
-
-Renaming a web-managed destination keeps its queued alerts, including an alert
-that is raised while the rename is saved. Replacing its URL discards its queued
-alerts instead of sending them to the new URL, and deleting it discards them
-too. An alert raised while either change is saved is also discarded, and the
-security audit log records it as `notifications.pending_discarded`.
+Renaming a destination keeps its queued alerts, including an alert that is
+raised while the rename is saved. Replacing its URL discards its queued alerts
+instead of sending them to the new URL, and deleting it discards them too. An
+alert raised while either change is saved is also discarded, and the security
+audit log records it as `notifications.pending_discarded`. To rotate a
+credential, such as a webhook token, replace the destination's URL in the
+console.
 
 Scan changes, scan failures, cancellations, timeouts, stalled cycles, and
 recovery events can all generate notifications. Delivery is retried durably;
 terminal failures are visible in the console without exposing provider errors
 or destination secrets.
+
+### Notification URLs in config.yaml (deprecated)
+
+Earlier releases also read Shoutrrr URLs from `notifications.urls` and
+`notifications.urls_file` in config.yaml. These keys are deprecated, and a later
+release will refuse to start while either is set. `notifications.encryption_key_file`
+stays supported.
+
+On the first daemon start of this release, after the database migration and
+before any alert is sent, EdgeWatch imports each configured URL once as an
+encrypted destination on the **Notifications** page:
+
+- it is named after its console label, `Deployment destination`, with a number
+  added when that name is taken, and can then be renamed, paused, tested,
+  rotated, or deleted like any other destination;
+- the same database change moves every reference to it: job selections,
+  update-alert routing, alerts that are still queued (including alerts queued
+  under the URL's older digest-based ID), and its delivery health. Queued
+  alerts are still delivered, and jobs that use all enabled destinations keep
+  receiving alerts from the imported destinations;
+- the default `notification.key` is created next to the database if it does
+  not exist yet, as for the first destination added in the console. A
+  configured `notifications.encryption_key_file` is used instead.
+
+After the import, EdgeWatch no longer delivers to the URLs in config.yaml. Each
+start logs a warning while config.yaml still lists them, and `edgewatch health`
+reports `notification URLs in config.yaml were imported; remove them from
+config.yaml`. Remove `notifications.urls` and `notifications.urls_file` from
+config.yaml, and the URL file mount from compose.yaml. A URL that is added to
+or changed in config.yaml later is imported as an additional destination at
+the next start. An imported destination that you delete in the console is not
+recreated.
+
+The import is all or nothing. If it cannot complete, for example because the
+notification key is missing while encrypted destinations exist, or is
+unreadable or cannot decrypt them, nothing is imported and EdgeWatch keeps
+delivering to the configured URLs as before. The daemon still starts, logs the
+error without the URL, and `edgewatch health` reports `notification URLs in
+config.yaml could not be imported (<reason>); they are still delivered from
+config.yaml`. Fix the cause and restart to retry. The security audit log
+records a successful import as `notifications.config_imported`, with counts and
+destination IDs only.
+
+Only the daemon imports. Host commands such as `notify test` keep using the
+configured URLs until the daemon has imported them, and use the imported
+destinations afterwards. A backup taken before the import is imported again
+after it is restored.
+
+Until its import succeeds, a URL in config.yaml is a read-only deployment
+destination. Its ID follows its exact URL, so changing any part of the URL
+creates a new destination at the next restart, and alerts still queued for the
+old URL are not delivered. Jobs do not follow that change: EdgeWatch logs a
+warning that names the jobs whose routing selects a destination that no longer
+exists, each affected job shows a notice in the console, and saving the job
+editor removes the missing selection. After the import, change a URL by
+replacing it on the **Notifications** page instead; a changed URL in
+config.yaml only adds another destination.
 
 ## Users and public status
 
@@ -472,14 +515,17 @@ cannot re-publish a withdrawn page. API clients send the `updated_at` value from
 All runtime state lives in ./data, including:
 
 - edgewatch.db and SQLite sidecars;
-- notification.key for web-managed Shoutrrr URLs;
+- notification.key, which encrypts the notification destination URLs stored
+  in the database, including URLs imported from config.yaml;
 - auth.key for TOTP encryption when the default key location is used;
 - optional backups and exported baselines.
 
 Back up the complete ./data directory together with config.yaml and any
-separately mounted secret files. The backup command does not create missing
-directories, so create the backup directory first with the same owner as
-./data. For standard rootful Docker:
+separately mounted secret files. Notification credentials live encrypted in
+the database, so a database backup is only usable with its
+`notification.key`. The backup command does not create missing directories,
+so create the backup directory first with the same owner as ./data. For
+standard rootful Docker:
 
 ```console
 sudo install -d -m 0750 -o 0 -g 0 ./data/backups
@@ -537,7 +583,7 @@ The service therefore starts at once after a restore, and a repeated restore
 onto the stopped service is not refused. The active-daemon check reads only
 the lease in the database that is being replaced.
 
-The current schema is version 49. Database migrations are forward-only. An
+The current schema is version 50. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,
@@ -556,6 +602,11 @@ committed batch.
 Schema 49 records which revision of each web-managed destination last changed
 its credentials, so an alert raised during a rename is still queued. It is a
 quick in-place change with no background phase.
+
+Schema 50 records which notification URLs from config.yaml were imported as
+web-managed destinations, and the outcome of the import at each daemon start.
+It is a quick in-place change; the import itself runs once after the
+migration, as described in [Notifications](#notification-urls-in-configyaml-deprecated).
 
 ## Useful commands
 
@@ -584,6 +635,10 @@ docker compose exec edgewatch edgewatch history \
 docker compose exec edgewatch edgewatch notify test \
   --config /etc/edgewatch/config.yaml
 ```
+
+`health` exits non-zero when migrations or the daemon heartbeat are unhealthy.
+Its `warnings` list actions that do not stop EdgeWatch, such as removing
+imported notification URLs from config.yaml.
 
 `notify test` sends one test message to each enabled destination and prints
 the number of destinations `tested`, `failed`, and `locked`. It exits non-zero

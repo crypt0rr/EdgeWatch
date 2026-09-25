@@ -308,10 +308,27 @@ func New(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logge
 	return NewWithScannerPaths(cfg, s, nmapPath, "/usr/local/bin/naabu", logger)
 }
 
+// Options selects startup work that only the daemon performs.
+type Options struct {
+	// ImportNotificationURLs imports the notification URLs in config.yaml as
+	// encrypted web-managed destinations before the notifier loads its
+	// destinations. Host commands leave it unset, so they never import.
+	ImportNotificationURLs bool
+}
+
+// NewWithOptions is New with daemon-only startup work selected by options.
+func NewWithOptions(cfg *config.Config, s *store.Store, nmapPath string, logger *slog.Logger, options Options) (*App, error) {
+	return newApp(cfg, s, nmapPath, "/usr/local/bin/naabu", logger, options)
+}
+
 // NewWithScannerPaths is the production constructor used when the daemon
 // needs to locate both fixed scanner binaries. New remains the compatibility
 // entry point for tests and embedded callers that only know about Nmap.
 func NewWithScannerPaths(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logger *slog.Logger) (*App, error) {
+	return newApp(cfg, s, nmapPath, naabuPath, logger, Options{})
+}
+
+func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logger *slog.Logger, options Options) (*App, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -327,6 +344,15 @@ func NewWithScannerPaths(cfg *config.Config, s *store.Store, nmapPath, naabuPath
 		if err := notify.ValidateKeyFile(cfg.Notifications.EncryptionKeyFile); err != nil {
 			return nil, fmt.Errorf("validate notification encryption key file: %w", err)
 		}
+	}
+	if options.ImportNotificationURLs {
+		// The import runs before the notifier loads, so imported URLs are
+		// never registered as deployment destinations or queued for delivery.
+		if err := importConfiguredNotifications(context.Background(), cfg, s, logger); err != nil {
+			return nil, err
+		}
+	}
+	if cfg.Notifications.EncryptionKeyFile != "" {
 		// An explicitly configured path is operator-managed. It must already
 		// contain a valid key; the notifier only generates the default key next
 		// to the database when no override is configured.
@@ -367,6 +393,40 @@ func NewWithScannerPaths(cfg *config.Config, s *store.Store, nmapPath, naabuPath
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second, clock: time.Now}, nil
+}
+
+// importConfiguredNotifications imports the notification URLs in config.yaml
+// once and records the outcome for the health command and the console. Only
+// an invalid URL, which is invalid configuration, stops startup. When the
+// import fails, nothing is imported and the configured URLs keep delivering
+// as deployment destinations. Logs name counts and destination IDs only.
+func importConfiguredNotifications(ctx context.Context, cfg *config.Config, s *store.Store, logger *slog.Logger) error {
+	result, err := notify.ImportConfiguredURLs(ctx, s, cfg.Notifications.URLs, cfg.Notifications.EncryptionKeyFile)
+	state := store.NotificationConfigImport{Status: store.NotificationConfigImportNone, ConfiguredURLs: result.Configured, ImportedURLs: result.ImportedURLs()}
+	var importErr *notify.ConfigImportError
+	switch {
+	case errors.As(err, &importErr):
+		logger.Error("notification URLs in config.yaml could not be imported; they are still delivered from config.yaml", "error_code", importErr.Code, "error", importErr.Err, "configured_urls", result.Configured)
+		state.Status, state.ErrorCode = store.NotificationConfigImportFailed, importErr.Code
+	case err != nil:
+		return err
+	case result.Configured > 0:
+		state.Status = store.NotificationConfigImportImported
+	}
+	if len(result.Imported) > 0 {
+		ids := make([]string, 0, len(result.Imported))
+		for _, imported := range result.Imported {
+			ids = append(ids, imported.ID)
+		}
+		logger.Info("imported notification URLs from config.yaml as web-managed destinations", "imported", len(ids), "destination_ids", ids, "jobs_rerouted", len(result.ChangedJobs), "update_routing_changed", result.UpdateRoutingChanged, "pending_deliveries_moved", result.MovedDeliveries, "duplicate_deliveries_merged", result.MergedDeliveries)
+	}
+	if result.ImportedURLs() > 0 {
+		logger.Warn("notification URLs in config.yaml were imported as web-managed destinations and are no longer used; remove notifications.urls and notifications.urls_file from config.yaml, a later release refuses to start while they are set", "configured_urls", result.Configured, "imported_urls", result.ImportedURLs())
+	}
+	if recordErr := s.RecordNotificationConfigImport(ctx, state); recordErr != nil {
+		logger.Warn("notification import state could not be recorded for the health command", "error", recordErr)
+	}
+	return nil
 }
 
 // reportMissingNotificationDestinations warns about saved routing that no

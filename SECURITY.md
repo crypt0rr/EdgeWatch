@@ -100,7 +100,7 @@ If the key is lost or replaced, web-managed destinations become unavailable;
 they cannot be recovered from the database alone. Restore the original key and
 database together, or delete and recreate the affected destinations after
 confirming that the old credentials are revoked. A database upgraded to schema
-47 must not be opened by an older EdgeWatch binary; downgrade by restoring the
+48 must not be opened by an older EdgeWatch binary; downgrade by restoring the
 complete pre-upgrade `./data` backup before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
 refuse a schema newer than the binary supports before they write anything.

@@ -94,36 +94,13 @@ func (s *Store) BaselineHostProjectionExists(ctx context.Context, jobID string) 
 // in SQLite. Search is intentionally limited to the normalized projection
 // text, never the unbounded evidence JSON.
 func (s *Store) ListBaselineHostsPage(ctx context.Context, jobID, query, protocol string, hasOpen *bool, limit, offset int) (Page[ScanHost], error) {
-	limit, offset = normalizePage(limit, offset)
-	filter := buildHostFilter(query, protocol, hasOpen)
-	where := append([]string{"h.job_id=?"}, filter.where...)
-	args := append([]any{jobID}, filter.args...)
-	if filter.searchText != "" {
-		// Use the same bounded FTS document as scan and latest-host queries.
-		// The current job name is joined separately so renames are searchable
-		// without leaving stale names in the per-host projection.
-		var predicate string
-		var searchArg any
-		if len([]rune(filter.searchText)) < 3 {
-			predicate = `EXISTS (SELECT 1 FROM baseline_host_search WHERE baseline_host_search.content LIKE ? ESCAPE '\' AND baseline_host_search.job_id=h.job_id AND baseline_host_search.address=h.address)`
-			searchArg = "%" + escapeLikePattern(filter.searchText) + "%"
-		} else {
-			predicate = `EXISTS (SELECT 1 FROM baseline_host_search WHERE baseline_host_search MATCH ? AND baseline_host_search.job_id=h.job_id AND baseline_host_search.address=h.address)`
-			searchArg = hostSearchMatchQuery(filter.searchText)
-		}
-		where = append(where, "("+predicate+` OR lower(j.name) LIKE ? ESCAPE '\')`)
-		args = append(args, searchArg)
-		args = append(args, "%"+escapeLikePattern(filter.searchText)+"%")
-	}
+	queries := baselineHostsPageQueries(jobID, query, protocol, hasOpen, limit, offset)
 	var page Page[ScanHost]
 	reader := s.reader()
-	countQuery := `SELECT COUNT(*) FROM baseline_hosts h JOIN jobs j ON j.id=h.job_id WHERE ` + strings.Join(where, " AND ")
-	if err := reader.QueryRowContext(ctx, countQuery, args...).Scan(&page.Total); err != nil {
+	if err := reader.QueryRowContext(ctx, queries.countSQL, queries.countArg...).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	querySQL := `SELECT h.address,h.data_quality,h.host_json FROM baseline_hosts h JOIN jobs j ON j.id=h.job_id WHERE ` + strings.Join(where, " AND ") + ` ORDER BY h.address LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-	rows, err := reader.QueryContext(ctx, querySQL, args...)
+	rows, err := reader.QueryContext(ctx, queries.pageSQL, queries.pageArg...)
 	if err != nil {
 		return page, err
 	}
@@ -142,6 +119,40 @@ func (s *Store) ListBaselineHostsPage(ctx context.Context, jobID, query, protoco
 		page.Items = append(page.Items, item)
 	}
 	return page, rows.Err()
+}
+
+func baselineHostsPageQueries(jobID, query, protocol string, hasOpen *bool, limit, offset int) scanPageQueries {
+	limit, offset = normalizePage(limit, offset)
+	filter := buildHostFilter(query, protocol, hasOpen)
+	where := append([]string{"h.job_id=?"}, filter.where...)
+	args := append([]any{jobID}, filter.args...)
+	if filter.searchText != "" {
+		// Use the same bounded FTS document as scan and latest-host queries.
+		// The current job name is matched separately so renames are searchable
+		// without leaving stale names in the per-host projection. Search rows
+		// share the baseline_hosts rowid: a full-text query runs once and its
+		// rowids are joined, while the short-query LIKE fallback reads only the
+		// search row of each host in this job.
+		var predicate string
+		var searchArg any
+		if len([]rune(filter.searchText)) < 3 {
+			predicate = `EXISTS (SELECT 1 FROM baseline_host_search hs WHERE hs.rowid=h.rowid AND hs.content LIKE ? ESCAPE '\')`
+			searchArg = "%" + escapeLikePattern(filter.searchText) + "%"
+		} else {
+			predicate = `h.rowid IN (SELECT rowid FROM baseline_host_search WHERE baseline_host_search MATCH ?)`
+			searchArg = hostSearchMatchQuery(filter.searchText)
+		}
+		where = append(where, `(lower(j.name) LIKE ? ESCAPE '\' OR `+predicate+")")
+		args = append(args, "%"+escapeLikePattern(filter.searchText)+"%")
+		args = append(args, searchArg)
+	}
+	whereSQL := strings.Join(where, " AND ")
+	return scanPageQueries{
+		countSQL: `SELECT COUNT(*) FROM baseline_hosts h JOIN jobs j ON j.id=h.job_id WHERE ` + whereSQL,
+		countArg: append([]any(nil), args...),
+		pageSQL:  `SELECT h.address,h.data_quality,h.host_json FROM baseline_hosts h JOIN jobs j ON j.id=h.job_id WHERE ` + whereSQL + ` ORDER BY h.address LIMIT ? OFFSET ?`,
+		pageArg:  append(append([]any(nil), args...), limit, offset),
+	}
 }
 
 func (s *Store) GetBaselineHost(ctx context.Context, jobID, address string) (ScanHost, error) {

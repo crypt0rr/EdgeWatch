@@ -10,11 +10,11 @@ import type { JobForm, Protocol } from '../types'
 import type { ScannerCapabilities, ScannerProfile } from '../api'
 import { cidrWarning, duplicateTarget, targetKind } from '../target'
 import { ActionDialog } from '../components/ActionDialog'
+import { formatDateTime, getDisplayTimeZone } from '../format'
 
-const blank: JobForm = {
+const blank: Omit<JobForm, 'timezone'> = {
   name: '',
   schedule: '0 */6 * * *',
-  timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
   run_on_start: false,
   assume_alive: true,
   targets: [''],
@@ -27,6 +27,14 @@ const blank: JobForm = {
   allow_high_cost: false,
   enabled: true,
 }
+
+// New jobs default to the deployment timezone from config.yaml and otherwise
+// to the browser's timezone. Resolve it when the editor opens, after the
+// signed-in session has supplied the deployment setting.
+const newJobDefaults = (): JobForm => ({
+  ...blank,
+  timezone: getDisplayTimeZone() || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+})
 
 const defaultTCP = (): Protocol => ({
   ports: '1-65535',
@@ -62,7 +70,8 @@ export function JobEditor() {
   const notificationDestinations = useQuery({ queryKey: ['notifications'], queryFn: listNotificationDestinations, staleTime: 30_000 })
   const scannerProfiles = useQuery({ queryKey: ['scanner-profiles'], queryFn: () => listScannerProfiles(false), staleTime: 60_000 })
   const scannerCapabilityState = useQuery({ queryKey: ['scanner-capabilities'], queryFn: scannerCapabilities, staleTime: 5 * 60_000, retry: false })
-  const [targets, setTargets] = useState<string[]>(blank.targets)
+  const [defaults] = useState(newJobDefaults)
+  const [targets, setTargets] = useState<string[]>(defaults.targets)
   const [tcp, setTCP] = useState<Protocol | undefined>(() => defaultTCP())
   const [udp, setUDP] = useState<Protocol | undefined>()
   const [selectedNotificationIDs, setSelectedNotificationIDs] = useState<string[]>([])
@@ -72,13 +81,13 @@ export function JobEditor() {
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({})
   const [saving, setSaving] = useState(false)
   const [draftDirty, setDraftDirty] = useState(false)
-  const [suggestionInput, setSuggestionInput] = useState({ schedule: blank.schedule, timezone: blank.timezone })
+  const [suggestionInput, setSuggestionInput] = useState({ schedule: defaults.schedule, timezone: defaults.timezone })
   const [dismissedSuggestion, setDismissedSuggestion] = useState('')
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const [rebaselinePrompt, setRebaselinePrompt] = useState<{ values: JobFormFields; summary: string } | null>(null)
   const loadedRevision = useRef<{ id?: string; revision: number } | null>(null)
   const { register, handleSubmit, reset, watch, setValue, formState: { errors: formErrors, isDirty } } = useForm<JobFormFields>({
-    defaultValues: blank,
+    defaultValues: defaults,
     resolver: zodResolver(jobFormSchema),
   })
   const schedule = watch('schedule')
@@ -409,7 +418,7 @@ function presetFor(schedule: string) {
 function formatSuggestionTime(value: string) {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return 'the next scheduled run'
-  return date.toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+  return formatDateTime(date, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
 }
 
 function formatGap(minutes: number) {

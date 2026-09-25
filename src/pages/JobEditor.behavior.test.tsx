@@ -6,6 +6,7 @@ import { Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, createJob, getJob, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
 import { renderWithProviders } from '../test/test-utils'
+import { setDisplayTimeZone } from '../format'
 import { JobEditor } from './JobEditor'
 
 vi.mock('../api', async () => {
@@ -47,6 +48,24 @@ describe('job editor workflow coverage', () => {
     await waitFor(() => expect(createJob).toHaveBeenCalled())
     const payload = vi.mocked(createJob).mock.calls[0][0]
     expect(payload).toMatchObject({ name: 'Public edge', targets: ['198.51.100.10'], run_on_start: false, notification_destinations: [], tcp: { engine: 'naabu_nmap', ports: '1-65535' } })
+  })
+
+  it('defaults a new job to the deployment timezone from the session', async () => {
+    setDisplayTimeZone('Asia/Kathmandu')
+    try {
+      renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+      expect(screen.getByLabelText(/^Timezone/)).toHaveValue('Asia/Kathmandu')
+      await waitFor(() => expect(scheduleSuggestion).toHaveBeenCalledWith('0 */6 * * *', 'Asia/Kathmandu'))
+    } finally {
+      setDisplayTimeZone(undefined)
+    }
+  })
+
+  it("defaults a new job to the browser's timezone without a deployment timezone", async () => {
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    expect(screen.getByLabelText(/^Timezone/)).toHaveValue(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
   })
 
   it('validates target/protocol requirements before sending a request', async () => {

@@ -27,6 +27,17 @@ func (a *App) nowUTC() time.Time {
 	return time.Now().UTC()
 }
 
+// displayLocation is the timezone for human-readable times in notification
+// text. It follows config.timezone and keeps the previous UTC text otherwise.
+func (a *App) displayLocation() *time.Location {
+	if a.Config != nil {
+		if location, err := a.Config.Location(); err == nil && location != nil {
+			return location
+		}
+	}
+	return time.UTC
+}
+
 // checkJobSilence runs from the daemon heartbeat. It only evaluates enabled,
 // non-archived managed jobs and leaves the normal scan/change engine untouched.
 // A store transaction decides whether a job is overdue, active, or already
@@ -85,7 +96,7 @@ func (a *App) checkJobSilence(ctx context.Context, now time.Time) {
 				continue
 			}
 		}
-		event, created, err := a.Store.RecordJobSilenceAlert(ctx, record.ID, record.Job.Name, record.CreatedAt, now, threshold, destinations)
+		event, created, err := a.Store.RecordJobSilenceAlert(ctx, record.ID, record.Job.Name, record.CreatedAt, now.In(a.displayLocation()), threshold, destinations)
 		if err != nil {
 			a.silenceLogger().Warn("job silence watchdog failed", "job", record.Job.Name, "error", err)
 			continue

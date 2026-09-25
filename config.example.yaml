@@ -1,6 +1,13 @@
 database: /var/lib/edgewatch/edgewatch.db
 retention: 90d
 
+# Optional IANA timezone for this deployment. When set, daemon log timestamps,
+# CLI status times, times in notification messages, and every signed-in web
+# console follow it, and new jobs default to it. Omit it to keep UTC in the
+# container and each browser's own timezone in the console. Each job still
+# runs its schedule in its own timezone field.
+# timezone: Europe/Amsterdam
+
 # The administration UI is loopback-only. Access it on the Docker
 # host at http://127.0.0.1:8080 or through an SSH tunnel.
 web:

@@ -339,7 +339,18 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request, session store.S
 		writeError(w, http.StatusInternalServerError, "user_missing", "account could not be loaded", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user_id": user.ID, "username": user.Username, "display_name": user.DisplayName, "role": user.Role, "permissions": auth.PermissionsForRole(user.Role), "csrf_token": session.CSRFToken, "totp_enabled": user.TOTPEnabled, "password_requirements": auth.PasswordRequirements()})
+	writeJSON(w, http.StatusOK, map[string]any{"user_id": user.ID, "username": user.Username, "display_name": user.DisplayName, "role": user.Role, "permissions": auth.PermissionsForRole(user.Role), "csrf_token": session.CSRFToken, "totp_enabled": user.TOTPEnabled, "password_requirements": auth.PasswordRequirements(), "timezone": s.deploymentTimezone()})
+}
+
+// deploymentTimezone is the optional IANA zone from config.yaml. Signed-in
+// consoles render timestamps in it and use it as the default for new jobs; an
+// empty value keeps each browser's own timezone. It is deliberately absent
+// from unauthenticated and public-status responses.
+func (s *Server) deploymentTimezone() string {
+	if s == nil || s.App == nil || s.App.Config == nil {
+		return ""
+	}
+	return strings.TrimSpace(s.App.Config.Timezone)
 }
 
 const maxDisplayNameRunes = 80

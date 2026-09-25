@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -142,7 +143,7 @@ func run(args []string) error {
 	// Initialize the configured logger before opening the writable store so
 	// migration and resumable-backfill progress uses the same structured output
 	// as the rest of the daemon.
-	logger := newLogger(cfg.LogLevel())
+	logger := newLogger(cfg.LogLevel(), deploymentLocation(cfg))
 	var openStore func(string) (*store.Store, error)
 	switch {
 	case readOnlyCommand:
@@ -254,7 +255,14 @@ func usage() error {
 	return errors.New("invalid or missing command")
 }
 
-func newLogger(level string) *slog.Logger {
+func newLogger(level string, location *time.Location) *slog.Logger {
+	return newLoggerTo(os.Stdout, level, location)
+}
+
+// newLoggerTo builds the structured JSON logger. A configured deployment
+// timezone rewrites the record timestamp so daemon logs follow config.yaml
+// instead of the process timezone, which is UTC in the container image.
+func newLoggerTo(w io.Writer, level string, location *time.Location) *slog.Logger {
 	var minimum slog.Level
 	switch strings.ToLower(strings.TrimSpace(level)) {
 	case "debug":
@@ -266,7 +274,30 @@ func newLogger(level string) *slog.Logger {
 	default:
 		minimum = slog.LevelInfo
 	}
-	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: minimum}))
+	options := &slog.HandlerOptions{Level: minimum}
+	if location != nil {
+		options.ReplaceAttr = func(groups []string, attr slog.Attr) slog.Attr {
+			if len(groups) == 0 && attr.Key == slog.TimeKey && attr.Value.Kind() == slog.KindTime {
+				attr.Value = slog.TimeValue(attr.Value.Time().In(location))
+			}
+			return attr
+		}
+	}
+	return slog.New(slog.NewJSONHandler(w, options))
+}
+
+// deploymentLocation resolves config.timezone for host-side output. Recovery
+// commands load configuration without deployment validation, so an invalid
+// zone there keeps the previous formatting instead of blocking recovery.
+func deploymentLocation(cfg *config.Config) *time.Location {
+	if cfg == nil {
+		return nil
+	}
+	location, err := cfg.Location()
+	if err != nil {
+		return nil
+	}
+	return location
 }
 
 func adminAction(ctx context.Context, action string, s *store.Store, passwordFile string, confirmations ...bool) error {
@@ -447,7 +478,7 @@ func normalizedConfig(cfg *config.Config) map[string]any {
 	for _, j := range cfg.Jobs {
 		jobs = append(jobs, map[string]any{"name": j.Name, "schedule": j.Schedule, "timezone": j.Timezone, "targets": j.Targets, "security_hash": j.SecurityHash()})
 	}
-	return map[string]any{"valid": true, "version": cfg.Version, "database": cfg.Database, "web_listen": cfg.Web.Listen, "log_level": cfg.LogLevel(), "max_probe_count": cfg.Scheduler.MaxProbeCount, "max_naabu_probe_count": cfg.Scheduler.MaxNaabuProbeCount, "target_exclusions": append([]string(nil), cfg.Scanner.TargetExclusions...), "rdap_enabled": cfg.RDAPEnabled(), "updates_enabled": cfg.UpdatesEnabled(), "jobs": jobs, "legacy_jobs_inactive": len(jobs) > 0, "notification_destinations": len(cfg.Notifications.URLs)}
+	return map[string]any{"valid": true, "version": cfg.Version, "database": cfg.Database, "timezone": cfg.Timezone, "web_listen": cfg.Web.Listen, "log_level": cfg.LogLevel(), "max_probe_count": cfg.Scheduler.MaxProbeCount, "max_naabu_probe_count": cfg.Scheduler.MaxNaabuProbeCount, "target_exclusions": append([]string(nil), cfg.Scanner.TargetExclusions...), "rdap_enabled": cfg.RDAPEnabled(), "updates_enabled": cfg.UpdatesEnabled(), "jobs": jobs, "legacy_jobs_inactive": len(jobs) > 0, "notification_destinations": len(cfg.Notifications.URLs)}
 }
 
 func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, output string) error {
@@ -466,6 +497,7 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 		FailedDeliveries    int    `json:"failed_deliveries"`
 	}
 	var rows []row
+	display := deploymentLocation(cfg)
 	failedDeliveries, err := s.FailedDeliveries(ctx)
 	if err != nil {
 		return err
@@ -495,12 +527,12 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 			return listErr
 		} else if len(scans) == 1 {
 			entry.LastScanID, entry.LastScanStatus = scans[0].ID, scans[0].Status
-			entry.LastScanFinished = scans[0].FinishedAt.Format(time.RFC3339)
+			entry.LastScanFinished = statusTime(scans[0].FinishedAt, display)
 		}
 		location := statusLocation(record.Job.Timezone)
 		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 		if schedule, parseErr := parser.Parse(record.Job.Schedule); parseErr == nil {
-			entry.NextRun = schedule.Next(time.Now().In(location)).Format(time.RFC3339)
+			entry.NextRun = statusTime(schedule.Next(time.Now().In(location)), display)
 		}
 		rows = append(rows, entry)
 	}
@@ -527,12 +559,12 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 		} else if len(scans) == 1 {
 			entry.LastScanID = scans[0].ID
 			entry.LastScanStatus = scans[0].Status
-			entry.LastScanFinished = scans[0].FinishedAt.Format(time.RFC3339)
+			entry.LastScanFinished = statusTime(scans[0].FinishedAt, display)
 		}
 		location := statusLocation(j.Timezone)
 		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 		if schedule, parseErr := parser.Parse(j.Schedule); parseErr == nil {
-			entry.NextRun = schedule.Next(time.Now().In(location)).Format(time.RFC3339)
+			entry.NextRun = statusTime(schedule.Next(time.Now().In(location)), display)
 		}
 		rows = append(rows, entry)
 	}
@@ -540,6 +572,15 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 		return fmt.Errorf("unknown job %q", filter)
 	}
 	return printValue(output, rows)
+}
+
+// statusTime renders CLI status times in the configured deployment timezone.
+// Without one, it keeps the previous stored or schedule-local offset.
+func statusTime(value time.Time, display *time.Location) string {
+	if display != nil {
+		value = value.In(display)
+	}
+	return value.Format(time.RFC3339)
 }
 
 func statusLocation(timezone string) *time.Location {

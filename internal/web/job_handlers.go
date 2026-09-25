@@ -325,6 +325,11 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 	if !decodeJSON(w, r, &p) {
 		return
 	}
+	if strings.TrimSpace(p.Timezone) == "" {
+		// New jobs without an explicit schedule timezone follow config.yaml;
+		// without a deployment timezone, job normalization keeps UTC.
+		p.Timezone = s.deploymentTimezone()
+	}
 	defaultNewScannerProfile(&p)
 	job, err := p.config()
 	if err != nil {

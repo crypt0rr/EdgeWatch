@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { AlertTriangle, LockKeyhole } from 'lucide-react'
 
@@ -21,6 +21,8 @@ type ActionDialogProps = {
   secondaryPlaceholder?: string
   secondaryAutoComplete?: string
   error?: string
+  /** Extra content, such as a warning or a list of consequences, shown below the description. */
+  children?: ReactNode
 }
 
 const focusableSelector = [
@@ -56,6 +58,7 @@ export function ActionDialog({
   secondaryPlaceholder,
   secondaryAutoComplete,
   error,
+  children,
 }: ActionDialogProps) {
   const dialogRef = useRef<HTMLElement>(null)
   const valueRef = useRef<HTMLInputElement>(null)
@@ -170,6 +173,7 @@ export function ActionDialog({
       <div className={destructive ? 'action-dialog-icon destructive' : 'action-dialog-icon'}>{destructive ? <AlertTriangle size={19} /> : <LockKeyhole size={19} />}</div>
       <h2 id={titleID}>{title}</h2>
       <p id={descriptionID}>{description}</p>
+      {children && <div className="action-dialog-details">{children}</div>}
       <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{busy ? `${confirmLabel} in progress.` : ''}</div>
       <form className="action-dialog-form" onSubmit={event => { event.preventDefault(); void submit() }}>
         {valueLabel && <label>{valueLabel}<input ref={valueRef} type={valueType} value={value} onChange={event => { setValue(event.target.value); setValidationError('') }} placeholder={placeholder} autoComplete={autoComplete} aria-invalid={!!(validationError || error)} aria-describedby={validationError || error ? errorID : undefined} required={valueRequired} /></label>}

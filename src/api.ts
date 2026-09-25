@@ -105,10 +105,22 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (!response.ok) throw new APIError(body?.error?.message || 'Request failed', body?.error?.code, body?.error?.details)
   return body as T
 }
-export type Role = 'administrator' | 'operator' | 'viewer'
-export type SessionUser = { user_id: string; username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_enabled: boolean; password_requirements: { minimum_length: number }; timezone?: string }
+/** `platform_admin` is the business-unit main administrator, who has no unit. */
+export type Role = 'administrator' | 'operator' | 'viewer' | 'platform_admin'
+/** The roles an account inside a business unit can hold. */
+export type UnitRole = Exclude<Role, 'platform_admin'>
+/** A business unit as referenced from sessions, audit rows, and listings. */
+export type UnitRef = { id: string; name: string; slug: string }
+/**
+ * `scope` separates unit consoles from the platform (main administrator)
+ * console. `unit` is null for platform sessions, and `multi_unit` reports
+ * whether the deployment has business units enabled at all.
+ */
+export type SessionUser = { user_id: string; username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_enabled: boolean; password_requirements: { minimum_length: number }; timezone?: string; scope?: 'unit' | 'platform'; unit?: UnitRef | null; multi_unit?: boolean }
 export type AdminStatus = { configured?: boolean; username?: string; display_name?: string; role?: Role; permissions?: string[]; version: string; version_release_url?: string; legacy_yaml_jobs?: string[]; notification_destinations?: number; notifications?: NotificationStatus; retention?: string; max_concurrent_scans?: number; max_probe_count?: number; max_naabu_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number }; updates?: ApplicationUpdateStatus; telemetry?: DeploymentTelemetry }
-export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; public_dashboard_enabled?: boolean; password_requirements: { minimum_length: number } }>('/setup/status')
+// platform_setup_available is true after an upgrade to business units until
+// the first main administrator is created with a host-issued setup token.
+export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; public_dashboard_enabled?: boolean; password_requirements: { minimum_length: number }; multi_unit?: boolean; platform_setup_available?: boolean }>('/setup/status')
 export const adminStatus = () => api<AdminStatus>('/status')
 // The session carries the deployment timezone from config.yaml; apply it before
 // any signed-in page formats a timestamp.
@@ -120,6 +132,7 @@ export const getSession = async () => {
 export const recordActivity = () => api<void>('/auth/activity', { method: 'POST' })
 export const login = (password: string, otp?: string, recovery_code?: string, username = 'admin') => api<{ username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_required: boolean }>('/auth/login', { method: 'POST', body: JSON.stringify({ username, password, otp, recovery_code }) })
 export const setup = (token: string, password: string) => api('/setup', { method: 'POST', body: JSON.stringify({ token, password }) })
+export const platformSetup = (token: string, username: string, password: string) => api('/setup/platform', { method: 'POST', body: JSON.stringify({ token, username, password }) })
 export const activate = (token: string, password: string) => api('/auth/activate', { method: 'POST', body: JSON.stringify({ token, password }) })
 export const logout = () => api('/auth/logout', { method: 'POST' })
 export const logoutAllSessions = () => api('/auth/sessions', { method: 'DELETE' })
@@ -239,9 +252,71 @@ export const getPublicDashboardConfig = () => api<PublicDashboardConfig>('/publi
 // updated_at is the concurrency token from the loaded configuration; the
 // server rejects a save based on an older value with a 409 conflict.
 export const savePublicDashboardConfig = (value: { enabled: boolean; title: string; introduction: string; hosts: PublicDashboardHostSelection[]; updated_at: string }) => api<PublicDashboardConfig>('/public-dashboard', { method: 'PUT', body: JSON.stringify(value) })
-export async function getPublicDashboard(): Promise<PublicDashboard> {
-  const response = await fetch('/api/public/v1/dashboard', { credentials: 'omit' })
+// Without a slug the legacy public URL serves the default business unit.
+export async function getPublicDashboard(slug?: string): Promise<PublicDashboard> {
+  const response = await fetch(slug ? `/api/public/v1/dashboard/${encodeURIComponent(slug)}` : '/api/public/v1/dashboard', { credentials: 'omit' })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) throw new APIError(body?.error?.message || 'Public status is not available', body?.error?.code)
   return body as PublicDashboard
 }
+
+// Business units: platform (main administrator) API. None of these responses
+// carry job, scan, host, or incident data; the platform console only manages
+// units, their accounts, capacity, and deployment notification routing.
+export type BusinessUnitStatus = 'active' | 'disabled' | 'deleting' | 'deleted'
+export type UnitCapacity = { slot_cap: number; slots_in_use: number; queued: number; max_probe_count: number; max_naabu_probe_count: number }
+export type DeploymentLimits = { max_concurrent_scans: number; max_probe_count: number; max_naabu_probe_count: number; max_probe_count_limit: number }
+export type BusinessUnit = UnitRef & { status: BusinessUnitStatus; is_default: boolean; revision: number; created_at: string; updated_at: string; disabled_at?: string; accounts: number; administrators: number; pending_invitations: number; public_enabled: boolean; capacity: UnitCapacity; delete_progress?: number }
+export type EraseCategory = { key: string; label: string; detail: string }
+export type BusinessUnitDetail = BusinessUnit & { limits: DeploymentLimits; erase_categories: EraseCategory[] }
+export type UnitCapacityPatch = Pick<UnitCapacity, 'slot_cap' | 'max_probe_count' | 'max_naabu_probe_count'>
+export type UnitPatch = { revision: number; name?: string; slug?: string; capacity?: UnitCapacityPatch }
+export type UnitAccount = Omit<UserSummary, 'role'> & { role: UnitRole }
+export type AccountInvitation<T> = { user: T; activation_token: string; activation_path: string }
+export type PasswordResetLink = { activation_token: string; activation_path: string; expires_at: string; target_totp_enabled: boolean }
+export type DeploymentDestination = { id: string; name: string; provider: string; enabled: boolean }
+export type UnitNotificationAssignment = { revision: number; destinations: (DeploymentDestination & { assigned: boolean })[] }
+export type CapacityOverview = { version?: string; limits: DeploymentLimits; totals: { slots_in_use: number; queued: number; slot_caps: number }; units: (UnitRef & { status: BusinessUnitStatus; is_default: boolean; capacity: UnitCapacity })[] }
+export type AuditActorKind = 'unit' | 'platform' | 'host'
+export type AuditEntry = { id: number; at: string; action: string; category: 'platform' | 'account' | 'data'; actor: { kind: AuditActorKind; username?: string; display_name?: string }; unit?: UnitRef | null; target?: string; detail: string }
+export type AuditPage = { entries: AuditEntry[]; next_before: number | null }
+export type AuditQuery = { before?: number | null; limit?: number; unit?: string; action?: string; since?: string }
+
+const unitPath = (id: string) => `/platform/units/${encodeURIComponent(id)}`
+const accountPath = (id: string, accountID: string) => `${unitPath(id)}/accounts/${encodeURIComponent(accountID)}`
+export const listUnits = () => api<{ units: BusinessUnit[]; limits: DeploymentLimits }>('/platform/units')
+export const createUnit = (value: { name: string; slug?: string }) => api<BusinessUnit>('/platform/units', { method: 'POST', body: JSON.stringify(value) })
+export const getUnit = (id: string) => api<BusinessUnitDetail>(unitPath(id))
+export const updateUnit = (id: string, value: UnitPatch) => api<BusinessUnitDetail>(unitPath(id), { method: 'PATCH', body: JSON.stringify(value) })
+export const disableUnit = (id: string, password: string) => api<BusinessUnitDetail>(`${unitPath(id)}/disable`, { method: 'POST', body: JSON.stringify({ password }) })
+export const enableUnit = (id: string, password: string) => api<BusinessUnitDetail>(`${unitPath(id)}/enable`, { method: 'POST', body: JSON.stringify({ password }) })
+// Deleting requires a disabled unit, the typed unit name, and the caller's
+// password. The server answers with the unit in its "deleting" state and the
+// purge continues in the background; poll getUnit for delete_progress.
+export const deleteUnit = (id: string, confirmName: string, password: string) => api<BusinessUnitDetail>(unitPath(id), { method: 'DELETE', body: JSON.stringify({ confirm_name: confirmName, password }) })
+export const listUnitAccounts = (id: string) => api<{ accounts: UnitAccount[] }>(`${unitPath(id)}/accounts`)
+export const inviteUnitAccount = (id: string, value: { username: string; display_name: string; role: UnitRole; password: string }) => api<AccountInvitation<UnitAccount>>(`${unitPath(id)}/accounts`, { method: 'POST', body: JSON.stringify(value) })
+export const updateUnitAccount = (id: string, accountID: string, value: { role?: UnitRole; enabled?: boolean; revision: number; password: string }) => api<UnitAccount>(accountPath(id, accountID), { method: 'PATCH', body: JSON.stringify(value) })
+// Main administrators may only reset unit administrators (account recovery).
+export const resetUnitAccountPassword = (id: string, accountID: string, password: string) => api<PasswordResetLink>(`${accountPath(id, accountID)}/password-reset`, { method: 'POST', body: JSON.stringify({ password }) })
+export const revokeUnitAccountSessions = (id: string, accountID: string, password: string) => api<void>(`${accountPath(id, accountID)}/sessions`, { method: 'DELETE', body: JSON.stringify({ password }) })
+export const getUnitNotifications = (id: string) => api<UnitNotificationAssignment>(`${unitPath(id)}/notifications`)
+export const setUnitNotifications = (id: string, destinations: string[], revision: number) => api<UnitNotificationAssignment>(`${unitPath(id)}/notifications`, { method: 'PUT', body: JSON.stringify({ destinations, revision }) })
+export const listDeploymentNotifications = () => api<{ destinations: (DeploymentDestination & { units: UnitRef[] })[] }>('/platform/notifications')
+export const listPlatformAdmins = () => api<{ admins: UserSummary[] }>('/platform/admins')
+export const invitePlatformAdmin = (value: { username: string; display_name: string; password: string }) => api<AccountInvitation<UserSummary>>('/platform/admins', { method: 'POST', body: JSON.stringify(value) })
+export const platformCapacity = () => api<CapacityOverview>('/platform/capacity')
+
+// Audit pages use keyset pagination: pass the previous page's next_before to
+// load older rows. A null next_before means the oldest row was reached.
+function auditQuery(query: AuditQuery) {
+  const params = new URLSearchParams()
+  if (query.before != null) params.set('before', String(query.before))
+  params.set('limit', String(query.limit ?? 50))
+  if (query.unit) params.set('unit', query.unit)
+  if (query.action) params.set('action', query.action)
+  if (query.since) params.set('since', query.since)
+  return params.toString()
+}
+export const platformAudit = (query: AuditQuery = {}) => api<AuditPage>(`/platform/audit?${auditQuery(query)}`)
+export const unitAudit = (query: AuditQuery = {}) => api<AuditPage>(`/audit?${auditQuery(query)}`)

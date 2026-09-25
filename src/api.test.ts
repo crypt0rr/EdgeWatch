@@ -249,6 +249,81 @@ describe('authentication and public API contracts', () => {
   })
 })
 
+describe('business unit API contract', () => {
+  it('builds the platform routes with encoded IDs, methods, and write-only confirmations', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    setCSRF('csrf-token')
+    await apiRoutes.platformSetup('setup-token', 'morgan', 'main admin password')
+    await apiRoutes.listUnits()
+    await apiRoutes.createUnit({ name: 'Retail', slug: 'retail' })
+    await apiRoutes.getUnit('unit/1')
+    await apiRoutes.updateUnit('unit/1', { revision: 2, capacity: { slot_cap: 1, max_probe_count: 10, max_naabu_probe_count: 20 } })
+    await apiRoutes.disableUnit('unit/1', 'pw')
+    await apiRoutes.enableUnit('unit/1', 'pw')
+    await apiRoutes.deleteUnit('unit/1', 'Retail', 'pw')
+    await apiRoutes.listUnitAccounts('unit/1')
+    await apiRoutes.inviteUnitAccount('unit/1', { username: 'riley', display_name: 'Riley', role: 'administrator', password: 'pw' })
+    await apiRoutes.updateUnitAccount('unit/1', 'user/2', { role: 'viewer', revision: 3, password: 'pw' })
+    await apiRoutes.resetUnitAccountPassword('unit/1', 'user/2', 'pw')
+    await apiRoutes.revokeUnitAccountSessions('unit/1', 'user/2', 'pw')
+    await apiRoutes.getUnitNotifications('unit/1')
+    await apiRoutes.setUnitNotifications('unit/1', ['deploy-ops-slack'], 4)
+    await apiRoutes.listDeploymentNotifications()
+    await apiRoutes.listPlatformAdmins()
+    await apiRoutes.invitePlatformAdmin({ username: 'sam', display_name: 'Sam', password: 'pw' })
+    await apiRoutes.platformCapacity()
+    const calls = fetchMock.mock.calls.map(([url, init]) => `${init?.method ?? 'GET'} ${String(url)}`)
+    expect(calls).toEqual([
+      'POST /api/v1/setup/platform',
+      'GET /api/v1/platform/units',
+      'POST /api/v1/platform/units',
+      'GET /api/v1/platform/units/unit%2F1',
+      'PATCH /api/v1/platform/units/unit%2F1',
+      'POST /api/v1/platform/units/unit%2F1/disable',
+      'POST /api/v1/platform/units/unit%2F1/enable',
+      'DELETE /api/v1/platform/units/unit%2F1',
+      'GET /api/v1/platform/units/unit%2F1/accounts',
+      'POST /api/v1/platform/units/unit%2F1/accounts',
+      'PATCH /api/v1/platform/units/unit%2F1/accounts/user%2F2',
+      'POST /api/v1/platform/units/unit%2F1/accounts/user%2F2/password-reset',
+      'DELETE /api/v1/platform/units/unit%2F1/accounts/user%2F2/sessions',
+      'GET /api/v1/platform/units/unit%2F1/notifications',
+      'PUT /api/v1/platform/units/unit%2F1/notifications',
+      'GET /api/v1/platform/notifications',
+      'GET /api/v1/platform/admins',
+      'POST /api/v1/platform/admins',
+      'GET /api/v1/platform/capacity',
+    ])
+    expect(JSON.parse(String(fetchMock.mock.calls[7][1]?.body))).toEqual({ confirm_name: 'Retail', password: 'pw' })
+    expect(JSON.parse(String(fetchMock.mock.calls[14][1]?.body))).toEqual({ destinations: ['deploy-ops-slack'], revision: 4 })
+    expect(new Headers(fetchMock.mock.calls[7][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
+  })
+
+  it('pages both audit logs by keyset and forwards platform filters', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ entries: [], next_before: null }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    await apiRoutes.unitAudit()
+    await apiRoutes.unitAudit({ before: 51 })
+    await apiRoutes.platformAudit({ before: null, limit: 20, unit: 'unit-retail', action: 'user.', since: '2026-09-01' })
+    await apiRoutes.platformAudit()
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
+      '/api/v1/audit?limit=50',
+      '/api/v1/audit?before=51&limit=50',
+      '/api/v1/platform/audit?limit=20&unit=unit-retail&action=user.&since=2026-09-01',
+      '/api/v1/platform/audit?limit=50',
+    ])
+  })
+
+  it('requests a business unit public page by slug', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ title: 'Retail', hosts: [] }), { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+    await getPublicDashboard('retail stores')
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/public/v1/dashboard/retail%20stores')
+    expect(fetchMock.mock.calls[0][1]?.credentials).toBe('omit')
+  })
+})
+
 describe('session timezone contract', () => {
   afterEach(() => setDisplayTimeZone(undefined))
 

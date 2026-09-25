@@ -4,13 +4,13 @@ import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useLocation } from 'react-router-dom'
-import { APIError, adminStatus, acceptIncident, getSession, listIncidents, listJobs, login, logout, recordActivity, setupStatus, suppressIncident } from './api'
+import { APIError, adminStatus, acceptIncident, getSession, listIncidents, listJobs, listUnits, login, logout, platformCapacity, recordActivity, setupStatus, suppressIncident, unitAudit } from './api'
 import { AppContent, AuthRoutes, Incidents, Jobs, ProtectedApp, Shell } from './main'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, acceptIncident: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), login: vi.fn(), logout: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), suppressIncident: vi.fn() }
+  return { ...actual, acceptIncident: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listUnits: vi.fn(), login: vi.fn(), logout: vi.fn(), platformCapacity: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), suppressIncident: vi.fn(), unitAudit: vi.fn() }
 })
 
 class EventSourceStub {
@@ -309,6 +309,50 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByText(/Public status/i)).toBeInTheDocument())
     expect(setupStatus).toHaveBeenCalled()
     expect(getSession).not.toHaveBeenCalled()
+  })
+
+  it('mounts the platform console for main administrators and never the unit pages', async () => {
+    const limits = { max_concurrent_scans: 4, max_probe_count: 5_000_000, max_naabu_probe_count: 20_000_000, max_probe_count_limit: 100_000_000 }
+    vi.mocked(listUnits).mockResolvedValue({ limits, units: [] })
+    vi.mocked(platformCapacity).mockResolvedValue({ version: 'v0.18.145', limits, totals: { slots_in_use: 0, queued: 0, slot_caps: 0 }, units: [] })
+    vi.mocked(getSession).mockResolvedValue({ role: 'platform_admin', user_id: 'acct-morgan', username: 'morgan', display_name: 'Morgan Reyes', permissions: ['units.manage', 'platform_status.read', 'account.self'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, scope: 'platform', unit: null, multi_unit: true })
+    renderWithProviders(<><ProtectedApp onLogout={async () => {}} /><CurrentPath /></>, { route: ['/incidents'] })
+    await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent('/platform/units'))
+    expect(screen.getByText('Main administration')).toBeInTheDocument()
+    expect(screen.getByText('Morgan Reyes')).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Incidents' })).not.toBeInTheDocument()
+    expect(listIncidents).not.toHaveBeenCalled()
+    expect(listJobs).not.toHaveBeenCalled()
+    expect(adminStatus).not.toHaveBeenCalled()
+    expect(EventSourceStub.instances).toHaveLength(0)
+  })
+
+  it('shows the business unit chip and the read-only audit page to unit administrators', async () => {
+    vi.mocked(unitAudit).mockResolvedValue({ entries: [], next_before: null })
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'acct-riley', username: 'riley', permissions: ['jobs.read', 'audit.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, scope: 'unit', unit: { id: 'unit-retail', name: 'Retail', slug: 'retail' }, multi_unit: true })
+    renderWithProviders(<ProtectedApp onLogout={async () => {}} />, { route: ['/audit'] })
+    expect(await screen.findByRole('heading', { name: 'Audit' })).toBeInTheDocument()
+    expect(screen.getByTitle('Business unit: Retail')).toHaveTextContent('Retail')
+    expect(screen.getByRole('link', { name: 'Audit' })).toHaveClass('active')
+    await waitFor(() => expect(unitAudit).toHaveBeenCalledWith({ before: null }))
+    cleanup()
+
+    renderWithProviders(<><Shell displayName="Operator" role="operator" permissions={['jobs.read']} onLogout={vi.fn()} /><CurrentPath /></>, { route: ['/audit'] })
+    await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent('/jobs'))
+    expect(screen.queryByRole('link', { name: 'Audit' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Business unit')).not.toBeInTheDocument()
+  })
+
+  it('serves a business unit public page by slug without a session', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ title: 'Retail storefront status', introduction: '', updated_at: '2026-09-20T00:00:00Z', hosts: [] }) })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWithProviders(<AppContent />, { route: ['/public/retail/'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Retail storefront status' })).toBeInTheDocument())
+    expect(fetchMock).toHaveBeenCalledWith('/api/public/v1/dashboard/retail', { credentials: 'omit' })
+    expect(getSession).not.toHaveBeenCalled()
+    cleanup()
+    renderWithProviders(<AppContent />, { route: ['/public/r%C3%A9tail'] })
+    await waitFor(() => expect(fetchMock).toHaveBeenLastCalledWith('/api/public/v1/dashboard/r%C3%A9tail', { credentials: 'omit' }))
   })
 
   it('renders the application unavailable and login fallbacks', async () => {

@@ -4,7 +4,7 @@ import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { APIError, getPublicDashboard, getPublicDashboardConfig, listHosts, savePublicDashboardConfig } from '../api'
+import { APIError, getPublicDashboard, getPublicDashboardConfig, getSession, listHosts, savePublicDashboardConfig } from '../api'
 import type { PublicDashboard, PublicDashboardConfig } from '../api'
 import type { GlobalHostsResponse } from '../types'
 import { limitUnicode, PublicDashboard as PublicDashboardView, PublicDashboardAdmin } from './PublicDashboard'
@@ -20,6 +20,7 @@ vi.mock('../api', () => ({
   },
   getPublicDashboard: vi.fn(),
   getPublicDashboardConfig: vi.fn(),
+  getSession: vi.fn(),
   listHosts: vi.fn(),
   savePublicDashboardConfig: vi.fn(),
 }))
@@ -77,6 +78,7 @@ describe('public dashboard pages', () => {
     vi.mocked(getPublicDashboardConfig).mockResolvedValue(publicConfig)
     vi.mocked(listHosts).mockResolvedValue(pickerResponse)
     vi.mocked(savePublicDashboardConfig).mockResolvedValue({ ...publicConfig, enabled: true })
+    vi.mocked(getSession).mockResolvedValue({ user_id: 'admin', username: 'admin', role: 'administrator', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
   })
 
   afterEach(() => {
@@ -113,6 +115,26 @@ describe('public dashboard pages', () => {
     expect(container.querySelector('h1')?.textContent).toBe('Public status unavailable')
     expect(container.textContent).toContain('temporarily rate limited')
     expect(container.querySelector('a[href="/login"]')).toBeTruthy()
+  })
+
+  it('loads a business unit page by slug and explains unknown addresses', async () => {
+    vi.mocked(getPublicDashboard).mockRejectedValue(new APIError('No public status page exists at this address.', 'not_found'))
+    await renderPage(<PublicDashboardView slug="old-slug" />)
+    expect(getPublicDashboard).toHaveBeenCalledWith('old-slug')
+    expect(container.textContent).toContain('No public status page exists at this address. The link may have changed.')
+  })
+
+  it('previews the legacy public URL without business units and the unit URL with them', async () => {
+    await renderPage(<PublicDashboardAdmin />)
+    const preview = () => Array.from(container.querySelectorAll('a')).find(link => link.textContent?.includes('Preview public page')) as HTMLAnchorElement
+    await vi.waitFor(() => expect(getSession).toHaveBeenCalled())
+    expect(preview().getAttribute('href')).toBe('/public')
+    act(() => root.unmount())
+    queryClient.clear()
+    root = createRoot(container)
+    vi.mocked(getSession).mockResolvedValue({ user_id: 'riley', username: 'riley', role: 'administrator', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, scope: 'unit', unit: { id: 'unit-retail', name: 'Retail', slug: 'retail' }, multi_unit: true })
+    await renderPage(<PublicDashboardAdmin />)
+    await vi.waitFor(() => expect(preview().getAttribute('href')).toBe('/public/retail'), { timeout: 1000 })
   })
 
   it('limits public text by Unicode code points rather than UTF-16 units', () => {

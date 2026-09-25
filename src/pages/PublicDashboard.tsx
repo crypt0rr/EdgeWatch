@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Globe2, LockKeyhole, ShieldCheck } from 'lucide-react'
-import { APIError, getPublicDashboard, getPublicDashboardConfig, listHosts, savePublicDashboardConfig } from '../api'
+import { APIError, getPublicDashboard, getPublicDashboardConfig, getSession, listHosts, savePublicDashboardConfig } from '../api'
 import { Pagination } from '../components/Pagination'
 import { formatDateTime } from '../format'
 
@@ -19,7 +19,9 @@ export function singleLine(value: string) {
 }
 
 export function PublicDashboardAdmin() {
-  const client = useQueryClient(); const [hostOffset, setHostOffset] = useState(0); const config = useQuery({ queryKey: ['public-dashboard-config'], queryFn: getPublicDashboardConfig }); const hosts = useQuery({ queryKey: ['hosts', 'public-picker', hostOffset], queryFn: () => listHosts({ limit: 100, offset: hostOffset }) }); const [draft, setDraft] = usePublicDraft(config.data)
+  const client = useQueryClient(); const [hostOffset, setHostOffset] = useState(0); const config = useQuery({ queryKey: ['public-dashboard-config'], queryFn: getPublicDashboardConfig }); const session = useQuery({ queryKey: ['session'], queryFn: getSession })
+  // With business units each unit publishes at /public/<slug>.
+  const publicPath = session.data?.multi_unit && session.data.unit ? `/public/${encodeURIComponent(session.data.unit.slug)}` : '/public'; const hosts = useQuery({ queryKey: ['hosts', 'public-picker', hostOffset], queryFn: () => listHosts({ limit: 100, offset: hostOffset }) }); const [draft, setDraft] = usePublicDraft(config.data)
   // The draft carries the loaded updated_at token. If another administrator
   // saved in the meantime the server answers 409; reload the current state so
   // a stale draft can never silently re-publish or change the page.
@@ -29,7 +31,7 @@ export function PublicDashboardAdmin() {
   const pickerHosts = hosts.data?.hosts ?? []
   const activeHosts = pickerHosts.filter(host => !host.archived)
   const archivedHosts = pickerHosts.filter(host => host.archived)
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Administration</p><h1>Public status</h1><p className="muted">Publish a small, unauthenticated highlights page for explicitly selected hosts.</p></div><Globe2 className="muted-icon" size={24} /></div><div className="legacy-banner"><LockKeyhole size={17} /><span><strong>Exposure warning.</strong> Published ports and ownership metadata are visible without a login. Private addresses never trigger an external registry lookup.</span></div>{save.isSuccess && <div className="success-banner" role="status">Public view saved.</div>}{save.error && <div className="form-error banner" role="alert">{isConflict(save.error) ? 'Another administrator changed the public view. The current settings were reloaded; review them and save again.' : save.error instanceof Error ? save.error.message : 'Could not save public view'}</div>}<div className="panel"><div className="settings-form"><label className="checkbox-label" htmlFor="public-status-enabled"><input id="public-status-enabled" type="checkbox" checked={draft.enabled} onChange={event => setDraft(value => ({ ...value, enabled: event.target.checked }))} /><span>Enable public status page</span></label><label>Title<input value={draft.title} onChange={event => setDraft(value => ({ ...value, title: limitUnicode(event.target.value, PUBLIC_TITLE_MAX_LENGTH) }))} /></label><label>Introduction<textarea value={draft.introduction} onChange={event => setDraft(value => ({ ...value, introduction: limitUnicode(singleLine(event.target.value), PUBLIC_INTRODUCTION_MAX_LENGTH) }))} rows={3} /><small>Shown as one paragraph. Line breaks are not allowed and become spaces.</small></label></div></div><div className="panel"><div className="panel-heading"><div><h2>Published hosts</h2><p className="muted">Select individual effective IPs. New DNS or CIDR results are not published automatically.</p></div><ShieldCheck className="muted-icon" size={20} /></div>{hosts.isLoading ? <div className="loading"><span className="spinner" />Loading hosts…</div> : hosts.error ? <div className="error-card" role="alert">Could not load scanned hosts.</div> : <>{activeHosts.length ? <PublicHostPickerGroup title="Active jobs" description="Hosts from scheduled, paused, or newly configured jobs." hosts={activeHosts} draft={draft} onChange={setDraft} /> : <div className="inline-empty">No hosts from active jobs.</div>}{archivedHosts.length ? <PublicHostPickerGroup title="Archived jobs" description="Historical host results retained from archived jobs. Archived hosts are no longer published to the public page." hosts={archivedHosts} draft={draft} onChange={setDraft} /> : null}<Pagination page={hosts.data?.pagination} onChange={setHostOffset} /></>}</div><div className="heading-actions"><button type="button" className="button primary" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : 'Save public view'}</button><a className="button secondary" href="/public" target="_blank" rel="noreferrer">Preview public page ↗</a></div></section>
+  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Administration</p><h1>Public status</h1><p className="muted">Publish a small, unauthenticated highlights page for explicitly selected hosts.</p></div><Globe2 className="muted-icon" size={24} /></div><div className="legacy-banner"><LockKeyhole size={17} /><span><strong>Exposure warning.</strong> Published ports and ownership metadata are visible without a login. Private addresses never trigger an external registry lookup.</span></div>{save.isSuccess && <div className="success-banner" role="status">Public view saved.</div>}{save.error && <div className="form-error banner" role="alert">{isConflict(save.error) ? 'Another administrator changed the public view. The current settings were reloaded; review them and save again.' : save.error instanceof Error ? save.error.message : 'Could not save public view'}</div>}<div className="panel"><div className="settings-form"><label className="checkbox-label" htmlFor="public-status-enabled"><input id="public-status-enabled" type="checkbox" checked={draft.enabled} onChange={event => setDraft(value => ({ ...value, enabled: event.target.checked }))} /><span>Enable public status page</span></label><label>Title<input value={draft.title} onChange={event => setDraft(value => ({ ...value, title: limitUnicode(event.target.value, PUBLIC_TITLE_MAX_LENGTH) }))} /></label><label>Introduction<textarea value={draft.introduction} onChange={event => setDraft(value => ({ ...value, introduction: limitUnicode(singleLine(event.target.value), PUBLIC_INTRODUCTION_MAX_LENGTH) }))} rows={3} /><small>Shown as one paragraph. Line breaks are not allowed and become spaces.</small></label></div></div><div className="panel"><div className="panel-heading"><div><h2>Published hosts</h2><p className="muted">Select individual effective IPs. New DNS or CIDR results are not published automatically.</p></div><ShieldCheck className="muted-icon" size={20} /></div>{hosts.isLoading ? <div className="loading"><span className="spinner" />Loading hosts…</div> : hosts.error ? <div className="error-card" role="alert">Could not load scanned hosts.</div> : <>{activeHosts.length ? <PublicHostPickerGroup title="Active jobs" description="Hosts from scheduled, paused, or newly configured jobs." hosts={activeHosts} draft={draft} onChange={setDraft} /> : <div className="inline-empty">No hosts from active jobs.</div>}{archivedHosts.length ? <PublicHostPickerGroup title="Archived jobs" description="Historical host results retained from archived jobs. Archived hosts are no longer published to the public page." hosts={archivedHosts} draft={draft} onChange={setDraft} /> : null}<Pagination page={hosts.data?.pagination} onChange={setHostOffset} /></>}</div><div className="heading-actions"><button type="button" className="button primary" disabled={save.isPending} onClick={() => save.mutate()}>{save.isPending ? 'Saving…' : 'Save public view'}</button><a className="button secondary" href={publicPath} target="_blank" rel="noreferrer">Preview public page ↗</a></div></section>
 }
 
 function PublicHostPickerGroup({ title, description, hosts, draft, onChange }: { title: string; description: string; hosts: Awaited<ReturnType<typeof listHosts>>['hosts']; draft: PublicDraft; onChange: React.Dispatch<React.SetStateAction<PublicDraft>> }) {
@@ -57,15 +59,19 @@ function useStateFromValue<T>(value: T | undefined, fallback: T) {
   return [state, setState] as const
 }
 
-export function PublicDashboard() {
-  const dashboard = useQuery({ queryKey: ['public-dashboard'], queryFn: getPublicDashboard, retry: false })
+/** `slug` selects a business unit's page (/public/<slug>); without it the default unit is shown. */
+export function PublicDashboard({ slug }: { slug?: string } = {}) {
+  const dashboard = useQuery({ queryKey: ['public-dashboard', slug ?? ''], queryFn: () => getPublicDashboard(slug), retry: false })
   if (dashboard.isLoading) return <div className="public-page loading"><span className="spinner" />Loading public status…</div>
   if (dashboard.error || !dashboard.data) {
-    const message = dashboard.error instanceof APIError && dashboard.error.code === 'rate_limited'
+    const code = dashboard.error instanceof APIError ? dashboard.error.code : undefined
+    const message = code === 'rate_limited'
       ? 'Public status is temporarily rate limited. Please try again shortly.'
-      : dashboard.error instanceof APIError && dashboard.error.code === 'public_disabled'
+      : code === 'public_disabled'
         ? 'This status page is not enabled by the administrator.'
-        : 'The public status page could not be loaded. Please try again shortly.'
+        : code === 'not_found'
+          ? 'No public status page exists at this address. The link may have changed.'
+          : 'The public status page could not be loaded. Please try again shortly.'
     return <main className="public-page"><div className="public-empty"><h1>Public status unavailable</h1><p>{message}</p><a className="button secondary" href="/login">Administrator sign in</a></div></main>
   }
   const value = dashboard.data

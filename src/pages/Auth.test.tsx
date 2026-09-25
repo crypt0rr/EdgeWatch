@@ -5,12 +5,13 @@ import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { activate, login, setCSRF, setup, setupStatus } from '../api'
+import { activate, login, platformSetup, setCSRF, setup, setupStatus } from '../api'
 import { Activate, Login, Setup } from './Auth'
 
 vi.mock('../api', () => ({
   activate: vi.fn(),
   login: vi.fn(),
+  platformSetup: vi.fn(),
   setCSRF: vi.fn(),
   setup: vi.fn(),
   setupStatus: vi.fn(),
@@ -215,6 +216,48 @@ describe('authentication pages', () => {
     expect(activate).toHaveBeenCalledWith('old-token', 'correct horse battery staple')
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('invalid or expired')
     expect(window.location.href).not.toContain('old-token')
+  })
+
+  it('creates the first main administrator with the platform setup variant', async () => {
+    vi.mocked(setupStatus).mockResolvedValue({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 }, multi_unit: true, platform_setup_available: true })
+    vi.mocked(platformSetup).mockRejectedValueOnce(new Error('The setup token is invalid or has expired.')).mockResolvedValueOnce(undefined)
+    await renderPage(<Setup />, '/setup')
+    await vi.waitFor(() => expect(container.querySelector('h1')?.textContent).toBe('Create the main administrator'))
+    expect(container.textContent).toContain('edgewatch admin platform-setup-token')
+    const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
+    const submit = async () => {
+      await act(async () => {
+        submitForm(container.querySelector('form') as HTMLFormElement)
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+    }
+    setInputValue(inputs[0], ' platform-token ')
+    await submit()
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Choose a username')
+    setInputValue(inputs[1], ' morgan ')
+    setInputValue(inputs[2], 'short')
+    await submit()
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('at least 12 characters')
+    setInputValue(inputs[2], 'correct horse battery staple')
+    setInputValue(inputs[3], 'different password')
+    await submit()
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Passwords do not match')
+    expect(platformSetup).not.toHaveBeenCalled()
+    setInputValue(inputs[3], 'correct horse battery staple')
+    await submit()
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('invalid or has expired')
+    await submit()
+    expect(platformSetup).toHaveBeenLastCalledWith('platform-token', 'morgan', 'correct horse battery staple')
+    expect(setup).not.toHaveBeenCalled()
+    expect(container.querySelector('[data-testid="location"]')?.textContent).toBe('/login')
+  })
+
+  it('points to platform setup from the sign-in page until a main administrator exists', async () => {
+    vi.mocked(setupStatus).mockResolvedValue({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 }, multi_unit: true, platform_setup_available: true })
+    await renderPage(<Login />, '/login')
+    await vi.waitFor(() => expect(container.textContent).toContain('no main administrator exists yet'))
+    expect(container.querySelector('a[href="/setup"]')?.textContent).toBe('Create the main administrator')
   })
 
   it('announces setup and activation failures accessibly', async () => {

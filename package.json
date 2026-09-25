@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "node scripts/check-node-runtime.mjs && vite --host 127.0.0.1",
+    "dev:prototype": "node scripts/check-node-runtime.mjs && vite --mode prototype --host 127.0.0.1",
     "build": "node scripts/check-node-runtime.mjs && tsc --noEmit && tsc --noEmit -p tsconfig.node.json && node scripts/build-frontend.mjs",
     "lint": "node scripts/check-node-runtime.mjs && tsc --noEmit",
     "test": "node scripts/check-node-runtime.mjs && vitest run",

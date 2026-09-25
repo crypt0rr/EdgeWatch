@@ -1,9 +1,13 @@
-import { StrictMode, useEffect, useRef, useState } from 'react'
+import { StrictMode, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Activity, ArrowUp, Bell, Boxes, ClipboardList, Code2, Gauge, Globe2, LogOut, Menu, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
-import { acceptIncident, adminStatus, APIError, getSession, listIncidents, listJobs, recordActivity, setCSRF, setupStatus, suppressIncident, logout as apiLogout } from './api'
+import { Activity, ArrowUp, Bell, Boxes, Building2, ClipboardList, Code2, Gauge, Globe2, LogOut, Menu, ScrollText, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
+import { acceptIncident, adminStatus, APIError, getSession, listIncidents, listJobs, setCSRF, setupStatus, suppressIncident, logout as apiLogout } from './api'
+import type { UnitRef } from './api'
+import { useActivityHeartbeat, useNavigationDrawer } from './components/navigation'
+import { Audit } from './pages/Audit'
+import { PlatformShell } from './pages/platform/PlatformShell'
 import { Dashboard } from './pages/Dashboard'
 import { JobEditor } from './pages/JobEditor'
 import { JobDetail } from './pages/JobDetail'
@@ -32,24 +36,6 @@ export function createQueryClient() {
   return new QueryClient({ defaultOptions: { queries: { staleTime: 5000, refetchOnWindowFocus: true } } })
 }
 const queryClient = createQueryClient()
-const navigationFocusableSelector = 'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
-
-function useIsMobile() {
-  const [mobile, setMobile] = useState(() => typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(max-width: 760px)').matches)
-  useEffect(() => {
-    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return
-    const media = window.matchMedia('(max-width: 760px)')
-    const update = () => setMobile(media.matches)
-    update()
-    if (media.addEventListener) media.addEventListener('change', update)
-    else media.addListener?.(update)
-    return () => {
-      if (media.removeEventListener) media.removeEventListener('change', update)
-      else media.removeListener?.(update)
-    }
-  }, [])
-  return mobile
-}
 
 /**
  * The application shell is exported so it can be exercised with a jsdom
@@ -57,13 +43,10 @@ function useIsMobile() {
  * makes the entrypoint side-effect free in tests while preserving the single
  * embedded SPA bundle in production.
  */
-export function Shell({ displayName, role, permissions, onLogout }: { displayName: string; role: Role; permissions: string[]; onLogout: () => void }) {
-  const [open, setOpen] = useState(false)
+export function Shell({ displayName, role, permissions, onLogout, unit }: { displayName: string; role: Role; permissions: string[]; onLogout: () => void; unit?: UnitRef | null }) {
   const [liveState, setLiveState] = useState<'connecting' | 'live' | 'reconnecting'>('connecting')
-  const isMobile = useIsMobile()
-  const menuButtonRef = useRef<HTMLButtonElement>(null)
-  const drawerRef = useRef<HTMLElement>(null)
-  const wasOpenRef = useRef(false)
+  const { open, setOpen, isMobile, menuButtonRef, drawerRef } = useNavigationDrawer()
+  useActivityHeartbeat()
   const location = useLocation()
   const client = useQueryClient()
   const hasPermission = (permission: string) => permissions.includes(permission)
@@ -75,76 +58,6 @@ export function Shell({ displayName, role, permissions, onLogout }: { displayNam
   const incidentSummary = useQuery({ queryKey: ['incidents', 'navigation'], queryFn: () => listIncidents(0, 1), refetchInterval: 15000, enabled: hasPermission('incidents.read') })
   const incidentCount = incidentSummary.data?.pagination.total ?? 0
   const incidentCountUnavailable = incidentSummary.isError
-  useEffect(() => {
-    if (!isMobile && open) setOpen(false)
-  }, [isMobile, open])
-  useEffect(() => {
-    if (!isMobile || !open) return
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => { document.body.style.overflow = previousOverflow }
-  }, [isMobile, open])
-  useEffect(() => {
-    if (!isMobile) {
-      wasOpenRef.current = false
-      return
-    }
-    if (open && !wasOpenRef.current) {
-      const first = drawerRef.current?.querySelector<HTMLElement>(navigationFocusableSelector)
-      first?.focus({ preventScroll: true })
-    } else if (!open && wasOpenRef.current) {
-      menuButtonRef.current?.focus({ preventScroll: true })
-    }
-    wasOpenRef.current = open
-  }, [isMobile, open])
-  useEffect(() => {
-    let lastSentAt = Number.NEGATIVE_INFINITY
-    const noteActivity = () => {
-      const now = Date.now()
-      if (now - lastSentAt < 60_000) return
-      lastSentAt = now
-      // Activity refresh is best-effort; normal API reads remain independent
-      // of this short, coalesced session write.
-      void recordActivity().catch(() => undefined)
-    }
-    const activityEvents = ['pointerdown', 'click', 'keydown', 'wheel'] as const
-    activityEvents.forEach(event => document.addEventListener(event, noteActivity, { passive: true }))
-    return () => {
-      activityEvents.forEach(event => document.removeEventListener(event, noteActivity))
-    }
-  }, [])
-  useEffect(() => {
-    if (!isMobile || !open) return
-    const drawer = drawerRef.current
-    function focusables() {
-      return Array.from(drawer?.querySelectorAll<HTMLElement>(navigationFocusableSelector) ?? [])
-    }
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') {
-        event.preventDefault()
-        setOpen(false)
-        return
-      }
-      if (event.key !== 'Tab') return
-      const items = focusables()
-      if (!items.length) {
-        event.preventDefault()
-        return
-      }
-      const first = items[0]
-      const last = items[items.length - 1]
-      const active = document.activeElement
-      if (event.shiftKey && (active === first || !drawer?.contains(active))) {
-        event.preventDefault()
-        last.focus()
-      } else if (!event.shiftKey && (active === last || !drawer?.contains(active))) {
-        event.preventDefault()
-        first.focus()
-      }
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [isMobile, open])
   useEffect(() => {
     if (!hasPermission('stream.read')) return
     const stream = new EventSource('/api/v1/stream')
@@ -229,6 +142,7 @@ export function Shell({ displayName, role, permissions, onLogout }: { displayNam
     ...(hasPermission('incidents.read') ? [{ to: '/incidents', label: 'Incidents', icon: Activity }] : []),
     ...(hasPermission('notifications.manage') ? [{ to: '/notifications', label: 'Notifications', icon: Bell }] : []),
     ...(hasPermission('users.manage') ? [{ to: '/users', label: 'Users', icon: UserRound }] : []),
+    ...(hasPermission('audit.read') ? [{ to: '/audit', label: 'Audit', icon: ScrollText }] : []),
     ...(hasPermission('public_dashboard.manage') ? [{ to: '/public-dashboard', label: 'Public status', icon: Globe2 }] : []),
     ...(hasPermission('scanner_profiles.read') ? [{ to: '/scanner-profiles', label: 'Scanner profiles', icon: Code2 }] : []),
     { to: '/security', label: 'Security', icon: ShieldCheck },
@@ -237,11 +151,12 @@ export function Shell({ displayName, role, permissions, onLogout }: { displayNam
   return <div className="app-shell">
     <aside id="primary-navigation" ref={drawerRef} role={isMobile && open ? 'dialog' : undefined} aria-label="Primary navigation" aria-modal={isMobile && open ? true : undefined} aria-hidden={isMobile ? !open : undefined} inert={isMobile ? !open : undefined} className={open ? 'sidebar open' : 'sidebar'}>
       <div className="brand"><span className="brand-mark"><Wifi size={19} /></span><span>EdgeWatch</span><button type="button" className="drawer-close" aria-label="Close navigation" onClick={() => setOpen(false)}><X size={19} /></button></div>
+      {unit && <div className="unit-chip" title={`Business unit: ${unit.name}`}><Building2 size={15} aria-hidden="true" /><span><small>Business unit</small><strong>{unit.name}</strong></span></div>}
       <nav>{links.map(({ to, label, icon: Icon }) => { const active = location.pathname === to || (to === '/jobs' && location.pathname.startsWith('/jobs')) || (to === '/hosts' && location.pathname.startsWith('/scans/')); const incidents = to === '/incidents'; const attention = incidents && (incidentCountUnavailable || incidentCount > 0); return <Link key={to} to={to} onClick={() => setOpen(false)} aria-label={incidents ? 'Incidents' : undefined} aria-describedby={attention ? 'active-incident-count' : undefined} className={`nav-link${active ? ' active' : ''}${attention ? ' nav-link-alert' : ''}`}><Icon size={18} /><span className="nav-link-label">{label}</span>{attention && <span id="active-incident-count" className={`nav-count${incidentCountUnavailable ? ' nav-count-error' : ''}`} aria-live="polite" aria-label={incidentCountUnavailable ? 'Active incident count unavailable; retrying' : `${incidentCount} active incident${incidentCount === 1 ? '' : 's'}`} title={incidentCountUnavailable ? 'Active incident count unavailable; retrying' : undefined}>{incidentCountUnavailable ? '?' : incidentCount > 99 ? '99+' : incidentCount}</span>}</Link> })}</nav>
       <div className="sidebar-bottom"><div className="user-chip"><span className="avatar">{displayName.trim().charAt(0).toUpperCase() || 'A'}</span><span><small className="app-version">{versionReleaseURL ? <a className="version-link" href={versionReleaseURL} target="_blank" rel="noopener noreferrer" aria-label={`Release notes for EdgeWatch ${version}`} title={`Release notes for EdgeWatch ${version}`}>EdgeWatch {version}</a> : <>EdgeWatch {version}</>}{updateAvailable && update.release_url && <a className="version-update" href={update.release_url} target="_blank" rel="noopener noreferrer" aria-label={`Update available: ${version} to ${update.latest_version ?? 'new release'}`} title={`Update available: ${version} to ${update.latest_version ?? 'new release'}`}><ArrowUp size={13} aria-hidden="true" /></a>}</small><strong>{displayName}</strong><small>{role === 'administrator' ? 'Administrator' : role === 'operator' ? 'Operator' : 'Viewer · read only'}</small></span></div><button className="nav-link quiet" onClick={onLogout}><LogOut size={17} />Sign out</button></div>
     </aside>
     {open && isMobile && <button type="button" aria-label="Close navigation" tabIndex={-1} className="backdrop" onClick={() => setOpen(false)} />}
-    <main className="main" inert={isMobile && open ? true : undefined} aria-hidden={isMobile && open ? true : undefined}><header className="topbar"><button ref={menuButtonRef} type="button" aria-label={open ? 'Close navigation' : 'Open navigation'} aria-controls="primary-navigation" aria-expanded={isMobile ? open : false} className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><nav className="breadcrumb" title={breadcrumb} aria-label={`Breadcrumb: ${breadcrumb}`}>{breadcrumb}</nav><div className="topbar-actions"><span className="status-dot"><i /> {liveState === 'live' ? 'Live updates' : liveState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}</span><Bell size={18} /></div></header><div className="content"><Routes><Route path="/" element={hasPermission('overview.read') ? <Dashboard /> : <Navigate to="/jobs" replace />} /><Route path="/highlights" element={hasPermission('overview.read') ? <PublicDashboard /> : <Navigate to="/jobs" replace />} /><Route path="/jobs" element={hasPermission('jobs.read') ? <Jobs /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/new" element={hasPermission('jobs.write') ? <JobEditor /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/:id/scans/:scanId" element={hasPermission('scans.read') ? <JobDetail /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/:id" element={hasPermission('jobs.read') ? <JobDetail /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/:id/edit" element={hasPermission('jobs.write') ? <JobEditor /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/:id/baseline" element={hasPermission('baselines.read') ? <BaselineHosts /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/:id/baseline/hosts/:address" element={hasPermission('baselines.read') ? <HostDetail /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/:id/scans/:scanId/hosts/:address" element={hasPermission('scans.read') ? <HostDetail /> : <Navigate to="/jobs" replace />} /><Route path="/hosts" element={hasPermission('hosts.read') ? <Hosts /> : <Navigate to="/jobs" replace />} /><Route path="/scans/:scanId" element={hasPermission('scans.read') ? <ScanDetail /> : <Navigate to="/jobs" replace />} /><Route path="/scans/:scanId/hosts/:address" element={hasPermission('scans.read') ? <HostDetail /> : <Navigate to="/jobs" replace />} /><Route path="/incidents" element={hasPermission('incidents.read') ? <Incidents /> : <Navigate to="/jobs" replace />} /><Route path="/notifications" element={hasPermission('notifications.manage') ? <Notifications /> : <Navigate to="/jobs" replace />} /><Route path="/users" element={hasPermission('users.manage') ? <Users /> : <Navigate to="/jobs" replace />} /><Route path="/public-dashboard" element={hasPermission('public_dashboard.manage') ? <PublicDashboardAdmin /> : <Navigate to="/jobs" replace />} /><Route path="/scanner-profiles" element={hasPermission('scanner_profiles.read') ? <ScannerProfiles /> : <Navigate to="/jobs" replace />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to={hasPermission('overview.read') ? '/' : '/jobs'} replace />} /></Routes></div></main>
+    <main className="main" inert={isMobile && open ? true : undefined} aria-hidden={isMobile && open ? true : undefined}><header className="topbar"><button ref={menuButtonRef} type="button" aria-label={open ? 'Close navigation' : 'Open navigation'} aria-controls="primary-navigation" aria-expanded={isMobile ? open : false} className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><nav className="breadcrumb" title={breadcrumb} aria-label={`Breadcrumb: ${breadcrumb}`}>{breadcrumb}</nav><div className="topbar-actions"><span className="status-dot"><i /> {liveState === 'live' ? 'Live updates' : liveState === 'reconnecting' ? 'Reconnecting…' : 'Connecting…'}</span><Bell size={18} /></div></header><div className="content"><Routes><Route path="/" element={hasPermission('overview.read') ? <Dashboard /> : <Navigate to="/jobs" replace />} /><Route path="/highlights" element={hasPermission('overview.read') ? <PublicDashboard /> : <Navigate to="/jobs" replace />} /><Route path="/jobs" element={hasPermission('jobs.read') ? <Jobs /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/new" element={hasPermission('jobs.write') ? <JobEditor /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/:id/scans/:scanId" element={hasPermission('scans.read') ? <JobDetail /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/:id" element={hasPermission('jobs.read') ? <JobDetail /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/:id/edit" element={hasPermission('jobs.write') ? <JobEditor /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/:id/baseline" element={hasPermission('baselines.read') ? <BaselineHosts /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/:id/baseline/hosts/:address" element={hasPermission('baselines.read') ? <HostDetail /> : <Navigate to="/jobs" replace />} /><Route path="/jobs/:id/scans/:scanId/hosts/:address" element={hasPermission('scans.read') ? <HostDetail /> : <Navigate to="/jobs" replace />} /><Route path="/hosts" element={hasPermission('hosts.read') ? <Hosts /> : <Navigate to="/jobs" replace />} /><Route path="/scans/:scanId" element={hasPermission('scans.read') ? <ScanDetail /> : <Navigate to="/jobs" replace />} /><Route path="/scans/:scanId/hosts/:address" element={hasPermission('scans.read') ? <HostDetail /> : <Navigate to="/jobs" replace />} /><Route path="/incidents" element={hasPermission('incidents.read') ? <Incidents /> : <Navigate to="/jobs" replace />} /><Route path="/notifications" element={hasPermission('notifications.manage') ? <Notifications /> : <Navigate to="/jobs" replace />} /><Route path="/users" element={hasPermission('users.manage') ? <Users /> : <Navigate to="/jobs" replace />} /><Route path="/audit" element={hasPermission('audit.read') ? <Audit /> : <Navigate to="/jobs" replace />} /><Route path="/public-dashboard" element={hasPermission('public_dashboard.manage') ? <PublicDashboardAdmin /> : <Navigate to="/jobs" replace />} /><Route path="/scanner-profiles" element={hasPermission('scanner_profiles.read') ? <ScannerProfiles /> : <Navigate to="/jobs" replace />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to={hasPermission('overview.read') ? '/' : '/jobs'} replace />} /></Routes></div></main>
   </div>
 }
 
@@ -346,7 +261,11 @@ function IncidentActions({ row, busy, acceptID, suppressID, onAction }: { row: I
   return <div className="incident-actions"><button className="button secondary" type="button" onClick={() => onAction(row, 'accept')} disabled={!key || !!busy}>{busy === acceptID ? 'Accepting…' : 'Accept change'}</button><button className="button ghost" type="button" onClick={() => onAction(row, 'suppress')} disabled={!key || !!busy}>{busy === suppressID ? 'Suppressing…' : 'Suppress 1 scan'}</button></div>
 }
 
-export function ProtectedApp({ onLogout }: { onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate]); if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; return <Shell displayName={session.data?.display_name ?? session.data?.username ?? 'admin'} role={session.data?.role ?? 'viewer'} permissions={session.data?.permissions ?? []} onLogout={onLogout} /> }
+export function ProtectedApp({ onLogout }: { onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate]); if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; const displayName = session.data?.display_name ?? session.data?.username ?? 'admin'; const permissions = session.data?.permissions ?? []
+  // A main administrator gets the platform console, which never mounts the
+  // unit pages (jobs, hosts, incidents); unit routes redirect to its units.
+  if (session.data?.scope === 'platform') return <PlatformShell displayName={displayName} permissions={permissions} onLogout={onLogout} />
+  return <Shell displayName={displayName} role={session.data?.role ?? 'viewer'} permissions={permissions} onLogout={onLogout} unit={session.data?.multi_unit ? session.data.unit : null} /> }
 
 export function AuthRoutes({ configured }: { configured: boolean }) { const location = useLocation(); return <Routes><Route path="/setup" element={<Setup />} /><Route path="/activate" element={<Activate />} /><Route path="/login" element={<Login />} /><Route path="*" element={configured ? <Navigate to="/login" replace state={{ from: { pathname: location.pathname, search: location.search } }} /> : <Navigate to="/setup" replace />} /></Routes> }
 
@@ -355,7 +274,11 @@ export function App() { return <BrowserRouter><AppContent /></BrowserRouter> }
 export function AppContent() {
   const location = useLocation()
   const client = useQueryClient()
-  const isPublic = location.pathname === '/public' || location.pathname === '/public/'
+  // /public serves the default business unit; /public/<slug> serves a unit's
+  // own public status page.
+  const publicMatch = /^\/public(?:\/([^/]+))?\/?$/.exec(location.pathname)
+  const isPublic = !!publicMatch
+  const publicSlug = publicMatch?.[1] ? decodePathSegment(publicMatch[1]) : undefined
   const [signedOut, setSignedOut] = useState(false)
   // The public highlights page is deliberately independent of setup/session
   // state. This avoids an unnecessary authenticated request and keeps the
@@ -381,13 +304,17 @@ export function AppContent() {
     try { await apiLogout() } catch { /* The server clears the cookie before reporting audit errors. */ }
     finally { setCSRF(''); client.clear(); client.setQueryData(['session'], null); setSignedOut(true) }
   }
-  if (isPublic) return <PublicDashboard />
+  if (isPublic) return <PublicDashboard slug={publicSlug} />
   if (status.isLoading || session.isLoading) return <Loading />
   if (status.error) return <ErrorCard message="Unable to contact EdgeWatch. Retry when the service is available." />
   return status.data?.configured && authenticated ? <ProtectedApp onLogout={handleLogout} /> : <AuthGate statusConfigured={!!status.data?.configured} />
 }
 
 function AuthGate({ statusConfigured }: { statusConfigured: boolean }) { return <AuthRoutes configured={statusConfigured} /> }
+
+function decodePathSegment(value: string) {
+  try { return decodeURIComponent(value) } catch { return value }
+}
 
 function Loading() { return <div className="loading"><span className="spinner" />Loading EdgeWatch…</div> }
 function ErrorCard({ message }: { message: string }) { return <div className="error-card">{message}</div> }

@@ -1430,6 +1430,25 @@ func (s *Store) ExpireScanCycles(ctx context.Context, now time.Time) (int64, err
 	}
 }
 
+// ExpireScanCycle ends one active cycle whose resume window has elapsed at
+// now and returns the cycle's current record. ExpireScanCycles skips a cycle
+// whose job holds a live lease, so the scan that holds the lease uses this to
+// record the expiry on its own trigger. A cycle that is still inside its
+// window, or that is no longer active, is returned unchanged.
+func (s *Store) ExpireScanCycle(ctx context.Context, cycleID string, now time.Time) (ScanCycleRecord, error) {
+	stamp := sqliteTimestamp(now)
+	result, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='expired',updated_at=?,finished_at=?,last_error='scan cycle exceeded its resume window' WHERE id=? AND status IN ('running','paused','stalled') AND expires_at<=?`, stamp, stamp, cycleID, stamp)
+	if err != nil {
+		return ScanCycleRecord{}, err
+	}
+	if changed, _ := result.RowsAffected(); changed == 1 {
+		// The terminal state is already durable. As in StartScanCycleAttempt,
+		// payload cleanup is best effort and the retention pass retries it.
+		_ = s.clearExpiredCyclePayloads(ctx, []string{cycleID})
+	}
+	return s.GetScanCycle(ctx, cycleID)
+}
+
 func expiredScanCycleIDs(ctx context.Context, tx *sql.Tx, stamp string) ([]string, error) {
 	// A cycle with a live job lease is still being worked, even if its resume
 	// window has elapsed. The scan owner renews its lease through finalization;

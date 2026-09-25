@@ -931,6 +931,17 @@ func upsertRuntimeBaselineMetaTx(ctx context.Context, tx *sql.Tx, jobID string, 
 	return err
 }
 
+// runtimeBaselineEpochTx reads the job's baseline epoch on the caller's
+// transaction. A job without runtime metadata is at epoch zero.
+func runtimeBaselineEpochTx(ctx context.Context, tx *sql.Tx, jobID string) (int64, error) {
+	var epoch int64
+	err := tx.QueryRowContext(ctx, `SELECT COALESCE(baseline_epoch,0) FROM job_runtime_meta WHERE job_id=?`, jobID).Scan(&epoch)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return epoch, err
+}
+
 func bumpRuntimeBaselineEpochTx(ctx context.Context, tx *sql.Tx, jobID string) error {
 	result, err := tx.ExecContext(ctx, `UPDATE job_runtime_meta SET baseline_epoch=baseline_epoch+1 WHERE job_id=?`, jobID)
 	if err != nil {

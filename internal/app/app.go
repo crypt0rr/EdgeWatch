@@ -106,6 +106,11 @@ var ErrScanWorkBudget = errors.New("estimated scan work exceeds the configured p
 // to retry the checkpointed cycle explicitly.
 var ErrScanCycleStalled = errors.New("scan cycle is stalled; manual retry required")
 
+// ErrQueuedRunSkipped reports that a managed run did not start because its job
+// was archived, or paused for a scheduled run, while the run waited for a scan
+// slot.
+var ErrQueuedRunSkipped = errors.New("queued run skipped")
+
 const (
 	scanPersistenceTimeoutFloor   = 10 * time.Second
 	scanPersistenceTimeoutPerHost = 25 * time.Millisecond
@@ -403,7 +408,8 @@ func (a *App) RunJob(ctx context.Context, job config.Job) (model.Scan, []model.E
 
 // RunJobRecord executes a web-managed job revision. The record is passed by
 // value so a concurrent edit cannot change the configuration of an in-flight
-// scan.
+// scan. If the job is edited while the run waits for a scan slot, the run
+// starts with the edited revision instead; see queuedManagedJob.
 func (a *App) RunJobRecord(ctx context.Context, record store.JobRecord) (model.Scan, []model.Event, error) {
 	return a.runJobRecord(ctx, record, true)
 }
@@ -417,6 +423,30 @@ func (a *App) runJobRecord(ctx context.Context, record store.JobRecord, manual b
 		return model.Scan{}, nil, errors.New("archived jobs cannot run")
 	}
 	return a.runJob(ctx, record.Job, record.ID, record.Revision, true, manual)
+}
+
+// queuedManagedJob returns the job definition a managed run starts with once
+// it holds a scan slot. A queued run holds no job lease, so an operator can
+// edit the job while the run waits. The run then uses the current revision
+// rather than failing the lease's revision check and disappearing. A job that
+// was archived, or paused for a scheduled run, is skipped with
+// ErrQueuedRunSkipped. The lease still checks the returned revision, so a
+// definition that changes again before the scan starts never runs.
+func (a *App) queuedManagedJob(ctx context.Context, job config.Job, jobID string, revision int64, manual bool) (config.Job, int64, error) {
+	current, err := a.Store.GetJob(ctx, jobID)
+	if err != nil {
+		return job, revision, err
+	}
+	if current.Revision == revision {
+		return job, revision, nil
+	}
+	if current.Archived {
+		return job, revision, fmt.Errorf("%w: job was archived while the run waited for a scan slot", ErrQueuedRunSkipped)
+	}
+	if !manual && !current.Enabled {
+		return job, revision, fmt.Errorf("%w: job was paused while the run waited for a scan slot", ErrQueuedRunSkipped)
+	}
+	return current.Job, current.Revision, nil
 }
 
 // BeginRun binds the application's asynchronous work to parent. The returned
@@ -570,12 +600,18 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	case <-ctx.Done():
 		return model.Scan{}, nil, ctx.Err()
 	}
+	if managed {
+		var queuedErr error
+		if job, revision, queuedErr = a.queuedManagedJob(ctx, job, jobID, revision, manual); queuedErr != nil {
+			return model.Scan{}, nil, queuedErr
+		}
+	}
 	estimate, err := a.CheckScanWorkBudget(job)
 	if err != nil {
 		return model.Scan{}, nil, err
 	}
 	if managed && !manual {
-		if cycle, cycleErr := a.Store.GetActiveScanCycle(ctx, jobID); cycleErr == nil && cycle.Status == "stalled" {
+		if cycle, cycleErr := a.Store.GetActiveScanCycle(ctx, jobID); cycleErr == nil && cycle.Status == "stalled" && !cycleResumeWindowElapsed(cycle, time.Now().UTC()) {
 			return model.Scan{}, nil, ErrScanCycleStalled
 		}
 	}
@@ -1320,6 +1356,10 @@ func (a *App) startManagedScheduled(ctx context.Context, id string) {
 		}
 		if errors.Is(runErr, ErrScanCycleStalled) {
 			a.Logger.Warn("scheduled run skipped because resumable cycle is stalled; manual retry required", "job", record.Job.Name)
+			return
+		}
+		if errors.Is(runErr, ErrQueuedRunSkipped) {
+			a.Logger.Info("scheduled run skipped", "job", record.Job.Name, "reason", runErr)
 			return
 		}
 		if runErr != nil {

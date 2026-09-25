@@ -424,6 +424,12 @@ Deleting a web-managed destination removes it from every job and from the
 update-alert routing in the same change. Each affected job gets a new revision
 and an audit record.
 
+Renaming a web-managed destination keeps its queued alerts, including an alert
+that is raised while the rename is saved. Replacing its URL discards its queued
+alerts instead of sending them to the new URL, and deleting it discards them
+too. An alert raised while either change is saved is also discarded, and the
+security audit log records it as `notifications.pending_discarded`.
+
 Scan changes, scan failures, cancellations, timeouts, stalled cycles, and
 recovery events can all generate notifications. Delivery is retried durably;
 terminal failures are visible in the console without exposing provider errors
@@ -531,7 +537,7 @@ The service therefore starts at once after a restore, and a repeated restore
 onto the stopped service is not refused. The active-daemon check reads only
 the lease in the database that is being replaced.
 
-The current schema is version 48. Database migrations are forward-only. An
+The current schema is version 49. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,
@@ -546,6 +552,10 @@ Schema 48 rebuilds the baseline host search index at startup in bounded,
 resumable batches. While it runs, `edgewatch health` reports the
 `host-search:baseline_hosts` phase, and a restart resumes after the last
 committed batch.
+
+Schema 49 records which revision of each web-managed destination last changed
+its credentials, so an alert raised during a rename is still queued. It is a
+quick in-place change with no background phase.
 
 ## Useful commands
 
@@ -574,6 +584,12 @@ docker compose exec edgewatch edgewatch history \
 docker compose exec edgewatch edgewatch notify test \
   --config /etc/edgewatch/config.yaml
 ```
+
+`notify test` sends one test message to each enabled destination and prints
+the number of destinations `tested`, `failed`, and `locked`. It exits non-zero
+when a send fails or when an enabled web-managed destination is locked because
+its notification key is missing, replaced, or unreadable, so it can confirm a
+restored key. Paused destinations are not tested.
 
 Each `status` row has a `state`: `scheduled`, `paused`, `archived`, or `legacy`
 for an inactive YAML job. Only scheduled jobs have a `next_run`. Commands print

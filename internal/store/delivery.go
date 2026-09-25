@@ -89,13 +89,19 @@ func (s *Store) QueueEvent(ctx context.Context, destination string, event model.
 	}
 	defer func() { _ = tx.Rollback() }()
 	if strings.HasPrefix(destination, "managed:") {
-		valid, validationErr := managedDestinationCurrentTx(ctx, tx, destination)
-		if validationErr != nil {
-			return validationErr
+		key, reason, resolveErr := resolveManagedIntentTx(ctx, tx, destination)
+		if resolveErr != nil {
+			return resolveErr
 		}
-		if !valid {
+		if key == "" {
+			var discarded managedIntentDiscards
+			discarded.add(destination, reason, 1)
+			if err := discarded.audit(ctx, tx); err != nil {
+				return err
+			}
 			return tx.Commit()
 		}
+		destination = key
 	}
 	now := time.Now().UTC()
 	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, destination, b, now.Format(time.RFC3339Nano))

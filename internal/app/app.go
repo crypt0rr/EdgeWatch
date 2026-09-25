@@ -1553,6 +1553,10 @@ func (a *App) WakeDelivery() {
 	a.wakeDelivery()
 }
 
+// deliveryPassWindow bounds how long one delivery pass claims and dispatches
+// notifications. Sends that have already started are not bounded by it.
+const deliveryPassWindow = 90 * time.Second
+
 func (a *App) startDeliveryWorker(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
 	go func() {
@@ -1562,14 +1566,14 @@ func (a *App) startDeliveryWorker(ctx context.Context) <-chan struct{} {
 		defer ticker.Stop()
 		drain := func() {
 			defer a.recoverBackgroundPanic("notification-delivery")
-			// Four batches of four-worker sends may each spend the provider's
-			// 15-second timeout plus the cancellation grace period. Keep the
-			// worker deadline above that bounded worst case so a healthy queue is
-			// not abandoned halfway through a pass; the next tick still provides
-			// a safety net for unusually slow stores/providers.
-			passCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-			defer cancel()
-			if err := a.Notifier.Drain(passCtx); err != nil && !errors.Is(err, context.Canceled) {
+			// The pass window only stops the pass from claiming and dispatching
+			// more deliveries, so a provider outage cannot monopolize the worker;
+			// the next wake or tick drains the rest. A send that has already
+			// started finishes under the daemon context and its own provider
+			// timeout, so a slow but healthy provider is never killed by the
+			// window and charged an indeterminate 30-minute deferral. Shutdown
+			// still cancels in-flight sends.
+			if err := a.Notifier.DrainWithin(ctx, deliveryPassWindow); err != nil && !errors.Is(err, context.Canceled) {
 				a.Logger.Warn("notification delivery deferred for retry", "error", err)
 			}
 		}

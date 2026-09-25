@@ -102,7 +102,9 @@ type Notifier struct {
 func New(s *store.Store, urls []string) (*Notifier, error) {
 	keyPath := ""
 	if s != nil {
-		keyPath = DefaultKeyPath(s.Path)
+		// Use the normalized database file, not the DSN: a file: URI in
+		// s.Path would otherwise place the key under the working directory.
+		keyPath = keyPathBeside(s.FilePath())
 	}
 	return newWithKeyFile(s, urls, keyPath, true)
 }
@@ -888,15 +890,37 @@ func (n *Notifier) Queue(ctx context.Context, events []model.Event) error {
 	return nil
 }
 
+// Drain delivers due notifications. Cancelling ctx stops dispatch and also
+// ends in-flight sends after the cancellation grace period, deferring them as
+// indeterminate. Use DrainWithin to bound a pass without cutting off sends.
 func (n *Notifier) Drain(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if err := lockContext(ctx, &n.drainMu); err != nil {
+	return n.drain(ctx, ctx)
+}
+
+// DrainWithin runs one delivery pass that claims and dispatches deliveries for
+// at most window. The window bounds only dispatch: a send that has already
+// started keeps running under ctx and its own provider timeout, so a slow but
+// healthy provider is neither cut off nor charged an indeterminate deferral
+// when the window closes. Claimed deliveries that were not dispatched are
+// released without consuming a retry budget. Cancelling ctx, for example at
+// shutdown, still ends in-flight sends as Drain does.
+func (n *Notifier) DrainWithin(ctx context.Context, window time.Duration) error {
+	dispatchCtx, cancel := context.WithTimeout(ctx, window)
+	defer cancel()
+	return n.drain(ctx, dispatchCtx)
+}
+
+// drain claims and dispatches deliveries until dispatchCtx ends, and runs each
+// dispatched send under sendCtx. dispatchCtx must be sendCtx or derived from it.
+func (n *Notifier) drain(sendCtx, dispatchCtx context.Context) error {
+	if err := lockContext(dispatchCtx, &n.drainMu); err != nil {
 		return err
 	}
 	defer n.drainMu.Unlock()
-	if err := n.Reload(ctx); err != nil {
+	if err := n.Reload(dispatchCtx); err != nil {
 		return err
 	}
 	destinations := n.destinationSnapshot()
@@ -904,30 +928,30 @@ func (n *Notifier) Drain(ctx context.Context) error {
 	pausedDestinations := n.pausedDestinationKeys()
 	excludedDestinations := append(append([]string{}, lockedDestinations...), pausedDestinations...)
 	if n.Store != nil {
-		if err := n.Store.WakeLockedDeliveries(ctx, destinationSnapshotKeys(destinations)); err != nil {
+		if err := n.Store.WakeLockedDeliveries(dispatchCtx, destinationSnapshotKeys(destinations)); err != nil {
 			return err
 		}
-		if err := n.Store.AgeLockedDeliveries(ctx, lockedDestinations); err != nil {
+		if err := n.Store.AgeLockedDeliveries(dispatchCtx, lockedDestinations); err != nil {
 			return err
 		}
 	}
 	var all []error
 	for batch := 0; batch < notificationMaxBatches; batch++ {
-		if ctx.Err() != nil {
+		if dispatchCtx.Err() != nil {
 			break
 		}
 		// A bounded pass drains several batches so a burst of events does not
 		// wait for multiple 30-second worker ticks. The batch and pass limits
 		// keep provider latency from starving scans and schedule reconciliation.
-		deliveries, err := n.Store.ClaimDueDeliveriesExcluding(ctx, notificationBatchSize, uuid.NewString(), excludedDestinations)
+		deliveries, err := n.Store.ClaimDueDeliveriesExcluding(dispatchCtx, notificationBatchSize, uuid.NewString(), excludedDestinations)
 		if err != nil {
 			return errors.Join(append(all, err)...)
 		}
 		if len(deliveries) == 0 {
 			break
 		}
-		all = append(all, n.deliverBatch(ctx, deliveries, destinations)...)
-		if ctx.Err() != nil {
+		all = append(all, n.deliverBatch(sendCtx, dispatchCtx, deliveries, destinations)...)
+		if dispatchCtx.Err() != nil {
 			break
 		}
 	}
@@ -943,7 +967,10 @@ func destinationSnapshotKeys(destinations map[string]string) []string {
 	return keys
 }
 
-func (n *Notifier) deliverBatch(ctx context.Context, deliveries []store.Delivery, destinations map[string]string) []error {
+// deliverBatch hands deliveries to the workers until dispatchCtx ends and
+// runs each send under sendCtx. Deliveries that were not handed to a worker
+// are released without consuming a retry budget.
+func (n *Notifier) deliverBatch(sendCtx, dispatchCtx context.Context, deliveries []store.Delivery, destinations map[string]string) []error {
 	workers := notificationWorkers
 	if len(deliveries) < workers {
 		workers = len(deliveries)
@@ -962,15 +989,19 @@ func (n *Notifier) deliverBatch(ctx context.Context, deliveries []store.Delivery
 				// A panic in notifier/store glue is just as capable of leaking a
 				// claim as a provider panic. Convert it into a redacted terminal
 				// delivery result so one bad row cannot kill the worker goroutine.
-				results <- n.deliverOneSafe(ctx, delivery, destinations)
+				results <- n.deliverOneSafe(sendCtx, delivery, destinations)
 			}
 		}()
 	}
 	var unsent []store.Delivery
 	for _, delivery := range deliveries {
+		if dispatchCtx.Err() != nil {
+			unsent = append(unsent, delivery)
+			continue
+		}
 		select {
 		case jobs <- delivery:
-		case <-ctx.Done():
+		case <-dispatchCtx.Done():
 			unsent = append(unsent, delivery)
 		}
 	}
@@ -984,9 +1015,9 @@ func (n *Notifier) deliverBatch(ctx context.Context, deliveries []store.Delivery
 		}
 	}
 	for _, delivery := range unsent {
-		// The caller cancelled before this delivery reached a worker. Return the
+		// Dispatch ended before this delivery reached a worker. Return the
 		// claim without consuming either the provider-attempt or deferral budget.
-		if err := n.releaseClaimWithoutBudget(ctx, delivery, 0); err != nil && !errors.Is(err, store.ErrDeliveryClaimLost) {
+		if err := n.releaseClaimWithoutBudget(sendCtx, delivery, 0); err != nil && !errors.Is(err, store.ErrDeliveryClaimLost) {
 			all = append(all, err)
 		}
 	}
@@ -1192,21 +1223,45 @@ func (n *Notifier) TestContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	_, err := n.TestSummaryContext(ctx)
+	return err
+}
+
+// TestSummary reports the outcome of a global notification test by count
+// only; it never contains destination URLs or provider responses.
+type TestSummary struct {
+	// Tested is the number of enabled, usable destinations the test covered.
+	Tested int `json:"tested"`
+	// Failed is the number of tested destinations whose test message was not
+	// delivered, including any the test deadline stopped before sending.
+	Failed int `json:"failed"`
+	// Locked is the number of enabled web-managed destinations that could not
+	// be tested because their credentials cannot be decrypted.
+	Locked int `json:"locked"`
+}
+
+// TestSummaryContext sends one test message to each enabled destination and
+// reports the counts. An enabled managed destination that is locked by a
+// missing, replaced, or unreadable key fails the test with
+// ErrManagedNotificationLocked, so restoring the wrong key is not reported as
+// a successful verification. Paused destinations are not tested, and an empty
+// configuration succeeds with nothing tested.
+func (n *Notifier) TestSummaryContext(ctx context.Context) (TestSummary, error) {
 	if err := n.Reload(ctx); err != nil {
-		return err
+		return TestSummary{}, err
 	}
-	snapshot := n.destinationSnapshot()
-	urls := make([]string, 0, len(snapshot))
-	for _, rawURL := range snapshot {
-		urls = append(urls, rawURL)
+	urls, locked := n.testDestinations()
+	summary := TestSummary{Tested: len(urls), Locked: len(locked)}
+	all := make([]error, 0, len(locked))
+	for _, entry := range locked {
+		all = append(all, fmt.Errorf("%w: destination %s (%s)", ErrManagedNotificationLocked, entry.record.ID, entry.code))
 	}
-	sort.Strings(urls)
 	workers := notificationWorkers
 	if len(urls) < workers {
 		workers = len(urls)
 	}
 	if workers == 0 {
-		return nil
+		return summary, errors.Join(all...)
 	}
 	testCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
@@ -1226,18 +1281,49 @@ func (n *Notifier) TestContext(ctx context.Context) error {
 		select {
 		case jobs <- rawURL:
 		case <-testCtx.Done():
+			// A destination that was never reached is a failed test, not a
+			// silently skipped one.
+			results <- testCtx.Err()
 		}
 	}
 	close(jobs)
 	wg.Wait()
 	close(results)
-	var all []error
 	for err := range results {
 		if err != nil {
+			summary.Failed++
 			all = append(all, err)
 		}
 	}
-	return errors.Join(all...)
+	return summary, errors.Join(all...)
+}
+
+// testDestinations returns one URL per enabled, usable destination and the
+// enabled managed destinations that are locked. It deliberately does not use
+// destinationSnapshot: that map also carries the legacy digest alias of each
+// deployment URL, which exists only to route outbox rows created before
+// opaque IDs and must not add a second test message. URLs are not merged, so
+// a managed destination that shares a deployment URL is still tested.
+func (n *Notifier) testDestinations() (urls []string, locked []managedDestination) {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	urls = make([]string, 0, len(n.fileURLs)+len(n.managed))
+	for _, raw := range n.fileURLs {
+		urls = append(urls, raw)
+	}
+	for _, entry := range n.managed {
+		if !entry.record.Enabled {
+			continue
+		}
+		if entry.locked {
+			locked = append(locked, entry)
+			continue
+		}
+		urls = append(urls, entry.url)
+	}
+	sort.Strings(urls)
+	sort.Slice(locked, func(i, j int) bool { return locked[i].record.ID < locked[j].record.ID })
+	return urls, locked
 }
 
 func (n *Notifier) TestDestination(id string) error {

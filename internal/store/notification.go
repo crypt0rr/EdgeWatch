@@ -108,7 +108,7 @@ func (s *Store) createManagedNotificationWithAuditsAndSelection(ctx context.Cont
 		return ManagedNotification{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO managed_notifications(id,name,provider,ciphertext,nonce,enabled,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,1,?,?)`, id, name, provider, ciphertext, nonce, boolInt(enabled), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO managed_notifications(id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at) VALUES(?,?,?,?,?,?,1,1,?,?)`, id, name, provider, ciphertext, nonce, boolInt(enabled), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return ManagedNotification{}, err
 	}
 	if selection != nil {
@@ -284,7 +284,10 @@ func (s *Store) updateManagedNotificationWithAudits(ctx context.Context, id stri
 	oldKey := managedNotificationKey(id, current.Revision)
 	newKey := managedNotificationKey(id, next)
 	credentialsChanged := current.Provider != provider || !bytes.Equal(current.Ciphertext, ciphertext) || !bytes.Equal(current.Nonce, nonce)
-	result, err := tx.ExecContext(ctx, `UPDATE managed_notifications SET name=?,provider=?,ciphertext=?,nonce=?,enabled=?,revision=?,updated_at=? WHERE id=? AND revision=?`, name, provider, ciphertext, nonce, boolInt(enabled), next, now.Format(time.RFC3339Nano), id, expectedRevision)
+	// credential_revision advances only with the credentials, so an alert that
+	// captured an earlier metadata revision can still be queued (see
+	// resolveManagedIntentTx).
+	result, err := tx.ExecContext(ctx, `UPDATE managed_notifications SET name=?,provider=?,ciphertext=?,nonce=?,enabled=?,revision=?,credential_revision=CASE WHEN ? THEN ? ELSE credential_revision END,updated_at=? WHERE id=? AND revision=?`, name, provider, ciphertext, nonce, boolInt(enabled), next, boolInt(credentialsChanged), next, now.Format(time.RFC3339Nano), id, expectedRevision)
 	if err != nil {
 		return ManagedNotification{}, err
 	}

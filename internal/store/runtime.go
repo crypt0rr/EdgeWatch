@@ -729,6 +729,21 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 		return nil
 	}
 	now := sqliteTimestamp(time.Now())
+	resolved := make(map[string]string, len(destinations))
+	var discarded managedIntentDiscards
+	for _, destination := range destinations {
+		key := destination
+		if strings.HasPrefix(destination, "managed:") {
+			var reason string
+			var err error
+			key, reason, err = resolveManagedIntentTx(ctx, tx, destination)
+			if err != nil {
+				return err
+			}
+			discarded.add(destination, reason, len(events))
+		}
+		resolved[destination] = key
+	}
 	for _, event := range events {
 		bounded, payload, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
 		if err != nil {
@@ -736,55 +751,115 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 		}
 		event = bounded
 		for _, destination := range destinations {
-			if strings.HasPrefix(destination, "managed:") {
-				valid, validationErr := managedDestinationCurrentTx(ctx, tx, destination)
-				if validationErr != nil {
-					return validationErr
-				}
-				// A destination may have been replaced or disabled after the
-				// notifier captured its revision. Preserve the state/event
-				// transition but do not create an orphaned delivery for a
-				// credential that can never send it.
-				if !valid {
-					continue
-				}
+			key := resolved[destination]
+			if key == "" {
+				continue
 			}
-			result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, destination, payload, now)
+			result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, key, payload, now)
 			if err != nil {
 				return err
 			}
 			if inserted, _ := result.RowsAffected(); inserted == 1 {
-				if err := ensureDeliveryHealthTx(ctx, tx, destination, time.Now().UTC()); err != nil {
+				if err := ensureDeliveryHealthTx(ctx, tx, key, time.Now().UTC()); err != nil {
 					return err
 				}
 			}
 		}
 	}
-	return nil
+	return discarded.audit(ctx, tx)
 }
 
-// managedDestinationCurrentTx validates an opaque managed destination key at
-// the same transaction boundary that inserts an outbox row. This closes the
-// race where a destination is replaced or deleted between notifier metadata
-// capture and the runtime/event commit.
-func managedDestinationCurrentTx(ctx context.Context, tx *sql.Tx, destination string) (bool, error) {
+const (
+	managedIntentRotated = "credential rotation"
+	managedIntentDeleted = "the destination was deleted"
+)
+
+// resolveManagedIntentTx resolves a managed destination key that the notifier
+// captured before this transaction to the key the outbox row must use. It runs
+// in the transaction that inserts the row, which closes the race with a
+// concurrent destination edit:
+//
+//   - a metadata-only edit (such as a rename) advances the revision but keeps
+//     the credentials, so the intent moves to the current revision key;
+//   - a credential change after the capture, or a deletion, discards the
+//     intent and returns the reason so the caller can audit it; an alert is
+//     never rerouted to replacement credentials;
+//   - a destination paused in the meantime is skipped without an audit, as
+//     alerts raised while it is paused are.
+//
+// An empty key means that no row is created.
+func resolveManagedIntentTx(ctx context.Context, tx *sql.Tx, destination string) (key, discardReason string, err error) {
 	parts := strings.Split(destination, ":")
 	if len(parts) != 3 || parts[0] != "managed" || parts[1] == "" {
-		return false, nil
+		return "", "", nil
 	}
-	revision, err := strconv.ParseInt(parts[2], 10, 64)
-	if err != nil || revision < 1 {
-		return false, nil
+	captured, ok := parseManagedRevision(parts[2])
+	if !ok {
+		return "", "", nil
 	}
 	var enabled int
-	err = tx.QueryRowContext(ctx, `SELECT enabled FROM managed_notifications WHERE id=? AND revision=?`, parts[1], revision).Scan(&enabled)
+	var revision, credentialRevision int64
+	err = tx.QueryRowContext(ctx, `SELECT enabled,revision,credential_revision FROM managed_notifications WHERE id=?`, parts[1]).Scan(&enabled, &revision, &credentialRevision)
 	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return "", managedIntentDeleted, nil
 	}
 	if err != nil {
-		return false, err
+		return "", "", err
 	}
-	return enabled != 0, nil
+	if captured < credentialRevision || captured > revision {
+		return "", managedIntentRotated, nil
+	}
+	if enabled == 0 {
+		return "", "", nil
+	}
+	return managedNotificationKey(parts[1], revision), "", nil
+}
+
+// parseManagedRevision reports whether value is a valid managed revision.
+func parseManagedRevision(value string) (int64, bool) {
+	revision, err := strconv.ParseInt(value, 10, 64)
+	return revision, err == nil && revision >= 1
+}
+
+// managedIntentDiscards counts discarded managed intents per destination and
+// reason, so one event transaction writes one bounded audit entry for each.
+type managedIntentDiscards map[[2]string]int
+
+func (d *managedIntentDiscards) add(destination, reason string, count int) {
+	if reason == "" || count == 0 {
+		return
+	}
+	if *d == nil {
+		*d = managedIntentDiscards{}
+	}
+	id := strings.Split(destination, ":")[1]
+	(*d)[[2]string{id, reason}] += count
+}
+
+// audit records discarded intents like the pending deliveries discarded by a
+// credential change. Only the stable destination ID and a count are recorded.
+func (d managedIntentDiscards) audit(ctx context.Context, tx *sql.Tx) error {
+	if len(d) == 0 {
+		return nil
+	}
+	keys := make([][2]string, 0, len(d))
+	for key := range d {
+		keys = append(keys, key)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i][0] != keys[j][0] {
+			return keys[i][0] < keys[j][0]
+		}
+		return keys[i][1] < keys[j][1]
+	})
+	entries := make([]AuditEntry, 0, len(keys))
+	for _, key := range keys {
+		entries = append(entries, AuditEntry{
+			Action: "notifications.pending_discarded",
+			Detail: fmt.Sprintf("discarded %d new deliveries for managed notification %s after %s", d[key], key[0], key[1]),
+		})
+	}
+	return insertAuditEntries(ctx, tx, entries, time.Now().UTC())
 }
 
 // updateRuntimeTx applies a runtime state transition and persists its events

@@ -338,15 +338,20 @@ func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request, sessio
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "notification tests are temporarily rate limited", nil)
 		return
 	}
-	if err := s.App.Notifier.TestContext(r.Context()); err != nil {
+	summary, err := s.App.Notifier.TestSummaryContext(r.Context())
+	if err != nil {
 		// Shoutrrr implementations may include destination details in an error;
 		// keep those credentials out of both API responses and logs.
 		s.auditOptionalEntry(r.Context(), store.AuditEntry{Action: "notifications.test_failed", Detail: "configured destination test failed", ActorUserID: session.UserID, ActorUsername: session.Username})
+		if errors.Is(err, notify.ErrManagedNotificationLocked) {
+			writeError(w, http.StatusServiceUnavailable, "notification_key_unavailable", "one or more web-managed notification destinations are locked; restore the notification encryption key and test again", nil)
+			return
+		}
 		writeError(w, http.StatusBadGateway, "notification_failed", "one or more notification destinations failed", nil)
 		return
 	}
 	if !s.requireAuditEntry(r.Context(), w, store.AuditEntry{Action: "notifications.test", Detail: "configured destinations tested", ActorUserID: session.UserID, ActorUsername: session.Username}) {
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"sent": s.App.Notifier.ActiveCount()})
+	writeJSON(w, http.StatusOK, map[string]any{"sent": summary.Tested})
 }

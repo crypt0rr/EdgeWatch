@@ -416,6 +416,167 @@ func TestRestoreRefusesLiveDaemonLeaseUnlessExplicitlyOverridden(t *testing.T) {
 	}
 }
 
+// A backup taken from a running daemon carries that daemon's fresh heartbeat
+// and its scan leases. The restored file has no process attached, so none of
+// those claims may survive: the next daemon must start at once, a repeat
+// restore onto the stopped destination must not see a live daemon, and copied
+// scan leases must not block scans. The destination's own live lease is still
+// refused.
+func TestRestoreClearsLeasesCopiedFromLiveDaemonBackup(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	live := filepath.Join(dir, "live.db")
+	createRestoreFixture(t, live, "source")
+	liveStore, err := Open(live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().UTC().Add(time.Hour)
+	if _, err := liveStore.AcquireDaemonLease(ctx, "old-daemon"); err != nil {
+		liveStore.Close()
+		t.Fatal(err)
+	}
+	for job, owner := range map[string]string{"daemon-job": "daemon/old-daemon/scan-1", "cli-job": "cli-scan-2"} {
+		if err := liveStore.AcquireJobLease(ctx, job, owner, expires); err != nil {
+			liveStore.Close()
+			t.Fatal(err)
+		}
+	}
+	backup, err := liveStore.Backup(ctx, filepath.Join(dir, "backup.db"))
+	if err != nil {
+		liveStore.Close()
+		t.Fatal(err)
+	}
+	if err := liveStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	destination := filepath.Join(dir, "restored.db")
+	options := RestoreOptions{PendingDeliveries: PendingDeliveriesDiscard}
+	if _, err := Restore(ctx, backup, destination, options); err != nil {
+		t.Fatalf("first restore: %v", err)
+	}
+	// The operator restored and immediately retries, for example with another
+	// backup. Nothing runs on the destination, so the retry must not be refused.
+	if dryRun, err := DryRunRestore(ctx, backup, destination, options); err != nil || !dryRun.Safe {
+		t.Fatalf("repeat restore dry run = %#v, %v; want safe", dryRun, err)
+	}
+	if _, err := Restore(ctx, backup, destination, options); err != nil {
+		t.Fatalf("repeat restore onto a stopped destination: %v", err)
+	}
+	if got, err := readRestoreValue(destination); err != nil || got != "source" {
+		t.Fatalf("restored value = %q, %v; want source", got, err)
+	}
+
+	if err := CheckDaemonLeaseBeforeStartup(ctx, destination); err != nil {
+		t.Fatalf("startup lease check after restore: %v", err)
+	}
+	restored, err := Open(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restored.AcquireDaemonLease(ctx, "new-daemon"); err != nil {
+		restored.Close()
+		t.Fatalf("new daemon lease after restore: %v", err)
+	}
+	for _, job := range []string{"daemon-job", "cli-job"} {
+		if active, err := restored.JobActive(ctx, job); err != nil || active {
+			restored.Close()
+			t.Fatalf("restored job %s active = %v, %v; want copied lease cleared", job, active, err)
+		}
+		if err := restored.AcquireJobLease(ctx, job, "daemon/new-daemon/"+job, expires); err != nil {
+			restored.Close()
+			t.Fatalf("scan lease for %s after restore: %v", job, err)
+		}
+	}
+	if err := restored.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// The daemon started on the restored database now holds a fresh lease of
+	// its own. That lease still protects the destination.
+	before, err := fileDigest(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Restore(ctx, backup, destination, options); !errors.Is(err, ErrRestoreDaemonLive) {
+		t.Fatalf("restore over the restored daemon = %v, want ErrRestoreDaemonLive", err)
+	}
+	if after, err := fileDigest(destination); err != nil || after != before {
+		t.Fatalf("refused restore changed the destination: %v", err)
+	}
+
+	// Restore reads the backup and never changes it.
+	source, err := OpenReadOnlyExisting(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	status, err := source.DaemonLeaseStatus(ctx)
+	if err != nil || status.Owner != "old-daemon" {
+		t.Fatalf("backup daemon lease = %#v, %v; want old-daemon kept in the backup", status, err)
+	}
+}
+
+// Clearing the copied leases is part of the staged sanitization. When it
+// fails, both the dry run and the restore refuse, and the destination is not
+// replaced.
+func TestRestoreLeaseCleanupFailureLeavesDestinationUnchanged(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "destination.db")
+	createRestoreFixture(t, source, "source")
+	createRestoreFixture(t, destination, "destination")
+	raw, err := sql.Open("sqlite", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`INSERT INTO daemon_lease(id,owner,heartbeat) VALUES(1,'old-daemon',?);
+CREATE TRIGGER keep_daemon_lease BEFORE DELETE ON daemon_lease BEGIN SELECT RAISE(ABORT, 'lease row is protected'); END`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := fileDigest(destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DryRunRestore(ctx, source, destination, RestoreOptions{}); err == nil || !strings.Contains(err.Error(), "clear restored daemon_lease") {
+		t.Fatalf("dry run error = %v, want the lease cleanup failure", err)
+	}
+	if _, err := Restore(ctx, source, destination, RestoreOptions{}); err == nil || !strings.Contains(err.Error(), "clear restored daemon_lease") {
+		t.Fatalf("restore error = %v, want the lease cleanup failure", err)
+	}
+	if after, err := fileDigest(destination); err != nil || after != before {
+		t.Fatalf("failed lease cleanup changed the destination: %v", err)
+	}
+}
+
+func TestClearRestoredLeasesSkipsMissingTablesAndReportsErrors(t *testing.T) {
+	ctx := context.Background()
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "no-leases.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	tx, err := raw.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := clearRestoredLeasesTx(ctx, tx); err != nil {
+		t.Fatalf("clear leases without lease tables: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := clearRestoredLeasesTx(ctx, tx); err == nil {
+		t.Fatal("clearing leases in a finished transaction succeeded")
+	}
+}
+
 func TestRestoreCanReplaceUnreadableDestinationAfterExplicitConfirmation(t *testing.T) {
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")

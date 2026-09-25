@@ -199,6 +199,23 @@ async function waitForScan(page: import('@playwright/test').Page, jobID: string,
   throw new Error(`scan ${count} did not complete`)
 }
 
+// The scan row is saved before the run releases its job lease, so a click
+// right after waitForScan can briefly get 409 job_active. Retry that case, as
+// the API message tells operators to, and fail on any other refusal.
+async function clickScanNow(page: import('@playwright/test').Page, jobID: string): Promise<void> {
+  const runPath = `/api/v1/jobs/${jobID}/run`
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const [response] = await Promise.all([
+      page.waitForResponse(response => response.request().method() === 'POST' && new URL(response.url()).pathname === runPath),
+      page.getByRole('button', { name: 'Scan now' }).click(),
+    ])
+    if (response.status() === 202) return
+    if (response.status() !== 409) throw new Error(`Scan now returned ${response.status()}: ${await response.text()}`)
+    await delay(250)
+  }
+  throw new Error('Scan now stayed busy after the previous scan completed')
+}
+
 test('real EdgeWatch setup, baseline, change detection, and restart persistence', async ({ page }) => {
   test.setTimeout(150_000)
   const harness = await createHarness()
@@ -244,12 +261,12 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
 
     await jobCard.click()
     await expect(page.getByRole('heading', { name: 'real-stack-fixture' })).toBeVisible()
-    await page.getByRole('button', { name: 'Scan now' }).click()
+    await clickScanNow(page, jobID)
     await waitForScan(page, jobID, csrf, 1)
     const learned = await callAPI(page, `/jobs/${jobID}`, 'GET', csrf)
     expect(learned.body.baseline.status).toBe('complete')
 
-    await page.getByRole('button', { name: 'Scan now' }).click()
+    await clickScanNow(page, jobID)
     await waitForScan(page, jobID, csrf, 2)
     const incidents = await callAPI(page, '/incidents', 'GET', csrf)
     expect(incidents.status).toBe(200)

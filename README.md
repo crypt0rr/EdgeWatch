@@ -524,6 +524,13 @@ pending deliveries the chosen `--pending-deliveries` policy would affect. The
 command exits non-zero when the restore would be refused, so scripts can act on
 its exit status.
 
+A backup taken while the daemon runs contains that daemon's lease and the
+leases of its running scans. No process runs on a restored copy, so restore
+clears these copied leases, and the dry run does the same in its private copy.
+The service therefore starts at once after a restore, and a repeated restore
+onto the stopped service is not refused. The active-daemon check reads only
+the lease in the database that is being replaced.
+
 The current schema is version 48. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is

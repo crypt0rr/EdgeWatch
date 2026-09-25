@@ -123,7 +123,10 @@ may explicitly choose `--pending-deliveries discard` or
 `--pending-deliveries preserve` when running the host restore command. The
 choice and a bounded count are recorded in a redacted audit event. Quarantined
 payloads remain in the restored database but are never claimed by the delivery
-worker.
+worker. A restore also clears the daemon and scan leases copied from the
+backup, because no process runs on the restored copy. It still refuses to
+replace a database whose own daemon heartbeat is recent, unless the operator
+passes the emergency `--allow-active-daemon` override.
 
 Host CLI commands that change state (`scan`, `baseline approve` and `reset`,
 `notify test`, `backup`, `restore`, and administrator recovery) record a

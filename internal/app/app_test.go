@@ -425,6 +425,127 @@ func TestStopRunWaitsForManualManagedRun(t *testing.T) {
 	}
 }
 
+type panicScanner struct{ started chan struct{} }
+
+func (s panicScanner) Version(context.Context) string { return "panic" }
+func (s panicScanner) Scan(context.Context, config.Job) (model.Snapshot, error) {
+	close(s.started)
+	panic("scanner defect")
+}
+
+func newManagedRunTestApp(t *testing.T, scan Scanner) (*App, *store.Store, store.JobRecord) {
+	t.Helper()
+	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	cfg := &config.Config{Version: 1, Database: s.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, s, "missing", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.Scanner = scan
+	record, err := s.CreateJob(context.Background(), config.NormalizeJob(config.Job{Name: "scan-now", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return a, s, record
+}
+
+// The console re-enables Scan now when the completion callback broadcasts
+// scan.completed, so the finished run must release its reservation before
+// that callback runs. Otherwise the next manual run is refused as busy.
+func TestStartManagedRunAcceptsNextRunFromCompletionCallback(t *testing.T) {
+	a, s, record := newManagedRunTestApp(t, schedulerFake{})
+	firstErr := make(chan error, 1)
+	restartErr := make(chan error, 1)
+	secondErr := make(chan error, 1)
+	if err := a.StartManagedRun(record.ID, func(_ model.Scan, _ []model.Event, runErr error) {
+		firstErr <- runErr
+		restartErr <- a.StartManagedRun(record.ID, func(_ model.Scan, _ []model.Event, runErr error) { secondErr <- runErr })
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, step := range []struct {
+		name string
+		ch   chan error
+	}{{"first run", firstErr}, {"Scan now from the completion callback", restartErr}, {"second run", secondErr}} {
+		select {
+		case err := <-step.ch:
+			if err != nil {
+				t.Fatalf("%s: %v", step.name, err)
+			}
+		case <-time.After(10 * time.Second):
+			t.Fatalf("%s did not finish", step.name)
+		}
+	}
+	a.StopRun()
+	scans, err := s.ListJobScans(context.Background(), record.ID, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scans) != 2 {
+		t.Fatalf("managed scans = %d, want both runs persisted", len(scans))
+	}
+}
+
+// Once a run has released its reservation, a newer run may hold the job. The
+// earlier run's goroutine must never remove that newer reservation, neither
+// before its completion callback nor when it returns.
+func TestManagedRunReleaseKeepsNewerReservation(t *testing.T) {
+	blocking := &releaseOnlyScanner{started: make(chan struct{}), release: make(chan struct{})}
+	a, _, record := newManagedRunTestApp(t, blocking)
+	seen := make(chan any, 1)
+	if err := a.StartManagedRun(record.ID, func(model.Scan, []model.Event, error) {
+		value, _ := a.managedReservations.Load(record.ID)
+		seen <- value
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocking.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("managed scan did not start")
+	}
+	a.managedReservations.Store(record.ID, "newer-reservation")
+	close(blocking.release)
+	select {
+	case value := <-seen:
+		if value != "newer-reservation" {
+			t.Fatalf("reservation during completion callback = %v, want the newer reservation", value)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("completion callback did not run")
+	}
+	// StopRun waits for the earlier goroutine, including its deferred release.
+	a.StopRun()
+	if value, ok := a.managedReservations.Load(record.ID); !ok || value != "newer-reservation" {
+		t.Fatalf("reservation after the earlier run returned = %v, %v; want the newer reservation", value, ok)
+	}
+}
+
+// A defect that panics before the run returns must still release the
+// reservation, so the job does not stay busy until the process restarts.
+func TestManagedRunReleasesReservationAfterPanic(t *testing.T) {
+	panicking := panicScanner{started: make(chan struct{})}
+	a, _, record := newManagedRunTestApp(t, panicking)
+	if err := a.StartManagedRun(record.ID, func(model.Scan, []model.Event, error) {
+		t.Error("completion callback ran after a panic")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-panicking.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("managed scan did not start")
+	}
+	a.StopRun()
+	if value, ok := a.managedReservations.Load(record.ID); ok {
+		t.Fatalf("reservation after a panicking run = %v, want released", value)
+	}
+}
+
 func TestDaemonReturnsWhenLeaseIsLost(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

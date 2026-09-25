@@ -351,6 +351,11 @@ scan may be split into resumable address, discovery, enrichment, and UDP work
 units. A timeout or restart preserves completed work for the configured resume
 window; partial work cannot change a baseline. The dashboard shows scanner
 phase, heartbeat, completed probes, ports found, and the last sanitized output.
+A resumed cycle keeps the scanner-profile arguments it started with, and its
+scans record that job and profile revision; a profile change applies from the
+next cycle. Accepting an incident, approving or resetting the baseline, or
+changing the monitored scope discards paused progress, and the next run starts
+a fresh cycle.
 
 ## Jobs, baselines, and incidents
 
@@ -368,7 +373,9 @@ when another active job is nearby; the administrator can keep concurrent times.
 Choose how many successful samples establish a baseline and how many matching
 changes confirm an incident. When a security-impacting job setting changes,
 EdgeWatch shows the affected scope and asks for explicit rebaselining. Schedule
-and execution-tuning changes do not reset the baseline.
+and execution-tuning changes do not reset the baseline. A run that waits for a
+free scan slot uses the job's settings when it starts; if the job is paused or
+archived while a scheduled run waits, that run is skipped.
 
 From **Incidents**, administrators and operators can:
 
@@ -569,7 +576,10 @@ with the job ID and the scan outcome.
 For a scan that appears stuck, open its live details in the dashboard first.
 Broad jobs report scanner phase, process heartbeat, completed probes, and
 resumable work. If a cycle has timed out, it will resume on the next scheduled
-or manual run until its resume window expires. Check docker compose logs
+or manual run until its resume window expires. A stalled cycle holds scheduled
+runs until an operator retries or discards it, or until its resume window
+ends; the first scheduled run after that records the expiry, and the next one
+starts a fresh cycle. Check docker compose logs
 edgewatch for a bounded error summary; do not assume a zero-progress display
 means the process is idle.
 

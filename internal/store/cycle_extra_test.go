@@ -91,6 +91,68 @@ func TestScanCycleExpiryAndDiscardRespectLiveJobLease(t *testing.T) {
 		t.Fatalf("cycle status = %q, want expired", updated.Status)
 	}
 }
+func TestExpireScanCycleEndsLeaseOwnersCycleAfterItsWindow(t *testing.T) {
+	ctx, s, job, plan := cycleFixture(t)
+	now := time.Now().UTC()
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
+		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(),
+		Plan: plan, ExpiresAt: now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.MarkScanCycleStalled(ctx, cycle.ID, "unit failed"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AcquireJobLease(ctx, job.ID, "cycle-owner", now.Add(3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Inside the resume window the cycle stays stalled.
+	if got, err := s.ExpireScanCycle(ctx, cycle.ID, now); err != nil || got.Status != "stalled" {
+		t.Fatalf("expiry inside the window = %#v, %v", got, err)
+	}
+
+	// After the window, housekeeping still skips the leased job, but the lease
+	// owner can record the expiry.
+	after := now.Add(2 * time.Hour)
+	if expired, err := s.ExpireScanCycles(ctx, after); err != nil || expired != 0 {
+		t.Fatalf("housekeeping expiry of leased cycle = %d, %v", expired, err)
+	}
+	got, err := s.ExpireScanCycle(ctx, cycle.ID, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "expired" || got.LastError != "scan cycle exceeded its resume window" || got.FinishedAt.IsZero() {
+		t.Fatalf("expired cycle = status %q last_error %q finished_at %v", got.Status, got.LastError, got.FinishedAt)
+	}
+	var payloads int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycle_units WHERE cycle_id=? AND snapshot_json<>'{}'`, cycle.ID).Scan(&payloads); err != nil {
+		t.Fatal(err)
+	}
+	if payloads != 0 {
+		t.Fatalf("expired cycle retained %d checkpoint payloads", payloads)
+	}
+
+	// A terminal cycle is returned unchanged.
+	if again, err := s.ExpireScanCycle(ctx, cycle.ID, after.Add(time.Hour)); err != nil || again.Status != "expired" || !again.FinishedAt.Equal(got.FinishedAt) {
+		t.Fatalf("second expiry = %#v, %v", again, err)
+	}
+	if _, err := s.ExpireScanCycle(ctx, "missing-cycle", after); !errors.Is(err, ErrNoScanCycle) {
+		t.Fatalf("missing cycle expiry error = %v, want ErrNoScanCycle", err)
+	}
+}
+
 func TestDiscardRunningScanCycleAtomicallyClearsProgress(t *testing.T) {
 	cases := []struct {
 		name           string

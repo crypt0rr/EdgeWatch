@@ -291,6 +291,57 @@ func TestJobSilenceThresholdPreservesDSTWallClock(t *testing.T) {
 	}
 }
 
+func TestJobSilenceThresholdAfterRepeatedFallBackOccurrence(t *testing.T) {
+	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	location, err := time.LoadLocation("Europe/Amsterdam")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// On 2026-10-25 Europe/Amsterdam falls back from 03:00+02:00 to
+	// 02:00+01:00, so 02:00 and 02:30 occur twice. Each reference is the
+	// success of the repeated occurrence.
+	tests := []struct {
+		name      string
+		schedule  string
+		reference time.Time
+		deadline  time.Time
+		interval  time.Duration
+	}{
+		{
+			name:      "daily",
+			schedule:  "30 2 * * *",
+			reference: time.Date(2026, time.October, 25, 1, 35, 0, 0, time.UTC), // 02:35+01:00
+			deadline:  time.Date(2026, time.October, 27, 2, 30, 0, 0, location),
+			interval:  24 * time.Hour,
+		},
+		{
+			name:      "hourly",
+			schedule:  "0 * * * *",
+			reference: time.Date(2026, time.October, 25, 1, 5, 0, 0, time.UTC), // 02:05+01:00
+			deadline:  time.Date(2026, time.October, 25, 4, 0, 0, 0, location),
+			interval:  time.Hour,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := jobSilenceThreshold(parser, config.Job{Schedule: test.schedule, Timezone: "Europe/Amsterdam"}, test.reference)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if deadline := test.reference.Add(got); !deadline.Equal(test.deadline) {
+				t.Fatalf("threshold = %s (deadline %s), want deadline %s", got, deadline.In(location), test.deadline)
+			}
+			parsed, err := parser.Parse("CRON_TZ=Europe/Amsterdam " + test.schedule)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if interval, ok := cronInterval(parsed, test.reference.In(location)); !ok || interval != test.interval {
+				t.Fatalf("interval = %s, %v; want %s", interval, ok, test.interval)
+			}
+		})
+	}
+}
+
 func TestJobSilenceWatchdogUsesReferenceSpecificDeadline(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))

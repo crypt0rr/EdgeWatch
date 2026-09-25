@@ -280,11 +280,28 @@ func (s *Store) updateIncidentAction(ctx context.Context, jobID string, destinat
 	if active {
 		return nil, ErrJobScanActive
 	}
+	epochBefore, err := runtimeBaselineEpochTx(ctx, tx, jobID)
+	if err != nil {
+		return nil, err
+	}
 	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, destinations, func(state *model.JobState) ([]model.Event, error) {
 		return fn(state)
 	})
 	if err != nil {
 		return nil, err
+	}
+	epochAfter, err := runtimeBaselineEpochTx(ctx, tx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if epochAfter != epochBefore {
+		// Accepting an incident changes the comparison baseline, which fences
+		// paused resumable progress. Discard that progress in this transaction,
+		// as baseline reset and approval do, so the next trigger starts a fresh
+		// cycle instead of reporting the fenced cycle as a failed scan.
+		if err := discardUnpromotedCyclesTx(ctx, tx, jobID, "incident accepted", time.Now().UTC()); err != nil {
+			return nil, err
+		}
 	}
 	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 		return nil, err

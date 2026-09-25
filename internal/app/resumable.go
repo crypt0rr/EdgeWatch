@@ -183,6 +183,21 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 			return true, model.Snapshot{}, err
 		}
 	}
+	if cycleResumeWindowElapsed(cycle, now) {
+		// ExpireScanCycles above skips a cycle whose job holds a live lease, and
+		// this scan holds that lease. Record the expiry here, before the stalled
+		// guard, so a stalled cycle stops blocking scheduled triggers when its
+		// resume window ends rather than at the next daily housekeeping pass.
+		expired, expireErr := a.Store.ExpireScanCycle(stateCtx, cycle.ID, now)
+		if expireErr != nil {
+			scan.Status = "failed"
+			scan.Error = expireErr.Error()
+			return true, model.Snapshot{}, expireErr
+		}
+		if expired.Status == "expired" {
+			return expiredCycleAttempt(scan, expired)
+		}
+	}
 	if cycle.Status == "stalled" && !manual {
 		// Scheduled triggers must not spin a known-stalled cycle forever. The
 		// scheduler performs the same guard before acquiring a lease; this second
@@ -256,6 +271,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 	}
 	cycle = startedCycle
 	setScanCycleMetadata(scan, cycle)
+	setScanCyclePlanProvenance(scan, run, cycle)
 	setActiveCycle(run, cycle, "starting", 0)
 
 	completedThisAttempt := 0
@@ -296,8 +312,10 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		}
 		setActiveCycle(run, cycle, "scanning", claimed.Sequence+1)
 		attemptJob := cycle.Plan.Job
-		// The scope and pinned DNS expansion remain immutable, while execution
-		// settings such as timing may be updated between paused attempts.
+		// The scope, pinned DNS expansion and scanner-profile arguments remain
+		// those of the plan, so every unit of a cycle runs with one profile
+		// revision and the scan records it (setScanCyclePlanProvenance). Only
+		// timing follows the current job between paused attempts.
 		attemptJob.Timing = job.Timing
 		fragment, scanErr := rs.ScanWorkUnit(scanCtx, attemptJob, claimed.Unit, func(progress scanner.Progress) {
 			progress.TotalUnits = cycle.TotalUnits
@@ -517,8 +535,41 @@ func (a *App) recoverCompletedCycle(ctx context.Context, scan *model.Scan, run *
 	scan.Resumable = true
 	scan.Snapshot = snapshot
 	setScanCycleMetadata(scan, cycle)
+	setScanCyclePlanProvenance(scan, run, cycle)
 	setActiveCycle(run, cycle, "complete", cycle.TotalUnits)
 	return true, snapshot, nil
+}
+
+// cycleResumeWindowElapsed reports whether a cycle may no longer resume. A
+// zero expiry comes only from legacy or synthetic records and never expires,
+// matching StartScanCycleAttempt.
+func cycleResumeWindowElapsed(cycle store.ScanCycleRecord, now time.Time) bool {
+	return !cycle.ExpiresAt.IsZero() && !now.Before(cycle.ExpiresAt)
+}
+
+// setScanCyclePlanProvenance records the job revision and TCP scanner profile
+// pinned in the cycle plan. Resumed units run with the plan's job, so after an
+// execution-only edit (for example a new profile revision) the scan must name
+// the revision whose arguments actually ran, not the job's current one. The
+// new revision applies from the next cycle.
+func setScanCyclePlanProvenance(scan *model.Scan, run *activeRun, cycle store.ScanCycleRecord) {
+	planJob := cycle.Plan.Job
+	if cycle.JobRevision <= 0 || (planJob.TCP == nil && planJob.UDP == nil) {
+		return
+	}
+	profileID, profileRevision := "", int64(0)
+	if planJob.TCP != nil {
+		profileID, profileRevision = planJob.TCP.ProfileID, planJob.TCP.ProfileRevision
+	}
+	scan.JobRevision = cycle.JobRevision
+	scan.ScannerProfileID, scan.ScannerProfileRevision = profileID, profileRevision
+	if run == nil {
+		return
+	}
+	run.mu.Lock()
+	defer run.mu.Unlock()
+	run.scan.JobRevision = cycle.JobRevision
+	run.scan.ScannerProfileID, run.scan.ScannerProfileRevision = profileID, profileRevision
 }
 
 func expiredCycleAttempt(scan *model.Scan, cycle store.ScanCycleRecord) (bool, model.Snapshot, error) {

@@ -83,6 +83,64 @@ func TestIncidentActionsQueueNotificationOutboxAtomically(t *testing.T) {
 	}
 }
 
+func TestAcceptIncidentDiscardsPausedScanCycle(t *testing.T) {
+	ctx, s, record, plan := cycleFixture(t)
+	acceptKey := "port|192.0.2.1|tcp|1"
+	suppressKey := "port|192.0.2.1|tcp|2"
+	if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &model.Snapshot{Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-2"}}}
+		state.Incidents[acceptKey] = model.Incident{Change: model.Change{Key: acceptKey, Kind: "port", Target: "192.0.2.1", Protocol: "tcp", Port: 1, Old: "not-open", New: "open", Severity: "critical"}, ScanID: "scan-1"}
+		state.Incidents[suppressKey] = model.Incident{Change: model.Change{Key: suppressKey, Kind: "port", Target: "192.0.2.1", Protocol: "tcp", Port: 2, Old: "not-open", New: "open", Severity: "critical"}, ScanID: "scan-1"}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	epoch, err := s.RuntimeBaselineEpoch(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), ExecutionHash: record.Job.ExecutionHash(), BaselineEpoch: epoch, Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PauseScanCycle(ctx, cycle.ID, false, "scan timed out"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Suppression leaves the comparison baseline untouched, so paused
+	// progress stays valid.
+	if _, err := s.SuppressIncidentWithAudit(ctx, record.ID, record.Job.Name, suppressKey, AuditEntry{Action: "incident.suppressed", Detail: suppressKey}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.GetScanCycle(ctx, cycle.ID); err != nil || got.Status != "paused" {
+		t.Fatalf("cycle after suppression = %#v, %v", got, err)
+	}
+
+	if _, err := s.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, acceptKey, AuditEntry{Action: "incident.accepted", Detail: acceptKey}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetScanCycle(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "discarded" || got.LastError != "incident accepted" || got.FinishedAt.IsZero() {
+		t.Fatalf("cycle after accept = status %q last_error %q finished_at %v", got.Status, got.LastError, got.FinishedAt)
+	}
+	var units int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_cycle_units WHERE cycle_id=?`, cycle.ID).Scan(&units); err != nil {
+		t.Fatal(err)
+	}
+	if units != 0 {
+		t.Fatalf("discarded cycle retained %d work units", units)
+	}
+	if _, err := s.GetActiveScanCycle(ctx, record.ID); !errors.Is(err, ErrNoScanCycle) {
+		t.Fatalf("active cycle after accept = %v, want ErrNoScanCycle", err)
+	}
+}
+
 func TestSuppressIncidentStoresOneScanWindow(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

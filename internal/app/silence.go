@@ -222,7 +222,7 @@ func cronWindow(schedule cron.Schedule, now time.Time) (last, next time.Time, in
 	}
 	for delta := jobSilenceMinimumInterval; delta <= jobSilenceLookback; {
 		probe := now.Add(-delta)
-		var previous, last time.Time
+		var occurrences []time.Time
 		var upcoming time.Time
 		for attempts := 0; attempts < 4096; attempts++ {
 			occurrence := schedule.Next(probe)
@@ -233,18 +233,14 @@ func cronWindow(schedule cron.Schedule, now time.Time) (last, next time.Time, in
 				upcoming = occurrence
 				break
 			}
-			previous, last = last, occurrence
+			occurrences = append(occurrences, occurrence)
 			probe = occurrence
 		}
-		if !previous.IsZero() && !last.IsZero() {
-			interval = wallClockDuration(previous, last)
-			if interval < jobSilenceMinimumInterval {
-				interval = jobSilenceMinimumInterval
-			}
+		if latest, gap, found := precedingWallClockInterval(occurrences); found {
 			if upcoming.IsZero() {
 				upcoming = schedule.Next(now)
 			}
-			return last, upcoming, interval, true
+			return latest, upcoming, gap, true
 		}
 		if delta >= jobSilenceLookback {
 			break
@@ -256,6 +252,26 @@ func cronWindow(schedule cron.Schedule, now time.Time) (last, next time.Time, in
 		}
 	}
 	return time.Time{}, time.Time{}, 0, false
+}
+
+// precedingWallClockInterval returns the last of the ascending occurrences and
+// its wall-clock gap to the latest earlier occurrence with an earlier civil
+// time. A daylight-saving fall-back repeats civil times: a daily 02:30 job in
+// Europe/Amsterdam fires at 02:30+02:00 and again at 02:30+01:00. The gap
+// inside such a pair is zero (or negative) and says nothing about the
+// schedule's cadence, so those occurrences are skipped rather than collapsing
+// the grace to one minute.
+func precedingWallClockInterval(occurrences []time.Time) (time.Time, time.Duration, bool) {
+	if len(occurrences) < 2 {
+		return time.Time{}, 0, false
+	}
+	last := occurrences[len(occurrences)-1]
+	for i := len(occurrences) - 2; i >= 0; i-- {
+		if gap := wallClockDuration(occurrences[i], last); gap >= jobSilenceMinimumInterval {
+			return last, gap, true
+		}
+	}
+	return time.Time{}, 0, false
 }
 
 // wallClockDuration measures a cron gap using the displayed calendar fields

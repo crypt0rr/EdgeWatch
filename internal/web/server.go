@@ -94,9 +94,12 @@ type sseMessage struct {
 
 // publicDashboardBuild represents one shared cache fill. The result is
 // published before done is closed so every waiter observes the same outcome.
+// generation is the publication generation the build's dashboard was read
+// under; a waiter from a newer generation must not adopt its error.
 type publicDashboardBuild struct {
-	done chan struct{}
-	err  error
+	done       chan struct{}
+	err        error
+	generation uint64
 }
 
 type publicDashboardFailure struct {

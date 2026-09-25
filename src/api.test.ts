@@ -331,7 +331,7 @@ describe('API route helpers', () => {
 		await apiRoutes.validateScannerProfile(profile)
 		await apiRoutes.revokeUserActivation('user/1')
 		await apiRoutes.getPublicDashboardConfig()
-		await apiRoutes.savePublicDashboardConfig({ enabled: true, title: 'Status', introduction: '', hosts: [] })
+		await apiRoutes.savePublicDashboardConfig({ enabled: true, title: 'Status', introduction: '', hosts: [], updated_at: '2026-09-12T08:00:00Z' })
 		expect(fetchMock.mock.calls.length).toBeGreaterThan(50)
 	})
 })

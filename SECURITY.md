@@ -44,7 +44,8 @@ send notification-channel alerts.
 The authenticated live-update stream (`/api/v1/stream`) is authorized to the
 specific browser session that opened it. Two browser sessions for the same
 account are independent: revoking one session does not grant, revoke, or close
-the other. Disabling an account, changing its role, changing its password, or
+the other. Disabling an account, changing its role, changing its password
+(including by redeeming an administrator-issued password-reset link), or
 changing its TOTP settings revokes the affected sessions, and a stream stops
 delivering once its next authorization check observes that revocation.
 

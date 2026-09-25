@@ -67,6 +67,44 @@ func TestManagedJobsHonorConfiguredTargetExclusions(t *testing.T) {
 	}
 }
 
+func TestJobAndProfileWritesClassifyOnlyInputErrorsAsValidation(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	invalid := testJob("invalid-schedule")
+	invalid.Schedule = "not a schedule"
+	_, err := s.CreateJob(ctx, invalid)
+	var validation *ValidationError
+	if !errors.Is(err, ErrValidation) || !errors.As(err, &validation) || !strings.Contains(err.Error(), "invalid schedule") {
+		t.Fatalf("invalid job error = %v, want a ValidationError that keeps the validator message", err)
+	}
+	if inner := errors.Unwrap(err); inner == nil || inner.Error() != err.Error() {
+		t.Fatalf("ValidationError does not unwrap to the validator error: %v", inner)
+	}
+	for name, profileName := range map[string]string{"empty name": "", "line break": "bad\nname"} {
+		if _, err := s.CreateScannerProfile(ctx, profileName, "", config.BuiltinNmapProfile(), "admin"); !errors.Is(err, ErrValidation) {
+			t.Fatalf("%s profile error = %v, want ErrValidation", name, err)
+		}
+	}
+	if _, err := s.UpdateScannerProfile(ctx, BuiltinNmapProfileID, 1, "Built-in", "", config.BuiltinNmapProfile(), "admin"); !errors.Is(err, ErrValidation) {
+		t.Fatalf("built-in profile update error = %v, want ErrValidation", err)
+	}
+	if err := s.SetScannerProfileArchived(ctx, BuiltinNmapProfileID, true, 1, "admin"); !errors.Is(err, ErrValidation) {
+		t.Fatalf("built-in profile archive error = %v, want ErrValidation", err)
+	}
+	if NewValidationError(nil) != nil {
+		t.Fatal("NewValidationError(nil) must stay nil")
+	}
+
+	// A storage failure is not a validation error, even though the job itself
+	// is valid and the failure text comes from SQLite.
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER fail_job_insert BEFORE INSERT ON jobs BEGIN SELECT RAISE(ABORT, 'database is locked'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateJob(ctx, testJob("storage-failure")); err == nil || errors.Is(err, ErrValidation) {
+		t.Fatalf("storage failure error = %v, want a non-validation error", err)
+	}
+}
+
 func TestAuditedMutationsRollBackWhenAuditInsertFails(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

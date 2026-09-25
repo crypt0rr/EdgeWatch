@@ -53,7 +53,7 @@ func TestAuthValidationBranchesAndSetupRequest(t *testing.T) {
 	if err := m.SetupRequest(ctx, request, token, "another administrator password"); err == nil {
 		t.Fatal("consumed setup token was accepted")
 	}
-	if err := m.ActivateRequest(ctx, nil, "", "short"); err == nil {
+	if _, err := m.ActivateRequest(ctx, nil, "", "short"); err == nil {
 		t.Fatal("short activation password was accepted")
 	}
 }

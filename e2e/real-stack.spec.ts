@@ -335,11 +335,16 @@ test('real public status page is unauthenticated and follows publication state',
     expect(run.status).toBe(202)
     await waitForScan(page, jobID, csrf, 1)
 
+    // Saves carry the loaded updated_at token; a save based on an older
+    // token is rejected instead of overwriting a newer publication.
+    const loaded = await callAPI(page, '/public-dashboard', 'GET', csrf)
+    expect(loaded.status).toBe(200)
     const publish = await callAPI(page, '/public-dashboard', 'PUT', csrf, {
       enabled: true,
       title: 'Public fixture',
       introduction: 'Selected real-stack host',
       hosts: [{ job_id: jobID, address: '127.0.0.1' }],
+      updated_at: loaded.body.updated_at,
     })
     expect(publish.status).toBe(200)
 
@@ -356,8 +361,17 @@ test('real public status page is unauthenticated and follows publication state',
       title: 'Public fixture',
       introduction: 'Selected real-stack host',
       hosts: [{ job_id: jobID, address: '127.0.0.1' }],
+      updated_at: publish.body.updated_at,
     })
     expect(disable.status).toBe(200)
+    const staleRepublish = await callAPI(page, '/public-dashboard', 'PUT', csrf, {
+      enabled: true,
+      title: 'Public fixture',
+      introduction: 'Stale editor',
+      hosts: [{ job_id: jobID, address: '127.0.0.1' }],
+      updated_at: publish.body.updated_at,
+    })
+    expect(staleRepublish.status).toBe(409)
     await guest.reload()
     await expect(guest.getByRole('heading', { name: 'Public status unavailable' })).toBeVisible()
   } finally {

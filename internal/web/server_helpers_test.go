@@ -3,6 +3,7 @@ package web
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -271,6 +272,30 @@ func TestServerScopeAndDurationHelpers(t *testing.T) {
 	cycle := cycleJSON(store.ScanCycleRecord{ID: "cycle", JobID: "job", Status: "paused", TotalUnits: 2, CompletedUnits: 1})
 	if cycle["id"] != "cycle" || cycle["completed_units"] != 1 {
 		t.Fatalf("cycle JSON = %#v", cycle)
+	}
+}
+
+func TestWriteStoreWriteErrorMapsValidationMissingAndStorageFailures(t *testing.T) {
+	server := &Server{}
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/jobs/job-1", nil)
+	for name, tc := range map[string]struct {
+		err    error
+		status int
+		code   string
+	}{
+		"validation": {store.NewValidationError(errors.New("invalid schedule")), http.StatusBadRequest, "validation_failed"},
+		// A job deleted between the handler's read and the store transaction.
+		"deleted mid-request": {fmt.Errorf("%w: job job-1", store.ErrNotFound), http.StatusNotFound, "not_found"},
+		"storage failure":     {errors.New("database is locked (5) (SQLITE_BUSY)"), http.StatusInternalServerError, "store"},
+	} {
+		recorder := httptest.NewRecorder()
+		server.writeStoreWriteError(recorder, request, tc.err, "job not found")
+		if recorder.Code != tc.status || !strings.Contains(recorder.Body.String(), `"code":"`+tc.code+`"`) {
+			t.Fatalf("%s = %d %s, want %d %s", name, recorder.Code, recorder.Body.String(), tc.status, tc.code)
+		}
+		if tc.status != http.StatusBadRequest && strings.Contains(recorder.Body.String(), tc.err.Error()) {
+			t.Fatalf("%s echoed the store error: %s", name, recorder.Body.String())
+		}
 	}
 }
 

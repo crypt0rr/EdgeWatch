@@ -360,6 +360,28 @@ func TestValidateJobRejectsScheduleThatNeverFires(t *testing.T) {
 	}
 }
 
+func TestValidateJobBoundsNameLengthAndCharacters(t *testing.T) {
+	named := func(name string) Job {
+		return NormalizeJob(Job{Name: name, Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &Protocol{Ports: "443", Mode: "connect"}})
+	}
+	// The limit counts characters, not bytes.
+	for _, name := range []string{strings.Repeat("a", MaxJobNameRunes), strings.Repeat("é", MaxJobNameRunes), "Production edge (EU)"} {
+		if err := ValidateJob(named(name)); err != nil {
+			t.Fatalf("valid name of %d characters rejected: %v", len([]rune(name)), err)
+		}
+	}
+	tooLong := strings.Repeat("a", MaxJobNameRunes+1)
+	for name, value := range map[string]string{"too long": tooLong, "NUL": "edge\x00job", "line break": "edge\njob", "C1 control": "edge\u0085job"} {
+		err := ValidateJob(named(value))
+		if err == nil || !strings.Contains(err.Error(), "job name") {
+			t.Fatalf("%s name error = %v, want a job name error", name, err)
+		}
+		if strings.Contains(err.Error(), tooLong) {
+			t.Fatalf("%s name error echoes the rejected name", name)
+		}
+	}
+}
+
 func TestSecurityHashIncludesAssumeAlive(t *testing.T) {
 	trueValue, falseValue := true, false
 	base := Job{Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1, AssumeAlive: &trueValue, TCP: &Protocol{Ports: "443", Mode: "syn"}}

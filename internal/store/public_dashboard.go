@@ -135,8 +135,23 @@ func (s *Store) GetPublicDashboard(ctx context.Context) (PublicDashboard, error)
 
 // SavePublicDashboard replaces the explicit publication set in one
 // transaction. Publication is intentionally allow-list based: selecting a
-// job never implicitly publishes all of its current or future hosts.
+// job never implicitly publishes all of its current or future hosts. It does
+// not detect a concurrent change; the web console saves through
+// SavePublicDashboardIfCurrent.
 func (s *Store) SavePublicDashboard(ctx context.Context, dashboard PublicDashboard, hosts []PublicDashboardHost, audit AuditEntry) error {
+	return s.savePublicDashboard(ctx, nil, dashboard, hosts, audit)
+}
+
+// SavePublicDashboardIfCurrent replaces the publication only while its
+// updated_at still equals expectedUpdatedAt, the value the editor loaded.
+// Otherwise it returns ErrConflict and changes nothing, so an editor opened
+// before another administrator's save cannot silently overwrite it, for
+// example by publishing a page that was withdrawn in the meantime.
+func (s *Store) SavePublicDashboardIfCurrent(ctx context.Context, expectedUpdatedAt time.Time, dashboard PublicDashboard, hosts []PublicDashboardHost, audit AuditEntry) error {
+	return s.savePublicDashboard(ctx, &expectedUpdatedAt, dashboard, hosts, audit)
+}
+
+func (s *Store) savePublicDashboard(ctx context.Context, expectedUpdatedAt *time.Time, dashboard PublicDashboard, hosts []PublicDashboardHost, audit AuditEntry) error {
 	if strings.TrimSpace(dashboard.Title) == "" {
 		dashboard.Title = "EdgeWatch public status"
 	}
@@ -149,6 +164,24 @@ func (s *Store) SavePublicDashboard(ctx context.Context, dashboard PublicDashboa
 		return err
 	}
 	defer tx.Rollback()
+	// The single row always exists after migration; a missing row reads as
+	// the zero time, which is also what GET reports for it.
+	var currentRaw string
+	var current time.Time
+	if err := tx.QueryRowContext(ctx, `SELECT updated_at FROM public_dashboard WHERE id=1`).Scan(&currentRaw); err == nil {
+		current = scanTime(currentRaw)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if expectedUpdatedAt != nil && !expectedUpdatedAt.Equal(current) {
+		return ErrConflict
+	}
+	// updated_at doubles as the revision token, so every save must advance
+	// it, even when two saves fall within one clock tick or the clock steps
+	// back.
+	if !now.After(current) {
+		now = current.Add(time.Microsecond)
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO public_dashboard(id,enabled,title,introduction,updated_at) VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,title=excluded.title,introduction=excluded.introduction,updated_at=excluded.updated_at`, boolInt(dashboard.Enabled), strings.TrimSpace(dashboard.Title), strings.TrimSpace(dashboard.Introduction), now.Format(time.RFC3339Nano)); err != nil {
 		return err
 	}

@@ -89,8 +89,12 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	current, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, 404, "not_found", "job not found", nil)
+		return
+	}
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
 		return
 	}
 	// High-cost approval is administrator-owned. Preserve it for older clients
@@ -123,7 +127,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, "profile_conflict", "scanner profile was modified; reload and select its current revision", nil)
 		} else {
-			writeValidationError(w, err)
+			s.writeStoreWriteError(w, r, err, "scanner profile not found")
 		}
 		return
 	}
@@ -195,7 +199,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		if isUnique(err) {
 			writeError(w, 409, "conflict", "job name is already in use", nil)
 		} else {
-			writeValidationError(w, err)
+			s.writeStoreWriteError(w, r, err, "job not found")
 		}
 		return
 	}

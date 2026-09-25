@@ -144,7 +144,39 @@ describe('public dashboard pages', () => {
     })
     expect(savePublicDashboardConfig).toHaveBeenCalledWith(expect.objectContaining({
       hosts: [{ job_id: 'job-1', address: '198.51.100.10' }],
+      updated_at: publicConfig.updated_at,
     }))
     expect(container.textContent).toContain('Public view saved.')
+  })
+
+  it('reloads the current configuration when another administrator saved first', async () => {
+    await renderPage(<PublicDashboardAdmin />)
+    const enabled = container.querySelector('#public-status-enabled') as HTMLInputElement
+    act(() => enabled.click())
+    expect(enabled.checked).toBe(true)
+
+    // Another administrator withdrew the page and changed the introduction.
+    const current: PublicDashboardConfig = { ...publicConfig, enabled: false, introduction: 'Changed elsewhere', updated_at: '2026-09-12T09:00:00Z' }
+    vi.mocked(getPublicDashboardConfig).mockResolvedValue(current)
+    vi.mocked(savePublicDashboardConfig).mockRejectedValueOnce(new APIError('public status was changed by another administrator; reload before saving', 'conflict'))
+    const saveButton = () => Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Save public view')) as HTMLButtonElement
+    await act(async () => {
+      saveButton().click()
+      await Promise.resolve()
+    })
+    expect(savePublicDashboardConfig).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: true, updated_at: publicConfig.updated_at }))
+    await vi.waitFor(() => expect(container.textContent).toContain('Another administrator changed the public view'), { timeout: 1000 })
+    await vi.waitFor(() => expect((container.querySelector('textarea') as HTMLTextAreaElement).value).toBe('Changed elsewhere'), { timeout: 1000 })
+    expect((container.querySelector('#public-status-enabled') as HTMLInputElement).checked).toBe(false)
+    expect(container.textContent).not.toContain('Public view saved.')
+
+    // The next save is based on the reloaded revision.
+    vi.mocked(savePublicDashboardConfig).mockResolvedValueOnce({ ...current, updated_at: '2026-09-12T09:30:00Z' })
+    await act(async () => {
+      saveButton().click()
+      await Promise.resolve()
+    })
+    expect(savePublicDashboardConfig).toHaveBeenLastCalledWith(expect.objectContaining({ enabled: false, introduction: 'Changed elsewhere', updated_at: current.updated_at }))
+    await vi.waitFor(() => expect(container.textContent).toContain('Public view saved.'), { timeout: 1000 })
   })
 })

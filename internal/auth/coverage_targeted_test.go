@@ -173,7 +173,7 @@ func TestRequestWrappersMapTokenStoreErrorsAndDisabledAccounts(t *testing.T) {
 	if err := manager.SetupRequest(ctx, request, "token", "administrator password"); err == nil {
 		t.Fatal("closed setup store unexpectedly succeeded")
 	}
-	if err := manager.ActivateRequest(ctx, request, "token", "invitee account password"); err == nil {
+	if _, err := manager.ActivateRequest(ctx, request, "token", "invitee account password"); err == nil {
 		t.Fatal("closed activation store unexpectedly succeeded")
 	}
 

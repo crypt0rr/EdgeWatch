@@ -101,13 +101,18 @@ func TestActivateRequestConsumesInviteOnceAndEnforcesPasswordLength(t *testing.T
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/activate", nil)
 	request.RemoteAddr = "198.51.100.40:8000"
-	if err := m.ActivateRequest(ctx, request, plain, "short"); err == nil {
+	if _, err := m.ActivateRequest(ctx, request, plain, "short"); err == nil {
 		t.Fatal("short activation password was accepted")
 	}
-	if err := m.ActivateRequest(ctx, request, plain, "invitee account password"); err != nil {
+	activatedID, err := m.ActivateRequest(ctx, request, plain, "invitee account password")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.ActivateRequest(ctx, request, plain, "another account password"); err == nil {
+	// The web handler uses the returned ID to close the account's streams.
+	if activatedID != user.ID {
+		t.Fatalf("activated user ID = %q, want %q", activatedID, user.ID)
+	}
+	if _, err := m.ActivateRequest(ctx, request, plain, "another account password"); err == nil {
 		t.Fatal("activation invite was reusable")
 	}
 	activated, err := db.GetUser(ctx, user.ID)

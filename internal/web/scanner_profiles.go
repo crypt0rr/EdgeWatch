@@ -35,13 +35,20 @@ type scannerProfilePayload struct {
 // revisions are readable for audit and may be selected only through an
 // administrator-controlled rollback; operator writes must use the profile's
 // current active revision.
+//
+// Selection problems are returned as store.ValidationError values. Storage
+// failures are returned unchanged so the caller reports them as internal
+// errors instead of echoing SQLite text as a validation message.
 func (s *Server) applySelectedScannerProfile(ctx context.Context, job *config.Job, allowArchived, allowHistorical bool) error {
 	if job == nil || job.TCP == nil || strings.TrimSpace(job.TCP.ProfileID) == "" {
 		return nil
 	}
 	profile, err := s.Store.GetScannerProfile(ctx, job.TCP.ProfileID)
+	if errors.Is(err, store.ErrNotFound) {
+		return invalidProfileSelection("selected scanner profile was not found")
+	}
 	if err != nil {
-		return errors.New("selected scanner profile was not found")
+		return err
 	}
 	requestedRevision := job.TCP.ProfileRevision
 	if requestedRevision == 0 {
@@ -65,10 +72,10 @@ func (s *Server) applySelectedScannerProfile(ctx context.Context, job *config.Jo
 		definition = historical.Definition
 	}
 	if profile.Archived && !allowArchived {
-		return errors.New("selected scanner profile is archived")
+		return invalidProfileSelection("selected scanner profile is archived")
 	}
 	if definition.Engine != config.EngineNmap && definition.Engine != config.EngineNaabuNmap {
-		return errors.New("selected scanner profile has an invalid engine")
+		return invalidProfileSelection("selected scanner profile has an invalid engine")
 	}
 	job.TCP.Engine = definition.Engine
 	job.TCP.ProfileRevision = requestedRevision
@@ -97,7 +104,7 @@ func (s *Server) applySelectedScannerProfile(ctx context.Context, job *config.Jo
 			case "scan_type":
 				if requested.ScanType != "" {
 					if requested.ScanType != "connect" && requested.ScanType != "syn" {
-						return errors.New("naabu scan_type must be connect or syn")
+						return invalidProfileSelection("naabu scan_type must be connect or syn")
 					}
 					options.ScanType = requested.ScanType
 				}
@@ -118,7 +125,7 @@ func (s *Server) applySelectedScannerProfile(ctx context.Context, job *config.Jo
 			}
 			value := naabuOptionValue(requested, field)
 			if value < bound.Min || value > bound.Max {
-				return fmt.Errorf("naabu %s must be between %d and %d", field, bound.Min, bound.Max)
+				return invalidProfileSelection(fmt.Sprintf("naabu %s must be between %d and %d", field, bound.Min, bound.Max))
 			}
 			setNaabuOptionValue(&options, field, value)
 		}
@@ -133,6 +140,10 @@ func (s *Server) applySelectedScannerProfile(ctx context.Context, job *config.Jo
 		job.TCP.Naabu = nil
 	}
 	return nil
+}
+
+func invalidProfileSelection(message string) error {
+	return store.NewValidationError(errors.New(message))
 }
 
 func naabuOptionValue(options config.NaabuOptions, field string) int {
@@ -374,7 +385,7 @@ func (s *Server) createScannerProfile(w http.ResponseWriter, r *http.Request, se
 		if isUnique(err) {
 			writeError(w, http.StatusConflict, "conflict", "scanner profile name is already in use", nil)
 		} else {
-			writeValidationError(w, err)
+			s.writeStoreWriteError(w, r, err, "scanner profile not found")
 		}
 		return
 	}
@@ -406,7 +417,7 @@ func (s *Server) updateScannerProfile(w http.ResponseWriter, r *http.Request, se
 		if isUnique(err) {
 			writeError(w, http.StatusConflict, "conflict", "scanner profile name is already in use", nil)
 		} else {
-			writeValidationError(w, err)
+			s.writeStoreWriteError(w, r, err, "scanner profile not found")
 		}
 		return
 	}
@@ -441,12 +452,8 @@ func (s *Server) setScannerProfileArchived(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusConflict, "conflict", "scanner profile was modified; reload before changing its lifecycle", nil)
 		return
 	}
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "not_found", "scanner profile not found", nil)
-		return
-	}
 	if err != nil {
-		writeValidationError(w, err)
+		s.writeStoreWriteError(w, r, err, "scanner profile not found")
 		return
 	}
 	s.broadcast(map[string]any{"type": "scanner-profile.changed", "profile_id": id})

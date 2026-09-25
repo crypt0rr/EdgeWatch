@@ -354,6 +354,10 @@ phase, heartbeat, completed probes, ports found, and the last sanitized output.
 
 ## Jobs, baselines, and incidents
 
+Job names can have at most 200 characters and cannot contain control
+characters. Existing jobs with longer names are not changed, but saving an edit
+to one requires a shorter name.
+
 Jobs accept individual IP addresses, CIDRs, and DNS names. DNS names remain
 logical targets while each resolved effective address is shown separately in
 host evidence. Schedules use five-field cron syntax in the selected IANA
@@ -422,7 +426,9 @@ or destination secrets.
 
 The first account is an administrator. Administrators can invite additional
 accounts with single-use activation links. Every user can manage their own
-display name, password, and optional TOTP protection.
+display name, password, and optional TOTP protection. Usernames can use at most
+80 bytes of UTF-8 text, so accented and non-Latin characters count as 2 to 4
+bytes each, and cannot contain control characters, `/`, `\`, or `:`.
 
 New activation and password-reset links keep their one-time token in the URL
 fragment, which is not sent in the HTTP request to EdgeWatch or a reverse proxy.
@@ -441,6 +447,12 @@ effective hosts. The unauthenticated /public page contains only the chosen job
 names, latest successful scan time, positive ports, service names, and cached
 normalized network-registration data. It does not expose raw Nmap evidence,
 product fingerprints, credentials, or an arbitrary RDAP proxy.
+
+A public-status save applies only to the configuration the editor loaded. If
+another administrator saved in the meantime, EdgeWatch rejects the save with a
+conflict and the editor reloads the current settings, so an outdated editor
+cannot re-publish a withdrawn page. API clients send the `updated_at` value from
+`GET /api/v1/public-dashboard` with each `PUT`.
 
 ## Data, backup, and recovery
 

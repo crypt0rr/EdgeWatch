@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Check, Copy, KeyRound, LogOut, ShieldCheck, UserRound } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
-import { api, getSession, logout, logoutAllSessions, setCSRF, updateDisplayName } from '../api'
+import { api, APIError, getSession, logout, logoutAllSessions, setCSRF, updateDisplayName } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
 
 export function Security() {
@@ -108,6 +108,16 @@ export function Security() {
       setMessage('TOTP enabled. Save the recovery codes below, then sign in again.')
       await client.invalidateQueries({ queryKey: ['session'] })
     } catch (err) {
+      if (err instanceof APIError && err.code === 'totp_setup_expired') {
+        // The pending enrolment expired or used up its attempts, so the
+        // secret on screen can no longer be enabled. Return to the start.
+        setTotp(null)
+        setCode('')
+        setError('This authenticator setup expired or had too many incorrect codes. Start setup again.')
+        return
+      }
+      // A mistyped code keeps the enrolment; clear the field for a retry.
+      if (err instanceof APIError && err.code === 'totp_failed') setCode('')
       setError(err instanceof Error ? err.message : 'TOTP setup failed')
     }
   }

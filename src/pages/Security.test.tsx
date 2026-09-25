@@ -3,7 +3,7 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
-import { api, getSession, logout, logoutAllSessions, setCSRF, updateDisplayName } from '../api'
+import { api, APIError, getSession, logout, logoutAllSessions, setCSRF, updateDisplayName } from '../api'
 import { Security } from './Security'
 import { renderWithProviders } from '../test/test-utils'
 
@@ -65,6 +65,56 @@ describe('security settings', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: /I saved these recovery codes/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Continue to sign in' }))
     await waitFor(() => expect(logout).toHaveBeenCalledOnce())
+  })
+
+  it('keeps the enrolment open after a mistyped code and restarts it once the setup expired', async () => {
+    let enableAttempts = 0
+    vi.mocked(api).mockImplementation(async (path: string) => {
+      if (path === '/auth/totp/setup') return { secret: 'BASE32SECRET', otpauth: 'otpauth://totp/EdgeWatch' } as never
+      enableAttempts += 1
+      if (enableAttempts === 1) throw new APIError('the verification code is incorrect; 4 attempts remain', 'totp_failed', { remaining_attempts: 4 })
+      throw new APIError('TOTP setup expired; start setup again', 'totp_setup_expired')
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Set up authenticator' })).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Current password'), { target: { value: 'correct-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Set up authenticator' }))
+    await waitFor(() => expect(screen.getByText('BASE32SECRET')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '000000' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Enable TOTP' }))
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('4 attempts remain'))
+    expect(screen.getByText('BASE32SECRET')).toBeInTheDocument()
+    expect(screen.getByLabelText('Verification code')).toHaveValue('')
+    expect(screen.queryByRole('button', { name: 'Set up authenticator' })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '111111' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Enable TOTP' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Set up authenticator' })).toBeInTheDocument())
+    expect(screen.queryByText('BASE32SECRET')).not.toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Start setup again')
+  })
+
+  it('restores the replacement action when a replacement enrolment expired', async () => {
+    vi.mocked(getSession).mockResolvedValue({ ...administrator, totp_enabled: true })
+    vi.mocked(api).mockImplementation(async (path: string) => {
+      if (path === '/auth/totp/setup') return { secret: 'REPLACEMENTSECRET', otpauth: 'otpauth://totp/EdgeWatch' } as never
+      throw new APIError('TOTP setup expired; start setup again', 'totp_setup_expired')
+    })
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Replace authenticator' })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Replace authenticator' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(screen.getByLabelText('Account password'), { target: { value: 'correct-password' } })
+    fireEvent.change(screen.getByLabelText('Current authenticator code or recovery code'), { target: { value: '123456' } })
+    fireEvent.click(dialog.querySelector('button[type="submit"]')!)
+    await waitFor(() => expect(screen.getByText('REPLACEMENTSECRET')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '654321' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Replace authenticator' }))
+    await waitFor(() => expect(screen.queryByText('REPLACEMENTSECRET')).not.toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Replace authenticator' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Disable TOTP' })).toBeInTheDocument()
   })
 
   it('requires confirmation for session revocation and handles server errors', async () => {

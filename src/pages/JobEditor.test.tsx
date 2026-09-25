@@ -5,12 +5,13 @@ import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getJob, listNotificationDestinations, listScannerProfiles, scannerCapabilities } from '../api'
+import { getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities } from '../api'
 import { JobEditor } from './JobEditor'
 
 vi.mock('../api', () => ({
   BUILTIN_NAABU_PROFILE_ID: 'builtin-naabu',
   getJob: vi.fn(),
+  getSession: vi.fn(),
   listNotificationDestinations: vi.fn(),
   listScannerProfiles: vi.fn(),
   scannerCapabilities: vi.fn(),
@@ -36,6 +37,7 @@ describe('job editor', () => {
       status: { deployment: 0, managed: 0, active: 0, locked: 0, key_state: 'ready' },
     })
     vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [] })
+    vi.mocked(getSession).mockResolvedValue({ role: 'operator', user_id: 'operator', username: 'operator', permissions: ['jobs.write'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
     vi.mocked(scannerCapabilities).mockResolvedValue({
       engines: ['nmap', 'naabu_nmap'],
       nmap: { available: true, path: '/usr/bin/nmap', version: '7.99' },

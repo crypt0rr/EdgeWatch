@@ -137,6 +137,15 @@ describe('dashboard', () => {
     await vi.waitFor(() => expect(container.textContent).toContain('Scans in progress'), { timeout: 1000 })
   }
 
+  it('counts an updating baseline as ready', async () => {
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [{ ...job, baseline: { status: 'updating', scan_id: 'scan-1', host_count: 1, samples: 0 } }] })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.textContent).toContain('1 baselines ready'), { timeout: 1000 })
+    const pill = Array.from(container.querySelectorAll('.dashboard-job .pill')).find(element => element.textContent === 'Ready (updating scope)')
+    expect(pill?.classList.contains('green')).toBe(true)
+    expect(container.querySelector('.dashboard-job')?.textContent).not.toContain('Learning')
+  })
+
   it('shows operational metrics, detailed active progress, and actionable links', async () => {
     await renderDashboard()
     expect(container.textContent).toContain('Good afternoon, Alice')

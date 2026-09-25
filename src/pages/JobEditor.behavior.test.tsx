@@ -4,14 +4,14 @@ import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { APIError, createJob, getJob, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
+import { APIError, createJob, getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
 import { renderWithProviders } from '../test/test-utils'
 import { setDisplayTimeZone } from '../format'
 import { JobEditor } from './JobEditor'
 
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
-  return { ...actual, createJob: vi.fn(), getJob: vi.fn(), listNotificationDestinations: vi.fn(), listScannerProfiles: vi.fn(), scannerCapabilities: vi.fn(), scheduleSuggestion: vi.fn(), updateJob: vi.fn() }
+  return { ...actual, createJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), listNotificationDestinations: vi.fn(), listScannerProfiles: vi.fn(), scannerCapabilities: vi.fn(), scheduleSuggestion: vi.fn(), updateJob: vi.fn() }
 })
 
 const destinationResponse = {
@@ -19,6 +19,9 @@ const destinationResponse = {
   status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' },
 }
 const capabilities = { engines: ['nmap', 'naabu_nmap'], nmap: { available: true, path: '/usr/bin/nmap', version: '7.99' }, naabu: { available: true, path: '/usr/local/bin/naabu', version: '2.6.1', syn_supported: false } }
+const administrator = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.delete', 'users.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } }
+const operator = { ...administrator, role: 'operator' as const, user_id: 'operator', username: 'operator', permissions: ['jobs.write'] }
+const approvedJob = { id: 'job-1', revision: 4, enabled: true, archived: false, security_hash: 'old', job: { name: 'Broad edge', schedule: '0 */6 * * *', timezone: 'UTC', targets: ['198.51.100.0/16'], max_expanded_hosts: 65536, tcp: { ports: '1-65535', mode: 'connect', service_detection: false, engine: 'nmap' }, timing: 'balanced', timeout: '1h', resume_window: '8d', baseline_samples: 1, change_confirmations: 1, allow_high_cost: true }, baseline: { status: 'complete', samples: 1, attempts: 1 } }
 const profile = { id: 'profile-1', name: 'Naabu default', description: '', built_in: true, archived: false, revision: 1, definition: { engine: 'naabu_nmap', naabu: { scan_type: 'connect', rate: 1000, workers: 25, retries: 3, timeout_ms: 1000, warm_up_seconds: 2, verify: true, address_batch_size: 16 }, nmap_args: [], naabu_args: [], enrichment_args: [] } }
 
 describe('job editor workflow coverage', () => {
@@ -29,6 +32,7 @@ describe('job editor workflow coverage', () => {
     vi.mocked(createJob).mockResolvedValue({} as never)
     vi.mocked(updateJob).mockResolvedValue({} as never)
     vi.mocked(scheduleSuggestion).mockResolvedValue({ suggested: false, gap_minutes: 60 })
+    vi.mocked(getSession).mockResolvedValue(administrator)
   })
   afterEach(() => vi.clearAllMocks())
 
@@ -97,6 +101,86 @@ describe('job editor workflow coverage', () => {
       await Promise.resolve()
     })
     expect(screen.getByLabelText(/^Five-field cron/)).toHaveValue('30 */6 * * *')
+  })
+
+  it('shows the stagger time in the neighbouring job timezone it names', async () => {
+    setDisplayTimeZone('Europe/Amsterdam')
+    try {
+      // 07:00 UTC is 03:00 in New York and 09:00 in Amsterdam (both on summer time).
+      vi.mocked(scheduleSuggestion).mockResolvedValue({ suggested: true, suggested_schedule: '30 9 * * *', offset_minutes: 30, gap_minutes: 0, nearest: { id: 'job-2', name: 'New York edge', schedule: '0 3 * * *', timezone: 'America/New_York', next_run: '2026-09-19T07:00:00Z' } })
+      renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+      await act(async () => {
+        await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Stagger scheduled scans'), { timeout: 2000 })
+      })
+      const notice = screen.getByRole('status')
+      const newYork = new Date('2026-09-19T07:00:00Z').toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'America/New_York' })
+      expect(newYork).toContain('03:00')
+      expect(notice).toHaveTextContent(`New York edge is next at ${newYork} (America/New_York; at the same time)`)
+      expect(notice).not.toHaveTextContent('09:00')
+    } finally {
+      setDisplayTimeZone(undefined)
+    }
+  })
+
+  it('labels the stagger time with the console timezone when the neighbouring zone is unsupported', async () => {
+    setDisplayTimeZone('Europe/Amsterdam')
+    try {
+      vi.mocked(scheduleSuggestion).mockResolvedValue({ suggested: true, suggested_schedule: '30 9 * * *', offset_minutes: 30, gap_minutes: 15, nearest: { id: 'job-2', name: 'Unknown zone job', schedule: '0 3 * * *', timezone: 'Mars/Olympus', next_run: '2026-09-19T07:00:00Z' } })
+      renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+      await act(async () => {
+        await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Stagger scheduled scans'), { timeout: 2000 })
+      })
+      const amsterdam = new Date('2026-09-19T07:00:00Z').toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Amsterdam' })
+      expect(amsterdam).toContain('09:00')
+      expect(screen.getByRole('status')).toHaveTextContent(`Unknown zone job is next at ${amsterdam} (Europe/Amsterdam; 15 minutes apart)`)
+    } finally {
+      setDisplayTimeZone(undefined)
+    }
+  })
+
+  it('does not let an operator request high-cost approval on a new job', async () => {
+    vi.mocked(getSession).mockResolvedValue(operator)
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    expect(await screen.findByText(/Only an administrator can approve high-cost scans\./)).toBeInTheDocument()
+    const highCost = screen.getByRole('checkbox', { name: /Allow high-cost scans/ })
+    expect(highCost).not.toBeChecked()
+    expect(highCost).toBeDisabled()
+  })
+
+  it('lets an administrator approve high-cost scans on a new job', async () => {
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    const highCost = screen.getByRole('checkbox', { name: /Allow high-cost scans/ })
+    await waitFor(() => expect(highCost).toBeEnabled())
+    expect(screen.queryByText(/Only an administrator can approve high-cost scans\./)).not.toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Broad edge' } })
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.100.10' } })
+    fireEvent.click(highCost)
+    fireEvent.click(screen.getByRole('button', { name: 'Create job' }))
+    await waitFor(() => expect(createJob).toHaveBeenCalled())
+    expect(vi.mocked(createJob).mock.calls[0][0]).toMatchObject({ allow_high_cost: true })
+  })
+
+  it('lets an operator keep or clear an existing high-cost approval', async () => {
+    vi.mocked(getSession).mockResolvedValue(operator)
+    vi.mocked(getJob).mockResolvedValue(approvedJob as never)
+    renderWithProviders(<Routes><Route path="/jobs/:id/edit" element={<JobEditor />} /></Routes>, { route: ['/jobs/job-1/edit'] })
+    await waitFor(() => expect(screen.getByDisplayValue('Broad edge')).toBeInTheDocument())
+    expect(await screen.findByText(/Only an administrator can approve high-cost scans\./)).toBeInTheDocument()
+    const highCost = screen.getByRole('checkbox', { name: /Allow high-cost scans/ })
+    expect(highCost).toBeChecked()
+    expect(highCost).toBeEnabled()
+    fireEvent.click(highCost)
+    expect(highCost).not.toBeChecked()
+    // Re-checking restores the saved approval, which the server accepts.
+    expect(highCost).toBeEnabled()
+    fireEvent.click(highCost)
+    expect(highCost).toBeChecked()
+    fireEvent.click(highCost)
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(updateJob).toHaveBeenCalled())
+    expect(vi.mocked(updateJob).mock.calls[0][2]).toMatchObject({ allow_high_cost: false })
   })
 
   it('requires explicit rebaseline confirmation for a security-scope edit', async () => {

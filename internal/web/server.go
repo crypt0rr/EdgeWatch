@@ -115,6 +115,8 @@ type sseAuthCacheEntry struct {
 type pendingTOTP struct {
 	Secret  string
 	Expires time.Time
+	// Failures counts wrong verification codes; see pendingTOTPMaxAttempts.
+	Failures int
 }
 
 const defaultHTTPWriteTimeout = 60 * time.Second
@@ -134,6 +136,12 @@ const (
 // normal administration unaffected while preventing an unbounded map under
 // deliberate or accidental repeated setup requests.
 const pendingTOTPMaxEntries = 4096
+
+// pendingTOTPMaxAttempts bounds the verification codes that may be tried
+// against one pending enrolment secret. /auth/totp/enable has no separate
+// rate limiter, so this budget is what limits guessing; a mistyped code keeps
+// the enrolment usable until the budget or its ten-minute expiry runs out.
+const pendingTOTPMaxAttempts = 5
 
 func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	if logger == nil {

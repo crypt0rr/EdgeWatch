@@ -39,6 +39,13 @@ trusted client-IP forwarding. Failed login and TOTP attempts, along with
 rate-limit events, are written to the security audit log; they do not currently
 send notification-channel alerts.
 
+Setting up or replacing an authenticator requires the account password, plus
+the current authenticator or a recovery code when TOTP is already enabled. The
+new secret then stays pending for ten minutes and accepts at most five incorrect
+verification codes. A mistyped code can be retried against the same secret;
+after the fifth incorrect code, or once the ten minutes pass, the pending secret
+is discarded and setup must start again.
+
 ## Live-update streams and session revocation
 
 The authenticated live-update stream (`/api/v1/stream`) is authorized to the

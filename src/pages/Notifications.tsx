@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Bell, Check, KeyRound, LockKeyhole, Pencil, Plug, RefreshCw, Send, ShieldCheck, Trash2 } from 'lucide-react'
 import {
@@ -7,6 +7,7 @@ import {
   deleteNotificationDestination,
   listNotificationDestinations,
   NotificationDestination,
+  type NotificationDestinationsResponse,
   testNotificationDestination,
   updateNotificationDestination,
   updateNotificationRouting,
@@ -43,18 +44,6 @@ export function Notifications() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
-  const [updateSelection, setUpdateSelection] = useState<string[] | undefined>(undefined)
-
-  const updateRouting = destinations.data?.update_routing
-  useEffect(() => {
-    if (!destinations.data || !updateRouting?.configured) return
-    const available = new Set(destinations.data.destinations.map(destination => destination.id))
-    setUpdateSelection(current => {
-      const next = (current ?? updateRouting.destinations).filter(id => available.has(id))
-      if (current !== undefined && next.length === current.length && next.every((id, index) => id === current[index])) return current
-      return next
-    })
-  }, [destinations.data, updateRouting?.configured, updateRouting?.destinations])
 
   function resetFeedback() {
     setMessage('')
@@ -187,27 +176,22 @@ export function Notifications() {
     }
   }
 
-  function selectedUpdateDestinationIds() {
-    if (!destinations.data) return []
-    if (updateSelection !== undefined) return updateSelection
-    return updateRouting?.configured
-      ? updateRouting.destinations
-      : destinations.data.destinations.filter(destination => destination.enabled).map(destination => destination.id)
-  }
-
   async function toggleUpdateRouting(destination: NotificationDestination, checked: boolean) {
     if (!destinations.data || busy.startsWith('update-routing:') || passwordPrompt) return
     resetFeedback()
-    const selected = selectedUpdateDestinationIds()
+    const confirmation = await askPassword(`Confirm update alerts for ${destination.name}`, `Enter your account password to ${checked ? 'send' : 'stop sending'} release and upgrade alerts through this destination.`, checked ? 'Enable update alerts' : 'Disable update alerts')
+    if (confirmation === null) return
+    // The request replaces the whole routing list. Build it from the latest
+    // fetched routing, which may include changes saved in another session
+    // while the password prompt was open, and change only this destination.
+    const selected = selectedUpdateDestinationIds(client.getQueryData<NotificationDestinationsResponse>(['notifications']) ?? destinations.data)
     const next = checked
       ? [...new Set([...selected, destination.id])]
       : selected.filter(id => id !== destination.id)
-    const confirmation = await askPassword(`Confirm update alerts for ${destination.name}`, `Enter your account password to ${checked ? 'send' : 'stop sending'} release and upgrade alerts through this destination.`, checked ? 'Enable update alerts' : 'Disable update alerts')
-    if (confirmation === null) return
     setBusy(`update-routing:${destination.id}`)
     try {
       const result = await updateNotificationRouting(next, confirmation)
-      setUpdateSelection([...result.destinations])
+      client.setQueryData<NotificationDestinationsResponse>(['notifications'], current => current && { ...current, update_routing: result })
       setMessage(`Application update alerts ${checked ? 'enabled' : 'disabled'} for ${destination.name}.`)
       await client.invalidateQueries({ queryKey: ['notifications'] })
     } catch (err) {
@@ -218,7 +202,7 @@ export function Notifications() {
   }
 
   const status = destinations.data?.status
-  const selectedUpdateDestinations = selectedUpdateDestinationIds()
+  const selectedUpdateDestinations = selectedUpdateDestinationIds(destinations.data)
   const updateRoutingBusy = busy.startsWith('update-routing:') || passwordPrompt !== null
   return <section className="page narrow notifications-page">
     <div className="page-heading"><div><p className="eyebrow">Delivery</p><h1>Notifications</h1><p className="muted">Manage named Shoutrrr destinations without exposing their credentials.</p></div><Bell className="muted-icon" size={24} /></div>
@@ -243,6 +227,16 @@ export function Notifications() {
     <p className="helper notification-footnote"><LockKeyhole size={13} /> URLs containing credentials are encrypted with the local notification key. Back up <code>notification.key</code> with <code>edgewatch.db</code>; losing it locks web-managed destinations until the key is restored (or a destination is deleted and recreated).</p>
     {passwordPrompt && <ActionDialog title={passwordPrompt.title} description={passwordPrompt.description} confirmLabel={passwordPrompt.confirmLabel} valueLabel="Account password" valueType="password" valueRequired autoComplete="current-password" onConfirm={value => resolvePassword(value)} onCancel={() => resolvePassword(null)} />}
   </section>
+}
+
+// The update-alert checkboxes always follow the latest fetched routing, so a
+// change saved in another session appears after the next refetch.
+function selectedUpdateDestinationIds(data: NotificationDestinationsResponse | undefined) {
+  if (!data) return []
+  const routing = data.update_routing
+  if (!routing?.configured) return data.destinations.filter(destination => destination.enabled).map(destination => destination.id)
+  const available = new Set(data.destinations.map(destination => destination.id))
+  return routing.destinations.filter(id => available.has(id))
 }
 
 function DestinationRow({ destination, editing, busy, canManage, updateAlertSelected, updateAlertsBusy, onToggleUpdateAlerts, onEdit, onCancel, onSave, onChange, onToggle, onDelete, onTest }: { destination: NotificationDestination; editing: EditState | null; busy: string; canManage: boolean; updateAlertSelected: boolean; updateAlertsBusy: boolean; onToggleUpdateAlerts: (destination: NotificationDestination, checked: boolean) => void; onEdit: (destination: NotificationDestination) => void; onCancel: () => void; onSave: (event: FormEvent) => void; onChange: (next: EditState | null) => void; onToggle: (destination: NotificationDestination) => void; onDelete: (destination: NotificationDestination) => void; onTest: (destination: NotificationDestination) => void }) {

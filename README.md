@@ -446,7 +446,7 @@ existing 30-minute expiry and are also removed from browser history on arrival.
 | Role | Access |
 | --- | --- |
 | Administrator | Full administration, users, destinations, profiles, jobs, baselines, incidents, and public status. |
-| Operator | Configure and run jobs; approve or reset baselines; accept or suppress incidents; review evidence; and select existing destinations for jobs. Cannot manage destinations, users, or scanner profiles. |
+| Operator | Configure and run jobs; approve or reset baselines; accept or suppress incidents; review evidence; and select existing destinations for jobs. Cannot manage destinations, users, or scanner profiles, permanently delete archived jobs, or approve high-cost scans; an operator's scope change clears an existing high-cost approval. |
 | Viewer | Read-only jobs and baseline information. |
 
 An administrator can enable **Public status** and explicitly publish selected

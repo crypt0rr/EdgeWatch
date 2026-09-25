@@ -29,6 +29,25 @@ func TestNormalizeAndCompareVersions(t *testing.T) {
 	}
 }
 
+func TestBuildReleasePageURLLinksOnlyPublishedVersions(t *testing.T) {
+	for raw, want := range map[string]string{
+		"0.18.141":            ReleasePageBase + "v0.18.141",
+		"v0.18.141":           ReleasePageBase + "v0.18.141",
+		"v0.3.0-rc.1":         ReleasePageBase + "v0.3.0-rc.1",
+		"1.2.3-beta":          ReleasePageBase + "v1.2.3-beta",
+		"0.18.141+build.7":    ReleasePageBase + "v0.18.141",
+		"dev":                 "",
+		"":                    "",
+		"not-a-version":       "",
+		"0.18.141-3-gabc1234": "",
+		"0.18.141-SNAPSHOT":   "",
+	} {
+		if got := BuildReleasePageURL(raw); got != want {
+			t.Fatalf("BuildReleasePageURL(%q) = %q, want %q", raw, got, want)
+		}
+	}
+}
+
 func TestNewClientDefaultsAndURLValidation(t *testing.T) {
 	client := NewClient()
 	if client.Endpoint != LatestReleaseEndpoint || client.HTTPClient == nil || client.UserAgent == "" || client.MaxResponseBytes != MaxResponseBytes {

@@ -60,10 +60,12 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	if !auth.HasPermission(session, auth.PermissionOverviewRead) {
 		// Viewers are authenticated users too, but must not inherit operational
 		// overview data just to show the product version and release indicator.
-		writeJSON(w, http.StatusOK, map[string]any{
+		viewerStatus := map[string]any{
 			"version": s.Version,
 			"updates": s.applicationUpdateStatus(r.Context()),
-		})
+		}
+		s.addVersionReleaseURL(viewerStatus)
+		writeJSON(w, http.StatusOK, viewerStatus)
 		return
 	}
 	if reloadErr := s.App.Notifier.Reload(r.Context()); reloadErr != nil {
@@ -85,6 +87,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		"max_naabu_probe_count":     s.App.Config.Scheduler.MaxNaabuProbeCount,
 		"rdap_enabled":              s.App.Config.RDAPEnabled(),
 	}
+	s.addVersionReleaseURL(status)
 	if user.Role != store.RoleViewer && len(s.App.Config.Jobs) > 0 {
 		legacy := make([]string, 0, len(s.App.Config.Jobs))
 		for _, job := range s.App.Config.Jobs {
@@ -157,6 +160,15 @@ func (s *Server) cachedDeploymentTelemetry(ctx context.Context) (store.Deploymen
 		case <-ctx.Done():
 			return store.DeploymentTelemetry{}, ctx.Err()
 		}
+	}
+}
+
+// addVersionReleaseURL links the running version to its release page. The URL
+// is derived locally from the build version, so it needs no update check and
+// is omitted for development and other unpublished builds.
+func (s *Server) addVersionReleaseURL(status map[string]any) {
+	if releaseURL := updatecheck.BuildReleasePageURL(s.Version); releaseURL != "" {
+		status["version_release_url"] = releaseURL
 	}
 }
 

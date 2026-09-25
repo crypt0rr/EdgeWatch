@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -101,6 +102,25 @@ func ReleasePageURL(version string) string {
 		return ""
 	}
 	return ReleasePageBase + url.PathEscape(version)
+}
+
+// releasePrerelease matches the prerelease forms EdgeWatch publishes as tags.
+var releasePrerelease = regexp.MustCompile(`^-(alpha|beta|rc)(\.[0-9]+)*$`)
+
+// BuildReleasePageURL returns the release page for the version of the running
+// build. It is stricter than ReleasePageURL: a build version such as
+// 0.18.141-3-gabc123 (git describe output) is a valid semantic version but has
+// no published release, so only stable versions and alpha, beta, or rc
+// prereleases link to a release page. Development builds return "".
+func BuildReleasePageURL(version string) string {
+	normalized := NormalizeVersion(version)
+	if normalized == "" {
+		return ""
+	}
+	if prerelease := semver.Prerelease(normalized); prerelease != "" && !releasePrerelease.MatchString(prerelease) {
+		return ""
+	}
+	return ReleasePageBase + url.PathEscape(normalized)
 }
 
 type githubRelease struct {

@@ -84,8 +84,9 @@ type managedDestination struct {
 }
 
 // Notifier owns the effective destination set. File-managed URLs are loaded
-// from deployment configuration, while web-managed URLs are decrypted from
-// SQLite and can be reloaded without restarting the daemon.
+// from deployment configuration until the daemon imports them, while
+// web-managed URLs are decrypted from SQLite and can be reloaded without
+// restarting the daemon.
 type Notifier struct {
 	Store *store.Store
 
@@ -125,7 +126,16 @@ func newWithKeyFile(s *store.Store, urls []string, keyPath string, autoCreateKey
 	}
 	opaqueIDs := map[string]string{}
 	if s != nil {
-		var err error
+		// A URL that the daemon imported as a web-managed destination is no
+		// longer a deployment destination, even while config.yaml still lists
+		// it. Before the import, every configured URL is delivered as before.
+		imported, err := s.ImportedDeploymentNotifications(context.Background(), sortedKeys(legacyURLs))
+		if err != nil {
+			return nil, fmt.Errorf("load imported notification URLs: %w", err)
+		}
+		for digest := range imported {
+			delete(legacyURLs, digest)
+		}
 		opaqueIDs, err = s.EnsureDeploymentNotificationIDs(context.Background(), sortedKeys(legacyURLs))
 		if err != nil {
 			return nil, fmt.Errorf("persist deployment notification IDs: %w", err)
@@ -609,6 +619,17 @@ func (n *Notifier) StatusContext(ctx context.Context) map[string]any {
 	}
 	status := map[string]any{"deployment": fileCount, "managed": managedCount, "active": fileCount + activeManaged, "locked": locked, "key_state": keyState}
 	if n.Store != nil {
+		// Tell the console when config.yaml still lists URLs that were
+		// imported, or when their import failed and they are still delivered
+		// from config.yaml. Only the outcome is exposed, never a URL.
+		if state, err := n.Store.NotificationConfigImportState(ctx); err == nil {
+			switch {
+			case state.Status == store.NotificationConfigImportFailed:
+				status["config_import"] = store.NotificationConfigImportFailed
+			case state.ImportedURLs > 0:
+				status["config_import"] = store.NotificationConfigImportImported
+			}
+		}
 		if health, err := n.Store.ListDeliveryHealth(ctx); err == nil {
 			pending, retrying, deferrals, terminal := 0, 0, 0, 0
 			for _, item := range health {

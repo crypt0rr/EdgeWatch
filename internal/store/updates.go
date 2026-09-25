@@ -163,6 +163,47 @@ func removeApplicationUpdateDestinationTx(ctx context.Context, tx *sql.Tx, id st
 	return true, nil
 }
 
+// replaceApplicationUpdateDestinationsTx applies replacements, a map from an
+// old destination selector to its replacement, to an explicitly configured
+// update routing, and returns the old selectors it replaced. Routing that was
+// never configured keeps following every enabled destination, and an
+// explicitly empty routing stays silent.
+func replaceApplicationUpdateDestinationsTx(ctx context.Context, tx *sql.Tx, replacements map[string]string) ([]string, error) {
+	var destinationsJSON string
+	err := tx.QueryRowContext(ctx, `SELECT notification_destinations_json FROM application_update_state WHERE id=1`).Scan(&destinationsJSON)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && strings.TrimSpace(destinationsJSON) == "") {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var destinations []string
+	if err := json.Unmarshal([]byte(destinationsJSON), &destinations); err != nil {
+		return nil, err
+	}
+	current := normalizeUpdateDestinations(destinations)
+	updated := make([]string, 0, len(current))
+	var replaced []string
+	for _, selector := range current {
+		if replacement, ok := replacements[selector]; ok {
+			replaced = append(replaced, selector)
+			selector = replacement
+		}
+		updated = append(updated, selector)
+	}
+	if len(replaced) == 0 {
+		return nil, nil
+	}
+	raw, err := json.Marshal(normalizeUpdateDestinations(updated))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE application_update_state SET notification_destinations_json=? WHERE id=1`, string(raw)); err != nil {
+		return nil, err
+	}
+	return replaced, nil
+}
+
 // RecordInstalledVersion persists the running build version. When notify is
 // true, the transition and its notification intent are committed atomically.
 // The first observed version is intentionally seeded without an event by the

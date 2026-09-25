@@ -407,9 +407,9 @@ type routedNotificationJob struct {
 }
 
 // jobsSelectingNotificationDestinationTx reads every job, archived or not,
-// whose saved routing selects the destination. The rows are closed before
-// the caller writes to the same transaction.
-func jobsSelectingNotificationDestinationTx(ctx context.Context, tx *sql.Tx, id string) ([]routedNotificationJob, error) {
+// whose saved routing selects any of the given destination selectors. The
+// rows are closed before the caller writes to the same transaction.
+func jobsSelectingNotificationDestinationTx(ctx context.Context, tx *sql.Tx, ids ...string) ([]routedNotificationJob, error) {
 	rows, err := tx.QueryContext(ctx, `SELECT id,definition_json,revision FROM jobs ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -426,7 +426,7 @@ func jobsSelectingNotificationDestinationTx(ctx context.Context, tx *sql.Tx, id 
 		if err != nil {
 			return nil, err
 		}
-		if !slices.Contains(job.NotificationDestinations, id) {
+		if !slices.ContainsFunc(job.NotificationDestinations, func(selector string) bool { return slices.Contains(ids, selector) }) {
 			continue
 		}
 		item.job = job
@@ -474,4 +474,81 @@ func removeNotificationDestinationFromJobsTx(ctx context.Context, tx *sql.Tx, id
 		changed = append(changed, item.id)
 	}
 	return changed, nil
+}
+
+// replaceNotificationDestinationsInJobsTx applies replacements, a map from an
+// old destination selector to its replacement, to every job that selects any
+// of the old selectors, including archived jobs. Each changed job gets one new
+// revision, however many of its selectors change. It mirrors
+// removeNotificationDestinationFromJobsTx: a nil selection is never selected,
+// so it keeps following every enabled destination, and routing is not part of
+// the security scope, so baselines and in-flight scans are unaffected. The
+// selection stays sorted and free of duplicates, as a normalized job
+// definition is. It returns, per changed job, the old selectors it replaced.
+func replaceNotificationDestinationsInJobsTx(ctx context.Context, tx *sql.Tx, replacements map[string]string, now time.Time) ([]replacedJobSelection, error) {
+	selectors := make([]string, 0, len(replacements))
+	for selector := range replacements {
+		selectors = append(selectors, selector)
+	}
+	affected, err := jobsSelectingNotificationDestinationTx(ctx, tx, selectors...)
+	if err != nil {
+		return nil, err
+	}
+	changed := make([]replacedJobSelection, 0, len(affected))
+	for _, item := range affected {
+		legacyHash := item.job.LegacySecurityHash()
+		var replaced []string
+		item.job.NotificationDestinations, replaced = replaceNotificationSelectors(item.job.NotificationDestinations, replacements)
+		raw, err := marshalJob(item.job)
+		if err != nil {
+			return nil, err
+		}
+		next := item.revision + 1
+		result, err := tx.ExecContext(ctx, `UPDATE jobs SET definition_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, raw, next, now.Format(time.RFC3339Nano), item.id, item.revision)
+		if err != nil {
+			return nil, err
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return nil, ErrConflict
+		}
+		if err := appendJobRevisionTx(ctx, tx, item.id, next, raw, item.job.SecurityHash(), now); err != nil {
+			return nil, err
+		}
+		// Rewriting the stored definition persists its canonical port spelling.
+		// Move matching baseline metadata along, as a normal job edit does.
+		if err := migrateLegacyScopeHashTx(ctx, tx, item.id, legacyHash, item.job.SecurityHash()); err != nil {
+			return nil, err
+		}
+		changed = append(changed, replacedJobSelection{jobID: item.id, replaced: replaced})
+	}
+	return changed, nil
+}
+
+// replacedJobSelection names a job whose routing changed and the old
+// selectors that were replaced in it.
+type replacedJobSelection struct {
+	jobID    string
+	replaced []string
+}
+
+// replaceNotificationSelectors returns a sorted, duplicate-free copy of
+// selection with each selector in replacements swapped for its replacement,
+// and the old selectors that were found.
+func replaceNotificationSelectors(selection []string, replacements map[string]string) ([]string, []string) {
+	out := make([]string, 0, len(selection))
+	var replaced []string
+	seen := make(map[string]struct{}, len(selection))
+	for _, selector := range selection {
+		if replacement, ok := replacements[selector]; ok {
+			replaced = append(replaced, selector)
+			selector = replacement
+		}
+		if _, duplicate := seen[selector]; duplicate {
+			continue
+		}
+		seen[selector] = struct{}{}
+		out = append(out, selector)
+	}
+	slices.Sort(out)
+	return out, replaced
 }

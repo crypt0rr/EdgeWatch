@@ -67,16 +67,20 @@ enrichment:
     enabled: true
 
 notifications:
-  # Prefer a regular, owner-readable (0400 or 0600) file with one Shoutrrr
-  # URL per line. Symlinks and files larger than 1 MiB are rejected at startup.
-  # Changing any part of a URL (for example a rotated token) creates a new
-  # destination; select it again for each job in the web console.
-  # urls_file: /run/secrets/edgewatch-notification-urls
-  # Web-managed destinations are encrypted with ./data/notification.key.
-  # To supply the key separately (for example as a Docker secret), set this
-  # to a file containing 32 raw bytes or 64 hexadecimal characters, mode 0600.
+  # Add notification destinations on the Notifications page of the web
+  # console. They are encrypted with ./data/notification.key. To supply the
+  # key separately (for example as a Docker secret), set this to a file
+  # containing 32 raw bytes or 64 hexadecimal characters, mode 0600.
   # encryption_key_file: /run/secrets/edgewatch-notification-key
-  urls: []
+  #
+  # Deprecated: urls and urls_file. The daemon imports each URL listed here
+  # once as an encrypted destination in the web console and then no longer
+  # uses it; each start warns until you remove both keys. A later release
+  # refuses to start while either is set. A URL file must be a regular,
+  # owner-readable (0400 or 0600) file with one Shoutrrr URL per line; symlinks
+  # and files larger than 1 MiB are rejected at startup.
+  # urls_file: /run/secrets/edgewatch-notification-urls
+  # urls: []
 
 # Jobs are created and scheduled from the web interface. YAML jobs from older
 # releases are intentionally not imported; they remain inactive with a

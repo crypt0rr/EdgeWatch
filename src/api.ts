@@ -29,6 +29,8 @@ export type NotificationStatus = {
   active: number
   locked: number
   key_state: string
+  /** Set while config.yaml still lists imported notification URLs, or when their import failed. */
+  config_import?: 'imported' | 'failed' | string
   delivery_pending?: number
   delivery_retrying?: number
   delivery_deferrals?: number

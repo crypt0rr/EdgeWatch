@@ -38,6 +38,9 @@ type HealthStatus struct {
 	Total     int64     `json:"total,omitempty"`
 	StartedAt time.Time `json:"started_at,omitempty"`
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	// Warnings are operator actions that do not make the daemon unhealthy,
+	// such as removing imported notification URLs from config.yaml.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 func migrationOwner() string {
@@ -172,5 +175,10 @@ func (s *Store) HealthStatus(ctx context.Context) (HealthStatus, error) {
 	}
 	status.Status = "ready"
 	status.UpdatedAt = heartbeat.UTC()
+	// The import outcome is advisory: a failed import keeps delivering from
+	// config.yaml, so it is reported without failing the health check.
+	if state, stateErr := notificationConfigImportState(ctx, reader); stateErr == nil {
+		status.Warnings = state.Warnings()
+	}
 	return status, nil
 }

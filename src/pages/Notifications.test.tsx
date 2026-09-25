@@ -194,3 +194,63 @@ describe('notification update-alert routing', () => {
     })
   })
 })
+
+describe('notification URLs imported from config.yaml', () => {
+  let root: Root
+  let container: HTMLDivElement
+  let queryClient: QueryClient
+
+  beforeEach(() => {
+    container = document.createElement('div')
+    document.body.appendChild(container)
+    root = createRoot(container)
+    queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    queryClient.clear()
+    container.remove()
+    vi.clearAllMocks()
+  })
+
+  async function renderWithImport(configImport?: string) {
+    const imported = { id: 'imported-1', name: 'Deployment destination', provider: 'generic', source: 'web', enabled: true, locked: false, read_only: false, revision: 1 }
+    vi.mocked(listNotificationDestinations).mockResolvedValue({
+      destinations: [imported],
+      status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready', ...(configImport ? { config_import: configImport } : {}) },
+      update_routing: { configured: false, destinations: [] },
+    })
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><Notifications /></QueryClientProvider>)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.querySelectorAll('.notification-row')).toHaveLength(1), { timeout: 1000 })
+  }
+
+  it('asks the operator to remove imported URLs from config.yaml', async () => {
+    await renderWithImport('imported')
+    const banner = container.querySelector('.notification-config-import')
+    expect(banner?.textContent).toContain('Notification URLs in config.yaml were imported.')
+    expect(banner?.textContent).toContain('Remove notifications.urls and notifications.urls_file from config.yaml')
+    // Imported destinations are ordinary web-managed destinations.
+    const row = container.querySelector('.notification-row') as HTMLElement
+    expect(row.textContent).toContain('Deployment destination')
+    expect(row.textContent).toContain('revision 1')
+    expect(row.textContent).not.toContain('Read-only')
+  })
+
+  it('reports a failed import that keeps delivering from config.yaml', async () => {
+    await renderWithImport('failed')
+    const banner = container.querySelector('.notification-config-import')
+    expect(banner?.textContent).toContain('could not be imported')
+    expect(banner?.textContent).toContain('still delivers to them from config.yaml')
+  })
+
+  it('shows no import banner when config.yaml lists no imported URLs', async () => {
+    await renderWithImport()
+    expect(container.querySelector('.notification-config-import')).toBeNull()
+  })
+})

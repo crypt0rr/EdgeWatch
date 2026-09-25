@@ -2,7 +2,7 @@
 
 Please report security vulnerabilities privately through GitHub's security advisory feature for this repository. Do not open a public issue containing exploit details, credentials, notification URLs, or target information.
 
-EdgeWatch executes Nmap with validated argument arrays and does not expose arbitrary Nmap flags. Treat its configuration, SQLite volume, notification URL file, and notification encryption key as sensitive. Only configure targets you own or are explicitly authorized to scan.
+EdgeWatch executes Nmap with validated argument arrays and does not expose arbitrary Nmap flags. Treat its configuration, SQLite volume, notification encryption key, and any remaining notification URL file as sensitive. Only configure targets you own or are explicitly authorized to scan.
 
 TCP jobs may use the optional Naabu discovery-to-Nmap pipeline. Both scanners
 are fixed, image-bundled executables (`/usr/local/bin/naabu` and
@@ -88,10 +88,28 @@ configured. The default key always sits next to the database file, also when
 `database` is a `file:` URI. Protect that key as a credential, keep it mode
 `0600`, and include it in backups of the corresponding SQLite database. An explicitly configured
 key is checked at startup and must be present, valid, and owner-readable.
-Deployment URL files are likewise checked at startup, must be regular files
-with mode `0400` or `0600`, and are capped at 1 MiB. Do not report
-notification URLs or key material in issues, logs, screenshots, or audit
-records.
+Do not report notification URLs or key material in issues, logs, screenshots,
+or audit records.
+
+Notification secrets now live encrypted in the database. The
+`notifications.urls` and `notifications.urls_file` keys in config.yaml are
+deprecated: on its first start, the daemon imports each configured URL once as
+an encrypted web-managed destination, in one transaction that also moves the
+job routing, update-alert routing, queued alerts, and delivery health to it.
+The import uses the same key, and creates the default key exactly as the
+first web-managed destination does. After the import, EdgeWatch no longer
+reads those URLs for delivery; remove them, and any mounted URL file, from the
+deployment, because the file keeps a second plaintext copy of the credentials.
+Back up `notification.key` with the database: without it, the imported
+destinations are locked and cannot be recovered from config.yaml. An import
+that cannot complete, for example because the key is missing, unreadable, or
+cannot decrypt the existing destinations, imports nothing and leaves delivery
+on the configured URLs. Logs, the `edgewatch health` warning, and the
+`notifications.config_imported` audit record contain only counts, destination
+IDs, and a bounded reason, never a URL or its digest. While a URL file is
+still configured, it is checked at startup, must be a regular file with mode
+`0400` or `0600`, and is capped at 1 MiB. A later release will refuse to start
+while either key is set.
 
 Notification delivery health is exposed only as named-destination counts and
 timestamps. Terminal drops store a stable destination/error fingerprint and a
@@ -110,7 +128,7 @@ database together, or delete and recreate the affected destinations after
 confirming that the old credentials are revoked. After restoring a key, run
 `notify test` or the console notification test: it fails while any enabled
 web-managed destination is still locked. A database upgraded to schema
-49 must not be opened by an older EdgeWatch binary; downgrade by restoring the
+50 must not be opened by an older EdgeWatch binary; downgrade by restoring the
 complete pre-upgrade `./data` backup before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
 refuse a schema newer than the binary supports before they write anything.

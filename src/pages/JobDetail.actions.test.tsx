@@ -3,7 +3,7 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Route, Routes } from 'react-router-dom'
-import { approveBaseline, archiveJob, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, resetBaseline, restoreJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
+import { APIError, approveBaseline, archiveJob, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, resetBaseline, restoreJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
 import { renderWithProviders } from '../test/test-utils'
 import { JobDetail } from './JobDetail'
 
@@ -19,11 +19,13 @@ const job = {
 }
 const scan = { id: 'scan-1', job_id: 'job-1', job: 'Production', started_at: '2026-01-01T00:00:00Z', finished_at: '2026-01-01T00:01:00Z', status: 'success', config_hash: 'scope' }
 const page = { limit: 10, offset: 0, total: 1, has_more: false, next_offset: null }
+const administrator = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.delete', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } }
+const operator = { ...administrator, role: 'operator' as const, user_id: 'operator', username: 'operator', permissions: ['jobs.write', 'scans.read', 'baselines.read'] }
 
 describe('job detail actions', () => {
   beforeEach(() => {
     vi.mocked(getJob).mockResolvedValue(job as never)
-    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getSession).mockResolvedValue(administrator)
     vi.mocked(jobBaseline).mockResolvedValue({ job_id: 'job-1', job: 'Production', revision: 7, security_hash: 'scope', baseline: job.baseline, snapshot: { units: [], scopes: [] }, pagination: page } as never)
     vi.mocked(latestSuccessfulScan).mockResolvedValue({ scan } as never)
     vi.mocked(jobScans).mockResolvedValue({ scans: [scan], pagination: page } as never)
@@ -106,6 +108,30 @@ describe('job detail actions', () => {
     await waitFor(() => expect(deleteJob).toHaveBeenCalledWith('job-1', 'Production'))
   })
 
+  it('does not offer permanent deletion to an operator without jobs.delete', async () => {
+    vi.mocked(getSession).mockResolvedValue(operator)
+    vi.mocked(getJob).mockResolvedValue({ ...job, archived: true, enabled: false } as never)
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Restore' })).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: 'Delete permanently' })).not.toBeInTheDocument()
+  })
+
+  it('refreshes a stale job after a lifecycle conflict and refreshes the job list after archiving', async () => {
+    vi.mocked(archiveJob).mockRejectedValueOnce(new APIError('job was modified; reload before changing its lifecycle', 'conflict'))
+    const { client } = renderPage()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    await waitFor(() => expect(screen.getByText('Revision 7 · Updated', { exact: false })).toBeInTheDocument())
+    vi.mocked(getJob).mockResolvedValue({ ...job, revision: 8, enabled: false } as never)
+    fireEvent.click(screen.getByRole('button', { name: 'Archive job' }))
+    fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
+    await waitFor(() => expect(archiveJob).toHaveBeenCalledWith('job-1', 7))
+    await waitFor(() => expect(screen.getByText('Revision 8 · Updated', { exact: false })).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
+    await waitFor(() => expect(archiveJob).toHaveBeenLastCalledWith('job-1', 8))
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['jobs'] }))
+  })
+
   it('keeps mutation errors visible and allows a guarded action to be retried', async () => {
     vi.mocked(getJob).mockResolvedValue({ ...job, archived: true, enabled: false } as never)
     vi.mocked(restoreJob).mockRejectedValueOnce(new Error('restore conflict'))
@@ -133,6 +159,21 @@ describe('job detail actions', () => {
     await waitFor(() => expect(screen.getByText('Learning')).toBeInTheDocument())
     expect(screen.getByText('1 of 1 samples')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Explore baseline/ })).not.toBeInTheDocument()
+  })
+
+  it('presents an updating baseline as active and keeps its evidence available', async () => {
+    vi.mocked(getJob).mockResolvedValue({
+      ...job,
+      job: { ...job.job, baseline_samples: 2 },
+      baseline: { status: 'updating', samples: 0, attempts: 0, scan_id: 'scan-1', host_count: 1 },
+    } as never)
+    renderPage()
+    await waitFor(() => expect(screen.getByText('Ready (updating scope)')).toBeInTheDocument())
+    expect(screen.getByText('Baseline is active')).toBeInTheDocument()
+    expect(screen.queryByText(/Baseline is learning/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/0 of 2 samples/)).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Explore baseline/ })).toHaveAttribute('href', '/jobs/job-1/baseline')
+    await waitFor(() => expect(jobBaseline).toHaveBeenCalledWith('job-1', 0, 10))
   })
 
   it('offers retry when the job detail cannot be loaded', async () => {

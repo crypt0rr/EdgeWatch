@@ -129,6 +129,8 @@ describe('notification update-alert routing', () => {
 
     act(() => first.click())
     dialog = document.body.querySelector('[role="dialog"]') as HTMLElement
+    // The server stores the new routing; the page's follow-up refetch reads it.
+    vi.mocked(listNotificationDestinations).mockResolvedValue(response(true, []))
     setInputValue(dialog.querySelector('input[type="password"]') as HTMLInputElement, 'fixture-password')
     await act(async () => {
       ;(dialog.querySelector('button[type="submit"]') as HTMLButtonElement).click()
@@ -139,5 +141,56 @@ describe('notification update-alert routing', () => {
     expect(first.checked).toBe(false)
     expect(updateNotificationRouting).toHaveBeenNthCalledWith(1, [], 'fixture-password')
     expect(updateNotificationRouting).toHaveBeenNthCalledWith(2, [], 'fixture-password')
+  })
+
+  describe('with routing changed in another session', () => {
+    const pager = { id: 'dest-3', name: 'Pager', provider: 'generic', source: 'web', enabled: true, locked: false, read_only: false, revision: 1 }
+    const routed = (selected: string[]) => ({ ...response(true, selected), destinations: [...destinations, pager] })
+
+    async function renderThreeDestinations() {
+      await act(async () => {
+        root.render(<QueryClientProvider client={queryClient}><Notifications /></QueryClientProvider>)
+        await Promise.resolve()
+      })
+      await vi.waitFor(() => expect(container.querySelectorAll('.notification-row')).toHaveLength(3), { timeout: 1000 })
+    }
+
+    async function confirm(password: string) {
+      const dialog = document.body.querySelector('[role="dialog"]') as HTMLElement
+      setInputValue(dialog.querySelector('input[type="password"]') as HTMLInputElement, password)
+      await act(async () => {
+        ;(dialog.querySelector('button[type="submit"]') as HTMLButtonElement).click()
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+    }
+
+    beforeEach(() => {
+      vi.mocked(listNotificationDestinations).mockResolvedValue(routed(['dest-1']))
+      vi.mocked(updateNotificationRouting).mockImplementation(async selected => ({ configured: true, destinations: selected }))
+    })
+
+    it('shows the refetched routing and toggles only the chosen destination', async () => {
+      await renderThreeDestinations()
+      expect(container.querySelector('input[aria-label="Enable update alerts for Backup"]')).toBeTruthy()
+
+      vi.mocked(listNotificationDestinations).mockResolvedValue(routed(['dest-1', 'dest-2']))
+      await act(async () => { await queryClient.invalidateQueries({ queryKey: ['notifications'] }) })
+      await vi.waitFor(() => expect(container.querySelector('input[aria-label="Disable update alerts for Backup"]')).toBeTruthy(), { timeout: 1000 })
+
+      act(() => (container.querySelector('input[aria-label="Enable update alerts for Pager"]') as HTMLInputElement).click())
+      await confirm('fixture-password')
+      await vi.waitFor(() => expect(updateNotificationRouting).toHaveBeenCalledWith(['dest-1', 'dest-2', 'dest-3'], 'fixture-password'), { timeout: 1000 })
+    })
+
+    it('applies a toggle to routing that changed while the password prompt was open', async () => {
+      await renderThreeDestinations()
+      act(() => (container.querySelector('input[aria-label="Enable update alerts for Pager"]') as HTMLInputElement).click())
+
+      vi.mocked(listNotificationDestinations).mockResolvedValue(routed(['dest-1', 'dest-2']))
+      await act(async () => { await queryClient.invalidateQueries({ queryKey: ['notifications'] }) })
+      await confirm('fixture-password')
+      await vi.waitFor(() => expect(updateNotificationRouting).toHaveBeenCalledWith(['dest-1', 'dest-2', 'dest-3'], 'fixture-password'), { timeout: 1000 })
+    })
   })
 })

@@ -13,6 +13,7 @@ import {
   TimerReset,
 } from 'lucide-react'
 import {
+  APIError,
   approveBaseline,
   archiveJob,
   deleteJob,
@@ -60,7 +61,13 @@ export function JobDetail() {
   // avoiding a transient unauthorized request, this keeps viewer pages from
   // ever fetching scan history that their role cannot read.
   const canOperate = session.data?.permissions.includes('jobs.write') ?? false
+  // Permanent deletion is administrator-only (jobs.delete); operators may
+  // archive and restore, but the API rejects their delete requests.
+  const canDelete = session.data?.permissions.includes('jobs.delete') ?? false
   const canReadScans = session.data?.permissions.includes('scans.read') ?? false
+  // "updating" is an active baseline whose stored scope hash is being
+  // re-keyed; its expected results remain available.
+  const baselineActive = !!job.data && baselinePresentation(job.data.baseline).status === 'complete'
   const scans = useQuery({
     queryKey: ['job-scans', id, scanOffset],
     queryFn: () => jobScans(id, scanOffset),
@@ -70,7 +77,7 @@ export function JobDetail() {
   const baseline = useQuery({
     queryKey: ['job-baseline-overview', id, baselineOffset],
     queryFn: () => jobBaseline(id, baselineOffset, 10),
-    enabled: !!id && job.data?.baseline.status === 'complete',
+    enabled: !!id && baselineActive,
   })
   const latest = useQuery({
     queryKey: ['latest-successful-scan', id],
@@ -142,6 +149,12 @@ export function JobDetail() {
   function reportActionError(err: unknown, fallback: string) {
     setActionError(err instanceof Error ? err.message : fallback)
   }
+  function reportLifecycleError(err: unknown, fallback: string) {
+    reportActionError(err, fallback)
+    // A lifecycle conflict means this page holds an older revision. Reload
+    // it so a retry sends the current revision.
+    if (err instanceof APIError && err.code === 'conflict') void client.invalidateQueries({ queryKey: ['job', id] })
+  }
   async function run() {
     setActionError('')
     setActionBusy('run')
@@ -202,10 +215,13 @@ export function JobDetail() {
     setActionBusy('archive')
     try {
       await archiveJob(id, value.revision)
+      await client.invalidateQueries({ queryKey: ['jobs'] })
+      // Mark the detail stale without refetching it on the way out.
+      void client.invalidateQueries({ queryKey: ['job', id], refetchType: 'none' })
       setDialog(null)
       navigate('/jobs')
     } catch (err) {
-      reportActionError(err, 'Could not archive this job.')
+      reportLifecycleError(err, 'Could not archive this job.')
       setActionBusy('')
     }
   }
@@ -217,7 +233,7 @@ export function JobDetail() {
       await client.invalidateQueries({ queryKey: ['job', id] })
       await client.invalidateQueries({ queryKey: ['jobs'] })
     } catch (err) {
-      reportActionError(err, 'Could not restore this job.')
+      reportLifecycleError(err, 'Could not restore this job.')
     } finally {
       setActionBusy('')
     }
@@ -227,6 +243,7 @@ export function JobDetail() {
     setActionBusy('delete')
     try {
       await deleteJob(id, confirmation)
+      await client.invalidateQueries({ queryKey: ['jobs'] })
       setDialog(null)
       navigate('/jobs')
     } catch (err) {
@@ -342,7 +359,7 @@ export function JobDetail() {
           <button className="button secondary" onClick={() => navigate(`/jobs/${id}/edit`)} disabled={!!actionBusy}>
             <Edit3 size={16} /> Edit
           </button>
-          {value.archived ? <><button className="button secondary" onClick={restore} disabled={!!actionBusy}>{actionBusy === 'restore' ? 'Restoring…' : 'Restore'}</button><button className="button danger" onClick={() => { setActionError(''); setDialog('delete') }} disabled={!!actionBusy}>{actionBusy === 'delete' ? 'Deleting…' : 'Delete permanently'}</button></> : <button className="icon-button danger" aria-label="Archive job" onClick={() => { setActionError(''); setDialog('archive') }} disabled={!!actionBusy}><Archive size={17} /></button>}
+          {value.archived ? <><button className="button secondary" onClick={restore} disabled={!!actionBusy}>{actionBusy === 'restore' ? 'Restoring…' : 'Restore'}</button>{canDelete && <button className="button danger" onClick={() => { setActionError(''); setDialog('delete') }} disabled={!!actionBusy}>{actionBusy === 'delete' ? 'Deleting…' : 'Delete permanently'}</button>}</> : <button className="icon-button danger" aria-label="Archive job" onClick={() => { setActionError(''); setDialog('archive') }} disabled={!!actionBusy}><Archive size={17} /></button>}
         </div>}
       </div>
       {actionError && <div className="form-error banner" role="alert">{actionError}</div>}
@@ -352,7 +369,7 @@ export function JobDetail() {
           <span className="summary-label">Baseline</span>
           <strong>{baselineStatus.label}</strong>
           <span className="muted">
-            {value.baseline.status === 'complete'
+            {baselineStatus.status === 'complete'
               ? `Established from ${value.baseline.scan_id?.slice(0, 8) ?? 'scan'}`
               : value.baseline.status === 'stalled'
                 ? `${value.baseline.incomplete_attempts ?? 0} incomplete scans; coverage is blocking baseline learning`
@@ -396,13 +413,14 @@ export function JobDetail() {
             <ShieldAlert size={18} className="muted-icon" />
           </div>
           <div className="baseline-box">
-            {value.baseline.status === 'complete' ? (
+            {baselineStatus.status === 'complete' ? (
               <>
                 <CheckCircle2 className="green-icon" size={22} />
                 <div>
                   <strong>Baseline is active</strong>
                   <span className="muted">
                     New changes will be confirmed after {value.job.change_confirmations} matching scan{value.job.change_confirmations === 1 ? '' : 's'}.
+                    {value.baseline.status === 'updating' && ' Its stored scope uses an older port spelling and is updated by the next finalized scan or job save.'}
                   </span>
                 </div>
               </>
@@ -426,9 +444,9 @@ export function JobDetail() {
           </div>
           <div className="overview-actions">
             {canOperate && <button className="button secondary" onClick={() => { setActionError(''); setDialog('reset') }} disabled={!!actionBusy}><RotateCcw size={16} /> {actionBusy === 'reset' ? 'Resetting…' : 'Reset baseline'}</button>}
-            {value.baseline.status === 'complete' && <Link className="button secondary explore-button" to={`/jobs/${id}/baseline`}><Server size={16} /> Explore baseline <span className="button-count">{value.baseline.host_count ?? 'hosts'}</span></Link>}
+            {baselineActive && <Link className="button secondary explore-button" to={`/jobs/${id}/baseline`}><Server size={16} /> Explore baseline <span className="button-count">{value.baseline.host_count ?? 'hosts'}</span></Link>}
           </div>
-          {value.baseline.status === 'complete' && (
+          {baselineActive && (
             <div className="overview-results">
               {baseline.isLoading ? <div className="skeleton-list" /> : baseline.error ? <div className="form-error" role="alert">Could not load expected baseline results.</div> : baseline.data?.snapshot?.units?.length ? <SurfaceUnitList units={baseline.data.snapshot.units} /> : <div className="inline-empty">No positive ports are in the current baseline.</div>}
               <Pagination page={baseline.data?.pagination} onChange={setBaselineOffset} />

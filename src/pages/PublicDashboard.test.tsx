@@ -122,6 +122,39 @@ describe('public dashboard pages', () => {
     expect(limitUnicode('é'.repeat(121), 120)).toBe('é'.repeat(120))
   })
 
+  it('keeps a typed or pasted introduction on one line so the API accepts it', async () => {
+    await renderPage(<PublicDashboardAdmin />)
+    const introduction = container.querySelector('textarea') as HTMLTextAreaElement
+    act(() => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+      setter?.call(introduction, 'Line one\nLine two\r\n\r\nLine three')
+      introduction.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect(introduction.value).toBe('Line one Line two Line three')
+    expect(container.textContent).toContain('Line breaks are not allowed')
+    const saveButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Save public view')) as HTMLButtonElement
+    await act(async () => {
+      saveButton.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(savePublicDashboardConfig).toHaveBeenCalledWith(expect.objectContaining({ introduction: 'Line one Line two Line three' }))
+    expect(vi.mocked(savePublicDashboardConfig).mock.calls[0][0].introduction).not.toMatch(/[\r\n]/)
+    expect(container.textContent).toContain('Public view saved.')
+  })
+
+  it('shows the field-specific reason when the API rejects the text', async () => {
+    vi.mocked(savePublicDashboardConfig).mockRejectedValueOnce(new APIError('the introduction cannot contain line breaks', 'validation_failed'))
+    await renderPage(<PublicDashboardAdmin />)
+    const saveButton = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Save public view')) as HTMLButtonElement
+    await act(async () => {
+      saveButton.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toBe('the introduction cannot contain line breaks'), { timeout: 1000 })
+  })
+
   it('separates archived and legacy hosts and saves checkbox changes', async () => {
     await renderPage(<PublicDashboardAdmin />)
     expect(container.textContent).toContain('Active jobs')

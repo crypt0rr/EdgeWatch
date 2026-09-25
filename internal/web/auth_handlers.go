@@ -527,14 +527,17 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 		return
 	}
 	key := digest(cookie.Value)
-	now := s.currentTime()
-	s.mu.Lock()
-	s.prunePendingTOTPLocked(now)
-	pending, ok := s.pendingTOTP[key]
-	delete(s.pendingTOTP, key)
-	s.mu.Unlock()
-	if !ok || !now.Before(pending.Expires) || !auth.VerifyTOTP(pending.Secret, input.Code) {
-		writeError(w, http.StatusBadRequest, "totp_failed", "invalid or expired TOTP setup", nil)
+	pending, remaining, ok := s.verifyPendingTOTP(key, input.Code, s.currentTime())
+	if !ok {
+		if remaining > 0 {
+			attempts := "attempts"
+			if remaining == 1 {
+				attempts = "attempt"
+			}
+			writeError(w, http.StatusBadRequest, "totp_failed", fmt.Sprintf("the verification code is incorrect; %d %s remaining", remaining, attempts), map[string]any{"remaining_attempts": remaining})
+			return
+		}
+		writeError(w, http.StatusBadRequest, "totp_setup_expired", "TOTP setup expired or had too many incorrect codes; start setup again", nil)
 		return
 	}
 	plain, hashes, err := auth.RecoveryCodes()
@@ -571,6 +574,36 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 	}
 	s.revokeSSEUserExcept(session.UserID, preserveSessionHash)
 	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": plain})
+}
+
+// verifyPendingTOTP checks code against the enrolment pending for key. A
+// correct code consumes the enrolment and returns it. A wrong code keeps the
+// enrolment for a retry and returns how many attempts remain; the last
+// permitted failure discards it. remaining is zero when no enrolment is
+// pending, it expired, or its attempts are spent, so the user must start
+// setup again. Verification and counting happen under one lock so parallel
+// requests cannot exceed pendingTOTPMaxAttempts.
+func (s *Server) verifyPendingTOTP(key, code string, now time.Time) (pendingTOTP, int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.prunePendingTOTPLocked(now)
+	pending, found := s.pendingTOTP[key]
+	if !found || !now.Before(pending.Expires) {
+		delete(s.pendingTOTP, key)
+		return pendingTOTP{}, 0, false
+	}
+	if auth.VerifyTOTP(pending.Secret, code) {
+		delete(s.pendingTOTP, key)
+		return pending, 0, true
+	}
+	pending.Failures++
+	remaining := pendingTOTPMaxAttempts - pending.Failures
+	if remaining <= 0 {
+		delete(s.pendingTOTP, key)
+		return pendingTOTP{}, 0, false
+	}
+	s.pendingTOTP[key] = pending
+	return pendingTOTP{}, remaining, false
 }
 
 func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session store.Session) {

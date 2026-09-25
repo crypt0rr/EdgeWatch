@@ -329,6 +329,19 @@ func TestBaselineJSONReportsStalledLearning(t *testing.T) {
 	}
 }
 
+func TestBaselineJSONReportsUpdatingForLegacyScopeHash(t *testing.T) {
+	// A baseline keyed to a legacy spelling of the job's scope is still the
+	// active baseline; it is re-keyed by the next finalized scan or save.
+	summary := store.RuntimeStateSummary{HasBaseline: true, BaselineScanID: "scan-legacy", BaselineConfigHash: "legacy-hash", BaselineHostCount: 1}
+	result := baselineJSONFromSummary(summary, "current-hash")
+	if result["status"] != "updating" || result["scan_id"] != "scan-legacy" || result["host_count"] != 1 {
+		t.Fatalf("legacy-hash baseline response = %#v", result)
+	}
+	if current := baselineJSONFromSummary(summary, "legacy-hash"); current["status"] != "complete" {
+		t.Fatalf("matching-hash baseline response = %#v", current)
+	}
+}
+
 func TestJobListBatchesProfileAndActiveCycleSummaries(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)

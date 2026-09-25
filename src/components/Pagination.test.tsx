@@ -40,6 +40,17 @@ describe('Pagination', () => {
 		expect(onChange.mock.calls).toEqual([[0], [20]])
 	})
 
+	it('keeps Previous reachable on a later page after the list shrank to one page', () => {
+		const onChange = vi.fn()
+		act(() => root.render(<Pagination page={{ limit: 20, offset: 20, total: 20, has_more: false, next_offset: null }} onChange={onChange} />))
+		expect(container.querySelector('[aria-label="Pagination"]')?.textContent).toContain('20 total')
+		const [previous, next] = Array.from(container.querySelectorAll('button')) as HTMLButtonElement[]
+		expect(previous.disabled).toBe(false)
+		expect(next.disabled).toBe(true)
+		act(() => previous.click())
+		expect(onChange).toHaveBeenCalledWith(0)
+	})
+
 	it('disables controls at the beginning and end of the result set', () => {
 		const onChange = vi.fn()
 		act(() => root.render(<Pagination page={{ limit: 10, offset: 0, total: 25, has_more: false, next_offset: null }} onChange={onChange} />))

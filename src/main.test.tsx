@@ -211,6 +211,14 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByText('No jobs configured')).toBeInTheDocument())
   })
 
+  it('lists a baseline whose stored scope is being updated as ready', async () => {
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [{ id: 'job-4', revision: 3, enabled: true, archived: false, job: { name: 'Legacy ports', targets: ['198.51.100.13'], tcp: { ports: '2, 1' }, schedule: '0 * * * *', baseline_samples: 2 }, baseline: { status: 'updating', scan_id: 'scan-4', host_count: 1, samples: 0 } }] } as never)
+    renderWithProviders(<Jobs />)
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Legacy ports' })).toBeInTheDocument())
+    expect(screen.getByText('● Baseline ready (updating scope)')).toHaveClass('complete')
+    expect(screen.queryByText(/Collecting/)).not.toBeInTheDocument()
+  })
+
   it('shows the viewer empty state without a creation action', async () => {
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] } as never)
     vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
@@ -248,6 +256,43 @@ describe('application shell', () => {
     fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('changed while it was open'))
+  })
+
+  it('returns to the last non-empty incident page after resolving the only row on a later page', async () => {
+    const incidentRow = (index: number) => ({ job_id: 'job-1', job: 'TCP monitor', incident: { change: { key: `tcp:198.51.100.10:${1000 + index}`, kind: 'port', target: '198.51.100.10', protocol: 'tcp', port: 1000 + index, old: 'closed', new: 'open', severity: 'critical' }, opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:01:00Z' } })
+    let active = Array.from({ length: 21 }, (_, index) => incidentRow(index))
+    vi.mocked(listIncidents).mockImplementation(async (offset = 0, limit = 20) => {
+      const rows = active.slice(offset, offset + limit)
+      const hasMore = offset + rows.length < active.length
+      return { incidents: rows, pagination: { limit, offset, total: active.length, has_more: hasMore, next_offset: hasMore ? offset + limit : null } } as never
+    })
+    vi.mocked(acceptIncident).mockImplementation(async (_job, key) => { active = active.filter(row => row.incident.change.key !== key) })
+    renderWithProviders(<Incidents />)
+    await waitFor(() => expect(screen.getByText('1–20 of 21')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await waitFor(() => expect(screen.getByText('21–21 of 21')).toBeInTheDocument())
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])
+    fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
+    await waitFor(() => expect(acceptIncident).toHaveBeenCalledWith('job-1', 'tcp:198.51.100.10:1020', expect.anything()))
+
+    // The 20 remaining incidents now fit on the first page; the page must not
+    // claim that there are no incidents or strand the operator on an empty page.
+    await waitFor(() => expect(screen.getAllByText('TCP monitor')).toHaveLength(40))
+    expect(vi.mocked(listIncidents)).toHaveBeenLastCalledWith(0)
+    expect(screen.queryByText('No active incidents')).not.toBeInTheDocument()
+  })
+
+  it('shows the incident empty state only when no incidents remain', async () => {
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { limit: 20, offset: 0, total: 3, has_more: false, next_offset: null } })
+    renderWithProviders(<Incidents />)
+    await waitFor(() => expect(screen.getByText('No incidents on this page.')).toBeInTheDocument())
+    expect(screen.queryByText('No active incidents')).not.toBeInTheDocument()
+
+    cleanup()
+    vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })
+    renderWithProviders(<Incidents />)
+    await waitFor(() => expect(screen.getByText('No active incidents')).toBeInTheDocument())
   })
 
   it('routes auth states and bypasses authentication for the public path', async () => {

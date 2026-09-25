@@ -5,7 +5,7 @@ import { z } from 'zod'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Bell, ChevronDown, Info, Plus, Save, Trash2, TriangleAlert } from 'lucide-react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, getJob, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
+import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
 import type { JobForm, Protocol } from '../types'
 import type { ScannerCapabilities, ScannerProfile } from '../api'
 import { cidrWarning, duplicateTarget, targetKind } from '../target'
@@ -67,6 +67,7 @@ export function JobEditor() {
   const navigate = useNavigate()
   const client = useQueryClient()
   const existing = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id!), enabled: edit })
+  const session = useQuery({ queryKey: ['session'], queryFn: getSession })
   const notificationDestinations = useQuery({ queryKey: ['notifications'], queryFn: listNotificationDestinations, staleTime: 30_000 })
   const scannerProfiles = useQuery({ queryKey: ['scanner-profiles'], queryFn: () => listScannerProfiles(false), staleTime: 60_000 })
   const scannerCapabilityState = useQuery({ queryKey: ['scanner-capabilities'], queryFn: scannerCapabilities, staleTime: 5 * 60_000, retry: false })
@@ -93,6 +94,12 @@ export function JobEditor() {
   const schedule = watch('schedule')
   const timezone = watch('timezone')
   const timing = watch('timing')
+  const allowHighCost = watch('allow_high_cost')
+  // Only administrators (users.manage) may turn high-cost approval on; the API
+  // rejects it for every other role. Operators may still keep or clear an
+  // approval that is already saved, which the API accepts.
+  const canApproveHighCost = session.data?.permissions.includes('users.manage') ?? false
+  const highCostLocked = !canApproveHighCost && !allowHighCost && !existing.data?.job.allow_high_cost
 
   useEffect(() => {
     if (edit) return
@@ -202,7 +209,16 @@ export function JobEditor() {
     setError('')
     try {
       if (edit) {
-        await updateJob(id!, loadedRevision.current?.revision ?? existing.data!.revision, payload, confirm)
+        const saved = await updateJob(id!, loadedRevision.current?.revision ?? existing.data!.revision, payload, confirm)
+        // Job detail reads this query. Without a live update it could keep the
+        // pre-save revision for its stale time, and a lifecycle action would
+        // then send that revision and be rejected. Store the saved job.
+        if (saved?.id === id) {
+          loadedRevision.current = { id, revision: saved.revision }
+          client.setQueryData(['job', id], saved)
+        } else {
+          void client.invalidateQueries({ queryKey: ['job', id], refetchType: 'none' })
+        }
       } else {
         await createJob(payload)
       }
@@ -228,6 +244,8 @@ export function JobEditor() {
       setSaving(false)
     }
   }
+
+  const nearestRun = currentSuggestion?.nearest ? suggestionTime(currentSuggestion.nearest.next_run, currentSuggestion.nearest.timezone) : null
 
   if (edit && existing.isLoading) {
     return <div className="loading"><span className="spinner" />Loading job…</div>
@@ -281,7 +299,7 @@ export function JobEditor() {
               {(fieldErrors.targets || fieldErrors.target) && <small className="field-error">{fieldErrors.targets || fieldErrors.target}</small>}
             </div>
             <label className="inline-field">Maximum expanded hosts <span className="input-suffix"><input type="number" min={1} max={1000000} {...register('max_expanded_hosts', { valueAsNumber: true })} /><em>hosts</em></span>{(formErrors.max_expanded_hosts?.message || fieldErrors.max_expanded_hosts) && <small className="field-error">{formErrors.max_expanded_hosts?.message || fieldErrors.max_expanded_hosts}</small>}</label>
-            <label className="switch-row"><input type="checkbox" {...register('allow_high_cost')} /><span><strong>Allow high-cost scans</strong><small>Override the deployment probe budget for deliberately broad scopes. The estimated cost is shown after saving.</small></span></label>
+            <label className="switch-row"><input type="checkbox" disabled={highCostLocked} {...register('allow_high_cost')} /><span><strong>Allow high-cost scans</strong><small>Override the deployment probe budget for deliberately broad scopes. The estimated cost is shown after saving.{session.data && !canApproveHighCost ? ' Only an administrator can approve high-cost scans.' : ''}</small></span></label>
             <div className="notice"><Info size={16} /><span>Large CIDRs can take a long time to scan. The expansion limit protects the host from accidental wide scopes.</span></div>
           </div>
 
@@ -332,7 +350,7 @@ export function JobEditor() {
             <label>Preset<select value={presetFor(schedule)} onChange={(event) => { if (event.target.value !== 'custom') { setDraftDirty(true); setValue('schedule', event.target.value, { shouldDirty: true }) } }}><option value="0 */6 * * *">Every 6 hours</option><option value="0 * * * *">Every hour</option><option value="0 3 * * *">Daily at 03:00</option><option value="0 3 * * 0">Weekly on Sunday</option><option value="custom">Custom cron</option></select></label>
             <label>Five-field cron<input {...register('schedule')} placeholder="minute hour day month weekday" />{(formErrors.schedule?.message || fieldErrors.schedule) && <small className="field-error">{formErrors.schedule?.message || fieldErrors.schedule}</small>}<small>Uses the server’s standard cron parser.</small></label>
             <label>Timezone<input {...register('timezone')} placeholder="Europe/Amsterdam" />{(formErrors.timezone?.message || fieldErrors.timezone) && <small className="field-error">{formErrors.timezone?.message || fieldErrors.timezone}</small>}<small className="helper">Daylight-saving transitions follow standard cron rules: skipped local times do not run, while repeated fall-back times may run twice. Choose a time outside transition hours when exact cadence matters.</small></label>
-            {showSuggestion && currentSuggestion?.nearest && <div className="notice schedule-suggestion" role="status"><Info size={16} /><div className="schedule-suggestion-copy"><strong>Stagger scheduled scans</strong><span>{currentSuggestion.nearest.name} is next at {formatSuggestionTime(currentSuggestion.nearest.next_run)} ({currentSuggestion.nearest.timezone}; {formatGap(currentSuggestion.gap_minutes)}). Starting 30 minutes {currentSuggestion.offset_minutes && currentSuggestion.offset_minutes < 0 ? 'earlier' : 'later'} keeps scheduled work apart.</span><small>You can keep this schedule when overlapping runs are intentional.</small></div>{currentSuggestion.suggested_schedule && <button type="button" className="button secondary" onClick={() => { setDraftDirty(true); setDismissedSuggestion(suggestionKey); setValue('schedule', currentSuggestion.suggested_schedule!, { shouldDirty: true, shouldValidate: true }) }}>Use {currentSuggestion.offset_minutes && currentSuggestion.offset_minutes < 0 ? 'earlier' : 'later'} time</button>}</div>}
+            {showSuggestion && currentSuggestion?.nearest && <div className="notice schedule-suggestion" role="status"><Info size={16} /><div className="schedule-suggestion-copy"><strong>Stagger scheduled scans</strong><span>{currentSuggestion.nearest.name} is next at {nearestRun?.time} ({nearestRun?.zone}; {formatGap(currentSuggestion.gap_minutes)}). Starting 30 minutes {currentSuggestion.offset_minutes && currentSuggestion.offset_minutes < 0 ? 'earlier' : 'later'} keeps scheduled work apart.</span><small>You can keep this schedule when overlapping runs are intentional.</small></div>{currentSuggestion.suggested_schedule && <button type="button" className="button secondary" onClick={() => { setDraftDirty(true); setDismissedSuggestion(suggestionKey); setValue('schedule', currentSuggestion.suggested_schedule!, { shouldDirty: true, shouldValidate: true }) }}>Use {currentSuggestion.offset_minutes && currentSuggestion.offset_minutes < 0 ? 'earlier' : 'later'} time</button>}</div>}
             <label className="switch-row"><input type="checkbox" checked={scheduleEnabled} onChange={(event) => { setDraftDirty(true); setScheduleEnabled(event.target.checked) }} /><span><strong>Schedule enabled</strong><small>Pause future scheduled runs without archiving this job.</small></span></label>
             <label className="switch-row"><input type="checkbox" {...register('run_on_start')} /><span><strong>Run on startup</strong><small>Start a scan when EdgeWatch launches.</small></span></label>
             <label className="switch-row"><input type="checkbox" {...register('assume_alive')} /><span><strong>Assume targets are alive</strong><small>Use Nmap <code>-Pn</code>. Turn off to use host discovery.</small></span></label>
@@ -437,10 +455,18 @@ function presetFor(schedule: string) {
   return ['0 */6 * * *', '0 * * * *', '0 3 * * *', '0 3 * * 0'].includes(schedule) ? schedule : 'custom'
 }
 
-function formatSuggestionTime(value: string) {
+// Show the neighbouring job's next run in the timezone the notice names: its
+// own. A zone this browser cannot render falls back to the console's display
+// timezone, and the notice then names that zone instead.
+function suggestionTime(value: string, timeZone: string) {
   const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return 'the next scheduled run'
-  return formatDateTime(date, { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+  if (Number.isNaN(date.getTime())) return { time: 'the next scheduled run', zone: timeZone }
+  const options = { weekday: 'short', hour: '2-digit', minute: '2-digit' } as const
+  try {
+    return { time: date.toLocaleString(undefined, { ...options, timeZone }), zone: timeZone }
+  } catch {
+    return { time: formatDateTime(date, options), zone: getDisplayTimeZone() || Intl.DateTimeFormat().resolvedOptions().timeZone }
+  }
 }
 
 function formatGap(minutes: number) {

@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -392,6 +394,147 @@ func TestPendingTOTPEnrolmentsExpireAndRemainBounded(t *testing.T) {
 	if freshOK {
 		t.Fatal("expired pending TOTP enrolment survived the expiry sweep")
 	}
+}
+
+// startTOTPEnrolment begins a pending enrolment for cookieValue and returns
+// the secret shown to the user.
+func startTOTPEnrolment(t *testing.T, server *Server, db *store.Store, session store.Session, cookieValue string) string {
+	t.Helper()
+	now := time.Now().UTC()
+	if err := db.CreateSessionForUserWithAuditEntry(context.Background(), session.UserID, digest(cookieValue), "csrf", now, now.Add(time.Hour), store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/setup", strings.NewReader(`{"password":"administrator password"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
+	response := httptest.NewRecorder()
+	server.totpSetup(response, request, session)
+	var payload struct {
+		Secret string `json:"secret"`
+	}
+	if response.Code != http.StatusOK || json.Unmarshal(response.Body.Bytes(), &payload) != nil || payload.Secret == "" {
+		t.Fatalf("TOTP setup = %d: %s", response.Code, response.Body.String())
+	}
+	return payload.Secret
+}
+
+func submitTOTPEnable(server *Server, session store.Session, cookieValue, code string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/enable", strings.NewReader(`{"code":"`+code+`"}`))
+	request.Header.Set("Content-Type", "application/json")
+	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
+	response := httptest.NewRecorder()
+	server.totpEnable(response, request, session)
+	return response
+}
+
+// wrongTOTPCode returns a six-digit code that no step in the verification
+// window accepts for secret.
+func wrongTOTPCode(secret string) string {
+	step := time.Now().Unix() / 30
+	valid := map[string]bool{}
+	for offset := int64(-2); offset <= 2; offset++ {
+		valid[coverageTOTPCode(secret, step+offset)] = true
+	}
+	for candidate := 0; ; candidate++ {
+		code := fmt.Sprintf("%06d", candidate)
+		if !valid[code] {
+			return code
+		}
+	}
+}
+
+func assertTOTPEnableError(t *testing.T, response *httptest.ResponseRecorder, code string) map[string]any {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code    string         `json:"code"`
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	if response.Code != http.StatusBadRequest || json.Unmarshal(response.Body.Bytes(), &body) != nil || body.Error.Code != code {
+		t.Fatalf("TOTP enable = %d: %s; want 400 %s", response.Code, response.Body.String(), code)
+	}
+	return body.Error.Details
+}
+
+func TestTOTPEnableAllowsRetryAfterMistypedCode(t *testing.T) {
+	server, db, admin := newUsersTestServer(t)
+	secret := startTOTPEnrolment(t, server, db, admin, "totp-retry-session")
+
+	details := assertTOTPEnableError(t, submitTOTPEnable(server, admin, "totp-retry-session", wrongTOTPCode(secret)), "totp_failed")
+	response := submitTOTPEnable(server, admin, "totp-retry-session", coverageTOTPCode(secret, time.Now().Unix()/30))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "recovery_codes") {
+		t.Fatalf("TOTP enable after a mistyped code = %d: %s", response.Code, response.Body.String())
+	}
+	if details["remaining_attempts"] != float64(pendingTOTPMaxAttempts-1) {
+		t.Fatalf("remaining attempts = %#v, want %d", details["remaining_attempts"], pendingTOTPMaxAttempts-1)
+	}
+	user, err := db.GetUser(context.Background(), admin.UserID)
+	if err != nil || !user.TOTPEnabled {
+		t.Fatalf("TOTP was not enabled: %#v, %v", user, err)
+	}
+	// A completed enrolment cannot be replayed.
+	assertTOTPEnableError(t, submitTOTPEnable(server, admin, "totp-retry-session", coverageTOTPCode(secret, time.Now().Unix()/30)), "totp_setup_expired")
+}
+
+func TestTOTPEnableDiscardsEnrolmentAfterTooManyWrongCodes(t *testing.T) {
+	server, db, admin := newUsersTestServer(t)
+	secret := startTOTPEnrolment(t, server, db, admin, "totp-limit-session")
+	wrong := wrongTOTPCode(secret)
+	for attempt := 1; attempt < pendingTOTPMaxAttempts; attempt++ {
+		details := assertTOTPEnableError(t, submitTOTPEnable(server, admin, "totp-limit-session", wrong), "totp_failed")
+		if details["remaining_attempts"] != float64(pendingTOTPMaxAttempts-attempt) {
+			t.Fatalf("attempt %d remaining = %#v", attempt, details["remaining_attempts"])
+		}
+	}
+	// The last permitted failure discards the enrolment and says so.
+	assertTOTPEnableError(t, submitTOTPEnable(server, admin, "totp-limit-session", wrong), "totp_setup_expired")
+	assertTOTPEnableError(t, submitTOTPEnable(server, admin, "totp-limit-session", coverageTOTPCode(secret, time.Now().Unix()/30)), "totp_setup_expired")
+	if user, err := db.GetUser(context.Background(), admin.UserID); err != nil || user.TOTPEnabled {
+		t.Fatalf("TOTP enabled after the attempt budget was spent: %#v, %v", user, err)
+	}
+}
+
+func TestTOTPEnableAttemptBudgetHoldsUnderConcurrentGuesses(t *testing.T) {
+	server, db, admin := newUsersTestServer(t)
+	secret := startTOTPEnrolment(t, server, db, admin, "totp-parallel-session")
+	wrong := wrongTOTPCode(secret)
+	const guesses = 3 * pendingTOTPMaxAttempts
+	codes := make(chan string, guesses)
+	var wg sync.WaitGroup
+	for range guesses {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			var body struct {
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			response := submitTOTPEnable(server, admin, "totp-parallel-session", wrong)
+			_ = json.Unmarshal(response.Body.Bytes(), &body)
+			codes <- body.Error.Code
+		}()
+	}
+	wg.Wait()
+	close(codes)
+	counts := map[string]int{}
+	for code := range codes {
+		counts[code]++
+	}
+	if counts["totp_failed"] != pendingTOTPMaxAttempts-1 || counts["totp_setup_expired"] != guesses-pendingTOTPMaxAttempts+1 {
+		t.Fatalf("concurrent wrong codes = %#v", counts)
+	}
+	assertTOTPEnableError(t, submitTOTPEnable(server, admin, "totp-parallel-session", coverageTOTPCode(secret, time.Now().Unix()/30)), "totp_setup_expired")
+}
+
+func TestTOTPEnableReportsMissingAndExpiredEnrolments(t *testing.T) {
+	server, _, admin := newUsersTestServer(t)
+	assertTOTPEnableError(t, submitTOTPEnable(server, admin, "never-started-session", "123456"), "totp_setup_expired")
+
+	base := time.Now().UTC()
+	server.storePendingTOTP(digest("expired-enrolment-session"), "JBSWY3DPEHPK3PXP", base.Add(-11*time.Minute))
+	assertTOTPEnableError(t, submitTOTPEnable(server, admin, "expired-enrolment-session", coverageTOTPCode("JBSWY3DPEHPK3PXP", base.Unix()/30)), "totp_setup_expired")
 }
 
 func TestPasswordConfirmationIsRateLimited(t *testing.T) {

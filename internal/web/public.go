@@ -312,6 +312,38 @@ type publicDashboardHostPayload struct {
 	CreatedAt *string `json:"created_at,omitempty"`
 }
 
+// publicDashboardTextError explains why the public-status title or
+// introduction is rejected, naming only the fields that fail. Both are shown
+// as single lines, so neither may contain a line break. It returns an empty
+// message when both are valid.
+func publicDashboardTextError(title, introduction string) (string, map[string]string) {
+	details := map[string]string{}
+	var reasons []string
+	for _, field := range []struct {
+		name  string
+		value string
+		limit int
+	}{{"title", title, 120}, {"introduction", introduction, 500}} {
+		var problems []string
+		if utf8.RuneCountInString(field.value) > field.limit {
+			problems = append(problems, fmt.Sprintf("must be at most %d characters", field.limit))
+		}
+		if strings.ContainsAny(field.value, "\r\n") {
+			problems = append(problems, "cannot contain line breaks")
+		}
+		if len(problems) == 0 {
+			continue
+		}
+		reason := "the public status " + field.name + " " + strings.Join(problems, " and ")
+		details[field.name] = reason
+		reasons = append(reasons, reason)
+	}
+	if len(reasons) == 0 {
+		return "", nil
+	}
+	return strings.Join(reasons, "; "), details
+}
+
 func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, session store.Session) {
 	dashboard, err := s.Store.GetPublicDashboard(r.Context())
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -343,8 +375,8 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 	if input.Title == "" {
 		input.Title = "EdgeWatch public status"
 	}
-	if utf8.RuneCountInString(input.Title) > 120 || utf8.RuneCountInString(input.Introduction) > 500 || strings.ContainsAny(input.Title+input.Introduction, "\r\n") {
-		writeError(w, http.StatusBadRequest, "validation_failed", "public dashboard text is invalid or too long", map[string]string{"title": "use at most 120 characters", "introduction": "use at most 500 characters and no line breaks"})
+	if message, details := publicDashboardTextError(input.Title, input.Introduction); message != "" {
+		writeError(w, http.StatusBadRequest, "validation_failed", message, details)
 		return
 	}
 	if len(input.Hosts) > 1000 {

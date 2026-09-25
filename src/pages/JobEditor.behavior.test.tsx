@@ -150,6 +150,47 @@ describe('job editor workflow coverage', () => {
     expect(vi.mocked(updateJob).mock.calls.at(-1)?.[2]).toMatchObject({ notification_destinations: ['notify-2'] })
   })
 
+  describe('with a saved destination that no longer exists', () => {
+    const rotated = {
+      id: 'job-1', revision: 4, enabled: true, archived: false, security_hash: 'old',
+      job: { name: 'Existing', schedule: '0 */6 * * *', timezone: 'UTC', targets: ['198.51.100.10'], max_expanded_hosts: 256, tcp: { ports: '22', mode: 'connect', service_detection: false, engine: 'nmap' }, timing: 'balanced', timeout: '1h', resume_window: '8d', baseline_samples: 1, change_confirmations: 1, notification_destinations: ['file:old-uuid'] },
+      baseline: { status: 'complete', samples: 1, attempts: 1 },
+      missing_notification_destinations: ['file:old-uuid'],
+    }
+    beforeEach(() => {
+      vi.mocked(listNotificationDestinations).mockResolvedValue({
+        destinations: [{ id: 'file:new-uuid', name: 'Deployment destination', provider: 'generic', source: 'deployment', enabled: true, locked: false, read_only: true }],
+        status: { deployment: 1, managed: 0, active: 1, locked: 0, key_state: 'not_required' },
+      } as never)
+      vi.mocked(getJob).mockResolvedValue(rotated as never)
+    })
+
+    it('saves only destinations that still exist', async () => {
+      renderWithProviders(<Routes><Route path="/jobs/:id/edit" element={<JobEditor />} /></Routes>, { route: ['/jobs/job-1/edit'] })
+      await waitFor(() => expect(screen.getByDisplayValue('Existing')).toBeInTheDocument())
+      const replacement = await screen.findByRole('checkbox', { name: /Deployment destination/ }) as HTMLInputElement
+      expect(replacement).not.toBeChecked()
+      fireEvent.click(replacement)
+      expect(replacement).toBeChecked()
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+      await waitFor(() => expect(updateJob).toHaveBeenCalled())
+      expect(vi.mocked(updateJob).mock.calls.at(-1)?.[2].notification_destinations).toEqual(['file:new-uuid'])
+    })
+
+    it('shows the missing destination and lets an operator remove it', async () => {
+      renderWithProviders(<Routes><Route path="/jobs/:id/edit" element={<JobEditor />} /></Routes>, { route: ['/jobs/job-1/edit'] })
+      await waitFor(() => expect(screen.getByDisplayValue('Existing')).toBeInTheDocument())
+      const notice = await screen.findByRole('status', { name: 'Missing notification destination' })
+      expect(notice).toHaveTextContent('file:old-uuid')
+      expect(notice).toHaveTextContent('deployment URL')
+      fireEvent.click(screen.getByRole('button', { name: 'Remove missing destination file:old-uuid' }))
+      expect(screen.queryByRole('status', { name: 'Missing notification destination' })).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+      await waitFor(() => expect(updateJob).toHaveBeenCalled())
+      expect(vi.mocked(updateJob).mock.calls.at(-1)?.[2].notification_destinations).toEqual([])
+    })
+  })
+
   it('covers the TCP/UDP scanner controls and capability warning', async () => {
     renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())

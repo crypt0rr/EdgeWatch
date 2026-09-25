@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -319,44 +320,155 @@ func (s *Store) updateManagedNotificationWithAudits(ctx context.Context, id stri
 }
 
 func (s *Store) DeleteManagedNotification(ctx context.Context, id string, expectedRevision int64) error {
-	return s.deleteManagedNotificationWithAudits(ctx, id, expectedRevision, nil)
+	_, err := s.deleteManagedNotificationWithAudits(ctx, id, expectedRevision, nil)
+	return err
 }
 
 // DeleteManagedNotificationWithAudit removes a destination, pending delivery
-// intents, and its audit row in one transaction.
-func (s *Store) DeleteManagedNotificationWithAudit(ctx context.Context, id string, expectedRevision int64, audit AuditEntry) error {
+// intents, and its audit row in one transaction. The same transaction removes
+// the destination from every job's routing and from the application update
+// routing, so no saved selection keeps pointing at it. It returns the IDs of
+// the jobs whose routing changed.
+func (s *Store) DeleteManagedNotificationWithAudit(ctx context.Context, id string, expectedRevision int64, audit AuditEntry) ([]string, error) {
 	return s.deleteManagedNotificationWithAudits(ctx, id, expectedRevision, []AuditEntry{audit})
 }
 
-func (s *Store) deleteManagedNotificationWithAudits(ctx context.Context, id string, expectedRevision int64, audits []AuditEntry) error {
+func (s *Store) deleteManagedNotificationWithAudits(ctx context.Context, id string, expectedRevision int64, audits []AuditEntry) ([]string, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
 	var revision int64
 	err = tx.QueryRowContext(ctx, `SELECT revision FROM managed_notifications WHERE id=?`, id).Scan(&revision)
 	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("%w: notification %s", ErrNotFound, id)
+		return nil, fmt.Errorf("%w: notification %s", ErrNotFound, id)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if revision != expectedRevision {
-		return ErrConflict
+		return nil, ErrConflict
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE destination LIKE ? AND sent_at IS NULL`, "managed:"+id+":%"); err != nil {
-		return err
+		return nil, err
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM managed_notifications WHERE id=? AND revision=?`, id, expectedRevision)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
-		return ErrConflict
+		return nil, ErrConflict
 	}
-	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
-		return err
+	now := time.Now().UTC()
+	changedJobs, err := removeNotificationDestinationFromJobsTx(ctx, tx, id, now)
+	if err != nil {
+		return nil, err
 	}
-	return tx.Commit()
+	routingChanged, err := removeApplicationUpdateDestinationTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	for _, jobID := range changedJobs {
+		audits = append(audits, deletedDestinationRoutingAudit(audits, "job.notification_destination_removed", fmt.Sprintf("%s: removed deleted notification destination %s from job routing", jobID, id)))
+	}
+	if routingChanged {
+		audits = append(audits, deletedDestinationRoutingAudit(audits, "notifications.update_routing", fmt.Sprintf("removed deleted notification destination %s from application update notification routing", id)))
+	}
+	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return changedJobs, nil
+}
+
+// deletedDestinationRoutingAudit attributes an automatic routing change to the
+// operator who deleted the destination. Only stable IDs enter the detail.
+func deletedDestinationRoutingAudit(audits []AuditEntry, action, detail string) AuditEntry {
+	entry := AuditEntry{Action: action, Detail: detail}
+	if len(audits) > 0 {
+		entry.ActorUserID = audits[0].ActorUserID
+		entry.ActorUsername = audits[0].ActorUsername
+		entry.RequestID = audits[0].RequestID
+		entry.SourceIP = audits[0].SourceIP
+	}
+	return entry
+}
+
+type routedNotificationJob struct {
+	id       string
+	job      config.Job
+	revision int64
+}
+
+// jobsSelectingNotificationDestinationTx reads every job, archived or not,
+// whose saved routing selects the destination. The rows are closed before
+// the caller writes to the same transaction.
+func jobsSelectingNotificationDestinationTx(ctx context.Context, tx *sql.Tx, id string) ([]routedNotificationJob, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id,definition_json,revision FROM jobs ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var selecting []routedNotificationJob
+	for rows.Next() {
+		var item routedNotificationJob
+		var raw []byte
+		if err := rows.Scan(&item.id, &raw, &item.revision); err != nil {
+			return nil, err
+		}
+		job, err := unmarshalJob(raw)
+		if err != nil {
+			return nil, err
+		}
+		if !slices.Contains(job.NotificationDestinations, id) {
+			continue
+		}
+		item.job = job
+		selecting = append(selecting, item)
+	}
+	return selecting, rows.Err()
+}
+
+// removeNotificationDestinationFromJobsTx drops a deleted destination from
+// every job that selected it, including archived jobs, and appends a job
+// revision for each change. Routing is not part of the security scope, so the
+// baseline and any in-flight scan are unaffected.
+func removeNotificationDestinationFromJobsTx(ctx context.Context, tx *sql.Tx, id string, now time.Time) ([]string, error) {
+	affected, err := jobsSelectingNotificationDestinationTx(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	changed := make([]string, 0, len(affected))
+	for _, item := range affected {
+		legacyHash := item.job.LegacySecurityHash()
+		// Keep an explicit empty selection when the deleted destination was the
+		// only one: the job stays silent instead of reverting to the legacy
+		// "every destination" fallback.
+		item.job.NotificationDestinations = slices.DeleteFunc(cloneNotificationSelection(item.job.NotificationDestinations), func(selector string) bool { return selector == id })
+		raw, err := marshalJob(item.job)
+		if err != nil {
+			return nil, err
+		}
+		next := item.revision + 1
+		result, err := tx.ExecContext(ctx, `UPDATE jobs SET definition_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, raw, next, now.Format(time.RFC3339Nano), item.id, item.revision)
+		if err != nil {
+			return nil, err
+		}
+		if n, _ := result.RowsAffected(); n != 1 {
+			return nil, ErrConflict
+		}
+		if err := appendJobRevisionTx(ctx, tx, item.id, next, raw, item.job.SecurityHash(), now); err != nil {
+			return nil, err
+		}
+		// Rewriting the stored definition persists its canonical port spelling.
+		// Move matching baseline metadata along, as a normal job edit does.
+		if err := migrateLegacyScopeHashTx(ctx, tx, item.id, legacyHash, item.job.SecurityHash()); err != nil {
+			return nil, err
+		}
+		changed = append(changed, item.id)
+	}
+	return changed, nil
 }

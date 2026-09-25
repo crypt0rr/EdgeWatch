@@ -28,7 +28,9 @@ func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Req
 	}
 	routing := map[string]any{"configured": false, "destinations": []string{}}
 	if state, err := s.Store.GetApplicationUpdateState(r.Context()); err == nil {
-		destinations := state.UpdateNotificationDestinations
+		// Show legacy deployment digests as current selectors. The console
+		// drops selectors that are not in the destination list before saving.
+		destinations, _ := s.App.Notifier.CanonicalSelection(state.UpdateNotificationDestinations)
 		if destinations == nil {
 			destinations = []string{}
 		}
@@ -223,7 +225,8 @@ func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationAuthError(w, err)
 		return
 	}
-	if err := s.App.Notifier.DeleteManagedWithAudit(r.Context(), id, *input.Revision, store.AuditEntry{Action: "notifications.deleted", Detail: "managed notification deleted: " + id, ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+	changedJobs, err := s.App.Notifier.DeleteManagedWithAudit(r.Context(), id, *input.Revision, store.AuditEntry{Action: "notifications.deleted", Detail: "managed notification deleted: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
+	if err != nil {
 		if s.writeAuditUnavailable(w, err, "notifications.deleted") {
 			return
 		}
@@ -231,6 +234,11 @@ func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Re
 		return
 	}
 	s.broadcast(map[string]any{"type": "notification.changed", "notification_id": id})
+	// The delete also removed the destination from these jobs' routing and
+	// gave each a new revision. Let open editors reload before they save.
+	for _, jobID := range changedJobs {
+		s.broadcastContext(r.Context(), map[string]any{"type": "job.updated", "job_id": jobID})
+	}
 	writeJSON(w, http.StatusNoContent, nil)
 }
 

@@ -429,26 +429,21 @@ func (n *Notifier) updateManaged(ctx context.Context, id string, expectedRevisio
 }
 
 func (n *Notifier) DeleteManaged(ctx context.Context, id string, expectedRevision int64) error {
-	return n.deleteManaged(ctx, id, expectedRevision, nil)
-}
-
-// DeleteManagedWithAudit removes a destination and records the action in the
-// same transaction.
-func (n *Notifier) DeleteManagedWithAudit(ctx context.Context, id string, expectedRevision int64, audit store.AuditEntry) error {
-	return n.deleteManaged(ctx, id, expectedRevision, &audit)
-}
-
-func (n *Notifier) deleteManaged(ctx context.Context, id string, expectedRevision int64, audit *store.AuditEntry) error {
-	var err error
-	if audit == nil {
-		err = n.Store.DeleteManagedNotification(ctx, id, expectedRevision)
-	} else {
-		err = n.Store.DeleteManagedNotificationWithAudit(ctx, id, expectedRevision, *audit)
-	}
-	if err != nil {
+	if err := n.Store.DeleteManagedNotification(ctx, id, expectedRevision); err != nil {
 		return err
 	}
 	return n.Reload(ctx)
+}
+
+// DeleteManagedWithAudit removes a destination and records the action in the
+// same transaction. The destination is also removed from job and application
+// update routing; the returned IDs identify the jobs whose routing changed.
+func (n *Notifier) DeleteManagedWithAudit(ctx context.Context, id string, expectedRevision int64, audit store.AuditEntry) ([]string, error) {
+	changedJobs, err := n.Store.DeleteManagedNotificationWithAudit(ctx, id, expectedRevision, audit)
+	if err != nil {
+		return nil, err
+	}
+	return changedJobs, n.Reload(ctx)
 }
 
 func (n *Notifier) view(id string) DestinationView {
@@ -787,6 +782,48 @@ func (n *Notifier) ValidateDestinationSelection(ctx context.Context, selection [
 		}
 	}
 	return nil
+}
+
+// CanonicalSelection prepares a saved routing selection for display. A legacy
+// deployment digest is replaced by the opaque ID of the same destination, so
+// the console can match it against the destination list without seeing the
+// digest. Selectors that no longer identify a configured destination are kept
+// in the selection and also returned in missing. That happens when a
+// deployment URL changes, because the changed URL is a new destination. Paused
+// and locked managed destinations still exist and are never reported missing.
+// The result reflects the last Reload; it never contains destination URLs.
+func (n *Notifier) CanonicalSelection(selection []string) (canonical, missing []string) {
+	if selection == nil {
+		return nil, nil
+	}
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	canonical = make([]string, 0, len(selection))
+	seen := make(map[string]struct{}, len(selection))
+	for _, selector := range selection {
+		selector = strings.TrimSpace(selector)
+		if selector == "" {
+			continue
+		}
+		if id, ok := strings.CutPrefix(selector, "file:"); ok {
+			if _, current := n.fileURLs[id]; !current {
+				if opaque := n.fileLegacy[id]; opaque != "" {
+					selector = "file:" + opaque
+				}
+			}
+		}
+		if _, duplicate := seen[selector]; duplicate {
+			continue
+		}
+		seen[selector] = struct{}{}
+		canonical = append(canonical, selector)
+		if !n.destinationSelectorExistsLocked(selector) {
+			missing = append(missing, selector)
+		}
+	}
+	sort.Strings(canonical)
+	sort.Strings(missing)
+	return canonical, missing
 }
 
 func (n *Notifier) selectedDestinationKeys(selection []string) map[string]struct{} {

@@ -167,8 +167,28 @@ func jobJSONFromStateSummary(record store.JobRecord, summary store.RuntimeStateS
 }
 
 func (s *Server) jobJSONWithCycle(ctx context.Context, record store.JobRecord, state model.JobState) map[string]any {
-	value := jobJSON(record, state)
+	value := s.addNotificationRouting(jobJSON(record, state))
 	return s.addJobCycleAndProfile(ctx, record, value)
+}
+
+// addNotificationRouting reports a job's routing as the console can use it.
+// Legacy deployment digests are shown as the current opaque selector. Saved
+// selectors that no longer identify a destination, for example after a
+// deployment URL changed, are also listed in missing_notification_destinations
+// so the console can show them and let an operator remove them. The job
+// already exposes these selectors to the same readers; no URL is added.
+func (s *Server) addNotificationRouting(value map[string]any) map[string]any {
+	payload, ok := value["job"].(jobPayload)
+	if !ok || payload.NotificationDestinations == nil || s.App == nil || s.App.Notifier == nil {
+		return value
+	}
+	selection, missing := s.App.Notifier.CanonicalSelection(*payload.NotificationDestinations)
+	payload.NotificationDestinations = &selection
+	value["job"] = payload
+	if len(missing) > 0 {
+		value["missing_notification_destinations"] = missing
+	}
+	return value
 }
 
 func (s *Server) addJobCycleAndProfile(ctx context.Context, record store.JobRecord, value map[string]any) map[string]any {
@@ -300,7 +320,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]map[string]any, 0, len(jobs))
 	for _, j := range jobs {
-		value := jobJSONFromStateSummary(j, summaries[j.ID])
+		value := s.addNotificationRouting(jobJSONFromStateSummary(j, summaries[j.ID]))
 		if payload, ok := value["job"].(jobPayload); ok && payload.TCP != nil && payload.TCP.ProfileID != "" && profileErr == nil {
 			if revision := profileRevisions[payload.TCP.ProfileID]; revision > payload.TCP.ProfileRevision {
 				payload.TCP.ProfileUpdateAvailable = true

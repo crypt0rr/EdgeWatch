@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -128,6 +129,38 @@ func (s *Store) SetApplicationUpdateDestinations(ctx context.Context, destinatio
 		}
 	}
 	return tx.Commit()
+}
+
+// removeApplicationUpdateDestinationTx drops a deleted destination from an
+// explicitly configured update routing. When it was the only selection, the
+// routing stays configured and empty, which keeps update alerts silent rather
+// than reverting to the legacy "every destination" fallback.
+func removeApplicationUpdateDestinationTx(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
+	var destinationsJSON string
+	err := tx.QueryRowContext(ctx, `SELECT notification_destinations_json FROM application_update_state WHERE id=1`).Scan(&destinationsJSON)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && strings.TrimSpace(destinationsJSON) == "") {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var destinations []string
+	if err := json.Unmarshal([]byte(destinationsJSON), &destinations); err != nil {
+		return false, err
+	}
+	current := normalizeUpdateDestinations(destinations)
+	kept := slices.DeleteFunc(slices.Clone(current), func(selector string) bool { return selector == id })
+	if len(kept) == len(current) {
+		return false, nil
+	}
+	raw, err := json.Marshal(kept)
+	if err != nil {
+		return false, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE application_update_state SET notification_destinations_json=? WHERE id=1`, string(raw)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // RecordInstalledVersion persists the running build version. When notify is

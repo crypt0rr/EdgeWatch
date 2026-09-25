@@ -166,6 +166,27 @@ describe('job surface overview', () => {
     expect(container.textContent).not.toContain('sensitive store detail')
   })
 
+  it('points an operator at the editor when routing selects a missing destination', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, job: { ...job.job, notification_destinations: ['file:old-uuid'] }, missing_notification_destinations: ['file:old-uuid'] })
+    await renderPage()
+
+    await vi.waitFor(() => expect(container.textContent).toContain('Notification routing needs attention.'), { timeout: 1000 })
+    expect(container.textContent).toContain('A selected notification destination no longer exists')
+    expect(container.textContent).toContain('Changing a deployment URL in config.yaml creates a new destination.')
+    const edit = Array.from(container.querySelectorAll('a')).find(link => link.textContent === 'Edit the job to choose a current destination.')
+    expect(edit?.getAttribute('href')).toBe('/jobs/job-1/edit')
+  })
+
+  it('reports several missing destinations without an edit link for viewers', async () => {
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'user-2', username: 'viewer', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getJob).mockResolvedValue({ ...job, missing_notification_destinations: ['file:old-uuid', 'deleted-uuid'] })
+    await renderPage()
+
+    await vi.waitFor(() => expect(container.textContent).toContain('2 selected notification destinations no longer exist'), { timeout: 1000 })
+    expect(container.textContent).toContain('An operator can edit the job to choose a current destination.')
+    expect(Array.from(container.querySelectorAll('a')).some(link => link.textContent?.includes('Edit the job'))).toBe(false)
+  })
+
   it('renders the selected scan detail directly beneath its row with accessible expansion state', async () => {
     await renderPage()
     await vi.waitFor(() => expect(container.querySelector('.scan-row')).not.toBeNull(), { timeout: 1000 })

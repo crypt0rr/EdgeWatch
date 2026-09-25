@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -67,7 +68,7 @@ func TestManagedNotificationStoreCRUDAndLegacySelectionMaterialization(t *testin
 	if err := s.DeleteManagedNotification(ctx, created.ID, 1); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale destination delete error = %v", err)
 	}
-	if err := s.DeleteManagedNotificationWithAudit(ctx, created.ID, 2, AuditEntry{Action: "notification.deleted"}); err != nil {
+	if _, err := s.DeleteManagedNotificationWithAudit(ctx, created.ID, 2, AuditEntry{Action: "notification.deleted"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetManagedNotification(ctx, created.ID); !errors.Is(err, ErrNotFound) {
@@ -156,4 +157,198 @@ func containsAll(value string, parts ...string) bool {
 		}
 	}
 	return true
+}
+
+func TestDeleteManagedNotificationRemovesDeletedDestinationFromRouting(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	destination, err := s.CreateManagedNotification(ctx, "destination-deleted", "Operations", "generic", []byte{1}, []byte{2}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	create := func(name string, selection []string) JobRecord {
+		t.Helper()
+		job := testJob(name)
+		job.NotificationDestinations = selection
+		record, createErr := s.CreateJob(ctx, job)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		return record
+	}
+	shared := create("shared-routing", []string{"file:kept", destination.ID})
+	only := create("only-deleted-routing", []string{destination.ID})
+	unrelated := create("unrelated-routing", []string{"file:kept"})
+	legacy := create("legacy-routing", nil)
+	archived := create("archived-routing", []string{destination.ID})
+	if err := s.SetJobArchived(ctx, archived.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	archived, err = s.GetJob(ctx, archived.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetApplicationUpdateDestinations(ctx, []string{"file:kept", destination.ID}, AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := s.DeleteManagedNotificationWithAudit(ctx, destination.ID, destination.Revision, AuditEntry{Action: "notifications.deleted", ActorUsername: "admin"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantChanged := []string{shared.ID, only.ID, archived.ID}
+	slices.Sort(wantChanged)
+	if !slices.Equal(changed, wantChanged) {
+		t.Fatalf("jobs reported as changed = %#v, want %#v", changed, wantChanged)
+	}
+
+	for _, tc := range []struct {
+		before JobRecord
+		want   []string
+	}{{shared, []string{"file:kept"}}, {only, []string{}}, {archived, []string{}}} {
+		stored, getErr := s.GetJob(ctx, tc.before.ID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if stored.Revision != tc.before.Revision+1 || stored.Job.NotificationDestinations == nil || strings.Join(stored.Job.NotificationDestinations, ",") != strings.Join(tc.want, ",") {
+			t.Fatalf("job %s after destination delete = revision %d selection %#v, want revision %d selection %#v", tc.before.Job.Name, stored.Revision, stored.Job.NotificationDestinations, tc.before.Revision+1, tc.want)
+		}
+		if stored.Archived != tc.before.Archived || stored.Enabled != tc.before.Enabled || stored.Job.SecurityHash() != tc.before.Job.SecurityHash() {
+			t.Fatalf("job %s lifecycle or scope changed: %#v", tc.before.Job.Name, stored)
+		}
+		var revisionJSON string
+		if scanErr := s.DB.QueryRowContext(ctx, `SELECT definition_json FROM job_revisions WHERE job_id=? AND revision=?`, stored.ID, stored.Revision).Scan(&revisionJSON); scanErr != nil {
+			t.Fatalf("job %s revision %d was not recorded: %v", tc.before.Job.Name, stored.Revision, scanErr)
+		}
+		if strings.Contains(revisionJSON, destination.ID) {
+			t.Fatalf("job %s revision still references deleted destination: %s", tc.before.Job.Name, revisionJSON)
+		}
+		var audits int
+		if scanErr := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE action='job.notification_destination_removed' AND actor_username='admin' AND detail LIKE ? AND detail LIKE ?`, "%"+stored.ID+"%", "%"+destination.ID+"%").Scan(&audits); scanErr != nil {
+			t.Fatal(scanErr)
+		}
+		if audits != 1 {
+			t.Fatalf("job %s routing scrub audit rows = %d, want 1", tc.before.Job.Name, audits)
+		}
+	}
+	for _, before := range []JobRecord{unrelated, legacy} {
+		stored, getErr := s.GetJob(ctx, before.ID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if stored.Revision != before.Revision || (before.Job.NotificationDestinations == nil) != (stored.Job.NotificationDestinations == nil) {
+			t.Fatalf("unaffected job %s changed: %#v", before.Job.Name, stored)
+		}
+	}
+	state, err := s.GetApplicationUpdateState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !state.UpdateNotificationDestinationsConfigured || strings.Join(state.UpdateNotificationDestinations, ",") != "file:kept" {
+		t.Fatalf("update routing after destination delete = %#v", state)
+	}
+	var routingAudits int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE action='notifications.update_routing' AND actor_username='admin' AND detail LIKE ?`, "%"+destination.ID+"%").Scan(&routingAudits); err != nil {
+		t.Fatal(err)
+	}
+	if routingAudits != 1 {
+		t.Fatalf("update routing scrub audit rows = %d, want 1", routingAudits)
+	}
+
+	unused, err := s.CreateManagedNotification(ctx, "destination-unused", "Unused", "generic", []byte{3}, []byte{4}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err = s.DeleteManagedNotificationWithAudit(ctx, unused.ID, unused.Revision, AuditEntry{Action: "notifications.deleted", ActorUsername: "admin"})
+	if err != nil || len(changed) != 0 {
+		t.Fatalf("delete of an unselected destination changed jobs %#v: %v", changed, err)
+	}
+	if state, err := s.GetApplicationUpdateState(ctx); err != nil || strings.Join(state.UpdateNotificationDestinations, ",") != "file:kept" {
+		t.Fatalf("update routing after unrelated delete = %#v, %v", state, err)
+	}
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE action IN ('job.notification_destination_removed','notifications.update_routing') AND detail LIKE ?`, "%"+unused.ID+"%").Scan(&routingAudits); err != nil || routingAudits != 0 {
+		t.Fatalf("unrelated delete wrote %d routing audit rows: %v", routingAudits, err)
+	}
+}
+
+func TestDeleteManagedNotificationRollsBackWhenRoutingCannotBeUpdated(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		fault string
+	}{
+		{"unreadable job definition", `UPDATE jobs SET definition_json='{'`},
+		{"job write rejected", `CREATE TRIGGER reject_job_update BEFORE UPDATE ON jobs BEGIN SELECT RAISE(ABORT,'jobs unavailable'); END`},
+		{"job revision rejected", `CREATE TRIGGER reject_job_revision BEFORE INSERT ON job_revisions BEGIN SELECT RAISE(ABORT,'revisions unavailable'); END`},
+		{"unreadable update routing", `UPDATE application_update_state SET notification_destinations_json='{'`},
+		{"update routing write rejected", `CREATE TRIGGER reject_routing_update BEFORE UPDATE ON application_update_state BEGIN SELECT RAISE(ABORT,'routing unavailable'); END`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := openTestStore(t)
+			destination, err := s.CreateManagedNotification(ctx, "destination-fault", "Operations", "generic", []byte{1}, []byte{2}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			job := testJob("fault-routing")
+			job.NotificationDestinations = []string{destination.ID}
+			record, err := s.CreateJob(ctx, job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := s.SetApplicationUpdateDestinations(ctx, []string{destination.ID}, AuditEntry{}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DB.ExecContext(ctx, test.fault); err != nil {
+				t.Fatal(err)
+			}
+			if changed, err := s.DeleteManagedNotificationWithAudit(ctx, destination.ID, destination.Revision, AuditEntry{Action: "notifications.deleted"}); err == nil {
+				t.Fatalf("delete succeeded although routing could not be updated; changed jobs %#v", changed)
+			}
+			if _, err := s.GetManagedNotification(ctx, destination.ID); err != nil {
+				t.Fatalf("destination deleted although its routing update failed: %v", err)
+			}
+			var revision int64
+			if err := s.DB.QueryRowContext(ctx, `SELECT revision FROM jobs WHERE id=?`, record.ID).Scan(&revision); err != nil || revision != record.Revision {
+				t.Fatalf("job revision after failed delete = %d, %v; want %d", revision, err, record.Revision)
+			}
+		})
+	}
+}
+
+func TestDeleteManagedNotificationReportsUnknownDestination(t *testing.T) {
+	s := openTestStore(t)
+	if _, err := s.DeleteManagedNotificationWithAudit(context.Background(), "missing-destination", 1, AuditEntry{Action: "notifications.deleted"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete of unknown destination error = %v, want not found", err)
+	}
+}
+
+func TestDeleteManagedNotificationRoutingScrubRollsBackWithDelete(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	destination, err := s.CreateManagedNotification(ctx, "destination-rollback", "Operations", "generic", []byte{1}, []byte{2}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := testJob("rollback-routing")
+	job.NotificationDestinations = []string{destination.ID}
+	record, err := s.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER reject_scrub_audit BEFORE INSERT ON security_audit WHEN NEW.action='job.notification_destination_removed' BEGIN SELECT RAISE(ABORT,'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DeleteManagedNotificationWithAudit(ctx, destination.ID, destination.Revision, AuditEntry{Action: "notifications.deleted"}); !errors.Is(err, ErrAuditUnavailable) {
+		t.Fatalf("delete with failing scrub audit error = %v, want audit unavailable", err)
+	}
+	stored, err := s.GetJob(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Revision != record.Revision || strings.Join(stored.Job.NotificationDestinations, ",") != destination.ID {
+		t.Fatalf("job routing changed although the delete rolled back: %#v", stored)
+	}
+	if _, err := s.GetManagedNotification(ctx, destination.ID); err != nil {
+		t.Fatalf("destination deleted although its routing scrub rolled back: %v", err)
+	}
 }

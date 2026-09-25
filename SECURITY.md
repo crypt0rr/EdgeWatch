@@ -10,7 +10,10 @@ are fixed, image-bundled executables (`/usr/local/bin/naabu` and
 approved placeholders. EdgeWatch invokes them directly without a shell, so
 shell syntax, alternate binaries, arbitrary output paths, and unapproved NSE
 scripts are rejected. Naabu discovery is JSONL and Nmap confirmation remains
-authoritative for baselines and incidents. Connect discovery is the least
+authoritative for baselines and incidents. EdgeWatch parses Naabu output as a
+stream, rejects records for addresses outside the invocation, keeps each
+distinct result once, and stops the child on an oversized line or an
+implausible number of repeated records. Connect discovery is the least
 privileged default; SYN discovery additionally requires the explicitly opted-in
 `NET_ADMIN` and `NET_RAW` container capabilities.
 

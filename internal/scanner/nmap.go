@@ -54,6 +54,13 @@ const maxNmapOutput = 16 << 20
 
 var errNmapProgressOutputExceeded = fmt.Errorf("nmap XML output exceeded %d bytes", maxNmapOutput)
 
+// nmapUnlistedOpenFilteredReason marks a protocol observation whose
+// open|filtered ports Nmap folded into <extraports> without a usable port
+// list. Nmap folds a state once it exceeds a display threshold that depends
+// on the count and the verbosity level, so the unlisted ports are neither
+// recorded nor treated as closed: the protocol is incomplete coverage.
+const nmapUnlistedOpenFilteredReason = "open-filtered-ports-unlisted"
+
 // Scanner metadata is descriptive evidence, not scan scope. Keep each
 // target-controlled value small enough that a single hostile response cannot
 // inflate a snapshot or its compact service fingerprint. The item limits also
@@ -326,11 +333,12 @@ func (n *Nmap) ScanWithProgress(ctx context.Context, job config.Job, report Prog
 }
 
 // ScanWithProgressBudget is the application entry point for scans whose work
-// is data-dependent. Naabu discovers the TCP ports before Nmap enrichment,
-// so the caller supplies a check that can reject the exact discovered Nmap
-// work before the child process is started. Keeping this as an optional
-// interface preserves the small Scanner contract used by deterministic test
-// scanners and integrations.
+// is data-dependent. The scan resolves its targets again, so the caller
+// supplies a check that sees the resolved work before any process starts.
+// Naabu discovers the TCP ports before Nmap enrichment, so the check also
+// rejects the exact discovered Nmap work before enrichment starts. Keeping
+// this as an optional interface preserves the small Scanner contract used by
+// deterministic test scanners and integrations.
 func (n *Nmap) ScanWithProgressBudget(ctx context.Context, job config.Job, report ProgressReporter, check func(discoveryProbes, nmapProbes int64) error) (model.Snapshot, error) {
 	return n.scanWithProgress(ctx, job, report, check)
 }
@@ -356,6 +364,13 @@ func (n *Nmap) scanWithProgress(ctx context.Context, job config.Job, report Prog
 		return model.Snapshot{}, err
 	}
 	totalProbes, totalInvocations := progressTotals(targets, job)
+	if budgetCheck != nil {
+		// The caller's budget check used an earlier resolution, and a DNS
+		// answer can grow in between. Check the work this scan will run.
+		if err := budgetCheck(0, totalProbes); err != nil {
+			return model.Snapshot{}, err
+		}
+	}
 	progress := Progress{TotalProbes: totalProbes, TotalInvocations: totalInvocations, Phase: "scanning", StartedAt: started}
 	emit(progress)
 	snap := model.Snapshot{DNS: map[string][]string{}}
@@ -1629,19 +1644,76 @@ type nmapRun struct {
 				Output string `xml:"output,attr"`
 			} `xml:"script"`
 		} `xml:"ports>port"`
-		ExtraPorts []struct {
-			State   string `xml:"state,attr"`
-			Count   int    `xml:"count,attr"`
-			Reasons []struct {
-				Reason string `xml:"reason,attr"`
-				Count  int    `xml:"count,attr"`
-			} `xml:"extrareasons"`
-		} `xml:"ports>extraports"`
+		ExtraPorts []nmapExtraPorts `xml:"ports>extraports"`
 	} `xml:"host"`
 	RunStats struct {
 		Exit string `xml:"exit,attr"`
 	} `xml:"runstats>finished"`
 }
+
+// nmapExtraPorts is a state Nmap folded instead of listing each port. Nmap
+// 7.80 and later attach the folded ports to each reason.
+type nmapExtraPorts struct {
+	State   string `xml:"state,attr"`
+	Count   int    `xml:"count,attr"`
+	Reasons []struct {
+		Reason   string `xml:"reason,attr"`
+		Count    int    `xml:"count,attr"`
+		Protocol string `xml:"proto,attr"`
+		Ports    string `xml:"ports,attr"`
+	} `xml:"extrareasons"`
+}
+
+type foldedPort struct {
+	port   int
+	reason string
+}
+
+// foldedPositivePorts expands the port lists of a folded open|filtered (or,
+// defensively, open) state. ok is false unless the lists name exactly the
+// folded ports for this protocol, with no duplicates. Expansion stops as soon
+// as a list names more ports than its count, so a malformed list cannot
+// expand beyond 65535 ports.
+func foldedPositivePorts(extra nmapExtraPorts, protocol string) (ports []foldedPort, ok bool) {
+	if extra.Count < 1 || extra.Count > 65535 {
+		return nil, false
+	}
+	seen := make(map[int]struct{}, extra.Count)
+	for _, reason := range extra.Reasons {
+		if reason.Count < 1 || len(ports)+reason.Count > extra.Count || (reason.Protocol != "" && !strings.EqualFold(reason.Protocol, protocol)) {
+			return nil, false
+		}
+		label := boundScannerMetadata(reason.Reason)
+		listed := 0
+		for item := range strings.SplitSeq(reason.Ports, ",") {
+			first, last, isRange := strings.Cut(strings.TrimSpace(item), "-")
+			start, err := strconv.Atoi(first)
+			end := start
+			if err == nil && isRange {
+				end, err = strconv.Atoi(last)
+			}
+			if err != nil || start < 1 || end > 65535 || end < start || listed+end-start+1 > reason.Count {
+				return nil, false
+			}
+			for port := start; port <= end; port++ {
+				if _, duplicate := seen[port]; duplicate {
+					return nil, false
+				}
+				seen[port] = struct{}{}
+				ports = append(ports, foldedPort{port: port, reason: label})
+			}
+			listed += end - start + 1
+		}
+		if listed != reason.Count {
+			return nil, false
+		}
+	}
+	if len(ports) != extra.Count {
+		return nil, false
+	}
+	return ports, true
+}
+
 type parsedRun struct {
 	Exit  string
 	Units map[string]model.Unit
@@ -1792,6 +1864,31 @@ func parseXMLWithConfig(data []byte, protocol string, pc config.Protocol) (parse
 			addStateSummary(&observation, extra.State, "", extra.Count)
 			for _, reason := range extra.Reasons {
 				addStateReason(&observation, extra.State, boundScannerMetadata(reason.Reason), reason.Count)
+			}
+			if extra.State != "open" && extra.State != "open|filtered" {
+				continue
+			}
+			// Whether Nmap lists a positive state or folds it depends on how
+			// many ports share it and on the verbosity level, so a folded state
+			// is recorded exactly like listed ports. Without a usable port list
+			// the ports cannot be named; flag the protocol as incomplete rather
+			// than letting the missing ports look closed.
+			folded, ok := foldedPositivePorts(extra, protocol)
+			if !ok {
+				observation.Status = "unknown"
+				observation.StatusReason = nmapUnlistedOpenFilteredReason
+				continue
+			}
+			listed := make(map[int]struct{}, len(unit.Ports))
+			for _, port := range unit.Ports {
+				listed[port.Port] = struct{}{}
+			}
+			for _, port := range folded {
+				if _, exists := listed[port.port]; exists {
+					continue
+				}
+				unit.Ports = append(unit.Ports, model.PortState{Port: port.port, State: extra.State, Evidence: []string{address}})
+				observation.Ports = append(observation.Ports, model.PortObservation{Port: port.port, State: extra.State, Reason: port.reason, Verification: "confirmed"})
 			}
 		}
 		hostObservation.Protocols = append(hostObservation.Protocols, observation)

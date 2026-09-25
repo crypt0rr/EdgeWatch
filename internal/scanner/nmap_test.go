@@ -621,6 +621,147 @@ func TestScanProtocolFailsWhenEntireInvocationOmitsHosts(t *testing.T) {
 	}
 }
 
+// udpOpenFilteredXML renders Nmap 7.9x XML for one UDP host scanned on ports
+// 20001-(20000+total). The first silent ports are open|filtered and the rest
+// are closed. listed selects whether Nmap printed the open|filtered ports one
+// by one (at most 25 by default, more with -v, -vv or -vvv) or folded them
+// into <extraports>. portList controls the extrareasons port list that Nmap
+// 7.80 and later attach to folded states.
+func udpOpenFilteredXML(silent, total int, listed, portList bool) []byte {
+	var ports strings.Builder
+	extra := func(state, reason string, first, count int) {
+		if count == 0 {
+			return
+		}
+		list := ""
+		if portList {
+			list = fmt.Sprintf(` proto="udp" ports="%d-%d"`, first, first+count-1)
+		}
+		fmt.Fprintf(&ports, `<extraports state="%s" count="%d"><extrareasons reason="%s" count="%d"%s/></extraports>`, state, count, reason, count, list)
+	}
+	if listed {
+		for port := 20001; port < 20001+silent; port++ {
+			fmt.Fprintf(&ports, `<port protocol="udp" portid="%d"><state state="open|filtered" reason="no-response" reason_ttl="0"/><service name="unknown" method="table" conf="3"/></port>`, port)
+		}
+	} else {
+		extra("open|filtered", "no-response", 20001, silent)
+	}
+	extra("closed", "port-unreach", 20001+silent, total-silent)
+	return []byte(`<?xml version="1.0" encoding="UTF-8"?><nmaprun scanner="nmap" version="7.99" xmloutputversion="1.05"><scaninfo type="udp" protocol="udp"/><host><status state="up" reason="user-set" reason_ttl="0"/><address addr="192.0.2.10" addrtype="ipv4"/><ports>` + ports.String() + `</ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+}
+
+func udpUnitPorts(t *testing.T, data []byte) (model.Unit, model.ProtocolObservation) {
+	t.Helper()
+	run, err := parseXMLWithConfig(data, "udp", config.Protocol{Ports: "20001-20040"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, ok := run.Hosts["192.0.2.10"]
+	if !ok || len(host.Protocols) != 1 {
+		t.Fatalf("UDP host evidence = %#v", run.Hosts)
+	}
+	unit := run.Units["192.0.2.10"]
+	(&model.Snapshot{Units: []model.Unit{unit}}).Normalize()
+	return unit, host.Protocols[0]
+}
+
+// Nmap folds more than 25 open|filtered UDP ports into one <extraports>
+// element at default verbosity. The folded ports are still observations and
+// must reach the baseline exactly as if Nmap had listed them one by one.
+func TestParseXMLRecordsFoldedUDPOpenFilteredPorts(t *testing.T) {
+	folded, foldedProtocol := udpUnitPorts(t, udpOpenFilteredXML(26, 40, false, true))
+	if len(folded.Ports) != 26 || folded.Ports[0].Port != 20001 || folded.Ports[25].Port != 20026 {
+		t.Fatalf("folded open|filtered ports were dropped: %#v", folded.Ports)
+	}
+	for _, port := range folded.Ports {
+		if port.State != "open|filtered" || len(port.Evidence) != 1 || port.Evidence[0] != "192.0.2.10" {
+			t.Fatalf("folded port = %#v", port)
+		}
+	}
+	if foldedProtocol.Status != "up" || len(foldedProtocol.Ports) != 26 || foldedProtocol.Ports[0].Reason != "no-response" {
+		t.Fatalf("folded protocol evidence = %#v", foldedProtocol)
+	}
+	summaries := map[string]int{}
+	for _, summary := range foldedProtocol.StateSummaries {
+		summaries[summary.State] = summary.Count
+	}
+	if summaries["open|filtered"] != 26 || summaries["closed"] != 14 {
+		t.Fatalf("folded ports were counted twice or not at all: %#v", foldedProtocol.StateSummaries)
+	}
+
+	// -v, -vv and -vvv make Nmap list the same ports individually. Profile
+	// verbosity must not change what the comparison engine sees.
+	listed, _ := udpUnitPorts(t, udpOpenFilteredXML(26, 40, true, true))
+	if !reflect.DeepEqual(listed.Ports, folded.Ports) {
+		t.Fatalf("listed and folded observations differ:\nlisted %#v\nfolded %#v", listed.Ports, folded.Ports)
+	}
+
+	// Crossing the 25-port display threshold must only report the ports that
+	// actually changed: 24 silent ports are listed, 26 are folded.
+	fewer, _ := udpUnitPorts(t, udpOpenFilteredXML(24, 40, false, true))
+	fewerListed, _ := udpUnitPorts(t, udpOpenFilteredXML(24, 40, true, true))
+	if !reflect.DeepEqual(fewer.Ports, fewerListed.Ports) || len(fewer.Ports) != 24 {
+		t.Fatalf("24 silent ports = %#v", fewer.Ports)
+	}
+	if !reflect.DeepEqual(fewer.Ports, folded.Ports[:24]) {
+		t.Fatalf("24-port and 26-port observations disagree beyond the two changed ports")
+	}
+
+	// Non-contiguous folded ports are listed as comma-separated ports and
+	// ranges, possibly under several reasons.
+	scattered := []byte(`<?xml version="1.0"?><nmaprun><host><status state="up"/><address addr="192.0.2.10" addrtype="ipv4"/><ports><port protocol="udp" portid="161"><state state="open" reason="udp-response"/></port><extraports state="open|filtered" count="4"><extrareasons reason="no-response" count="3" proto="udp" ports="53, 123-124"/><extrareasons reason="admin-prohibited" count="1" ports="500"/></extraports></ports></host><runstats><finished exit="success"/></runstats></nmaprun>`)
+	unit, protocol := udpUnitPorts(t, scattered)
+	var got []string
+	for _, port := range unit.Ports {
+		got = append(got, fmt.Sprintf("%d/%s", port.Port, port.State))
+	}
+	if want := []string{"53/open|filtered", "123/open|filtered", "124/open|filtered", "161/open", "500/open|filtered"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("scattered folded ports = %v, want %v", got, want)
+	}
+	if protocol.Status != "up" || len(protocol.Ports) != 5 {
+		t.Fatalf("scattered folded protocol = %#v", protocol)
+	}
+}
+
+// XML without a usable folded port list (older Nmap releases, or a list that
+// does not account for every folded port) cannot say which ports were
+// open|filtered. The protocol must then be flagged as incomplete coverage so
+// the engine neither adds nor removes the unlisted ports.
+func TestParseXMLFlagsUnlistedFoldedOpenFilteredPorts(t *testing.T) {
+	folded := string(udpOpenFilteredXML(26, 40, false, true))
+	const reason = `<extrareasons reason="no-response" count="26" proto="udp" ports="20001-20026"/>`
+	replace := func(old, replacement string) []byte {
+		if !strings.Contains(folded, old) {
+			t.Fatalf("fixture does not contain %q", old)
+		}
+		return []byte(strings.Replace(folded, old, replacement, 1))
+	}
+	for _, test := range []struct {
+		name string
+		xml  []byte
+	}{
+		{name: "no port list", xml: udpOpenFilteredXML(26, 40, false, false)},
+		{name: "short port list", xml: replace(`ports="20001-20026"`, `ports="20001-20025"`)},
+		{name: "long port list", xml: replace(`ports="20001-20026"`, `ports="1-65535"`)},
+		{name: "other protocol", xml: replace(`proto="udp" ports="20001-20026"`, `proto="tcp" ports="20001-20026"`)},
+		{name: "invalid port list", xml: replace(`ports="20001-20026"`, `ports="20001-x"`)},
+		{name: "reversed range", xml: replace(`ports="20001-20026"`, `ports="20026-20001"`)},
+		{name: "duplicate ports", xml: replace(reason, `<extrareasons reason="no-response" count="13" proto="udp" ports="20001-20013"/><extrareasons reason="no-response" count="13" proto="udp" ports="20001-20013"/>`)},
+		{name: "reason counts exceed the folded count", xml: replace(reason, `<extrareasons reason="no-response" count="26" proto="udp" ports="20001-20026"/><extrareasons reason="no-response" count="1" proto="udp" ports="20027"/>`)},
+		{name: "implausible count", xml: replace(`state="open|filtered" count="26"`, `state="open|filtered" count="70000"`)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			unit, protocol := udpUnitPorts(t, test.xml)
+			if len(unit.Ports) != 0 {
+				t.Fatalf("unverifiable folded ports were recorded: %#v", unit.Ports)
+			}
+			if protocol.Status != "unknown" || protocol.StatusReason != nmapUnlistedOpenFilteredReason {
+				t.Fatalf("unlisted open|filtered ports were silently dropped: status %q/%q", protocol.Status, protocol.StatusReason)
+			}
+		})
+	}
+}
+
 func TestParseXMLRecordsDownHostAsUnreachable(t *testing.T) {
 	data := []byte(`<?xml version="1.0"?><nmaprun><host><status state="down" reason="no-response" reason_ttl="64"/><address addr="192.0.2.9" addrtype="ipv4"/></host><runstats><finished exit="success"/></runstats></nmaprun>`)
 	run, err := parseXMLWithConfig(data, "tcp", config.Protocol{Ports: "1-100", Mode: "connect"})

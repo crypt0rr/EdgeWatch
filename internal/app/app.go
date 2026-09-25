@@ -289,10 +289,11 @@ type ProgressScanner interface {
 }
 
 // BudgetedProgressScanner can validate data-dependent work immediately before
-// a scanner launches it. Naabu discovers the TCP port set first, so the
-// direct path needs this optional hook to account for the subsequent Nmap
-// enrichment without changing the small Scanner contract used by test and
-// plugin implementations.
+// a scanner launches it. The direct path resolves DNS again, so the hook
+// checks the resolved work of every engine; Naabu also discovers the TCP port
+// set first, so the hook accounts for the subsequent Nmap enrichment. It is
+// optional so the small Scanner contract used by test and plugin
+// implementations does not change.
 type BudgetedProgressScanner interface {
 	ProgressScanner
 	ScanWithProgressBudget(context.Context, config.Job, scanner.ProgressReporter, func(discoveryProbes, nmapProbes int64) error) (model.Snapshot, error)
@@ -683,7 +684,10 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 			}
 		}
 		if scanErr == nil {
-			if budgetedScanner, ok := a.Scanner.(BudgetedProgressScanner); ok && job.TCP != nil && config.NormalizeJob(job).TCP != nil && config.NormalizeJob(job).TCP.Engine == config.EngineNaabuNmap {
+			// The direct scanner path resolves DNS again. A budgeted scanner
+			// checks the work of that resolution before it starts, so a DNS
+			// answer that grew since the plan cannot bypass the probe budget.
+			if budgetedScanner, ok := a.Scanner.(BudgetedProgressScanner); ok {
 				snapshot, scanErr = budgetedScanner.ScanWithProgressBudget(scanCtx, job, func(progress scanner.Progress) {
 					a.updateActiveProgress(scan.ID, progress)
 				}, func(discoveryProbes, nmapProbes int64) error {

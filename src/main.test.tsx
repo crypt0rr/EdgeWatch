@@ -29,7 +29,7 @@ function CurrentPath() {
 
 describe('application shell', () => {
   beforeEach(() => {
-    vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.18.70', updates: { available: true, status: 'update_available', latest_version: 'v0.19.0', release_url: 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.19.0' } } as never)
+    vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.18.70', version_release_url: 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.18.70', updates: { available: true, status: 'update_available', latest_version: 'v0.19.0', release_url: 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.19.0' } } as never)
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } })
     vi.mocked(listJobs).mockResolvedValue({ jobs: [] } as never)
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'incidents.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
@@ -53,6 +53,11 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByLabelText('3 active incidents')).toBeInTheDocument())
     expect(screen.getByRole('link', { name: 'Incidents' })).toHaveAttribute('aria-describedby', 'active-incident-count')
     expect(screen.getByRole('link', { name: /Update available/ })).toHaveAttribute('href', 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.19.0')
+    const versionLink = screen.getByRole('link', { name: 'Release notes for EdgeWatch v0.18.70' })
+    expect(versionLink).toHaveAttribute('href', 'https://github.com/crypt0rr/EdgeWatch/releases/tag/v0.18.70')
+    expect(versionLink).toHaveAttribute('target', '_blank')
+    expect(versionLink).toHaveAttribute('rel', 'noopener noreferrer')
+    expect(versionLink).toHaveTextContent('EdgeWatch v0.18.70')
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
     expect(onLogout).toHaveBeenCalledOnce()
   })
@@ -126,6 +131,13 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByText('Live updates')).toBeInTheDocument())
     act(() => stream.onerror?.())
     await waitFor(() => expect(screen.getByText('Reconnecting…')).toBeInTheDocument())
+  })
+
+  it('shows the version as plain text when the build has no published release', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ version: 'dev', updates: { available: false, status: 'development_build' } } as never)
+    renderWithProviders(<Shell displayName="Viewer" role="viewer" permissions={['jobs.read']} onLogout={vi.fn()} />)
+    await waitFor(() => expect(screen.getByText('EdgeWatch dev')).toBeInTheDocument())
+    expect(screen.queryByRole('link', { name: /Release notes for EdgeWatch/ })).not.toBeInTheDocument()
   })
 
   it('shows unavailable incident counts and handles status failures without hiding navigation', async () => {

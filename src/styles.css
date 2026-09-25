@@ -17,6 +17,7 @@
 .expected-panel{margin-bottom:16px}.expected-protocols{display:flex;gap:8px;flex-wrap:wrap}
 .sort-button{appearance:none;background:transparent;border:0;color:inherit;font:inherit;font-size:inherit;font-weight:inherit;letter-spacing:inherit;text-transform:inherit;padding:2px 0;text-align:left}.sort-button:hover,.sort-button:focus-visible{color:#b9dcfa;text-decoration:underline;outline:none}.sort-button:focus-visible{outline:2px solid #5499dc;outline-offset:3px;border-radius:2px}
 .user-chip .app-version{font-size:10px;color:#6888a9;margin-top:0;margin-bottom:3px;letter-spacing:.02em}
+.app-version .version-link{color:inherit;text-decoration:none}.app-version .version-link:hover,.app-version .version-link:focus-visible{color:#8cc8ff;text-decoration:underline;outline-offset:2px}
 .version-update{display:inline-flex;align-items:center;justify-content:center;margin-left:6px;width:19px;height:19px;border-radius:50%;color:#8cc8ff;background:#153d67;vertical-align:-5px;animation:version-update-pulse 2s ease-in-out infinite}.version-update:hover,.version-update:focus-visible{color:#fff;background:#2877d5;outline:2px solid #65a9ff;outline-offset:2px}
 @keyframes version-update-pulse{0%,100%{box-shadow:0 0 0 0 #65a9ff33}50%{box-shadow:0 0 0 5px #65a9ff00}}
 @media (prefers-reduced-motion: reduce){.version-update{animation:none}}

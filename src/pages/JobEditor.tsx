@@ -162,6 +162,18 @@ export function JobEditor() {
     setSelectedNotificationIDs(notificationDestinations.data.destinations.filter(isActiveDestination).map(destination => destination.id))
   }, [existing.data, notificationDestinations.data, notificationSelectionTouched])
 
+  // A saved selection can outlive its destination: a deployment URL change in
+  // config.yaml creates a new destination ID. Show those IDs so the operator
+  // can see why alerts stopped, and never send them back to the server, which
+  // rejects unknown destinations.
+  const availableNotificationIDs = new Set(notificationDestinations.data?.destinations.map(destination => destination.id) ?? [])
+  const missingNotificationIDs = notificationDestinations.data ? selectedNotificationIDs.filter(idValue => !availableNotificationIDs.has(idValue)) : []
+  const removeNotificationID = (idValue: string) => {
+    setNotificationSelectionTouched(true)
+    setDraftDirty(true)
+    setSelectedNotificationIDs(current => current.filter(selected => selected !== idValue))
+  }
+
   const save = async (values: JobFormFields, confirm = false) => {
     setFieldErrors({})
     const normalizedTargets = targets.map((value) => value.trim()).filter(Boolean)
@@ -185,7 +197,7 @@ export function JobEditor() {
       setError('This job changed in another tab. Reload the saved version before continuing.')
       return
     }
-    const payload = { ...values, enabled: scheduleEnabled, targets: normalizedTargets, tcp, udp, notification_destinations: notificationDestinations.data ? selectedNotificationIDs : undefined }
+    const payload = { ...values, enabled: scheduleEnabled, targets: normalizedTargets, tcp, udp, notification_destinations: notificationDestinations.data ? selectedNotificationIDs.filter(idValue => availableNotificationIDs.has(idValue)) : undefined }
     setSaving(true)
     setError('')
     try {
@@ -293,6 +305,16 @@ export function JobEditor() {
 
           <div className="panel form-panel job-notification-panel">
             <div className="panel-heading"><div><h2>Notifications for this job</h2><p className="muted">Choose one or more configured destinations for this job’s alerts.</p></div><Bell className="muted-icon" size={19} /></div>
+            {missingNotificationIDs.length > 0 && <div className="notice warning" role="status" aria-label="Missing notification destination">
+              <TriangleAlert size={16} />
+              <div className="missing-destination-copy">
+                <strong>{missingNotificationIDs.length === 1 ? 'A selected destination no longer exists' : `${missingNotificationIDs.length} selected destinations no longer exist`}</strong>
+                <span>This job’s alerts are not sent to {missingNotificationIDs.length === 1 ? 'it' : 'them'}. Changing a deployment URL in config.yaml creates a new destination, so select its replacement below. Saving removes the missing {missingNotificationIDs.length === 1 ? 'selection' : 'selections'}.</span>
+                <ul>
+                  {missingNotificationIDs.map(idValue => <li key={idValue}><code title={idValue}>{idValue}</code><button type="button" className="text-button" aria-label={`Remove missing destination ${idValue}`} onClick={() => removeNotificationID(idValue)}>Remove</button></li>)}
+                </ul>
+              </div>
+            </div>}
             {notificationDestinations.isLoading ? <div className="loading"><span className="spinner" />Loading destinations…</div> : notificationDestinations.error ? <div className="form-error" role="alert">Notification destinations could not be loaded. The existing routing will be preserved.</div> : notificationDestinations.data?.destinations.length ? <div className="job-notification-list">
               {notificationDestinations.data.destinations.map(destination => <label className="switch-row job-notification-option" key={destination.id}>
                 <input type="checkbox" checked={selectedNotificationIDs.includes(destination.id)} onChange={event => { setNotificationSelectionTouched(true); setDraftDirty(true); setSelectedNotificationIDs(current => event.target.checked ? [...current, destination.id] : current.filter(idValue => idValue !== destination.id)) }} />

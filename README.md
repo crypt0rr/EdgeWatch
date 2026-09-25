@@ -377,6 +377,21 @@ Each job can select its own destinations. On the **Notifications** page,
   in-console indicator continue to work;
 - password confirmation is required for every routing or credential change.
 
+Routing stores destination IDs. A deployment destination's ID follows its exact
+URL, so changing any part of a URL in config.yaml or the URL file, such as a
+rotated webhook token, creates a new destination at the next restart. Jobs do
+not follow that change: open each affected job and select the new destination.
+Alerts still queued for the old URL are not delivered. After the restart,
+EdgeWatch logs a warning that names the jobs whose routing selects a
+destination that no longer exists, and each affected job shows a notice in the
+console. The job editor lists the missing selection, and saving removes it.
+If update alerts went to the old destination, turn on **Update alerts** for the
+new one on the **Notifications** page.
+
+Deleting a web-managed destination removes it from every job and from the
+update-alert routing in the same change. Each affected job gets a new revision
+and an audit record.
+
 Scan changes, scan failures, cancellations, timeouts, stalled cycles, and
 recovery events can all generate notifications. Delivery is retried durably;
 terminal failures are visible in the console without exposing provider errors

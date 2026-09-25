@@ -67,6 +67,8 @@ enrichment:
 notifications:
   # Prefer a regular, owner-readable (0400 or 0600) file with one Shoutrrr
   # URL per line. Symlinks and files larger than 1 MiB are rejected at startup.
+  # Changing any part of a URL (for example a rotated token) creates a new
+  # destination; select it again for each job in the web console.
   # urls_file: /run/secrets/edgewatch-notification-urls
   # Web-managed destinations are encrypted with ./data/notification.key.
   # To supply the key separately (for example as a Docker secret), set this

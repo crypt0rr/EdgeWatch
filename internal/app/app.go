@@ -343,6 +343,7 @@ func NewWithScannerPaths(cfg *config.Config, s *store.Store, nmapPath, naabuPath
 	if materialized > 0 {
 		logger.Info("froze legacy notification selections", "jobs", materialized)
 	}
+	reportMissingNotificationDestinations(context.Background(), s, n, logger)
 	if len(cfg.Jobs) > 0 {
 		legacyNames := make([]string, 0, len(cfg.Jobs))
 		for _, job := range cfg.Jobs {
@@ -360,6 +361,30 @@ func NewWithScannerPaths(cfg *config.Config, s *store.Store, nmapPath, naabuPath
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second, clock: time.Now}, nil
+}
+
+// reportMissingNotificationDestinations warns about saved routing that no
+// longer resolves. A deployment destination's ID follows its exact URL, so
+// changing a URL in config.yaml creates a new destination. Jobs that selected
+// the old one keep a selector that no longer delivers anywhere. The warning
+// names jobs only: selectors can be legacy URL digests and are not logged. A
+// failed check is logged and never blocks startup.
+func reportMissingNotificationDestinations(ctx context.Context, s *store.Store, n *notify.Notifier, logger *slog.Logger) {
+	jobs, err := s.ListJobs(ctx, false)
+	if err != nil {
+		logger.Warn("notification routing check failed", "error", err)
+		return
+	}
+	var names, ids []string
+	for _, record := range jobs {
+		if _, missing := n.CanonicalSelection(record.Job.NotificationDestinations); len(missing) > 0 {
+			names = append(names, record.Job.Name)
+			ids = append(ids, record.ID)
+		}
+	}
+	if len(names) > 0 {
+		logger.Warn("jobs route notifications to destinations that no longer exist; edit each job in the web console to select a current destination", "jobs", names, "job_ids", ids)
+	}
 }
 
 func (a *App) Job(name string) (config.Job, error) {

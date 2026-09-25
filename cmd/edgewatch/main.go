@@ -118,14 +118,21 @@ func run(args []string) error {
 		if *dryRun && *allowSidecarReplay {
 			return errors.New("--allow-sidecar-replay cannot be combined with --dry-run")
 		}
-		preflight, err := store.PreflightRestore(context.Background(), *fromPath, cfg.Database)
-		if err != nil {
-			return err
-		}
+		options := store.RestoreOptions{AllowSidecarReplay: *allowSidecarReplay, AllowActiveDaemon: *allowActiveDaemon, AllowUnreadableDestination: *allowUnreadableDestination, PendingDeliveries: policy}
 		if *dryRun {
-			return printValue(*output, preflight)
+			// The dry run goes through the same refusal checks as the restore
+			// below. It prints its report either way and exits non-zero when the
+			// restore would be refused, so scripts can rely on the exit status.
+			report, refusal := store.DryRunRestore(context.Background(), *fromPath, cfg.Database, options)
+			if err := printValue(*output, report); err != nil {
+				return err
+			}
+			if refusal != nil {
+				return fmt.Errorf("restore dry run: %w", refusal)
+			}
+			return nil
 		}
-		result, err := store.Restore(context.Background(), *fromPath, cfg.Database, store.RestoreOptions{AllowSidecarReplay: *allowSidecarReplay, AllowActiveDaemon: *allowActiveDaemon, AllowUnreadableDestination: *allowUnreadableDestination, PendingDeliveries: policy})
+		result, err := store.Restore(context.Background(), *fromPath, cfg.Database, options)
 		if err != nil {
 			// Do not open the destination to audit a refused restore: doing so
 			// could itself cause SQLite to inspect, checkpoint, or remove the
@@ -143,7 +150,7 @@ func run(args []string) error {
 	// Initialize the configured logger before opening the writable store so
 	// migration and resumable-backfill progress uses the same structured output
 	// as the rest of the daemon.
-	logger := newLogger(cfg.LogLevel(), deploymentLocation(cfg))
+	logger := newLoggerTo(commandLogWriter(cmd), cfg.LogLevel(), deploymentLocation(cfg))
 	var openStore func(string) (*store.Store, error)
 	switch {
 	case readOnlyCommand:
@@ -219,6 +226,7 @@ func run(args []string) error {
 			return fmt.Errorf("unknown managed job %q; YAML jobs are inactive and must be recreated in the web console", *jobName)
 		}
 		scan, events, err := application.RunJobRecord(ctx, record)
+		auditHostCommand(ctx, s, store.AuditEntry{Action: "scan.run_requested", Detail: scanAuditDetail(record.ID, scan.Status, err)})
 		if printErr := printValue(*output, map[string]any{"scan": scan, "events": events}); printErr != nil {
 			return printErr
 		}
@@ -279,6 +287,16 @@ func usage() error {
 
 func newLogger(level string, location *time.Location) *slog.Logger {
 	return newLoggerTo(os.Stdout, level, location)
+}
+
+// commandLogWriter keeps the daemon's structured log on stdout, where
+// container runtimes collect it. Every other command prints its result on
+// stdout, so its log goes to stderr and --output json stays one document.
+func commandLogWriter(cmd string) io.Writer {
+	if cmd == "daemon" {
+		return os.Stdout
+	}
+	return os.Stderr
 }
 
 // newLoggerTo builds the structured JSON logger. A configured deployment
@@ -505,7 +523,10 @@ func normalizedConfig(cfg *config.Config) map[string]any {
 
 func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, output string) error {
 	type row struct {
-		Name                string `json:"name"`
+		Name string `json:"name"`
+		// State is scheduled, paused, archived, or legacy (an inactive YAML
+		// job). Only scheduled jobs run on their schedule and have a NextRun.
+		State               string `json:"state"`
 		Schedule            string `json:"schedule"`
 		Timezone            string `json:"timezone"`
 		BaselineScanID      string `json:"baseline_scan_id,omitempty"`
@@ -515,7 +536,7 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 		LastScanID          string `json:"last_scan_id,omitempty"`
 		LastScanStatus      string `json:"last_scan_status,omitempty"`
 		LastScanFinished    string `json:"last_scan_finished,omitempty"`
-		NextRun             string `json:"next_run"`
+		NextRun             string `json:"next_run,omitempty"`
 		FailedDeliveries    int    `json:"failed_deliveries"`
 	}
 	var rows []row
@@ -544,17 +565,20 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 		} else if state.BaselineConfigHash != record.Job.SecurityHash() {
 			progress = fmt.Sprintf("updating %d/%d", state.CandidateCount, record.Job.Baseline.Samples)
 		}
-		entry := row{Name: record.Job.Name, Schedule: record.Job.Schedule, Timezone: record.Job.Timezone, BaselineScanID: state.BaselineScanID, BaselineProgress: progress, ActiveIncidents: len(state.Incidents), ConsecutiveFailures: state.ConsecutiveFailures, FailedDeliveries: failedDeliveries}
+		entry := row{Name: record.Job.Name, State: managedJobState(record), Schedule: record.Job.Schedule, Timezone: record.Job.Timezone, BaselineScanID: state.BaselineScanID, BaselineProgress: progress, ActiveIncidents: len(state.Incidents), ConsecutiveFailures: state.ConsecutiveFailures, FailedDeliveries: failedDeliveries}
 		if scans, listErr := s.ListJobScans(ctx, record.ID, 1); listErr != nil {
 			return listErr
 		} else if len(scans) == 1 {
 			entry.LastScanID, entry.LastScanStatus = scans[0].ID, scans[0].Status
 			entry.LastScanFinished = statusTime(scans[0].FinishedAt, display)
 		}
-		location := statusLocation(record.Job.Timezone)
-		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-		if schedule, parseErr := parser.Parse(record.Job.Schedule); parseErr == nil {
-			entry.NextRun = statusTime(schedule.Next(time.Now().In(location)), display)
+		// The daemon schedules only enabled, non-archived managed jobs.
+		if entry.State == jobStateScheduled {
+			location := statusLocation(record.Job.Timezone)
+			parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+			if schedule, parseErr := parser.Parse(record.Job.Schedule); parseErr == nil {
+				entry.NextRun = statusTime(schedule.Next(time.Now().In(location)), display)
+			}
 		}
 		rows = append(rows, entry)
 	}
@@ -575,7 +599,9 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 		} else if state.BaselineConfigHash != j.SecurityHash() {
 			progress = fmt.Sprintf("updating %d/%d", state.CandidateCount, j.Baseline.Samples)
 		}
-		entry := row{Name: j.Name, Schedule: j.Schedule, Timezone: j.Timezone, BaselineScanID: state.BaselineScanID, BaselineProgress: progress, ActiveIncidents: len(state.Incidents), ConsecutiveFailures: state.ConsecutiveFailures, FailedDeliveries: failedDeliveries}
+		// Legacy YAML jobs are inactive: the daemon never schedules them, so
+		// they have no next run.
+		entry := row{Name: j.Name, State: jobStateLegacy, Schedule: j.Schedule, Timezone: j.Timezone, BaselineScanID: state.BaselineScanID, BaselineProgress: progress, ActiveIncidents: len(state.Incidents), ConsecutiveFailures: state.ConsecutiveFailures, FailedDeliveries: failedDeliveries}
 		if scans, listErr := s.ListScans(ctx, j.Name, 1); listErr != nil {
 			return listErr
 		} else if len(scans) == 1 {
@@ -583,17 +609,34 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 			entry.LastScanStatus = scans[0].Status
 			entry.LastScanFinished = statusTime(scans[0].FinishedAt, display)
 		}
-		location := statusLocation(j.Timezone)
-		parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
-		if schedule, parseErr := parser.Parse(j.Schedule); parseErr == nil {
-			entry.NextRun = statusTime(schedule.Next(time.Now().In(location)), display)
-		}
 		rows = append(rows, entry)
 	}
 	if filter != "" && len(rows) == 0 {
 		return fmt.Errorf("unknown job %q", filter)
 	}
 	return printValue(output, rows)
+}
+
+// Job states reported by the status command. They match the console's job
+// labels, plus legacy for inactive YAML definitions.
+const (
+	jobStateScheduled = "scheduled"
+	jobStatePaused    = "paused"
+	jobStateArchived  = "archived"
+	jobStateLegacy    = "legacy"
+)
+
+// managedJobState mirrors the scheduler: archived jobs never run, and paused
+// (disabled) jobs run only on demand.
+func managedJobState(record store.JobRecord) string {
+	switch {
+	case record.Archived:
+		return jobStateArchived
+	case !record.Enabled:
+		return jobStatePaused
+	default:
+		return jobStateScheduled
+	}
 }
 
 // statusTime renders CLI status times in the configured deployment timezone.

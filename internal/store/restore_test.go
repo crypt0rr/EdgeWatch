@@ -575,7 +575,7 @@ func TestRestoreSidecarErrorPathsAreRecoverable(t *testing.T) {
 	pending = false
 	restoreSidecarsOnFailure(&pending, nil)
 
-	if err := validateStagedRestore(context.Background(), filepath.Join(dir, "does-not-exist.db")); err == nil {
+	if _, err := validateStagedRestore(context.Background(), filepath.Join(dir, "does-not-exist.db")); err == nil {
 		t.Fatal("missing staged restore database was accepted")
 	}
 }

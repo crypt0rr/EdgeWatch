@@ -64,6 +64,21 @@ func hostAuditDetail(label, path string, operationErr error) string {
 	return fmt.Sprintf("%s=%s status=%s", label, auditPathName(path), status)
 }
 
+// scanAuditDetail records a host CLI scan with the same job ID the web run
+// action audits, plus the outcome. The status is the scan's own terminal
+// status; a run that returned an error is failed unless the scan was canceled
+// or timed out. Targets and scanner arguments are never included.
+func scanAuditDetail(jobID, scanStatus string, runErr error) string {
+	status := scanStatus
+	switch {
+	case runErr != nil && status != "canceled" && status != "timed_out":
+		status = "failed"
+	case status == "":
+		status = "success"
+	}
+	return fmt.Sprintf("job=%s status=%s", auditPathName(jobID), status)
+}
+
 func auditPathName(path string) string {
 	name := filepath.Base(filepath.Clean(strings.TrimSpace(path)))
 	if name == "." || name == string(filepath.Separator) || name == "" {

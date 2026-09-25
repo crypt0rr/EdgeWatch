@@ -424,6 +424,11 @@ func mapHosts(hosts map[string]model.HostObservation) []model.HostObservation {
 // own port chunk in detailed host evidence.
 func MergeWorkSnapshots(plan WorkPlan, fragments []model.Snapshot) model.Snapshot {
 	units := map[string]model.Unit{}
+	// portIndexes maps each unit key to the position of every port already in
+	// that merged unit. A full-range host with every port open arrives as many
+	// 4096-port fragments; a linear search per incoming port would make the
+	// merge quadratic in the number of port records.
+	portIndexes := map[string]map[int]int{}
 	hosts := map[string]model.HostObservation{}
 	result := model.Snapshot{Scopes: append([]model.Scope(nil), plan.Scopes...), DNS: map[string][]string{}}
 	for name, addresses := range plan.DNS {
@@ -436,16 +441,16 @@ func MergeWorkSnapshots(plan WorkPlan, fragments []model.Snapshot) model.Snapsho
 			if !exists {
 				current = model.Unit{Target: unit.Target, Protocol: unit.Protocol}
 			}
+			indexes := portIndexes[key]
+			if indexes == nil {
+				indexes = make(map[int]int, len(unit.Ports))
+				portIndexes[key] = indexes
+			}
 			current.Addresses = append(current.Addresses, unit.Addresses...)
 			for _, port := range unit.Ports {
-				found := -1
-				for index := range current.Ports {
-					if current.Ports[index].Port == port.Port {
-						found = index
-						break
-					}
-				}
-				if found < 0 {
+				found, seen := indexes[port.Port]
+				if !seen {
+					indexes[port.Port] = len(current.Ports)
 					current.Ports = append(current.Ports, port)
 					continue
 				}

@@ -573,6 +573,131 @@ func canceledContext() context.Context {
 	return ctx
 }
 
+// naabuConfirmationScanner plays a resumable Naabu pipeline whose discovery
+// reports only 443, followed by Nmap enrichment that reports the requested
+// ports in open as open and every other requested port as closed.
+type naabuConfirmationScanner struct {
+	mu       sync.Mutex
+	open     map[int]bool
+	enriched []string
+}
+
+func (s *naabuConfirmationScanner) Version(context.Context) string { return "naabu-confirmation" }
+func (s *naabuConfirmationScanner) Scan(context.Context, config.Job) (model.Snapshot, error) {
+	return model.Snapshot{}, errors.New("ordinary scan path is not expected")
+}
+func (s *naabuConfirmationScanner) Plan(context.Context, config.Job) (scanner.WorkPlan, error) {
+	target := scanner.ResolvedTarget{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}}
+	return scanner.WorkPlan{
+		Targets: []scanner.ResolvedTarget{target},
+		Scopes:  []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}},
+		Units: []scanner.WorkUnit{{
+			Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4,
+			Targets: []scanner.ResolvedTarget{target}, Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535,
+		}},
+		TotalUnits: 1, TotalProbes: 65535,
+	}, nil
+}
+func (s *naabuConfirmationScanner) ScanWorkUnit(_ context.Context, _ config.Job, unit scanner.WorkUnit, _ scanner.ProgressReporter) (model.Snapshot, error) {
+	if unit.Phase == "discovery" {
+		return model.Snapshot{
+			Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: []string{"192.0.2.1"}}},
+			Hosts: []model.HostObservation{{Address: "192.0.2.1", Status: "up", Protocols: []model.ProtocolObservation{{
+				Protocol: "tcp", Status: "up", DiscoveryEngine: "naabu", ScannedPorts: "1-65535", ScannedPortCount: 65535,
+				DiscoveredPorts: []model.PortObservation{{Port: 443, State: "open", Verification: "discovered"}},
+			}}}},
+		}, nil
+	}
+	ports, err := config.ParsePorts(unit.Ports)
+	if err != nil {
+		return model.Snapshot{}, err
+	}
+	s.mu.Lock()
+	s.enriched = append(s.enriched, unit.Ports)
+	s.mu.Unlock()
+	confirmed := model.Unit{Target: "192.0.2.1", Protocol: "tcp", Addresses: unit.Addresses}
+	for _, port := range ports {
+		if s.open[port] {
+			confirmed.Ports = append(confirmed.Ports, model.PortState{Port: port, State: "open", Evidence: []string{"192.0.2.1"}})
+		}
+	}
+	return model.Snapshot{Units: []model.Unit{confirmed}}, nil
+}
+
+// A new port with an open incident is not in the baseline yet. When Naabu
+// misses it once, Nmap must still check it: the incident stays open while
+// Nmap reports the port open and recovers only when Nmap reports it closed.
+func TestNaabuMissDoesNotRecoverIncidentWithoutNmapConfirmation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		open      map[int]bool
+		recovered bool
+	}{
+		{name: "nmap confirms open", open: map[int]bool{443: true, 8080: true}},
+		{name: "nmap reports closed", open: map[int]bool{443: true}, recovered: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := store.Open(filepath.Join(t.TempDir(), "naabu-incident.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+			a, err := New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fake := &naabuConfirmationScanner{open: test.open}
+			a.Scanner = fake
+			job := config.NormalizeJob(config.Job{
+				Name: "naabu-incident", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
+				TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Mode: "connect", Naabu: &config.NaabuOptions{ScanType: "connect"}},
+				Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour),
+			})
+			record, err := db.CreateJob(ctx, job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			incident := model.Change{Key: "port|192.0.2.1|tcp|8080", Kind: "port", Severity: "critical", Target: "192.0.2.1", Protocol: "tcp", Port: 8080, Old: "not-open", New: "open"}
+			if _, err := db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+				state.Baseline = &model.Snapshot{
+					Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}},
+					Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 443, State: "open", Evidence: []string{"192.0.2.1"}}}}},
+				}
+				state.BaselineScanID = "baseline"
+				state.BaselineConfigHash = record.Job.SecurityHash()
+				state.Incidents = map[string]model.Incident{incident.Key: {Change: incident, OpenedAt: time.Now().UTC(), LastSeenAt: time.Now().UTC()}}
+				return nil, nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			scan, events, err := a.RunJobRecord(ctx, record)
+			if err != nil || scan.Status != "success" {
+				t.Fatalf("Naabu cycle = %q (%q), err %v", scan.Status, scan.Error, err)
+			}
+			recoveredEvent := false
+			for _, event := range events {
+				if event.Type == "changes-recovered" {
+					recoveredEvent = true
+				}
+			}
+			state, err := db.RuntimeState(ctx, record.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, stillOpen := state.Incidents[incident.Key]
+			if recoveredEvent != test.recovered || stillOpen == test.recovered {
+				t.Fatalf("incident recovered = %t (event %t), want %t; events %#v", !stillOpen, recoveredEvent, test.recovered, events)
+			}
+			if len(fake.enriched) != 1 || fake.enriched[0] != "443,8080" {
+				t.Fatalf("Nmap enrichment ports = %#v, want the discovered and the incident port", fake.enriched)
+			}
+		})
+	}
+}
+
 func deadlineContext() context.Context {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	cancel()

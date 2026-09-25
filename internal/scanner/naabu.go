@@ -1,17 +1,18 @@
 package scanner
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"math/bits"
 	"net"
 	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,20 +31,93 @@ const (
 	// ports), but use a distinct reason so the change engine can distinguish
 	// complete zero-positive coverage from a failed or partial discovery.
 	naabuFullRangeCompleteReason = "scan-complete"
-	// Naabu emits one JSON object per discovered port. A pathological target
-	// set can still produce a large response, so cap one invocation before it
-	// can exhaust the daemon's memory. The scan fails safely when the cap is
-	// reached and can be resumed from the previous completed unit.
-	maxNaabuOutput = 16 << 20
+	// naabuResultLimitReason marks an address whose discoveries were dropped
+	// because one invocation reported more distinct open ports than
+	// maxNaabuUniqueResults. The address stays incomplete instead of failing
+	// the whole work unit on every retry.
+	naabuResultLimitReason = "naabu-too-many-open-ports"
+	// maxNaabuLineBytes bounds one JSONL record. A result is a few hundred
+	// bytes; a longer line is malformed output.
+	maxNaabuLineBytes = 1 << 20
+)
+
+// Naabu emits one JSON object per discovered port, and v2.6.1 prints every
+// result twice: once when found and again when the scan ends. EdgeWatch
+// parses the stream as it arrives and keeps one bit per distinct
+// address:port, so the retained data is bounded by distinct results rather
+// than raw bytes. These are variables only so tests can exercise the limits
+// without generating millions of records.
+var (
+	// maxNaabuUniqueResults bounds the distinct results one invocation may
+	// contribute to a checkpoint: two addresses with every TCP port open.
+	// When a batch exceeds it, the addresses with the most results are
+	// recorded as incomplete, largest first, until the rest fit.
+	maxNaabuUniqueResults = 2 * 65535
+	// maxNaabuRecordsPerAddress bounds raw records, including repeats, so a
+	// child that keeps printing the same result is stopped.
+	maxNaabuRecordsPerAddress = 8 * 65535
 )
 
 type naabuResult struct {
-	Host       string    `json:"host"`
-	IP         string    `json:"ip"`
-	Port       int       `json:"port"`
-	Protocol   string    `json:"protocol"`
-	MacAddress string    `json:"mac_address"`
-	Timestamp  time.Time `json:"timestamp"`
+	Host       string `json:"host"`
+	IP         string `json:"ip"`
+	Port       int    `json:"port"`
+	Protocol   string `json:"protocol"`
+	MacAddress string `json:"mac_address"`
+}
+
+// naabuDiscovery is the deduplicated result of one Naabu invocation.
+type naabuDiscovery struct {
+	// ports holds the sorted distinct open ports of every address that
+	// reported at least one result and fits the result limit.
+	ports map[string][]int
+	macs  map[string][]string
+	// truncated lists, sorted, the addresses whose results exceeded
+	// maxNaabuUniqueResults and were therefore not retained.
+	truncated []string
+}
+
+// naabuSkipsHostDiscovery reports whether the invocation probes every port of
+// every address. Only then does an address without JSONL records prove that
+// no port was open. With host discovery, Naabu silently skips addresses that
+// did not answer, which is indistinguishable from an address with no open
+// port.
+func naabuSkipsHostDiscovery(options config.NaabuOptions, assumeAlive bool) bool {
+	return naabuHostDiscoveryFlag(options, assumeAlive) == "-skip-host-discovery"
+}
+
+// recordNaabuDiscovery merges one invocation's deduplicated results into the
+// discovery state and returns the number of newly seen addresses and ports.
+func recordNaabuDiscovery(result naabuDiscovery, discovered map[string]map[int]bool, hosts map[string]model.HostObservation) (addresses, ports int) {
+	for address, found := range result.ports {
+		if discovered[address] == nil {
+			discovered[address] = map[int]bool{}
+			addresses++
+		}
+		for _, port := range found {
+			if !discovered[address][port] {
+				discovered[address][port] = true
+				ports++
+			}
+		}
+		host := hosts[address]
+		host.Address = address
+		host.AddressFamily = addressFamily(address)
+		host.Status = "up"
+		for _, mac := range result.macs[address] {
+			host.LinkAddresses = append(host.LinkAddresses, model.LinkAddress{Address: mac, Type: "mac"})
+		}
+		hosts[address] = host
+	}
+	for _, address := range result.truncated {
+		host := hosts[address]
+		host.Address = address
+		host.AddressFamily = addressFamily(address)
+		host.Status = "unknown"
+		host.StatusReason = naabuResultLimitReason
+		hosts[address] = host
+	}
+	return addresses, ports
 }
 
 // scanNaabuPipeline performs TCP discovery first and then asks Nmap to
@@ -91,7 +165,7 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 	if err := config.ValidateNaabuOptions(options); err != nil {
 		return model.Snapshot{}, ConfigurationError(fmt.Errorf("tcp naabu: %w", err))
 	}
-	if err := validateNaabuInvocation(options, job.AssumesAlive(), hasRawScannerPrivileges()); err != nil {
+	if err := validateNaabuInvocation(options, job.AssumesAlive(), naabuRawPrivileges()); err != nil {
 		return model.Snapshot{}, err
 	}
 	if len(addresses) == 0 {
@@ -137,45 +211,20 @@ func (n *Nmap) scanNaabuDiscoveryResolved(ctx context.Context, job config.Job, t
 			}
 			return partialSnapshot(), fmt.Errorf("naabu discovery failed: %w: %s", err, sanitizeStderr(stderr))
 		}
-		for _, result := range results {
-			address := normalizeAddress(result.IP)
-			if address == "" {
-				address = normalizeAddress(result.Host)
-			}
-			if net.ParseIP(address) == nil {
-				return partialSnapshot(), fmt.Errorf("naabu returned invalid address %q", address)
-			}
-			if !containsString(batch, address) {
-				return partialSnapshot(), fmt.Errorf("naabu returned unexpected address %s", address)
-			}
-			if result.Port < 1 || result.Port > 65535 {
-				return partialSnapshot(), fmt.Errorf("naabu returned invalid port %d", result.Port)
-			}
-			if result.Protocol != "" && !strings.EqualFold(result.Protocol, "tcp") {
-				return partialSnapshot(), fmt.Errorf("naabu returned non-TCP protocol %q", result.Protocol)
-			}
-			if discovered[address] == nil {
-				discovered[address] = map[int]bool{}
-				addressesFound++
-			}
-			if !discovered[address][result.Port] {
-				discovered[address][result.Port] = true
-				portsFound++
-			}
-			host := discoveryHosts[address]
-			host.Address = address
-			host.AddressFamily = addressFamily(address)
-			host.Status = "up"
-			if result.MacAddress != "" {
-				host.LinkAddresses = append(host.LinkAddresses, model.LinkAddress{Address: boundScannerMetadata(result.MacAddress), Type: "mac"})
-			}
-			discoveryHosts[address] = host
-		}
+		newAddresses, newPorts := recordNaabuDiscovery(results, discovered, discoveryHosts)
+		addressesFound += newAddresses
+		portsFound += newPorts
 		reportProgress(report, Progress{StartedAt: started, Phase: "tcp discovery", Protocol: "tcp", CurrentInvocation: localInvocation, TotalBatches: totalInvocations, TotalInvocations: totalInvocations, TotalProbes: discoveryTotal, CompletedProbes: int64(end) * 65535, CompletedInvocations: localInvocation, ProcessAlive: false, UnitAddresses: len(batch), UnitPorts: naabuFullPortExpression, DiscoveryPortsFound: portsFound, DiscoveryAddresses: addressesFound, DiscoveryDurationMS: time.Since(discoveryStarted).Milliseconds()})
 	}
 	discoveryDuration := time.Since(discoveryStarted).Milliseconds()
 	discoveryHosts = materializeNaabuDiscoveryHosts(targets, addresses, discovered, discoveryHosts, options, job)
-	markCompletedNaabuDiscoveryHosts(discoveryHosts)
+	if naabuSkipsHostDiscovery(options, job.AssumesAlive()) {
+		// Every port of every address was probed, so an address without
+		// records is complete zero-positive coverage (#718). With host
+		// discovery a silent address may simply be down; it keeps the
+		// incomplete unknown/no-response marker, as a down host does with Nmap.
+		markCompletedNaabuDiscoveryHosts(discoveryHosts)
+	}
 	// Discovery units carry no authoritative ports. They preserve logical DNS
 	// aggregation and give MergeWorkSnapshots a stable address inventory while
 	// the follow-up enrichment units are generated from DiscoveredPorts.
@@ -227,7 +276,7 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 	if err := config.ValidateNaabuOptions(options); err != nil {
 		return model.Snapshot{}, ConfigurationError(fmt.Errorf("tcp naabu: %w", err))
 	}
-	if err := validateNaabuInvocation(options, job.AssumesAlive(), hasRawScannerPrivileges()); err != nil {
+	if err := validateNaabuInvocation(options, job.AssumesAlive(), naabuRawPrivileges()); err != nil {
 		return model.Snapshot{}, err
 	}
 	if len(addresses) == 0 {
@@ -241,6 +290,19 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 	// exact probe units, while Naabu's stderr remains sanitized and advisory.
 	discoveryTotal := int64(len(addresses)) * 65535
 	discoveryInvocations := int64((len(addresses) + batchSize - 1) / batchSize)
+	udpProbes := int64(0)
+	if job.UDP != nil {
+		udpProbes, _ = protocolProgressTotals(targets, *job.UDP, nil)
+	}
+	if budgetCheck != nil {
+		// The caller's budget check used an earlier resolution, and a DNS
+		// answer can grow in between. Check the discovery and UDP work of
+		// this resolution before Naabu starts; enrichment is checked again
+		// once the discovered ports are known.
+		if err := budgetCheck(discoveryTotal, udpProbes); err != nil {
+			return model.Snapshot{}, err
+		}
+	}
 	progress := Progress{StartedAt: started, Phase: "tcp discovery", Protocol: "tcp", TotalProbes: discoveryTotal, TotalInvocations: discoveryInvocations}
 	reportProgress(report, progress)
 	discovered := map[string]map[int]bool{}
@@ -275,40 +337,9 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 			}
 			return partialSnapshot(), fmt.Errorf("naabu discovery failed: %w: %s", err, sanitizeStderr(stderr))
 		}
-		for _, result := range results {
-			address := normalizeAddress(result.IP)
-			if address == "" {
-				address = normalizeAddress(result.Host)
-			}
-			if net.ParseIP(address) == nil {
-				return partialSnapshot(), fmt.Errorf("naabu returned invalid address %q", address)
-			}
-			if !containsString(batch, address) {
-				return partialSnapshot(), fmt.Errorf("naabu returned unexpected address %s", address)
-			}
-			if result.Port < 1 || result.Port > 65535 {
-				return partialSnapshot(), fmt.Errorf("naabu returned invalid port %d", result.Port)
-			}
-			if result.Protocol != "" && !strings.EqualFold(result.Protocol, "tcp") {
-				return partialSnapshot(), fmt.Errorf("naabu returned non-TCP protocol %q", result.Protocol)
-			}
-			if discovered[address] == nil {
-				discovered[address] = map[int]bool{}
-				addressesFound++
-			}
-			if !discovered[address][result.Port] {
-				discovered[address][result.Port] = true
-				portsFound++
-			}
-			host := discoveryHosts[address]
-			host.Address = address
-			host.AddressFamily = addressFamily(address)
-			host.Status = "up"
-			if result.MacAddress != "" {
-				host.LinkAddresses = append(host.LinkAddresses, model.LinkAddress{Address: boundScannerMetadata(result.MacAddress), Type: "mac"})
-			}
-			discoveryHosts[address] = host
-		}
+		newAddresses, newPorts := recordNaabuDiscovery(results, discovered, discoveryHosts)
+		addressesFound += newAddresses
+		portsFound += newPorts
 		if report != nil {
 			reportProgress(report, Progress{StartedAt: started, Phase: "tcp discovery", Protocol: "tcp", CurrentInvocation: localInvocation, TotalBatches: progress.TotalInvocations, TotalInvocations: progress.TotalInvocations, TotalProbes: discoveryTotal, CompletedProbes: int64(end) * 65535, CompletedInvocations: localInvocation, ProcessAlive: false, UnitAddresses: len(batch), UnitPorts: naabuFullPortExpression, DiscoveryPortsFound: portsFound, DiscoveryAddresses: addressesFound, DiscoveryDurationMS: time.Since(discoveryStarted).Milliseconds()})
 		}
@@ -318,6 +349,7 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 	// for which no port replied. This distinguishes complete zero-open coverage
 	// from the absence of an address in a legacy snapshot.
 	enrichmentStarted := time.Now()
+	silentAddressesComplete := naabuSkipsHostDiscovery(options, job.AssumesAlive())
 	for _, address := range addresses {
 		host := discoveryHosts[address]
 		host.Address = address
@@ -325,11 +357,16 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 			host.AddressFamily = addressFamily(address)
 		}
 		if host.Status == "" {
-			// Naabu JSONL reports positive ports only. A target that produced
-			// no records was still covered by the full-range pass, but its
-			// reachability is unknown (especially with assume_alive=true).
+			// Naabu JSONL reports positive ports only. Without host discovery
+			// a target that produced no records was still covered by the
+			// full-range pass, but its reachability is unknown. With host
+			// discovery Naabu skips addresses that did not answer, so a silent
+			// address stays incomplete.
 			host.Status = "unknown"
-			host.StatusReason = naabuFullRangeCompleteReason
+			host.StatusReason = "no-response"
+			if silentAddressesComplete {
+				host.StatusReason = naabuFullRangeCompleteReason
+			}
 		}
 		fingerprintArgs := naabuArgsWithTemplate(options, "<targets-file>", job.AssumesAlive(), job.TCP.NaabuArgs)
 		protocol := model.ProtocolObservation{Protocol: "tcp", Status: strings.ToLower(host.Status), StatusReason: host.StatusReason, ScanType: "naabu", ScannedPorts: naabuFullPortExpression, ScannedPortCount: 65535, ServiceDetection: job.TCP.ServiceDetection, DiscoveryEngine: "naabu", NSEProfile: job.TCP.NSEProfile, NSEArgs: cloneStringMap(job.TCP.NSEArgs), CommandFingerprint: commandFingerprint(fingerprintArgs)}
@@ -372,10 +409,6 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 	}
 	sort.Strings(groupScopes)
 	enrichmentProbes := int64(0)
-	udpProbes := int64(0)
-	if job.UDP != nil {
-		udpProbes, _ = protocolProgressTotals(targets, *job.UDP, nil)
-	}
 	for _, scope := range groupScopes {
 		group := append([]string(nil), groups[scope]...)
 		ports := portsByGroup[scope]
@@ -542,9 +575,10 @@ func (n *Nmap) scanNaabuPipelineResolvedWithBudget(ctx context.Context, job conf
 }
 
 // markCompletedNaabuDiscoveryHosts changes only the successful discovery
-// checkpoint's empty-result marker. Error and cancellation snapshots continue
-// to use unknown/no-response and therefore remain protected from baseline and
-// change detection.
+// checkpoint's empty-result marker, and only callers whose invocation skipped
+// host discovery may use it. Error and cancellation snapshots, and silent
+// addresses under host discovery, keep unknown/no-response and therefore
+// remain protected from baseline and change detection.
 func markCompletedNaabuDiscoveryHosts(hosts map[string]model.HostObservation) {
 	for address, host := range hosts {
 		if strings.EqualFold(host.Status, "unknown") && strings.EqualFold(host.StatusReason, "no-response") {
@@ -689,29 +723,29 @@ func (n *Nmap) scanUDPAfterNaabu(ctx context.Context, job config.Job, targets []
 	return snapshot, nil
 }
 
-func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profileArgs, addresses []string, assumeAlive bool, statusReports ...func(invocationProgress)) ([]naabuResult, string, error) {
+func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profileArgs, addresses []string, assumeAlive bool, statusReports ...func(invocationProgress)) (naabuDiscovery, string, error) {
 	file, err := os.CreateTemp("", "edgewatch-naabu-targets-*")
 	if err != nil {
-		return nil, "", err
+		return naabuDiscovery{}, "", err
 	}
 	path := file.Name()
 	defer os.Remove(path)
 	if err := file.Chmod(0o600); err != nil {
 		file.Close()
-		return nil, "", err
+		return naabuDiscovery{}, "", err
 	}
 	for _, address := range addresses {
 		if _, err := io.WriteString(file, address+"\n"); err != nil {
 			file.Close()
-			return nil, "", err
+			return naabuDiscovery{}, "", err
 		}
 	}
 	if err := file.Close(); err != nil {
-		return nil, "", err
+		return naabuDiscovery{}, "", err
 	}
 
 	if err := config.ValidateScannerProfile(config.ScannerProfile{Engine: config.EngineNaabuNmap, Naabu: options, NaabuArgs: profileArgs}); err != nil {
-		return nil, "", ConfigurationError(fmt.Errorf("scanner profile arguments: %w", err))
+		return naabuDiscovery{}, "", ConfigurationError(fmt.Errorf("scanner profile arguments: %w", err))
 	}
 	args := naabuArgsWithTemplate(options, path, assumeAlive, profileArgs)
 	naabuPath := strings.TrimSpace(n.NaabuPath)
@@ -731,13 +765,13 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	var outputExceeded atomic.Bool
 	killOnOutputLimit := func() {
 		if outputExceeded.CompareAndSwap(false, true) && cmd.Process != nil {
-			// Stop the child as soon as either output channel reaches its cap.
-			// Returning an error only after Wait would leave a malformed scanner
-			// free to consume CPU and fill the container's temporary filesystem.
+			// Stop the child as soon as either output channel reaches its cap
+			// or emits an invalid record. Returning an error only after Wait
+			// would leave a malformed scanner free to consume CPU.
 			_ = cmd.Process.Kill()
 		}
 	}
-	stdout := cappedBuffer{limit: maxNaabuOutput, onExceeded: killOnOutputLimit}
+	stdout := newNaabuResultCollector(addresses, killOnOutputLimit)
 	var status func(invocationProgress)
 	if len(statusReports) > 0 {
 		status = statusReports[0]
@@ -762,10 +796,10 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 	stderr := &progressOutputWriter{limit: maxProgressOutput, onExceeded: killOnOutputLimit, emit: func(line string) {
 		emitStatus(invocationProgress{Output: line, Alive: true})
 	}}
-	cmd.Stdout = &stdout
+	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
-		return nil, stderr.String(), ExecutableStartError(cmd.Path, err)
+		return naabuDiscovery{}, stderr.String(), ExecutableStartError(cmd.Path, err)
 	}
 	heartbeatStop := make(chan struct{})
 	heartbeatDone := make(chan struct{})
@@ -799,15 +833,17 @@ func (n *Nmap) runNaabu(ctx context.Context, options config.NaabuOptions, profil
 		emitStatus(invocationProgress{Alive: false})
 	}
 	if stderr.exceeded {
-		return nil, stderr.String(), fmt.Errorf("naabu diagnostic output exceeded %d bytes", maxProgressOutput)
+		return naabuDiscovery{}, stderr.String(), fmt.Errorf("naabu diagnostic output exceeded %d bytes", maxProgressOutput)
 	}
-	if stdout.exceeded {
-		return nil, stderr.String(), fmt.Errorf("naabu JSON output exceeded %d bytes", maxNaabuOutput)
+	if stdout.err != nil {
+		// The collector killed the child; its error explains why, while the
+		// wait error would only report the signal.
+		return naabuDiscovery{}, stderr.String(), stdout.err
 	}
 	if waitErr != nil {
-		return nil, stderr.String(), scannerStorageError(waitErrWithContext(ctx, waitErr), stderr.String())
+		return naabuDiscovery{}, stderr.String(), scannerStorageError(waitErrWithContext(ctx, waitErr), stderr.String())
 	}
-	results, err := parseNaabuJSON(stdout.Bytes())
+	results, err := stdout.finish()
 	return results, stderr.String(), err
 }
 
@@ -916,27 +952,170 @@ func naabuHostDiscoveryFlag(options config.NaabuOptions, assumeAlive bool) strin
 	return "-with-host-discovery"
 }
 
-func parseNaabuJSON(data []byte) ([]naabuResult, error) {
-	var results []naabuResult
-	scanner := bufio.NewScanner(bytes.NewReader(data))
-	// A JSON result is small, but keep the bound explicit so a malformed line
-	// cannot allocate unbounded memory inside bufio.Scanner.
-	scanner.Buffer(make([]byte, 4096), 1<<20)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
+// naabuResultCollector parses Naabu's JSONL stdout as the child writes it.
+// Each record is validated against the invocation's address batch and
+// deduplicated into one bit per address:port, so memory is bounded by the
+// batch size however often Naabu repeats a result. An invalid or oversized
+// record, or an implausible number of repeats, stops the child.
+type naabuResultCollector struct {
+	allowed    map[string]struct{}
+	maxRecords int
+	onFailure  func()
+	pending    []byte
+	records    int
+	addresses  map[string]*naabuAddressPorts
+	err        error
+}
+
+type naabuAddressPorts struct {
+	bits  [65536 / 64]uint64
+	count int
+	macs  []string
+}
+
+func newNaabuResultCollector(addresses []string, onFailure func()) *naabuResultCollector {
+	allowed := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		if normalized := normalizeAddress(address); normalized != "" {
+			allowed[normalized] = struct{}{}
+		}
+	}
+	return &naabuResultCollector{allowed: allowed, maxRecords: max(len(allowed), 1) * maxNaabuRecordsPerAddress, onFailure: onFailure, addresses: map[string]*naabuAddressPorts{}}
+}
+
+func (c *naabuResultCollector) Write(data []byte) (int, error) {
+	if c.err != nil {
+		return len(data), c.err
+	}
+	written := len(data)
+	for len(data) > 0 {
+		newline := bytes.IndexByte(data, '\n')
+		chunk := data
+		if newline >= 0 {
+			chunk = data[:newline]
+		}
+		if len(c.pending)+len(chunk) >= maxNaabuLineBytes {
+			return written, c.fail(fmt.Errorf("naabu JSON line exceeded %d bytes", maxNaabuLineBytes))
+		}
+		if newline < 0 {
+			c.pending = append(c.pending, chunk...)
+			break
+		}
+		line := chunk
+		if len(c.pending) > 0 {
+			c.pending = append(c.pending, chunk...)
+			line = c.pending
+		}
+		if err := c.record(line); err != nil {
+			return written, c.fail(err)
+		}
+		c.pending = c.pending[:0]
+		data = data[newline+1:]
+	}
+	return written, nil
+}
+
+func (c *naabuResultCollector) fail(err error) error {
+	c.err = err
+	if c.onFailure != nil {
+		c.onFailure()
+	}
+	return err
+}
+
+func (c *naabuResultCollector) record(line []byte) error {
+	line = bytes.TrimSpace(line)
+	if len(line) == 0 {
+		return nil
+	}
+	c.records++
+	if c.records > c.maxRecords {
+		return fmt.Errorf("naabu emitted more than %d JSON records for %d address(es)", c.maxRecords, len(c.allowed))
+	}
+	var result naabuResult
+	if err := json.Unmarshal(line, &result); err != nil {
+		return fmt.Errorf("parse naabu JSON: %w", err)
+	}
+	address := normalizeAddress(result.IP)
+	if address == "" {
+		address = normalizeAddress(result.Host)
+	}
+	if net.ParseIP(address) == nil {
+		return fmt.Errorf("naabu returned invalid address %q", address)
+	}
+	if _, ok := c.allowed[address]; !ok {
+		return fmt.Errorf("naabu returned unexpected address %s", address)
+	}
+	if result.Port < 1 || result.Port > 65535 {
+		return fmt.Errorf("naabu returned invalid port %d", result.Port)
+	}
+	if result.Protocol != "" && !strings.EqualFold(result.Protocol, "tcp") {
+		return fmt.Errorf("naabu returned non-TCP protocol %q", result.Protocol)
+	}
+	ports := c.addresses[address]
+	if ports == nil {
+		ports = &naabuAddressPorts{}
+		c.addresses[address] = ports
+	}
+	word, bit := result.Port/64, uint64(1)<<(result.Port%64)
+	if ports.bits[word]&bit == 0 {
+		ports.bits[word] |= bit
+		ports.count++
+	}
+	if mac := boundScannerMetadata(result.MacAddress); mac != "" && len(ports.macs) < maxScannerLinkAddresses && !slices.Contains(ports.macs, mac) {
+		ports.macs = append(ports.macs, mac)
+	}
+	return nil
+}
+
+// finish parses a final record without a trailing newline and returns the
+// deduplicated results. When the batch reported more distinct results than
+// maxNaabuUniqueResults, the addresses with the most results are dropped,
+// largest first, and listed as truncated so their coverage stays incomplete.
+func (c *naabuResultCollector) finish() (naabuDiscovery, error) {
+	if c.err == nil && len(c.pending) > 0 {
+		if err := c.record(c.pending); err != nil {
+			c.err = err
+		}
+		c.pending = nil
+	}
+	if c.err != nil {
+		return naabuDiscovery{}, c.err
+	}
+	addresses := make([]string, 0, len(c.addresses))
+	total := 0
+	for address, ports := range c.addresses {
+		addresses = append(addresses, address)
+		total += ports.count
+	}
+	sort.Slice(addresses, func(i, j int) bool {
+		left, right := c.addresses[addresses[i]].count, c.addresses[addresses[j]].count
+		if left != right {
+			return left > right
+		}
+		return addresses[i] < addresses[j]
+	})
+	result := naabuDiscovery{ports: make(map[string][]int, len(addresses)), macs: make(map[string][]string, len(addresses))}
+	for _, address := range addresses {
+		ports := c.addresses[address]
+		if total > maxNaabuUniqueResults {
+			total -= ports.count
+			result.truncated = append(result.truncated, address)
 			continue
 		}
-		var result naabuResult
-		if err := json.Unmarshal([]byte(line), &result); err != nil {
-			return nil, fmt.Errorf("parse naabu JSON: %w", err)
+		found := make([]int, 0, ports.count)
+		for word, set := range ports.bits {
+			for ; set != 0; set &= set - 1 {
+				found = append(found, word*64+bits.TrailingZeros64(set))
+			}
 		}
-		results = append(results, result)
+		result.ports[address] = found
+		if len(ports.macs) > 0 {
+			result.macs[address] = ports.macs
+		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read naabu JSON: %w", err)
-	}
-	return results, nil
+	sort.Strings(result.truncated)
+	return result, nil
 }
 
 type cappedBuffer struct {
@@ -1002,15 +1181,6 @@ func sortedPortSet(values map[int]bool) []int {
 	}
 	sort.Ints(ports)
 	return ports
-}
-
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func addressFamily(address string) string {
@@ -1093,6 +1263,11 @@ func markNaabuEnrichmentFailure(host *model.HostObservation, discovered []int) {
 		}
 	}
 }
+
+// naabuRawPrivileges is the capability check applied before a Naabu
+// invocation. It is a variable only so tests can exercise SYN discovery
+// without granting the test process raw-packet capabilities.
+var naabuRawPrivileges = hasRawScannerPrivileges
 
 // hasRawScannerPrivileges is intentionally conservative. Connect mode is
 // usable without either capability. Linux deployments that grant both raw

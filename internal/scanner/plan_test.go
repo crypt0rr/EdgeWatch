@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -120,6 +121,74 @@ func TestMergeWorkSnapshotsDeduplicatesChunkedHostProtocols(t *testing.T) {
 	protocol := result.Hosts[0].Protocols[0]
 	if protocol.ScannedPorts != "1-8192" || protocol.ScannedPortCount != 8192 || len(protocol.Ports) != 2 {
 		t.Fatalf("merged protocol scope/evidence = %#v", protocol)
+	}
+}
+
+// fullRangeOpenFragments returns the checkpoints produced by a full-range
+// scan of one host with every TCP port open: sixteen 4096-port chunks.
+func fullRangeOpenFragments(address string) []model.Snapshot {
+	var fragments []model.Snapshot
+	for start := 1; start <= 65535; start += maxWorkUnitPorts {
+		end := min(start+maxWorkUnitPorts-1, 65535)
+		unit := model.Unit{Target: address, Protocol: "tcp", Addresses: []string{address}}
+		for port := start; port <= end; port++ {
+			unit.Ports = append(unit.Ports, model.PortState{Port: port, State: "open", Evidence: []string{address}})
+		}
+		fragments = append(fragments, model.Snapshot{Units: []model.Unit{unit}})
+	}
+	return fragments
+}
+
+func TestMergeWorkSnapshotsFoldsRepeatedPortsDeterministically(t *testing.T) {
+	plan := WorkPlan{Scopes: []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "22"}}, DNS: map[string][]string{"edge.example": {"192.0.2.1", "192.0.2.2"}}}
+	fragment := func(address, state, service string) model.Snapshot {
+		return model.Snapshot{Units: []model.Unit{{Target: "edge.example", Protocol: "tcp", Addresses: []string{address}, Ports: []model.PortState{{Port: 22, State: state, Service: service, Evidence: []string{address}}}}}}
+	}
+	result := MergeWorkSnapshots(plan, []model.Snapshot{
+		fragment("192.0.2.2", "open|filtered", ""),
+		fragment("192.0.2.1", "open", "ssh"),
+		fragment("192.0.2.2", "open|filtered", "other"),
+	})
+	if len(result.Units) != 1 || len(result.Units[0].Ports) != 1 {
+		t.Fatalf("repeated port was not folded into one record: %#v", result.Units)
+	}
+	port := result.Units[0].Ports[0]
+	if port.State != "open" || port.Service != "ssh" || len(port.Evidence) != 2 || port.Evidence[0] != "192.0.2.1" || port.Evidence[1] != "192.0.2.2" {
+		t.Fatalf("folded port = %#v, want open ssh with both addresses as evidence", port)
+	}
+}
+
+// A host with every port open arrives as sixteen 4096-port checkpoints. The
+// merge runs while a cycle is finalized, so it must stay linear in the number
+// of port records instead of rescanning the merged ports for each addition.
+func TestMergeWorkSnapshotsFullRangeAllOpenHostIsLinear(t *testing.T) {
+	plan := WorkPlan{Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}}, DNS: map[string][]string{}}
+	fragments := fullRangeOpenFragments("192.0.2.1")
+	started := time.Now()
+	result := MergeWorkSnapshots(plan, fragments)
+	elapsed := time.Since(started)
+	if len(result.Units) != 1 || len(result.Units[0].Ports) != 65535 {
+		t.Fatalf("merged full-range host has %d units, want one with 65535 ports", len(result.Units))
+	}
+	for index, port := range result.Units[0].Ports {
+		if port.Port != index+1 || port.State != "open" || len(port.Evidence) != 1 || port.Evidence[0] != "192.0.2.1" {
+			t.Fatalf("merged port %d = %#v", index, port)
+		}
+	}
+	// The quadratic merge needed seconds for this input even without the race
+	// detector; the indexed merge needs tens of milliseconds. The bound leaves
+	// ample headroom for slow, instrumented CI runners.
+	if elapsed > 2*time.Second {
+		t.Fatalf("merging 65535 ports in %d fragments took %s", len(fragments), elapsed)
+	}
+}
+
+func BenchmarkMergeWorkSnapshotsFullRangeAllOpenHost(b *testing.B) {
+	plan := WorkPlan{Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}}, DNS: map[string][]string{}}
+	fragments := fullRangeOpenFragments("192.0.2.1")
+	b.ResetTimer()
+	for b.Loop() {
+		MergeWorkSnapshots(plan, fragments)
 	}
 }
 

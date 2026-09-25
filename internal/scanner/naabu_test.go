@@ -136,15 +136,54 @@ func TestNaabuCustomProfileKeepsHostDiscoveryDefaultWhenOmitted(t *testing.T) {
 	}
 }
 
-func TestParseNaabuJSONRejectsMalformedAndOversizedLines(t *testing.T) {
-	if _, err := parseNaabuJSON([]byte(`{"ip":"192.0.2.1","port":22}`)); err != nil {
-		t.Fatal(err)
+func collectNaabuOutput(t *testing.T, addresses []string, chunks ...string) (naabuDiscovery, int, error) {
+	t.Helper()
+	failures := 0
+	collector := newNaabuResultCollector(addresses, func() { failures++ })
+	for _, chunk := range chunks {
+		if _, err := collector.Write([]byte(chunk)); err != nil {
+			return naabuDiscovery{}, failures, err
+		}
 	}
-	if _, err := parseNaabuJSON([]byte(`{"ip":`)); err == nil {
-		t.Fatal("malformed Naabu JSON was accepted")
+	result, err := collector.finish()
+	return result, failures, err
+}
+
+func TestNaabuResultCollectorRejectsMalformedAndOversizedLines(t *testing.T) {
+	batch := []string{"192.0.2.1"}
+	// A record may be split across writes and the last one may lack a newline.
+	result, failures, err := collectNaabuOutput(t, batch, `{"ip":"192.0.2.1",`, `"port":22}`+"\n\n", `{"ip":"192.0.2.1","port":22}`+"\n", `{"host":"192.0.2.1","port":80}`)
+	if err != nil || failures != 0 || !slices.Equal(result.ports["192.0.2.1"], []int{22, 80}) {
+		t.Fatalf("split and repeated records = %#v, %v (failures %d)", result, err, failures)
 	}
-	if _, err := parseNaabuJSON([]byte(strings.Repeat("x", 1<<20))); err == nil {
-		t.Fatal("oversized Naabu JSON line was accepted")
+	if _, failures, err := collectNaabuOutput(t, batch, `{"ip":`); err == nil || !strings.Contains(err.Error(), "parse naabu JSON") || failures != 0 {
+		t.Fatalf("malformed trailing Naabu JSON = %v (failures %d)", err, failures)
+	}
+	if _, failures, err := collectNaabuOutput(t, batch, `{"ip":`+"\n"); err == nil || !strings.Contains(err.Error(), "parse naabu JSON") || failures != 1 {
+		t.Fatalf("malformed Naabu JSON = %v (failures %d), want the child stopped", err, failures)
+	}
+	if _, failures, err := collectNaabuOutput(t, batch, strings.Repeat("x", maxNaabuLineBytes/2), strings.Repeat("x", maxNaabuLineBytes/2)); err == nil || !strings.Contains(err.Error(), "line exceeded") || failures != 1 {
+		t.Fatalf("oversized Naabu JSON line = %v (failures %d)", err, failures)
+	}
+	collector := newNaabuResultCollector(batch, nil)
+	if _, err := collector.Write([]byte("{\"ip\":\n")); err == nil {
+		t.Fatal("malformed record was accepted")
+	}
+	if written, err := collector.Write([]byte(`{"ip":"192.0.2.1","port":22}` + "\n")); written == 0 || err == nil {
+		t.Fatalf("write after failure = (%d, %v), want the first error again", written, err)
+	}
+}
+
+func TestNaabuResultCollectorStopsRepeatedRecords(t *testing.T) {
+	previous := maxNaabuRecordsPerAddress
+	maxNaabuRecordsPerAddress = 3
+	t.Cleanup(func() { maxNaabuRecordsPerAddress = previous })
+	record := `{"ip":"192.0.2.1","port":22,"protocol":"tcp"}` + "\n"
+	if _, failures, err := collectNaabuOutput(t, []string{"192.0.2.1"}, record, record, record); err != nil || failures != 0 {
+		t.Fatalf("records within the bound = %v (failures %d)", err, failures)
+	}
+	if _, failures, err := collectNaabuOutput(t, []string{"192.0.2.1"}, record, record, record, record); err == nil || !strings.Contains(err.Error(), "more than 3 JSON records") || failures != 1 {
+		t.Fatalf("repeated records beyond the bound = %v (failures %d)", err, failures)
 	}
 }
 
@@ -188,13 +227,31 @@ func TestCappedBufferBoundsIOCopyFromPipe(t *testing.T) {
 	}
 }
 
-func TestRunNaabuKillsChildWhenJSONOutputLimitExceeded(t *testing.T) {
+func TestRunNaabuKillsChildWhenJSONLineLimitExceeded(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "finished")
 	script := "i=0\nwhile [ \"$i\" -lt 17 ]; do\n  printf '%1048576s' x\n  i=$((i + 1))\ndone\nsleep 1\ntouch " + marker + "\n"
 	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, script))
 	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
-	if err == nil || !strings.Contains(err.Error(), "naabu JSON output exceeded") {
+	if err == nil || !strings.Contains(err.Error(), "naabu JSON line exceeded") {
 		t.Fatalf("Naabu oversized output error = %v", err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("Naabu child reached post-output marker (stat error %v)", statErr)
+	}
+}
+
+// A child that keeps repeating a result is stopped once it exceeds the raw
+// record bound, even though the distinct results stay small.
+func TestRunNaabuKillsChildThatRepeatsResults(t *testing.T) {
+	previous := maxNaabuRecordsPerAddress
+	maxNaabuRecordsPerAddress = 1000
+	t.Cleanup(func() { maxNaabuRecordsPerAddress = previous })
+	marker := filepath.Join(t.TempDir(), "finished")
+	script := "i=0\nwhile [ \"$i\" -lt 100000 ]; do\n  printf '%s\\n' '{\"ip\":\"192.0.2.1\",\"port\":22,\"protocol\":\"tcp\"}'\n  i=$((i + 1))\ndone\ntouch " + marker + "\n"
+	n := NewWithNaabu("missing-nmap", writeNaabuFixture(t, script))
+	_, _, err := n.runNaabu(context.Background(), testNaabuOptions(), nil, []string{"192.0.2.1"}, true)
+	if err == nil || !strings.Contains(err.Error(), "more than 1000 JSON records") {
+		t.Fatalf("repeated Naabu output error = %v", err)
 	}
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
 		t.Fatalf("Naabu child reached post-output marker (stat error %v)", statErr)
@@ -444,7 +501,7 @@ func TestRunNaabuReportsOutputAndHeartbeat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || results[0].Port != 22 {
+	if !slices.Equal(results.ports["192.0.2.1"], []int{22}) {
 		t.Fatalf("Naabu result = %#v", results)
 	}
 	seenOutput, seenAlive, seenTerminal := false, false, false

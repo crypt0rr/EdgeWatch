@@ -319,13 +319,34 @@ are available only when the runtime has both NET_RAW and NET_ADMIN. UDP is
 always Nmap-only. Naabu evidence and disagreements are retained as diagnostic
 data, but they do not independently create incidents.
 
+Naabu reports open ports only, so Nmap also confirms every TCP port the job
+still tracks: baseline ports and the ports of open incidents, pending changes,
+and suppressed changes. A single Naabu miss cannot close them. An address with
+no Naabu result counts as complete coverage only when host discovery is
+skipped (assume_alive, the default). With SYN host discovery, Naabu cannot
+tell a down address from one without open ports, so that address stays
+incomplete, as a down host does with Nmap. Repeated Naabu results are counted
+once. One Naabu invocation keeps at most 131,070 distinct open ports, the
+equivalent of two addresses with every port open. Beyond that, the addresses
+with the most results are recorded as incomplete with the reason
+`naabu-too-many-open-ports`.
+
+Nmap folds more than 25 `open|filtered` UDP ports into a summary line (the
+threshold rises with `-v` and `-vv`). EdgeWatch records the ports listed in
+that summary, so the baseline does not depend on the port count or on profile
+verbosity. If a result lacks that list, the host's UDP coverage is marked
+incomplete (`open-filtered-ports-unlisted`) rather than treating the ports as
+closed.
+
 Jobs can configure TCP and UDP independently, service detection, timing,
 timeouts, host discovery (assume_alive), and approved scanner-profile
 overrides. EdgeWatch executes fixed Nmap and Naabu binaries with validated
 argument arrays; it never runs browser-supplied shell commands or arbitrary
 executables.
 
-Full-range scans are deliberately bounded by scheduler probe budgets. A broad
+Full-range scans are deliberately bounded by scheduler probe budgets. A scan
+that runs as a single invocation resolves DNS again when it starts, and the
+budget is checked against that resolution before any scanner runs. A broad
 scan may be split into resumable address, discovery, enrichment, and UDP work
 units. A timeout or restart preserves completed work for the configured resume
 window; partial work cannot change a baseline. The dashboard shows scanner

@@ -282,10 +282,11 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 
 	// Gather one deterministic port set per effective address from only this
 	// batch. Discovery address batches are disjoint; unioning within the batch
-	// still protects against duplicate host observations during recovery. A
-	// current baseline expectation is included as a bounded safety net: Naabu
-	// emits positive discoveries only, so a transient miss must still be
-	// confirmed by Nmap before EdgeWatch records a closure.
+	// still protects against duplicate host observations during recovery.
+	// Every positive TCP port the job currently tracks (baseline, open
+	// incidents, pending and suppressed changes) is included as a bounded
+	// safety net: Naabu emits positive discoveries only, so a transient miss
+	// must still be confirmed by Nmap before EdgeWatch records a closure.
 	portsByAddress := map[string]map[int]struct{}{}
 	batchAddresses := map[string]struct{}{}
 	for _, row := range pending {
@@ -300,11 +301,11 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 			}
 		}
 	}
-	baselinePorts, baselineErr := baselineExpectedTCPPortsTx(ctx, tx, cycleJob)
-	if baselineErr != nil {
-		return false, baselineErr
+	expectedPorts, expectedErr := expectedTCPPortsTx(ctx, tx, cycleJob, plan.Targets)
+	if expectedErr != nil {
+		return false, expectedErr
 	}
-	for address, ports := range baselinePorts {
+	for address, ports := range expectedPorts {
 		if _, inBatch := batchAddresses[address]; !inBatch {
 			continue
 		}
@@ -501,7 +502,12 @@ func (s *Store) reconcileScanCycleEnrichmentBatch(ctx context.Context, cycleID s
 	return worked, nil
 }
 
-func baselineExpectedTCPPortsTx(ctx context.Context, tx *sql.Tx, jobID string) (map[string]map[int]struct{}, error) {
+// expectedTCPPortsTx returns, per effective address, every positive TCP port
+// the job's runtime state currently tracks: baseline ports, and the ports of
+// open incidents, pending changes and suppressed changes that expect the port
+// to be open. Changes name a logical target, so targets maps a DNS or other
+// logical name to the addresses pinned by the cycle plan.
+func expectedTCPPortsTx(ctx context.Context, tx *sql.Tx, jobID string, targets []scanner.ResolvedTarget) (map[string]map[int]struct{}, error) {
 	expected := map[string]map[int]struct{}{}
 	if strings.TrimSpace(jobID) == "" {
 		return expected, nil
@@ -518,12 +524,12 @@ func baselineExpectedTCPPortsTx(ctx context.Context, tx *sql.Tx, jobID string) (
 		// keep the empty map and let the discovery evidence stand on its own.
 		state = model.JobState{}
 	}
+	addTrackedChangeTCPPorts(expected, state, targets)
 	if state.Baseline == nil {
 		return expected, nil
 	}
 	positive := func(port model.PortState) bool {
-		value := strings.ToLower(strings.TrimSpace(port.State))
-		return port.Port >= 1 && port.Port <= 65535 && (value == "open" || value == "open|filtered")
+		return port.Port >= 1 && port.Port <= 65535 && isPositiveCyclePortState(port.State)
 	}
 	for _, unit := range state.Baseline.Units {
 		if !strings.EqualFold(unit.Protocol, "tcp") {
@@ -554,6 +560,67 @@ func baselineExpectedTCPPortsTx(ctx context.Context, tx *sql.Tx, jobID string) (
 		}
 	}
 	return expected, nil
+}
+
+// addTrackedChangeTCPPorts adds the TCP ports that open incidents, pending
+// changes and suppressed changes expect to be open. A change carries only its
+// logical target, so each target maps to every address the plan pinned for it;
+// a target missing from the plan is used only when it is an address itself.
+func addTrackedChangeTCPPorts(expected map[string]map[int]struct{}, state model.JobState, targets []scanner.ResolvedTarget) {
+	targetAddresses := make(map[string][]string, len(targets))
+	for _, target := range targets {
+		targetAddresses[target.Name] = append(targetAddresses[target.Name], target.Addresses...)
+	}
+	add := func(change model.Change) {
+		if !strings.EqualFold(change.Protocol, "tcp") || change.Port < 1 || change.Port > 65535 || !changeExpectsOpenPort(change) {
+			return
+		}
+		addresses := targetAddresses[change.Target]
+		if len(addresses) == 0 {
+			addresses = []string{change.Target}
+		}
+		for _, address := range addresses {
+			address = normalizeCycleAddress(address)
+			if address == "" {
+				continue
+			}
+			set := expected[address]
+			if set == nil {
+				set = map[int]struct{}{}
+				expected[address] = set
+			}
+			set[change.Port] = struct{}{}
+		}
+	}
+	for _, incident := range state.Incidents {
+		add(incident.Change)
+	}
+	for _, pending := range state.Pending {
+		add(pending.Change)
+	}
+	for _, change := range state.SuppressedChanges {
+		add(change)
+	}
+}
+
+func isPositiveCyclePortState(state string) bool {
+	state = strings.ToLower(strings.TrimSpace(state))
+	return state == "open" || state == "open|filtered"
+}
+
+// changeExpectsOpenPort reports whether a tracked change claims its port is
+// currently open: a port change to a positive state, or a service change
+// whose new value is a fingerprint rather than the absence of the port.
+func changeExpectsOpenPort(change model.Change) bool {
+	switch change.Kind {
+	case "port":
+		return isPositiveCyclePortState(change.New)
+	case "service":
+		value := strings.TrimSpace(change.New)
+		return value != "" && value != "not-open"
+	default:
+		return false
+	}
 }
 
 func scanCycleUnitIdentity(unit scanner.WorkUnit) string {

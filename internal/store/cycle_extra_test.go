@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -483,6 +484,138 @@ func TestReconcileNaabuDiscoveryIncludesBaselineExpectedPorts(t *testing.T) {
 	}
 	if len(summaries) != 2 || summaries[1].Phase != "enrichment" || summaries[1].Ports != "22,443" {
 		t.Fatalf("baseline union enrichment = %#v", summaries)
+	}
+}
+
+// Naabu reports positive ports only, so a single miss must not close a port
+// the job still tracks. Open incidents, pending changes and suppressed
+// changes that expect a TCP port open are confirmed by Nmap, like baseline
+// ports. Changes name logical targets, so a DNS target maps to every
+// address its plan resolved to.
+func TestReconcileNaabuDiscoveryIncludesTrackedChangePorts(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	defer s.Close()
+	jobValue := config.NormalizeJob(config.Job{
+		Name: "naabu-tracked-changes", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"192.0.2.1", "edge.example"}, MaxExpandedHosts: 3,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{AddressBatchSize: 16}},
+		UDP: &config.Protocol{Ports: "53"},
+	})
+	job, err := s.CreateJob(ctx, jobValue)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := func(kind, target, protocol string, port int, old, current string) model.Change {
+		return model.Change{Key: kind + "|" + target + "|" + protocol + "|" + fmt.Sprint(port), Kind: kind, Target: target, Protocol: protocol, Port: port, Old: old, New: current}
+	}
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}, {Target: "edge.example", Protocol: "tcp", Ports: "1-65535"}},
+		Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 443, State: "open"}}}},
+	}
+	if _, err := s.UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &baseline
+		state.BaselineScanID = "baseline"
+		state.BaselineConfigHash = job.Job.SecurityHash()
+		addition := change("port", "192.0.2.1", "tcp", 8080, "not-open", "open")
+		service := change("service", "192.0.2.1", "tcp", 8081, "not-open", "http")
+		removal := change("port", "192.0.2.1", "tcp", 25, "open", "not-open")
+		udp := change("port", "192.0.2.1", "udp", 53, "not-open", "open|filtered")
+		serviceRemoval := change("service", "192.0.2.1", "tcp", 587, "smtp", "not-open")
+		dnsChange := model.Change{Key: "dns|edge.example|192.0.2.9", Kind: "dns-added", Target: "edge.example", New: "192.0.2.9"}
+		unplanned := change("port", "gone.example", "tcp", 7000, "not-open", "open")
+		invalidPort := change("port", "192.0.2.1", "tcp", 0, "not-open", "open")
+		state.Incidents = map[string]model.Incident{}
+		for _, tracked := range []model.Change{addition, service, removal, udp, serviceRemoval, dnsChange, unplanned, invalidPort} {
+			state.Incidents[tracked.Key] = model.Incident{Change: tracked}
+		}
+		pending := change("port", "192.0.2.1", "tcp", 8443, "not-open", "open|filtered")
+		state.Pending = map[string]model.Pending{pending.Key: {Change: pending, Count: 1}}
+		suppressed := change("port", "edge.example", "tcp", 9443, "not-open", "open")
+		state.Suppressed = map[string]int{suppressed.Key: 1}
+		state.SuppressedChanges = map[string]model.Change{suppressed.Key: suppressed}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	direct := scanner.ResolvedTarget{Name: "192.0.2.1", ConfiguredTarget: "192.0.2.1", Addresses: []string{"192.0.2.1"}}
+	dns := scanner.ResolvedTarget{Name: "edge.example", ConfiguredTarget: "edge.example", Addresses: []string{"192.0.2.7", "192.0.2.8"}, Aggregate: true, Hostname: true}
+	targets := []scanner.ResolvedTarget{direct, dns}
+	addresses := []string{"192.0.2.1", "192.0.2.7", "192.0.2.8"}
+	plan := scanner.WorkPlan{
+		Job: job.Job, Targets: targets, DNS: map[string][]string{"edge.example": dns.Addresses},
+		Scopes:     baseline.Scopes,
+		Units:      []scanner.WorkUnit{{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Targets: targets, Addresses: addresses, Ports: "1-65535", PortCount: 65535, Probes: 3 * 65535}},
+		TotalUnits: 1, TotalProbes: 3 * 65535,
+	}
+	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+		t.Fatal(err)
+	}
+	// Naabu misses every tracked port in this run; it only reports 22.
+	discovered := func(address string, ports ...int) model.HostObservation {
+		protocol := model.ProtocolObservation{Protocol: "tcp", DiscoveryEngine: "naabu"}
+		for _, port := range ports {
+			protocol.DiscoveredPorts = append(protocol.DiscoveredPorts, model.PortObservation{Port: port, State: "open", Verification: "discovered"})
+		}
+		return model.HostObservation{Address: address, Protocols: []model.ProtocolObservation{protocol}}
+	}
+	fragment := model.Snapshot{Hosts: []model.HostObservation{discovered("192.0.2.1", 22), discovered("192.0.2.7", 22), discovered("192.0.2.8")}}
+	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT work_unit_json FROM scan_cycle_units WHERE cycle_id=? AND phase='enrichment' ORDER BY sequence`, cycle.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	enrichment := map[string]string{}
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			t.Fatal(err)
+		}
+		var unit scanner.WorkUnit
+		if err := json.Unmarshal(raw, &unit); err != nil {
+			t.Fatal(err)
+		}
+		for _, address := range unit.Addresses {
+			enrichment[address] = unit.Ports
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		// Discovered 22, baseline 443, incidents 8080 and 8081 (a service
+		// change implies an open port), pending 8443. Removals (port 25 and
+		// the service on 587), the UDP and DNS incidents, a target outside
+		// the plan and an invalid port add no TCP confirmation.
+		"192.0.2.1": "22,443,8080-8081,8443",
+		// The suppressed change on edge.example covers both DNS addresses.
+		"192.0.2.7": "22,9443",
+		"192.0.2.8": "9443",
+	}
+	if len(enrichment) != len(want) {
+		t.Fatalf("enrichment units = %#v, want %#v", enrichment, want)
+	}
+	for address, ports := range want {
+		if enrichment[address] != ports {
+			t.Fatalf("enrichment ports for %s = %q, want %q (all %#v)", address, enrichment[address], ports, enrichment)
+		}
 	}
 }
 

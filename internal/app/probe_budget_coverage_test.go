@@ -3,7 +3,12 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
+	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -203,5 +208,90 @@ func TestResolvedPlanBudgetRejectsExpandedWorkBeforeCycleCreation(t *testing.T) 
 	}
 	if _, err := db.GetActiveScanCycle(ctx, record.ID); !errors.Is(err, store.ErrNoScanCycle) {
 		t.Fatalf("over-budget plan created a cycle: %v", err)
+	}
+}
+
+// growingResolver answers the first lookup with one address and every later
+// lookup with twenty, modelling a DNS answer that grows between the plan and
+// the scan.
+type growingResolver struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (r *growingResolver) LookupIP(context.Context, string, string) ([]net.IP, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	if r.calls == 1 {
+		return []net.IP{net.ParseIP("192.0.2.1")}, nil
+	}
+	addresses := make([]net.IP, 0, 20)
+	for host := 1; host <= 20; host++ {
+		addresses = append(addresses, net.ParseIP(fmt.Sprintf("192.0.2.%d", host)))
+	}
+	return addresses, nil
+}
+
+// A plan with one unit runs on the direct scanner path, which resolves DNS
+// again, and file-managed jobs always do. The work that path executes must be
+// the work that was checked against scheduler.max_probe_count: a grown DNS
+// answer is rejected before Nmap starts.
+func TestDirectScanRechecksProbeBudgetAfterResolvingAgain(t *testing.T) {
+	for _, managed := range []bool{true, false} {
+		t.Run(fmt.Sprintf("managed=%t", managed), func(t *testing.T) {
+			ctx := context.Background()
+			db, err := store.Open(filepath.Join(t.TempDir(), "direct-budget.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			cfg := &config.Config{
+				Version: 1, Database: db.Path, Retention: config.Duration(time.Hour),
+				Scheduler: config.Scheduler{MaxConcurrent: 1, MaxProbeCount: 10, MaxNaabuProbeCount: config.DefaultNaabuMaxProbeCount},
+				Web:       config.Web{Listen: "127.0.0.1:8080"},
+			}
+			a, err := New(cfg, db, "missing-nmap", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := t.TempDir()
+			marker := filepath.Join(dir, "nmap-ran")
+			nmapPath := filepath.Join(dir, "nmap")
+			if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+marker+"\nexit 1\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			resolver := &growingResolver{}
+			direct := scanner.New(nmapPath)
+			direct.Resolver = resolver
+			a.Scanner = direct
+			job := config.NormalizeJob(config.Job{
+				Name: "growing-dns", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"edge.example"}, MaxExpandedHosts: 32,
+				TCP: &config.Protocol{Engine: config.EngineNmap, Ports: "1-5", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour),
+			})
+			var scan model.Scan
+			var runErr error
+			if managed {
+				record, err := db.CreateJob(ctx, job)
+				if err != nil {
+					t.Fatal(err)
+				}
+				scan, _, runErr = a.RunJobRecord(ctx, record)
+			} else {
+				scan, _, runErr = a.RunJob(ctx, job)
+			}
+			if !errors.Is(runErr, ErrScanWorkBudget) {
+				t.Fatalf("run = %v, want %v", runErr, ErrScanWorkBudget)
+			}
+			if scan.Status != "failed" || !strings.Contains(scan.Error, ErrScanWorkBudget.Error()) {
+				t.Fatalf("scan after DNS growth = %q (%q), want a probe-budget failure", scan.Status, scan.Error)
+			}
+			if args, err := os.ReadFile(marker); !os.IsNotExist(err) {
+				t.Fatalf("Nmap ran with unchecked work: %q (%v)", args, err)
+			}
+			if resolver.calls != 2 {
+				t.Fatalf("resolver calls = %d, want the plan and the scan", resolver.calls)
+			}
+		})
 	}
 }

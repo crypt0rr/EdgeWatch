@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +39,7 @@ func TestRunNaabuSuccessParsesJSONAndReportsLiveness(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runNaabu success = %v (stderr %q)", err, stderr)
 	}
-	if len(results) != 1 || results[0].IP != "192.0.2.1" || results[0].Port != 443 || results[0].MacAddress != "aa:bb" {
+	if len(results.ports) != 1 || !slices.Equal(results.ports["192.0.2.1"], []int{443}) || !slices.Equal(results.macs["192.0.2.1"], []string{"aa:bb"}) || len(results.truncated) != 0 {
 		t.Fatalf("parsed results = %#v", results)
 	}
 	if !strings.Contains(stderr, "discovery complete") {
@@ -255,7 +256,7 @@ func TestNaabuPipelineBudgetAllowsEnrichmentAtLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("budgeted pipeline at limit = %v", err)
 	}
-	if len(snapshot.Units) != 1 || len(checks) != 1 || checks[0] != [2]int64{65535, 1} {
+	if len(snapshot.Units) != 1 || !slices.Equal(checks, [][2]int64{{65535, 0}, {65535, 1}}) {
 		t.Fatalf("budget checks = %#v, snapshot units = %#v", checks, snapshot.Units)
 	}
 	if _, err := os.Stat(marker); err != nil {
@@ -293,11 +294,87 @@ func TestNaabuPipelineBudgetRejectsEnrichmentBeforeNmap(t *testing.T) {
 	if !errors.Is(err, budgetErr) {
 		t.Fatalf("over-budget pipeline error = %v", err)
 	}
-	if len(checks) != 1 || checks[0] != [2]int64{2 * 65535, 2} {
+	if !slices.Equal(checks, [][2]int64{{2 * 65535, 0}, {2 * 65535, 2}}) {
 		t.Fatalf("over-budget checks = %#v", checks)
 	}
 	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
 		t.Fatalf("Nmap enrichment started despite budget rejection (stat error %v)", statErr)
+	}
+}
+
+// The direct path resolves DNS again, so the discovery work it is about to
+// run is checked before Naabu starts, not only the later enrichment.
+func TestNaabuPipelineBudgetRejectsResolvedDiscoveryBeforeNaabu(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "naabu-ran")
+	naabuPath := filepath.Join(dir, "naabu")
+	if err := os.WriteFile(naabuPath, []byte("#!/bin/sh\ntouch "+marker+"\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := NewWithNaabu(filepath.Join(dir, "missing-nmap"), naabuPath)
+	n.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("192.0.2.2"), net.ParseIP("192.0.2.1")}}
+	job := config.NormalizeJob(config.Job{
+		Name: "discovery-over", Targets: []string{"edge.example"}, MaxExpandedHosts: 2,
+		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{ScanType: "connect"}},
+		UDP: &config.Protocol{Ports: "53"},
+	})
+	budgetErr := errors.New("discovery budget exceeded")
+	var checks [][2]int64
+	_, err := n.ScanWithProgressBudget(context.Background(), job, nil, func(discovery, nmapProbes int64) error {
+		checks = append(checks, [2]int64{discovery, nmapProbes})
+		return budgetErr
+	})
+	if !errors.Is(err, budgetErr) || !slices.Equal(checks, [][2]int64{{2 * 65535, 2}}) {
+		t.Fatalf("resolved discovery budget = %v, checks %#v", err, checks)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("Naabu started despite budget rejection (stat error %v)", statErr)
+	}
+}
+
+func TestNmapScanBudgetChecksResolvedWorkBeforeNmap(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "nmap-ran")
+	nmapPath := filepath.Join(dir, "nmap")
+	if err := os.WriteFile(nmapPath, []byte("#!/bin/sh\ntouch "+marker+"\nprintf '%s' '"+sampleXML+"'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	n := New(nmapPath)
+	n.Resolver = fakeResolver{ips: []net.IP{net.ParseIP("192.0.2.2"), net.ParseIP("192.0.2.1")}}
+	job := config.NormalizeJob(config.Job{
+		Name: "nmap-budget", Targets: []string{"edge.example"}, MaxExpandedHosts: 2,
+		TCP: &config.Protocol{Engine: config.EngineNmap, Ports: "1-5", Mode: "connect", ServiceDetection: true},
+		UDP: &config.Protocol{Ports: "53"},
+	})
+	budgetErr := errors.New("nmap budget exceeded")
+	var checks [][2]int64
+	check := func(discovery, nmapProbes int64) error {
+		checks = append(checks, [2]int64{discovery, nmapProbes})
+		return budgetErr
+	}
+	if _, err := n.ScanWithProgressBudget(context.Background(), job, nil, check); !errors.Is(err, budgetErr) {
+		t.Fatalf("resolved Nmap budget error = %v", err)
+	}
+	// Two addresses: five TCP ports with service detection count twice, plus
+	// one UDP port.
+	if !slices.Equal(checks, [][2]int64{{0, 2*5*2 + 2}}) {
+		t.Fatalf("resolved Nmap budget checks = %#v", checks)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("Nmap started despite budget rejection (stat error %v)", statErr)
+	}
+	checks = nil
+	if _, err := n.ScanWithProgressBudget(context.Background(), job, nil, func(discovery, nmapProbes int64) error {
+		checks = append(checks, [2]int64{discovery, nmapProbes})
+		return nil
+	}); err != nil {
+		t.Fatalf("Nmap scan within budget = %v", err)
+	}
+	if len(checks) != 1 {
+		t.Fatalf("Nmap scan within budget checked %d times, want once", len(checks))
+	}
+	if _, statErr := os.Stat(marker); statErr != nil {
+		t.Fatalf("Nmap did not run within the budget: %v", statErr)
 	}
 }
 

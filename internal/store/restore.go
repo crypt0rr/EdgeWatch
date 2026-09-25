@@ -601,6 +601,21 @@ func refuseActiveDaemon(ctx context.Context, destination string) error {
 		// must not turn that read into a persistent sidecar refusal, so remove
 		// only companions created by this probe and only when the WAL is empty.
 		cleanupSQLiteProbeSidecars(destination, before)
+		// A probe sidecar that is still present means another connection had
+		// the destination open. Replacing the file now would leave that
+		// connection's WAL and WAL index next to the restored database.
+		var left []string
+		for _, suffix := range []string{"-wal", "-shm"} {
+			if before[suffix] {
+				continue
+			}
+			if _, err := os.Lstat(destination + suffix); err == nil {
+				left = append(left, destination+suffix)
+			}
+		}
+		if len(left) > 0 {
+			return fmt.Errorf("another connection has the destination database open: %w", &RestoreSidecarError{Paths: left})
+		}
 		return nil
 	}
 	return fmt.Errorf("%w (owner %s heartbeat %s)", ErrRestoreDaemonLive, status.Owner, status.Heartbeat.UTC().Format(time.RFC3339Nano))
@@ -615,31 +630,51 @@ func snapshotSQLiteSidecars(database string) map[string]bool {
 	return result
 }
 
+// cleanupSQLiteProbeSidecars removes the empty WAL/SHM pair that a read-only
+// probe created, but only while it can prove that no other SQLite connection
+// has the database open. Another process, or another store in this process,
+// may have attached to those files after the probe created them; unlinking
+// them would send that connection's commits to deleted inodes. A rollback
+// journal is never removed: a read-only connection never creates one, so it
+// always belongs to another connection's transaction.
 func cleanupSQLiteProbeSidecars(database string, before map[string]bool) {
-	walPath := database + "-wal"
-	walInfo, walErr := os.Stat(walPath)
-	walEmpty := walErr != nil && errors.Is(walErr, os.ErrNotExist)
-	if walErr == nil {
-		walEmpty = walInfo.Size() == 0
+	candidates := make([]string, 0, 2)
+	for _, suffix := range []string{"-wal", "-shm"} {
+		if !before[suffix] {
+			candidates = append(candidates, database+suffix)
+		}
 	}
-	if !walEmpty {
+	if len(candidates) == 0 || !sqliteWALEmpty(database) {
 		return
 	}
-	removed := false
-	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
-		if before[suffix] {
-			continue
+	openDatabases.withUnused(database, func() {
+		removed := false
+		withExclusiveSQLiteDatabase(database, func() {
+			// Check again under the lock: a writer may have committed between
+			// the first check and the lock.
+			if !sqliteWALEmpty(database) {
+				return
+			}
+			for _, path := range candidates {
+				if err := os.Remove(path); err == nil {
+					removed = true
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return
+				}
+			}
+		})
+		if removed {
+			_ = syncDirectory(filepath.Dir(database))
 		}
-		path := database + suffix
-		if err := os.Remove(path); err == nil {
-			removed = true
-		} else if !errors.Is(err, os.ErrNotExist) {
-			return
-		}
+	})
+}
+
+func sqliteWALEmpty(database string) bool {
+	info, err := os.Stat(database + "-wal")
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
 	}
-	if removed {
-		_ = syncDirectory(filepath.Dir(database))
-	}
+	return info.Size() == 0
 }
 
 func restorePath(path string) (string, error) {

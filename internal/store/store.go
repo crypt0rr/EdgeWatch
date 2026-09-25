@@ -27,12 +27,16 @@ type Store struct {
 	authKeyPath string
 	authAutoKey bool
 	// queryOnly records a read-only inspection store so Close can remove only
-	// empty SQLite sidecars that this connection created. Existing companions
-	// are deliberately left untouched because they may contain live or foreign
+	// empty SQLite sidecars that this connection created, and only when no
+	// other connection has the database open. Existing companions are
+	// deliberately left untouched because they may contain live or foreign
 	// state that restore must inspect.
 	queryOnly     bool
 	artifactPath  string
 	probeSidecars map[string]bool
+	// releaseOpen removes this store from the process-wide registry of open
+	// databases once its connections are closed.
+	releaseOpen func()
 	// targetExclusions is configured once during daemon startup. A nil slice
 	// means the caller did not provide deployment policy (kept for embedded
 	// library compatibility); a non-nil empty slice is an explicit allow-all
@@ -114,7 +118,8 @@ func OpenExistingContext(ctx context.Context, path string) (*Store, error) {
 // or runs migrations, making it safe for health, verification, and export
 // reads. SQLite may still initialize transient WAL/SHM coordination files
 // while attaching to a live database; Store.Close removes only empty
-// companions created by this inspection connection.
+// companions created by this inspection connection, and leaves them when
+// another connection has the database open.
 func OpenReadOnlyExisting(path string) (*Store, error) {
 	return openWithOptions(path, openOptions{requireExisting: true, queryOnly: true})
 }
@@ -123,7 +128,8 @@ func OpenReadOnlyExisting(path string) (*Store, error) {
 // long-running host-side checks. It never changes database content, journal
 // mode, permissions, or schema. SQLite may initialize transient coordination
 // sidecars while opening a live WAL database. Store.Close removes only empty
-// companions created by this inspection connection.
+// companions created by this inspection connection, and leaves them when
+// another connection has the database open.
 func OpenReadOnlyExistingContext(ctx context.Context, path string) (*Store, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -200,6 +206,19 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 			dsn = readOnlySQLiteDSN(artifactPath)
 		}
 	}
+	var releaseOpen func()
+	opened := false
+	if !memoryDatabase {
+		// Register before SQLite opens the file, so a read-only probe closing
+		// in this process never tests for other connections by opening and
+		// closing its own descriptor while this store holds SQLite locks.
+		releaseOpen = openDatabases.register(artifactPath)
+		defer func() {
+			if !opened {
+				releaseOpen()
+			}
+		}()
+	}
 	if options.queryOnly && !memoryDatabase {
 		// Capture the companion files before SQLite opens the live-safe
 		// read-only connection; it may initialize an empty WAL/SHM pair.
@@ -212,6 +231,19 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 	db := sql.OpenDB(sqlitePragmaConnector{Connector: connector, queryOnly: options.queryOnly})
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
+	if !options.migrate && !options.queryOnly {
+		// Write-capable host commands open without migrating. Refuse a schema
+		// from a newer release before anything writes, as the daemon does.
+		var version int
+		if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+			db.Close()
+			return nil, err
+		}
+		if version > schemaVersion {
+			db.Close()
+			return nil, newerSchemaError(version)
+		}
+	}
 	if options.migrate && !options.queryOnly {
 		// New databases must select incremental auto-vacuum before WAL mode or
 		// any application table is created. Existing databases are intentionally
@@ -280,11 +312,12 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 				return nil, err
 			}
 		}
-		store := &Store{DB: db, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true, queryOnly: true}
+		store := &Store{DB: db, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true, queryOnly: true, releaseOpen: releaseOpen}
 		if !memoryDatabase {
 			store.artifactPath = artifactPath
 			store.probeSidecars = probeSidecars
 		}
+		opened = true
 		return store, nil
 	}
 	var readDB *sql.DB
@@ -314,7 +347,8 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 			return nil, fmt.Errorf("secure EdgeWatch database artifacts %q: %w", artifactPath, err)
 		}
 	}
-	return &Store{DB: db, ReadDB: readDB, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true}, nil
+	opened = true
+	return &Store{DB: db, ReadDB: readDB, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true, releaseOpen: releaseOpen}, nil
 }
 
 // readOnlySQLiteDSN builds a live-safe file URI with SQLite's mode=ro flag from
@@ -514,11 +548,15 @@ func (s *Store) Close() error {
 	} else {
 		closeErr = errors.Join(s.ReadDB.Close(), s.DB.Close())
 	}
+	if s.releaseOpen != nil {
+		s.releaseOpen()
+	}
 	if s.queryOnly && s.artifactPath != "" {
 		// The read-only DSN is intentionally live-safe and may cause SQLite to
 		// create an empty WAL/SHM pair. Remove only companions that were absent
-		// before this probe and only while the WAL is empty; never hide existing
-		// or non-empty recovery evidence.
+		// before this probe, only while the WAL is empty, and only while no
+		// other connection has the database open; never hide existing or
+		// non-empty recovery evidence or another connection's files.
 		cleanupSQLiteProbeSidecars(s.artifactPath, s.probeSidecars)
 	}
 	return closeErr

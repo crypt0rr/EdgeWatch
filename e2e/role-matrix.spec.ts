@@ -31,11 +31,12 @@ const routePermissions: Array<{ path: string; permission?: string }> = [
   { path: '/security', permission: 'account.self' },
 ]
 
-test('role route and navigation matrix matches the authorization contract', async ({ browser }, testInfo) => {
+test('role route and navigation matrix matches the authorization contract', async ({ browser, baseURL }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'The permission matrix runs once on desktop; mobile navigation is covered separately.')
 
   for (const role of Object.keys(expectedNavigation) as ConsoleRole[]) {
-    const context = await browser.newContext({ baseURL: 'http://127.0.0.1:4173' })
+    // Use the configured preview origin so PLAYWRIGHT_PORT is honored.
+    const context = await browser.newContext({ baseURL })
     const page = await context.newPage()
     try {
       await mockConsole(page, role)
@@ -77,7 +78,7 @@ test('role route and navigation matrix matches the authorization contract', asyn
       for (const route of routePermissions) {
         await page.goto(route.path)
         const allowed = route.permission === undefined || rolePermissions[role].includes(route.permission)
-        const expectedPath = allowed ? new URL(route.path, 'http://127.0.0.1:4173').pathname : '/jobs'
+        const expectedPath = allowed ? new URL(route.path, baseURL).pathname : '/jobs'
         await expect.poll(() => new URL(page.url()).pathname).toBe(expectedPath)
       }
     } finally {

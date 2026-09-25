@@ -81,8 +81,16 @@ func TestDiscardCompletedCycleRequiresUnpromotedState(t *testing.T) {
 	if readDB != nil {
 		defer readDB.Close()
 	}
-	discardCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-	defer cancel()
+	// Bound each discard separately so the deadline measures only the discard
+	// transaction. A shared deadline created before the setup below could expire
+	// during the cycle and scan writes on a slow runner, turning the regression
+	// check into a spurious "context deadline exceeded".
+	discard := func(id string) error {
+		t.Helper()
+		discardCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+		defer cancel()
+		return s.DiscardScanCycle(discardCtx, id)
+	}
 	complete := func(id string) ScanCycleRecord {
 		t.Helper()
 		cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{ID: id, JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
@@ -108,7 +116,7 @@ func TestDiscardCompletedCycleRequiresUnpromotedState(t *testing.T) {
 		return cycle
 	}
 	unpromoted := complete("discard-unpromoted")
-	if err := s.DiscardScanCycle(discardCtx, unpromoted.ID); err != nil {
+	if err := discard(unpromoted.ID); err != nil {
 		t.Fatalf("discard unpromoted completed cycle = %v", err)
 	}
 	promoted := complete("discard-promoted")
@@ -116,7 +124,7 @@ func TestDiscardCompletedCycleRequiresUnpromotedState(t *testing.T) {
 	if err := s.SaveScan(ctx, model.Scan{ID: "discard-promoted-scan", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", CycleID: promoted.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DiscardScanCycle(discardCtx, promoted.ID); !errors.Is(err, ErrCycleNotResumable) {
+	if err := discard(promoted.ID); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("discard promoted completed cycle = %v", err)
 	}
 }

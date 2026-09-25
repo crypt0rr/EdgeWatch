@@ -84,8 +84,9 @@ absolute session lifetime remains 30 days.
 Web-managed Shoutrrr destinations are write-only through the API. Their URLs
 are encrypted at rest with AES-256-GCM; the key is stored in
 `./data/notification.key` unless `notifications.encryption_key_file` is
-configured. Protect that key as a credential, keep it mode `0600`, and include
-it in backups of the corresponding SQLite database. An explicitly configured
+configured. The default key always sits next to the database file, also when
+`database` is a `file:` URI. Protect that key as a credential, keep it mode
+`0600`, and include it in backups of the corresponding SQLite database. An explicitly configured
 key is checked at startup and must be present, valid, and owner-readable.
 Deployment URL files are likewise checked at startup, must be regular files
 with mode `0400` or `0600`, and are capped at 1 MiB. Do not report
@@ -106,8 +107,10 @@ command can still disable TOTP and invalidate sessions.
 If the key is lost or replaced, web-managed destinations become unavailable;
 they cannot be recovered from the database alone. Restore the original key and
 database together, or delete and recreate the affected destinations after
-confirming that the old credentials are revoked. A database upgraded to schema
-48 must not be opened by an older EdgeWatch binary; downgrade by restoring the
+confirming that the old credentials are revoked. After restoring a key, run
+`notify test` or the console notification test: it fails while any enabled
+web-managed destination is still locked. A database upgraded to schema
+49 must not be opened by an older EdgeWatch binary; downgrade by restoring the
 complete pre-upgrade `./data` backup before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
 refuse a schema newer than the binary supports before they write anything.

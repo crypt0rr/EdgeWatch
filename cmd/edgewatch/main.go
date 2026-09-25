@@ -254,8 +254,13 @@ func run(args []string) error {
 		if action != "test" {
 			return errors.New("expected: notify test")
 		}
-		err := application.Notifier.Test()
+		// A locked web-managed destination fails the test, so restoring the
+		// wrong notification key is not reported as a successful check.
+		summary, err := application.Notifier.TestSummaryContext(ctx)
 		auditHostCommand(ctx, s, store.AuditEntry{Action: "notifications.test", Detail: hostAuditDetail("operation", "global", err)})
+		if printErr := printValue(*output, summary); printErr != nil {
+			return errors.Join(err, printErr)
+		}
 		return err
 	case "backup":
 		if *outPath == "" {

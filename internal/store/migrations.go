@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 48
+const schemaVersion = 49
 
 // newerSchemaError is the refusal for a database that a newer release has
 // upgraded. Migrations are forward-only, so an older binary must not write to
@@ -1154,6 +1154,31 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
 			`INSERT INTO fts_backfill_state(table_name,last_rowid,processed_rows,initialized,complete,updated_at)
 VALUES('baseline_hosts',0,0,0,0,datetime('now'))
 ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=0,complete=0,updated_at=excluded.updated_at`,
+		},
+		49: {
+			// Record the revision at which a web-managed destination's
+			// credentials last changed. An alert resolves its destination
+			// revision before the event transaction starts; a rename in that
+			// window advances the revision but keeps the credentials, so the
+			// alert must be queued under the current revision instead of being
+			// dropped. Existing destinations have no credential history, so
+			// their current revision is the conservative starting point. The
+			// table guard keeps partially created recovery databases, which
+			// have a schema marker but not every table, upgradeable.
+			`CREATE TABLE IF NOT EXISTS managed_notifications (
+ id TEXT PRIMARY KEY,
+ name TEXT NOT NULL UNIQUE,
+ provider TEXT NOT NULL,
+ ciphertext BLOB NOT NULL,
+ nonce BLOB NOT NULL,
+ enabled INTEGER NOT NULL DEFAULT 1,
+ revision INTEGER NOT NULL DEFAULT 1,
+ created_at TEXT NOT NULL,
+ updated_at TEXT NOT NULL
+);`,
+			"CREATE INDEX IF NOT EXISTS managed_notifications_enabled ON managed_notifications(enabled, name)",
+			"ALTER TABLE managed_notifications ADD COLUMN credential_revision INTEGER NOT NULL DEFAULT 1",
+			"UPDATE managed_notifications SET credential_revision=revision",
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

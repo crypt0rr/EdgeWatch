@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
 const notificationKeySize = 32
@@ -23,11 +25,23 @@ var (
 
 // DefaultKeyPath keeps the generated key beside the database so a normal
 // ./data bind mount contains all state needed for an appliance deployment.
+// The database may be given in any form the store accepts, including a file:
+// URI with options; an in-memory database has no default key path.
 func DefaultKeyPath(database string) string {
-	if database == "" || database == ":memory:" {
+	path, err := store.DatabaseFilePath(database)
+	if err != nil {
 		return ""
 	}
-	return filepath.Join(filepath.Dir(database), "notification.key")
+	return keyPathBeside(path)
+}
+
+// keyPathBeside returns the default key path for an already normalized
+// database file, as returned by store.Store.FilePath.
+func keyPathBeside(databaseFile string) string {
+	if databaseFile == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(databaseFile), "notification.key")
 }
 
 func loadKey(path string) ([]byte, error) {

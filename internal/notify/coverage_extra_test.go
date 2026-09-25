@@ -287,8 +287,10 @@ func TestNotifierLockedAndErrorBranches(t *testing.T) {
 		t.Fatalf("locked destination test error = %v", err)
 	}
 
-	if err := notifier.TestContext(nil); err != nil {
-		t.Fatalf("nil notification test context = %v", err)
+	// The enabled destination is locked, so the global test must fail.
+	//nolint:staticcheck // TestContext deliberately tolerates a nil context.
+	if err := notifier.TestContext(nil); !errors.Is(err, ErrManagedNotificationLocked) {
+		t.Fatalf("nil notification test context = %v, want ErrManagedNotificationLocked", err)
 	}
 	if err := notifier.Drain(nil); err != nil {
 		t.Fatalf("nil drain context = %v", err)

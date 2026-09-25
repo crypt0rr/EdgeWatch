@@ -348,7 +348,32 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 		}
 	}
 	opened = true
-	return &Store{DB: db, ReadDB: readDB, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true, releaseOpen: releaseOpen}, nil
+	store := &Store{DB: db, ReadDB: readDB, Path: dsn, authKeyPath: defaultAuthKeyPath(artifactPath), authAutoKey: true, releaseOpen: releaseOpen}
+	if !memoryDatabase {
+		store.artifactPath = artifactPath
+	}
+	return store, nil
+}
+
+// FilePath returns the on-disk SQLite database file, with any file: URI
+// syntax and connection options removed, or an empty string for an in-memory
+// database. Files kept beside the database, such as default encryption keys,
+// must be derived from this path: Path holds the DSN, which may be a URI.
+func (s *Store) FilePath() string {
+	if s == nil {
+		return ""
+	}
+	return s.artifactPath
+}
+
+// DatabaseFilePath returns the on-disk SQLite database file named by an
+// accepted DSN, a plain path or a file: URI, with connection options removed.
+// It returns an empty path for an in-memory database.
+func DatabaseFilePath(dsn string) (string, error) {
+	if isSQLiteMemoryPath(dsn) {
+		return "", nil
+	}
+	return sqliteArtifactPath(dsn)
 }
 
 // readOnlySQLiteDSN builds a live-safe file URI with SQLite's mode=ro flag from

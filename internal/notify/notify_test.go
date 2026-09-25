@@ -450,7 +450,7 @@ func TestCanceledBatchReleasesUnsentClaims(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	_ = notifier.deliverBatch(canceled, deliveries, nil)
+	_ = notifier.deliverBatch(canceled, canceled, deliveries, nil)
 	var liveClaims, attempts, deferrals int
 	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE claim_token<>''`).Scan(&liveClaims); err != nil {
 		t.Fatal(err)

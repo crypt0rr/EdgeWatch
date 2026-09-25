@@ -1216,13 +1216,14 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 		// the API message tells operators to.
 		deadline := time.Now().Add(10 * time.Second)
 		for {
-			resp = request(http.MethodPost, "/api/v1/jobs/"+created.ID+"/run", "{}", loginResult.CSRF)
-			resp.Body.Close()
-			if resp.StatusCode == http.StatusAccepted {
+			runResp := request(http.MethodPost, "/api/v1/jobs/"+created.ID+"/run", "{}", loginResult.CSRF)
+			status := runResp.StatusCode
+			runResp.Body.Close()
+			if status == http.StatusAccepted {
 				break
 			}
-			if resp.StatusCode != http.StatusConflict || !time.Now().Before(deadline) {
-				t.Fatalf("run status %d", resp.StatusCode)
+			if status != http.StatusConflict || !time.Now().Before(deadline) {
+				t.Fatalf("run status %d", status)
 			}
 			time.Sleep(10 * time.Millisecond)
 		}

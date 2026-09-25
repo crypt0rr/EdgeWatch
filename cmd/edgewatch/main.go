@@ -166,7 +166,18 @@ func run(args []string) error {
 		return err
 	}
 	defer s.Close()
+	// Install the operator-managed authentication key before any command reads
+	// or seals TOTP secrets. The daemon's compatibility migration and the host
+	// recovery commands run before app.New, which otherwise applies this path;
+	// without it they would use, or auto-create, a default key beside the
+	// database that the configured key cannot open.
+	s.SetAuthKeyPath(cfg.Web.AuthKeyFile)
 	if cmd == "daemon" {
+		if cfg.Web.AuthKeyFile != "" {
+			if err := store.ValidateAuthKeyFile(cfg.Web.AuthKeyFile); err != nil {
+				return fmt.Errorf("validate authentication key file: %w", err)
+			}
+		}
 		if err := s.MigrateAdminCompatibility(context.Background()); err != nil {
 			return fmt.Errorf("migrate administrator compatibility state: %w", err)
 		}

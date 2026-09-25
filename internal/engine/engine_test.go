@@ -200,8 +200,195 @@ func TestTotalLossScanRequiresConfirmationBeforeOpeningIncidents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(state.Incidents) != len(ports) || state.TotalLossCandidateCount != 0 || state.TotalLossCandidateHash != "" {
+	if len(state.Incidents) != len(ports) || state.TotalLossCandidateCount != totalLossConfirmationScans || state.TotalLossCandidateHash == "" {
 		t.Fatalf("confirmed total-loss state: %#v", state)
+	}
+
+	// The confirmation covers the whole outage: later zero-positive scans are
+	// compared normally instead of being held back as new anomalies.
+	for i := 3; i <= 5; i++ {
+		events, err = e.Success(ctx, job, scan(fmt.Sprintf("empty-%d", i), snapshot("")))
+		if err != nil || len(events) != 0 {
+			t.Fatalf("sustained total-loss scan %d: %#v, %v", i, events, err)
+		}
+	}
+	state, err = db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Incidents) != len(ports) || state.TotalLossCandidateCount != totalLossConfirmationScans {
+		t.Fatalf("sustained total-loss state: %#v", state)
+	}
+
+	// A positive result ends the outage, so the next sudden all-closed scan
+	// again needs its own matching confirmation.
+	events, err = e.Success(ctx, job, scan("restored", snapshotWithOpenPorts(ports...)))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-recovered" {
+		t.Fatalf("restored scan: %#v, %v", events, err)
+	}
+	state, err = db.State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Incidents) != 0 || state.TotalLossCandidateCount != 0 || state.TotalLossCandidateHash != "" {
+		t.Fatalf("restored state: %#v", state)
+	}
+	events, err = e.Success(ctx, job, scan("empty-again", snapshot("")))
+	if err != nil || len(events) != 1 || events[0].Type != "scan-anomaly" {
+		t.Fatalf("new total-loss scan after recovery: %#v, %v", events, err)
+	}
+}
+
+func TestTotalLossConfirmsOncePerOutage(t *testing.T) {
+	dnsBaseline := func() model.Snapshot {
+		s := model.Snapshot{
+			Scopes: []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "1-65535"}},
+			Units:  []model.Unit{{Target: "edge.example", Protocol: "tcp", Addresses: []string{"192.0.2.10"}, Ports: []model.PortState{{Port: 22, State: "open"}, {Port: 443, State: "open"}}}},
+			DNS:    map[string][]string{"edge.example": {"192.0.2.10"}},
+		}
+		s.Normalize()
+		return s
+	}
+	dnsEmpty := func(address string) model.Snapshot {
+		s := model.Snapshot{
+			Scopes: []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "1-65535"}},
+			Units:  []model.Unit{{Target: "edge.example", Protocol: "tcp", Addresses: []string{address}}},
+			DNS:    map[string][]string{"edge.example": {address}},
+		}
+		s.Normalize()
+		return s
+	}
+	for _, tc := range []struct {
+		name          string
+		confirmations int
+		baseline      model.Snapshot
+		empty         func(scan int) model.Snapshot
+		openAt        int
+	}{
+		{name: "confirmations-1", confirmations: 1, baseline: snapshotWithOpenPorts(22, 443), empty: func(int) model.Snapshot { return snapshot("") }, openAt: 2},
+		{name: "confirmations-2", confirmations: 2, baseline: snapshotWithOpenPorts(22, 443), empty: func(int) model.Snapshot { return snapshot("") }, openAt: 3},
+		{name: "dns-rotating", confirmations: 1, baseline: dnsBaseline(), empty: func(i int) model.Snapshot { return dnsEmpty(fmt.Sprintf("192.0.2.%d", 10+i)) }, openAt: 2},
+		{name: "dns-alternating", confirmations: 1, baseline: dnsBaseline(), empty: func(i int) model.Snapshot { return dnsEmpty(fmt.Sprintf("192.0.2.%d", 11+i%2)) }, openAt: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := tc.baseline
+			state := model.JobState{Baseline: &base, BaselineScanID: "baseline", BaselineConfigHash: "hash", Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{}, Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{}, FingerprintCandidates: map[string]model.ValueCount{}}
+			job := config.Job{Name: "test", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: tc.confirmations}}
+			var timeline []string
+			for i := 1; i <= 6; i++ {
+				events, _, err := processSuccessWithChanges(&state, job, scan(fmt.Sprintf("empty-%d", i), tc.empty(i)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, event := range events {
+					entry := fmt.Sprintf("scan%d:%s", i, event.Type)
+					for _, change := range event.Changes {
+						if change.Kind == "port" {
+							entry += "[" + change.Key + "]"
+						}
+					}
+					timeline = append(timeline, entry)
+					switch {
+					case event.Type == "scan-anomaly" && i != 1:
+						t.Fatalf("total loss was held back again after the first scan: %v", timeline)
+					case event.Type == "changes-recovered" && strings.Contains(entry, "port|"):
+						t.Fatalf("sustained total loss recovered a port: %v", timeline)
+					case event.Type == "changes-detected" && strings.Contains(entry, "port|") && i != tc.openAt:
+						t.Fatalf("port incidents opened on scan %d, want scan %d: %v", i, tc.openAt, timeline)
+					}
+				}
+				if i == 1 && (len(events) != 1 || events[0].Type != "scan-anomaly") {
+					t.Fatalf("first empty scan was not held for confirmation: %v", timeline)
+				}
+			}
+			portIncidents := 0
+			for key := range state.Incidents {
+				if strings.HasPrefix(key, "port|") {
+					portIncidents++
+				}
+			}
+			if portIncidents != 2 {
+				t.Fatalf("port incidents = %d, want 2: %v", portIncidents, timeline)
+			}
+		})
+	}
+}
+
+func TestConfirmedTotalLossResetsOnlyForNewEvidence(t *testing.T) {
+	base := snapshotWithOpenPorts(22, 443)
+	state := model.JobState{Baseline: &base, BaselineScanID: "baseline", BaselineConfigHash: "hash", Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{}, Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{}, FingerprintCandidates: map[string]model.ValueCount{}}
+	job := config.Job{Name: "test", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	eventTypes := func(events []model.Event) []string {
+		types := make([]string, 0, len(events))
+		for _, event := range events {
+			types = append(types, event.Type)
+		}
+		return types
+	}
+	process := func(id string, snapshot model.Snapshot) []string {
+		t.Helper()
+		events, _, err := processSuccessWithChanges(&state, job, scan(id, snapshot))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return eventTypes(events)
+	}
+	if got := process("empty-1", snapshot("")); fmt.Sprint(got) != "[scan-anomaly]" {
+		t.Fatalf("first empty scan = %v", got)
+	}
+	if got := process("empty-2", snapshot("")); fmt.Sprint(got) != "[changes-detected]" {
+		t.Fatalf("confirming empty scan = %v", got)
+	}
+
+	// Failed and incomplete scans provide no positive evidence, so they neither
+	// end a confirmed outage nor make the next complete empty scan an anomaly.
+	failed := scan("failed", model.Snapshot{})
+	failed.Status = "failed"
+	if events, err := processFailure(&state, job.Name, failed); err != nil || fmt.Sprint(eventTypes(events)) != "[scan-failure]" {
+		t.Fatalf("failed scan = %#v, %v", events, err)
+	}
+	if got := process("empty-3", snapshot("")); len(got) != 0 {
+		t.Fatalf("empty scan after a failure = %v", got)
+	}
+	partial := snapshot("")
+	partial.Hosts = []model.HostObservation{{Address: "192.0.2.1", Status: "down", StatusReason: "nmap-omitted"}}
+	if got := process("partial", partial); fmt.Sprint(got) != "[scan-incomplete]" {
+		t.Fatalf("incomplete empty scan = %v", got)
+	}
+	if got := process("empty-4", snapshot("")); len(got) != 0 {
+		t.Fatalf("empty scan after an incomplete scan = %v", got)
+	}
+	if len(state.Incidents) != 2 || state.TotalLossCandidateCount != totalLossConfirmationScans {
+		t.Fatalf("confirmed outage state = %#v", state)
+	}
+
+	// A replaced baseline is new expected state; its first all-closed scan
+	// needs its own confirmation.
+	replaced := snapshotWithOpenPorts(22, 443, 8443)
+	state.Baseline = &replaced
+	state.BaselineScanID = "approved"
+	state.Incidents = map[string]model.Incident{}
+	if got := process("empty-5", snapshot("")); fmt.Sprint(got) != "[scan-anomaly]" {
+		t.Fatalf("empty scan after baseline replacement = %v", got)
+	}
+	if got := process("empty-6", snapshot("")); fmt.Sprint(got) != "[changes-detected]" {
+		t.Fatalf("confirming empty scan after baseline replacement = %v", got)
+	}
+
+	// An unconfirmed candidate still requires consecutive complete evidence.
+	state.Incidents = map[string]model.Incident{}
+	clearTotalLossCandidate(&state)
+	if got := process("empty-7", snapshot("")); fmt.Sprint(got) != "[scan-anomaly]" {
+		t.Fatalf("new empty scan = %v", got)
+	}
+	if _, err := processFailure(&state, job.Name, failed); err != nil {
+		t.Fatal(err)
+	}
+	if state.TotalLossCandidateCount != 0 || state.TotalLossCandidateHash != "" {
+		t.Fatalf("failed scan kept an unconfirmed total-loss candidate: %#v", state)
+	}
+	if got := process("empty-8", snapshot("")); fmt.Sprint(got) != "[scan-anomaly]" {
+		t.Fatalf("empty scan after an interrupted confirmation = %v", got)
 	}
 }
 
@@ -974,5 +1161,160 @@ func TestFingerprintStabilizesWithoutBlockingPortBaseline(t *testing.T) {
 	state, _ = db.State(ctx, "test")
 	if got := baselineService(*state.Baseline, "192.0.2.1", "tcp", 443); got != "service B" {
 		t.Fatalf("stable service not learned: %q", got)
+	}
+}
+
+func TestNewPortServiceFingerprintDoesNotAlternate(t *testing.T) {
+	scopes := []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535", ServiceDetection: true}}
+	base := model.Snapshot{Scopes: scopes, Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 22, State: "open", Service: "ssh"}}}}}
+	current := model.Snapshot{Scopes: scopes, Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 22, State: "open", Service: "ssh"}, {Port: 8080, State: "open", Service: "http"}}}}}
+	state := model.JobState{Baseline: &base, BaselineConfigHash: "hash", Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{}, Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{}, FingerprintCandidates: map[string]model.ValueCount{}}
+	job := config.Job{Name: "test", Baseline: config.Baseline{Samples: 2}, Change: config.Change{Confirmations: 1}}
+	portKey := "port|192.0.2.1|tcp|8080"
+	serviceKey := fingerprintKey("192.0.2.1", "tcp", 8080)
+	history := make([][]model.Event, 0, 6)
+	var transitions []string
+	for i := 1; i <= 6; i++ {
+		events, _, err := processSuccessWithChanges(&state, job, scan(fmt.Sprintf("scan-%d", i), current))
+		if err != nil {
+			t.Fatal(err)
+		}
+		history = append(history, events)
+		for _, event := range events {
+			for _, change := range event.Changes {
+				transitions = append(transitions, fmt.Sprintf("scan%d:%s[%s]", i, event.Type, change.Key))
+			}
+		}
+	}
+	for _, transition := range transitions {
+		if strings.Contains(transition, "changes-recovered") {
+			t.Fatalf("unchanged new-port fingerprint alternated between detected and recovered: %v", transitions)
+		}
+	}
+	for i, events := range history {
+		if i == 0 {
+			if len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 2 || events[0].Changes[0].Key != portKey || events[0].Changes[1].Key != serviceKey {
+				t.Fatalf("new port and service were not reported together: %v", transitions)
+			}
+		} else if len(events) != 0 {
+			t.Fatalf("scan %d emitted events for an unchanged observation: %v", i+1, transitions)
+		}
+	}
+	if _, ok := state.Incidents[serviceKey]; !ok {
+		t.Fatalf("service incident is not open after identical scans: %#v", state.Incidents)
+	}
+	if got := baselineService(*state.Baseline, "192.0.2.1", "tcp", 8080); got != "" {
+		t.Fatalf("new-port fingerprint entered the baseline without an operator decision: %q", got)
+	}
+	if _, ok := state.FingerprintCandidates[serviceKey]; ok {
+		t.Fatalf("new-port fingerprint was tracked as a learning candidate: %#v", state.FingerprintCandidates)
+	}
+}
+
+func TestNewPortServiceIncidentsAcceptInEitherOrder(t *testing.T) {
+	for _, order := range []string{"port-then-service", "service-while-port-open"} {
+		t.Run(order, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			record, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{
+				Name: "new-port-" + order, Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
+				TCP: &config.Protocol{Ports: "22,8080", Mode: "connect", ServiceDetection: true}, Timing: "balanced", Timeout: config.Duration(time.Minute),
+				Baseline: config.Baseline{Samples: 2}, Change: config.Change{Confirmations: 1},
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := Engine{Store: db}
+			observe := func(ports ...model.PortState) model.Snapshot {
+				snapshot := model.Snapshot{
+					Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "22,8080", ServiceDetection: true}},
+					Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: ports}},
+				}
+				snapshot.Normalize()
+				return snapshot
+			}
+			sequence := 0
+			run := func(snapshot model.Snapshot) []model.Event {
+				t.Helper()
+				sequence++
+				current := model.Scan{ID: fmt.Sprintf("%s-%d", order, sequence), JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: snapshot, FinishedAt: time.Now().UTC()}
+				events, err := e.FinalizeManagedScan(ctx, record.ID, record.Job, &current, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return events
+			}
+			accept := func(key string) []model.Event {
+				t.Helper()
+				events, err := db.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, key, store.AuditEntry{Action: "incident.accepted", Detail: record.ID + ":" + key})
+				if err != nil {
+					t.Fatalf("accept %s: %v", key, err)
+				}
+				return events
+			}
+			ssh := model.PortState{Port: 22, State: "open", Service: "ssh"}
+			http := model.PortState{Port: 8080, State: "open", Service: "http"}
+			portKey := "port|192.0.2.1|tcp|8080"
+			serviceKey := "service|192.0.2.1|tcp|8080"
+
+			run(observe(ssh))
+			if events := run(observe(ssh)); len(events) != 1 || events[0].Type != "baseline-complete" {
+				t.Fatalf("baseline setup: %#v", events)
+			}
+			if events := run(observe(ssh, http)); len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 2 {
+				t.Fatalf("new port with service: %#v", events)
+			}
+
+			switch order {
+			case "port-then-service":
+				if events := accept(portKey); len(events) != 1 || len(events[0].Changes) != 1 || events[0].Changes[0].Key != portKey {
+					t.Fatalf("port acceptance also approved its fingerprint: %#v", events)
+				}
+				// A scan between the two decisions must keep the reported service
+				// incident open rather than relearning it and emitting a false
+				// recovery for a fingerprint that never changed.
+				if events := run(observe(ssh, http)); len(events) != 0 {
+					t.Fatalf("scan between acceptances emitted events: %#v", events)
+				}
+				state, err := db.RuntimeState(ctx, record.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, ok := state.Incidents[serviceKey]; !ok {
+					t.Fatalf("service incident closed before the operator accepted it: %#v", state.Incidents)
+				}
+				if events := accept(serviceKey); len(events) != 1 || len(events[0].Changes) != 1 || events[0].Changes[0].Key != serviceKey {
+					t.Fatalf("service acceptance: %#v", events)
+				}
+			case "service-while-port-open":
+				events := accept(serviceKey)
+				if len(events) != 1 || len(events[0].Changes) != 2 || events[0].Changes[0].Key != portKey || events[0].Changes[1].Key != serviceKey {
+					t.Fatalf("service acceptance did not include its new port: %#v", events)
+				}
+			}
+
+			for i := 0; i < 3; i++ {
+				if events := run(observe(ssh, http)); len(events) != 0 {
+					t.Fatalf("accepted observation emitted events: %#v", events)
+				}
+			}
+			state, err := db.RuntimeState(ctx, record.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(state.Incidents) != 0 || len(state.Pending) != 0 {
+				t.Fatalf("accepted observation left runtime findings: incidents=%#v pending=%#v", state.Incidents, state.Pending)
+			}
+			if got := baselineService(*state.Baseline, "192.0.2.1", "tcp", 8080); got != "http" {
+				t.Fatalf("accepted service = %q, want http", got)
+			}
+			if positivePortCount(*state.Baseline) != 2 {
+				t.Fatalf("accepted baseline = %#v", state.Baseline)
+			}
+		})
 	}
 }

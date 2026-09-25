@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -173,9 +175,10 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		// expected port disappeared: the missing coverage may be the reason for
 		// the empty result. Do not let it advance the complete-scan total-loss
 		// confirmation counter, and discard pending closure anomalies that were
-		// waiting on this unreliable observation.
+		// waiting on this unreliable observation. A total loss that complete
+		// scans already confirmed stays confirmed.
 		if positivePortCount(scan.Snapshot) == 0 {
-			clearTotalLossCandidate(state)
+			clearUnconfirmedTotalLoss(state)
 			clearPendingTotalLoss(state)
 			events = append(events, model.Event{Type: "scan-incomplete", Job: scan.Job, ScanID: scan.ID, Message: incompleteScanError(scan.Snapshot), CreatedAt: scan.FinishedAt})
 			return events, nil, nil
@@ -263,7 +266,9 @@ const BaselineStallThreshold = 3
 
 // guardTotalLoss returns a scan-level anomaly event while a zero-positive
 // result is awaiting one matching confirmation. Once the confirmation count
-// is reached the candidate is cleared and normal comparison is allowed.
+// is reached, the confirmed state is kept for the rest of the outage so later
+// zero-positive scans go straight to normal comparison. A scan with positive
+// ports, a scope change, or a replaced baseline ends it.
 func guardTotalLoss(state *model.JobState, scan model.Scan) (bool, []model.Event) {
 	baselinePositive := positivePortCount(*state.Baseline)
 	currentPositive := positivePortCount(scan.Snapshot)
@@ -274,19 +279,13 @@ func guardTotalLoss(state *model.JobState, scan model.Scan) (bool, []model.Event
 		clearTotalLossCandidate(state)
 		return false, nil
 	}
-	hash := scan.Snapshot.Hash()
-	if state.TotalLossCandidateHash != hash {
-		state.TotalLossCandidateHash = hash
+	identity := totalLossIdentity(state, scan)
+	if state.TotalLossCandidateHash != identity {
+		state.TotalLossCandidateHash = identity
 		state.TotalLossCandidateCount = 1
-		return true, []model.Event{{
-			Type:      "scan-anomaly",
-			Job:       scan.Job,
-			ScanID:    scan.ID,
-			Message:   fmt.Sprintf("Scan returned zero positive ports while the baseline contains %d; awaiting confirmation", baselinePositive),
-			CreatedAt: scan.FinishedAt,
-		}}
+	} else if state.TotalLossCandidateCount < totalLossConfirmationScans {
+		state.TotalLossCandidateCount++
 	}
-	state.TotalLossCandidateCount++
 	if state.TotalLossCandidateCount < totalLossConfirmationScans {
 		return true, []model.Event{{
 			Type:      "scan-anomaly",
@@ -296,13 +295,41 @@ func guardTotalLoss(state *model.JobState, scan model.Scan) (bool, []model.Event
 			CreatedAt: scan.FinishedAt,
 		}}
 	}
-	clearTotalLossCandidate(state)
 	return false, nil
+}
+
+// totalLossIdentity names the zero-positive evidence that a confirmation
+// must match: the same monitored scope observed empty against the same
+// baseline. DNS answers, effective addresses, and non-positive port details
+// are deliberately excluded, so a DNS target whose resolved addresses rotate
+// can still confirm a total loss.
+func totalLossIdentity(state *model.JobState, scan model.Scan) string {
+	payload, _ := json.Marshal(struct {
+		BaselineScanID string `json:"baseline_scan_id"`
+		ConfigHash     string `json:"config_hash"`
+		Scope          string `json:"scope"`
+	}{
+		BaselineScanID: state.BaselineScanID,
+		ConfigHash:     scan.ConfigHash,
+		Scope:          model.Snapshot{Scopes: scan.Snapshot.Scopes}.Hash(),
+	})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
 }
 
 func clearTotalLossCandidate(state *model.JobState) {
 	state.TotalLossCandidateHash = ""
 	state.TotalLossCandidateCount = 0
+}
+
+// clearUnconfirmedTotalLoss discards a zero-positive candidate that is still
+// awaiting its matching confirmation. A failed or incomplete scan interrupts
+// that sequence, but it has no positive evidence that ports returned, so an
+// already confirmed total loss is kept.
+func clearUnconfirmedTotalLoss(state *model.JobState) {
+	if state.TotalLossCandidateCount < totalLossConfirmationScans {
+		clearTotalLossCandidate(state)
+	}
 }
 
 func positivePortCount(snapshot model.Snapshot) int {
@@ -667,6 +694,9 @@ func withStableFingerprints(snapshot model.Snapshot, candidates map[string]model
 	return snapshot
 }
 
+// learnMissingFingerprints fills in the service of a baseline port that was
+// established without a stable fingerprint. It returns the service keys that
+// are still collecting samples so their changes are not reported yet.
 func learnMissingFingerprints(state *model.JobState, current model.Snapshot, required int) map[string]struct{} {
 	learning := map[string]struct{}{}
 	if state.Baseline == nil {
@@ -675,10 +705,26 @@ func learnMissingFingerprints(state *model.JobState, current model.Snapshot, req
 	seen := map[string]bool{}
 	for _, unit := range current.Units {
 		for _, port := range unit.Ports {
-			if port.Service == "" || baselineService(*state.Baseline, unit.Target, unit.Protocol, port.Port) != "" || !scopeAllows(*state.Baseline, unit.Target, unit.Protocol, port.Port, true) {
+			if port.Service == "" || !scopeAllows(*state.Baseline, unit.Target, unit.Protocol, port.Port, true) {
+				continue
+			}
+			// Only a port that is already expected can learn its missing
+			// fingerprint. The service of a port that is not in the baseline is
+			// part of that port's new observation and goes through the normal
+			// comparison; learning it here could never complete and would make
+			// the service incident open and recover on alternate scans.
+			expected, ok := baselinePort(*state.Baseline, unit.Target, unit.Protocol, port.Port)
+			if !ok || expected.Service != "" {
 				continue
 			}
 			key := fingerprintKey(unit.Target, unit.Protocol, port.Port)
+			// A service incident reported before its port entered the baseline
+			// (for example, when an operator accepted the port first) stays
+			// under normal comparison until the operator acts on it. Learning it
+			// now would recover an unchanged fingerprint.
+			if _, reported := state.Incidents[key]; reported {
+				continue
+			}
 			seen[key] = true
 			candidate := state.FingerprintCandidates[key]
 			if candidate.Value == port.Service {
@@ -709,17 +755,24 @@ func learnMissingFingerprints(state *model.JobState, current model.Snapshot, req
 }
 
 func baselineService(snapshot model.Snapshot, target, protocol string, port int) string {
+	value, _ := baselinePort(snapshot, target, protocol, port)
+	return value.Service
+}
+
+// baselinePort distinguishes a baseline port without a fingerprint from a
+// port that is absent from the baseline.
+func baselinePort(snapshot model.Snapshot, target, protocol string, port int) (model.PortState, bool) {
 	for _, unit := range snapshot.Units {
 		if unit.Target != target || unit.Protocol != protocol {
 			continue
 		}
 		for _, value := range unit.Ports {
 			if value.Port == port {
-				return value.Service
+				return value, true
 			}
 		}
 	}
-	return ""
+	return model.PortState{}, false
 }
 
 func setBaselineService(snapshot *model.Snapshot, target, protocol string, port int, service string) bool {
@@ -759,7 +812,7 @@ func (e *Engine) FailureForJobWithDestinations(ctx context.Context, jobID, job s
 }
 
 func processFailure(state *model.JobState, job string, scan model.Scan) ([]model.Event, error) {
-	clearTotalLossCandidate(state)
+	clearUnconfirmedTotalLoss(state)
 	if scan.Resumable && scan.CycleStatus == "paused" {
 		if scan.Status == "canceled" {
 			return []model.Event{{Type: "scan-canceled", Job: job, ScanID: scan.ID, Message: scanOutcomeMessage(scan), CreatedAt: scan.FinishedAt}}, nil

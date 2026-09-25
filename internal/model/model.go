@@ -312,7 +312,10 @@ type JobState struct {
 	// successful scan that returned no positive ports while the baseline still
 	// contains positive ports. The engine requires a second matching scan
 	// before comparing that result, preventing a transient empty discovery from
-	// opening one incident per previously observed port.
+	// opening one incident per previously observed port. The hash identifies
+	// the scope and baseline, not DNS answers. Once the count reaches the
+	// confirmation threshold it stays there until positive ports return or the
+	// scope or baseline changes, so one outage is confirmed only once.
 	TotalLossCandidateHash  string `json:"total_loss_candidate_hash,omitempty"`
 	TotalLossCandidateCount int    `json:"total_loss_candidate_count,omitempty"`
 	ConsecutiveFailures     int    `json:"consecutive_failures"`

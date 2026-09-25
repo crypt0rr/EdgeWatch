@@ -43,10 +43,15 @@ func (s *Store) AcceptIncidentWithExpectedOutboxAndAudit(ctx context.Context, jo
 		// fingerprint. Treat the pair as one operator decision so accepting the
 		// first row cannot leave the other row (or the old positive port) behind.
 		// Keep service-only changes independent: a port that is still open may
-		// legitimately lose only its fingerprint.
+		// legitimately lose only its fingerprint. A service that appeared on a
+		// port the baseline does not contain yet also needs that port, so the
+		// open port incident is accepted with it.
 		accepted := []model.Change{change}
 		acceptedKeys := []string{key}
 		relatedKey, related, hasRelated := relatedIncident(state, key, change)
+		if !hasRelated {
+			relatedKey, related, hasRelated = newPortIncidentForService(state, key, change)
+		}
 		if hasRelated {
 			// Apply the port first so a paired service removal cannot leave a
 			// positive port behind. The order is deterministic regardless of
@@ -147,6 +152,43 @@ func relatedIncident(state *model.JobState, key string, change model.Change) (st
 		return candidateKey, candidate, true
 	}
 	return "", model.Incident{}, false
+}
+
+// newPortIncidentForService finds the open port incident that a service
+// appearance depends on. A fingerprint cannot be expected on a port that is
+// absent from the baseline, so accepting that service also accepts its port.
+// The reverse is deliberately not paired: accepting a new port alone leaves
+// its fingerprint for a separate decision.
+func newPortIncidentForService(state *model.JobState, key string, change model.Change) (string, model.Incident, bool) {
+	if change.Kind != "service" || change.New == "not-open" || state.Baseline == nil || baselineHasPort(state.Baseline, change) {
+		return "", model.Incident{}, false
+	}
+	for candidateKey, candidate := range state.Incidents {
+		if candidateKey == key || candidate.Change.Kind != "port" {
+			continue
+		}
+		if candidate.Change.Target != change.Target || candidate.Change.Protocol != change.Protocol || candidate.Change.Port != change.Port {
+			continue
+		}
+		if candidate.Change.New == "not-open" || strings.TrimSpace(candidate.Change.New) == "" {
+			continue
+		}
+		return candidateKey, candidate, true
+	}
+	return "", model.Incident{}, false
+}
+
+func baselineHasPort(snapshot *model.Snapshot, change model.Change) bool {
+	unitIndex := findUnit(snapshot, change.Target, change.Protocol)
+	if unitIndex < 0 {
+		return false
+	}
+	for _, port := range snapshot.Units[unitIndex].Ports {
+		if port.Port == change.Port {
+			return true
+		}
+	}
+	return false
 }
 
 func acceptedIncidentMessage(count int) string {

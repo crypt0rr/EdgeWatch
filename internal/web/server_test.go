@@ -1211,12 +1211,22 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 		t.Fatal("missing job id")
 	}
 	run := func(expected int) {
-		resp = request(http.MethodPost, "/api/v1/jobs/"+created.ID+"/run", "{}", loginResult.CSRF)
-		if resp.StatusCode != http.StatusAccepted {
-			t.Fatalf("run status %d", resp.StatusCode)
+		// The previous run saves its scan before it releases its run
+		// reservation, so a new run can briefly get 409 job_active. Retry as
+		// the API message tells operators to.
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			resp = request(http.MethodPost, "/api/v1/jobs/"+created.ID+"/run", "{}", loginResult.CSRF)
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusAccepted {
+				break
+			}
+			if resp.StatusCode != http.StatusConflict || !time.Now().Before(deadline) {
+				t.Fatalf("run status %d", resp.StatusCode)
+			}
+			time.Sleep(10 * time.Millisecond)
 		}
-		resp.Body.Close()
-		deadline := time.Now().Add(2 * time.Second)
+		deadline = time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
 			scans, scanErr := s.ListJobScans(ctx, created.ID, 5)
 			if scanErr != nil {
@@ -1244,7 +1254,7 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 	// A matching confirmation is required before the per-port incident opens.
 	run(2)
 	run(3)
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		resp = request(http.MethodGet, "/api/v1/incidents", "", "")
 		var incidents struct {

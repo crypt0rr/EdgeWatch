@@ -32,7 +32,8 @@ jobs:
   verify:
     name: Verify release candidate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Includes the race-enabled Go suite; see the CI test job for its budget.
+    timeout-minutes: 40
     permissions:
       contents: read
       actions: write
@@ -129,7 +130,7 @@ jobs:
       - name: Test
         run: |
           set -o pipefail
-          go test -race -timeout=15m -coverprofile=coverage.out ./... | tee go-coverage-summary.txt
+          go test -race -timeout=25m -coverprofile=coverage.out ./... | tee go-coverage-summary.txt
       - name: Check Go coverage
         run: ./scripts/check-go-coverage.sh coverage.out go-coverage-summary.txt
       - name: Go diff coverage

@@ -499,6 +499,12 @@ npm run test:e2e
 docker compose config --quiet
 ```
 
+`npm run test:e2e` builds the console and serves it on 127.0.0.1:4173. Set
+`PLAYWRIGHT_PORT` to use another port. If the port is already in use, the run
+stops before any test instead of testing whatever server is listening there.
+Set `PLAYWRIGHT_REUSE_SERVER=1` only to reuse a preview of the same checkout
+that you started yourself.
+
 The production image embeds the frontend and does not include Node.js. Use
 controlled listeners for integration scans and never commit notification URLs,
 passwords, setup tokens, database files, or encryption keys.

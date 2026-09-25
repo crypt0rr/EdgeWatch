@@ -13,6 +13,11 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # docker/build-push-action uploads a build-record artifact for every image
+  # build. The job summary still reports the build; skip the artifact.
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+
 jobs:
   frontend:
     runs-on: ubuntu-latest
@@ -69,6 +74,8 @@ jobs:
         with:
           name: frontend-coverage
           if-no-files-found: error
+          # Coverage reports are diagnostics for this run; keep them briefly.
+          retention-days: 14
           path: |
             coverage/coverage-final.json
             coverage/coverage-summary.json
@@ -159,6 +166,8 @@ jobs:
         with:
           name: go-coverage
           if-no-files-found: error
+          # Coverage reports are diagnostics for this run; keep them briefly.
+          retention-days: 14
           path: |
             coverage.out
             go-coverage-summary.txt

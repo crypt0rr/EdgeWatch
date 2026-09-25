@@ -21,6 +21,9 @@ env:
   CANDIDATE_IMAGE: ghcr.io/crypt0rr/edgewatch:candidate-${{ github.run_id }}-${{ github.run_attempt }}
   NODE_VERSION: 24.21.0
   GORELEASER_VERSION: v2.18.0
+  # docker/build-push-action uploads a build-record artifact for every image
+  # build. The job summary still reports the build; skip the artifact.
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
 
 jobs:
   # This is the only job that builds frontend assets and EdgeWatch binaries.
@@ -100,6 +103,8 @@ jobs:
         with:
           name: release-frontend-coverage
           if-no-files-found: error
+          # Coverage reports are diagnostics for this run; keep them briefly.
+          retention-days: 14
           path: |
             coverage/coverage-final.json
             coverage/coverage-summary.json
@@ -134,6 +139,8 @@ jobs:
         with:
           name: release-go-coverage
           if-no-files-found: error
+          # Coverage reports are diagnostics for this run; keep them briefly.
+          retention-days: 14
           path: |
             coverage.out
             go-coverage-summary.txt
@@ -167,6 +174,10 @@ jobs:
         with:
           name: release-candidate
           if-no-files-found: error
+          # Later jobs in this run consume the candidate, and the published release
+          # keeps its own copy of the assets. Seven days leaves room to re-run failed
+          # jobs without storing every candidate for the repository default of 90 days.
+          retention-days: 7
           path: |
             dist/*.tar.gz
             dist/checksums.txt

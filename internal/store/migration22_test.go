@@ -157,7 +157,7 @@ PRAGMA user_version = 21;`); err != nil {
 		t.Fatalf("scan host FTS rows = %d, want %d", indexed, hostCount)
 	}
 	var completed int
-	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fts_backfill_state WHERE complete=1`).Scan(&completed); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM fts_backfill_state WHERE complete=1 AND table_name IN ('scan_hosts','latest_scan_hosts')`).Scan(&completed); err != nil {
 		t.Fatal(err)
 	}
 	if completed != 2 {

@@ -123,7 +123,7 @@ func repairScanHostsForeignKey(db *sql.DB) error {
 	// Force the bounded rebuild to run after the source table was replaced. The
 	// state table is created by migration 22, but this update is harmless when a
 	// recovery fixture already carried it.
-	if _, err = tx.Exec(`UPDATE fts_backfill_state SET last_rowid=0, processed_rows=0, initialized=0, complete=0, updated_at=?`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.Exec(`UPDATE fts_backfill_state SET last_rowid=0, processed_rows=0, initialized=0, complete=0, updated_at=? WHERE table_name IN ('scan_hosts','latest_scan_hosts')`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		if !strings.Contains(strings.ToLower(err.Error()), "no such table") {
 			return rollback()
 		}
@@ -267,10 +267,10 @@ END;`,
 END;`,
 }
 
-// backfillHostSearchIndexesContext rebuilds both FTS projections without
-// making database-open work uncancellable. Each batch commits its checkpoint
-// before returning, so a cancelled migration can be restarted without
-// replaying already indexed rows.
+// backfillHostSearchIndexesContext rebuilds the scan, latest-host, and
+// baseline host FTS projections without making database-open work
+// uncancellable. Each batch commits its checkpoint before returning, so a
+// cancelled migration can be restarted without replaying already indexed rows.
 func backfillHostSearchIndexesContext(ctx context.Context, db *sql.DB) error {
 	return backfillHostSearchIndexesContextWithProgress(ctx, db, nil)
 }
@@ -293,6 +293,9 @@ func backfillHostSearchIndexesContextWithProgress(ctx context.Context, db *sql.D
 		return err
 	}
 	if err := initializeFTSBackfillContext(ctx, db); err != nil {
+		return err
+	}
+	if err := ensureBaselineHostSearchContext(ctx, db); err != nil {
 		return err
 	}
 	for {
@@ -323,6 +326,24 @@ func backfillHostSearchIndexesContextWithProgress(ctx context.Context, db *sql.D
 			logFTSProgress(logger, latestProgress)
 		}
 		if scanProgress.complete && latestProgress.complete {
+			break
+		}
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		baselineProgress, err := backfillBaselineHostSearchBatchContext(ctx, db)
+		if err != nil {
+			return err
+		}
+		if observer != nil && baselineProgress.batchRows > 0 {
+			observer(baselineProgress)
+		}
+		if baselineProgress.batchRows > 0 || baselineProgress.complete {
+			logFTSProgress(logger, baselineProgress)
+		}
+		if baselineProgress.complete {
 			return nil
 		}
 	}
@@ -368,8 +389,9 @@ func ensureHostSearchTriggersContext(ctx context.Context, db *sql.DB) error {
 		// A newly installed trigger set must see a complete rebuild. Ignore the
 		// update only when this is the first startup before migration 22 creates
 		// the progress table; ensureFTSBackfillState will create it immediately
-		// afterwards.
-		if _, err := tx.ExecContext(ctx, `UPDATE fts_backfill_state SET last_rowid=0,processed_rows=0,initialized=0,complete=0,updated_at=?`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+		// afterwards. The baseline projection has its own triggers and
+		// checkpoint, so it is not rebuilt here.
+		if _, err := tx.ExecContext(ctx, `UPDATE fts_backfill_state SET last_rowid=0,processed_rows=0,initialized=0,complete=0,updated_at=? WHERE table_name IN ('scan_hosts','latest_scan_hosts')`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
 			return err
 		}
 	}
@@ -399,7 +421,7 @@ func ensureFTSBackfillStateContext(ctx context.Context, db *sql.DB) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	for _, tableName := range []string{"scan_hosts", "latest_scan_hosts"} {
+	for _, tableName := range []string{"scan_hosts", "latest_scan_hosts", baselineHostSearchBackfillTable} {
 		// This is intentionally the first statement in the transaction. Even
 		// when the row already exists, INSERT OR IGNORE is a write attempt and
 		// therefore waits for an active writer instead of upgrading a read

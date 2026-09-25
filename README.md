@@ -524,7 +524,7 @@ pending deliveries the chosen `--pending-deliveries` policy would affect. The
 command exits non-zero when the restore would be refused, so scripts can act on
 its exit status.
 
-The current schema is version 47. Database migrations are forward-only. An
+The current schema is version 48. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,
@@ -534,6 +534,11 @@ such a database with the release that upgraded it, or copy ./data while
 EdgeWatch is stopped. A daemon that finds another daemon's live lease exits
 before it migrates the database. Keep encryption keys with the database or
 encrypted web-managed destinations and never commit them.
+
+Schema 48 rebuilds the baseline host search index at startup in bounded,
+resumable batches. While it runs, `edgewatch health` reports the
+`host-search:baseline_hosts` phase, and a restart resumes after the last
+committed batch.
 
 ## Useful commands
 

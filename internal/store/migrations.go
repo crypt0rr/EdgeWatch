@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 47
+const schemaVersion = 48
 
 // newerSchemaError is the refusal for a database that a newer release has
 // upgraded. Migrations are forward-only, so an older binary must not write to
@@ -976,7 +976,10 @@ FROM job_runtime,json_each(job_runtime.state_json,'$.incidents')
 WHERE json_valid(job_runtime.state_json)`,
 			// Baseline host search uses the same bounded normalized document as
 			// scan and latest-host search. The job/name columns are unindexed join
-			// keys; only content participates in FTS matching.
+			// keys; only content participates in FTS matching. Migration 48
+			// replaces this table and its triggers with rowid-keyed ones and
+			// indexes existing baseline hosts in bounded batches, so this
+			// migration no longer copies them with a per-row search of the index.
 			`CREATE VIRTUAL TABLE IF NOT EXISTS baseline_host_search USING fts5(
  job_id UNINDEXED,
  address UNINDEXED,
@@ -993,9 +996,6 @@ END;`,
 			`CREATE TRIGGER IF NOT EXISTS baseline_hosts_search_ad AFTER DELETE ON baseline_hosts BEGIN
  DELETE FROM baseline_host_search WHERE job_id=OLD.job_id AND address=OLD.address;
 END;`,
-			`INSERT INTO baseline_host_search(job_id,address,content)
-SELECT job_id,address,lower(coalesce(search_text,'')) FROM baseline_hosts
-WHERE NOT EXISTS (SELECT 1 FROM baseline_host_search hs WHERE hs.job_id=baseline_hosts.job_id AND hs.address=baseline_hosts.address)`,
 		},
 		41: {
 			// TOTP acceptance is a durable, account-scoped replay guard. Keeping
@@ -1137,6 +1137,23 @@ VALUES(1,CASE WHEN EXISTS (SELECT 1 FROM scan_cycle_units WHERE identity='') THE
 			"ALTER TABLE legacy_scan_host_backfill ADD COLUMN error TEXT NOT NULL DEFAULT ''",
 			"ALTER TABLE legacy_scan_host_backfill ADD COLUMN attempts INTEGER NOT NULL DEFAULT 1",
 			"CREATE INDEX IF NOT EXISTS legacy_scan_host_backfill_status ON legacy_scan_host_backfill(status,processed_at)",
+		},
+		48: {
+			// Baseline host search rows use baseline_hosts.rowid as their key, as
+			// scan and latest-host search rows have since migration 25. Deleting
+			// by job and address could not use the FTS index, so every removed
+			// baseline host scanned the search rows of every job while the writer
+			// was held. The old rowids are unrelated to baseline_hosts, so drop
+			// the projection instead of deleting its rows. The resumable host
+			// search backfill after the migrations recreates it with rowid-keyed
+			// triggers and indexes existing baseline hosts in bounded batches.
+			"DROP TRIGGER IF EXISTS baseline_hosts_search_ai",
+			"DROP TRIGGER IF EXISTS baseline_hosts_search_au",
+			"DROP TRIGGER IF EXISTS baseline_hosts_search_ad",
+			"DROP TABLE IF EXISTS baseline_host_search",
+			`INSERT INTO fts_backfill_state(table_name,last_rowid,processed_rows,initialized,complete,updated_at)
+VALUES('baseline_hosts',0,0,0,0,datetime('now'))
+ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=0,complete=0,updated_at=excluded.updated_at`,
 		},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL

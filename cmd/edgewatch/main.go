@@ -156,6 +156,17 @@ func run(args []string) error {
 		// without touching startup_state, avoiding health-signal changes and
 		// writer contention while a healthy daemon is running.
 		openStore = func(path string) (*store.Store, error) {
+			// Refuse before migrating when another daemon's lease is live, so
+			// a second daemon never upgrades the schema or rewrites
+			// startup_state under a running one. If the lease cannot be read
+			// here, startup continues and App.Daemon still refuses to take a
+			// live lease after the migration.
+			if err := store.CheckDaemonLeaseBeforeStartup(context.Background(), path); err != nil {
+				if errors.Is(err, store.ErrDaemonLeaseBusy) {
+					return nil, err
+				}
+				logger.Warn("could not check the daemon lease before migration", "error", err)
+			}
 			return store.OpenWithLogger(path, logger)
 		}
 	default:

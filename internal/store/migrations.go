@@ -43,6 +43,13 @@ CREATE TABLE IF NOT EXISTS job_leases (
 // The former describes on-disk compatibility; the latter describes YAML.
 const schemaVersion = 47
 
+// newerSchemaError is the refusal for a database that a newer release has
+// upgraded. Migrations are forward-only, so an older binary must not write to
+// a schema it does not know.
+func newerSchemaError(version int) error {
+	return fmt.Errorf("database schema version %d is newer than supported version %d", version, schemaVersion)
+}
+
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
 }
@@ -63,7 +70,7 @@ func migrateContextWithLogger(ctx context.Context, db *sql.DB, logger *slog.Logg
 		return err
 	}
 	if version > schemaVersion {
-		return fmt.Errorf("database schema version %d is newer than supported version %d", version, schemaVersion)
+		return newerSchemaError(version)
 	}
 	migrations := map[int][]string{
 		// Version 1 is the pre-web daemon schema. Keeping it as a real

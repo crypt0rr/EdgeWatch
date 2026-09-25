@@ -462,8 +462,13 @@ docker compose up -d edgewatch
 The current schema is version 47. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
-required. Keep encryption keys with the database or encrypted web-managed
-destinations and never commit them.
+required. The daemon and the commands that write to the database (admin, scan,
+notify test, baseline approve and reset, and backup) refuse a newer schema
+with `database schema version N is newer than supported version M`. Back up
+such a database with the release that upgraded it, or copy ./data while
+EdgeWatch is stopped. A daemon that finds another daemon's live lease exits
+before it migrates the database. Keep encryption keys with the database or
+encrypted web-managed destinations and never commit them.
 
 ## Useful commands
 

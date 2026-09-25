@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -464,6 +465,41 @@ func (s *Store) DaemonLeaseStatus(ctx context.Context) (DaemonLeaseStatus, error
 	status.Heartbeat = heartbeat
 	status.Active = !heartbeat.Before(time.Now().UTC().Add(-2 * time.Minute))
 	return status, nil
+}
+
+// CheckDaemonLeaseBeforeStartup lets a starting daemon refuse before it
+// migrates the schema or writes startup state. It reads the lease through a
+// read-only open and returns an error wrapping ErrDaemonLeaseBusy when
+// another daemon's heartbeat is fresh. A missing database file (first start),
+// an in-memory database, and a missing lease table or row are not busy. Any
+// other error means the lease could not be read. AcquireDaemonLease still
+// decides ownership after startup.
+func CheckDaemonLeaseBeforeStartup(ctx context.Context, path string) error {
+	if isSQLiteMemoryPath(path) {
+		return nil
+	}
+	artifactPath, err := sqliteArtifactPath(path)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Lstat(artifactPath); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	reader, err := OpenReadOnlyExistingContext(ctx, path)
+	if err != nil {
+		return err
+	}
+	status, err := reader.DaemonLeaseStatus(ctx)
+	// Close removes the probe's WAL/SHM pair only when no other connection
+	// has the database open, so a live daemon keeps its files.
+	closeErr := reader.Close()
+	if err != nil {
+		return err
+	}
+	if status.Active {
+		return fmt.Errorf("%w (owner %s, heartbeat %s)", ErrDaemonLeaseBusy, status.Owner, status.Heartbeat.UTC().Format(time.RFC3339Nano))
+	}
+	return closeErr
 }
 
 func (s *Store) acquireLease(ctx context.Context, owner string, reclaimPreviousDaemon bool) (int64, error) {

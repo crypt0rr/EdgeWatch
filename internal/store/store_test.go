@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1190,6 +1191,74 @@ func TestAcquireDaemonLeaseDoesNotStealLiveDaemon(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("live daemon job lease was altered")
+	}
+}
+
+func TestCheckDaemonLeaseBeforeStartup(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	withLease := func(name string, heartbeat string) string {
+		t.Helper()
+		path := filepath.Join(dir, name)
+		s, err := openWithOptionsContext(ctx, path, openOptions{create: true, migrate: true, configureWAL: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO daemon_lease(id,owner,heartbeat) VALUES(1,'running-daemon',?)`, heartbeat); err != nil {
+			s.Close()
+			t.Fatal(err)
+		}
+		if err := s.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	now := time.Now().UTC()
+	live := withLease("live.db", now.Format(time.RFC3339Nano))
+	stale := withLease("stale.db", now.Add(-10*time.Minute).Format(time.RFC3339Nano))
+	malformed := withLease("malformed.db", "not-a-time")
+	unleased := filepath.Join(dir, "unleased.db")
+	s, err := openWithOptionsContext(ctx, unleased, openOptions{create: true, migrate: true, configureWAL: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	noLeaseTable := filepath.Join(dir, "plain.db")
+	raw, err := sql.Open("sqlite", noLeaseTable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`PRAGMA journal_mode=WAL; CREATE TABLE unrelated (id INTEGER)`); err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	missing := filepath.Join(dir, "missing.db")
+
+	if err := CheckDaemonLeaseBeforeStartup(ctx, live); !errors.Is(err, ErrDaemonLeaseBusy) || !strings.Contains(err.Error(), "running-daemon") {
+		t.Fatalf("live lease error = %v, want ErrDaemonLeaseBusy naming the owner", err)
+	}
+	for name, path := range map[string]string{"stale lease": stale, "no lease row": unleased, "no lease table": noLeaseTable, "missing database": missing, "memory": ":memory:"} {
+		if err := CheckDaemonLeaseBeforeStartup(ctx, path); err != nil {
+			t.Fatalf("%s: error = %v, want nil", name, err)
+		}
+	}
+	if err := CheckDaemonLeaseBeforeStartup(ctx, malformed); err == nil || errors.Is(err, ErrDaemonLeaseBusy) {
+		t.Fatalf("malformed lease error = %v, want a read error", err)
+	}
+	if _, err := os.Stat(missing); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lease check created the missing database: %v", err)
+	}
+	for _, path := range []string{live, stale, malformed, unleased, noLeaseTable} {
+		for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+			if _, err := os.Stat(path + suffix); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("lease check left %s%s: %v", filepath.Base(path), suffix, err)
+			}
+		}
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -484,6 +485,9 @@ func TestVerifyDoesNotChangeReadOnlyDatabaseBytesOrMode(t *testing.T) {
 }
 
 func TestReadOnlyVerificationCleansProbeSidecarsForSafeRestore(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("probe sidecar cleanup needs Linux open file description locks; other systems keep the sidecars")
+	}
 	dir := t.TempDir()
 	source := filepath.Join(dir, "source.db")
 	destination := filepath.Join(dir, "destination.db")

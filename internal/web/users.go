@@ -163,6 +163,12 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, session stor
 		writeError(w, http.StatusBadRequest, "validation_failed", "username is required", map[string]string{"username": "username is required"})
 		return
 	}
+	// Apply the store's username rule here so a rejected name is a field-level
+	// 400 rather than a failed insert reported as a server error.
+	if _, validationErr := store.NormalizeUsername(input.Username); validationErr != nil {
+		writeError(w, http.StatusBadRequest, "validation_failed", validationErr.Error(), map[string]string{"username": validationErr.Error()})
+		return
+	}
 	if input.DisplayName == "" {
 		// The username is a safe, useful default for API clients that do not
 		// need a separate presentation label. The UI still asks for one so an
@@ -398,7 +404,8 @@ func (s *Server) activateUser(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "activation_failed", "activation token is required", nil)
 		return
 	}
-	if err := s.Auth.ActivateRequest(r.Context(), r, input.Token, input.Password); err != nil {
+	userID, err := s.Auth.ActivateRequest(r.Context(), r, input.Token, input.Password)
+	if err != nil {
 		if errors.Is(err, auth.ErrRateLimited) {
 			w.Header().Set("Retry-After", "300")
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many activation attempts; try again later", nil)
@@ -418,5 +425,10 @@ func (s *Server) activateUser(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	// Redeeming a password-reset link revoked the account's sessions in the
+	// activation transaction. Close the live-update streams opened with those
+	// sessions now, as other password changes do, instead of waiting for the
+	// cached stream authorization to expire. A first-time invitee has none.
+	s.revokeSSEUser(userID)
 	writeJSON(w, http.StatusOK, map[string]any{"activated": true})
 }

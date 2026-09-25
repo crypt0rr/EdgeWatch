@@ -177,6 +177,21 @@ func writeValidationError(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusBadRequest, "validation_failed", message, details)
 }
 
+// writeStoreWriteError maps a failed job or scanner-profile write. Only typed
+// validation errors return 400 with their field details. A resource removed
+// by a concurrent request is 404, and every other failure (a locked or full
+// database, an I/O error) is an internal error whose detail is only logged.
+func (s *Server) writeStoreWriteError(w http.ResponseWriter, r *http.Request, err error, notFoundMessage string) {
+	switch {
+	case errors.Is(err, store.ErrValidation):
+		writeValidationError(w, err)
+	case errors.Is(err, store.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", notFoundMessage, nil)
+	default:
+		s.writeInternalError(w, r, "store", err)
+	}
+}
+
 // auditFailure logs only the action and storage error; callers must not echo
 // credential-bearing details when an audit insert fails. Sensitive handlers
 // use this before writing their success response and fail closed.

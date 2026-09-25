@@ -383,11 +383,13 @@ func (s *Store) SetTargetExclusions(exclusions []string) error {
 	return nil
 }
 
+// validateManagedJob classifies every rejection as a ValidationError so the
+// web layer can tell caller-correctable input apart from storage failures.
 func (s *Store) validateManagedJob(job config.Job) error {
 	if s.targetExclusions == nil {
-		return config.ValidateJob(job)
+		return NewValidationError(config.ValidateJob(job))
 	}
-	return config.ValidateJobWithTargetExclusions(job, s.targetExclusions)
+	return NewValidationError(config.ValidateJobWithTargetExclusions(job, s.targetExclusions))
 }
 
 // sqliteArtifactPath resolves the on-disk filename represented by an accepted
@@ -599,4 +601,31 @@ var (
 	// ErrJobRevisionChanged is returned when a scan was queued with an older
 	// immutable job revision. The caller must reload the job before starting it.
 	ErrJobRevisionChanged = errors.New("job revision changed before scan started")
+	// ErrValidation classifies errors caused by caller-supplied input that
+	// fails a validation rule. API handlers map only this class to field-level
+	// 400 responses; any other write failure is an internal error whose
+	// storage detail must not reach clients.
+	ErrValidation = errors.New("validation failed")
 )
+
+// ValidationError marks a caller-correctable input error. It keeps the
+// validator's message unchanged, because API clients use that text as the
+// field-level detail, while errors.Is(err, ErrValidation) reports true.
+type ValidationError struct {
+	Err error
+}
+
+func (e *ValidationError) Error() string { return e.Err.Error() }
+
+func (e *ValidationError) Unwrap() error { return e.Err }
+
+func (e *ValidationError) Is(target error) bool { return target == ErrValidation }
+
+// NewValidationError wraps err as a ValidationError. A nil error stays nil so
+// validators can be wrapped directly at a return statement.
+func NewValidationError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ValidationError{Err: err}
+}

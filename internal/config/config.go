@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
@@ -721,6 +723,26 @@ func (c Config) Location() (*time.Location, error) {
 	return location, nil
 }
 
+// MaxJobNameRunes bounds job names. Every event, scan row, and notification
+// carries the job name, so an unbounded name could push the event payload
+// past model.EventPayloadLimit and make every event write for the job fail,
+// including scan finalization. The console editor enforces the same limit.
+const MaxJobNameRunes = 200
+
+// validateJobName rejects over-long names and control characters. It never
+// quotes the name, so a rejected megabyte-sized value is not echoed back.
+func validateJobName(name string) error {
+	if utf8.RuneCountInString(name) > MaxJobNameRunes {
+		return fmt.Errorf("job name must be at most %d characters", MaxJobNameRunes)
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return errors.New("job name must not contain control characters")
+		}
+	}
+	return nil
+}
+
 func (c Config) Validate() error {
 	if err := c.ValidateDeployment(); err != nil {
 		return err
@@ -732,6 +754,10 @@ func (c Config) Validate() error {
 		// callers frequently construct a Config value in tests or recovery
 		// tooling, and legacy TCP records omit the engine field by design.
 		j := NormalizeJob(rawJob)
+		// Check the bound before any message below quotes the name.
+		if err := validateJobName(j.Name); err != nil {
+			return err
+		}
 		if j.Name == "" || seen[j.Name] {
 			return fmt.Errorf("job names must be non-empty and unique: %q", j.Name)
 		}

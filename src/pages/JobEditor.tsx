@@ -45,7 +45,7 @@ const defaultTCP = (): Protocol => ({
 })
 
 const jobFormSchema = z.object({
-  name: z.string().trim().min(1, 'A name is required.'),
+  name: z.string().trim().min(1, 'A name is required.').refine((value) => Array.from(value).length <= 200, 'Use at most 200 characters.').refine((value) => !/\p{Cc}/u.test(value), 'Remove control characters such as tabs or line breaks.'), // Mirrors the server's job-name rule (config.MaxJobNameRunes).
   schedule: z.string().trim().min(1, 'A cron schedule is required.'),
   timezone: z.string().trim().min(1, 'A timezone is required.'),
   run_on_start: z.boolean().optional(),

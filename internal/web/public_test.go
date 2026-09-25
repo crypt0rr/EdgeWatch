@@ -206,10 +206,10 @@ func TestPublicDashboardFailureCacheAndFreshBucketEviction(t *testing.T) {
 		},
 	}
 	dashboard := store.PublicDashboard{Enabled: true, Title: "failure"}
-	if _, err := server.cachedPublicDashboardPayload(ctx, dashboard); !errors.Is(err, failure) {
+	if _, err := server.cachedPublicDashboardPayload(ctx, server.publicDashboardGeneration(), dashboard); !errors.Is(err, failure) {
 		t.Fatalf("first dashboard build error = %v", err)
 	}
-	if _, err := server.cachedPublicDashboardPayload(ctx, dashboard); !errors.Is(err, failure) {
+	if _, err := server.cachedPublicDashboardPayload(ctx, server.publicDashboardGeneration(), dashboard); !errors.Is(err, failure) {
 		t.Fatalf("negative dashboard cache error = %v", err)
 	}
 
@@ -256,7 +256,7 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), "EdgeWatch public status") {
 		t.Fatalf("default public dashboard = %d: %s", get.Code, get.Body.String())
 	}
-	badText := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"title":"bad\ntitle"}`))
+	badText := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"title":"bad\ntitle","updated_at":"`+publicDashboardToken(t, server, admin)+`"}`))
 	badText.Header.Set("Content-Type", "application/json")
 	badTextRecorder := httptest.NewRecorder()
 	server.publicDashboardRoute(badTextRecorder, badText, admin)
@@ -273,7 +273,7 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	if err := db.SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	unknownHost := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.11"}]}`))
+	unknownHost := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.11"}],"updated_at":"`+publicDashboardToken(t, server, admin)+`"}`))
 	unknownHost.Header.Set("Content-Type", "application/json")
 	unknownRecorder := httptest.NewRecorder()
 	server.publicDashboardRoute(unknownRecorder, unknownHost, admin)
@@ -283,7 +283,7 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	// Older console builds round-tripped the read-only created_at field as an
 	// empty string. The write API accepts that compatibility field while only
 	// persisting the job/address selection.
-	publish := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","introduction":"Selected host","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.10","created_at":""}]}`))
+	publish := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","introduction":"Selected host","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.10","created_at":""}],"updated_at":"`+publicDashboardToken(t, server, admin)+`"}`))
 	publish.Header.Set("Content-Type", "application/json")
 	publishRecorder := httptest.NewRecorder()
 	server.publicDashboardRoute(publishRecorder, publish, admin)
@@ -300,7 +300,7 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	// Retained archived selections remain valid for the admin configuration
 	// and can be removed without making an unrelated save fail, but they stay
 	// absent from the unauthenticated response.
-	archiveSave := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status updated","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.10"}]}`))
+	archiveSave := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status updated","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.10"}],"updated_at":"`+publicDashboardToken(t, server, admin)+`"}`))
 	archiveSave.Header.Set("Content-Type", "application/json")
 	archiveRecorder := httptest.NewRecorder()
 	server.publicDashboardRoute(archiveRecorder, archiveSave, admin)
@@ -329,10 +329,11 @@ func TestPublicDashboardSaveFailureDoesNotExposeStoreDetails(t *testing.T) {
 	if _, err := db.DB.ExecContext(ctx, `CREATE TRIGGER fail_public_dashboard_update BEFORE UPDATE ON public_dashboard BEGIN SELECT RAISE(ABORT, 'sqlite leaked details'); END`); err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","hosts":[]}`))
+	admin := store.Session{UserID: store.LegacyAdminUserID, Username: "admin", Role: store.RoleAdministrator}
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","hosts":[],"updated_at":"`+publicDashboardToken(t, server, admin)+`"}`))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
-	server.publicDashboardRoute(recorder, request, store.Session{UserID: store.LegacyAdminUserID, Username: "admin", Role: store.RoleAdministrator})
+	server.publicDashboardRoute(recorder, request, admin)
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("save failure status = %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -435,11 +436,11 @@ func TestLatestLegacyPublicHostsHonorsCanceledContext(t *testing.T) {
 func TestCachedPublicDashboardPayloadReusesShortLivedProjection(t *testing.T) {
 	server := &Server{}
 	dashboard := store.PublicDashboard{Enabled: true, Title: "Status", Introduction: "hello"}
-	first, err := server.cachedPublicDashboardPayload(context.Background(), dashboard)
+	first, err := server.cachedPublicDashboardPayload(context.Background(), server.publicDashboardGeneration(), dashboard)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := server.cachedPublicDashboardPayload(context.Background(), dashboard)
+	second, err := server.cachedPublicDashboardPayload(context.Background(), server.publicDashboardGeneration(), dashboard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -477,7 +478,7 @@ func TestCachedPublicDashboardBuildOutlivesCanceledRequester(t *testing.T) {
 	requestContext, cancel := context.WithCancel(context.Background())
 	first := make(chan error, 1)
 	go func() {
-		_, err := server.cachedPublicDashboardPayload(requestContext, dashboard)
+		_, err := server.cachedPublicDashboardPayload(requestContext, server.publicDashboardGeneration(), dashboard)
 		first <- err
 	}()
 	<-started
@@ -491,7 +492,7 @@ func TestCachedPublicDashboardBuildOutlivesCanceledRequester(t *testing.T) {
 		err     error
 	}, 1)
 	go func() {
-		payload, err := server.cachedPublicDashboardPayload(context.Background(), dashboard)
+		payload, err := server.cachedPublicDashboardPayload(context.Background(), server.publicDashboardGeneration(), dashboard)
 		second <- struct {
 			payload []byte
 			err     error
@@ -501,6 +502,48 @@ func TestCachedPublicDashboardBuildOutlivesCanceledRequester(t *testing.T) {
 	result := <-second
 	if result.err != nil || string(result.payload) == "" {
 		t.Fatalf("second requester did not receive shared build: payload=%s err=%v", result.payload, result.err)
+	}
+}
+
+func TestPublicCacheFastPathIgnoresEntriesFromAnOlderGeneration(t *testing.T) {
+	server := &Server{}
+	server.publicCache = &publicDashboardCache{key: "stale", generation: 0, expiresAt: time.Now().UTC().Add(time.Minute), payload: []byte(`{"title":"published-v1"}`)}
+	if _, ok := server.cachedPublicDashboardResponse(); !ok {
+		t.Fatal("current-generation entry was not served")
+	}
+	server.publicCacheMu.Lock()
+	server.publicGen++
+	server.publicCacheMu.Unlock()
+	if payload, ok := server.cachedPublicDashboardResponse(); ok {
+		t.Fatalf("fast path served an entry from an older generation: %s", payload)
+	}
+	if _, err := server.cachedPublicDashboardPayload(context.Background(), 0, store.PublicDashboard{Enabled: true, Title: "published-v1"}); !errors.Is(err, errPublicDashboardChanged) {
+		t.Fatalf("stale-generation payload error = %v, want errPublicDashboardChanged", err)
+	}
+}
+
+func TestPublicAPIStopsRereadingAPublicationThatKeepsChanging(t *testing.T) {
+	server, db, _ := newUsersTestServer(t)
+	if err := db.SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "Status"}, nil, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	var builds int
+	// Every build races a save, so each attempt reads a publication that is
+	// already outdated when its payload is ready.
+	server.publicDashboardBuildFunc = func(context.Context, store.PublicDashboard) (publicDashboardResponse, error) {
+		builds++
+		server.invalidatePublicDashboardCache()
+		return publicDashboardResponse{Title: "Status", Hosts: []publicHostResponse{}}, nil
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/public/v1/dashboard", nil)
+	request.RemoteAddr = "198.51.100.60:1000"
+	recorder := httptest.NewRecorder()
+	server.publicAPI(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable || recorder.Header().Get("Retry-After") != "1" || !strings.Contains(recorder.Body.String(), "public_dashboard_changed") {
+		t.Fatalf("continuously changing publication = %d %v: %s", recorder.Code, recorder.Header(), recorder.Body.String())
+	}
+	if builds != publicDashboardReadAttempts {
+		t.Fatalf("builds = %d, want one per read attempt (%d)", builds, publicDashboardReadAttempts)
 	}
 }
 

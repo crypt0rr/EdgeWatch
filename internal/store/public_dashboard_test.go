@@ -246,6 +246,60 @@ func TestPublicDashboardDefaultsBlankTitle(t *testing.T) {
 	}
 }
 
+func TestSavePublicDashboardIfCurrentRejectsAStaleToken(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	loaded, err := s.GetPublicDashboard(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SavePublicDashboardIfCurrent(ctx, loaded.UpdatedAt, PublicDashboard{Enabled: true, Title: "Status", Introduction: "v1"}, nil, AuditEntry{Action: "public_dashboard.updated"}); err != nil {
+		t.Fatal(err)
+	}
+	published, err := s.GetPublicDashboard(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !published.UpdatedAt.After(loaded.UpdatedAt) {
+		t.Fatalf("save did not advance updated_at: %s -> %s", loaded.UpdatedAt, published.UpdatedAt)
+	}
+	err = s.SavePublicDashboardIfCurrent(ctx, loaded.UpdatedAt, PublicDashboard{Enabled: false, Title: "Stale"}, nil, AuditEntry{Action: "public_dashboard.updated"})
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale save error = %v, want ErrConflict", err)
+	}
+	current, err := s.GetPublicDashboard(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !current.Enabled || current.Title != "Status" || !current.UpdatedAt.Equal(published.UpdatedAt) {
+		t.Fatalf("stale save changed the dashboard: %#v", current)
+	}
+	var audits int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE action='public_dashboard.updated'`).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("audit rows = %d (%v), want only the accepted save", audits, err)
+	}
+
+	// Saves within one clock tick, or after the clock stepped back, still
+	// advance the token, so a stale editor cannot match a newer save.
+	future := time.Now().UTC().Add(time.Hour)
+	if _, err := s.DB.ExecContext(ctx, `UPDATE public_dashboard SET updated_at=? WHERE id=1`, future.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SavePublicDashboardIfCurrent(ctx, future, PublicDashboard{Enabled: true, Title: "After clock step"}, nil, AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	stepped, err := s.GetPublicDashboard(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stepped.UpdatedAt.After(future) {
+		t.Fatalf("updated_at after a clock step = %s, want later than %s", stepped.UpdatedAt, future)
+	}
+	if err := s.SavePublicDashboardIfCurrent(ctx, future, PublicDashboard{Title: "Stale again"}, nil, AuditEntry{}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("save with the pre-step token = %v, want ErrConflict", err)
+	}
+}
+
 func TestListLegacyPublicScansExcludesIndexedSnapshots(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

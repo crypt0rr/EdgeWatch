@@ -4,10 +4,22 @@ import { Copy, KeyRound, ShieldCheck, UserPlus, Users as UsersIcon } from 'lucid
 import { APIError, createUser, issueUserActivation, listUsers, revokeUserActivation, Role, updateUser } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
 
+const USERNAME_MAX_BYTES = 80
+
+// Mirrors the server's username rule so an invalid name is explained before
+// the request. The limit counts UTF-8 bytes, so the input's maxLength (which
+// counts UTF-16 code units) alone cannot enforce it.
+export function usernameProblem(value: string) {
+  const username = value.trim()
+  if (new TextEncoder().encode(username).length > USERNAME_MAX_BYTES) return `Usernames can use at most ${USERNAME_MAX_BYTES} bytes; accented and non-Latin characters use 2 to 4 bytes each.`
+  if (/[\p{Cc}/\\:]/u.test(username)) return 'Usernames cannot contain control characters, "/", "\\", or ":".'
+  return ''
+}
+
 export function Users() {
   const client = useQueryClient(); const users = useQuery({ queryKey: ['users'], queryFn: listUsers }); const [username, setUsername] = useState(''); const [displayName, setDisplayName] = useState(''); const [role, setRole] = useState<Role>('viewer'); const [password, setPassword] = useState(''); const [message, setMessage] = useState(''); const [error, setError] = useState(''); const [token, setToken] = useState(''); const [tokenUser, setTokenUser] = useState(''); const [prompt, setPrompt] = useState<{ action: 'toggle' | 'renew' | 'revoke'; userID: string; label: string } | null>(null)
   const create = useMutation({ mutationFn: () => createUser(username, displayName, role, password), onSuccess: value => { setUsername(''); setDisplayName(''); setPassword(''); setToken(value.activation_token); setTokenUser(value.user.username); setMessage(`Created ${value.user.username}. Copy the activation token before leaving this page.`); void client.invalidateQueries({ queryKey: ['users'] }) }, onError: err => setError(err instanceof Error ? err.message : 'Could not create user') })
-  async function submit(event: FormEvent) { event.preventDefault(); setMessage(''); setError(''); create.mutate() }
+  async function submit(event: FormEvent) { event.preventDefault(); setMessage(''); setError(''); const problem = usernameProblem(username); if (problem) { setError(problem); return } create.mutate() }
   async function toggle(user: Awaited<ReturnType<typeof listUsers>>['users'][number]) { setPrompt({ action: 'toggle', userID: user.id, label: `${user.enabled ? 'Disable' : 'Enable'} ${user.username}` }) }
   async function renew(userID: string) { setPrompt({ action: 'renew', userID, label: 'Issue activation link' }) }
   async function revoke(userID: string) { setPrompt({ action: 'revoke', userID, label: 'Revoke activation link' }) }

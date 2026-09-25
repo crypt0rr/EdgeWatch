@@ -78,17 +78,25 @@ func ValidateUserRole(role string) error {
 	return nil
 }
 
-func normalizeUsername(username string) (string, error) {
+// MaxUsernameBytes bounds a username's UTF-8 encoding. The limit counts
+// bytes, not characters, so a name with accented or non-Latin characters
+// reaches it sooner.
+const MaxUsernameBytes = 80
+
+// NormalizeUsername validates a username and returns its stored, lower-case
+// form. Handlers call it before a write so a rejected name is reported as a
+// field-level validation error instead of a failed store call.
+func NormalizeUsername(username string) (string, error) {
 	username = strings.TrimSpace(username)
 	if username == "" {
 		return "", errors.New("username cannot be empty")
 	}
-	if len(username) > 80 {
-		return "", errors.New("username must be at most 80 characters")
+	if len(username) > MaxUsernameBytes {
+		return "", fmt.Errorf("username must be at most %d bytes; accented and non-Latin characters use 2 to 4 bytes each", MaxUsernameBytes)
 	}
 	for _, r := range username {
 		if unicode.IsControl(r) || r == '/' || r == '\\' || r == ':' {
-			return "", errors.New("username contains an invalid character")
+			return "", errors.New(`username must not contain control characters, "/", "\", or ":"`)
 		}
 	}
 	// SQLite's NOCASE collation is ASCII-only. Persisting one Unicode-aware
@@ -129,7 +137,7 @@ func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
 }
 
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, error) {
-	normalized, err := normalizeUsername(username)
+	normalized, err := NormalizeUsername(username)
 	if err != nil {
 		return User{}, err
 	}
@@ -196,7 +204,7 @@ func (s *Store) createUser(ctx context.Context, u User, invite *userInviteRecord
 	if _, err := uuid.Parse(u.ID); err != nil {
 		return User{}, errors.New("user id must be a UUID")
 	}
-	username, err := normalizeUsername(u.Username)
+	username, err := NormalizeUsername(u.Username)
 	if err != nil {
 		return User{}, err
 	}
@@ -255,7 +263,7 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	if _, err := uuid.Parse(u.ID); err != nil {
 		return errors.New("user id must be a UUID")
 	}
-	username, err := normalizeUsername(u.Username)
+	username, err := NormalizeUsername(u.Username)
 	if err != nil {
 		return err
 	}
@@ -278,10 +286,10 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 		return err
 	}
 	defer tx.Rollback()
-	var currentRole, currentPasswordHash string
-	var currentEnabled int
+	var currentUsername, currentDisplayName, currentRole, currentPasswordHash string
+	var currentEnabled, currentTOTPEnabled int
 	var currentRevision int64
-	if err := tx.QueryRowContext(ctx, `SELECT role,password_hash,enabled,revision FROM users WHERE id=?`, u.ID).Scan(&currentRole, &currentPasswordHash, &currentEnabled, &currentRevision); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT username,display_name,role,password_hash,totp_enabled,enabled,revision FROM users WHERE id=?`, u.ID).Scan(&currentUsername, &currentDisplayName, &currentRole, &currentPasswordHash, &currentTOTPEnabled, &currentEnabled, &currentRevision); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
@@ -302,8 +310,16 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	if expectedRevision == 0 {
 		expectedRevision = currentRevision
 	}
-	if currentRole == u.Role && (currentEnabled != 0) == u.Enabled && currentPasswordHash == u.PasswordHash {
-		// Idempotent updates should not create misleading security transitions.
+	// An empty stored display name is presented as the username, so treat
+	// that as the effective current value.
+	if strings.TrimSpace(currentDisplayName) == "" {
+		currentDisplayName = currentUsername
+	}
+	// Idempotent updates should not create misleading audit rows, but any
+	// change to a persisted account field is audited, including a display-name
+	// change. The TOTP secret is compared through its enabled state because a
+	// save re-encrypts an unchanged secret.
+	if currentUsername == u.Username && currentDisplayName == u.DisplayName && currentRole == u.Role && (currentEnabled != 0) == u.Enabled && currentPasswordHash == u.PasswordHash && (currentTOTPEnabled != 0) == u.TOTPEnabled {
 		audit.Action = ""
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND revision=?`, u.Username, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID, expectedRevision)

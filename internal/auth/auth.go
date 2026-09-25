@@ -533,24 +533,26 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 // ActivateRequest protects one-time user activation/password-reset links with
 // the same per-source failure budget as setup and login. The token digest and
 // Argon2id hash are handled inside the store transaction; a failed attempt
-// never consumes the invite.
-func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, token, password string) error {
+// never consumes the invite. On success it returns the activated user's ID so
+// the caller can close live-update streams opened with the sessions that the
+// activation revoked.
+func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, token, password string) (string, error) {
 	source := m.sourceScopeFor(request, "activation")
 	account := "activation:" + digest(strings.TrimSpace(token))
 	if !m.allowScoped(source, account) {
 		m.auditRateLimit(ctx, "activation", request)
-		return ErrRateLimited
+		return "", ErrRateLimited
 	}
 	defer m.releaseScoped(source, account)
 	usable, checkErr := m.Store.ActivationTokenUsable(ctx, digest(strings.TrimSpace(token)), m.now())
 	if checkErr != nil {
 		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
-		return errors.New("activation could not be completed")
+		return "", errors.New("activation could not be completed")
 	}
 	if !usable {
 		m.failedScoped(source, account, "", false)
 		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
-		return errors.New("activation could not be completed")
+		return "", errors.New("activation could not be completed")
 	}
 	var hash string
 	if err := m.withArgon2(ctx, func() error {
@@ -560,20 +562,21 @@ func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, to
 	}); err != nil {
 		if errors.Is(err, ErrRateLimited) {
 			m.auditRateLimit(ctx, "activation", request)
-			return err
+			return "", err
 		}
 		m.failedScoped(source, account, "", false)
 		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
-		return err
+		return "", err
 	}
 	now := m.now()
-	if _, err := m.Store.ActivateUser(ctx, digest(token), hash, now, store.AuditEntry{Action: "user.activated", Detail: "user account activated"}); err != nil {
+	activated, err := m.Store.ActivateUser(ctx, digest(token), hash, now, store.AuditEntry{Action: "user.activated", Detail: "user account activated"})
+	if err != nil {
 		m.failedScoped(source, account, "", false)
 		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
-		return err
+		return "", err
 	}
 	m.clearScoped(source, account, "")
-	return nil
+	return activated.ID, nil
 }
 
 // LoginAs authenticates any enabled EdgeWatch user.

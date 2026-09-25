@@ -41,6 +41,24 @@ describe('user administration', () => {
     expect(writeText).toHaveBeenCalledWith('token-123')
   })
 
+  it('applies the server username rule before sending an invitation', async () => {
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Display name'), { target: { value: 'Alice' } })
+    fireEvent.change(screen.getByLabelText(/^Administrator password/), { target: { value: 'administrator-password' } })
+    for (const [username, problem] of [['corp\\alice', 'cannot contain'], ['ops:alice', 'cannot contain'], ['a/b', 'cannot contain'], ['ali\tce', 'cannot contain'], ['é'.repeat(41), 'at most 80 bytes']]) {
+      fireEvent.change(screen.getByLabelText('Username'), { target: { value: username } })
+      fireEvent.click(screen.getByRole('button', { name: 'Create activation link' }))
+      await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(problem))
+    }
+    expect(createUser).not.toHaveBeenCalled()
+
+    // 40 two-byte characters are exactly 80 bytes.
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'é'.repeat(40) } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create activation link' }))
+    await waitFor(() => expect(createUser).toHaveBeenCalledWith('é'.repeat(40), 'Alice', 'viewer', 'administrator-password'))
+  })
+
   it('surfaces invitation creation failures', async () => {
     vi.mocked(createUser).mockRejectedValueOnce(new Error('creation failed'))
     renderWithProviders(<Users />)

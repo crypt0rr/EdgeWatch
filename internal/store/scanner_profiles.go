@@ -18,6 +18,10 @@ const (
 	BuiltinNaabuProfileID = "00000000-0000-0000-0000-000000000014"
 )
 
+// errBuiltinScannerProfileImmutable rejects edits and lifecycle changes to a
+// built-in profile. It is a caller error, not a storage failure.
+var errBuiltinScannerProfileImmutable = NewValidationError(errors.New("built-in scanner profiles are immutable"))
+
 // ScannerProfileRecord is the durable, revisioned profile exposed to the
 // authenticated console. Definition is the complete effective, validated
 // profile; arguments are never written to audit records.
@@ -142,19 +146,18 @@ func ensureBuiltinScannerProfilesContext(ctx context.Context, db *sql.DB) error 
 	return tx.Commit()
 }
 
+// validateScannerProfileRecord returns only ValidationError values, so a
+// rejected name or definition stays distinguishable from a storage failure.
 func validateScannerProfileRecord(name string, definition config.ScannerProfile) error {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 100 {
-		return errors.New("scanner profile name must be 1..100 characters")
+		return NewValidationError(errors.New("scanner profile name must be 1..100 characters"))
 	}
 	if strings.ContainsAny(name, "\x00\n\r") {
-		return errors.New("scanner profile name contains invalid characters")
+		return NewValidationError(errors.New("scanner profile name contains invalid characters"))
 	}
 	definition = config.NormalizeScannerProfile(definition)
-	if err := config.ValidateScannerProfile(definition); err != nil {
-		return err
-	}
-	return nil
+	return NewValidationError(config.ValidateScannerProfile(definition))
 }
 
 func marshalProfileDefinition(definition config.ScannerProfile) ([]byte, error) {
@@ -419,7 +422,7 @@ func (s *Store) UpdateScannerProfile(ctx context.Context, id string, expectedRev
 		return ScannerProfileRecord{}, ErrConflict
 	}
 	if builtIn != 0 {
-		return ScannerProfileRecord{}, errors.New("built-in scanner profiles are immutable")
+		return ScannerProfileRecord{}, errBuiltinScannerProfileImmutable
 	}
 	next := current.Revision + 1
 	result, err := tx.ExecContext(ctx, `UPDATE scanner_profiles SET name=?,description=?,definition_json=?,revision=?,updated_by=?,updated_at=? WHERE id=? AND revision=?`, name, strings.TrimSpace(description), raw, next, actor, now.Format(time.RFC3339Nano), id, expectedRevision)
@@ -456,7 +459,7 @@ func (s *Store) SetScannerProfileArchived(ctx context.Context, id string, archiv
 		return err
 	}
 	if builtIn != 0 {
-		return errors.New("built-in scanner profiles are immutable")
+		return errBuiltinScannerProfileImmutable
 	}
 	if currentRevision != expectedRevision {
 		return ErrConflict

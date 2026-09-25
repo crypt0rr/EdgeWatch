@@ -23,12 +23,24 @@ const (
 	// scan history.
 	publicDashboardCacheTTL     = 5 * time.Second
 	publicDashboardBuildTimeout = 5 * time.Second
+	// publicDashboardReadAttempts bounds how often one anonymous request
+	// re-reads the publication after concurrent saves invalidated it.
+	publicDashboardReadAttempts = 3
 )
 
+// errPublicDashboardChanged reports that a save invalidated the publication
+// a request had read. The request reads the dashboard again rather than
+// building or returning a payload from the withdrawn state.
+var errPublicDashboardChanged = errors.New("public dashboard changed while it was loading")
+
+// publicDashboardCache holds one rendered payload. generation is the
+// publication generation it was built under; a save bumps the generation,
+// and an entry from an older generation is never served.
 type publicDashboardCache struct {
-	key       string
-	expiresAt time.Time
-	payload   []byte
+	key        string
+	generation uint64
+	expiresAt  time.Time
+	payload    []byte
 }
 
 // publicAPI is intentionally separate from /api/v1. It has no session
@@ -52,33 +64,54 @@ func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), publicDashboardBuildTimeout)
 	defer cancel()
-	dashboard, err := s.Store.GetPublicDashboard(ctx)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
-		return
-	}
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			writeError(w, http.StatusGatewayTimeout, "public_dashboard_timeout", "public status took too long to load", nil)
+	for attempt := 1; ; attempt++ {
+		// Capture the generation before the read. A save that commits after
+		// this point bumps it, so a payload from the dashboard read below can
+		// neither be cached nor returned once the save has invalidated it.
+		generation := s.publicDashboardGeneration()
+		dashboard, err := s.Store.GetPublicDashboard(ctx)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "public_dashboard", "public status could not be loaded", nil)
-		return
-	}
-	if !dashboard.Enabled {
-		writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
-		return
-	}
-	payload, err := s.cachedPublicDashboardPayload(ctx, dashboard)
-	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
-			writeError(w, http.StatusGatewayTimeout, "public_dashboard_timeout", "public status took too long to load", nil)
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				writeError(w, http.StatusGatewayTimeout, "public_dashboard_timeout", "public status took too long to load", nil)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "public_dashboard", "public status could not be loaded", nil)
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "public_dashboard", "public status could not be loaded", nil)
+		if !dashboard.Enabled {
+			writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
+			return
+		}
+		payload, err := s.cachedPublicDashboardPayload(ctx, generation, dashboard)
+		if errors.Is(err, errPublicDashboardChanged) {
+			if attempt < publicDashboardReadAttempts {
+				continue
+			}
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusServiceUnavailable, "public_dashboard_changed", "public status is being updated; try again shortly", nil)
+			return
+		}
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) {
+				writeError(w, http.StatusGatewayTimeout, "public_dashboard_timeout", "public status took too long to load", nil)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "public_dashboard", "public status could not be loaded", nil)
+			return
+		}
+		writeJSON(w, http.StatusOK, json.RawMessage(payload))
 		return
 	}
-	writeJSON(w, http.StatusOK, json.RawMessage(payload))
+}
+
+func (s *Server) publicDashboardGeneration() uint64 {
+	s.publicCacheMu.Lock()
+	defer s.publicCacheMu.Unlock()
+	return s.publicGen
 }
 
 func publicDashboardCacheKey(dashboard store.PublicDashboard) string {
@@ -89,12 +122,21 @@ func publicDashboardCacheKey(dashboard store.PublicDashboard) string {
 	return string(raw)
 }
 
-func (s *Server) cachedPublicDashboardPayload(ctx context.Context, dashboard store.PublicDashboard) ([]byte, error) {
+// cachedPublicDashboardPayload returns the rendered payload for dashboard,
+// which the caller read under generation. It returns
+// errPublicDashboardChanged as soon as a save has bumped the generation, so
+// the caller re-reads the publication instead of building, caching, or
+// returning content that the save withdrew.
+func (s *Server) cachedPublicDashboardPayload(ctx context.Context, generation uint64, dashboard store.PublicDashboard) ([]byte, error) {
 	key := publicDashboardCacheKey(dashboard)
 	for {
 		now := s.currentTime()
 		s.publicCacheMu.Lock()
-		if cached := s.publicCache; cached != nil && cached.key == key && now.Before(cached.expiresAt) {
+		if generation != s.publicGen {
+			s.publicCacheMu.Unlock()
+			return nil, errPublicDashboardChanged
+		}
+		if cached := s.publicCache; cached != nil && cached.generation == generation && cached.key == key && now.Before(cached.expiresAt) {
 			payload := append([]byte(nil), cached.payload...)
 			s.publicCacheMu.Unlock()
 			return payload, nil
@@ -108,7 +150,9 @@ func (s *Server) cachedPublicDashboardPayload(ctx context.Context, dashboard sto
 			s.publicCacheMu.Unlock()
 			select {
 			case <-building.done:
-				if building.err != nil {
+				// A build started under an older generation may have failed only
+				// because it read the withdrawn publication; do not adopt its error.
+				if building.err != nil && building.generation == generation {
 					return nil, building.err
 				}
 				// The builder either populated a matching cache or completed while
@@ -119,8 +163,7 @@ func (s *Server) cachedPublicDashboardPayload(ctx context.Context, dashboard sto
 				return nil, ctx.Err()
 			}
 		}
-		building := &publicDashboardBuild{done: make(chan struct{})}
-		generation := s.publicGen
+		building := &publicDashboardBuild{done: make(chan struct{}), generation: generation}
 		s.publicBuild = building
 		s.publicCacheMu.Unlock()
 		// Strip cancellation and deadlines so this shared work outlives a
@@ -157,7 +200,7 @@ func (s *Server) buildPublicDashboardPayload(parent context.Context, building *p
 	s.publicCacheMu.Lock()
 	building.err = err
 	if err == nil && generation == s.publicGen {
-		s.publicCache = &publicDashboardCache{key: key, expiresAt: now.Add(publicDashboardCacheTTL), payload: append([]byte(nil), payload...)}
+		s.publicCache = &publicDashboardCache{key: key, generation: generation, expiresAt: now.Add(publicDashboardCacheTTL), payload: append([]byte(nil), payload...)}
 		s.publicFailure = nil
 	} else if err != nil && generation == s.publicGen {
 		// Short negative caching prevents a broken legacy snapshot or slow store
@@ -180,11 +223,13 @@ func (s *Server) invalidatePublicDashboardCache() {
 	s.publicCacheMu.Unlock()
 }
 
+// cachedPublicDashboardResponse is the anonymous fast path. It serves only an
+// unexpired entry built under the current publication generation.
 func (s *Server) cachedPublicDashboardResponse() ([]byte, bool) {
 	now := s.currentTime()
 	s.publicCacheMu.Lock()
 	defer s.publicCacheMu.Unlock()
-	if s.publicCache == nil || !now.Before(s.publicCache.expiresAt) {
+	if s.publicCache == nil || s.publicCache.generation != s.publicGen || !now.Before(s.publicCache.expiresAt) {
 		return nil, false
 	}
 	return append([]byte(nil), s.publicCache.payload...), true
@@ -245,11 +290,15 @@ func (s *Server) allowAnonymousRequest(r *http.Request, namespace string) bool {
 	return true
 }
 
+// publicDashboardPayload replaces the whole publication. UpdatedAt is the
+// concurrency token: the updated_at value from the GET response the editor
+// loaded. A save based on an older value is rejected with 409.
 type publicDashboardPayload struct {
 	Enabled      bool                         `json:"enabled"`
 	Title        string                       `json:"title"`
 	Introduction string                       `json:"introduction"`
 	Hosts        []publicDashboardHostPayload `json:"hosts"`
+	UpdatedAt    *string                      `json:"updated_at"`
 }
 
 // publicDashboardHostPayload contains only the writable host selection. The
@@ -278,6 +327,15 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 	}
 	var input publicDashboardPayload
 	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.UpdatedAt == nil || strings.TrimSpace(*input.UpdatedAt) == "" {
+		writeError(w, http.StatusBadRequest, "revision_required", "the updated_at value of the loaded public status is required", map[string]string{"updated_at": "send the updated_at value from the public status you loaded"})
+		return
+	}
+	expectedUpdatedAt, err := time.Parse(time.RFC3339Nano, strings.TrimSpace(*input.UpdatedAt))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "validation_failed", "updated_at must be an RFC 3339 timestamp", map[string]string{"updated_at": "send the updated_at value from the public status you loaded"})
 		return
 	}
 	input.Title = strings.TrimSpace(input.Title)
@@ -320,8 +378,12 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 		hosts = append(hosts, selection)
 	}
 	dashboard.Enabled, dashboard.Title, dashboard.Introduction = input.Enabled, input.Title, input.Introduction
-	if err := s.Store.SavePublicDashboard(r.Context(), dashboard, hosts, store.AuditEntry{Action: "public_dashboard.updated", Detail: fmt.Sprintf("dashboard updated by %s; enabled=%t; hosts=%d", session.Username, input.Enabled, len(hosts)), ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+	if err := s.Store.SavePublicDashboardIfCurrent(r.Context(), expectedUpdatedAt, dashboard, hosts, store.AuditEntry{Action: "public_dashboard.updated", Detail: fmt.Sprintf("dashboard updated by %s; enabled=%t; hosts=%d", session.Username, input.Enabled, len(hosts)), ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
 		if s.writeAuditUnavailable(w, err, "public_dashboard.updated") {
+			return
+		}
+		if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "conflict", "public status was changed by another administrator; reload before saving", nil)
 			return
 		}
 		s.writeInternalError(w, r, "save_failed", err)

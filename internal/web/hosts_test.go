@@ -152,6 +152,25 @@ func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testi
 	if len(listResponse.Hosts) != 1 || listResponse.Hosts[0].OpenPorts != 2 {
 		t.Fatalf("accepted baseline list = %#v", listResponse.Hosts)
 	}
+	// The accepted incident makes the baseline modified, so searches use the
+	// projected overlay. One- and two-character queries take its LIKE path and
+	// must match like longer queries do. 44 only matches the accepted port.
+	for _, query := range []string{"2", "22", "44"} {
+		searchRecorder := httptest.NewRecorder()
+		server.jobBaselineHosts(searchRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts?q="+query, nil), record.ID)
+		if searchRecorder.Code != http.StatusOK {
+			t.Fatalf("baseline host search q=%s status %d: %s", query, searchRecorder.Code, searchRecorder.Body.String())
+		}
+		var searchResponse struct {
+			Hosts []hostSummary `json:"hosts"`
+		}
+		if err := json.Unmarshal(searchRecorder.Body.Bytes(), &searchResponse); err != nil {
+			t.Fatal(err)
+		}
+		if len(searchResponse.Hosts) != 1 || searchResponse.Hosts[0].Address != "198.51.100.1" {
+			t.Fatalf("baseline host search q=%s = %#v", query, searchResponse.Hosts)
+		}
+	}
 
 	detailRecorder := httptest.NewRecorder()
 	server.jobBaselineHost(detailRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts/198.51.100.1", nil), record.ID, "198.51.100.1")

@@ -128,7 +128,9 @@ func (s *Store) createManagedNotificationWithAuditsAndSelection(ctx context.Cont
 // still nil to the supplied global destination set. A nil slice means that
 // no destinations existed, so it is deliberately converted to a non-nil
 // empty selection. The operation appends a job revision for each changed job
-// but leaves its security hash and runtime comparison state untouched.
+// without changing its effective scope: when normalization canonicalizes a
+// legacy port spelling, the stored baseline and cycle scope hashes move from
+// the legacy alias to the canonical hash in the same transaction.
 func (s *Store) MaterializeLegacyNotificationSelections(ctx context.Context, selection []string) (int, error) {
 	selection = cloneNotificationSelection(selection)
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -186,6 +188,12 @@ func materializeLegacyNotificationSelectionsTx(ctx context.Context, tx *sql.Tx, 
 
 	now := time.Now().UTC()
 	for _, item := range legacy {
+		// The rewrite stores canonical port expressions, which removes the
+		// legacy scope hash alias. Move matching baseline and cycle hashes to
+		// the canonical hash first, as an equivalent job edit does.
+		if err := migrateLegacyScopeHashTx(ctx, tx, item.id, item.job.LegacySecurityHash(), item.job.SecurityHash()); err != nil {
+			return 0, err
+		}
 		item.job.NotificationDestinations = cloneNotificationSelection(selection)
 		item.job = config.NormalizeJob(item.job)
 		raw, err := marshalJob(item.job)

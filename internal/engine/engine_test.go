@@ -114,6 +114,87 @@ func TestManagedScanMigratesLegacyPortHashWithoutResettingBaseline(t *testing.T)
 	}
 }
 
+func TestLegacyNotificationMaterializationKeepsNewPortIncidentOpen(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	created, err := db.CreateJob(ctx, config.Job{
+		Name: "legacy-notification-managed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
+		TCP:      &config.Protocol{Ports: "1-2", Mode: "connect"},
+		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyDefinition := created.Job
+	legacyDefinition.TCP.Ports = "2, 1"
+	legacyDefinition.NotificationDestinations = nil
+	legacyHash := config.NormalizeStoredJob(legacyDefinition).LegacySecurityHash()
+	definition, err := json.Marshal(legacyDefinition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE jobs SET definition_json=? WHERE id=?`, definition, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE job_revisions SET definition_json=?,security_hash=? WHERE job_id=? AND revision=?`, definition, legacyHash, created.ID, created.Revision); err != nil {
+		t.Fatal(err)
+	}
+	baseline := snapshotWithOpenPorts(1)
+	if _, err := db.UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &baseline
+		state.BaselineScanID = "legacy-baseline"
+		state.BaselineConfigHash = legacyHash
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Freezing the legacy nil selection only changes routing. It must not turn
+	// the next scan of the same effective scope into a scope change.
+	if count, err := db.MaterializeLegacyNotificationSelections(ctx, []string{}); err != nil || count != 1 {
+		t.Fatalf("materialized job count = %d, %v", count, err)
+	}
+	current, err := db.GetJob(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e := Engine{Store: db}
+	for i := 1; i <= 2; i++ {
+		scan := model.Scan{
+			ID: fmt.Sprintf("materialized-scan-%d", i), JobID: created.ID, Job: current.Job.Name, JobRevision: current.Revision,
+			StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "success",
+			ConfigHash: current.Job.SecurityHash(), Snapshot: snapshotWithOpenPorts(1, 2),
+		}
+		events, err := e.FinalizeManagedScan(ctx, created.ID, current.Job, &scan, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, event := range events {
+			if event.Type == "baseline-updated" || event.Type == "changes-recovered" {
+				t.Fatalf("scan %d after materialization emitted %s: %#v", i, event.Type, events)
+			}
+		}
+	}
+	state, err := db.RuntimeState(ctx, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Baseline == nil || state.BaselineScanID != "legacy-baseline" || state.BaselineConfigHash != current.Job.SecurityHash() {
+		t.Fatalf("materialization moved the baseline instead of preserving it: %#v", state)
+	}
+	if len(state.Incidents) != 1 {
+		t.Fatalf("newly opened port incident = %#v, want one open incident", state.Incidents)
+	}
+	for _, incident := range state.Incidents {
+		if incident.Change.Port != 2 || incident.Change.New != "open" {
+			t.Fatalf("open incident = %#v, want tcp/2 opened", incident)
+		}
+	}
+}
+
 func snapshotWithOpenPorts(ports ...int) model.Snapshot {
 	s := model.Snapshot{Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}}}
 	unit := model.Unit{Target: "192.0.2.1", Protocol: "tcp"}

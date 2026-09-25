@@ -105,7 +105,7 @@ func (s *Store) ListBaselineHostsPage(ctx context.Context, jobID, query, protoco
 		var predicate string
 		var searchArg any
 		if len([]rune(filter.searchText)) < 3 {
-			predicate = `EXISTS (SELECT 1 FROM baseline_host_search WHERE baseline_host_search.content LIKE ? ESCAPE '\\' AND baseline_host_search.job_id=h.job_id AND baseline_host_search.address=h.address)`
+			predicate = `EXISTS (SELECT 1 FROM baseline_host_search WHERE baseline_host_search.content LIKE ? ESCAPE '\' AND baseline_host_search.job_id=h.job_id AND baseline_host_search.address=h.address)`
 			searchArg = "%" + escapeLikePattern(filter.searchText) + "%"
 		} else {
 			predicate = `EXISTS (SELECT 1 FROM baseline_host_search WHERE baseline_host_search MATCH ? AND baseline_host_search.job_id=h.job_id AND baseline_host_search.address=h.address)`

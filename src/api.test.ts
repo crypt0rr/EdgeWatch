@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setup, setupStatus, suppressIncident, updateNotificationDestination, updateUser } from './api'
 import * as apiRoutes from './api'
+import { getDisplayTimeZone, setDisplayTimeZone } from './format'
 
 afterEach(() => {
   vi.restoreAllMocks()
@@ -245,6 +246,22 @@ describe('authentication and public API contracts', () => {
     })
     vi.stubGlobal('fetch', events)
     await apiRoutes.listEvents()
+  })
+})
+
+describe('session timezone contract', () => {
+  afterEach(() => setDisplayTimeZone(undefined))
+
+  it('applies the deployment timezone from the signed-in session', async () => {
+    const session = { user_id: 'u', username: 'admin', role: 'administrator', permissions: [], csrf_token: 'csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } }
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ ...session, timezone: 'Europe/Amsterdam' }), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+    await expect(apiRoutes.getSession()).resolves.toMatchObject({ timezone: 'Europe/Amsterdam' })
+    expect(getDisplayTimeZone()).toBe('Europe/Amsterdam')
+
+    // An older server or an omitted setting falls back to the browser timezone.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(session), { status: 200, headers: { 'Content-Type': 'application/json' } })))
+    await apiRoutes.getSession()
+    expect(getDisplayTimeZone()).toBeUndefined()
   })
 })
 

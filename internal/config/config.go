@@ -45,6 +45,7 @@ type Config struct {
 	Version       int           `yaml:"version"`
 	Database      string        `yaml:"database"`
 	Retention     Duration      `yaml:"retention"`
+	Timezone      string        `yaml:"timezone"`
 	Scheduler     Scheduler     `yaml:"scheduler"`
 	Scanner       ScannerConfig `yaml:"scanner"`
 	Log           LogConfig     `yaml:"log"`
@@ -543,6 +544,7 @@ func applyDefaults(c *Config) {
 	if c.Retention == 0 && !c.retentionSet {
 		c.Retention = Duration(90 * 24 * time.Hour)
 	}
+	c.Timezone = strings.TrimSpace(c.Timezone)
 	if c.Scheduler.MaxConcurrent == 0 && !c.Scheduler.maxConcurrentSet {
 		c.Scheduler.MaxConcurrent = 1
 	}
@@ -695,6 +697,28 @@ func (c Config) LogLevel() string {
 		return "info"
 	}
 	return level
+}
+
+// Location resolves the optional IANA deployment timezone. When it is set,
+// daemon log timestamps, CLI status times, notification text, the web console,
+// and the default timezone of new jobs follow it. It returns a nil location and
+// no error when timezone is omitted, so callers keep their previous behavior:
+// the process timezone (UTC in the container image) on the host and each
+// browser's own timezone in the web console. "Local" is rejected because it
+// names the host's zone rather than a portable IANA zone the console can render.
+func (c Config) Location() (*time.Location, error) {
+	name := strings.TrimSpace(c.Timezone)
+	if name == "" {
+		return nil, nil
+	}
+	if strings.EqualFold(name, "Local") {
+		return nil, fmt.Errorf("timezone must be an IANA time zone name such as Europe/Amsterdam, not %q", name)
+	}
+	location, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("timezone must be an IANA time zone name such as Europe/Amsterdam: %w", err)
+	}
+	return location, nil
 }
 
 func (c Config) Validate() error {
@@ -855,6 +879,9 @@ func (c Config) ValidateDeployment() error {
 	}
 	if c.Retention.Value() < 24*time.Hour {
 		return fmt.Errorf("retention must be at least 24h")
+	}
+	if _, err := c.Location(); err != nil {
+		return err
 	}
 	if c.Scheduler.MaxConcurrent < 1 || c.Scheduler.MaxConcurrent > 64 {
 		return fmt.Errorf("max_concurrent_scans must be between 1 and 64")

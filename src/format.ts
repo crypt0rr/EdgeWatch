@@ -16,3 +16,46 @@ export function formatRetention(value: string): string {
   if (hours > 0) parts.push(`${hours} hour${hours === 1 ? '' : 's'}`)
   return parts.join(' ') || '0 hours'
 }
+
+type DateInput = string | number | Date
+
+let displayTimeZone: string | undefined
+
+function supportedTimeZone(zone: string) {
+  try {
+    new Intl.DateTimeFormat(undefined, { timeZone: zone })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Render console timestamps in the deployment timezone from config.yaml. An
+ * omitted value, or one this browser cannot render, keeps the browser's own
+ * timezone so the console still shows a valid local time.
+ */
+export function setDisplayTimeZone(value?: string | null) {
+  const zone = value?.trim()
+  displayTimeZone = zone && supportedTimeZone(zone) ? zone : undefined
+}
+
+/** The configured deployment timezone, when one is in effect. */
+export function getDisplayTimeZone(): string | undefined {
+  return displayTimeZone
+}
+
+/** Date and time in the deployment timezone (or the browser's own). */
+export function formatDateTime(value: DateInput, options: Intl.DateTimeFormatOptions = {}): string {
+  return new Date(value).toLocaleString(undefined, { ...options, timeZone: displayTimeZone })
+}
+
+/** Calendar date in the deployment timezone (or the browser's own). */
+export function formatDate(value: DateInput, options: Intl.DateTimeFormatOptions = {}): string {
+  return new Date(value).toLocaleDateString(undefined, { ...options, timeZone: displayTimeZone })
+}
+
+/** Time of day in the deployment timezone (or the browser's own). */
+export function formatTime(value: DateInput, options: Intl.DateTimeFormatOptions = {}): string {
+  return new Date(value).toLocaleTimeString(undefined, { ...options, timeZone: displayTimeZone })
+}

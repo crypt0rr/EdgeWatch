@@ -6,6 +6,7 @@ import { listHosts } from '../api'
 import { Pagination } from '../components/Pagination'
 import type { GlobalHostSummary } from '../types'
 import { useDebouncedValue } from '../useDebouncedValue'
+import { formatDateTime } from '../format'
 
 function addressKind(address: string) {
   return address.includes(':') ? 'IPv6' : 'IPv4'
@@ -27,7 +28,7 @@ function visibility(address: string) {
 
 function HostRow({ host }: { host: GlobalHostSummary }) {
   const source = host.source_targets?.length ? host.source_targets.join(', ') : host.dns_names?.join(', ')
-  const scannedAt = host.scanned_at ? new Date(host.scanned_at).toLocaleString() : 'Unknown time'
+  const scannedAt = host.scanned_at ? formatDateTime(host.scanned_at) : 'Unknown time'
   return <Link className="host-row global-host-row" to={`/scans/${encodeURIComponent(host.scan_id)}/hosts/${encodeURIComponent(host.address)}`}>
     <span className="host-address"><strong>{host.address}</strong><span className="host-badges"><span className="pill blue">{host.address_family ?? addressKind(host.address)}</span><span className={visibility(host.address) === 'Public' ? 'pill green' : 'pill gray'}>{visibility(host.address)}</span>{host.legacy && <span className="pill amber">Legacy detail</span>}</span></span>
     <span className="host-source"><strong>{host.job || 'Legacy scan'}</strong><small>{scannedAt}</small><span>{source || 'Configured target'}</span></span>

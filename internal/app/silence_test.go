@@ -5,6 +5,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -397,5 +398,63 @@ func TestJobSilenceWatchdogHonorsFutureEligibility(t *testing.T) {
 	}
 	if page.Total != 1 || page.Items[0].Type != "job-silent" {
 		t.Fatalf("resume grace did not alert at the expected deadline: %#v", page.Items)
+	}
+}
+
+func TestJobSilenceAlertTextFollowsDeploymentTimezone(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	job := config.NormalizeJob(config.Job{
+		Name:     "silent-local-time",
+		Schedule: "0 * * * *",
+		Timezone: "UTC",
+		Targets:  []string{"192.0.2.4"},
+		TCP:      &config.Protocol{Ports: "443", Mode: "connect"},
+	})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, time.January, 1, 4, 30, 0, 0, time.UTC)
+	created := now.Add(-3 * time.Hour)
+	if _, err := db.DB.ExecContext(ctx, `UPDATE jobs SET created_at=? WHERE id=?`, created.Format(time.RFC3339Nano), record.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=? WHERE job_id=?`, created.Format(time.RFC3339Nano), record.ID); err != nil {
+		t.Fatal(err)
+	}
+	a := &App{Config: &config.Config{Timezone: "Europe/Amsterdam"}, Store: db, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), clock: func() time.Time { return now }}
+	a.checkJobSilence(ctx, now)
+
+	page, err := db.ListJobEventsPage(ctx, record.ID, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Total != 1 || len(page.Items) != 1 {
+		t.Fatalf("silence events = %#v (total %d), want one", page.Items, page.Total)
+	}
+	// 01:30 UTC is 02:30 in Amsterdam during January (CET, +01:00).
+	if got := page.Items[0].Message; !strings.Contains(got, "last success 2026-01-01T02:30:00+01:00") {
+		t.Fatalf("silence alert text = %q, want the last success in the configured timezone", got)
+	}
+}
+
+func TestDisplayLocationDefaultsToUTC(t *testing.T) {
+	for name, a := range map[string]*App{
+		"no config":        {},
+		"omitted timezone": {Config: &config.Config{}},
+		"invalid timezone": {Config: &config.Config{Timezone: "Not/AZone"}},
+	} {
+		if location := a.displayLocation(); location != time.UTC {
+			t.Fatalf("%s: display location = %v, want UTC", name, location)
+		}
+	}
+	a := &App{Config: &config.Config{Timezone: "Asia/Kathmandu"}}
+	if location := a.displayLocation(); location.String() != "Asia/Kathmandu" {
+		t.Fatalf("configured display location = %v", location)
 	}
 }

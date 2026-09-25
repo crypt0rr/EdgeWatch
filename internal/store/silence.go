@@ -19,11 +19,14 @@ import (
 //
 // createdAt is used as the reference point for jobs that have never completed
 // a scan. A zero reference means the job is not old enough to evaluate yet.
+// The location of now selects the timezone of the human-readable last-success
+// time in the alert text; persisted timestamps remain UTC.
 // The returned bool reports whether a new event was committed.
 func (s *Store) RecordJobSilenceAlert(ctx context.Context, jobID, job string, createdAt, now time.Time, threshold time.Duration, destinations []string) (model.Event, bool, error) {
 	if jobID == "" || threshold <= 0 {
 		return model.Event{}, false, nil
 	}
+	display := now.Location()
 	now = now.UTC()
 	createdAt = createdAt.UTC()
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -43,7 +46,7 @@ func (s *Store) RecordJobSilenceAlert(ctx context.Context, jobID, job string, cr
 
 	message := fmt.Sprintf("No successful scan completed in %s", humanSilenceDuration(threshold))
 	if !lastReference.IsZero() {
-		message += "; last success " + lastReference.Format(time.RFC3339)
+		message += "; last success " + lastReference.In(display).Format(time.RFC3339)
 	}
 	event := model.Event{
 		Type:      "job-silent",

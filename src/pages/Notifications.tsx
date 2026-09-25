@@ -13,6 +13,7 @@ import {
   getSession,
 } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
+import { formatDateTime } from '../format'
 
 type EditState = {
   id: string
@@ -268,5 +269,5 @@ function DeliveryHealth({ destination }: { destination: NotificationDestination 
 
 function formatDeliveryTime(value: string) {
   const date = new Date(value)
-  return Number.isNaN(date.getTime()) ? 'unknown time' : date.toLocaleString()
+  return Number.isNaN(date.getTime()) ? 'unknown time' : formatDateTime(date)
 }

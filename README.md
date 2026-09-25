@@ -247,6 +247,7 @@ validated schema.
 | Configuration | Managed in | Purpose |
 | --- | --- | --- |
 | database, retention | YAML | SQLite location and history retention. |
+| timezone | YAML | Optional IANA timezone for log, CLI, notification, and console times, and the default for new jobs. |
 | web.listen, web.allowed_hosts, web.trusted_proxies, web.forwarded_header | YAML | Loopback listener, approved proxy host names, trusted proxy networks, and the single forwarding header used for client IPs. |
 | scheduler.* | YAML | Concurrent scans and probe budgets. |
 | scanner.target_exclusions | YAML | Addresses that may never be scanned. |
@@ -261,6 +262,12 @@ recreated and reviewed explicitly in the console.
 
 Important defaults:
 
+- `timezone` is omitted by default: the daemon and CLI keep the process
+  timezone (UTC in the container image), and each signed-in console shows its
+  browser's timezone. Set it to an IANA name such as `Europe/Amsterdam` to use
+  one timezone everywhere. The public status page keeps the visitor's browser
+  timezone and never receives the configured value. Invalid names stop
+  startup; host recovery commands ignore them.
 - The web listener defaults to 127.0.0.1:8080; non-loopback listeners are
   rejected.
 - Requests using a proxy or tunnel host must match `web.allowed_hosts`; foreign
@@ -329,7 +336,8 @@ phase, heartbeat, completed probes, ports found, and the last sanitized output.
 Jobs accept individual IP addresses, CIDRs, and DNS names. DNS names remain
 logical targets while each resolved effective address is shown separately in
 host evidence. Schedules use five-field cron syntax in the selected IANA
-timezone. New jobs receive an optional 30-minute schedule-offset suggestion
+timezone. New jobs default to the deployment `timezone` from config.yaml, or to
+the browser's timezone when it is omitted. New jobs receive an optional 30-minute schedule-offset suggestion
 when another active job is nearby; the administrator can keep concurrent times.
 
 Choose how many successful samples establish a baseline and how many matching

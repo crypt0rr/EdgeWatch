@@ -63,6 +63,33 @@ func TestNormalizedConfigIncludesDeploymentAndLegacyJobMetadata(t *testing.T) {
 	}
 }
 
+func TestDeploymentTimezoneControlsCLIStatusTimes(t *testing.T) {
+	cfg := &config.Config{Timezone: "Europe/Amsterdam"}
+	if value := normalizedConfig(cfg); value["timezone"] != "Europe/Amsterdam" {
+		t.Fatalf("normalized timezone = %#v", value["timezone"])
+	}
+	display := deploymentLocation(cfg)
+	if display == nil || display.String() != "Europe/Amsterdam" {
+		t.Fatalf("deployment location = %v", display)
+	}
+	finished := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	if got := statusTime(finished, display); got != "2026-07-01T12:00:00+02:00" {
+		t.Fatalf("configured status time = %q", got)
+	}
+	// Without a deployment timezone the CLI keeps the stored offset.
+	if got := statusTime(finished, deploymentLocation(&config.Config{})); got != "2026-07-01T10:00:00Z" {
+		t.Fatalf("unconfigured status time = %q", got)
+	}
+	// Recovery loaders skip deployment validation, so an invalid zone must fall
+	// back instead of failing host-side status and history commands.
+	if location := deploymentLocation(&config.Config{Timezone: "Not/AZone"}); location != nil {
+		t.Fatalf("invalid timezone resolved to %v", location)
+	}
+	if location := deploymentLocation(nil); location != nil {
+		t.Fatalf("nil config resolved to %v", location)
+	}
+}
+
 func TestRunVersionHelpAndConfigValidation(t *testing.T) {
 	if err := run([]string{"version"}); err != nil {
 		t.Fatalf("version: %v", err)
@@ -261,7 +288,7 @@ func TestRunStatusHistoryAndBaselineForManagedJob(t *testing.T) {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(dir, "config.yaml")
-	contents := "database: " + database + "\njobs:\n  - name: legacy\n    schedule: \"0 * * * *\"\n    timezone: UTC\n    targets: [127.0.0.2]\n    tcp:\n      ports: \"1\"\n      mode: connect\n"
+	contents := "database: " + database + "\ntimezone: Europe/Amsterdam\njobs:\n  - name: legacy\n    schedule: \"0 * * * *\"\n    timezone: UTC\n    targets: [127.0.0.2]\n    tcp:\n      ports: \"1\"\n      mode: connect\n"
 	if err := os.WriteFile(configPath, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
 	}

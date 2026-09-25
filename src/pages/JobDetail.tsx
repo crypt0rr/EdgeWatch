@@ -36,6 +36,7 @@ import { PortScopeDetails } from '../components/PortScopeDetails'
 import { SurfaceUnitList } from '../components/SurfaceUnitList'
 import type { WorkEstimate } from '../types'
 import { baselinePresentation } from '../baseline'
+import { formatDateTime } from '../format'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 
@@ -332,7 +333,7 @@ export function JobDetail() {
               {value.archived ? 'Archived' : value.enabled ? 'Scheduled' : 'Paused'}
             </span>
           </div>
-          <p className="muted">Revision {value.revision} · Updated {new Date(value.updated_at).toLocaleString()}</p>
+          <p className="muted">Revision {value.revision} · Updated {formatDateTime(value.updated_at)}</p>
         </div>
         {canOperate && <div className="heading-actions">
           <button className="button secondary" onClick={run} disabled={value.archived || !!actionBusy}>
@@ -445,7 +446,7 @@ export function JobDetail() {
           {latest.isLoading ? <div className="skeleton-list" /> : latest.error ? <div className="error-card" role="alert">Could not load the latest successful scan.</div> : latest.data?.scan ? (
             <>
               <div className="latest-scan-meta">
-                <div><strong>{new Date(latest.data.scan.finished_at).toLocaleString()}</strong><span className="muted">Scan {latest.data.scan.id.slice(0, 8)}</span></div>
+                <div><strong>{formatDateTime(latest.data.scan.finished_at)}</strong><span className="muted">Scan {latest.data.scan.id.slice(0, 8)}</span></div>
                 <Link className="button ghost" to={`/jobs/${id}/scans/${encodeURIComponent(latest.data.scan.id)}`}>Open scan details →</Link>
               </div>
               <div className="overview-results">
@@ -483,7 +484,7 @@ export function JobDetail() {
                   >
                     <span className={scan.status === 'success' ? 'activity-dot success' : 'activity-dot fail'} />
                     <div className="scan-row-copy">
-                      <strong>{new Date(scan.finished_at).toLocaleString()}</strong>
+                      <strong>{formatDateTime(scan.finished_at)}</strong>
                       <span>
                         {scan.status === 'success'
                           ? 'Completed successfully · Open results to inspect the snapshot'

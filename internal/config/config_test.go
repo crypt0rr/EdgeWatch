@@ -180,6 +180,58 @@ func TestLogLevelValidation(t *testing.T) {
 	}
 }
 
+func TestDeploymentTimezoneValidation(t *testing.T) {
+	base := Config{Version: 1, Database: "db", Retention: Duration(24 * time.Hour), Scheduler: Scheduler{MaxConcurrent: 1}, Web: Web{Listen: "127.0.0.1:8080"}}
+	location, err := base.Location()
+	if err != nil || location != nil {
+		t.Fatalf("omitted timezone resolved to %v, %v; want nil location and no error", location, err)
+	}
+	for _, name := range []string{"UTC", "Europe/Amsterdam", " America/New_York "} {
+		base.Timezone = name
+		if err := base.ValidateDeployment(); err != nil {
+			t.Fatalf("timezone %q rejected: %v", name, err)
+		}
+		location, err := base.Location()
+		if err != nil || location == nil || location.String() != strings.TrimSpace(name) {
+			t.Fatalf("timezone %q resolved to %v, %v", name, location, err)
+		}
+	}
+	for _, name := range []string{"Local", "local", "Mars/Olympus", "../etc/passwd", "/etc/localtime"} {
+		base.Timezone = name
+		if err := base.ValidateDeployment(); err == nil || !strings.Contains(err.Error(), "IANA time zone") {
+			t.Fatalf("invalid timezone %q was accepted: %v", name, err)
+		}
+	}
+}
+
+func TestLoadTrimsDeploymentTimezoneAndRejectsInvalidZones(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	write := func(timezone string) {
+		t.Helper()
+		contents := "database: " + filepath.Join(dir, "db.sqlite") + "\ntimezone: \"" + timezone + "\"\n"
+		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(" Europe/Amsterdam ")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("valid timezone prevented deployment load: %v", err)
+	}
+	if cfg.Timezone != "Europe/Amsterdam" {
+		t.Fatalf("timezone = %q, want trimmed Europe/Amsterdam", cfg.Timezone)
+	}
+	write("Not/AZone")
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "timezone") {
+		t.Fatalf("invalid timezone was accepted by Load: %v", err)
+	}
+	// Host recovery commands must keep working when monitor settings are broken.
+	if _, err := LoadForAdmin(path); err != nil {
+		t.Fatalf("admin loader rejected an invalid display timezone: %v", err)
+	}
+}
+
 func TestSchedulerOmissionDefaultsRemainCompatible(t *testing.T) {
 	var scheduler Scheduler
 	if err := yaml.Unmarshal([]byte("max_probe_count: 0\n"), &scheduler); err != nil {

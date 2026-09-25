@@ -498,7 +498,8 @@ CREATE TABLE IF NOT EXISTS restore_epochs (
 // cannot leave the destination half-restored. The quarantine table is additive
 // and is also created by the next normal schema migration; creating it here
 // keeps older backup schemas safe without running application migrations in a
-// host recovery command.
+// host recovery command. The same transaction also clears the copied sessions
+// and lease rows, so Restore and DryRunRestore sanitize the copy identically.
 func applyRestoreDeliveryPolicy(ctx context.Context, path string, policy PendingDeliveryPolicy, epoch string, restoredAt time.Time) (int, error) {
 	staged, err := OpenExistingContext(ctx, path)
 	if err != nil {
@@ -573,6 +574,9 @@ SELECT ?,destination,payload_json,attempts,` + deferrals + `,next_at,last_error,
 			return 0, fmt.Errorf("invalidate restored sessions: %w", err)
 		}
 	}
+	if err := clearRestoredLeasesTx(ctx, tx); err != nil {
+		return 0, err
+	}
 	if err := insertRestoreAuditTx(ctx, tx, policy, pending, epoch, restoredAt); err != nil {
 		return 0, err
 	}
@@ -594,6 +598,34 @@ SELECT ?,destination,payload_json,attempts,` + deferrals + `,next_at,last_error,
 		return 0, fmt.Errorf("sync staged restore database: %w", err)
 	}
 	return pending, nil
+}
+
+// clearRestoredLeasesTx removes the daemon lease and the scan leases copied
+// from the backup. A backup taken from a running daemon carries that daemon's
+// fresh heartbeat, but the process that wrote it is attached to the source
+// database, not to the staged copy, and nothing else can have the private
+// staged copy open. Keeping the copied rows would make the restored daemon
+// wait out the old heartbeat, make a repeat restore see a live daemon on a
+// stopped destination, and keep jobs busy until the copied scan leases expire.
+// The destination's own daemon lease is checked separately before and after
+// staging, so a live destination is still refused.
+func clearRestoredLeasesTx(ctx context.Context, tx *sql.Tx) error {
+	for _, lease := range []struct{ table, query string }{
+		{table: "daemon_lease", query: `DELETE FROM daemon_lease`},
+		{table: "job_leases", query: `DELETE FROM job_leases`},
+	} {
+		exists, err := tableExistsTx(ctx, tx, lease.table)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, lease.query); err != nil {
+			return fmt.Errorf("clear restored %s: %w", lease.table, err)
+		}
+	}
+	return nil
 }
 
 func tableExistsTx(ctx context.Context, tx *sql.Tx, table string) (bool, error) {

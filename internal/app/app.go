@@ -529,7 +529,8 @@ func (a *App) recoverBackgroundPanic(name string) {
 
 // StartManagedRun accepts a web-triggered managed scan and tracks it in the
 // same wait group as scheduled work. The callback runs after the scan has
-// reached a terminal state (or could not be started).
+// reached a terminal state (or could not be started) and the job's run
+// reservation is released, so the callback may start the next run.
 func (a *App) StartManagedRun(id string, done func(model.Scan, []model.Event, error)) error {
 	reservation := scanner.NewID(time.Now().UTC())
 	if _, loaded := a.managedReservations.LoadOrStore(id, reservation); loaded {
@@ -556,26 +557,32 @@ func (a *App) StartManagedRun(id string, done func(model.Scan, []model.Event, er
 	a.wg.Add(1)
 	a.runMu.Unlock()
 	go func() {
-		defer a.managedReservations.Delete(id)
 		defer a.wg.Done()
+		// Each release compares the stored value, so this goroutine can never
+		// remove a reservation that a newer run made after the early release
+		// below. The deferred release covers a panic before that point.
+		defer a.managedReservations.CompareAndDelete(id, reservation)
 		defer a.recoverBackgroundPanic("managed-scan")
+		finish := func(scan model.Scan, events []model.Event, err error) {
+			// The run has returned, so it no longer holds the job lease.
+			// Release the reservation before done: the web callback broadcasts
+			// scan.completed, and the console then lets the operator start the
+			// next run at once.
+			a.managedReservations.CompareAndDelete(id, reservation)
+			if done != nil {
+				done(scan, events, err)
+			}
+		}
 		latest, err := a.Store.GetJob(ctx, id)
 		if err != nil {
-			if done != nil {
-				done(model.Scan{}, nil, err)
-			}
+			finish(model.Scan{}, nil, err)
 			return
 		}
 		if latest.Archived {
-			if done != nil {
-				done(model.Scan{}, nil, errors.New("archived jobs cannot run"))
-			}
+			finish(model.Scan{}, nil, errors.New("archived jobs cannot run"))
 			return
 		}
-		scan, events, runErr := a.RunJobRecord(ctx, latest)
-		if done != nil {
-			done(scan, events, runErr)
-		}
+		finish(a.RunJobRecord(ctx, latest))
 	}()
 	return nil
 }

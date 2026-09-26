@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,7 +10,7 @@ import (
 
 func TestRecordJobSilenceAlertPersistsEventAndOutboxAtomically(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +56,7 @@ func TestRecordJobSilenceAlertPersistsEventAndOutboxAtomically(t *testing.T) {
 
 func TestRecordJobSilenceAlertSkipsRecentSuccess(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

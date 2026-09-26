@@ -12,6 +12,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestNewRejectsUnsafeConfiguredSecretFiles(t *testing.T) {
@@ -60,7 +61,7 @@ func TestNewRejectsUnsafeConfiguredSecretFiles(t *testing.T) {
 }
 
 func TestNewRejectsMissingExplicitNotificationKey(t *testing.T) {
-	database, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	database, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

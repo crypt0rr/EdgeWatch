@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func snapshot(state string) model.Snapshot {
@@ -55,7 +55,7 @@ func TestEquivalentPortCanonicalizationDoesNotInvalidateExistingBaseline(t *test
 
 func TestManagedScanMigratesLegacyPortHashWithoutResettingBaseline(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestManagedScanMigratesLegacyPortHashWithoutResettingBaseline(t *testing.T)
 
 func TestLegacyNotificationMaterializationKeepsNewPortIncidentOpen(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +211,7 @@ func scan(id string, s model.Snapshot) model.Scan {
 
 func TestBaselineChangeAndRecoveryConfirmations(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestBaselineChangeAndRecoveryConfirmations(t *testing.T) {
 
 func TestTotalLossScanRequiresConfirmationBeforeOpeningIncidents(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -475,7 +475,7 @@ func TestConfirmedTotalLossResetsOnlyForNewEvidence(t *testing.T) {
 
 func TestGradualPortReductionBypassesTotalLossGuard(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,7 +500,7 @@ func TestGradualPortReductionBypassesTotalLossGuard(t *testing.T) {
 
 func TestSuppressedIncidentReopensAfterOneSuccessfulScan(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -623,7 +623,7 @@ func TestFormatEventSanitizesScanDerivedText(t *testing.T) {
 
 func TestIncompleteFailuresDoNotChangeBaseline(t *testing.T) {
 	ctx := context.Background()
-	db, _ := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, _ := store.Open(storetest.FreshPath(t))
 	defer db.Close()
 	e := Engine{Store: db}
 	job := config.Job{Name: "test", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
@@ -645,7 +645,7 @@ func TestIncompleteFailuresDoNotChangeBaseline(t *testing.T) {
 
 func TestUnreachableHostObservationDoesNotChangeBaseline(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -738,7 +738,7 @@ func TestUnknownNoResponseEvidenceCannotLearnOrRemoveBaselinePorts(t *testing.T)
 
 func TestCompletedNaabuNoDiscoveryCanEstablishBaseline(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -776,7 +776,7 @@ func TestCompletedNaabuNoDiscoveryCanEstablishBaseline(t *testing.T) {
 
 func TestIncompleteProtocolDoesNotSuppressCompleteProtocolChanges(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "protocol-partial.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -842,7 +842,7 @@ func TestIncompleteProtocolDoesNotSuppressCompleteProtocolChanges(t *testing.T) 
 
 func TestIncompleteDNSScanKeepsHealthySiblingAdditions(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "dns-partial.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -899,7 +899,7 @@ func TestIncompleteDNSScanKeepsHealthySiblingAdditions(t *testing.T) {
 
 func TestIncompleteDNSScanPreservesPendingHealthyAdditionUntilCompleteConfirmation(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "dns-pending.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -999,7 +999,7 @@ func TestIncompleteDNSScanPreservesPendingHealthyAdditionUntilCompleteConfirmati
 
 func TestEveryUnsuccessfulScanEmitsAnOutcomeEvent(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1051,7 +1051,7 @@ func TestEveryUnsuccessfulScanEmitsAnOutcomeEvent(t *testing.T) {
 
 func TestFinalizeManagedScanRecordsInitialBaselineScanMetadata(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1087,7 +1087,7 @@ func TestFinalizeManagedScanRecordsInitialBaselineScanMetadata(t *testing.T) {
 
 func TestFinalizeManagedScanMarksIncompleteAndKeepsReachableChanges(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1145,7 +1145,7 @@ func TestFinalizeManagedScanMarksIncompleteAndKeepsReachableChanges(t *testing.T
 
 func TestFinalizeManagedScanPersistsTheChangeSetAppliedByEngine(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1215,7 +1215,7 @@ func TestFinalizeManagedScanPersistsTheChangeSetAppliedByEngine(t *testing.T) {
 
 func TestFingerprintStabilizesWithoutBlockingPortBaseline(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1296,7 +1296,7 @@ func TestNewPortServiceIncidentsAcceptInEitherOrder(t *testing.T) {
 	for _, order := range []string{"port-then-service", "service-while-port-open"} {
 		t.Run(order, func(t *testing.T) {
 			ctx := context.Background()
-			db, err := store.Open(filepath.Join(t.TempDir(), "db"))
+			db, err := store.Open(storetest.FreshPath(t))
 			if err != nil {
 				t.Fatal(err)
 			}

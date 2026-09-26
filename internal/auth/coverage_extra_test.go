@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestAuthValidationBranchesAndSetupRequest(t *testing.T) {
@@ -216,7 +217,7 @@ func TestLoginAfterAdminsRetirementAndAuthenticationFailureModes(t *testing.T) {
 // holds.
 func TestConfirmationRequiresTheUsersRow(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +249,7 @@ func TestConfirmationRequiresTheUsersRow(t *testing.T) {
 
 func TestLogoutSessionEmptyCookieNoop(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

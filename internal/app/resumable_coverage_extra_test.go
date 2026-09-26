@@ -15,6 +15,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 type coverageResumableScanner struct {
@@ -77,7 +78,7 @@ func TestRetryableResumableErrorsAreBoundedAndConfigurationErrorsStall(t *testin
 
 func TestResumableScanRetriesTransientUnitFailure(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "resumable-transient.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +136,7 @@ func TestResumableScanRetriesTransientUnitFailure(t *testing.T) {
 
 func TestResumableScanStallsAfterRetryBudget(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "resumable-retry-budget.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +206,7 @@ func (s coverageResumableScanner) ScanWorkUnit(context.Context, config.Job, scan
 
 func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "resumable-coverage.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +364,7 @@ func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 
 func TestResumableRecoveryAndFinishPersistenceFailures(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "resumable-failures.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +403,7 @@ func TestFinishResumableCycleStallsWhenCheckpointRowsAreMissing(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			db, err := store.Open(filepath.Join(t.TempDir(), "missing-checkpoint.db"))
+			db, err := store.Open(storetest.FreshPath(t))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -538,7 +539,7 @@ func TestResumableAttemptHandlesUnitFailuresAndNoProgressStalls(t *testing.T) {
 
 func TestManagedFinalizationContinuesWhenLeaseRenewalIsLost(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "resumable-lease-warning.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -638,7 +639,7 @@ func TestNaabuMissDoesNotRecoverIncidentWithoutNmapConfirmation(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
-			db, err := store.Open(filepath.Join(t.TempDir(), "naabu-incident.db"))
+			db, err := store.Open(storetest.FreshPath(t))
 			if err != nil {
 				t.Fatal(err)
 			}

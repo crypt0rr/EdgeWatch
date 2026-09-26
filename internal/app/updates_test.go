@@ -5,13 +5,13 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 	"github.com/crypt0rr/edgewatch/internal/updatecheck"
 )
 
@@ -38,7 +38,7 @@ func (f *fakeReleaseChecker) Check(context.Context, string) (updatecheck.Result,
 }
 
 func TestRunUpdateCheckTracksAndDeduplicatesReleases(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestRunUpdateCheckTracksAndDeduplicatesReleases(t *testing.T) {
 }
 
 func TestRunUpdateCheckPreservesReleaseOnFailureAndHonorsDisable(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func TestRunUpdateCheckPreservesReleaseOnFailureAndHonorsDisable(t *testing.T) {
 
 func TestRunUpdateCheckCoversFailureNotModifiedRollbackAndRouting(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestRunUpdateCheckCoversPersistenceFailureBranches(t *testing.T) {
 	ctx := context.Background()
 	newApp := func(t *testing.T) (*App, *store.Store) {
 		t.Helper()
-		db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+		db, err := store.Open(storetest.FreshPath(t))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -221,7 +221,7 @@ func TestRunUpdateCheckCoversPersistenceFailureBranches(t *testing.T) {
 	// A healthy state store with a notifier whose metadata store is unavailable
 	// exercises the second routing failure branch.
 	a, db = newApp(t)
-	notifierStore, err := store.Open(filepath.Join(t.TempDir(), "notifier.db"))
+	notifierStore, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

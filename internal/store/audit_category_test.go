@@ -133,6 +133,7 @@ var notAuditActions = map[string]bool{
 	"scan.started":                true,
 	"auth.key":                    true,
 	"notification.key":            true,
+	"edgewatch.db":                true,
 	"github.com":                  true,
 	"localhost.localdomain":       true,
 }

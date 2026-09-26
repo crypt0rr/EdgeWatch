@@ -17,9 +17,11 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
+// openTestStore opens a fresh, fully migrated database. It copies a template
+// that one real migration built for this test binary; see migratedTemplate.
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
-	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

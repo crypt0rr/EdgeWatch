@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,11 +13,12 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestAppUtilityMethodsAndLifecycleBinding(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestDaemonProcessOwnerUsesUniqueInstanceToken(t *testing.T) {
 
 func TestAppRunJobAndScheduledWrappers(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +144,7 @@ func TestResumableProgressAndFailureMetadataHelpers(t *testing.T) {
 		t.Fatalf("nil active-run helpers changed state: before=%#v after=%#v", active, after)
 	}
 
-	db, err := store.Open(filepath.Join(t.TempDir(), "cycle.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

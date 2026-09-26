@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +15,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 	"github.com/robfig/cron/v3"
 )
 
@@ -73,7 +73,7 @@ func (s *resumableTestScanner) ScanWorkUnit(ctx context.Context, _ config.Job, u
 
 func TestNewFreezesLegacyNotificationSelections(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ type releaseOnlyScanner struct {
 
 func TestScanWorkBudgetIsCheckedBeforeLease(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestScanWorkBudgetIsCheckedBeforeLease(t *testing.T) {
 
 func TestResumableScanCheckpointsTimeoutAndRecovers(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,7 +252,7 @@ func TestResumableScanCheckpointsTimeoutAndRecovers(t *testing.T) {
 
 func TestExpiredResumableCycleProducesFailureBeforeFreshCycle(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +302,7 @@ func TestExpiredResumableCycleProducesFailureBeforeFreshCycle(t *testing.T) {
 
 func TestCompletedCycleWithoutScanIsRecovered(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +364,7 @@ func (s *releaseOnlyScanner) Scan(context.Context, config.Job) (model.Snapshot, 
 
 func TestStopRunWaitsForManualManagedRun(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -435,7 +435,7 @@ func (s panicScanner) Scan(context.Context, config.Job) (model.Snapshot, error) 
 
 func newManagedRunTestApp(t *testing.T, scan Scanner) (*App, *store.Store, store.JobRecord) {
 	t.Helper()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -548,7 +548,7 @@ func TestManagedRunReleasesReservationAfterPanic(t *testing.T) {
 
 func TestDaemonReturnsWhenLeaseIsLost(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,7 +587,7 @@ func TestDaemonReturnsWhenLeaseIsLost(t *testing.T) {
 
 func TestDaemonStopsSharedManagedRunWhenLeaseIsLost(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -662,7 +662,7 @@ func TestDaemonStopsSharedManagedRunWhenLeaseIsLost(t *testing.T) {
 func TestDaemonStartupPreservesLiveJobLease(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -714,7 +714,7 @@ func TestDaemonStartupPreservesLiveJobLease(t *testing.T) {
 
 func TestManagedScanLeaseBlocksScopeEditUntilScanCompletes(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,7 +758,7 @@ func TestManagedScanLeaseBlocksScopeEditUntilScanCompletes(t *testing.T) {
 
 func TestActiveScansReportsInFlightManagedScan(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -804,7 +804,7 @@ func TestActiveScansReportsInFlightManagedScan(t *testing.T) {
 
 func TestHighCostManagedScanReportsProgressAndCanBeCanceled(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -860,7 +860,7 @@ func TestHighCostManagedScanReportsProgressAndCanBeCanceled(t *testing.T) {
 
 func TestManagedTerminalOutcomesQueueNotifications(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -953,7 +953,7 @@ func TestManagedTerminalOutcomesQueueNotifications(t *testing.T) {
 
 func TestManagedRunQueuesOnlyJobSelectedNotifications(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1008,7 +1008,7 @@ func TestManagedRunQueuesOnlyJobSelectedNotifications(t *testing.T) {
 
 func TestManagedTimeoutIsPersistedAsDistinctTerminalStatus(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1045,7 +1045,7 @@ func TestManagedTimeoutIsPersistedAsDistinctTerminalStatus(t *testing.T) {
 }
 
 func TestManagedSchedulerReconcilesCreateUpdateAndArchive(t *testing.T) {
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1100,7 +1100,7 @@ func TestManagedSchedulerReconcilesCreateUpdateAndArchive(t *testing.T) {
 
 func TestManagedSchedulerRejectsInvalidDesiredSetWithoutUnscheduling(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1171,7 +1171,7 @@ func TestManagedSchedulerRejectsInvalidDesiredSetWithoutUnscheduling(t *testing.
 
 func TestManagedScanPublishesLifecycleEvents(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

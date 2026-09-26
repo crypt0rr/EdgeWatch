@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +17,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestServerErrorMappingHelpers(t *testing.T) {
@@ -423,7 +423,7 @@ func TestServerPaginationAndSSEBoundaryHelpers(t *testing.T) {
 }
 
 func TestSSECursorReservationRecoversAfterStartupFailure(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

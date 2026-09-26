@@ -433,10 +433,12 @@ func TestMigration53UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 			missing []string
 		}{name: table, missing: []string{table}})
 	}
+	base := newSchema52Fixture(t)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			fixture := newSchema52Fixture(t)
+			fixture := base
+			fixture.path = copyFixture(t, base.path)
 			extra := make([]string, 0, len(tc.missing))
 			for _, table := range tc.missing {
 				extra = append(extra, "DROP TABLE "+table)

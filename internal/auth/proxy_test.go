@@ -5,12 +5,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestClientIPIgnoresUntrustedForwardingHeaders(t *testing.T) {
@@ -125,7 +125,7 @@ func TestClientIPUsesXForwardedForWhenForwardedHasNoForParameter(t *testing.T) {
 
 func TestLoginRateLimitCannotBeBypassedByRotatingForwardedHeader(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestLoginRateLimitCannotBeBypassedByRotatingForwardedHeader(t *testing.T) {
 
 func TestSharedLoopbackLoginAttemptsAreCooledDownAndCanRecover(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,7 +219,7 @@ func TestRetryAfterHeaderValueUsesSharedLoopbackCooldown(t *testing.T) {
 
 func TestRotatingUnknownUsernamesRemainThrottledForRemotePeers(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestRotatingUnknownUsernamesRemainThrottledForRemotePeers(t *testing.T) {
 
 func TestSharedLoopbackTOTPFailuresAreCooledDown(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +330,7 @@ func TestClientIPRejectsInvalidTrustedProxy(t *testing.T) {
 }
 
 func TestLoginAuditRecordsResolvedClientIP(t *testing.T) {
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

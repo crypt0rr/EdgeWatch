@@ -16,6 +16,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // countingWebhook starts a local generic webhook that counts the requests it
@@ -37,7 +38,7 @@ func countingWebhook(t *testing.T, path string) (string, *atomic.Int32) {
 
 func TestStoreBackedNotificationTestSendsOncePerDeploymentDestination(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +74,7 @@ func TestStoreBackedNotificationTestSendsOncePerDeploymentDestination(t *testing
 
 func TestNotificationTestKeepsManagedDestinationSharingDeploymentURL(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

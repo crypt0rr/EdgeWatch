@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +11,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func routingTestJob(name string) config.Job {
@@ -37,7 +37,7 @@ func routingTestConfig(database string, urls ...string) *config.Config {
 
 func TestNewReportsJobsRoutedToRotatedDeploymentDestination(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestNewReportsJobsRoutedToRotatedDeploymentDestination(t *testing.T) {
 }
 
 func TestMissingNotificationDestinationCheckDoesNotBlockStartup(t *testing.T) {
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestMissingNotificationDestinationCheckDoesNotBlockStartup(t *testing.T) {
 }
 
 func TestNewDoesNotReportCurrentNotificationRouting(t *testing.T) {
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

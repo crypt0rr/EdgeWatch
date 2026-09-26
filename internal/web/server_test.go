@@ -24,6 +24,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestDefaultNewScannerProfileUsesNaabuOnlyWhenTCPScannerIsUnspecified(t *testing.T) {
@@ -199,7 +200,7 @@ func TestConsoleSetupLoginCreateAndRun(t *testing.T) {
 
 func TestDisplayNameAPIUpdatesSessionAndAudit(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1008,7 +1009,7 @@ func TestSSEAuthorizationCacheDoesNotCrossSessionsOrMissingCookie(t *testing.T) 
 
 func TestAPIRequiresSessionCSRFAndRejectsUnvalidatedOptions(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1086,7 +1087,7 @@ func TestAPIRequiresSessionCSRFAndRejectsUnvalidatedOptions(t *testing.T) {
 
 func TestSensitiveJobMutationFailsClosedWhenAuditUnavailable(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1141,7 +1142,7 @@ func TestSensitiveJobMutationFailsClosedWhenAuditUnavailable(t *testing.T) {
 
 func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1387,7 +1388,7 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 
 func TestHistoryEndpointsExposePaginationAndScopedResults(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1512,7 +1513,7 @@ func TestHistoryEndpointsExposePaginationAndScopedResults(t *testing.T) {
 
 func TestLifecycleEndpointsRequireCurrentRevision(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

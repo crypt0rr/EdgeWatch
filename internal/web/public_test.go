@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,6 +20,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/rdap"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestIsPrivateAddressClassifiesSpecialAndPublicRanges(t *testing.T) {
@@ -92,7 +92,7 @@ func TestPublicRdapProjectionAndCachedPayloadValidation(t *testing.T) {
 
 func TestPublicHostProjectionDoesNotServeRDAPBeyondStaleWindow(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestPublicHostProjectionDoesNotServeRDAPBeyondStaleWindow(t *testing.T) {
 
 func TestPublicAPIDisabledEnabledAndRateLimited(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +239,7 @@ func TestPublicHTMLCarriesNoIndexHeader(t *testing.T) {
 
 func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -315,7 +315,7 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 
 func TestPublicDashboardSaveFailureDoesNotExposeStoreDetails(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +356,7 @@ func TestPublicDashboardSaveFailureDoesNotExposeStoreDetails(t *testing.T) {
 
 func TestLatestLegacyPublicHostsLimitsEachJobIndependently(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,7 @@ func TestLatestLegacyPublicHostsLimitsEachJobIndependently(t *testing.T) {
 }
 
 func TestLatestLegacyPublicHostsHonorsCanceledContext(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

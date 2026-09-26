@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // A delivery pass window bounds dispatch, not in-flight sends. This test goes
@@ -30,7 +30,7 @@ func TestDrainWithinLetsInFlightSendsFinishAfterDispatchWindow(t *testing.T) {
 	notificationExecutable = func() (string, error) { return "/usr/local/bin/edgewatch", nil }
 
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

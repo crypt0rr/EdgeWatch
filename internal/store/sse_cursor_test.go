@@ -2,13 +2,12 @@ package store
 
 import (
 	"context"
-	"path/filepath"
 	"testing"
 )
 
 func TestReserveSSEEventIDsSurvivesRestartAndFollowsDurableEvents(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "edgewatch.db")
+	path := freshTestDatabasePath(t)
 	db, err := Open(path)
 	if err != nil {
 		t.Fatal(err)

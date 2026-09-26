@@ -17,15 +17,18 @@ import (
 )
 
 func TestBackupCreatesVerifiableSnapshotsWithIndependentConnections(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	dir := t.TempDir()
-	database := filepath.Join(dir, "edgewatch.db")
+	// Start from a migrated copy, so a full migration under -race does not
+	// use up the deadline, and start the deadline only after setup. It still
+	// bounds a hung backup or verify, with room for a loaded machine.
+	database := freshTestDatabasePath(t)
+	dir := filepath.Dir(database)
 	writer, err := Open(database)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer writer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 	backupStore, err := OpenExistingContext(ctx, database)
 	if err != nil {
 		t.Fatal(err)

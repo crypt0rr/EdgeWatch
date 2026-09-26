@@ -46,7 +46,7 @@ func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session stor
 }
 
 func (s *Server) getJob(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
-	state, err := s.Store.RuntimeState(r.Context(), record.ID)
+	state, err := ts.RuntimeState(r.Context(), record.ID)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -211,7 +211,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		s.App.WakeDelivery()
 	}
 	s.App.RefreshSchedules()
-	state, _ := s.Store.RuntimeState(r.Context(), id)
+	state, _ := ts.RuntimeState(r.Context(), id)
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "job.updated", "job_id": id})
 	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), ts, record, state))
 }
@@ -573,7 +573,7 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, ts *store.Tenan
 	comparable := summary.Status == "success" || summary.Status == "incomplete"
 	needsCurrentBaseline := comparable && summary.BaselineScanID == "" && summary.BaselineConfigHash == ""
 	if needsCurrentBaseline {
-		state, stateErr = s.Store.RuntimeState(r.Context(), id)
+		state, stateErr = ts.RuntimeState(r.Context(), id)
 	}
 	if comparable {
 		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
@@ -641,7 +641,7 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, ts *stor
 			changes, total = page.Items, page.Total
 			comparisonSource = "scan_time"
 			comparisonState = "compared"
-		} else if state, stateErr := s.Store.RuntimeState(r.Context(), id); stateErr == nil && state.Baseline != nil {
+		} else if state, stateErr := ts.RuntimeState(r.Context(), id); stateErr == nil && state.Baseline != nil {
 			scan, scanErr := ts.GetScan(r.Context(), scanID)
 			if scanErr != nil {
 				s.writeInternalError(w, r, "store", scanErr)
@@ -877,7 +877,7 @@ func (s *Server) broadcastIncidentEvents(ctx context.Context, audience sseAudien
 // every page.
 func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
 	id := record.ID
-	state, err := s.Store.RuntimeState(r.Context(), id)
+	state, err := ts.RuntimeState(r.Context(), id)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -927,7 +927,7 @@ func decodeResetBaseline(w http.ResponseWriter, r *http.Request) (resetBaselineR
 
 func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, record store.JobRecord, input resetBaselineRequest) {
 	id := record.ID
-	state, stateErr := s.Store.RuntimeState(r.Context(), id)
+	state, stateErr := ts.RuntimeState(r.Context(), id)
 	if stateErr != nil {
 		writeError(w, http.StatusInternalServerError, "store", "baseline state could not be loaded", nil)
 		return
@@ -944,7 +944,7 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session s
 		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 		return
 	}
-	events, err := s.Store.ResetRuntimeWithExpectationAndAudit(r.Context(), id, record.Job.Name, destinations, actorAudit(session, "baseline.reset", id), expected)
+	events, err := ts.ResetRuntimeWithExpectationAndAudit(r.Context(), id, record.Job.Name, destinations, actorAudit(session, "baseline.reset", id), expected)
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "baseline.reset") {
 			return
@@ -986,7 +986,7 @@ func decodeApproveBaseline(w http.ResponseWriter, r *http.Request) (approveBasel
 
 func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, record store.JobRecord, input approveBaselineRequest) {
 	id := record.ID
-	state, stateErr := s.Store.RuntimeState(r.Context(), id)
+	state, stateErr := ts.RuntimeState(r.Context(), id)
 	if stateErr != nil {
 		writeError(w, http.StatusInternalServerError, "store", "baseline state could not be loaded", nil)
 		return
@@ -1008,7 +1008,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 		return
 	}
-	events, err := s.Store.ApproveRuntimeWithExpectationAndAudit(r.Context(), id, record.Job.Name, scan, destinations, actorAudit(session, "baseline.approved", id), expected)
+	events, err := ts.ApproveRuntimeWithExpectationAndAudit(r.Context(), id, record.Job.Name, scan, destinations, actorAudit(session, "baseline.approved", id), expected)
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "baseline.approved") {
 			return
@@ -1033,7 +1033,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 
 func (s *Server) writeBaselineConflict(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
 	current := map[string]any{}
-	if info, err := s.Store.RuntimeBaselineInfo(r.Context(), id); err == nil {
+	if info, err := ts.RuntimeBaselineInfo(r.Context(), id); err == nil {
 		current = map[string]any{"baseline_scan_id": info.BaselineScanID, "baseline_modified": info.BaselineModified, "baseline_config_hash": info.BaselineConfigHash}
 	}
 	writeError(w, http.StatusConflict, "baseline_conflict", "the baseline changed; refresh before retrying", map[string]any{"current": current})

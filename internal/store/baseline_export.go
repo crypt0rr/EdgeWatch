@@ -55,19 +55,34 @@ type exportQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-// ExportBaselines returns the current runtime baseline for one managed job,
-// or every managed and legacy job when name is empty. Legacy job_states rows
-// are included for portability but are explicitly marked so they cannot be
-// mistaken for a newly recreated managed job.
+// ExportBaselines returns the current runtime baselines of the default
+// tenant's jobs.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ExportBaselines.
 func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExport, error) {
+	return s.Tenant(DefaultTenantScope()).ExportBaselines(ctx, name)
+}
+
+// ExportBaselines returns the current runtime baseline for one of the
+// tenant's managed jobs, or every managed and legacy job of the tenant when
+// name is empty. Legacy job_states rows are included for portability but are
+// explicitly marked so they cannot be mistaken for a newly recreated managed
+// job. Those rows hold the state of config.yaml jobs, which belong to the
+// default tenant, so only the default tenant's export includes them. A job of
+// another tenant is ErrNotFound, by name or by ID, as an unknown job is.
+func (ts *TenantStore) ExportBaselines(ctx context.Context, name string) (BaselineExport, error) {
+	if err := ts.ready(); err != nil {
+		return BaselineExport{}, err
+	}
 	result := BaselineExport{FormatVersion: BaselineExportVersion, ExportedAt: time.Now().UTC(), Jobs: []BaselineExportEntry{}}
 	name = strings.TrimSpace(name)
-	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	tx, err := ts.store.DB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return result, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	managed, err := listJobsForExport(ctx, tx, true)
+	tenantID := ts.scope.id
+	managed, err := listJobsForExport(ctx, tx, tenantID, true)
 	if err != nil {
 		return result, err
 	}
@@ -83,7 +98,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 			}
 		}
 		if !selectedFound {
-			legacy, legacyErr := exportLegacyBaselineForQuery(ctx, tx, name)
+			legacy, legacyErr := exportLegacyBaselineForQuery(ctx, tx, tenantID, name)
 			if legacyErr != nil {
 				if !errors.Is(legacyErr, sql.ErrNoRows) {
 					return result, legacyErr
@@ -93,7 +108,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 			result.Jobs = append(result.Jobs, legacy)
 			return result, nil
 		}
-		entry, err := exportManagedBaselineForQuery(ctx, tx, selected)
+		entry, err := exportManagedBaselineForQuery(ctx, tx, tenantID, selected)
 		if err != nil {
 			return result, err
 		}
@@ -103,7 +118,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 
 	for _, record := range managed {
 		seen[record.Job.Name] = record.ID
-		entry, err := exportManagedBaselineForQuery(ctx, tx, record)
+		entry, err := exportManagedBaselineForQuery(ctx, tx, tenantID, record)
 		if err != nil {
 			return result, err
 		}
@@ -111,13 +126,14 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 	}
 	// Legacy states are deliberately read one row at a time and only decoded
 	// once. They have no stable UUID or revision, and are not attached to newly
-	// created jobs with the same display name.
+	// created jobs with the same display name. They belong to the default
+	// tenant, so the statement reads them only for it.
 	type legacyRow struct {
 		name string
 		raw  []byte
 	}
 	legacyRows, err := func() ([]legacyRow, error) {
-		rows, err := tx.QueryContext(ctx, `SELECT job,state_json FROM job_states ORDER BY job`)
+		rows, err := tx.QueryContext(ctx, `SELECT s.job,s.state_json FROM job_states AS s JOIN tenants AS t ON t.id=? AND t.is_default=1 ORDER BY s.job`, tenantID)
 		if err != nil {
 			return nil, err
 		}
@@ -141,7 +157,7 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 	}
 	for _, legacy := range legacyRows {
 		legacyName := legacy.name
-		entry, err := exportLegacyBaselineJSONForQuery(ctx, tx, legacyName, legacy.raw)
+		entry, err := exportLegacyBaselineJSONForQuery(ctx, tx, tenantID, legacyName, legacy.raw)
 		if err != nil {
 			return result, err
 		}
@@ -172,23 +188,32 @@ func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExpor
 	return result, nil
 }
 
+// exportLegacyBaseline exports the default tenant's config.yaml job state of
+// the given name.
 func (s *Store) exportLegacyBaseline(ctx context.Context, name string) (BaselineExportEntry, error) {
-	return exportLegacyBaselineForQuery(ctx, s.reader(), name)
+	return exportLegacyBaselineForQuery(ctx, s.reader(), DefaultTenantID, name)
 }
 
-func exportLegacyBaselineForQuery(ctx context.Context, queryer exportQueryer, name string) (BaselineExportEntry, error) {
+// exportLegacyBaselineForQuery exports the stored state of the config.yaml
+// job with the given name. Those jobs belong to the default tenant, so the
+// statement reads the state only for it; another tenant gets sql.ErrNoRows.
+func exportLegacyBaselineForQuery(ctx context.Context, queryer exportQueryer, tenantID, name string) (BaselineExportEntry, error) {
 	var raw []byte
-	if err := queryer.QueryRowContext(ctx, `SELECT state_json FROM job_states WHERE job=?`, name).Scan(&raw); err != nil {
+	if err := queryer.QueryRowContext(ctx, `SELECT s.state_json FROM job_states AS s JOIN tenants AS t ON t.id=? AND t.is_default=1 WHERE s.job=?`, tenantID, name).Scan(&raw); err != nil {
 		return BaselineExportEntry{}, err
 	}
-	return exportLegacyBaselineJSONForQuery(ctx, queryer, name, raw)
+	return exportLegacyBaselineJSONForQuery(ctx, queryer, tenantID, name, raw)
 }
 
+// exportLegacyBaselineJSON exports a config.yaml job state of the default
+// tenant.
 func (s *Store) exportLegacyBaselineJSON(ctx context.Context, name string, raw []byte) (BaselineExportEntry, error) {
-	return exportLegacyBaselineJSONForQuery(ctx, s.reader(), name, raw)
+	return exportLegacyBaselineJSONForQuery(ctx, s.reader(), DefaultTenantID, name, raw)
 }
 
-func exportLegacyBaselineJSONForQuery(ctx context.Context, queryer exportQueryer, name string, raw []byte) (BaselineExportEntry, error) {
+// exportLegacyBaselineJSONForQuery exports a config.yaml job state of the
+// tenant, with the metadata of its source scan when the tenant has it.
+func exportLegacyBaselineJSONForQuery(ctx context.Context, queryer exportQueryer, tenantID, name string, raw []byte) (BaselineExportEntry, error) {
 	var state model.JobState
 	if err := json.Unmarshal(raw, &state); err != nil {
 		return BaselineExportEntry{}, err
@@ -198,20 +223,25 @@ func exportLegacyBaselineJSONForQuery(ctx context.Context, queryer exportQueryer
 		entry.Status = "ready"
 	}
 	if state.BaselineScanID != "" {
-		if summary, summaryErr := getScanSummaryForQuery(ctx, queryer, state.BaselineScanID); summaryErr == nil {
+		if summary, summaryErr := getScanSummaryForQuery(ctx, queryer, tenantID, state.BaselineScanID); summaryErr == nil {
 			entry.SourceScan = &summary
 		}
 	}
 	return entry, nil
 }
 
+// exportManagedBaseline exports the baseline of one of the default tenant's
+// jobs.
 func (s *Store) exportManagedBaseline(ctx context.Context, record JobRecord) (BaselineExportEntry, error) {
-	return exportManagedBaselineForQuery(ctx, s.reader(), record)
+	return exportManagedBaselineForQuery(ctx, s.reader(), DefaultTenantID, record)
 }
 
-func exportManagedBaselineForQuery(ctx context.Context, queryer exportQueryer, record JobRecord) (BaselineExportEntry, error) {
+// exportManagedBaselineForQuery exports the runtime baseline of one of the
+// tenant's jobs. The runtime read joins the job's tenant, so a job of another
+// tenant exports as a job without a baseline.
+func exportManagedBaselineForQuery(ctx context.Context, queryer exportQueryer, tenantID string, record JobRecord) (BaselineExportEntry, error) {
 	var raw []byte
-	err := queryer.QueryRowContext(ctx, `SELECT state_json FROM job_runtime WHERE job_id=?`, record.ID).Scan(&raw)
+	err := queryer.QueryRowContext(ctx, `SELECT r.state_json FROM job_runtime r JOIN jobs j ON j.id=r.job_id AND j.tenant_id=? WHERE r.job_id=?`, tenantID, record.ID).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		raw = []byte(`{}`)
 	} else if err != nil {
@@ -236,20 +266,21 @@ func exportManagedBaselineForQuery(ctx context.Context, queryer exportQueryer, r
 		entry.Status = "ready"
 	}
 	if state.BaselineScanID != "" {
-		if summary, summaryErr := getScanSummaryForQuery(ctx, queryer, state.BaselineScanID); summaryErr == nil {
+		if summary, summaryErr := getScanSummaryForQuery(ctx, queryer, tenantID, state.BaselineScanID); summaryErr == nil {
 			entry.SourceScan = &summary
 		}
 	}
 	return entry, nil
 }
 
-func listJobsForExport(ctx context.Context, queryer exportQueryer, includeArchived bool) ([]JobRecord, error) {
-	query := `SELECT id,name,definition_json,enabled,archived,revision,created_at,updated_at FROM jobs`
+// listJobsForExport lists the tenant's jobs, the active ones first.
+func listJobsForExport(ctx context.Context, queryer exportQueryer, tenantID string, includeArchived bool) ([]JobRecord, error) {
+	query := `SELECT id,name,definition_json,enabled,archived,revision,created_at,updated_at FROM jobs WHERE tenant_id=?`
 	if !includeArchived {
-		query += ` WHERE archived=0`
+		query += ` AND archived=0`
 	}
 	query += ` ORDER BY archived ASC,name,id`
-	rows, err := queryer.QueryContext(ctx, query)
+	rows, err := queryer.QueryContext(ctx, query, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -275,13 +306,15 @@ func listJobsForExport(ctx context.Context, queryer exportQueryer, includeArchiv
 	return out, rows.Err()
 }
 
-func getScanSummaryForQuery(ctx context.Context, queryer exportQueryer, id string) (model.ScanSummary, error) {
+// getScanSummaryForQuery reads the metadata of one of the tenant's scans; a
+// scan of another tenant is sql.ErrNoRows, as an unknown scan is.
+func getScanSummaryForQuery(ctx context.Context, queryer exportQueryer, tenantID, id string) (model.ScanSummary, error) {
 	var v model.ScanSummary
 	var started, finished string
 	var jobID sql.NullString
 	var revision sql.NullInt64
 	var resumable int
-	err := queryer.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE id=?`, id).
+	err := queryer.QueryRowContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE id=? AND tenant_id=?`, id, tenantID).
 		Scan(&v.ID, &jobID, &revision, &v.Job, &started, &finished, &v.Status, &v.Error, &v.NmapVersion, &v.ScannerEngine, &v.ScannerProfileID, &v.ScannerProfileRevision, &v.NaabuVersion, &v.DiscoveryPorts, &v.ConfirmedPorts, &v.DiscoveryDurationMS, &v.EnrichmentDurationMS, &v.ConfigHash, &v.CycleID, &v.CycleAttempt, &v.CycleStatus, &resumable, &v.CompletedProbes, &v.TotalProbes, &v.CompletedUnits, &v.TotalUnits, &v.NoProgressTries, &v.BaselineScanID, &v.BaselineConfigHash)
 	if err != nil {
 		return v, err

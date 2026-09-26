@@ -296,7 +296,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, ts *store.Tena
 		s.writeInternalError(w, r, "store", err)
 		return
 	}
-	summaries, err := s.Store.RuntimeStateSummaries(r.Context(), include)
+	summaries, err := ts.RuntimeStateSummaries(r.Context(), include)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -388,7 +388,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	s.App.RefreshSchedules()
-	state, _ := s.Store.RuntimeState(r.Context(), record.ID)
+	state, _ := ts.RuntimeState(r.Context(), record.ID)
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "job.created", "job_id": record.ID})
 	writeJSON(w, http.StatusCreated, s.jobJSONWithCycle(r.Context(), ts, record, state))
 }

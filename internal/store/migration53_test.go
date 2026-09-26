@@ -790,7 +790,7 @@ func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
 	// Runtime, silence and job events, with the deliveries queued for them.
 	for jobID, want := range map[string]string{jobA.ID: DefaultTenantID, jobB: secondTenantID} {
 		destination := "reset-" + want
-		if _, err := s.ResetRuntimeWithOutbox(ctx, jobID, "edge", []string{destination}); err != nil {
+		if _, err := s.Tenant(TenantScope{id: want}).ResetRuntimeWithOutbox(ctx, jobID, "edge", []string{destination}); err != nil {
 			t.Fatal(err)
 		}
 		if got := tenantOf(t, s.DB, `SELECT tenant_id FROM events WHERE type='baseline-reset' AND job_id=?`, jobID); got != want {
@@ -894,7 +894,7 @@ func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
 	if err := s.SaveScan(ctx, largeSnapshotScan("scan-deleting", jobB, "edge", now)); err == nil || !strings.Contains(err.Error(), "must name an active or disabled tenant") {
 		t.Fatalf("save a scan of a deleting tenant = %v", err)
 	}
-	if _, err := s.ResetRuntimeWithOutbox(ctx, jobB, "edge", []string{"reset-deleting"}); err == nil || !strings.Contains(err.Error(), "must name an active or disabled tenant") {
+	if _, err := s.Tenant(TenantScope{id: secondTenantID}).ResetRuntimeWithOutbox(ctx, jobB, "edge", []string{"reset-deleting"}); err == nil || !strings.Contains(err.Error(), "must name an active or disabled tenant") {
 		t.Fatalf("reset a job of a deleting tenant = %v", err)
 	}
 	if got := countRows(t, s.DB, `SELECT COUNT(*) FROM outbox WHERE destination='reset-deleting'`); got != 0 {

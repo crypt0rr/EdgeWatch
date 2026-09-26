@@ -279,8 +279,8 @@ func TestDeleteManagedNotificationRollsBackWhenRoutingCannotBeUpdated(t *testing
 		{"unreadable job definition", `UPDATE jobs SET definition_json='{'`},
 		{"job write rejected", `CREATE TRIGGER reject_job_update BEFORE UPDATE ON jobs BEGIN SELECT RAISE(ABORT,'jobs unavailable'); END`},
 		{"job revision rejected", `CREATE TRIGGER reject_job_revision BEFORE INSERT ON job_revisions BEGIN SELECT RAISE(ABORT,'revisions unavailable'); END`},
-		{"unreadable update routing", `UPDATE application_update_state SET notification_destinations_json='{'`},
-		{"update routing write rejected", `CREATE TRIGGER reject_routing_update BEFORE UPDATE ON application_update_state BEGIN SELECT RAISE(ABORT,'routing unavailable'); END`},
+		{"unreadable update routing", `UPDATE tenants SET update_destinations_json='{' WHERE is_default=1`},
+		{"update routing write rejected", `CREATE TRIGGER reject_routing_update BEFORE UPDATE OF update_destinations_json ON tenants BEGIN SELECT RAISE(ABORT,'routing unavailable'); END`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()

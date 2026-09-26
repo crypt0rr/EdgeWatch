@@ -326,7 +326,7 @@ func TestPublicDashboardSaveFailureDoesNotExposeStoreDetails(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if _, err := db.DB.ExecContext(ctx, `CREATE TRIGGER fail_public_dashboard_update BEFORE UPDATE ON public_dashboard BEGIN SELECT RAISE(ABORT, 'sqlite leaked details'); END`); err != nil {
+	if _, err := db.DB.ExecContext(ctx, `CREATE TRIGGER fail_public_dashboard_update BEFORE UPDATE ON public_dashboards BEGIN SELECT RAISE(ABORT, 'sqlite leaked details'); END`); err != nil {
 		t.Fatal(err)
 	}
 	admin := store.Session{UserID: store.LegacyAdminUserID, Username: "admin", Role: store.RoleAdministrator}

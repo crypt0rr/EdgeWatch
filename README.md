@@ -583,7 +583,7 @@ The service therefore starts at once after a restore, and a repeated restore
 onto the stopped service is not refused. The active-daemon check reads only
 the lease in the database that is being replaced.
 
-The current schema is version 50. Database migrations are forward-only. An
+The current schema is version 51. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,
@@ -607,6 +607,12 @@ Schema 50 records which notification URLs from config.yaml were imported as
 web-managed destinations, and the outcome of the import at each daemon start.
 It is a quick in-place change; the import itself runs once after the
 migration, as described in [Notifications](#notification-urls-in-configyaml-deprecated).
+
+Schema 51 adds a default tenant to the database. The update alert routing and
+the public status page settings move to it unchanged, setup tokens record their
+purpose, and each security audit record gains a tenant and a category. It is a
+quick in-place change with no background phase, and the console, API, CLI,
+public status page, and notifications behave as before.
 
 ## Useful commands
 

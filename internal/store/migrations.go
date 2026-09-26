@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 50
+const schemaVersion = 51
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -1215,6 +1215,10 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
  updated_at TEXT NOT NULL DEFAULT ''
 );`,
 		},
+		// Tenants, with the update alert routing, the public status page,
+		// setup token purposes, and audit attribution moved to the default
+		// tenant. See migration51Statements.
+		51: migration51Statements(),
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an

@@ -395,7 +395,7 @@ func TestImportDeploymentNotificationsRollsBackCompletely(t *testing.T) {
 	}{
 		{"audit rejected", `CREATE TRIGGER reject_import_audit BEFORE INSERT ON security_audit WHEN NEW.action='notifications.config_imported' BEGIN SELECT RAISE(ABORT,'audit unavailable'); END`},
 		{"job revision rejected", `CREATE TRIGGER reject_job_revision BEFORE INSERT ON job_revisions BEGIN SELECT RAISE(ABORT,'revisions unavailable'); END`},
-		{"update routing unreadable", `UPDATE application_update_state SET notification_destinations_json='{'`},
+		{"update routing unreadable", `UPDATE tenants SET update_destinations_json='{' WHERE is_default=1`},
 		{"outbox write rejected", `CREATE TRIGGER reject_outbox_move BEFORE UPDATE OF destination ON outbox BEGIN SELECT RAISE(ABORT,'outbox unavailable'); END`},
 		{"health write rejected", `CREATE TRIGGER reject_health_merge BEFORE INSERT ON notification_delivery_health WHEN NEW.destination_identity LIKE 'managed:%' BEGIN SELECT RAISE(ABORT,'health unavailable'); END`},
 	} {

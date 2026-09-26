@@ -724,7 +724,7 @@ func TestExistingSchemaMigratesWithWebTables(t *testing.T) {
 	if version != schemaVersion {
 		t.Fatalf("schema version %d", version)
 	}
-	for _, table := range []string{"jobs", "job_revisions", "job_runtime", "admins", "users", "user_invites", "sessions", "recovery_codes", "security_audit", "setup_tokens", "managed_notifications", "deployment_notification_ids", "rdap_cache", "scan_hosts", "latest_scan_hosts", "legacy_scan_host_backfill", "scan_host_search", "latest_host_search", "notification_delivery_health", "scan_cycles", "scan_cycle_units", "scan_cycle_discovery_checkpoints", "public_dashboard", "public_dashboard_hosts", "application_update_state", "sse_event_cursor", "startup_state", "totp_replay", "scan_cycle_identity_backfill", "timestamp_normalization_state"} {
+	for _, table := range []string{"jobs", "job_revisions", "job_runtime", "admins", "users", "user_invites", "sessions", "recovery_codes", "security_audit", "setup_tokens", "managed_notifications", "deployment_notification_ids", "rdap_cache", "scan_hosts", "latest_scan_hosts", "legacy_scan_host_backfill", "scan_host_search", "latest_host_search", "notification_delivery_health", "scan_cycles", "scan_cycle_units", "scan_cycle_discovery_checkpoints", "tenants", "public_dashboards", "public_dashboard_hosts", "application_update_state", "sse_event_cursor", "startup_state", "totp_replay", "scan_cycle_identity_backfill", "timestamp_normalization_state"} {
 		var name string
 		if err := s.DB.QueryRow("SELECT name FROM sqlite_master WHERE type='table' AND name=?", table).Scan(&name); err != nil {
 			t.Fatalf("missing %s: %v", table, err)
@@ -915,7 +915,7 @@ PRAGMA user_version = 11;`, now, now, now)
 		t.Fatalf("unsalted recovery code survived schema migration: %d", recoveryCount)
 	}
 	var updated string
-	if err := s.DB.QueryRow(`SELECT updated_at FROM public_dashboard WHERE id=1`).Scan(&updated); err != nil {
+	if err := s.DB.QueryRow(`SELECT updated_at FROM public_dashboards WHERE id=1`).Scan(&updated); err != nil {
 		t.Fatal(err)
 	}
 	if scanTime(updated).IsZero() {

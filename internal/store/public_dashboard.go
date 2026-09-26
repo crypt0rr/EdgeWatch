@@ -99,12 +99,14 @@ func normalizePublicAddress(address string) (string, error) {
 	return ip.String(), nil
 }
 
+// GetPublicDashboard returns the default tenant's public status page.
 func (s *Store) GetPublicDashboard(ctx context.Context) (PublicDashboard, error) {
 	var d PublicDashboard
+	var id int64
 	var enabled int
 	var updated string
 	reader := s.reader()
-	err := reader.QueryRowContext(ctx, `SELECT enabled,title,introduction,updated_at FROM public_dashboard WHERE id=1`).Scan(&enabled, &d.Title, &d.Introduction, &updated)
+	err := reader.QueryRowContext(ctx, `SELECT id,enabled,title,introduction,updated_at FROM public_dashboards WHERE tenant_id=?`, DefaultTenantID).Scan(&id, &enabled, &d.Title, &d.Introduction, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return d, ErrNotFound
 	}
@@ -113,7 +115,7 @@ func (s *Store) GetPublicDashboard(ctx context.Context) (PublicDashboard, error)
 	}
 	d.Enabled = enabled != 0
 	d.UpdatedAt = scanTime(updated)
-	rows, err := reader.QueryContext(ctx, `SELECT job_id,address,created_at FROM public_dashboard_hosts WHERE dashboard_id=1 ORDER BY job_id,address`)
+	rows, err := reader.QueryContext(ctx, `SELECT job_id,address,created_at FROM public_dashboard_hosts WHERE dashboard_id=? ORDER BY job_id,address`, id)
 	if err != nil {
 		return d, err
 	}
@@ -164,11 +166,14 @@ func (s *Store) savePublicDashboard(ctx context.Context, expectedUpdatedAt *time
 		return err
 	}
 	defer tx.Rollback()
-	// The single row always exists after migration; a missing row reads as
-	// the zero time, which is also what GET reports for it.
+	// The default tenant's row always exists after migration; a missing row
+	// reads as the zero time, which is also what GET reports for it.
+	var dashboardID int64
 	var currentRaw string
 	var current time.Time
-	if err := tx.QueryRowContext(ctx, `SELECT updated_at FROM public_dashboard WHERE id=1`).Scan(&currentRaw); err == nil {
+	exists := false
+	if err := tx.QueryRowContext(ctx, `SELECT id,updated_at FROM public_dashboards WHERE tenant_id=?`, DefaultTenantID).Scan(&dashboardID, &currentRaw); err == nil {
+		exists = true
 		current = scanTime(currentRaw)
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
@@ -182,10 +187,15 @@ func (s *Store) savePublicDashboard(ctx context.Context, expectedUpdatedAt *time
 	if !now.After(current) {
 		now = current.Add(time.Microsecond)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO public_dashboard(id,enabled,title,introduction,updated_at) VALUES(1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET enabled=excluded.enabled,title=excluded.title,introduction=excluded.introduction,updated_at=excluded.updated_at`, boolInt(dashboard.Enabled), strings.TrimSpace(dashboard.Title), strings.TrimSpace(dashboard.Introduction), now.Format(time.RFC3339Nano)); err != nil {
+	enabled, title, introduction, updatedAt := boolInt(dashboard.Enabled), strings.TrimSpace(dashboard.Title), strings.TrimSpace(dashboard.Introduction), now.Format(time.RFC3339Nano)
+	if exists {
+		if _, err := tx.ExecContext(ctx, `UPDATE public_dashboards SET enabled=?,title=?,introduction=?,updated_at=? WHERE id=?`, enabled, title, introduction, updatedAt, dashboardID); err != nil {
+			return err
+		}
+	} else if err := tx.QueryRowContext(ctx, `INSERT INTO public_dashboards(tenant_id,enabled,title,introduction,updated_at) VALUES(?,?,?,?,?) RETURNING id`, DefaultTenantID, enabled, title, introduction, updatedAt).Scan(&dashboardID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM public_dashboard_hosts WHERE dashboard_id=1`); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM public_dashboard_hosts WHERE dashboard_id=?`, dashboardID); err != nil {
 		return err
 	}
 	seen := map[string]struct{}{}
@@ -202,7 +212,7 @@ func (s *Store) savePublicDashboard(ctx context.Context, expectedUpdatedAt *time
 			continue
 		}
 		seen[key] = struct{}{}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO public_dashboard_hosts(dashboard_id,job_id,address,created_at) VALUES(1,?,?,?)`, host.JobID, address, now.Format(time.RFC3339Nano)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO public_dashboard_hosts(dashboard_id,job_id,address,created_at) VALUES(?,?,?,?)`, dashboardID, host.JobID, address, updatedAt); err != nil {
 			return err
 		}
 	}

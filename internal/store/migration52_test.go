@@ -273,14 +273,15 @@ func schema52RowSnapshot(t *testing.T, db *sql.DB) string {
 }
 
 // schemaObjectsSnapshot renders every schema object that is not one of the
-// rebuilt tables or their indexes. It also leaves out what schema 53 changes
-// next: the definitions of the tables that gain tenant_id, and the tenant
-// indexes and guard triggers. migration53_test.go checks those.
+// rebuilt tables or their indexes. It also leaves out what schemas 53 and 54
+// change next: the definitions of the tables that gain tenant_id, the tenant
+// indexes and guard triggers, and latest_scan_hosts with its indexes and
+// triggers. migration53_test.go and migration54_test.go check those.
 func schemaObjectsSnapshot(t *testing.T, db *sql.DB) string {
 	t.Helper()
 	schema53Objects := slices.Concat(schema53Tables, schema53Triggers, []string{"scans_tenant_id_time", "events_tenant_id_time"})
 	var out strings.Builder
-	if err := snapshotRows(db, `SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master WHERE tbl_name NOT IN ('users','jobs','scanner_profiles','managed_notifications') AND name NOT IN ('`+strings.Join(schema53Objects, "','")+`') ORDER BY type,name`, &out); err != nil {
+	if err := snapshotRows(db, `SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master WHERE tbl_name NOT IN ('users','jobs','scanner_profiles','managed_notifications','latest_scan_hosts') AND name NOT IN ('`+strings.Join(schema53Objects, "','")+`') ORDER BY type,name`, &out); err != nil {
 		t.Fatal(err)
 	}
 	return out.String()

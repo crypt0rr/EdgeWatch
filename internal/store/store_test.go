@@ -1621,8 +1621,20 @@ func TestPruneRepairsDanglingLatestHostProjectionWithoutScanDeletions(t *testing
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,host_json) VALUES(?,?,?,?,?,?)`, "198.51.100.88", "missing-scan", "missing-job", "legacy", time.Now().UTC().Format(time.RFC3339Nano), []byte(`{"address":"198.51.100.88"}`)); err != nil {
-		t.Fatal(err)
+	// A projection row must belong to an existing scan, so the row is
+	// written first and its scan removed afterwards.
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO scans(id,job,started_at,finished_at,status,config_hash,snapshot_json) VALUES(?,?,?,?,'success','hash','{}')`, []any{"missing-scan", "legacy", stamp, stamp}},
+		{`INSERT INTO latest_scan_hosts(tenant_id,address,scan_id,job_id,job,finished_at,host_json) VALUES(?,?,?,?,?,?,?)`, []any{DefaultTenantID, "198.51.100.88", "missing-scan", "missing-job", "legacy", stamp, []byte(`{"address":"198.51.100.88"}`)}},
+		{`DELETE FROM scans WHERE id=?`, []any{"missing-scan"}},
+	} {
+		if _, err := s.DB.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			t.Fatal(err)
+		}
 	}
 	stats, err := s.PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
 	if err != nil {

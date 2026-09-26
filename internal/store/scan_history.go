@@ -184,13 +184,15 @@ func hostSearchContent(job string, host model.HostObservation) string {
 }
 
 // upsertLatestScanHostExec maintains the exact latest successful observation
-// for one effective address. The finished-at/id ordering mirrors the historical
-// ranking query, including deterministic ties between scans with equal times.
+// for one effective address of the scan's tenant. The finished-at/id ordering
+// mirrors the historical ranking query, including deterministic ties between
+// scans with equal times. The tenant is read from the scan row, which the
+// caller has written in the same transaction.
 func upsertLatestScanHostExec(ctx context.Context, execer contextExecer, scan model.Scan, address, addressFamily string, sourceTargets, dnsNames, hostJSON []byte, searchText string, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered int) error {
 	finishedAt := sqliteTimestamp(scan.FinishedAt)
-	_, err := execer.ExecContext(ctx, `INSERT INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-ON CONFLICT(address) DO UPDATE SET
+	_, err := execer.ExecContext(ctx, `INSERT INTO latest_scan_hosts(tenant_id,address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,search_text,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports)
+VALUES((SELECT tenant_id FROM scans WHERE id=?),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+ON CONFLICT(tenant_id,address) DO UPDATE SET
  scan_id=excluded.scan_id,
  job_id=excluded.job_id,
  job=excluded.job,
@@ -211,7 +213,7 @@ ON CONFLICT(address) DO UPDATE SET
  udp_open_filtered_ports=excluded.udp_open_filtered_ports
 WHERE excluded.finished_at > latest_scan_hosts.finished_at
    OR (excluded.finished_at = latest_scan_hosts.finished_at AND excluded.scan_id > latest_scan_hosts.scan_id)`,
-		address, scan.ID, scan.JobID, scan.Job, finishedAt, "detailed", addressFamily, sourceTargets, dnsNames, hostJSON, searchText, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered)
+		scan.ID, address, scan.ID, scan.JobID, scan.Job, finishedAt, "detailed", addressFamily, sourceTargets, dnsNames, hostJSON, searchText, open, openFiltered, tcpPresent, udpPresent, tcpOpen, tcpOpenFiltered, udpOpen, udpOpenFiltered)
 	return err
 }
 
@@ -311,8 +313,9 @@ func (s *Store) GetScanHost(ctx context.Context, scanID, address string) (ScanHo
 }
 
 // ListLatestScanHostsPage returns the maintained newest successful observation
-// for each effective address across all jobs. The projection is updated in the
-// same transaction as a successful scan and rebuilt after retention deletes.
+// for each effective address across all jobs of the default tenant. The
+// projection is updated in the same transaction as a successful scan and
+// rebuilt after retention deletes.
 func (s *Store) ListLatestScanHostsPage(ctx context.Context, query, protocol string, hasOpen *bool, limit, offset int) (Page[LatestScanHost], error) {
 	queries := latestScanHostsPageQueries(query, protocol, hasOpen, limit, offset)
 	var page Page[LatestScanHost]

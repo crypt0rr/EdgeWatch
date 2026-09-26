@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -31,6 +32,12 @@ var scanHostSearchTriggerNames = []string{
 // cannot add a foreign key to an existing table, so only tables that are
 // missing the exact scans(id) ON DELETE CASCADE constraint are rebuilt.
 func repairScanHostsForeignKey(db *sql.DB) error {
+	// The repair recreates every host search trigger. While the schema 54
+	// copy is pending, the latest-host triggers on the new table would index
+	// the copied rows a second time, so finish the copy first.
+	if err := awaitLatestScanHostsTenantRekeyContext(context.Background(), db); err != nil {
+		return err
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -240,7 +247,11 @@ func ensureHostSearchSchemaTx(tx *sql.Tx, recreateTriggers bool) error {
 	return nil
 }
 
-var currentHostSearchTriggerSQL = []string{
+// currentHostSearchTriggerSQL installs the rowid-keyed search triggers of
+// scan_hosts and latest_scan_hosts.
+var currentHostSearchTriggerSQL = slices.Concat(scanHostSearchTriggerSQL, latestHostSearchTriggerSQL)
+
+var scanHostSearchTriggerSQL = []string{
 	`CREATE TRIGGER IF NOT EXISTS scan_hosts_search_ai AFTER INSERT ON scan_hosts BEGIN
  INSERT INTO scan_host_search(rowid,scan_id,address,content)
  VALUES(NEW.rowid,NEW.scan_id,NEW.address,lower(coalesce(NEW.search_text,'') || ' ' || coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'')));
@@ -253,6 +264,12 @@ END;`,
 	`CREATE TRIGGER IF NOT EXISTS scan_hosts_search_ad AFTER DELETE ON scan_hosts BEGIN
  DELETE FROM scan_host_search WHERE rowid=OLD.rowid;
 END;`,
+}
+
+// latestHostSearchTriggerSQL keys each latest_host_search row by the rowid
+// of its latest_scan_hosts row. Schema 54 keeps those rowids when it keys
+// the projection by tenant and installs these triggers on the new table.
+var latestHostSearchTriggerSQL = []string{
 	`CREATE TRIGGER IF NOT EXISTS latest_scan_hosts_search_ai AFTER INSERT ON latest_scan_hosts BEGIN
  INSERT INTO latest_host_search(rowid,address,content)
  VALUES(NEW.rowid,NEW.address,lower(coalesce(NEW.search_text,'') || ' ' || coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'')));
@@ -284,6 +301,12 @@ func backfillHostSearchIndexesContextWithProgress(ctx context.Context, db *sql.D
 		logger = loggers[0]
 	}
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	// The schema 54 copy installs the latest-host search triggers when it
+	// completes. Finish it first: the missing triggers would otherwise
+	// restart both search projections from scratch.
+	if err := awaitLatestScanHostsTenantRekeyContext(ctx, db); err != nil {
 		return err
 	}
 	if err := ensureHostSearchTriggersContext(ctx, db); err != nil {

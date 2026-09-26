@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 53
+const schemaVersion = 54
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -56,6 +56,17 @@ var foreignKeysOffMigrations = map[int]bool{
 	// Schema 52 rebuilds users, jobs, scanner_profiles and
 	// managed_notifications with a tenant_id column.
 	52: true,
+}
+
+// conditionalMigrationStatements lists the schema versions with statements
+// that depend on the current schema, such as a table rename that a repeated
+// run must not apply a second time. The function reads the schema in the
+// version's transaction and returns the statements to run after the fixed
+// ones. These versions run through applyMigration.
+var conditionalMigrationStatements = map[int]func(*sql.Tx) ([]string, error){
+	// Schema 54 swaps the latest host projection for a tenant-keyed table
+	// while it is still keyed by address.
+	54: migration54ConditionalStatements,
 }
 
 // newerSchemaError is the refusal for a database that a newer release has
@@ -1229,6 +1240,10 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 		// The history and delivery tables gain their tenant, with guard
 		// triggers. See migration53Statements.
 		53: migration53Statements(),
+		// The latest host projection is keyed by tenant and address. The
+		// tenant-latest-hosts phase below copies its rows. See
+		// migration54.go.
+		54: migration54Statements(),
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an
@@ -1254,6 +1269,23 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 			return err
 		}
 		logger.Info("database migration step completed", "schema", version, "target_schema", schemaVersion)
+	}
+	// Copy the latest host projection into its tenant-keyed table first. Until
+	// the copy completes, the table has no search triggers and refuses other
+	// writes, and the phases below that repair or index it wait for the copy.
+	if err := updateMigrationStatus(ctx, db, latestScanHostsTenantPhase, 0, 0); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return err
+	}
+	if err := rekeyLatestScanHostsByTenantContext(ctx, db, func(processed, total int64) {
+		// The callback runs after each committed batch. Progress bookkeeping
+		// is diagnostic only and never fails the migration.
+		statusCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		_ = updateMigrationStatus(statusCtx, db, latestScanHostsTenantPhase, processed, total)
+		cancel()
+	}); err != nil {
+		markMigrationFailed(ctx, db, err)
+		return fmt.Errorf("key the latest host projection by tenant: %w", err)
 	}
 	if err := updateMigrationStatus(ctx, db, "timestamp-normalization", 0, 0); err != nil {
 		markMigrationFailed(ctx, db, err)
@@ -1341,6 +1373,17 @@ func applyMigration(db *sql.DB, version int, statements []string) error {
 	for _, statement := range statements {
 		if err := execMigrationStatement(tx, statement); err != nil {
 			return err
+		}
+	}
+	if conditional := conditionalMigrationStatements[version]; conditional != nil {
+		extra, err := conditional(tx)
+		if err != nil {
+			return err
+		}
+		for _, statement := range extra {
+			if err := execMigrationStatement(tx, statement); err != nil {
+				return err
+			}
 		}
 	}
 	if _, err := tx.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {

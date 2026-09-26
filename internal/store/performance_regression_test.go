@@ -15,7 +15,9 @@ const seededPerformanceHostCount = 2048
 
 // seedLatestHostsForPerformance creates a representative projection without
 // relying on wall-clock thresholds. The test below then checks result bounds
-// and query-plan ownership, which remain stable across CI hardware.
+// and query-plan ownership, which remain stable across CI hardware. Every
+// row names one seed scan, because a projection row must belong to the
+// tenant of an existing scan.
 func seedLatestHostsForPerformance(t *testing.T, s *Store, count int) {
 	t.Helper()
 	tx, err := s.DB.BeginTx(context.Background(), nil)
@@ -24,6 +26,9 @@ func seedLatestHostsForPerformance(t *testing.T, s *Store, count int) {
 	}
 	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(context.Background(), `INSERT INTO scans(id,job,started_at,finished_at,status,config_hash,snapshot_json) VALUES('seed-scan','seed',?,?,'success','hash','{}')`, now, now); err != nil {
+		t.Fatal(err)
+	}
 	for i := 0; i < count; i++ {
 		address := fmt.Sprintf("198.51.%d.%d", i/254, i%254+1)
 		open := i%3 == 0
@@ -38,7 +43,7 @@ func seedLatestHostsForPerformance(t *testing.T, s *Store, count int) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := tx.ExecContext(context.Background(), `INSERT INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports) VALUES(?,?,?,?,?,'detailed','IPv4',?,?,?, ?,0,1,0,?,?,0,0)`, address, fmt.Sprintf("seed-scan-%d", i), "seed-job", "seed", now, fmt.Sprintf(`["asset-%d.example"]`, i%32), `[]`, raw, openCount, openCount, 0); err != nil {
+		if _, err := tx.ExecContext(context.Background(), `INSERT INTO latest_scan_hosts(tenant_id,address,scan_id,job_id,job,finished_at,data_quality,address_family,source_targets_json,dns_names_json,host_json,open_ports,open_filtered_ports,tcp_present,udp_present,tcp_open_ports,tcp_open_filtered_ports,udp_open_ports,udp_open_filtered_ports) VALUES(?,?,?,?,?,?,'detailed','IPv4',?,?,?, ?,0,1,0,?,?,0,0)`, DefaultTenantID, address, "seed-scan", "seed-job", "seed", now, fmt.Sprintf(`["asset-%d.example"]`, i%32), `[]`, raw, openCount, openCount, 0); err != nil {
 			t.Fatal(err)
 		}
 	}

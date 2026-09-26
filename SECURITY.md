@@ -128,7 +128,7 @@ database together, or delete and recreate the affected destinations after
 confirming that the old credentials are revoked. After restoring a key, run
 `notify test` or the console notification test: it fails while any enabled
 web-managed destination is still locked. A database upgraded to schema
-53 must not be opened by an older EdgeWatch binary; downgrade by restoring the
+54 must not be opened by an older EdgeWatch binary; downgrade by restoring the
 complete pre-upgrade `./data` backup before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
 refuse a schema newer than the binary supports before they write anything.
@@ -146,8 +146,10 @@ delivery to the tenant of its job, and database triggers refuse a scan or
 event in another tenant than its job, a new scan or event for a tenant that
 is being deleted, a later change of that tenant, and a published host whose
 job belongs to another tenant than the public page. Update alerts and their
-deliveries belong to no tenant. Back up the complete `./data` directory
-before the upgrade.
+deliveries belong to no tenant. Schema 54 keeps the newest observation of an
+address per tenant, and a database trigger refuses a latest-host row in
+another tenant than its scan or for a tenant that is being deleted. Back up
+the complete `./data` directory before the upgrade.
 
 Recovery codes are stored in the salted `v2` representation. Schema 38 removes
 legacy unsalted SHA-256 recovery-code digests and records only their count in

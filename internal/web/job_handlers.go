@@ -198,7 +198,7 @@ func (s *Server) addJobCycleAndProfile(ctx context.Context, ts *store.TenantStor
 	// upgrade (and its rebaseline confirmation) instead of silently changing a
 	// running scope.
 	if payload, ok := value["job"].(jobPayload); ok && payload.TCP != nil && payload.TCP.ProfileID != "" {
-		if profile, err := s.Store.GetScannerProfile(ctx, payload.TCP.ProfileID); err == nil && profile.Revision > payload.TCP.ProfileRevision {
+		if profile, err := ts.GetScannerProfile(ctx, payload.TCP.ProfileID); err == nil && profile.Revision > payload.TCP.ProfileRevision {
 			payload.TCP.ProfileUpdateAvailable = true
 			payload.TCP.ProfileLatestRevision = profile.Revision
 			value["job"] = payload
@@ -309,7 +309,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, ts *store.Tena
 		}
 		logger.ErrorContext(r.Context(), "active scan cycle list lookup failed", "request_id", RequestID(r.Context()), "error", cycleErr)
 	}
-	profileRevisions, profileErr := s.Store.CurrentScannerProfileRevisions(r.Context())
+	profileRevisions, profileErr := ts.CurrentScannerProfileRevisions(r.Context())
 	if profileErr != nil {
 		logger := s.Log
 		if logger == nil {

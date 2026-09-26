@@ -50,6 +50,7 @@ type Server struct {
 	sseCancels       map[chan sseMessage]context.CancelFunc
 	sseSessionKey    map[chan sseMessage]string
 	sseUserKey       map[chan sseMessage]string
+	sseIdentity      map[chan sseMessage]sseSubscriber
 	sseAuthMu        sync.Mutex
 	sseAuthCache     map[string]sseAuthCacheEntry
 	sseAuthTTL       time.Duration
@@ -90,6 +91,8 @@ type Server struct {
 type sseMessage struct {
 	id      uint64
 	payload []byte
+	// audience decides which streams receive and replay the message.
+	audience sseAudience
 }
 
 // publicDashboardBuild represents one shared cache fill. The result is
@@ -215,7 +218,7 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 			if event.ReleaseURL != "" {
 				payload["release_url"] = event.ReleaseURL
 			}
-			v.broadcast(payload)
+			v.broadcastTo(context.Background(), audienceEveryone(), payload)
 		})
 	}
 	return v

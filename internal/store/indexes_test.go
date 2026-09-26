@@ -80,5 +80,5 @@ PRAGMA user_version = 20;`); err != nil {
 	jobQueries := jobScansPageQueries(DefaultTenantID, "job-id", 50, 0)
 	assertPlanUses("job count", jobQueries.countSQL, "scans_job_id_", jobQueries.countArg...)
 	assertPlanUses("job history", jobQueries.pageSQL, "scans_job_id_time", jobQueries.pageArg...)
-	assertPlanUses("cycle lookup", scanCycleHasScanQuery, "scans_cycle_id", "job-id")
+	assertPlanUses("cycle lookup", scanCycleHasScanQuery, "scans_cycle_id", "cycle-id", DefaultTenantID)
 }

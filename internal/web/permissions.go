@@ -7,6 +7,10 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/auth"
 )
 
+// requiredPermission maps an API method and path, relative to /api/v1, to
+// the capability a session needs. Every route it grants must be listed in
+// apiRoutes below; the route inventory tests check this function,
+// Server.api and its sub-routers against that table.
 func requiredPermission(path, method string) string {
 	// These are the only routes intentionally reachable without a capability.
 	// Keep the list exact so an accidentally added /auth/* endpoint cannot
@@ -384,4 +388,185 @@ func isJobItemPath(path string) bool {
 
 func isMutation(method string) bool {
 	return method != http.MethodGet && method != http.MethodHead && method != http.MethodOptions
+}
+
+// routeAccess records which gate a request passes before its handler runs.
+type routeAccess int
+
+const (
+	// routeSession routes pass session authentication, the CSRF check for
+	// mutations, and the requestPermission gate in Server.api.
+	routeSession routeAccess = iota
+	// routeUnauthenticated routes are dispatched by Server.api before the
+	// session gate. requiredPermission returns "" for them, which the gate
+	// itself would reject, so they can only be served by that early dispatch.
+	// Their state-changing requests are protected by validateBrowserOrigin.
+	routeUnauthenticated
+	// routePublic routes are served by Server.publicAPI under
+	// publicAPIBase. They never consult requiredPermission and may only
+	// return explicitly published data.
+	routePublic
+)
+
+const (
+	consoleAPIBase = "/api/v1"
+	publicAPIBase  = "/api/public/v1"
+)
+
+// apiRoute is one method and path combination that a handler serves.
+type apiRoute struct {
+	Method string
+	// Template is the path relative to the API base. A {name} segment
+	// matches exactly one non-empty path segment.
+	Template string
+	// Query, when set, selects a distinct action on the same method and
+	// path, and requestPermission maps it to a different capability.
+	Query string
+	// Permission is what requestPermission returns for the route: a
+	// capability, or "" for unauthenticated and public routes.
+	Permission string
+	// Mutates reports whether the method changes state. Session routes that
+	// mutate require a CSRF token.
+	Mutates bool
+	// Example is a concrete path that matches Template, used by the tests.
+	Example string
+	Access  routeAccess
+	// NoHandler marks a capability mapping that requiredPermission keeps
+	// although Server.api has no handler for it. Authorized requests receive
+	// the not-found default.
+	NoHandler bool
+}
+
+// apiRoutes is the route inventory: every method and path that the API
+// handlers serve, with the capability requiredPermission assigns to it.
+// Tests parse the routing functions and fail when a routed path is missing
+// here, and drive the permission matrix from this table, so a new route
+// cannot skip authorization tests. Paths that are not listed fail closed.
+var apiRoutes = []apiRoute{
+	// Entry points dispatched before the session gate.
+	{Method: http.MethodGet, Template: "/setup/status", Example: "/setup/status", Access: routeUnauthenticated},
+	{Method: http.MethodPost, Template: "/setup", Mutates: true, Example: "/setup", Access: routeUnauthenticated},
+	{Method: http.MethodPost, Template: "/auth/login", Mutates: true, Example: "/auth/login", Access: routeUnauthenticated},
+	{Method: http.MethodPost, Template: "/auth/activate", Mutates: true, Example: "/auth/activate", Access: routeUnauthenticated},
+	// The session probe authenticates itself but needs no capability.
+	{Method: http.MethodGet, Template: "/auth/session", Example: "/auth/session", Access: routeUnauthenticated},
+
+	// Account self-service.
+	{Method: http.MethodPost, Template: "/auth/activity", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/activity"},
+	{Method: http.MethodPost, Template: "/auth/logout", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/logout"},
+	{Method: http.MethodPut, Template: "/auth/display-name", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/display-name"},
+	{Method: http.MethodPut, Template: "/auth/password", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/password"},
+	{Method: http.MethodPost, Template: "/auth/totp/setup", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/totp/setup"},
+	{Method: http.MethodPost, Template: "/auth/totp/enable", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/totp/enable"},
+	{Method: http.MethodPost, Template: "/auth/totp/recovery-codes", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/totp/recovery-codes"},
+	{Method: http.MethodDelete, Template: "/auth/totp", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/totp"},
+	{Method: http.MethodDelete, Template: "/auth/sessions", Permission: auth.PermissionAccountSelf, Mutates: true, Example: "/auth/sessions"},
+
+	// Console status and live updates.
+	{Method: http.MethodGet, Template: "/status", Permission: auth.PermissionJobsRead, Example: "/status"},
+	{Method: http.MethodGet, Template: "/stream", Permission: auth.PermissionStreamRead, Example: "/stream"},
+
+	// Scanner capabilities and profiles, under both path spellings.
+	{Method: http.MethodGet, Template: "/scanner/capabilities", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/capabilities"},
+	{Method: http.MethodGet, Template: "/scanner-profiles", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles"},
+	{Method: http.MethodPost, Template: "/scanner-profiles", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles"},
+	{Method: http.MethodPost, Template: "/scanner-profiles/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/validate"},
+	{Method: http.MethodPost, Template: "/scanner-profiles/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/preview"},
+	{Method: http.MethodGet, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles/profile-1"},
+	{Method: http.MethodPut, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1"},
+	{Method: http.MethodDelete, Template: "/scanner-profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1"},
+	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/restore", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/restore"},
+	{Method: http.MethodGet, Template: "/scanner-profiles/{id}/revisions", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner-profiles/profile-1/revisions"},
+	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/validate"},
+	{Method: http.MethodPost, Template: "/scanner-profiles/{id}/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner-profiles/profile-1/preview"},
+	{Method: http.MethodGet, Template: "/scanner/profiles", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles"},
+	{Method: http.MethodPost, Template: "/scanner/profiles", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles"},
+	{Method: http.MethodPost, Template: "/scanner/profiles/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/validate"},
+	{Method: http.MethodPost, Template: "/scanner/profiles/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/preview"},
+	{Method: http.MethodGet, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles/profile-1"},
+	{Method: http.MethodPut, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1"},
+	{Method: http.MethodDelete, Template: "/scanner/profiles/{id}", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1"},
+	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/restore", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/restore"},
+	{Method: http.MethodGet, Template: "/scanner/profiles/{id}/revisions", Permission: auth.PermissionScannerProfilesRead, Example: "/scanner/profiles/profile-1/revisions"},
+	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/validate", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/validate"},
+	{Method: http.MethodPost, Template: "/scanner/profiles/{id}/preview", Permission: auth.PermissionScannerProfilesManage, Mutates: true, Example: "/scanner/profiles/profile-1/preview"},
+
+	// User administration.
+	{Method: http.MethodGet, Template: "/users", Permission: auth.PermissionUsersManage, Example: "/users"},
+	{Method: http.MethodPost, Template: "/users", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users"},
+	{Method: http.MethodGet, Template: "/users/{id}", Permission: auth.PermissionUsersManage, Example: "/users/user-1"},
+	{Method: http.MethodPatch, Template: "/users/{id}", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1"},
+	{Method: http.MethodPost, Template: "/users/{id}/activation", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/activation"},
+	{Method: http.MethodDelete, Template: "/users/{id}/activation", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/activation"},
+	{Method: http.MethodPost, Template: "/users/{id}/password-reset", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/password-reset"},
+	{Method: http.MethodDelete, Template: "/users/{id}/sessions", Permission: auth.PermissionUsersManage, Mutates: true, Example: "/users/user-1/sessions"},
+
+	// Public status publication settings.
+	{Method: http.MethodGet, Template: "/public-dashboard", Permission: auth.PermissionPublicManage, Example: "/public-dashboard"},
+	{Method: http.MethodPut, Template: "/public-dashboard", Permission: auth.PermissionPublicManage, Mutates: true, Example: "/public-dashboard"},
+
+	// Notifications.
+	{Method: http.MethodPost, Template: "/notifications/test", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/test"},
+	{Method: http.MethodGet, Template: "/notifications/options", Permission: auth.PermissionNotificationOptions, Example: "/notifications/options"},
+	{Method: http.MethodPut, Template: "/notifications/update-routing", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/update-routing"},
+	{Method: http.MethodGet, Template: "/notifications/destinations", Permission: auth.PermissionNotificationOptions, Example: "/notifications/destinations"},
+	{Method: http.MethodPost, Template: "/notifications/destinations", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations"},
+	{Method: http.MethodGet, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationOptions, Example: "/notifications/destinations/destination-1"},
+	{Method: http.MethodPut, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1"},
+	{Method: http.MethodDelete, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1"},
+	{Method: http.MethodPost, Template: "/notifications/destinations/{id}/test", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations/destination-1/test"},
+
+	// Global inventories.
+	{Method: http.MethodGet, Template: "/hosts", Permission: auth.PermissionHostsRead, Example: "/hosts"},
+	{Method: http.MethodGet, Template: "/incidents", Permission: auth.PermissionIncidentsRead, Example: "/incidents"},
+	{Method: http.MethodGet, Template: "/events", Permission: auth.PermissionScansRead, Example: "/events"},
+
+	// Scans.
+	{Method: http.MethodGet, Template: "/scans", Permission: auth.PermissionScansRead, Example: "/scans"},
+	{Method: http.MethodPost, Template: "/scans", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/scans", NoHandler: true},
+	{Method: http.MethodGet, Template: "/scans/active", Permission: auth.PermissionScansRead, Example: "/scans/active"},
+	{Method: http.MethodGet, Template: "/scans/{id}", Permission: auth.PermissionScansRead, Example: "/scans/scan-1"},
+	{Method: http.MethodGet, Template: "/scans/{id}/summary", Permission: auth.PermissionScansRead, Example: "/scans/scan-1/summary"},
+	{Method: http.MethodPost, Template: "/scans/{id}/cancel", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/scans/scan-1/cancel"},
+	{Method: http.MethodGet, Template: "/scans/{id}/hosts", Permission: auth.PermissionHostsRead, Example: "/scans/scan-1/hosts"},
+	{Method: http.MethodGet, Template: "/scans/{id}/hosts/{address}", Permission: auth.PermissionHostsRead, Example: "/scans/scan-1/hosts/198.51.100.10"},
+	{Method: http.MethodGet, Template: "/scans/{id}/hosts/{address}/rdap", Permission: auth.PermissionHostsRead, Example: "/scans/scan-1/hosts/198.51.100.10/rdap"},
+
+	// Jobs.
+	{Method: http.MethodGet, Template: "/jobs", Permission: auth.PermissionJobsRead, Example: "/jobs"},
+	{Method: http.MethodPost, Template: "/jobs", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs"},
+	{Method: http.MethodGet, Template: "/jobs/schedule-suggestion", Permission: auth.PermissionJobsRead, Example: "/jobs/schedule-suggestion"},
+	{Method: http.MethodGet, Template: "/jobs/{id}", Permission: auth.PermissionJobsRead, Example: "/jobs/job-1"},
+	{Method: http.MethodPut, Template: "/jobs/{id}", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1"},
+	{Method: http.MethodDelete, Template: "/jobs/{id}", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1"},
+	{Method: http.MethodDelete, Template: "/jobs/{id}", Query: "permanent=true", Permission: auth.PermissionJobsDelete, Mutates: true, Example: "/jobs/job-1"},
+	{Method: http.MethodPost, Template: "/jobs/{id}/archive", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/archive"},
+	{Method: http.MethodPost, Template: "/jobs/{id}/restore", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/restore"},
+	{Method: http.MethodPost, Template: "/jobs/{id}/pause", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/pause"},
+	{Method: http.MethodPost, Template: "/jobs/{id}/resume", Permission: auth.PermissionJobsWrite, Mutates: true, Example: "/jobs/job-1/resume"},
+	{Method: http.MethodPost, Template: "/jobs/{id}/run", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/jobs/job-1/run"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scan-cycle", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scan-cycle"},
+	{Method: http.MethodDelete, Template: "/jobs/{id}/scan-cycle/{cycle}", Permission: auth.PermissionJobsRun, Mutates: true, Example: "/jobs/job-1/scan-cycle/cycle-1"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/latest-successful", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/latest-successful"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/scan-1"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/results", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/scan-1/results"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/changes", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/scans/scan-1/changes"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/hosts", Permission: auth.PermissionHostsRead, Example: "/jobs/job-1/scans/scan-1/hosts"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/hosts/{address}", Permission: auth.PermissionHostsRead, Example: "/jobs/job-1/scans/scan-1/hosts/2001:db8::1"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/scans/{scan}/hosts/{address}/rdap", Permission: auth.PermissionHostsRead, Example: "/jobs/job-1/scans/scan-1/hosts/2001:db8::1/rdap"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/baseline", Permission: auth.PermissionBaselinesRead, Example: "/jobs/job-1/baseline"},
+	{Method: http.MethodPost, Template: "/jobs/{id}/baseline/reset", Permission: auth.PermissionBaselinesManage, Mutates: true, Example: "/jobs/job-1/baseline/reset"},
+	{Method: http.MethodPost, Template: "/jobs/{id}/baseline/approve", Permission: auth.PermissionBaselinesManage, Mutates: true, Example: "/jobs/job-1/baseline/approve"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/baseline/hosts", Permission: auth.PermissionBaselinesRead, Example: "/jobs/job-1/baseline/hosts"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/baseline/hosts/{address}", Permission: auth.PermissionBaselinesRead, Example: "/jobs/job-1/baseline/hosts/198.51.100.1"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/baseline/hosts/{address}/rdap", Permission: auth.PermissionBaselinesRead, Example: "/jobs/job-1/baseline/hosts/198.51.100.1/rdap"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/incidents", Permission: auth.PermissionIncidentsRead, Example: "/jobs/job-1/incidents"},
+	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/accept", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/accept"},
+	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/suppress", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/suppress"},
+	{Method: http.MethodGet, Template: "/jobs/{id}/events", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/events"},
+
+	// Unauthenticated public status projection, relative to publicAPIBase.
+	// Server.publicAPI also accepts one trailing slash.
+	{Method: http.MethodGet, Template: "/dashboard", Example: "/dashboard", Access: routePublic},
 }

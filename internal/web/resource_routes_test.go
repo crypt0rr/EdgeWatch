@@ -84,12 +84,12 @@ func (l *resourceLookups) observe(query string, args []driver.NamedValue) error 
 		if l.failJobs {
 			return errInjectedLookup
 		}
-	case strings.HasSuffix(query, "baseline_config_hash FROM scans WHERE id=?"):
+	case strings.HasSuffix(query, "baseline_config_hash FROM scans WHERE id=? AND tenant_id=?"):
 		l.scanSummaries[id]++
 		if l.failSummaries {
 			return errInjectedLookup
 		}
-	case strings.HasSuffix(query, "snapshot_json FROM scans WHERE id=?"):
+	case strings.HasSuffix(query, "snapshot_json FROM scans WHERE id=? AND tenant_id=?"):
 		l.scans[id]++
 		if l.failScans {
 			return errInjectedLookup

@@ -202,6 +202,9 @@ type ScanSummary struct {
 	NoProgressTries        int       `json:"no_progress_attempts,omitempty"`
 	BaselineScanID         string    `json:"baseline_scan_id,omitempty"`
 	BaselineConfigHash     string    `json:"baseline_config_hash,omitempty"`
+	// TenantID is the tenant that owns the scan. It is set by the store's
+	// tenant-scoped reads and is never part of an API response.
+	TenantID string `json:"-"`
 }
 
 // ActiveScan describes a scan that has acquired its lease and is currently

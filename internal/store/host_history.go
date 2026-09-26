@@ -45,13 +45,20 @@ type scanPageQueries struct {
 	pageArg  []any
 }
 
-func jobScansPageQueries(jobID string, limit, offset int) scanPageQueries {
+// jobScansPageQueries lists the scans of one of the tenant's jobs. The reads
+// of a job's scans put the tenant predicate on the job instead of on
+// scans.tenant_id. The two agree: the schema 53 guard trigger requires a scan
+// to belong to its job's tenant, and neither tenant can change. Schema 53
+// appended scans.tenant_id to the scan row, after the snapshot, so testing it
+// would read the snapshot pages of every scan that a count or an offset
+// passes, which an index on job_id otherwise answers alone.
+func jobScansPageQueries(tenantID, jobID string, limit, offset int) scanPageQueries {
 	limit, offset = normalizePage(limit, offset)
 	return scanPageQueries{
-		countSQL: `SELECT COUNT(*) FROM scans WHERE job_id=?`,
-		countArg: []any{jobID},
-		pageSQL:  `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`,
-		pageArg:  []any{jobID, limit, offset},
+		countSQL: `SELECT COUNT(*) FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=?`,
+		countArg: []any{tenantID, jobID},
+		pageSQL:  `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash,s.changes_json,s.snapshot_json FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`,
+		pageArg:  []any{tenantID, jobID, limit, offset},
 	}
 }
 
@@ -162,11 +169,14 @@ func normalizePage(limit, offset int) (int, int) {
 	return limit, offset
 }
 
-func scanHostsPageQueries(scanID, query, protocol string, hasOpen *bool, limit, offset int) scanPageQueries {
+// scanHostsPageQueries lists the hosts of one of the tenant's scans. The
+// scan join carries the tenant predicate, so the hosts of another tenant's
+// scan never match.
+func scanHostsPageQueries(tenantID, scanID, query, protocol string, hasOpen *bool, limit, offset int) scanPageQueries {
 	limit, offset = normalizePage(limit, offset)
 	filter := buildHostFilter(query, protocol, hasOpen)
 	where := append([]string{"h.scan_id=?"}, filter.where...)
-	args := append([]any{scanID}, filter.args...)
+	args := append([]any{tenantID, scanID}, filter.args...)
 	// The FTS projection deliberately mirrors scan_hosts.rowid. Joining on
 	// that stable row identifier lets SQLite constrain the host lookup to the
 	// MATCH result instead of re-resolving every scan/address pair globally.
@@ -177,20 +187,21 @@ func scanHostsPageQueries(scanID, query, protocol string, hasOpen *bool, limit, 
 	}
 	whereSQL := strings.Join(where, " AND ")
 	return scanPageQueries{
-		countSQL: `SELECT COUNT(*) FROM scan_hosts h` + join + ` WHERE ` + whereSQL,
+		countSQL: `SELECT COUNT(*) FROM scan_hosts h JOIN scans s ON s.id=h.scan_id AND s.tenant_id=?` + join + ` WHERE ` + whereSQL,
 		countArg: append([]any(nil), args...),
-		pageSQL:  `SELECT h.address,h.data_quality,h.host_json FROM scan_hosts h` + join + ` WHERE ` + whereSQL + ` ORDER BY h.address LIMIT ? OFFSET ?`,
+		pageSQL:  `SELECT h.address,h.data_quality,h.host_json FROM scan_hosts h JOIN scans s ON s.id=h.scan_id AND s.tenant_id=?` + join + ` WHERE ` + whereSQL + ` ORDER BY h.address LIMIT ? OFFSET ?`,
 		pageArg:  append(append([]any(nil), args...), limit, offset),
 	}
 }
 
-func latestScanHostsPageQueries(query, protocol string, hasOpen *bool, limit, offset int) scanPageQueries {
+// latestScanHostsPageQueries lists the tenant's host inventory. The
+// projection is keyed by (tenant_id, address), so each tenant has its own
+// row for an address, and the tenant predicate leads its indexes.
+func latestScanHostsPageQueries(tenantID, query, protocol string, hasOpen *bool, limit, offset int) scanPageQueries {
 	limit, offset = normalizePage(limit, offset)
 	filter := buildHostFilter(query, protocol, hasOpen)
-	// The host inventory shows the default tenant's projection until requests
-	// carry a tenant scope. It is the only tenant, so the rows are the same.
-	where := append([]string{"h.tenant_id=?"}, filter.where...)
-	args := append([]any{DefaultTenantID}, filter.args...)
+	where := filter.where
+	args := append([]any{tenantID}, filter.args...)
 	// latest_host_search mirrors latest_scan_hosts.rowid for the same bounded
 	// rowid-scoped lookup used by the per-scan history query.
 	join, predicate, searchArgs := hostSearchPredicate(filter, "latest_host_search", "hs.rowid=h.rowid")
@@ -198,24 +209,48 @@ func latestScanHostsPageQueries(query, protocol string, hasOpen *bool, limit, of
 		where = append(where, predicate)
 		args = append(args, searchArgs...)
 	}
-	whereSQL := strings.Join(where, " AND ")
+	filterSQL := ""
+	for _, clause := range where {
+		filterSQL += " AND " + clause
+	}
 	return scanPageQueries{
-		countSQL: `SELECT COUNT(*) FROM latest_scan_hosts h` + join + ` WHERE ` + whereSQL,
+		countSQL: `SELECT COUNT(*) FROM latest_scan_hosts h` + join + ` WHERE h.tenant_id=?` + filterSQL,
 		countArg: append([]any(nil), args...),
-		pageSQL:  `SELECT h.scan_id,h.address,h.data_quality,h.host_json,h.job_id,h.job,h.finished_at,COALESCE(j.archived,0) FROM latest_scan_hosts h LEFT JOIN jobs j ON j.id=h.job_id` + join + ` WHERE ` + whereSQL + ` ORDER BY COALESCE(j.archived,0) ASC,h.address LIMIT ? OFFSET ?`,
+		pageSQL:  `SELECT h.scan_id,h.address,h.data_quality,h.host_json,h.job_id,h.job,h.finished_at,COALESCE(j.archived,0) FROM latest_scan_hosts h LEFT JOIN jobs j ON j.id=h.job_id` + join + ` WHERE h.tenant_id=?` + filterSQL + ` ORDER BY COALESCE(j.archived,0) ASC,h.address LIMIT ? OFFSET ?`,
 		pageArg:  append(append([]any(nil), args...), limit, offset),
 	}
 }
 
+// ListJobScans returns the newest complete scans of a job.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListJobScans.
 func (s *Store) ListJobScans(ctx context.Context, jobID string, limit int) ([]model.Scan, error) {
-	page, err := s.ListJobScansPage(ctx, jobID, limit, 0)
+	return s.Tenant(DefaultTenantScope()).ListJobScans(ctx, jobID, limit)
+}
+
+// ListJobScans returns the newest complete scans of one of the tenant's
+// jobs; a job of another tenant has none.
+func (ts *TenantStore) ListJobScans(ctx context.Context, jobID string, limit int) ([]model.Scan, error) {
+	page, err := ts.ListJobScansPage(ctx, jobID, limit, 0)
 	return page.Items, err
 }
 
+// ListJobScansPage returns one page of a job's complete scans.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListJobScansPage.
 func (s *Store) ListJobScansPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Scan], error) {
-	queries := jobScansPageQueries(jobID, limit, offset)
+	return s.Tenant(DefaultTenantScope()).ListJobScansPage(ctx, jobID, limit, offset)
+}
+
+// ListJobScansPage returns one page of the complete scans, newest first, of
+// one of the tenant's jobs; a job of another tenant has none.
+func (ts *TenantStore) ListJobScansPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Scan], error) {
+	if err := ts.ready(); err != nil {
+		return Page[model.Scan]{}, err
+	}
+	queries := jobScansPageQueries(ts.scope.id, jobID, limit, offset)
 	var page Page[model.Scan]
-	readDB := s.reader()
+	readDB := ts.store.reader()
 	if err := readDB.QueryRowContext(ctx, queries.countSQL, queries.countArg...).Scan(&page.Total); err != nil {
 		return page, err
 	}
@@ -257,16 +292,29 @@ func (s *Store) ListJobScansPage(ctx context.Context, jobID string, limit, offse
 	return page, rows.Err()
 }
 
-// ListJobScanSummariesPage returns only the metadata needed by a paginated
-// history view. Full snapshots are intentionally left to GetScan/results.
+// ListJobScanSummariesPage returns one page of a job's scan metadata.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.ListJobScanSummariesPage.
 func (s *Store) ListJobScanSummariesPage(ctx context.Context, jobID string, limit, offset int) (Page[model.ScanSummary], error) {
+	return s.Tenant(DefaultTenantScope()).ListJobScanSummariesPage(ctx, jobID, limit, offset)
+}
+
+// ListJobScanSummariesPage returns only the metadata needed by a paginated
+// history view of one of the tenant's jobs; a job of another tenant has no
+// scans. Full snapshots are intentionally left to GetScan/results. The
+// tenant predicate is on the job, as jobScansPageQueries explains.
+func (ts *TenantStore) ListJobScanSummariesPage(ctx context.Context, jobID string, limit, offset int) (Page[model.ScanSummary], error) {
+	if err := ts.ready(); err != nil {
+		return Page[model.ScanSummary]{}, err
+	}
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.ScanSummary]
-	readDB := s.reader()
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
+	readDB := ts.store.reader()
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=?`, ts.scope.id, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE job_id=? ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT s.id,s.job_id,s.job_revision,s.job,s.started_at,s.finished_at,s.status,s.error,s.nmap_version,s.scanner_engine,s.scanner_profile_id,s.scanner_profile_revision,s.naabu_version,s.discovery_ports,s.confirmed_ports,s.discovery_duration_ms,s.enrichment_duration_ms,s.config_hash,s.cycle_id,s.cycle_attempt,s.cycle_status,s.resumable,s.completed_probes,s.total_probes,s.completed_units,s.total_units,s.no_progress_attempts,s.baseline_scan_id,s.baseline_config_hash FROM scans s JOIN jobs j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=? ORDER BY s.finished_at DESC,s.id DESC LIMIT ? OFFSET ?`, ts.scope.id, jobID, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -288,6 +336,7 @@ func (s *Store) ListJobScanSummariesPage(ctx context.Context, jobID string, limi
 			v.JobRevision = revision.Int64
 		}
 		v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
+		v.TenantID = ts.scope.id
 		page.Items = append(page.Items, v)
 	}
 	return page, rows.Err()

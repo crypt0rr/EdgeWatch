@@ -339,8 +339,8 @@ func lintTenantSQL(statements []sqlStatement, tables map[string]tableTenancy) te
 		}
 		finding := fmt.Sprintf("%s: %s: %s", statement.position, statement.function, strings.Join(touched, ", "))
 		switch statement.receiver {
-		case "TenantStore":
-			result.violations = append(result.violations, finding+": a TenantStore statement must carry the tenant predicate (tenant_id) in the same SQL")
+		case "TenantStore", "PublicStore":
+			result.violations = append(result.violations, finding+": a "+statement.receiver+" statement must carry the tenant predicate (tenant_id) in the same SQL")
 		case "Store":
 			result.unscopedStore = append(result.unscopedStore, finding)
 		case "SystemStore", "PlatformStore":
@@ -379,8 +379,8 @@ func parseStoreSources(t *testing.T) (*token.FileSet, []*ast.File) {
 
 // The store's SQL keeps tenant data behind the tenant predicate:
 //
-//   - a TenantStore method names tenant_id in every statement that touches
-//     a direct or via table;
+//   - a TenantStore or PublicStore method names tenant_id in every
+//     statement that touches a direct or via table;
 //   - every INSERT into a direct table names tenant_id, apart from the
 //     exemptions listed in tenantInsertExemptions;
 //   - Store methods that touch tenant data without tenant_id are reported,
@@ -438,6 +438,11 @@ func (ts *TenantStore) ScopedJob(ctx context.Context, id string) {
 	_ = ts.store.DB.QueryRowContext(ctx, "SELECT name FROM tenants WHERE id=?", id)
 }
 
+func (ps *PublicStore) LeakyScans(ctx context.Context, id string) {
+	_ = ps.store.DB.QueryRowContext(ctx, "SELECT id FROM scans WHERE job_id=?", id)
+	_ = ps.store.DB.QueryRowContext(ctx, "SELECT s.id FROM scans AS s JOIN jobs AS j ON j.id=s.job_id AND j.tenant_id=? WHERE s.job_id=?", ps.scope.tenant.id, id)
+}
+
 func (s *Store) UnscopedJobs(ctx context.Context) {
 	_, _ = s.DB.QueryContext(ctx, "DELETE FROM job_revisions WHERE job_id NOT IN (SELECT id FROM jobs)")
 	_, _ = s.DB.ExecContext(ctx, "CREATE INDEX IF NOT EXISTS jobs_name ON jobs(name)")
@@ -484,6 +489,7 @@ func TestTenantSQLLintFindsViolations(t *testing.T) {
 			"TenantStore.LeakyJob: jobs" + predicate,
 			"TenantStore.LeakyJob: scan_hosts" + predicate,
 			"TenantStore.LeakyJob: jobs" + predicate,
+			"PublicStore.LeakyScans: scans: a PublicStore statement must carry the tenant predicate (tenant_id) in the same SQL",
 			"insertJobs: INSERT INTO jobs names no tenant_id column" + fix,
 			"insertJobs: INSERT INTO scans has no column list, so it cannot name tenant_id" + fix,
 			"insertJobs: INSERT INTO outbox builds its column list at run time without a visible tenant_id" + fix,

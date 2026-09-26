@@ -204,7 +204,7 @@ func TestLatestSuccessfulJobHostsUsesProjectionBeforeHistoryFallback(t *testing.
 
 func TestLatestSuccessfulJobHostsHistoryQueryScopesSelectionBeforeLookup(t *testing.T) {
 	s := openTestStore(t)
-	query, args := latestSuccessfulJobHostsHistoryQuery([]PublicDashboardHost{{JobID: "job", Address: "198.51.100.10"}})
+	query, args := latestSuccessfulJobHostsHistoryQuery(DefaultTenantID, []PublicDashboardHost{{JobID: "job", Address: "198.51.100.10"}})
 	rows, err := s.DB.QueryContext(context.Background(), `EXPLAIN QUERY PLAN `+query, args...)
 	if err != nil {
 		t.Fatal(err)

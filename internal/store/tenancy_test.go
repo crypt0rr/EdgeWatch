@@ -261,7 +261,12 @@ func assertTenantStoreRefusesInvalidScopes(t *testing.T, f tenantFixture) {
 					args[j] = reflect.Zero(in)
 				}
 			}
-			results := fn.Call(args)
+			call := fn.Call
+			if fn.Type().IsVariadic() {
+				// The last argument is the variadic slice itself.
+				call = fn.CallSlice
+			}
+			results := call(args)
 			last := results[len(results)-1]
 			err, _ := last.Interface().(error)
 			if !errors.Is(err, ErrNoTenantScope) || !errors.Is(err, ErrNotFound) {

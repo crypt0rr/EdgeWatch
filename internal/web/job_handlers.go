@@ -375,7 +375,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 	if p.Enabled != nil {
 		enabled = *p.Enabled
 	}
-	record, err := s.Store.CreateJobWithEnabledAndAudit(r.Context(), job, enabled, actorAudit(session, "job.created", job.Name))
+	record, err := ts.CreateJobWithEnabledAndAudit(r.Context(), job, enabled, actorAudit(session, "job.created", job.Name))
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "job.created") {
 			return
@@ -460,8 +460,9 @@ func (s *Server) validateNotificationSelection(w http.ResponseWriter, r *http.Re
 // its historical response to a failed lookup through its jobLookupFailure.
 //
 // The lifecycle writes (archive, restore, pause, resume) and the baseline
-// host RDAP route never loaded the job record. The lifecycle writes check the
-// job inside their revision-guarded transaction; the RDAP route answers a
+// host RDAP route never loaded the job record. The lifecycle writes look the
+// job up in the request's tenant inside their revision-guarded transaction,
+// so another tenant's job is not found there; the RDAP route answers a
 // missing job as a missing baseline host. They keep taking the ID, because a
 // lookup here would add a query and change those responses.
 func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {

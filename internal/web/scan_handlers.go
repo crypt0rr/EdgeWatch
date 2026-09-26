@@ -137,9 +137,11 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 	if p.NotificationDestinations == nil {
 		job.NotificationDestinations = cloneStrings(current.Job.NotificationDestinations)
 	}
-	active, activeErr := s.Store.JobActive(r.Context(), id)
+	active, activeErr := ts.JobActive(r.Context(), id)
 	if activeErr != nil {
-		s.writeInternalError(w, r, "store", activeErr)
+		// A job deleted since the router loaded it is not found, as it would be
+		// by the update below.
+		s.writeStoreWriteError(w, r, activeErr, "job not found")
 		return
 	}
 	scopeChanged := current.Job.SecurityHash() != job.SecurityHash()
@@ -174,7 +176,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 	if scopeChanged {
 		audits = append([]store.AuditEntry{actorAudit(session, "job.rebaseline_requested", id)}, audits...)
 	}
-	record, changed, events, err := s.Store.UpdateJobWithEventsWithOutboxAndAudit(r.Context(), id, p.Revision, job, enabled, current.Archived, p.ConfirmRebaseline, destinations, audits...)
+	record, changed, events, err := ts.UpdateJobWithEventsWithOutboxAndAudit(r.Context(), id, p.Revision, job, enabled, current.Archived, p.ConfirmRebaseline, destinations, audits...)
 	if errors.Is(err, store.ErrConflict) {
 		writeError(w, 409, "conflict", "job was modified; reload before saving", nil)
 		return
@@ -338,7 +340,7 @@ func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, session stor
 		return
 	}
 	action := map[bool]string{true: "job.archived", false: "job.restored"}[archive]
-	if err := s.Store.SetJobArchivedWithRevisionAndAudit(r.Context(), id, archive, *payload.Revision, actorAudit(session, action, id)); err != nil {
+	if err := ts.SetJobArchivedWithRevisionAndAudit(r.Context(), id, archive, *payload.Revision, actorAudit(session, action, id)); err != nil {
 		if s.writeAuditUnavailable(w, err, action) {
 			return
 		}
@@ -385,7 +387,7 @@ func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session
 		writeError(w, http.StatusConflict, "archive_required", "archive the job before permanently deleting it", nil)
 		return
 	}
-	if err := s.Store.DeleteJobWithAudit(r.Context(), id, actorAudit(session, "job.deleted", id)); err != nil {
+	if err := ts.DeleteJobWithAudit(r.Context(), id, actorAudit(session, "job.deleted", id)); err != nil {
 		if s.writeAuditUnavailable(w, err, "job.deleted") {
 			return
 		}
@@ -411,7 +413,7 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	action := map[bool]string{true: "job.resumed", false: "job.paused"}[enabled]
-	if err := s.Store.SetJobEnabledWithRevisionAndAudit(r.Context(), id, enabled, *payload.Revision, actorAudit(session, action, id)); err != nil {
+	if err := ts.SetJobEnabledWithRevisionAndAudit(r.Context(), id, enabled, *payload.Revision, actorAudit(session, action, id)); err != nil {
 		if s.writeAuditUnavailable(w, err, action) {
 			return
 		}
@@ -446,8 +448,8 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Se
 		writeError(w, http.StatusBadRequest, "scan_work_estimate_failed", budgetErr.Error(), map[string]any{"estimate": estimate})
 		return
 	}
-	if active, activeErr := s.Store.JobActive(r.Context(), id); activeErr != nil {
-		s.writeInternalError(w, r, "store", activeErr)
+	if active, activeErr := ts.JobActive(r.Context(), id); activeErr != nil {
+		s.writeStoreWriteError(w, r, activeErr, "job not found")
 		return
 	} else if active {
 		writeError(w, http.StatusConflict, "job_active", "job already has a scan in progress", nil)

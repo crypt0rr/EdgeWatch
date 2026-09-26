@@ -197,14 +197,6 @@ func getTenantJobTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id strin
 	return scanJobRecord(tx.QueryRowContext(ctx, `SELECT `+jobRecordColumns+` FROM jobs WHERE id=? AND tenant_id=?`, id, scope.id), id)
 }
 
-// getJobTx reads a job of any tenant on the caller's transaction. Only the
-// runtime and incident writes that are still Store methods use it, and they
-// act on any tenant's job until they move to TenantStore; each then calls
-// getTenantJobTx with its scope instead. TenantStore methods never call it.
-func getJobTx(ctx context.Context, tx *sql.Tx, id string) (JobRecord, error) {
-	return scanJobRecord(tx.QueryRowContext(ctx, `SELECT `+jobRecordColumns+` FROM jobs WHERE id=?`, id), id)
-}
-
 // GetJobByName returns the job with the given name.
 //
 // Deprecated: bound to DefaultTenantScope. Use TenantStore.GetJobByName.

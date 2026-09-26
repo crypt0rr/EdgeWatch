@@ -9,25 +9,41 @@ import (
 
 const maxSQLiteInt64 = int64(^uint64(0) >> 1)
 
+// ReserveSSEEventIDs reserves SSE identifiers through
+// SystemStore.ReserveSSEEventIDs, until its callers use a system store
+// themselves.
+func (s *Store) ReserveSSEEventIDs(ctx context.Context, count uint64) (uint64, uint64, error) {
+	return s.System().ReserveSSEEventIDs(ctx, count)
+}
+
 // ReserveSSEEventIDs reserves a contiguous, durable range of SSE identifiers.
 // The cursor is advanced in the same writer transaction that reads the
 // durable event high-water mark, so a restarted process starts after both
 // persisted events and every range reserved by a previous process. Unused
-// identifiers at shutdown are intentionally left as gaps.
-func (s *Store) ReserveSSEEventIDs(ctx context.Context, count uint64) (uint64, uint64, error) {
-	return s.reserveSSEEventIDs(ctx, count, 0)
+// identifiers at shutdown are intentionally left as gaps. The live updates
+// of every tenant share the identifiers, so the high-water mark covers every
+// tenant's events.
+func (ss *SystemStore) ReserveSSEEventIDs(ctx context.Context, count uint64) (uint64, uint64, error) {
+	return ss.reserveSSEEventIDs(ctx, count, 0)
+}
+
+// ReserveSSEEventIDsAfter reserves SSE identifiers through
+// SystemStore.ReserveSSEEventIDsAfter, until its callers use a system store
+// themselves.
+func (s *Store) ReserveSSEEventIDsAfter(ctx context.Context, count, minimum uint64) (uint64, uint64, error) {
+	return s.System().ReserveSSEEventIDsAfter(ctx, count, minimum)
 }
 
 // ReserveSSEEventIDsAfter is the cursor-aware variant used when an in-memory
 // server has already emitted a replay marker beyond its reserved range (for
 // example after a client reconnects with a future Last-Event-ID). The durable
 // cursor is advanced past that marker before another range is handed out.
-func (s *Store) ReserveSSEEventIDsAfter(ctx context.Context, count, minimum uint64) (uint64, uint64, error) {
-	return s.reserveSSEEventIDs(ctx, count, minimum)
+func (ss *SystemStore) ReserveSSEEventIDsAfter(ctx context.Context, count, minimum uint64) (uint64, uint64, error) {
+	return ss.reserveSSEEventIDs(ctx, count, minimum)
 }
 
-func (s *Store) reserveSSEEventIDs(ctx context.Context, count, minimum uint64) (uint64, uint64, error) {
-	if s == nil || s.DB == nil {
+func (ss *SystemStore) reserveSSEEventIDs(ctx context.Context, count, minimum uint64) (uint64, uint64, error) {
+	if ss == nil || ss.store == nil || ss.store.DB == nil {
 		return 0, 0, errors.New("store is unavailable")
 	}
 	if count == 0 {
@@ -36,7 +52,7 @@ func (s *Store) reserveSSEEventIDs(ctx context.Context, count, minimum uint64) (
 	if count > uint64(maxSQLiteInt64) {
 		return 0, 0, errors.New("SSE event range is too large")
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, 0, err
 	}

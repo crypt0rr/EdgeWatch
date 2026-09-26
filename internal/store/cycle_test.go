@@ -196,7 +196,7 @@ func TestRetentionDoesNotClearCycleCheckpointForAttemptOnly(t *testing.T) {
 	if err := s.SaveScan(ctx, model.Scan{ID: "timeout-attempt", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "timed_out", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.clearCompletedCyclePayloads(ctx); err != nil {
+	if err := s.System().clearCompletedCyclePayloads(ctx); err != nil {
 		t.Fatal(err)
 	}
 	var checkpoint []byte
@@ -209,7 +209,7 @@ func TestRetentionDoesNotClearCycleCheckpointForAttemptOnly(t *testing.T) {
 	if err := s.SaveScan(ctx, model.Scan{ID: "promoted-final", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.clearCompletedCyclePayloads(ctx); err != nil {
+	if err := s.System().clearCompletedCyclePayloads(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DB.QueryRowContext(ctx, `SELECT snapshot_json FROM scan_cycle_units WHERE cycle_id=? AND sequence=?`, cycle.ID, unit.Sequence).Scan(&checkpoint); err != nil {

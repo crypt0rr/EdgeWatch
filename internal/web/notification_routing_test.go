@@ -56,7 +56,7 @@ func TestDeletingManagedDestinationUnblocksJobEdits(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	created := httptest.NewRecorder()
-	server.createNotificationDestination(created, routingRequest(t, http.MethodPost, "/api/v1/notifications/destinations", `{"name":"Ops","url":"generic://localhost/ops?disabletls=yes","password":"administrator password"}`), admin)
+	server.createNotificationDestination(created, routingRequest(t, http.MethodPost, "/api/v1/notifications/destinations", `{"name":"Ops","url":"generic://localhost/ops?disabletls=yes","password":"administrator password"}`), admin, defaultTenantStore(server))
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create destination = %d: %s", created.Code, created.Body.String())
 	}
@@ -68,19 +68,19 @@ func TestDeletingManagedDestinationUnblocksJobEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	createdJob := httptest.NewRecorder()
-	server.createJob(createdJob, routingRequest(t, http.MethodPost, "/api/v1/jobs", `{"name":"routed","schedule":"0 * * * *","timezone":"UTC","targets":["127.0.0.1"],"tcp":{"ports":"1","mode":"connect","engine":"nmap"},"timeout":"1m","timing":"balanced","baseline_samples":1,"change_confirmations":1,"max_expanded_hosts":256,"notification_destinations":["`+destination.ID+`"]}`), admin)
+	server.createJob(createdJob, routingRequest(t, http.MethodPost, "/api/v1/jobs", `{"name":"routed","schedule":"0 * * * *","timezone":"UTC","targets":["127.0.0.1"],"tcp":{"ports":"1","mode":"connect","engine":"nmap"},"timeout":"1m","timing":"balanced","baseline_samples":1,"change_confirmations":1,"max_expanded_hosts":256,"notification_destinations":["`+destination.ID+`"]}`), admin, defaultTenantStore(server))
 	if createdJob.Code != http.StatusCreated {
 		t.Fatalf("create job = %d: %s", createdJob.Code, createdJob.Body.String())
 	}
 	job := decodeRoutingJob(t, createdJob)
 	routing := httptest.NewRecorder()
-	server.updateNotificationRouting(routing, routingRequest(t, http.MethodPut, "/api/v1/notifications/update-routing", `{"destinations":["`+destination.ID+`"],"password":"administrator password"}`), admin)
+	server.updateNotificationRouting(routing, routingRequest(t, http.MethodPut, "/api/v1/notifications/update-routing", `{"destinations":["`+destination.ID+`"],"password":"administrator password"}`), admin, defaultTenantStore(server))
 	if routing.Code != http.StatusOK {
 		t.Fatalf("update routing = %d: %s", routing.Code, routing.Body.String())
 	}
 
 	deleted := httptest.NewRecorder()
-	server.notificationDestinationRoute(deleted, routingRequest(t, http.MethodDelete, "/api/v1/notifications/destinations/"+destination.ID, fmt.Sprintf(`{"password":"administrator password","revision":%d}`, destination.Revision)), admin, destination.ID)
+	server.notificationDestinationRoute(deleted, routingRequest(t, http.MethodDelete, "/api/v1/notifications/destinations/"+destination.ID, fmt.Sprintf(`{"password":"administrator password","revision":%d}`, destination.Revision)), admin, defaultTenantStore(server), destination.ID)
 	if deleted.Code != http.StatusNoContent {
 		t.Fatalf("delete destination = %d: %s", deleted.Code, deleted.Body.String())
 	}
@@ -92,7 +92,7 @@ func TestDeletingManagedDestinationUnblocksJobEdits(t *testing.T) {
 	}
 
 	loaded := httptest.NewRecorder()
-	server.jobRoute(loaded, routingRequest(t, http.MethodGet, "/api/v1/jobs/"+job.ID, ""), admin, job.ID)
+	server.jobRoute(loaded, routingRequest(t, http.MethodGet, "/api/v1/jobs/"+job.ID, ""), admin, defaultTenantStore(server), job.ID)
 	if loaded.Code != http.StatusOK {
 		t.Fatalf("get job = %d: %s", loaded.Code, loaded.Body.String())
 	}
@@ -101,7 +101,7 @@ func TestDeletingManagedDestinationUnblocksJobEdits(t *testing.T) {
 		t.Fatalf("job after destination delete = %#v", current)
 	}
 	updated := httptest.NewRecorder()
-	server.jobRoute(updated, routingRequest(t, http.MethodPut, "/api/v1/jobs/"+job.ID, routingJobUpdateBody("30 * * * *", current.Revision, current.Job.NotificationDestinations)), admin, job.ID)
+	server.jobRoute(updated, routingRequest(t, http.MethodPut, "/api/v1/jobs/"+job.ID, routingJobUpdateBody("30 * * * *", current.Revision, current.Job.NotificationDestinations)), admin, defaultTenantStore(server), job.ID)
 	if updated.Code != http.StatusOK {
 		t.Fatalf("schedule-only edit after destination delete = %d: %s", updated.Code, updated.Body.String())
 	}
@@ -151,7 +151,7 @@ func TestJobAPIReportsRoutingToRotatedDeploymentDestination(t *testing.T) {
 		t.Fatalf("changed deployment URL kept selector %q", oldSelector)
 	}
 	loaded := httptest.NewRecorder()
-	server.jobRoute(loaded, routingRequest(t, http.MethodGet, "/api/v1/jobs/"+record.ID, ""), admin, record.ID)
+	server.jobRoute(loaded, routingRequest(t, http.MethodGet, "/api/v1/jobs/"+record.ID, ""), admin, defaultTenantStore(server), record.ID)
 	current := decodeRoutingJob(t, loaded)
 	if loaded.Code != http.StatusOK || strings.Join(current.MissingNotificationDestinations, ",") != oldSelector || strings.Join(current.Job.NotificationDestinations, ",") != oldSelector {
 		t.Fatalf("job after URL rotation = %d %#v, want missing %q", loaded.Code, current, oldSelector)
@@ -173,7 +173,7 @@ func TestJobAPIReportsRoutingToRotatedDeploymentDestination(t *testing.T) {
 	// The console drops the unresolved selector and opts into the new
 	// destination; the server accepts that save and stops reporting it.
 	updated := httptest.NewRecorder()
-	server.jobRoute(updated, routingRequest(t, http.MethodPut, "/api/v1/jobs/"+record.ID, routingJobUpdateBody("30 * * * *", current.Revision, []string{newSelector})), admin, record.ID)
+	server.jobRoute(updated, routingRequest(t, http.MethodPut, "/api/v1/jobs/"+record.ID, routingJobUpdateBody("30 * * * *", current.Revision, []string{newSelector})), admin, defaultTenantStore(server), record.ID)
 	if updated.Code != http.StatusOK {
 		t.Fatalf("repair save = %d: %s", updated.Code, updated.Body.String())
 	}
@@ -199,7 +199,7 @@ func TestJobAPIShowsLegacyDeploymentDigestAsCurrentSelector(t *testing.T) {
 	server := newRoutingTestServer(t, db, url)
 	currentSelector := server.App.Notifier.LegacySelection()[0]
 	loaded := httptest.NewRecorder()
-	server.jobRoute(loaded, routingRequest(t, http.MethodGet, "/api/v1/jobs/"+record.ID, ""), admin, record.ID)
+	server.jobRoute(loaded, routingRequest(t, http.MethodGet, "/api/v1/jobs/"+record.ID, ""), admin, defaultTenantStore(server), record.ID)
 	job := decodeRoutingJob(t, loaded)
 	if loaded.Code != http.StatusOK || strings.Join(job.Job.NotificationDestinations, ",") != currentSelector || len(job.MissingNotificationDestinations) != 0 {
 		t.Fatalf("legacy digest job = %d %#v, want selector %q", loaded.Code, job, currentSelector)
@@ -208,7 +208,7 @@ func TestJobAPIShowsLegacyDeploymentDigestAsCurrentSelector(t *testing.T) {
 		t.Fatalf("job response exposed the legacy URL digest: %s", loaded.Body.String())
 	}
 	listed := httptest.NewRecorder()
-	server.listNotificationDestinations(listed, routingRequest(t, http.MethodGet, "/api/v1/notifications/destinations", ""))
+	server.listNotificationDestinations(listed, routingRequest(t, http.MethodGet, "/api/v1/notifications/destinations", ""), defaultTenantStore(server))
 	var destinations struct {
 		UpdateRouting struct {
 			Destinations []string `json:"destinations"`

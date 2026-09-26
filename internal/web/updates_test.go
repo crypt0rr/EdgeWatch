@@ -31,7 +31,7 @@ func TestApplicationUpdateStatusIsAuthenticatedAndRedactsSetupState(t *testing.T
 		t.Fatalf("application update status=%#v", status)
 	}
 	private := httptest.NewRecorder()
-	server.adminStatus(private, httptest.NewRequest(http.MethodGet, "/api/v1/status", nil), admin)
+	server.adminStatus(private, httptest.NewRequest(http.MethodGet, "/api/v1/status", nil), admin, defaultTenantStore(server))
 	if private.Code != http.StatusOK || !strings.Contains(private.Body.String(), `"updates"`) || !strings.Contains(private.Body.String(), `"latest_version":"v1.1.0"`) {
 		t.Fatalf("authenticated status=%d %s", private.Code, private.Body.String())
 	}

@@ -540,10 +540,10 @@ func summaryForHost(host model.HostObservation, legacy bool) hostSummary {
 	return result
 }
 
-func (s *Server) latestScannedHosts(ctx context.Context) ([]allHostSummary, error) {
+func (s *Server) latestScannedHosts(ctx context.Context, ts *store.TenantStore) ([]allHostSummary, error) {
 	latest := make(map[string]allHostSummary)
 	archivedJobs := make(map[string]bool)
-	jobs, err := s.Store.ListJobs(ctx, true)
+	jobs, err := ts.ListJobs(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -610,7 +610,7 @@ func (s *Server) latestScannedHosts(ctx context.Context) ([]allHostSummary, erro
 	return result, nil
 }
 
-func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
+func (s *Server) listHosts(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	limit, offset, err := parseHostPagination(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_pagination", err.Error(), nil)
@@ -667,7 +667,7 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request) {
 			hosts = append(hosts, allSummaryFromIndexedHost(item))
 		}
 	}
-	legacyHosts, err := s.latestScannedHosts(r.Context())
+	legacyHosts, err := s.latestScannedHosts(r.Context(), ts)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -821,7 +821,7 @@ func hostFromSnapshot(snapshot model.Snapshot, address string) (model.HostObserv
 // source, but accepting an incident deliberately creates a runtime overlay;
 // historical pages must use that overlay too or they will continue to display
 // ports that the administrator already accepted as removed.
-func (s *Server) expectedHostForScan(ctx context.Context, jobID, address string, job config.Job) (model.HostObservation, bool, error) {
+func (s *Server) expectedHostForScan(ctx context.Context, ts *store.TenantStore, jobID, address string, job config.Job) (model.HostObservation, bool, error) {
 	baselineInfo, err := s.Store.RuntimeBaselineInfo(ctx, jobID)
 	if err != nil {
 		return model.HostObservation{}, false, err
@@ -909,7 +909,7 @@ func parseHostProtocol(raw string) (string, error) {
 	return value, nil
 }
 
-func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, record store.JobRecord) {
+func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
 	id := record.ID
 	limit, offset, err := parseHostPagination(r)
 	if err != nil {
@@ -1009,7 +1009,7 @@ func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, record
 	writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": record.Job.Name, "source_scan": source, "data_quality": quality, "hosts": items, "pagination": paginationJSON(offset, limit, total)})
 }
 
-func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, record store.JobRecord, rawAddress string) {
+func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord, rawAddress string) {
 	id := record.ID
 	address, err := normalizedHostAddress(rawAddress)
 	if err != nil {
@@ -1095,7 +1095,7 @@ func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, record 
 	writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": record.Job.Name, "data_quality": quality, "host": host, "expected": host, "source_scan": source})
 }
 
-func (s *Server) jobBaselineHostRDAP(w http.ResponseWriter, r *http.Request, id, rawAddress string) {
+func (s *Server) jobBaselineHostRDAP(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id, rawAddress string) {
 	address, err := normalizedHostAddress(rawAddress)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "host not found", nil)
@@ -1179,13 +1179,13 @@ func rdapUnavailable(address string) rdap.Result {
 	return rdap.Result{Status: "unavailable", Address: address, Message: "RDAP lookup is not available"}
 }
 
-func (s *Server) jobScanHosts(w http.ResponseWriter, r *http.Request, record store.JobRecord, summary model.ScanSummary) {
-	s.renderScanHosts(w, r, record.ID, record.Job.Name, summary)
+func (s *Server) jobScanHosts(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord, summary model.ScanSummary) {
+	s.renderScanHosts(w, r, ts, record.ID, record.Job.Name, summary)
 }
 
 // renderScanHosts lists the hosts of a resolved scan. id is the owning job's
 // ID, or empty for a legacy scan that only records its job name.
-func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, id, jobName string, summary model.ScanSummary) {
+func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id, jobName string, summary model.ScanSummary) {
 	scanID := summary.ID
 	limit, offset, err := parseHostPagination(r)
 	if err != nil {
@@ -1234,27 +1234,27 @@ func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, id, job
 // nested route remains available for callers that already scope every request
 // by job ID; both paths enforce the same ownership check. A scan that records
 // its job ID is listed under that job; a legacy scan keeps its job name.
-func (s *Server) scanHostsRoute(w http.ResponseWriter, r *http.Request, scanID string) {
-	summary, ok := s.resolveScanSummary(w, r, scanID, scanStoreErrorInternal)
+func (s *Server) scanHostsRoute(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, scanID string) {
+	summary, ok := s.resolveScanSummary(w, r, ts, scanID, scanStoreErrorInternal)
 	if !ok {
 		return
 	}
 	if summary.JobID == "" {
-		s.renderScanHosts(w, r, "", summary.Job, summary)
+		s.renderScanHosts(w, r, ts, "", summary.Job, summary)
 		return
 	}
-	if job, ok := s.resolveJob(w, r, summary.JobID, jobStoreErrorInternal); ok {
-		s.renderScanHosts(w, r, job.ID, job.Job.Name, summary)
+	if job, ok := s.resolveJob(w, r, ts, summary.JobID, jobStoreErrorInternal); ok {
+		s.renderScanHosts(w, r, ts, job.ID, job.Job.Name, summary)
 	}
 }
 
-func (s *Server) jobScanHost(w http.ResponseWriter, r *http.Request, record store.JobRecord, summary model.ScanSummary, rawAddress string) {
-	s.renderScanHostWithSummary(w, r, record.ID, record.Job.Name, rawAddress, summary, &record)
+func (s *Server) jobScanHost(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord, summary model.ScanSummary, rawAddress string) {
+	s.renderScanHostWithSummary(w, r, ts, record.ID, record.Job.Name, rawAddress, summary, &record)
 }
 
 // renderScanHostWithSummary shows one host of a resolved scan. id and record
 // name the owning job, or are empty and nil for a legacy scan.
-func (s *Server) renderScanHostWithSummary(w http.ResponseWriter, r *http.Request, id, jobName, rawAddress string, summary model.ScanSummary, record *store.JobRecord) {
+func (s *Server) renderScanHostWithSummary(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id, jobName, rawAddress string, summary model.ScanSummary, record *store.JobRecord) {
 	scanID := summary.ID
 	address, err := normalizedHostAddress(rawAddress)
 	if err != nil {
@@ -1284,7 +1284,7 @@ func (s *Server) renderScanHostWithSummary(w http.ResponseWriter, r *http.Reques
 			dedupeHost(&indexed.Host)
 			var expected any
 			if haveExpectedJob {
-				if baselineHost, found, expectedErr := s.expectedHostForScan(r.Context(), expectedJobID, address, expectedJob); expectedErr == nil && found {
+				if baselineHost, found, expectedErr := s.expectedHostForScan(r.Context(), ts, expectedJobID, address, expectedJob); expectedErr == nil && found {
 					dedupeHost(&baselineHost)
 					expected = baselineHost
 				} else if expectedErr != nil {
@@ -1331,29 +1331,29 @@ func (s *Server) renderScanHostWithSummary(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": jobName, "scan": summary, "data_quality": quality, "host": host, "expected": expected})
 }
 
-func (s *Server) scanHostRoute(w http.ResponseWriter, r *http.Request, scanID, rawAddress string) {
-	summary, ok := s.resolveScanSummary(w, r, scanID, scanStoreErrorDetail)
+func (s *Server) scanHostRoute(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, scanID, rawAddress string) {
+	summary, ok := s.resolveScanSummary(w, r, ts, scanID, scanStoreErrorDetail)
 	if !ok {
 		return
 	}
 	if summary.JobID == "" {
-		s.renderScanHostWithSummary(w, r, "", summary.Job, rawAddress, summary, nil)
+		s.renderScanHostWithSummary(w, r, ts, "", summary.Job, rawAddress, summary, nil)
 		return
 	}
-	if job, ok := s.resolveJob(w, r, summary.JobID, jobStoreErrorJobDetail); ok {
-		s.renderScanHostWithSummary(w, r, job.ID, job.Job.Name, rawAddress, summary, &job)
+	if job, ok := s.resolveJob(w, r, ts, summary.JobID, jobStoreErrorJobDetail); ok {
+		s.renderScanHostWithSummary(w, r, ts, job.ID, job.Job.Name, rawAddress, summary, &job)
 	}
 }
 
 // jobScanHostRDAP serves /jobs/{id}/scans/{scan}/hosts/{address}/rdap. The
 // router has already confirmed that the scan belongs to the job.
-func (s *Server) jobScanHostRDAP(w http.ResponseWriter, r *http.Request, summary model.ScanSummary, rawAddress string) {
-	s.renderScanHostRDAPWithSummary(w, r, summary, rawAddress)
+func (s *Server) jobScanHostRDAP(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, summary model.ScanSummary, rawAddress string) {
+	s.renderScanHostRDAPWithSummary(w, r, ts, summary, rawAddress)
 }
 
 // renderScanHostRDAPWithSummary answers an RDAP request for a host that the
 // resolved scan observed.
-func (s *Server) renderScanHostRDAPWithSummary(w http.ResponseWriter, r *http.Request, summary model.ScanSummary, rawAddress string) {
+func (s *Server) renderScanHostRDAPWithSummary(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, summary model.ScanSummary, rawAddress string) {
 	scanID := summary.ID
 	address, err := normalizedHostAddress(rawAddress)
 	if err != nil {
@@ -1402,15 +1402,15 @@ func (s *Server) renderScanHostRDAPWithSummary(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]any{"rdap": result})
 }
 
-func (s *Server) scanHostRDAPRoute(w http.ResponseWriter, r *http.Request, scanID, rawAddress string) {
-	summary, ok := s.resolveScanSummary(w, r, scanID, scanStoreErrorDetail)
+func (s *Server) scanHostRDAPRoute(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, scanID, rawAddress string) {
+	summary, ok := s.resolveScanSummary(w, r, ts, scanID, scanStoreErrorDetail)
 	if !ok {
 		return
 	}
 	if summary.JobID != "" {
-		if _, ok := s.resolveJob(w, r, summary.JobID, jobStoreErrorHostDetail); !ok {
+		if _, ok := s.resolveJob(w, r, ts, summary.JobID, jobStoreErrorHostDetail); !ok {
 			return
 		}
 	}
-	s.renderScanHostRDAPWithSummary(w, r, summary, rawAddress)
+	s.renderScanHostRDAPWithSummary(w, r, ts, summary, rawAddress)
 }

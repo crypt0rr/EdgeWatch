@@ -47,7 +47,7 @@ func TestBaselineHostExplorerReturnsDetailedAndFilteredHosts(t *testing.T) {
 	}
 	recordRequest := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts?protocol=tcp&has_open_ports=true", nil)
 	recorder := httptest.NewRecorder()
-	server.jobRoute(recorder, recordRequest, store.Session{}, record.ID+"/baseline/hosts")
+	server.jobRoute(recorder, recordRequest, store.Session{}, defaultTenantStore(server), record.ID+"/baseline/hosts")
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -64,7 +64,7 @@ func TestBaselineHostExplorerReturnsDetailedAndFilteredHosts(t *testing.T) {
 
 	detailRequest := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts/198.51.100.1", nil)
 	detailRecorder := httptest.NewRecorder()
-	server.jobRoute(detailRecorder, detailRequest, store.Session{}, record.ID+"/baseline/hosts/198.51.100.1")
+	server.jobRoute(detailRecorder, detailRequest, store.Session{}, defaultTenantStore(server), record.ID+"/baseline/hosts/198.51.100.1")
 	if detailRecorder.Code != http.StatusOK || !bytes.Contains(detailRecorder.Body.Bytes(), []byte(`"open"`)) {
 		t.Fatalf("unexpected detail response %d: %s", detailRecorder.Code, detailRecorder.Body.String())
 	}
@@ -78,7 +78,7 @@ func TestBaselineHostExplorerReturnsDetailedAndFilteredHosts(t *testing.T) {
 		t.Fatal(err)
 	}
 	historicalRecorder := httptest.NewRecorder()
-	server.jobRoute(historicalRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1", nil), store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1")
+	server.jobRoute(historicalRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1", nil), store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1")
 	if historicalRecorder.Code != http.StatusOK {
 		t.Fatalf("historical detail after scope edit status %d: %s", historicalRecorder.Code, historicalRecorder.Body.String())
 	}
@@ -139,7 +139,7 @@ func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testi
 	}
 
 	listRecorder := httptest.NewRecorder()
-	server.jobRoute(listRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts", nil), store.Session{}, record.ID+"/baseline/hosts")
+	server.jobRoute(listRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts", nil), store.Session{}, defaultTenantStore(server), record.ID+"/baseline/hosts")
 	if listRecorder.Code != http.StatusOK {
 		t.Fatalf("baseline host list status %d: %s", listRecorder.Code, listRecorder.Body.String())
 	}
@@ -157,7 +157,7 @@ func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testi
 	// must match like longer queries do. 44 only matches the accepted port.
 	for _, query := range []string{"2", "22", "44"} {
 		searchRecorder := httptest.NewRecorder()
-		server.jobRoute(searchRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts?q="+query, nil), store.Session{}, record.ID+"/baseline/hosts")
+		server.jobRoute(searchRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts?q="+query, nil), store.Session{}, defaultTenantStore(server), record.ID+"/baseline/hosts")
 		if searchRecorder.Code != http.StatusOK {
 			t.Fatalf("baseline host search q=%s status %d: %s", query, searchRecorder.Code, searchRecorder.Body.String())
 		}
@@ -173,7 +173,7 @@ func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testi
 	}
 
 	detailRecorder := httptest.NewRecorder()
-	server.jobRoute(detailRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts/198.51.100.1", nil), store.Session{}, record.ID+"/baseline/hosts/198.51.100.1")
+	server.jobRoute(detailRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts/198.51.100.1", nil), store.Session{}, defaultTenantStore(server), record.ID+"/baseline/hosts/198.51.100.1")
 	if detailRecorder.Code != http.StatusOK {
 		t.Fatalf("baseline host detail status %d: %s", detailRecorder.Code, detailRecorder.Body.String())
 	}
@@ -191,7 +191,7 @@ func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testi
 	// baseline explorer. The source scan remains immutable, but accepted
 	// runtime overlays are authoritative for the expected field.
 	historicalRecorder := httptest.NewRecorder()
-	server.jobRoute(historicalRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1", nil), store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1")
+	server.jobRoute(historicalRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1", nil), store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1")
 	if historicalRecorder.Code != http.StatusOK {
 		t.Fatalf("historical host detail status %d: %s", historicalRecorder.Code, historicalRecorder.Body.String())
 	}
@@ -274,7 +274,7 @@ func TestHistoricalHostUsesAcceptedPortAndServiceRemovals(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.20", nil), store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.20")
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.20", nil), store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.20")
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("historical removal detail status %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -317,7 +317,7 @@ func TestAllHostsReturnsLatestSuccessfulResultPerAddress(t *testing.T) {
 	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/hosts?q=198.51.100.1&protocol=tcp", nil)
 	recorder := httptest.NewRecorder()
-	server.listHosts(recorder, req)
+	server.listHosts(recorder, req, defaultTenantStore(server))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -332,7 +332,7 @@ func TestAllHostsReturnsLatestSuccessfulResultPerAddress(t *testing.T) {
 	}
 	queryRequest := httptest.NewRequest(http.MethodGet, "/api/v1/hosts?q=222", nil)
 	queryRecorder := httptest.NewRecorder()
-	server.listHosts(queryRecorder, queryRequest)
+	server.listHosts(queryRecorder, queryRequest, defaultTenantStore(server))
 	if queryRecorder.Code != http.StatusOK {
 		t.Fatalf("query status %d: %s", queryRecorder.Code, queryRecorder.Body.String())
 	}
@@ -386,7 +386,7 @@ func TestAllHostsSeparatesArchivedJobsAfterActiveHosts(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
-	server.listHosts(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts", nil))
+	server.listHosts(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts", nil), defaultTenantStore(server))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("host list status = %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -429,7 +429,7 @@ func TestAllHostsMergesIndexedAndLegacySuccessfulScans(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	server.listHosts(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts", nil))
+	server.listHosts(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts", nil), defaultTenantStore(server))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("host list status = %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -443,7 +443,7 @@ func TestAllHostsMergesIndexedAndLegacySuccessfulScans(t *testing.T) {
 		t.Fatalf("mixed host projection = %#v", response.Hosts)
 	}
 	queryRecorder := httptest.NewRecorder()
-	server.listHosts(queryRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts?q=legacy.example", nil))
+	server.listHosts(queryRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts?q=legacy.example", nil), defaultTenantStore(server))
 	if queryRecorder.Code != http.StatusOK {
 		t.Fatalf("legacy query status = %d: %s", queryRecorder.Code, queryRecorder.Body.String())
 	}
@@ -457,7 +457,7 @@ func TestAllHostsMergesIndexedAndLegacySuccessfulScans(t *testing.T) {
 		t.Fatalf("legacy query result = %#v", response.Hosts)
 	}
 	serviceRecorder := httptest.NewRecorder()
-	server.listHosts(serviceRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts?q=legacy-http", nil))
+	server.listHosts(serviceRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/hosts?q=legacy-http", nil), defaultTenantStore(server))
 	if serviceRecorder.Code != http.StatusOK {
 		t.Fatalf("legacy service query status = %d: %s", serviceRecorder.Code, serviceRecorder.Body.String())
 	}

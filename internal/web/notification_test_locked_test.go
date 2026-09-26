@@ -26,7 +26,7 @@ func TestNotificationTestReportsLockedManagedDestination(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/test", nil)
 	request.RemoteAddr = "127.0.0.1:4"
 	response := httptest.NewRecorder()
-	server.notificationTest(response, request, admin)
+	server.notificationTest(response, request, admin, defaultTenantStore(server))
 	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "notification_key_unavailable") {
 		t.Fatalf("locked notification test = %d: %s", response.Code, response.Body.String())
 	}

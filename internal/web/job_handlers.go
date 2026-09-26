@@ -166,9 +166,9 @@ func jobJSONFromStateSummary(record store.JobRecord, summary store.RuntimeStateS
 	return map[string]any{"id": record.ID, "revision": record.Revision, "enabled": record.Enabled, "archived": record.Archived, "created_at": record.CreatedAt, "updated_at": record.UpdatedAt, "security_hash": record.Job.SecurityHash(), "job": p, "baseline": baselineJSONFromSummary(summary, record.Job.SecurityHash()), "scan_estimate": estimate}
 }
 
-func (s *Server) jobJSONWithCycle(ctx context.Context, record store.JobRecord, state model.JobState) map[string]any {
+func (s *Server) jobJSONWithCycle(ctx context.Context, ts *store.TenantStore, record store.JobRecord, state model.JobState) map[string]any {
 	value := s.addNotificationRouting(jobJSON(record, state))
-	return s.addJobCycleAndProfile(ctx, record, value)
+	return s.addJobCycleAndProfile(ctx, ts, record, value)
 }
 
 // addNotificationRouting reports a job's routing as the console can use it.
@@ -191,7 +191,7 @@ func (s *Server) addNotificationRouting(value map[string]any) map[string]any {
 	return value
 }
 
-func (s *Server) addJobCycleAndProfile(ctx context.Context, record store.JobRecord, value map[string]any) map[string]any {
+func (s *Server) addJobCycleAndProfile(ctx context.Context, ts *store.TenantStore, record store.JobRecord, value map[string]any) map[string]any {
 	// A profile edit is intentionally non-breaking: jobs retain their pinned
 	// revision until an operator explicitly applies the newer one. Surface the
 	// availability on the job payload so the editor can offer that deliberate
@@ -340,7 +340,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, ts *store.Tena
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": out})
 }
 
-func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	var p jobPayload
 	if !decodeJSON(w, r, &p) {
 		return
@@ -360,7 +360,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 		writeError(w, http.StatusForbidden, "high_cost_admin_required", "only administrators may enable high-cost scans", nil)
 		return
 	}
-	if err := s.applySelectedScannerProfile(r.Context(), &job, false, auth.HasPermission(session, auth.PermissionScannerProfilesManage)); err != nil {
+	if err := s.applySelectedScannerProfile(r.Context(), ts, &job, false, auth.HasPermission(session, auth.PermissionScannerProfilesManage)); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, "profile_conflict", "scanner profile was modified; reload and select its current revision", nil)
 		} else {
@@ -390,7 +390,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 	s.App.RefreshSchedules()
 	state, _ := s.Store.RuntimeState(r.Context(), record.ID)
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "job.created", "job_id": record.ID})
-	writeJSON(w, http.StatusCreated, s.jobJSONWithCycle(r.Context(), record, state))
+	writeJSON(w, http.StatusCreated, s.jobJSONWithCycle(r.Context(), ts, record, state))
 }
 
 // defaultNewScannerProfile keeps new web-created TCP jobs on the faster,
@@ -464,7 +464,7 @@ func (s *Server) validateNotificationSelection(w http.ResponseWriter, r *http.Re
 // job inside their revision-guarded transaction; the RDAP route answers a
 // missing job as a missing baseline host. They keep taking the ID, because a
 // lookup here would add a query and change those responses.
-func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.Session, rest string) {
+func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		writeError(w, 404, "not_found", "job not found", nil)
@@ -472,8 +472,8 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 	}
 	id := parts[0]
 	if len(parts) == 1 && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, id, jobMissingOnAnyError); ok {
-			s.getJob(w, r, job)
+		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
+			s.getJob(w, r, ts, job)
 		}
 		return
 	}
@@ -482,8 +482,8 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		if !ok {
 			return
 		}
-		if job, ok := s.resolveJob(w, r, id, jobStoreErrorInternal); ok {
-			s.updateJob(w, r, session, job, update)
+		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
+			s.updateJob(w, r, session, ts, job, update)
 		}
 		return
 	}
@@ -493,115 +493,115 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 			if !ok {
 				return
 			}
-			if job, ok := s.resolveJob(w, r, id, jobMissingOnAnyError); ok {
-				s.permanentDelete(w, r, session, job, confirmName)
+			if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
+				s.permanentDelete(w, r, session, ts, job, confirmName)
 			}
 		} else {
-			s.archiveJob(w, r, session, id, true)
+			s.archiveJob(w, r, session, ts, id, true)
 		}
 		return
 	}
 	if len(parts) == 2 && parts[1] == "archive" && r.Method == http.MethodPost {
-		s.archiveJob(w, r, session, id, true)
+		s.archiveJob(w, r, session, ts, id, true)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "restore" && r.Method == http.MethodPost {
-		s.archiveJob(w, r, session, id, false)
+		s.archiveJob(w, r, session, ts, id, false)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "pause" && r.Method == http.MethodPost {
-		s.enableJob(w, r, session, id, false)
+		s.enableJob(w, r, session, ts, id, false)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "resume" && r.Method == http.MethodPost {
-		s.enableJob(w, r, session, id, true)
+		s.enableJob(w, r, session, ts, id, true)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "run" && r.Method == http.MethodPost {
-		if job, ok := s.resolveJob(w, r, id, jobMissingOnAnyError); ok {
-			s.runJob(w, r, session, job)
+		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
+			s.runJob(w, r, session, ts, job)
 		}
 		return
 	}
 	if len(parts) == 2 && parts[1] == "scan-cycle" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, id, jobStoreErrorInternal); ok {
-			s.scanCycle(w, r, job)
+		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
+			s.scanCycle(w, r, ts, job)
 		}
 		return
 	}
 	if len(parts) == 3 && parts[1] == "scan-cycle" && r.Method == http.MethodDelete {
-		if job, ok := s.resolveJob(w, r, id, jobStoreErrorInternal); ok {
-			s.discardScanCycle(w, r, session, job, parts[2])
+		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
+			s.discardScanCycle(w, r, session, ts, job, parts[2])
 		}
 		return
 	}
 	if len(parts) == 2 && parts[1] == "scans" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, id, jobStoreErrorInternal); ok {
-			s.jobScans(w, r, job)
+		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
+			s.jobScans(w, r, ts, job)
 		}
 		return
 	}
 	if len(parts) == 3 && parts[1] == "scans" && parts[2] == "latest-successful" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, id, jobMissingOnAnyError); ok {
-			s.latestSuccessfulScan(w, r, job)
+		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
+			s.latestSuccessfulScan(w, r, ts, job)
 		}
 		return
 	}
 	if len(parts) == 3 && parts[1] == "scans" && r.Method == http.MethodGet {
-		if job, scan, ok := s.resolveJobAndScan(w, r, id, jobStoreErrorInternal, parts[2], scanStoreErrorInternal); ok {
-			s.jobScan(w, r, job, scan)
+		if job, scan, ok := s.resolveJobAndScan(w, r, ts, id, jobStoreErrorInternal, parts[2], scanStoreErrorInternal); ok {
+			s.jobScan(w, r, ts, job, scan)
 		}
 		return
 	}
 	if len(parts) == 4 && parts[1] == "scans" && parts[3] == "results" && r.Method == http.MethodGet {
-		if _, scan, ok := s.resolveJobAndScan(w, r, id, jobStoreErrorInternal, parts[2], scanStoreErrorInternal); ok {
-			s.jobScanResults(w, r, scan)
+		if _, scan, ok := s.resolveJobAndScan(w, r, ts, id, jobStoreErrorInternal, parts[2], scanStoreErrorInternal); ok {
+			s.jobScanResults(w, r, ts, scan)
 		}
 		return
 	}
 	if len(parts) == 4 && parts[1] == "scans" && parts[3] == "hosts" && r.Method == http.MethodGet {
-		if job, scan, ok := s.resolveJobAndScan(w, r, id, jobStoreErrorInternal, parts[2], scanStoreErrorInternal); ok {
-			s.jobScanHosts(w, r, job, scan)
+		if job, scan, ok := s.resolveJobAndScan(w, r, ts, id, jobStoreErrorInternal, parts[2], scanStoreErrorInternal); ok {
+			s.jobScanHosts(w, r, ts, job, scan)
 		}
 		return
 	}
 	if len(parts) == 5 && parts[1] == "scans" && parts[3] == "hosts" && r.Method == http.MethodGet {
-		if job, scan, ok := s.resolveJobAndScan(w, r, id, jobStoreErrorJobDetail, parts[2], scanStoreErrorDetail); ok {
-			s.jobScanHost(w, r, job, scan, parts[4])
+		if job, scan, ok := s.resolveJobAndScan(w, r, ts, id, jobStoreErrorJobDetail, parts[2], scanStoreErrorDetail); ok {
+			s.jobScanHost(w, r, ts, job, scan, parts[4])
 		}
 		return
 	}
 	if len(parts) == 6 && parts[1] == "scans" && parts[3] == "hosts" && parts[5] == "rdap" && r.Method == http.MethodGet {
-		if _, scan, ok := s.resolveJobAndScan(w, r, id, jobStoreErrorHostDetail, parts[2], scanStoreErrorDetail); ok {
-			s.jobScanHostRDAP(w, r, scan, parts[4])
+		if _, scan, ok := s.resolveJobAndScan(w, r, ts, id, jobStoreErrorHostDetail, parts[2], scanStoreErrorDetail); ok {
+			s.jobScanHostRDAP(w, r, ts, scan, parts[4])
 		}
 		return
 	}
 	if len(parts) == 3 && parts[1] == "baseline" && parts[2] == "hosts" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, id, jobStoreErrorInternal); ok {
-			s.jobBaselineHosts(w, r, job)
+		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
+			s.jobBaselineHosts(w, r, ts, job)
 		}
 		return
 	}
 	if len(parts) == 4 && parts[1] == "baseline" && parts[2] == "hosts" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, id, jobStoreErrorInternal); ok {
-			s.jobBaselineHost(w, r, job, parts[3])
+		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
+			s.jobBaselineHost(w, r, ts, job, parts[3])
 		}
 		return
 	}
 	if len(parts) == 5 && parts[1] == "baseline" && parts[2] == "hosts" && parts[4] == "rdap" && r.Method == http.MethodGet {
-		s.jobBaselineHostRDAP(w, r, id, parts[3])
+		s.jobBaselineHostRDAP(w, r, ts, id, parts[3])
 		return
 	}
 	if len(parts) == 4 && parts[1] == "scans" && parts[3] == "changes" && r.Method == http.MethodGet {
-		if job, scan, ok := s.resolveJobAndScan(w, r, id, jobStoreErrorInternal, parts[2], scanStoreErrorInternal); ok {
-			s.jobScanChanges(w, r, job, scan)
+		if job, scan, ok := s.resolveJobAndScan(w, r, ts, id, jobStoreErrorInternal, parts[2], scanStoreErrorInternal); ok {
+			s.jobScanChanges(w, r, ts, job, scan)
 		}
 		return
 	}
 	if len(parts) == 2 && parts[1] == "incidents" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, id, jobMissingOnAnyError); ok {
-			s.jobIncidents(w, r, job)
+		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
+			s.jobIncidents(w, r, ts, job)
 		}
 		return
 	}
@@ -610,8 +610,8 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		if !ok {
 			return
 		}
-		if job, ok := s.resolveJob(w, r, id, jobStoreErrorInternal); ok {
-			s.acceptIncident(w, r, session, job, action)
+		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
+			s.acceptIncident(w, r, session, ts, job, action)
 		}
 		return
 	}
@@ -620,20 +620,20 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		if !ok {
 			return
 		}
-		if job, ok := s.resolveJob(w, r, id, jobStoreErrorInternal); ok {
-			s.suppressIncident(w, r, session, job, action)
+		if job, ok := s.resolveJob(w, r, ts, id, jobStoreErrorInternal); ok {
+			s.suppressIncident(w, r, session, ts, job, action)
 		}
 		return
 	}
 	if len(parts) == 2 && parts[1] == "events" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, id, jobMissingOnAnyError); ok {
-			s.jobEvents(w, r, job)
+		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
+			s.jobEvents(w, r, ts, job)
 		}
 		return
 	}
 	if len(parts) == 2 && parts[1] == "baseline" && r.Method == http.MethodGet {
-		if job, ok := s.resolveJob(w, r, id, jobMissingOnAnyError); ok {
-			s.jobBaseline(w, r, job)
+		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
+			s.jobBaseline(w, r, ts, job)
 		}
 		return
 	}
@@ -642,8 +642,8 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		if !ok {
 			return
 		}
-		if job, ok := s.resolveJob(w, r, id, jobMissingOnAnyError); ok {
-			s.resetBaseline(w, r, session, job, input)
+		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
+			s.resetBaseline(w, r, session, ts, job, input)
 		}
 		return
 	}
@@ -652,8 +652,8 @@ func (s *Server) jobRoute(w http.ResponseWriter, r *http.Request, session store.
 		if !ok {
 			return
 		}
-		if job, ok := s.resolveJob(w, r, id, jobMissingOnAnyError); ok {
-			s.approveBaseline(w, r, session, job, input)
+		if job, ok := s.resolveJob(w, r, ts, id, jobMissingOnAnyError); ok {
+			s.approveBaseline(w, r, session, ts, job, input)
 		}
 		return
 	}

@@ -344,7 +344,7 @@ func publicDashboardTextError(title, introduction string) (string, map[string]st
 	return strings.Join(reasons, "; "), details
 }
 
-func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	dashboard, err := s.Store.GetPublicDashboard(r.Context())
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusInternalServerError, "store", "public dashboard could not be loaded", nil)
@@ -395,7 +395,7 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 	// selections remain visible in the admin picker so they can be removed (or
 	// become publishable again if the job is restored), while the public
 	// response below deliberately omits them.
-	published, err := s.loadPublishedHosts(r.Context(), selections, true)
+	published, err := s.loadPublishedHosts(r.Context(), ts, selections, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", "published hosts could not be checked", nil)
 		return
@@ -431,7 +431,7 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 }
 
 func (s *Server) latestPublishedHost(ctx context.Context, jobID, address string) (store.ScanHost, error) {
-	lookup, err := s.loadPublishedHosts(ctx, []store.PublicDashboardHost{{JobID: jobID, Address: address}}, false)
+	lookup, err := s.loadPublishedHosts(ctx, s.Store, []store.PublicDashboardHost{{JobID: jobID, Address: address}}, false)
 	if err != nil {
 		return store.ScanHost{}, err
 	}
@@ -451,15 +451,24 @@ func publicSelectionKey(jobID, address string) string {
 	return strings.TrimSpace(jobID) + "\x00" + canonicalHostAddress(address)
 }
 
+// publishedJobLister lists the jobs that published host selections may name.
+// The administrator's public status route passes the request's tenant store.
+// The anonymous public page has no session and therefore no tenant store: it
+// passes the Store, which reads the default tenant, until public reads move to
+// a PublicScope.
+type publishedJobLister interface {
+	ListJobs(ctx context.Context, includeArchived bool) ([]store.JobRecord, error)
+}
+
 // loadPublishedHosts resolves all selected addresses through bounded set-based
 // reads. Indexed observations are loaded in one query; only selections absent
 // from that projection use the bounded legacy fallback.
-func (s *Server) loadPublishedHosts(ctx context.Context, selections []store.PublicDashboardHost, includeArchived bool) (map[string]publicHostLookup, error) {
+func (s *Server) loadPublishedHosts(ctx context.Context, lister publishedJobLister, selections []store.PublicDashboardHost, includeArchived bool) (map[string]publicHostLookup, error) {
 	lookup := map[string]publicHostLookup{}
 	if len(selections) == 0 {
 		return lookup, nil
 	}
-	jobs, err := s.Store.ListJobs(ctx, true)
+	jobs, err := lister.ListJobs(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -557,7 +566,7 @@ type publicRdapResponse struct {
 
 func (s *Server) publicDashboardResponse(ctx context.Context, dashboard store.PublicDashboard) (publicDashboardResponse, error) {
 	response := publicDashboardResponse{Title: dashboard.Title, Introduction: dashboard.Introduction, UpdatedAt: dashboard.UpdatedAt, Hosts: []publicHostResponse{}}
-	lookup, err := s.loadPublishedHosts(ctx, dashboard.Hosts, false)
+	lookup, err := s.loadPublishedHosts(ctx, s.Store, dashboard.Hosts, false)
 	if err != nil {
 		return response, err
 	}

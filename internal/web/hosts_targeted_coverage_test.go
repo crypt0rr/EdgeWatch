@@ -44,10 +44,10 @@ func TestExpectedHostAndPublishedHostCompatibilityBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if host, found, err := server.expectedHostForScan(ctx, record.ID, "198.51.100.10", record.Job); err != nil || !found || len(host.Protocols) != 1 {
+	if host, found, err := server.expectedHostForScan(ctx, defaultTenantStore(server), record.ID, "198.51.100.10", record.Job); err != nil || !found || len(host.Protocols) != 1 {
 		t.Fatalf("indexed expected host = %#v, %t, %v", host, found, err)
 	}
-	if _, found, err := server.expectedHostForScan(ctx, record.ID, "198.51.100.99", record.Job); err != nil || found {
+	if _, found, err := server.expectedHostForScan(ctx, defaultTenantStore(server), record.ID, "198.51.100.99", record.Job); err != nil || found {
 		t.Fatalf("unknown indexed host = %t, %v", found, err)
 	}
 	if _, err := server.latestPublishedHost(ctx, record.ID, "198.51.100.99"); err == nil {
@@ -63,13 +63,13 @@ func TestExpectedHostAndPublishedHostCompatibilityBranches(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if host, found, err := server.expectedHostForScan(ctx, record.ID, "198.51.100.10", record.Job); err != nil || !found || len(host.Protocols) != 1 {
+	if host, found, err := server.expectedHostForScan(ctx, defaultTenantStore(server), record.ID, "198.51.100.10", record.Job); err != nil || !found || len(host.Protocols) != 1 {
 		t.Fatalf("modified projected host = %#v, %t, %v", host, found, err)
 	}
 	if _, err := db.DB.ExecContext(ctx, `DELETE FROM baseline_hosts WHERE job_id=?`, record.ID); err != nil {
 		t.Fatal(err)
 	}
-	if host, found, err := server.expectedHostForScan(ctx, record.ID, "198.51.100.10", record.Job); err != nil || !found || len(host.Protocols) != 1 {
+	if host, found, err := server.expectedHostForScan(ctx, defaultTenantStore(server), record.ID, "198.51.100.10", record.Job); err != nil || !found || len(host.Protocols) != 1 {
 		t.Fatalf("modified legacy host = %#v, %t, %v", host, found, err)
 	}
 
@@ -84,10 +84,10 @@ func TestExpectedHostAndPublishedHostCompatibilityBranches(t *testing.T) {
 	if _, err := db.DB.ExecContext(ctx, `DELETE FROM scan_hosts WHERE scan_id=?`, scan.ID); err != nil {
 		t.Fatal(err)
 	}
-	if host, found, err := server.expectedHostForScan(ctx, record.ID, "198.51.100.10", record.Job); err != nil || !found || len(host.Protocols) != 1 {
+	if host, found, err := server.expectedHostForScan(ctx, defaultTenantStore(server), record.ID, "198.51.100.10", record.Job); err != nil || !found || len(host.Protocols) != 1 {
 		t.Fatalf("legacy source host = %#v, %t, %v", host, found, err)
 	}
-	if _, found, err := server.expectedHostForScan(ctx, record.ID, "198.51.100.99", record.Job); err != nil || found {
+	if _, found, err := server.expectedHostForScan(ctx, defaultTenantStore(server), record.ID, "198.51.100.99", record.Job); err != nil || found {
 		t.Fatalf("missing legacy source host = %t, %v", found, err)
 	}
 
@@ -110,7 +110,7 @@ func TestExpectedHostAndPublishedHostCompatibilityBranches(t *testing.T) {
 	// disabled; the endpoint remains a stable local response.
 	server.RDAP = nil
 	rdapResponse := httptest.NewRecorder()
-	server.jobBaselineHostRDAP(rdapResponse, httptest.NewRequest(http.MethodGet, "/rdap", nil), record.ID, "198.51.100.10")
+	server.jobBaselineHostRDAP(rdapResponse, httptest.NewRequest(http.MethodGet, "/rdap", nil), defaultTenantStore(server), record.ID, "198.51.100.10")
 	if rdapResponse.Code != http.StatusOK || !strings.Contains(rdapResponse.Body.String(), `"status":"unavailable"`) {
 		t.Fatalf("baseline RDAP fallback = %d: %s", rdapResponse.Code, rdapResponse.Body.String())
 	}

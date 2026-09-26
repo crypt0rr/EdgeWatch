@@ -21,7 +21,7 @@ func TestStatusLinksRunningVersionToItsRelease(t *testing.T) {
 	status := func(session store.Session) map[string]any {
 		t.Helper()
 		rec := httptest.NewRecorder()
-		server.adminStatus(rec, httptest.NewRequest(http.MethodGet, "/api/v1/status", nil), session)
+		server.adminStatus(rec, httptest.NewRequest(http.MethodGet, "/api/v1/status", nil), session, defaultTenantStore(server))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 		}

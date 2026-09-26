@@ -53,7 +53,7 @@ func TestNewJobsDefaultToConfiguredDeploymentTimezone(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs", strings.NewReader(string(raw)))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
-		server.createJob(rec, req, admin)
+		server.createJob(rec, req, admin, defaultTenantStore(server))
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("create %s = %d: %s", name, rec.Code, rec.Body.String())
 		}

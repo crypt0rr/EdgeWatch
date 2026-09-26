@@ -24,7 +24,7 @@ func startCookieSSEStream(server *Server, raw string, session store.Session) (*d
 	writer := &deadlineTrackingWriter{header: make(http.Header)}
 	done := make(chan struct{})
 	go func() {
-		server.stream(writer, request, session)
+		server.stream(writer, request, session, defaultTenantStore(server))
 		close(done)
 	}()
 	return writer, cancel, done
@@ -141,7 +141,7 @@ func TestSSEAnonymousStreamDoesNotSeedAuthorizationCache(t *testing.T) {
 	writer := &deadlineTrackingWriter{header: make(http.Header)}
 	done := make(chan struct{})
 	go func() {
-		server.stream(writer, request, store.Session{})
+		server.stream(writer, request, store.Session{}, defaultTenantStore(server))
 		close(done)
 	}()
 	waitForSSESubscribers(t, server, 1)

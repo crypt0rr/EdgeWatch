@@ -23,7 +23,7 @@ func TestCreateUserRejectsUsernamesTheStoreRejectsAsFieldErrors(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(string(body)))
 		request.Header.Set("Content-Type", "application/json")
 		recorder := httptest.NewRecorder()
-		server.usersRoute(recorder, request, admin, "")
+		server.usersRoute(recorder, request, admin, defaultTenantStore(server), "")
 		return recorder
 	}
 	before, err := db.ListUsers(ctx)
@@ -88,7 +88,7 @@ func TestPasswordResetActivationClosesTheAccountsStreams(t *testing.T) {
 	resetRequest := httptest.NewRequest(http.MethodPost, "/api/v1/users/"+operator.ID+"/password-reset", strings.NewReader(`{"password":"administrator password"}`))
 	resetRequest.Header.Set("Content-Type", "application/json")
 	reset := httptest.NewRecorder()
-	server.usersRoute(reset, resetRequest, admin, operator.ID+"/password-reset")
+	server.usersRoute(reset, resetRequest, admin, defaultTenantStore(server), operator.ID+"/password-reset")
 	if reset.Code != http.StatusOK {
 		t.Fatalf("password reset issue = %d: %s", reset.Code, reset.Body.String())
 	}
@@ -133,7 +133,7 @@ func TestFirstActivationOfAnInviteeStillSucceeds(t *testing.T) {
 	createRequest := httptest.NewRequest(http.MethodPost, "/api/v1/users", strings.NewReader(`{"username":"invitee","display_name":"Invitee","role":"viewer","password":"administrator password"}`))
 	createRequest.Header.Set("Content-Type", "application/json")
 	created := httptest.NewRecorder()
-	server.usersRoute(created, createRequest, admin, "")
+	server.usersRoute(created, createRequest, admin, defaultTenantStore(server), "")
 	if created.Code != http.StatusCreated {
 		t.Fatalf("invite = %d: %s", created.Code, created.Body.String())
 	}
@@ -181,7 +181,7 @@ func TestDisplayNameChangesAreAuditedForEveryAccount(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPatch, "/api/v1/users/"+id, strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		recorder := httptest.NewRecorder()
-		server.usersRoute(recorder, request, admin, id)
+		server.usersRoute(recorder, request, admin, defaultTenantStore(server), id)
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("administrator PATCH = %d: %s", recorder.Code, recorder.Body.String())
 		}

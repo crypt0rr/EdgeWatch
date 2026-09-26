@@ -19,7 +19,7 @@ func scannerProfileRequest(server *Server, session store.Session, method, rest, 
 		req.Header.Set("Content-Type", "application/json")
 	}
 	rec := httptest.NewRecorder()
-	server.scannerProfilesRoute(rec, req, session, rest)
+	server.scannerProfilesRoute(rec, req, session, defaultTenantStore(server), rest)
 	return rec
 }
 
@@ -41,7 +41,7 @@ func TestScannerProfilesRouteLifecycleAndValidationBranches(t *testing.T) {
 	}
 	contentTypeRequest := httptest.NewRequest(http.MethodPost, "/api/v1/scanner-profiles/", strings.NewReader(`{"name":"No content type"}`))
 	contentTypeResponse := httptest.NewRecorder()
-	server.scannerProfilesRoute(contentTypeResponse, contentTypeRequest, admin, "")
+	server.scannerProfilesRoute(contentTypeResponse, contentTypeRequest, admin, defaultTenantStore(server), "")
 	if contentTypeResponse.Code != http.StatusUnsupportedMediaType {
 		t.Fatalf("content type status = %d", contentTypeResponse.Code)
 	}
@@ -131,10 +131,10 @@ func TestScannerProfilesRouteLifecycleAndValidationBranches(t *testing.T) {
 		t.Fatalf("operator archive status = %d", got.Code)
 	}
 
-	if err := server.applySelectedScannerProfile(ctx, &config.Job{TCP: &config.Protocol{ProfileID: "missing"}}, false, false); err == nil {
+	if err := server.applySelectedScannerProfile(ctx, defaultTenantStore(server), &config.Job{TCP: &config.Protocol{ProfileID: "missing"}}, false, false); err == nil {
 		t.Fatal("missing selected profile unexpectedly succeeded")
 	}
-	if err := server.applySelectedScannerProfile(ctx, &config.Job{TCP: &config.Protocol{ProfileID: createdJSON.ID, ProfileRevision: 99}}, false, false); !errors.Is(err, store.ErrConflict) {
+	if err := server.applySelectedScannerProfile(ctx, defaultTenantStore(server), &config.Job{TCP: &config.Protocol{ProfileID: createdJSON.ID, ProfileRevision: 99}}, false, false); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("historical profile error = %v", err)
 	}
 }

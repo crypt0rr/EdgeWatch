@@ -25,7 +25,7 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	}
 
 	reset := httptest.NewRecorder()
-	server.jobRoute(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, record.ID+"/baseline/reset")
+	server.jobRoute(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, defaultTenantStore(server), record.ID+"/baseline/reset")
 	if reset.Code != http.StatusOK || !strings.Contains(reset.Body.String(), "baseline-reset") {
 		t.Fatalf("baseline reset = %d: %s", reset.Code, reset.Body.String())
 	}
@@ -38,14 +38,14 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	approveRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/approve", approveBody)
 	approveRequest.Header.Set("Content-Type", "application/json")
 	approve := httptest.NewRecorder()
-	server.jobRoute(approve, approveRequest, admin, record.ID+"/baseline/approve")
+	server.jobRoute(approve, approveRequest, admin, defaultTenantStore(server), record.ID+"/baseline/approve")
 	if approve.Code != http.StatusOK || !strings.Contains(approve.Body.String(), "baseline-approved") {
 		t.Fatalf("baseline approval = %d: %s", approve.Code, approve.Body.String())
 	}
 	invalidApproveRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/approve", strings.NewReader(`{"scan_id":"missing"}`))
 	invalidApproveRequest.Header.Set("Content-Type", "application/json")
 	invalidApprove := httptest.NewRecorder()
-	server.jobRoute(invalidApprove, invalidApproveRequest, admin, record.ID+"/baseline/approve")
+	server.jobRoute(invalidApprove, invalidApproveRequest, admin, defaultTenantStore(server), record.ID+"/baseline/approve")
 	if invalidApprove.Code != http.StatusBadRequest {
 		t.Fatalf("invalid baseline approval status = %d", invalidApprove.Code)
 	}
@@ -56,18 +56,18 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 		t.Fatal(err)
 	}
 	cycleResponse := httptest.NewRecorder()
-	server.jobRoute(cycleResponse, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scan-cycle", nil), admin, record.ID+"/scan-cycle")
+	server.jobRoute(cycleResponse, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scan-cycle", nil), admin, defaultTenantStore(server), record.ID+"/scan-cycle")
 	if cycleResponse.Code != http.StatusOK || !strings.Contains(cycleResponse.Body.String(), cycle.ID) || !strings.Contains(cycleResponse.Body.String(), `"units"`) {
 		t.Fatalf("scan cycle response = %d: %s", cycleResponse.Code, cycleResponse.Body.String())
 	}
 	discardRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+record.ID+"/scan-cycle/"+cycle.ID, nil)
 	discard := httptest.NewRecorder()
-	server.jobRoute(discard, discardRequest, admin, record.ID+"/scan-cycle/"+cycle.ID)
+	server.jobRoute(discard, discardRequest, admin, defaultTenantStore(server), record.ID+"/scan-cycle/"+cycle.ID)
 	if discard.Code != http.StatusNoContent {
 		t.Fatalf("cycle discard = %d: %s", discard.Code, discard.Body.String())
 	}
 	noCycle := httptest.NewRecorder()
-	server.jobRoute(noCycle, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scan-cycle", nil), admin, record.ID+"/scan-cycle")
+	server.jobRoute(noCycle, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scan-cycle", nil), admin, defaultTenantStore(server), record.ID+"/scan-cycle")
 	if noCycle.Code != http.StatusOK || !strings.Contains(noCycle.Body.String(), `"cycle":null`) {
 		t.Fatalf("empty cycle response = %d: %s", noCycle.Code, noCycle.Body.String())
 	}
@@ -79,7 +79,7 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	archiveRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/archive", strings.NewReader(`{"revision":1}`))
 	archiveRequest.Header.Set("Content-Type", "application/json")
 	archive := httptest.NewRecorder()
-	server.archiveJob(archive, archiveRequest, admin, record.ID, true)
+	server.archiveJob(archive, archiveRequest, admin, defaultTenantStore(server), record.ID, true)
 	if archive.Code != http.StatusNoContent {
 		t.Fatalf("archive = %d: %s", archive.Code, archive.Body.String())
 	}
@@ -90,7 +90,7 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	restoreRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/restore", strings.NewReader(`{"revision":2}`))
 	restoreRequest.Header.Set("Content-Type", "application/json")
 	restore := httptest.NewRecorder()
-	server.archiveJob(restore, restoreRequest, admin, record.ID, false)
+	server.archiveJob(restore, restoreRequest, admin, defaultTenantStore(server), record.ID, false)
 	if restore.Code != http.StatusNoContent {
 		t.Fatalf("restore = %d: %s", restore.Code, restore.Body.String())
 	}
@@ -102,28 +102,28 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	wrongName := httptest.NewRecorder()
 	wrongRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID+"?permanent=true", strings.NewReader(`{"confirm_name":"wrong"}`))
 	wrongRequest.Header.Set("Content-Type", "application/json")
-	server.jobRoute(wrongName, wrongRequest, admin, second.ID)
+	server.jobRoute(wrongName, wrongRequest, admin, defaultTenantStore(server), second.ID)
 	if wrongName.Code != http.StatusBadRequest {
 		t.Fatalf("wrong delete confirmation = %d", wrongName.Code)
 	}
 	activeName := httptest.NewRecorder()
 	activeRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID+"?permanent=true", strings.NewReader(`{"confirm_name":"delete-me"}`))
 	activeRequest.Header.Set("Content-Type", "application/json")
-	server.jobRoute(activeName, activeRequest, admin, second.ID)
+	server.jobRoute(activeName, activeRequest, admin, defaultTenantStore(server), second.ID)
 	if activeName.Code != http.StatusConflict {
 		t.Fatalf("unarchived delete = %d: %s", activeName.Code, activeName.Body.String())
 	}
 	archiveSecondRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+second.ID+"/archive", strings.NewReader(`{"revision":1}`))
 	archiveSecondRequest.Header.Set("Content-Type", "application/json")
 	archiveSecond := httptest.NewRecorder()
-	server.archiveJob(archiveSecond, archiveSecondRequest, admin, second.ID, true)
+	server.archiveJob(archiveSecond, archiveSecondRequest, admin, defaultTenantStore(server), second.ID, true)
 	if archiveSecond.Code != http.StatusNoContent {
 		t.Fatalf("second archive = %d: %s", archiveSecond.Code, archiveSecond.Body.String())
 	}
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID+"?permanent=true", strings.NewReader(`{"confirm_name":"delete-me"}`))
 	deleteRequest.Header.Set("Content-Type", "application/json")
 	deleted := httptest.NewRecorder()
-	server.jobRoute(deleted, deleteRequest, admin, second.ID)
+	server.jobRoute(deleted, deleteRequest, admin, defaultTenantStore(server), second.ID)
 	if deleted.Code != http.StatusNoContent {
 		t.Fatalf("permanent delete = %d: %s", deleted.Code, deleted.Body.String())
 	}
@@ -149,7 +149,7 @@ func TestLifecycleActionsRejectActiveScans(t *testing.T) {
 	archiveRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/archive", strings.NewReader(`{"revision":1}`))
 	archiveRequest.Header.Set("Content-Type", "application/json")
 	archive := httptest.NewRecorder()
-	server.archiveJob(archive, archiveRequest, admin, record.ID, true)
+	server.archiveJob(archive, archiveRequest, admin, defaultTenantStore(server), record.ID, true)
 	if archive.Code != http.StatusConflict || !strings.Contains(archive.Body.String(), "job_active") || !strings.Contains(archive.Body.String(), "wait") {
 		t.Fatalf("active archive response = %d: %s", archive.Code, archive.Body.String())
 	}
@@ -157,7 +157,7 @@ func TestLifecycleActionsRejectActiveScans(t *testing.T) {
 	pauseRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/pause", strings.NewReader(`{"revision":1}`))
 	pauseRequest.Header.Set("Content-Type", "application/json")
 	pause := httptest.NewRecorder()
-	server.enableJob(pause, pauseRequest, admin, record.ID, false)
+	server.enableJob(pause, pauseRequest, admin, defaultTenantStore(server), record.ID, false)
 	if pause.Code != http.StatusConflict || !strings.Contains(pause.Body.String(), "job_active") || !strings.Contains(pause.Body.String(), "wait") {
 		t.Fatalf("active pause response = %d: %s", pause.Code, pause.Body.String())
 	}
@@ -172,7 +172,7 @@ func TestNotificationRoutesAndRateLimit(t *testing.T) {
 	missingRequest := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations", strings.NewReader(`{"name":"Ops","url":"generic://localhost/ops"}`))
 	missingRequest.Header.Set("Content-Type", "application/json")
 	missingPassword := httptest.NewRecorder()
-	server.createNotificationDestination(missingPassword, missingRequest, admin)
+	server.createNotificationDestination(missingPassword, missingRequest, admin, defaultTenantStore(server))
 	if missingPassword.Code != http.StatusBadRequest || !strings.Contains(missingPassword.Body.String(), "password_required") {
 		t.Fatalf("missing notification password = %d: %s", missingPassword.Code, missingPassword.Body.String())
 	}
@@ -180,7 +180,7 @@ func TestNotificationRoutesAndRateLimit(t *testing.T) {
 	createRequest.Header.Set("Content-Type", "application/json")
 	createRequest.RemoteAddr = "127.0.0.1:2"
 	created := httptest.NewRecorder()
-	server.createNotificationDestination(created, createRequest, admin)
+	server.createNotificationDestination(created, createRequest, admin, defaultTenantStore(server))
 	if created.Code != http.StatusCreated || strings.Contains(created.Body.String(), "disabletls") {
 		t.Fatalf("notification create = %d: %s", created.Code, created.Body.String())
 	}
@@ -194,21 +194,21 @@ func TestNotificationRoutesAndRateLimit(t *testing.T) {
 
 	getRequest := httptest.NewRequest(http.MethodGet, "/api/v1/notifications/destinations/"+createdView.ID, nil)
 	getResponse := httptest.NewRecorder()
-	server.notificationDestinationRoute(getResponse, getRequest, admin, createdView.ID)
+	server.notificationDestinationRoute(getResponse, getRequest, admin, defaultTenantStore(server), createdView.ID)
 	if getResponse.Code != http.StatusOK || strings.Contains(getResponse.Body.String(), "disabletls") {
 		t.Fatalf("notification get = %d: %s", getResponse.Code, getResponse.Body.String())
 	}
 	updateRequest := httptest.NewRequest(http.MethodPut, "/api/v1/notifications/destinations/"+createdView.ID, strings.NewReader(`{"name":"Ops updated","password":"administrator password","revision":1,"enabled":false}`))
 	updateRequest.Header.Set("Content-Type", "application/json")
 	updateResponse := httptest.NewRecorder()
-	server.notificationDestinationRoute(updateResponse, updateRequest, admin, createdView.ID)
+	server.notificationDestinationRoute(updateResponse, updateRequest, admin, defaultTenantStore(server), createdView.ID)
 	if updateResponse.Code != http.StatusOK || !strings.Contains(updateResponse.Body.String(), "Ops updated") {
 		t.Fatalf("notification update = %d: %s", updateResponse.Code, updateResponse.Body.String())
 	}
 	routingRequest := httptest.NewRequest(http.MethodPut, "/api/v1/notifications/update-routing", strings.NewReader(`{"destinations":["`+createdView.ID+`"],"password":"administrator password"}`))
 	routingRequest.Header.Set("Content-Type", "application/json")
 	routingResponse := httptest.NewRecorder()
-	server.updateNotificationRouting(routingResponse, routingRequest, admin)
+	server.updateNotificationRouting(routingResponse, routingRequest, admin, defaultTenantStore(server))
 	if routingResponse.Code != http.StatusOK || !strings.Contains(routingResponse.Body.String(), createdView.ID) {
 		t.Fatalf("update notification routing = %d: %s", routingResponse.Code, routingResponse.Body.String())
 	}
@@ -219,12 +219,12 @@ func TestNotificationRoutesAndRateLimit(t *testing.T) {
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/notifications/destinations/"+createdView.ID, strings.NewReader(`{"password":"administrator password","revision":2}`))
 	deleteRequest.Header.Set("Content-Type", "application/json")
 	deleteResponse := httptest.NewRecorder()
-	server.notificationDestinationRoute(deleteResponse, deleteRequest, admin, createdView.ID)
+	server.notificationDestinationRoute(deleteResponse, deleteRequest, admin, defaultTenantStore(server), createdView.ID)
 	if deleteResponse.Code != http.StatusNoContent {
 		t.Fatalf("notification delete = %d: %s", deleteResponse.Code, deleteResponse.Body.String())
 	}
 	missing := httptest.NewRecorder()
-	server.notificationDestinationRoute(missing, httptest.NewRequest(http.MethodGet, "/api/v1/notifications/destinations/"+createdView.ID, nil), admin, createdView.ID)
+	server.notificationDestinationRoute(missing, httptest.NewRequest(http.MethodGet, "/api/v1/notifications/destinations/"+createdView.ID, nil), admin, defaultTenantStore(server), createdView.ID)
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("deleted notification status = %d", missing.Code)
 	}
@@ -232,14 +232,14 @@ func TestNotificationRoutesAndRateLimit(t *testing.T) {
 	firstTest := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/test", nil)
 	firstTest.RemoteAddr = "127.0.0.1:3"
 	firstResponse := httptest.NewRecorder()
-	server.notificationTest(firstResponse, firstTest, admin)
+	server.notificationTest(firstResponse, firstTest, admin, defaultTenantStore(server))
 	if firstResponse.Code != http.StatusOK || !strings.Contains(firstResponse.Body.String(), `"sent":0`) {
 		t.Fatalf("empty notification test = %d: %s", firstResponse.Code, firstResponse.Body.String())
 	}
 	secondTest := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/test", nil)
 	secondTest.RemoteAddr = "127.0.0.1:3"
 	secondResponse := httptest.NewRecorder()
-	server.notificationTest(secondResponse, secondTest, admin)
+	server.notificationTest(secondResponse, secondTest, admin, defaultTenantStore(server))
 	if secondResponse.Code != http.StatusTooManyRequests {
 		t.Fatalf("rate-limited notification test = %d: %s", secondResponse.Code, secondResponse.Body.String())
 	}
@@ -267,7 +267,7 @@ func TestBaselineMutationsRejectActiveJobs(t *testing.T) {
 	defer func() { _ = db.ReleaseJobLease(ctx, record.ID, "active-baseline-test") }()
 
 	reset := httptest.NewRecorder()
-	server.jobRoute(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, record.ID+"/baseline/reset")
+	server.jobRoute(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, defaultTenantStore(server), record.ID+"/baseline/reset")
 	if reset.Code != http.StatusConflict || !strings.Contains(reset.Body.String(), `"code":"job_active"`) {
 		t.Fatalf("active baseline reset = %d: %s", reset.Code, reset.Body.String())
 	}
@@ -275,7 +275,7 @@ func TestBaselineMutationsRejectActiveJobs(t *testing.T) {
 	approveRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/approve", strings.NewReader(`{"scan_id":"`+scan.ID+`"}`))
 	approveRequest.Header.Set("Content-Type", "application/json")
 	approve := httptest.NewRecorder()
-	server.jobRoute(approve, approveRequest, admin, record.ID+"/baseline/approve")
+	server.jobRoute(approve, approveRequest, admin, defaultTenantStore(server), record.ID+"/baseline/approve")
 	if approve.Code != http.StatusConflict || !strings.Contains(approve.Body.String(), `"code":"job_active"`) {
 		t.Fatalf("active baseline approval = %d: %s", approve.Code, approve.Body.String())
 	}

@@ -252,14 +252,14 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	admin := store.Session{UserID: store.LegacyAdminUserID, Username: "admin", Role: store.RoleAdministrator}
 	get := httptest.NewRecorder()
-	server.publicDashboardRoute(get, httptest.NewRequest(http.MethodGet, "/api/v1/public-dashboard", nil), admin)
+	server.publicDashboardRoute(get, httptest.NewRequest(http.MethodGet, "/api/v1/public-dashboard", nil), admin, defaultTenantStore(server))
 	if get.Code != http.StatusOK || !strings.Contains(get.Body.String(), "EdgeWatch public status") {
 		t.Fatalf("default public dashboard = %d: %s", get.Code, get.Body.String())
 	}
 	badText := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"title":"bad\ntitle","updated_at":"`+publicDashboardToken(t, server, admin)+`"}`))
 	badText.Header.Set("Content-Type", "application/json")
 	badTextRecorder := httptest.NewRecorder()
-	server.publicDashboardRoute(badTextRecorder, badText, admin)
+	server.publicDashboardRoute(badTextRecorder, badText, admin, defaultTenantStore(server))
 	if badTextRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("invalid public text status = %d: %s", badTextRecorder.Code, badTextRecorder.Body.String())
 	}
@@ -276,7 +276,7 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	unknownHost := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.11"}],"updated_at":"`+publicDashboardToken(t, server, admin)+`"}`))
 	unknownHost.Header.Set("Content-Type", "application/json")
 	unknownRecorder := httptest.NewRecorder()
-	server.publicDashboardRoute(unknownRecorder, unknownHost, admin)
+	server.publicDashboardRoute(unknownRecorder, unknownHost, admin, defaultTenantStore(server))
 	if unknownRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("unknown host status = %d: %s", unknownRecorder.Code, unknownRecorder.Body.String())
 	}
@@ -286,7 +286,7 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	publish := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","introduction":"Selected host","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.10","created_at":""}],"updated_at":"`+publicDashboardToken(t, server, admin)+`"}`))
 	publish.Header.Set("Content-Type", "application/json")
 	publishRecorder := httptest.NewRecorder()
-	server.publicDashboardRoute(publishRecorder, publish, admin)
+	server.publicDashboardRoute(publishRecorder, publish, admin, defaultTenantStore(server))
 	if publishRecorder.Code != http.StatusOK || !strings.Contains(publishRecorder.Body.String(), "198.51.100.10") {
 		t.Fatalf("published dashboard = %d: %s", publishRecorder.Code, publishRecorder.Body.String())
 	}
@@ -303,7 +303,7 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	archiveSave := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status updated","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.10"}],"updated_at":"`+publicDashboardToken(t, server, admin)+`"}`))
 	archiveSave.Header.Set("Content-Type", "application/json")
 	archiveRecorder := httptest.NewRecorder()
-	server.publicDashboardRoute(archiveRecorder, archiveSave, admin)
+	server.publicDashboardRoute(archiveRecorder, archiveSave, admin, defaultTenantStore(server))
 	if archiveRecorder.Code != http.StatusOK {
 		t.Fatalf("archived selection save = %d: %s", archiveRecorder.Code, archiveRecorder.Body.String())
 	}
@@ -333,7 +333,7 @@ func TestPublicDashboardSaveFailureDoesNotExposeStoreDetails(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","hosts":[],"updated_at":"`+publicDashboardToken(t, server, admin)+`"}`))
 	request.Header.Set("Content-Type", "application/json")
 	recorder := httptest.NewRecorder()
-	server.publicDashboardRoute(recorder, request, admin)
+	server.publicDashboardRoute(recorder, request, admin, defaultTenantStore(server))
 	if recorder.Code != http.StatusInternalServerError {
 		t.Fatalf("save failure status = %d: %s", recorder.Code, recorder.Body.String())
 	}

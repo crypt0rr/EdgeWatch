@@ -70,7 +70,7 @@ func TestActiveScanEndpointAndCancellationLifecycle(t *testing.T) {
 	}
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	listRecorder := httptest.NewRecorder()
-	server.activeScans(listRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/active", nil))
+	server.activeScans(listRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/active", nil), defaultTenantStore(server))
 	if listRecorder.Code != http.StatusOK {
 		t.Fatalf("active scan status = %d: %s", listRecorder.Code, listRecorder.Body.String())
 	}
@@ -82,7 +82,7 @@ func TestActiveScanEndpointAndCancellationLifecycle(t *testing.T) {
 	}
 
 	cancelRecorder := httptest.NewRecorder()
-	server.cancelScan(cancelRecorder, httptest.NewRequest(http.MethodPost, "/api/v1/scans/cancel", nil), store.Session{UserID: store.LegacyAdminUserID, Username: "admin"}, active[0].ID)
+	server.cancelScan(cancelRecorder, httptest.NewRequest(http.MethodPost, "/api/v1/scans/cancel", nil), store.Session{UserID: store.LegacyAdminUserID, Username: "admin"}, defaultTenantStore(server), active[0].ID)
 	if cancelRecorder.Code != http.StatusAccepted {
 		t.Fatalf("cancel status = %d: %s", cancelRecorder.Code, cancelRecorder.Body.String())
 	}
@@ -92,7 +92,7 @@ func TestActiveScanEndpointAndCancellationLifecycle(t *testing.T) {
 		t.Fatal("cancelled scan did not finish")
 	}
 	missingRecorder := httptest.NewRecorder()
-	server.cancelScan(missingRecorder, httptest.NewRequest(http.MethodPost, "/api/v1/scans/cancel", nil), store.Session{}, active[0].ID)
+	server.cancelScan(missingRecorder, httptest.NewRequest(http.MethodPost, "/api/v1/scans/cancel", nil), store.Session{}, defaultTenantStore(server), active[0].ID)
 	if missingRecorder.Code != http.StatusConflict {
 		t.Fatalf("second cancel status = %d: %s", missingRecorder.Code, missingRecorder.Body.String())
 	}

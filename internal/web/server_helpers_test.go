@@ -16,6 +16,42 @@ import (
 )
 
 func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
+	// The route inventory is the complete list of served routes. Every entry
+	// must resolve to its listed capability, and its mutation flag must agree
+	// with the CSRF classification that Server.api applies.
+	for _, route := range apiRoutes {
+		name := routeInventoryName(route)
+		if route.Mutates != isMutation(route.Method) {
+			t.Errorf("%s: Mutates = %t, isMutation = %t", name, route.Mutates, isMutation(route.Method))
+		}
+		if route.Access == routePublic {
+			// Server.publicAPI serves the public projection; the session API
+			// must not route the same relative path.
+			if got := requiredPermission(route.Example, route.Method); got != auth.PermissionDenied {
+				t.Errorf("%s: session API permission for %s = %q, want %q", name, route.Example, got, auth.PermissionDenied)
+			}
+			continue
+		}
+		request := httptest.NewRequest(route.Method, routeMatrixTarget(route), nil)
+		if got := requestPermission(route.Example, request); got != route.Permission {
+			t.Errorf("%s: requestPermission(%q) = %q, want %q", name, route.Example, got, route.Permission)
+		}
+		if route.Query != "" {
+			// The query selects a different action than the plain route, so
+			// the path alone must not carry the query's capability.
+			if got := requiredPermission(route.Example, route.Method); got == route.Permission {
+				t.Errorf("%s: requiredPermission without the query = %q, want a different capability", name, got)
+			}
+			continue
+		}
+		if got := requiredPermission(route.Example, route.Method); got != route.Permission {
+			t.Errorf("%s: requiredPermission(%q, %q) = %q, want %q", name, route.Example, route.Method, got, route.Permission)
+		}
+	}
+
+	// These spot checks predate the inventory. Each positive case must also
+	// be an inventory route with the same capability, and each denied case
+	// must be absent from it.
 	cases := []struct {
 		path, method, want string
 	}{
@@ -88,6 +124,15 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 	for _, test := range cases {
 		if got := requiredPermission(test.path, test.method); got != test.want {
 			t.Errorf("requiredPermission(%q, %q) = %q, want %q", test.path, test.method, got, test.want)
+		}
+		matches := inventoryRoutesFor(apiRoutes, test.method, test.path)
+		switch {
+		case test.want == auth.PermissionDenied && len(matches) > 0:
+			t.Errorf("%s %s is denied but the inventory lists %s", test.method, test.path, routeInventoryName(matches[0]))
+		case test.want != auth.PermissionDenied && len(matches) == 0:
+			t.Errorf("%s %s is missing from the route inventory", test.method, test.path)
+		case len(matches) > 0 && matches[0].Permission != test.want:
+			t.Errorf("%s %s inventory capability = %q, want %q", test.method, test.path, matches[0].Permission, test.want)
 		}
 	}
 	for _, method := range []string{http.MethodGet, http.MethodHead, http.MethodOptions} {

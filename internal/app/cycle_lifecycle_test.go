@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -286,7 +287,7 @@ func TestQueuedRunsUseJobEditedWhileWaitingForSlot(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			a.sem <- struct{}{}
+			releaseSlot := holdScanSlot(t, a)
 			type result struct {
 				scan model.Scan
 				err  error
@@ -312,7 +313,7 @@ func TestQueuedRunsUseJobEditedWhileWaitingForSlot(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			<-a.sem
+			releaseSlot()
 			got := <-done
 			if got.err != nil || got.scan.ID == "" || got.scan.JobRevision != updated.Revision || got.scan.Job != edited.Name {
 				t.Fatalf("queued run = %#v, err=%v", got.scan, got.err)
@@ -344,7 +345,7 @@ func TestQueuedScheduledRunSkipsJobArchivedOrPausedWhileWaiting(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			a.sem <- struct{}{}
+			releaseSlot := holdScanSlot(t, a)
 			a.startManagedScheduled(ctx, record.ID)
 			waitForQueuedRun(t, a, record.ID)
 			if archive {
@@ -355,7 +356,7 @@ func TestQueuedScheduledRunSkipsJobArchivedOrPausedWhileWaiting(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			<-a.sem
+			releaseSlot()
 			a.wg.Wait()
 			scans, err := db.ListJobScans(ctx, record.ID, 10)
 			if err != nil {
@@ -371,6 +372,153 @@ func TestQueuedScheduledRunSkipsJobArchivedOrPausedWhileWaiting(t *testing.T) {
 				t.Fatalf("skip log = %q", output)
 			}
 		})
+	}
+}
+
+// holdScanSlot takes a scan slot as a job would, so queued runs wait for it.
+func holdScanSlot(t *testing.T, a *App) func() {
+	t.Helper()
+	release, err := a.slots.Acquire(context.Background(), defaultSlotKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return release
+}
+
+// waitForSlotQueue blocks until n runs wait for a scan slot.
+func waitForSlotQueue(t *testing.T, a *App, n int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for a.slots.CapacitySnapshot().Queued != n {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d runs never queued for a scan slot: %#v", n, a.slots.CapacitySnapshot())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// gatedScanner reports each scan it starts and holds it until the test lets
+// it finish.
+type gatedScanner struct {
+	started chan string
+	finish  chan struct{}
+}
+
+func (gatedScanner) Version(context.Context) string { return "gated" }
+func (s gatedScanner) Scan(ctx context.Context, job config.Job) (model.Snapshot, error) {
+	s.started <- job.Name
+	select {
+	case <-s.finish:
+		return model.Snapshot{}, nil
+	case <-ctx.Done():
+		return model.Snapshot{}, ctx.Err()
+	}
+}
+
+func TestQueuedRunsStartInArrivalOrderWithOneSlot(t *testing.T) {
+	ctx := context.Background()
+	sc := gatedScanner{started: make(chan string, 2), finish: make(chan struct{})}
+	a, db := newLifecycleTestApp(t, sc, nil)
+	first, err := db.CreateJob(ctx, lifecycleJob("slot-first"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := db.CreateJob(ctx, lifecycleJob("slot-second"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseSlot := holdScanSlot(t, a)
+	firstDone, secondDone := make(chan error, 1), make(chan error, 1)
+	go func() {
+		_, _, err := a.runJobRecord(ctx, first, false)
+		firstDone <- err
+	}()
+	waitForSlotQueue(t, a, 1)
+	go func() {
+		_, _, err := a.runJobRecord(ctx, second, false)
+		secondDone <- err
+	}()
+	waitForSlotQueue(t, a, 2)
+	releaseSlot()
+
+	receiveStarted := func() string {
+		t.Helper()
+		select {
+		case name := <-sc.started:
+			return name
+		case <-time.After(10 * time.Second):
+			t.Fatal("no queued run started")
+			return ""
+		}
+	}
+	if got := receiveStarted(); got != first.Job.Name {
+		t.Fatalf("first scan started = %q, want %q", got, first.Job.Name)
+	}
+	// max_concurrent_scans is 1, so the second run waits while the first scans.
+	want := slotSnapshot{Capacity: 1, InUse: 1, Queued: 1, Keys: map[string]slotUsage{defaultSlotKey: {InUse: 1, Queued: 1, Limit: 1}}}
+	if got := a.slots.CapacitySnapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("slots while the first run scans = %#v, want %#v", got, want)
+	}
+	sc.finish <- struct{}{}
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	if got := receiveStarted(); got != second.Job.Name {
+		t.Fatalf("second scan started = %q, want %q", got, second.Job.Name)
+	}
+	sc.finish <- struct{}{}
+	if err := <-secondDone; err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	if got := a.slots.CapacitySnapshot(); got.InUse != 0 || got.Queued != 0 || len(got.Keys) != 0 {
+		t.Fatalf("slots after both runs = %#v", got)
+	}
+}
+
+func TestCanceledQueuedManualRunReleasesNoSlot(t *testing.T) {
+	a, db := newLifecycleTestApp(t, schedulerFake{}, nil)
+	ctx, _ := a.BeginRun(context.Background())
+	record, err := db.CreateJob(ctx, lifecycleJob("slot-canceled"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseSlot := holdScanSlot(t, a)
+	done := make(chan error, 1)
+	if err := a.StartManagedRun(record.ID, func(_ model.Scan, _ []model.Event, err error) {
+		done <- err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	waitForSlotQueue(t, a, 1)
+	// Stopping cancels the queued manual run and waits for it to return.
+	a.StopRun()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled queued run error = %v, want %v", err, context.Canceled)
+	}
+	// The run never held a slot, so the slot this test holds is still in use
+	// and nobody else can take it.
+	want := slotSnapshot{Capacity: 1, InUse: 1, Keys: map[string]slotUsage{defaultSlotKey: {InUse: 1, Limit: 1}}}
+	if got := a.slots.CapacitySnapshot(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("slots after cancel = %#v, want %#v", got, want)
+	}
+	waitCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if release, err := a.slots.Acquire(waitCtx, defaultSlotKey); !errors.Is(err, context.DeadlineExceeded) {
+		if release != nil {
+			release()
+		}
+		t.Fatalf("acquire while the slot is held = %v, want %v", err, context.DeadlineExceeded)
+	}
+	releaseSlot()
+	if got := a.slots.CapacitySnapshot(); got.InUse != 0 || got.Queued != 0 || len(got.Keys) != 0 {
+		t.Fatalf("slots after release = %#v", got)
+	}
+	scans, err := db.ListJobScans(context.Background(), record.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scans) != 0 {
+		t.Fatalf("canceled queued run persisted scans: %#v", scans)
 	}
 }
 

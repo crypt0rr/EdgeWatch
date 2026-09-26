@@ -79,7 +79,7 @@ func (l *resourceLookups) observe(query string, args []driver.NamedValue) error 
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	switch {
-	case strings.HasSuffix(query, "FROM jobs WHERE id=?"):
+	case strings.HasSuffix(query, "FROM jobs WHERE id=? AND tenant_id=?"):
 		l.jobs[id]++
 		if l.failJobs {
 			return errInjectedLookup

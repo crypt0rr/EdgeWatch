@@ -159,7 +159,7 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	server, db, _ = newUsersTestServer(t)
 	breakReadProjection(t, db, "jobs")
 	if code := get(func(w http.ResponseWriter, r *http.Request) {
-		server.scheduleSuggestion(w, httptest.NewRequest(http.MethodGet, "/api/v1/schedule/suggestion?schedule=0+*+*+*+*&timezone=UTC", nil))
+		server.scheduleSuggestion(w, httptest.NewRequest(http.MethodGet, "/api/v1/schedule/suggestion?schedule=0+*+*+*+*&timezone=UTC", nil), defaultTenantStore(server))
 	}); code != http.StatusInternalServerError {
 		t.Fatalf("schedule suggestion failure status = %d", code)
 	}

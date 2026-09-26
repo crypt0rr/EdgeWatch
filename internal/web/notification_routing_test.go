@@ -157,7 +157,7 @@ func TestJobAPIReportsRoutingToRotatedDeploymentDestination(t *testing.T) {
 		t.Fatalf("job after URL rotation = %d %#v, want missing %q", loaded.Code, current, oldSelector)
 	}
 	listed := httptest.NewRecorder()
-	server.listJobs(listed, routingRequest(t, http.MethodGet, "/api/v1/jobs", ""))
+	server.listJobs(listed, routingRequest(t, http.MethodGet, "/api/v1/jobs", ""), defaultTenantStore(server))
 	var list struct {
 		Jobs []routingJobResponse `json:"jobs"`
 	}

@@ -22,15 +22,21 @@ type LegacyScanSnapshot struct {
 	Snapshot   []byte
 }
 
-// ListLegacySuccessfulScanSnapshotsPage returns successful snapshots that do
-// not have a derived host index. Rows are ordered newest first so callers can
-// select the latest effective address without reading indexed scans. The
-// query remains paginated, but callers may walk every page when correctness
-// requires a complete legacy projection.
+// ListLegacySuccessfulScanSnapshotsPage forwards to
+// SystemStore.ListLegacySuccessfulScanSnapshotsPage.
 func (s *Store) ListLegacySuccessfulScanSnapshotsPage(ctx context.Context, limit, offset int) (Page[LegacyScanSnapshot], error) {
+	return s.System().ListLegacySuccessfulScanSnapshotsPage(ctx, limit, offset)
+}
+
+// ListLegacySuccessfulScanSnapshotsPage returns successful snapshots of every
+// tenant that do not have a derived host index. Rows are ordered newest first
+// so callers can select the latest effective address without reading indexed
+// scans. The query remains paginated, but callers may walk every page when
+// correctness requires a complete legacy projection.
+func (ss *SystemStore) ListLegacySuccessfulScanSnapshotsPage(ctx context.Context, limit, offset int) (Page[LegacyScanSnapshot], error) {
 	limit, offset = normalizePage(limit, offset)
 	var page Page[LegacyScanSnapshot]
-	reader := s.reader()
+	reader := ss.store.reader()
 	// A completed backfill checkpoint also excludes snapshots that were
 	// malformed or empty. Retrying those on every request would recreate the
 	// history-wide decode cost the migration is designed to remove.
@@ -95,23 +101,49 @@ func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {
 	return v, nil
 }
 
+// ListScans returns the most recent scans with their results, of every job
+// or of the job with the given name.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListScans.
 func (s *Store) ListScans(ctx context.Context, job string, limit int) ([]model.Scan, error) {
-	page, err := s.ListScansPage(ctx, job, limit, 0)
+	return s.Tenant(DefaultTenantScope()).ListScans(ctx, job, limit)
+}
+
+// ListScans returns the tenant's most recent scans with their results, of
+// every job or of the job with the given name. Another tenant's job of the
+// same name is never matched.
+func (ts *TenantStore) ListScans(ctx context.Context, job string, limit int) ([]model.Scan, error) {
+	page, err := ts.ListScansPage(ctx, job, limit, 0)
 	return page.Items, err
 }
 
+// ListScansPage returns a page of scans with their results, of every job or
+// of the job with the given name.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListScansPage.
 func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int) (Page[model.Scan], error) {
+	return s.Tenant(DefaultTenantScope()).ListScansPage(ctx, job, limit, offset)
+}
+
+// ListScansPage returns a page of the tenant's scans with their results,
+// newest first, of every job or of the job with the given name. The name
+// filter is tenant-qualified: another tenant's job of the same name, managed
+// or from config.yaml, is never matched.
+func (ts *TenantStore) ListScansPage(ctx context.Context, job string, limit, offset int) (Page[model.Scan], error) {
+	if err := ts.ready(); err != nil {
+		return Page[model.Scan]{}, err
+	}
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Scan]
-	readDB := s.reader()
-	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans`
-	countQuery := `SELECT COUNT(*) FROM scans`
-	args := []any{}
-	countArgs := []any{}
+	readDB := ts.store.reader()
+	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash,changes_json,snapshot_json FROM scans WHERE tenant_id=?`
+	countQuery := `SELECT COUNT(*) FROM scans WHERE tenant_id=?`
+	args := []any{ts.scope.id}
+	countArgs := []any{ts.scope.id}
 	if job != "" {
-		query += ` WHERE job=?`
+		query += ` AND job=?`
 		args = append(args, job)
-		countQuery += ` WHERE job=?`
+		countQuery += ` AND job=?`
 		countArgs = append(countArgs, job)
 	}
 	if err := readDB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
@@ -159,19 +191,32 @@ func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int
 }
 
 // ListScanSummariesPage is the metadata-only counterpart to ListScansPage.
-// Filtering remains name-based for compatibility with legacy CLI callers.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.ListScanSummariesPage.
 func (s *Store) ListScanSummariesPage(ctx context.Context, job string, limit, offset int) (Page[model.ScanSummary], error) {
+	return s.Tenant(DefaultTenantScope()).ListScanSummariesPage(ctx, job, limit, offset)
+}
+
+// ListScanSummariesPage is the metadata-only counterpart to ListScansPage.
+// Filtering remains name-based for compatibility with legacy CLI callers,
+// and stays within the tenant: another tenant's job of the same name is
+// never matched.
+func (ts *TenantStore) ListScanSummariesPage(ctx context.Context, job string, limit, offset int) (Page[model.ScanSummary], error) {
+	if err := ts.ready(); err != nil {
+		return Page[model.ScanSummary]{}, err
+	}
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.ScanSummary]
-	readDB := s.reader()
-	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans`
-	countQuery := `SELECT COUNT(*) FROM scans`
-	args := []any{}
-	countArgs := []any{}
+	readDB := ts.store.reader()
+	query := `SELECT id,job_id,job_revision,job,started_at,finished_at,status,error,nmap_version,scanner_engine,scanner_profile_id,scanner_profile_revision,naabu_version,discovery_ports,confirmed_ports,discovery_duration_ms,enrichment_duration_ms,config_hash,cycle_id,cycle_attempt,cycle_status,resumable,completed_probes,total_probes,completed_units,total_units,no_progress_attempts,baseline_scan_id,baseline_config_hash FROM scans WHERE tenant_id=?`
+	countQuery := `SELECT COUNT(*) FROM scans WHERE tenant_id=?`
+	args := []any{ts.scope.id}
+	countArgs := []any{ts.scope.id}
 	if job != "" {
-		query += ` WHERE job=?`
+		query += ` AND job=?`
 		args = append(args, job)
-		countQuery += ` WHERE job=?`
+		countQuery += ` AND job=?`
 		countArgs = append(countArgs, job)
 	}
 	if err := readDB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
@@ -206,23 +251,75 @@ func (s *Store) ListScanSummariesPage(ctx context.Context, job string, limit, of
 	return page, rows.Err()
 }
 
+// historyTenantSQL is the tenant predicate of the event and delivery
+// history, the events and outbox tables. It takes one argument, the tenant
+// ID. A history row without a tenant belongs to the platform: an update
+// alert, its deliveries, and the events about them. While there is one
+// tenant, its administrators are the installation's administrators, so the
+// default tenant's history keeps holding the platform's rows, as it did
+// before tenants existed. No other tenant sees them.
+//
+// The predicate attributes a platform row to the default tenant instead of
+// adding "OR tenant_id IS NULL": with an OR, SQLite reads both halves from
+// the tenant index and sorts the whole history for every page, while this
+// form keeps reading it in order from the created_at index.
+const historyTenantSQL = `COALESCE(tenant_id,'` + DefaultTenantID + `')=?`
+
+// eventsFromSQL returns the FROM clause that selects the tenant's events. It
+// takes one argument, the tenant ID. Another tenant's events are read from
+// the tenant index; the default tenant's also include the platform's.
+func (ts *TenantStore) eventsFromSQL() string {
+	if ts.scope.id == DefaultTenantID {
+		return `FROM events WHERE ` + historyTenantSQL
+	}
+	return `FROM events WHERE tenant_id=?`
+}
+
+// ListEvents returns the most recent events, of every job or of the job
+// with the given name.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListEvents.
 func (s *Store) ListEvents(ctx context.Context, job string, limit int) ([]model.Event, error) {
-	page, err := s.ListEventsPage(ctx, job, limit, 0)
+	return s.Tenant(DefaultTenantScope()).ListEvents(ctx, job, limit)
+}
+
+// ListEvents returns the tenant's most recent events, of every job or of the
+// job with the given name. Another tenant's job of the same name is never
+// matched.
+func (ts *TenantStore) ListEvents(ctx context.Context, job string, limit int) ([]model.Event, error) {
+	page, err := ts.ListEventsPage(ctx, job, limit, 0)
 	return page.Items, err
 }
 
+// ListEventsPage returns a page of events, of every job or of the job with
+// the given name.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListEventsPage.
 func (s *Store) ListEventsPage(ctx context.Context, job string, limit, offset int) (Page[model.Event], error) {
+	return s.Tenant(DefaultTenantScope()).ListEventsPage(ctx, job, limit, offset)
+}
+
+// ListEventsPage returns a page of the tenant's events, newest first, of
+// every job or of the job with the given name. The name filter is
+// tenant-qualified: another tenant's job of the same name, managed or from
+// config.yaml, is never matched. The default tenant's events include the
+// platform's, as historyTenantSQL describes.
+func (ts *TenantStore) ListEventsPage(ctx context.Context, job string, limit, offset int) (Page[model.Event], error) {
+	if err := ts.ready(); err != nil {
+		return Page[model.Event]{}, err
+	}
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Event]
-	readDB := s.reader()
-	query := `SELECT payload_json FROM events`
-	countQuery := `SELECT COUNT(*) FROM events`
-	args := []any{}
-	countArgs := []any{}
+	readDB := ts.store.reader()
+	from := ts.eventsFromSQL()
+	query := `SELECT payload_json ` + from
+	countQuery := `SELECT COUNT(*) ` + from
+	args := []any{ts.scope.id}
+	countArgs := []any{ts.scope.id}
 	if job != "" {
-		query += ` WHERE job=?`
+		query += ` AND job=?`
 		args = append(args, job)
-		countQuery += ` WHERE job=?`
+		countQuery += ` AND job=?`
 		countArgs = append(countArgs, job)
 	}
 	if err := readDB.QueryRowContext(ctx, countQuery, countArgs...).Scan(&page.Total); err != nil {
@@ -249,13 +346,24 @@ func (s *Store) ListEventsPage(ctx context.Context, job string, limit, offset in
 	return page, rows.Err()
 }
 
-// MaxEventID returns the greatest durable event identifier currently stored.
-// The web server uses this as the starting point for its in-memory SSE cursor
-// so a process restart cannot immediately reuse IDs that a browser already
-// acknowledged. A missing or empty event table naturally returns zero.
+// MaxEventID forwards to SystemStore.MaxEventID. The web server seeds its
+// live-update cursor from it when it starts, before any request names a
+// tenant.
 func (s *Store) MaxEventID(ctx context.Context) (uint64, error) {
+	return s.System().MaxEventID(ctx)
+}
+
+// MaxEventID returns the greatest durable event identifier currently stored,
+// across every tenant and the platform. The web server uses this as the
+// starting point for its in-memory SSE cursor so a process restart cannot
+// immediately reuse IDs that a browser already acknowledged. It stays
+// global because the live-update IDs are one sequence that every stream
+// shares, whatever its tenant: a floor taken from one tenant's events could
+// fall below IDs that a browser of another tenant already acknowledged. A
+// missing or empty event table naturally returns zero.
+func (ss *SystemStore) MaxEventID(ctx context.Context) (uint64, error) {
 	var id int64
-	if err := s.reader().QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM events`).Scan(&id); err != nil {
+	if err := ss.store.reader().QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM events`).Scan(&id); err != nil {
 		return 0, err
 	}
 	if id < 0 {
@@ -265,20 +373,43 @@ func (s *Store) MaxEventID(ctx context.Context) (uint64, error) {
 }
 
 // ListJobEvents returns only events written by the immutable managed job ID.
-// Name-based ListEvents is retained for legacy CLI history compatibility.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListJobEvents.
 func (s *Store) ListJobEvents(ctx context.Context, jobID string, limit int) ([]model.Event, error) {
-	page, err := s.ListJobEventsPage(ctx, jobID, limit, 0)
+	return s.Tenant(DefaultTenantScope()).ListJobEvents(ctx, jobID, limit)
+}
+
+// ListJobEvents returns only events written by the immutable managed job ID.
+// Name-based ListEvents is retained for legacy CLI history compatibility. A
+// job of another tenant has no events here.
+func (ts *TenantStore) ListJobEvents(ctx context.Context, jobID string, limit int) ([]model.Event, error) {
+	page, err := ts.ListJobEventsPage(ctx, jobID, limit, 0)
 	return page.Items, err
 }
 
+// ListJobEventsPage returns a page of the events of the managed job with the
+// given ID.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListJobEventsPage.
 func (s *Store) ListJobEventsPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Event], error) {
+	return s.Tenant(DefaultTenantScope()).ListJobEventsPage(ctx, jobID, limit, offset)
+}
+
+// ListJobEventsPage returns a page of the events of the tenant's managed job
+// with the given ID, newest first. A job of another tenant has no events
+// here.
+func (ts *TenantStore) ListJobEventsPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Event], error) {
+	if err := ts.ready(); err != nil {
+		return Page[model.Event]{}, err
+	}
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Event]
-	readDB := s.reader()
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
+	readDB := ts.store.reader()
+	from := ts.eventsFromSQL() + ` AND job_id=?`
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) `+from, ts.scope.id, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT payload_json FROM events WHERE job_id=? ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, jobID, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT payload_json `+from+` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, ts.scope.id, jobID, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -297,15 +428,46 @@ func (s *Store) ListJobEventsPage(ctx context.Context, jobID string, limit, offs
 	return page, rows.Err()
 }
 
+// FailedDeliveries returns the number of notification deliveries that
+// failed for good.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.FailedDeliveries.
 func (s *Store) FailedDeliveries(ctx context.Context) (int, error) {
+	return s.Tenant(DefaultTenantScope()).FailedDeliveries(ctx)
+}
+
+// FailedDeliveries returns the number of the tenant's notification
+// deliveries that failed for good. A delivery belongs to the tenant of its
+// event; the default tenant's count includes the platform's deliveries, as
+// historyTenantSQL describes.
+func (ts *TenantStore) FailedDeliveries(ctx context.Context) (int, error) {
+	if err := ts.ready(); err != nil {
+		return 0, err
+	}
 	var count int
-	err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '')`, deliveryMaxAttempts).Scan(&count)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '') AND `+historyTenantSQL, deliveryMaxAttempts, ts.scope.id).Scan(&count)
 	return count, err
 }
 
+// State returns the stored state of the config.yaml job with the given name,
+// or an empty state when it has none.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.State.
 func (s *Store) State(ctx context.Context, job string) (model.JobState, error) {
+	return s.Tenant(DefaultTenantScope()).State(ctx, job)
+}
+
+// State returns the stored state of the config.yaml job with the given name,
+// or an empty state when it has none. job_states keeps that state by job
+// name, and config.yaml jobs belong to the default tenant, so the statement
+// reads it only for the default tenant: another tenant gets an empty state
+// for a job of the same name.
+func (ts *TenantStore) State(ctx context.Context, job string) (model.JobState, error) {
+	if err := ts.ready(); err != nil {
+		return model.JobState{}, err
+	}
 	var b []byte
-	err := s.reader().QueryRowContext(ctx, `SELECT state_json FROM job_states WHERE job=?`, job).Scan(&b)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT s.state_json FROM job_states AS s JOIN tenants AS t ON t.id=? AND t.is_default=1 WHERE s.job=?`, ts.scope.id, job).Scan(&b)
 	if errors.Is(err, sql.ErrNoRows) {
 		return emptyState(), nil
 	}
@@ -330,14 +492,30 @@ type JobIncident struct {
 	Incident model.Incident
 }
 
+// ListJobIncidentsPage returns a page of the active incidents of the managed
+// job with the given ID.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.ListJobIncidentsPage.
 func (s *Store) ListJobIncidentsPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Incident], error) {
+	return s.Tenant(DefaultTenantScope()).ListJobIncidentsPage(ctx, jobID, limit, offset)
+}
+
+// ListJobIncidentsPage returns a page of the active incidents of the
+// tenant's managed job with the given ID, ordered by key. A job of another
+// tenant has no incidents here.
+func (ts *TenantStore) ListJobIncidentsPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Incident], error) {
+	if err := ts.ready(); err != nil {
+		return Page[model.Incident]{}, err
+	}
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Incident]
-	readDB := s.reader()
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents WHERE job_id=?`, jobID).Scan(&page.Total); err != nil {
+	readDB := ts.store.reader()
+	const from = `FROM runtime_incidents AS i JOIN jobs AS j ON j.id=i.job_id AND j.tenant_id=? WHERE i.job_id=?`
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) `+from, ts.scope.id, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT incident_json FROM runtime_incidents WHERE job_id=? ORDER BY key LIMIT ? OFFSET ?`, jobID, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT i.incident_json `+from+` ORDER BY i.key LIMIT ? OFFSET ?`, ts.scope.id, jobID, limit, offset)
 	if err != nil {
 		return page, err
 	}
@@ -356,14 +534,28 @@ func (s *Store) ListJobIncidentsPage(ctx context.Context, jobID string, limit, o
 	return page, rows.Err()
 }
 
+// ListIncidentsPage returns a page of the active incidents of every managed
+// job.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListIncidentsPage.
 func (s *Store) ListIncidentsPage(ctx context.Context, limit, offset int) (Page[JobIncident], error) {
+	return s.Tenant(DefaultTenantScope()).ListIncidentsPage(ctx, limit, offset)
+}
+
+// ListIncidentsPage returns a page of the active incidents of the tenant's
+// managed jobs, ordered by job name and key.
+func (ts *TenantStore) ListIncidentsPage(ctx context.Context, limit, offset int) (Page[JobIncident], error) {
+	if err := ts.ready(); err != nil {
+		return Page[JobIncident]{}, err
+	}
 	limit, offset = normalizePage(limit, offset)
 	var page Page[JobIncident]
-	readDB := s.reader()
-	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents JOIN jobs ON jobs.id=runtime_incidents.job_id`).Scan(&page.Total); err != nil {
+	readDB := ts.store.reader()
+	const from = `FROM runtime_incidents JOIN jobs ON jobs.id=runtime_incidents.job_id AND jobs.tenant_id=?`
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) `+from, ts.scope.id).Scan(&page.Total); err != nil {
 		return page, err
 	}
-	rows, err := readDB.QueryContext(ctx, `SELECT jobs.id,jobs.name,runtime_incidents.incident_json FROM runtime_incidents JOIN jobs ON jobs.id=runtime_incidents.job_id ORDER BY jobs.name,runtime_incidents.key LIMIT ? OFFSET ?`, limit, offset)
+	rows, err := readDB.QueryContext(ctx, `SELECT jobs.id,jobs.name,runtime_incidents.incident_json `+from+` ORDER BY jobs.name,runtime_incidents.key LIMIT ? OFFSET ?`, ts.scope.id, limit, offset)
 	if err != nil {
 		return page, err
 	}

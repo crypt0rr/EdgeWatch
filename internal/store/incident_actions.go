@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -19,11 +21,22 @@ type IncidentExpectation struct {
 
 // AcceptIncidentWithExpectedOutboxAndAudit folds one active incident into the
 // current baseline and queues the resulting event for the supplied job
-// destinations in the same transaction as the state and audit mutation. The
-// expected change must match the current incident exactly; this prevents a
-// stale browser dialog from approving a different observation.
+// destinations in the same transaction as the state and audit mutation.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.AcceptIncidentWithExpectedOutboxAndAudit.
 func (s *Store) AcceptIncidentWithExpectedOutboxAndAudit(ctx context.Context, jobID, jobName, key string, expected *IncidentExpectation, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.updateIncidentAction(ctx, jobID, destinations, []AuditEntry{audit}, func(state *model.JobState) ([]model.Event, error) {
+	return s.Tenant(DefaultTenantScope()).AcceptIncidentWithExpectedOutboxAndAudit(ctx, jobID, jobName, key, expected, destinations, audit)
+}
+
+// AcceptIncidentWithExpectedOutboxAndAudit folds one active incident of the
+// tenant's job into the current baseline and queues the resulting event for
+// the supplied job destinations in the same transaction as the state and
+// audit mutation. The expected change must match the current incident
+// exactly; this prevents a stale browser dialog from approving a different
+// observation. A job of another tenant is ErrNotFound, and nothing changes.
+func (ts *TenantStore) AcceptIncidentWithExpectedOutboxAndAudit(ctx context.Context, jobID, jobName, key string, expected *IncidentExpectation, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return ts.updateIncidentAction(ctx, jobID, destinations, []AuditEntry{audit}, func(state *model.JobState) ([]model.Event, error) {
 		if state.Baseline == nil {
 			return nil, ErrBaselineNotReady
 		}
@@ -97,19 +110,37 @@ func (s *Store) AcceptIncidentWithExpectedOutboxAndAudit(ctx context.Context, jo
 }
 
 // AcceptIncidentWithOutboxAndAudit folds one active incident into the current
+// baseline without checking a reviewed change.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.AcceptIncidentWithOutboxAndAudit.
+func (s *Store) AcceptIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return s.Tenant(DefaultTenantScope()).AcceptIncidentWithOutboxAndAudit(ctx, jobID, jobName, key, destinations, audit)
+}
+
+// AcceptIncidentWithOutboxAndAudit folds one active incident into the current
 // baseline and queues the resulting event for the supplied job destinations in
 // the same transaction as the state and audit mutation. It is retained for
 // internal callers that already operate inside a trusted, current-state flow;
 // HTTP handlers should use the expected-snapshot variant above.
-func (s *Store) AcceptIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.AcceptIncidentWithExpectedOutboxAndAudit(ctx, jobID, jobName, key, nil, destinations, audit)
+func (ts *TenantStore) AcceptIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return ts.AcceptIncidentWithExpectedOutboxAndAudit(ctx, jobID, jobName, key, nil, destinations, audit)
+}
+
+// AcceptIncidentWithAudit folds one active incident into the current
+// baseline without queueing notifications.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.AcceptIncidentWithAudit.
+func (s *Store) AcceptIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
+	return s.Tenant(DefaultTenantScope()).AcceptIncidentWithAudit(ctx, jobID, jobName, key, audit)
 }
 
 // AcceptIncidentWithAudit is retained for callers that only need the durable
 // state/audit mutation. Passing no destinations deliberately preserves the
 // historical silent behavior for those callers.
-func (s *Store) AcceptIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
-	return s.AcceptIncidentWithOutboxAndAudit(ctx, jobID, jobName, key, nil, audit)
+func (ts *TenantStore) AcceptIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
+	return ts.AcceptIncidentWithOutboxAndAudit(ctx, jobID, jobName, key, nil, audit)
 }
 
 // relatedIncident finds the sibling port/service change for the same scan and
@@ -200,10 +231,22 @@ func acceptedIncidentMessage(count int) string {
 
 // SuppressIncidentWithExpectedOutboxAndAudit hides an active incident for
 // exactly one future successful scan and queues the action event for the
-// supplied job destinations transactionally. The expected change must match
-// the current incident exactly so a stale dialog cannot suppress new evidence.
+// supplied job destinations transactionally.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.SuppressIncidentWithExpectedOutboxAndAudit.
 func (s *Store) SuppressIncidentWithExpectedOutboxAndAudit(ctx context.Context, jobID, jobName, key string, expected *IncidentExpectation, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.updateIncidentAction(ctx, jobID, destinations, []AuditEntry{audit}, func(state *model.JobState) ([]model.Event, error) {
+	return s.Tenant(DefaultTenantScope()).SuppressIncidentWithExpectedOutboxAndAudit(ctx, jobID, jobName, key, expected, destinations, audit)
+}
+
+// SuppressIncidentWithExpectedOutboxAndAudit hides an active incident of the
+// tenant's job for exactly one future successful scan and queues the action
+// event for the supplied job destinations transactionally. The expected
+// change must match the current incident exactly so a stale dialog cannot
+// suppress new evidence. A job of another tenant is ErrNotFound, and nothing
+// changes.
+func (ts *TenantStore) SuppressIncidentWithExpectedOutboxAndAudit(ctx context.Context, jobID, jobName, key string, expected *IncidentExpectation, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return ts.updateIncidentAction(ctx, jobID, destinations, []AuditEntry{audit}, func(state *model.JobState) ([]model.Event, error) {
 		incident, ok := state.Incidents[key]
 		if !ok {
 			return nil, ErrIncidentNotFound
@@ -230,17 +273,35 @@ func (s *Store) SuppressIncidentWithExpectedOutboxAndAudit(ctx context.Context, 
 }
 
 // SuppressIncidentWithOutboxAndAudit hides an active incident for exactly one
+// future successful scan without checking a reviewed change.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.SuppressIncidentWithOutboxAndAudit.
+func (s *Store) SuppressIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return s.Tenant(DefaultTenantScope()).SuppressIncidentWithOutboxAndAudit(ctx, jobID, jobName, key, destinations, audit)
+}
+
+// SuppressIncidentWithOutboxAndAudit hides an active incident for exactly one
 // future successful scan and queues the action event for the supplied job
 // destinations transactionally. It is retained for trusted internal callers;
 // HTTP handlers should use the expected-snapshot variant above.
-func (s *Store) SuppressIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.SuppressIncidentWithExpectedOutboxAndAudit(ctx, jobID, jobName, key, nil, destinations, audit)
+func (ts *TenantStore) SuppressIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return ts.SuppressIncidentWithExpectedOutboxAndAudit(ctx, jobID, jobName, key, nil, destinations, audit)
+}
+
+// SuppressIncidentWithAudit hides an active incident for exactly one future
+// successful scan without queueing notifications.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.SuppressIncidentWithAudit.
+func (s *Store) SuppressIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
+	return s.Tenant(DefaultTenantScope()).SuppressIncidentWithAudit(ctx, jobID, jobName, key, audit)
 }
 
 // SuppressIncidentWithAudit is retained for source compatibility with callers
 // that do not provide notification destinations.
-func (s *Store) SuppressIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
-	return s.SuppressIncidentWithOutboxAndAudit(ctx, jobID, jobName, key, nil, audit)
+func (ts *TenantStore) SuppressIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
+	return ts.SuppressIncidentWithOutboxAndAudit(ctx, jobID, jobName, key, nil, audit)
 }
 
 func incidentMatchesExpectation(key string, incident model.Incident, expected *IncidentExpectation) bool {
@@ -264,13 +325,23 @@ func incidentMatchesExpectation(key string, incident model.Incident, expected *I
 // is not actively scanning. Keeping the active-scan check, state transition,
 // event write, and audit insert in one transaction prevents a scan from
 // finishing against a half-applied operator decision.
-func (s *Store) updateIncidentAction(ctx context.Context, jobID string, destinations []string, audits []AuditEntry, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
+//
+// The transaction first confirms that the job belongs to the tenant. Every
+// later statement names only the job, so a job of another tenant is
+// ErrNotFound, as an unknown job is, before anything is read or written.
+func (ts *TenantStore) updateIncidentAction(ctx context.Context, jobID string, destinations []string, audits []AuditEntry, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	if _, err := getJobTx(ctx, tx, jobID); err != nil {
+	var owned int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM jobs WHERE id=? AND tenant_id=?`, jobID, ts.scope.id).Scan(&owned); errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: job %s", ErrNotFound, jobID)
+	} else if err != nil {
 		return nil, err
 	}
 	active, err := jobActiveTx(ctx, tx, jobID, time.Now().UTC())

@@ -780,12 +780,13 @@ func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry Audit
 		entry.SourceIP = requestContext.SourceIP
 	}
 	createdAt := now.UTC().Format(time.RFC3339Nano)
-	_, err := execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,category,created_at) VALUES(?,?,?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, auditCategory(entry.Action), createdAt)
+	// Every record belongs to the default tenant, the only tenant for now.
+	_, err := execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,category,tenant_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, auditCategory(entry.Action), DefaultTenantID, createdAt)
 	if err != nil {
 		// Host commands open the database without migrating it, for example
 		// the restored copy of an older backup. Before schema 51 the table
-		// has no category column; record the entry without it, and the
-		// migration categorizes it later.
+		// has no category or tenant_id column; record the entry without
+		// them, and the migration categorizes and attributes it later.
 		if legacy, checkErr := auditTableLacksCategory(ctx, execer); checkErr == nil && legacy {
 			_, err = execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,created_at) VALUES(?,?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, createdAt)
 		}

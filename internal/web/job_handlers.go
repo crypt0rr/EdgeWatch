@@ -289,9 +289,9 @@ func baselineJSONFromSummary(summary store.RuntimeStateSummary, currentHash stri
 	return map[string]any{"status": status, "scan_id": summary.BaselineScanID, "config_hash": summary.BaselineConfigHash, "modified": summary.BaselineModified, "samples": summary.CandidateCount, "attempts": summary.CandidateAttempts, "incomplete_attempts": summary.IncompleteCandidateAttempts, "incidents": summary.IncidentCount, "pending": summary.PendingCount, "host_count": summary.BaselineHostCount}
 }
 
-func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
+func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	include := r.URL.Query().Get("include_archived") == "true"
-	jobs, err := s.Store.ListJobs(r.Context(), include)
+	jobs, err := ts.ListJobs(r.Context(), include)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return

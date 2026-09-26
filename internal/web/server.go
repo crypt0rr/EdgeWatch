@@ -466,6 +466,16 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "your account is not allowed to perform this action", details)
 		return
 	}
+	// The account's own routes under /auth/ need no tenant. Every other
+	// route reads or changes the data of the account's tenant, and its store
+	// is resolved once, here, from the session; handlers never choose a
+	// tenant. A nil store refuses every call.
+	var ts *store.TenantStore
+	if !strings.HasPrefix(path, "/auth/") {
+		if ts, ok = s.requestTenant(w, r, session); !ok {
+			return
+		}
+	}
 	if isMutation(r.Method) {
 		if err := s.Auth.RecordActivity(r.Context(), session); err != nil {
 			// Activity persistence is opportunistic and bounded. It must never
@@ -535,11 +545,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/stream" && r.Method == http.MethodGet:
 		s.stream(w, r, session)
 	case path == "/jobs" && r.Method == http.MethodGet:
-		s.listJobs(w, r)
+		s.listJobs(w, r, ts)
 	case path == "/jobs" && r.Method == http.MethodPost:
 		s.createJob(w, r, session)
 	case path == "/jobs/schedule-suggestion" && r.Method == http.MethodGet:
-		s.scheduleSuggestion(w, r)
+		s.scheduleSuggestion(w, r, ts)
 	case path == "/scans" && r.Method == http.MethodGet:
 		s.listScans(w, r)
 	case path == "/hosts" && r.Method == http.MethodGet:

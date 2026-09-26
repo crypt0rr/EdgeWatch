@@ -707,6 +707,9 @@ func insertRestoreAuditTx(ctx context.Context, tx *sql.Tx, policy PendingDeliver
 	if columns["category"] {
 		names, values = append(names, "category"), append(values, auditCategory(action))
 	}
+	if columns["tenant_id"] {
+		names, values = append(names, "tenant_id"), append(values, DefaultTenantID)
+	}
 	names, values = append(names, "created_at"), append(values, restoredAt.Format(time.RFC3339Nano))
 	query := `INSERT INTO security_audit(` + strings.Join(names, ",") + `) VALUES(?` + strings.Repeat(",?", len(names)-1) + `)`
 	if _, err := tx.ExecContext(ctx, query, values...); err != nil {

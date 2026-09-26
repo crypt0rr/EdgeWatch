@@ -1,12 +1,5 @@
 package store
 
-// DefaultTenantID identifies the default tenant. Schema 51 creates it with
-// this fixed ID, like LegacyAdminUserID and the built-in scanner profile IDs,
-// so existing rows can be attributed to it with a constant column default
-// instead of a lookup. Every installation has exactly one tenant for now, and
-// it owns the update alert routing and the public status page.
-const DefaultTenantID = "00000000-0000-0000-0000-000000000100"
-
 // migration51Statements adds the tenants table with the default tenant and
 // moves the installation-wide singletons to that tenant. There is exactly one
 // tenant, so every read and write keeps its previous result:

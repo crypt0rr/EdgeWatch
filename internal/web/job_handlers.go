@@ -204,7 +204,7 @@ func (s *Server) addJobCycleAndProfile(ctx context.Context, ts *store.TenantStor
 			value["job"] = payload
 		}
 	}
-	cycle, err := s.Store.GetActiveScanCycle(ctx, record.ID)
+	cycle, err := ts.GetActiveScanCycle(ctx, record.ID)
 	if errors.Is(err, store.ErrNoScanCycle) {
 		value["scan_cycle"] = nil
 		return value
@@ -301,7 +301,7 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, ts *store.Tena
 		s.writeInternalError(w, r, "store", err)
 		return
 	}
-	cycles, cycleErr := s.Store.ListActiveScanCycleSummaries(r.Context(), include)
+	cycles, cycleErr := ts.ListActiveScanCycleSummaries(r.Context(), include)
 	if cycleErr != nil {
 		logger := s.Log
 		if logger == nil {

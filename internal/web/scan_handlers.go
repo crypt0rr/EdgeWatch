@@ -486,7 +486,7 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Se
 		mode = "resumable"
 	}
 	cycleID := ""
-	if cycle, cycleErr := s.Store.GetActiveScanCycle(r.Context(), id); cycleErr == nil {
+	if cycle, cycleErr := ts.GetActiveScanCycle(r.Context(), id); cycleErr == nil {
 		cycleID = cycle.ID
 		mode = "resumable"
 	}
@@ -503,7 +503,7 @@ func broadScan(job config.Job) bool {
 }
 
 func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job store.JobRecord) {
-	cycle, err := s.Store.GetRecoverableScanCycle(r.Context(), job.ID)
+	cycle, err := ts.GetRecoverableScanCycle(r.Context(), job.ID)
 	if errors.Is(err, store.ErrNoScanCycle) {
 		writeJSON(w, http.StatusOK, map[string]any{"cycle": nil})
 		return
@@ -516,7 +516,7 @@ func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, ts *store.Ten
 	// explain progress, but it is intentionally returned without raw scanner
 	// arguments or completed snapshot fragments.
 	limit, offset := queryLimit(r), queryOffset(r)
-	unitsPage, unitsErr := s.Store.ListScanCycleUnitSummariesPage(r.Context(), cycle.ID, limit, offset)
+	unitsPage, unitsErr := ts.ListScanCycleUnitSummariesPage(r.Context(), cycle.ID, limit, offset)
 	if unitsErr != nil {
 		s.writeInternalError(w, r, "store", unitsErr)
 		return
@@ -535,12 +535,12 @@ func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, ts *store.Ten
 
 func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, job store.JobRecord, cycleID string) {
 	id := job.ID
-	cycle, err := s.Store.GetScanCycle(r.Context(), cycleID)
+	cycle, err := ts.GetScanCycle(r.Context(), cycleID)
 	if err != nil || cycle.JobID != id {
 		writeError(w, http.StatusNotFound, "not_found", "scan cycle not found", nil)
 		return
 	}
-	if err := s.Store.DiscardScanCycle(r.Context(), cycleID); err != nil {
+	if err := ts.DiscardScanCycle(r.Context(), cycleID); err != nil {
 		writeError(w, http.StatusConflict, "cycle_discard_failed", "scan cycle could not be discarded", nil)
 		return
 	}

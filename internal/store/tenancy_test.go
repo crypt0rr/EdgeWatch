@@ -105,6 +105,7 @@ func buildTenantFixture(t *testing.T) (string, tenantFixtureIDs) {
 			t.Fatal(err)
 		}
 	}
+	addTenantHistory(t, s, ids)
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}

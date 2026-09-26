@@ -665,7 +665,7 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, ts *stor
 func (s *Server) listScans(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	limit := queryLimit(r)
 	offset := queryOffset(r)
-	page, err := s.Store.ListScanSummariesPage(r.Context(), r.URL.Query().Get("job"), limit, offset)
+	page, err := ts.ListScanSummariesPage(r.Context(), r.URL.Query().Get("job"), limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -693,7 +693,7 @@ func (s *Server) getScanSummary(w http.ResponseWriter, r *http.Request, ts *stor
 
 func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	offset, limit := queryOffset(r), queryLimit(r)
-	incidentPage, err := s.Store.ListIncidentsPage(r.Context(), limit, offset)
+	incidentPage, err := ts.ListIncidentsPage(r.Context(), limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -708,7 +708,7 @@ func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request, ts *store
 func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job string) {
 	if jobID := r.URL.Query().Get("job_id"); jobID != "" {
 		offset, limit := queryOffset(r), queryLimit(r)
-		page, err := s.Store.ListJobEventsPage(r.Context(), jobID, limit, offset)
+		page, err := ts.ListJobEventsPage(r.Context(), jobID, limit, offset)
 		if err != nil {
 			s.writeInternalError(w, r, "store", err)
 			return
@@ -725,7 +725,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, ts *store.Te
 		}
 	}
 	offset, limit := queryOffset(r), queryLimit(r)
-	page, err := s.Store.ListEventsPage(r.Context(), job, limit, offset)
+	page, err := ts.ListEventsPage(r.Context(), job, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -738,7 +738,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, ts *store.Te
 
 func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job store.JobRecord) {
 	offset, limit := queryOffset(r), queryLimit(r)
-	page, err := s.Store.ListJobEventsPage(r.Context(), job.ID, limit, offset)
+	page, err := ts.ListJobEventsPage(r.Context(), job.ID, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -751,7 +751,7 @@ func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, ts *store.Ten
 func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
 	id := record.ID
 	offset, limit := queryOffset(r), queryLimit(r)
-	incidentPage, err := s.Store.ListJobIncidentsPage(r.Context(), id, limit, offset)
+	incidentPage, err := ts.ListJobIncidentsPage(r.Context(), id, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -803,7 +803,7 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session 
 			return
 		}
 	}
-	events, err := s.Store.AcceptIncidentWithExpectedOutboxAndAudit(r.Context(), id, record.Job.Name, key, &store.IncidentExpectation{Change: action.expected}, destinations, actorAudit(session, "incident.accepted", id+":"+key))
+	events, err := ts.AcceptIncidentWithExpectedOutboxAndAudit(r.Context(), id, record.Job.Name, key, &store.IncidentExpectation{Change: action.expected}, destinations, actorAudit(session, "incident.accepted", id+":"+key))
 	if err != nil {
 		s.writeIncidentActionErrorWithRequest(w, r, err, "incident.accepted")
 		return
@@ -823,7 +823,7 @@ func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, sessio
 			return
 		}
 	}
-	events, err := s.Store.SuppressIncidentWithExpectedOutboxAndAudit(r.Context(), id, record.Job.Name, key, &store.IncidentExpectation{Change: action.expected}, destinations, actorAudit(session, "incident.suppressed", id+":"+key))
+	events, err := ts.SuppressIncidentWithExpectedOutboxAndAudit(r.Context(), id, record.Job.Name, key, &store.IncidentExpectation{Change: action.expected}, destinations, actorAudit(session, "incident.suppressed", id+":"+key))
 	if err != nil {
 		s.writeIncidentActionErrorWithRequest(w, r, err, "incident.suppressed")
 		return

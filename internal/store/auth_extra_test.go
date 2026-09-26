@@ -85,21 +85,21 @@ func TestTouchSessionIfStaleCoalescesActivity(t *testing.T) {
 	}
 }
 
-func TestSaveAdminRollsBackLegacyRowWhenUserSyncFails(t *testing.T) {
+func TestSaveAdminFailsWhenUsersRowCannotBeWritten(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER fail_admin_user_sync BEFORE INSERT ON users WHEN NEW.username='rollback-admin' BEGIN SELECT RAISE(ABORT, 'user sync unavailable'); END`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER fail_admin_user_write BEFORE INSERT ON users WHEN NEW.username='rollback-admin' BEGIN SELECT RAISE(ABORT, 'user sync unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
 	err := s.SaveAdmin(ctx, Admin{Username: "rollback-admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now})
 	if err == nil {
-		t.Fatal("SaveAdmin unexpectedly succeeded with a failing user sync")
+		t.Fatal("SaveAdmin unexpectedly succeeded with a failing users write")
 	}
 	if _, err := s.GetAdmin(ctx); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("legacy admin row survived rollback: %v", err)
+		t.Fatalf("administrator after a failed save: %v", err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER fail_admin_user_sync`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `DROP TRIGGER fail_admin_user_write`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SaveAdmin(ctx, Admin{Username: "rollback-admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {

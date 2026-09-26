@@ -13,11 +13,12 @@ import (
 	"time"
 )
 
-// schema50FixtureStatements turn a current database into the schema-50 shape:
-// the update alert routing and the public status page go back to their
-// schema-50 locations, and the tenants table, the public_dashboards table,
-// and the columns and indexes that schema 51 adds are removed.
-var schema50FixtureStatements = []string{
+// schema50FixtureStatements turn a current database into the schema-50 shape.
+// They first undo schema 52, see schema51FixtureStatements. Then the update
+// alert routing and the public status page go back to their schema-50
+// locations, and the tenants table, the public_dashboards table, and the
+// columns and indexes that schema 51 adds are removed.
+var schema50FixtureStatements = slices.Concat(schema51FixtureStatements, []string{
 	"DROP INDEX security_audit_tenant_time",
 	"DROP INDEX security_audit_platform_time",
 	"ALTER TABLE security_audit DROP COLUMN tenant_id",
@@ -37,7 +38,7 @@ SELECT 1,enabled,title,introduction,updated_at FROM public_dashboards WHERE tena
 	`UPDATE application_update_state SET notification_destinations_json=(SELECT update_destinations_json FROM tenants WHERE id='` + DefaultTenantID + `') WHERE id=1`,
 	"DROP TABLE tenants",
 	"PRAGMA user_version=50",
-}
+})
 
 // execFixtureStatements runs statements against the closed database at path
 // without migrating it.
@@ -243,8 +244,8 @@ func TestMigration51MovesSingletonsToTheDefaultTenant(t *testing.T) {
 			}
 			defer s.Close()
 			var version int
-			if err := s.DB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 51 {
-				t.Fatalf("schema version = %d, %v; want 51", version, err)
+			if err := s.DB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
+				t.Fatalf("schema version = %d, %v; want %d", version, err, schemaVersion)
 			}
 
 			// The default tenant exists once, with the fixed ID, and holds the
@@ -460,7 +461,7 @@ func TestMigration51UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 			}
 			defer s.Close()
 			var version int
-			if err := s.DB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 51 {
+			if err := s.DB.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
 				t.Fatalf("schema version = %d, %v", version, err)
 			}
 			var routing string
@@ -517,7 +518,8 @@ func TestUpdateRoutingWritesRequireTheDefaultTenant(t *testing.T) {
 	if err := s.SetApplicationUpdateDestinations(ctx, []string{destination.ID}, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `DELETE FROM public_dashboards; DELETE FROM tenants`); err != nil {
+	// Since schema 52 the destination references the tenant.
+	if _, err := s.DB.ExecContext(ctx, `PRAGMA foreign_keys=OFF; DELETE FROM public_dashboards; DELETE FROM tenants; PRAGMA foreign_keys=ON`); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SetApplicationUpdateDestinations(ctx, []string{"file:other"}, AuditEntry{Action: "notifications.update_routing"}); !errors.Is(err, ErrNotFound) {

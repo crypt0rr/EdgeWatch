@@ -233,22 +233,38 @@ func TestGetAdminUsesAuthoritativeUserCredentials(t *testing.T) {
 	}
 }
 
-func TestGetAdminFallsBackToAuthoritativeUserWhenCompatibilityRowMissing(t *testing.T) {
+// insertLegacyAdminsRow writes the row of the admins table that schema 52
+// retired, as a database changed by hand could still hold it.
+func insertLegacyAdminsRow(t *testing.T, s *Store, username, passwordHash string) {
+	t.Helper()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.DB.Exec(`INSERT INTO admins(id,username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,'',0,?,?)`, username, username, passwordHash, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// GetAdmin reads the users row only, so a leftover admins row never supplies
+// credentials or makes an administrator configured.
+func TestGetAdminReadsOnlyTheUsersRow(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
 	if err := s.SaveAdmin(ctx, Admin{Username: "admin", DisplayName: "Administrator", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `DELETE FROM admins WHERE id=1`); err != nil {
+	insertLegacyAdminsRow(t, s, "admin", "stale-hash")
+	admin, err := s.GetAdmin(ctx)
+	if err != nil || admin.Username != "admin" || admin.PasswordHash != "hash" || admin.Revision == 0 {
+		t.Fatalf("administrator = %#v, %v; want the users row", admin, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM users WHERE id=?`, LegacyAdminUserID); err != nil {
 		t.Fatal(err)
 	}
-	admin, err := s.GetAdmin(ctx)
-	if err != nil {
-		t.Fatalf("GetAdmin failed without compatibility row: %v", err)
+	if admin, err := s.GetAdmin(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("administrator with only an admins row = %#v, %v; want ErrNotFound", admin, err)
 	}
-	if admin.Username != "admin" || admin.PasswordHash != "hash" || admin.Revision == 0 {
-		t.Fatalf("unexpected authoritative administrator: %#v", admin)
+	if configured, err := s.HasAdministrator(ctx); err != nil || configured {
+		t.Fatalf("configured with only an admins row = %v, %v; want false", configured, err)
 	}
 }
 
@@ -265,10 +281,6 @@ func TestGetAdminWorksWithReadOnlyDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := writer.DB.ExecContext(ctx, `UPDATE users SET totp_secret=?,totp_enabled=1 WHERE id=?`, "legacy-seed", LegacyAdminUserID); err != nil {
-		writer.Close()
-		t.Fatal(err)
-	}
-	if _, err := writer.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=?,totp_enabled=1 WHERE id=1`, "legacy-seed"); err != nil {
 		writer.Close()
 		t.Fatal(err)
 	}
@@ -294,7 +306,7 @@ func TestGetAdminWorksWithReadOnlyDatabase(t *testing.T) {
 	}
 }
 
-func TestMigrateAdminCompatibilityUpgradesSecretAndSynchronizesAtomically(t *testing.T) {
+func TestMigrateAdminCompatibilityUpgradesSecretWithoutRecreatingAdminsRow(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -308,7 +320,7 @@ func TestMigrateAdminCompatibilityUpgradesSecretAndSynchronizesAtomically(t *tes
 		t.Fatalf("migrate administrator compatibility: %v", err)
 	}
 
-	var userSecret, legacyName, legacyPassword, legacySecret string
+	var userSecret string
 	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret FROM users WHERE id=?`, LegacyAdminUserID).Scan(&userSecret); err != nil {
 		t.Fatal(err)
 	}
@@ -319,11 +331,11 @@ func TestMigrateAdminCompatibilityUpgradesSecretAndSynchronizesAtomically(t *tes
 	if err != nil || migrate || secret != "JBSWY3DPEHPK3PXP" {
 		t.Fatalf("upgraded secret = %q, migrate=%v, err=%v", secret, migrate, err)
 	}
-	if err := s.DB.QueryRowContext(ctx, `SELECT display_name,password_hash,totp_secret FROM admins WHERE id=1`).Scan(&legacyName, &legacyPassword, &legacySecret); err != nil {
-		t.Fatal(err)
-	}
-	if legacyName != "Current name" || legacyPassword != "current-hash" || legacySecret != userSecret {
-		t.Fatalf("legacy compatibility row remains stale: name=%q password=%q secret-matches=%v", legacyName, legacyPassword, legacySecret == userSecret)
+	// Schema 52 retired the admins row; the startup migration must not write
+	// it again.
+	var legacyRows int
+	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM admins`).Scan(&legacyRows); err != nil || legacyRows != 0 {
+		t.Fatalf("admins rows after the compatibility migration = %d, %v; want 0", legacyRows, err)
 	}
 }
 
@@ -343,40 +355,36 @@ func TestMigrateAdminCompatibilityRollsBackOnSecretWriteFailure(t *testing.T) {
 	if err := s.MigrateAdminCompatibility(ctx); err == nil {
 		t.Fatal("TOTP migration write failure was ignored")
 	}
-	var stored, legacyName string
-	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret,display_name FROM users WHERE id=?`, LegacyAdminUserID).Scan(&stored, &legacyName); err != nil {
+	var stored, displayName string
+	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret,display_name FROM users WHERE id=?`, LegacyAdminUserID).Scan(&stored, &displayName); err != nil {
 		t.Fatal(err)
 	}
-	if stored != "JBSWY3DPEHPK3PXP" || legacyName != "Current name" {
-		t.Fatalf("failed migration partially changed authoritative row: secret=%q name=%q", stored, legacyName)
-	}
-	if err := s.DB.QueryRowContext(ctx, `SELECT display_name FROM admins WHERE id=1`).Scan(&legacyName); err != nil {
-		t.Fatal(err)
-	}
-	if legacyName != "Old name" {
-		t.Fatalf("failed migration partially changed compatibility row: %q", legacyName)
+	if stored != "JBSWY3DPEHPK3PXP" || displayName != "Current name" {
+		t.Fatalf("failed migration partially changed authoritative row: secret=%q name=%q", stored, displayName)
 	}
 }
 
-func TestMigrateAdminCompatibilityHandlesLegacyOnlyDatabase(t *testing.T) {
+// An admins row without a users row is not an administrator any more. The
+// startup migration neither restores the users row from it nor rewrites it.
+func TestMigrateAdminCompatibilityLeavesLegacyAdminsRowAlone(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	now := time.Now().UTC()
-	if err := s.SaveAdmin(ctx, Admin{Username: "legacy-admin", DisplayName: "Legacy Admin", PasswordHash: "legacy-hash", CreatedAt: now, UpdatedAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `DELETE FROM users WHERE id=?`, LegacyAdminUserID); err != nil {
+	insertLegacyAdminsRow(t, s, "legacy-admin", "legacy-hash")
+	if _, err := s.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=?,totp_enabled=1 WHERE id=1`, "JBSWY3DPEHPK3PXP"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.MigrateAdminCompatibility(ctx); err != nil {
-		t.Fatalf("migrate legacy-only administrator: %v", err)
+		t.Fatalf("compatibility migration with only an admins row: %v", err)
 	}
-	var username, passwordHash string
-	if err := s.DB.QueryRowContext(ctx, `SELECT username,password_hash FROM admins WHERE id=1`).Scan(&username, &passwordHash); err != nil {
+	var username, passwordHash, secret string
+	if err := s.DB.QueryRowContext(ctx, `SELECT username,password_hash,totp_secret FROM admins WHERE id=1`).Scan(&username, &passwordHash, &secret); err != nil {
 		t.Fatal(err)
 	}
-	if username != "legacy-admin" || passwordHash != "legacy-hash" {
-		t.Fatalf("legacy administrator changed during no-op migration: username=%q password=%q", username, passwordHash)
+	if username != "legacy-admin" || passwordHash != "legacy-hash" || secret != "JBSWY3DPEHPK3PXP" {
+		t.Fatalf("admins row changed: username=%q password=%q secret=%q", username, passwordHash, secret)
+	}
+	if _, err := s.GetUser(ctx, LegacyAdminUserID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("users row restored from the admins row: %v", err)
 	}
 }
 
@@ -394,14 +402,41 @@ func TestMigrateAdminCompatibilityAllowsMissingLegacyAdmin(t *testing.T) {
 	}
 }
 
-func TestMigrateAdminCompatibilityReportsLegacyReadFailure(t *testing.T) {
-	ctx := context.Background()
-	s := openTestStore(t)
-	if _, err := s.DB.ExecContext(ctx, `DROP TABLE admins`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.MigrateAdminCompatibility(ctx); err == nil || !strings.Contains(err.Error(), "read legacy administrator row for compatibility migration") {
-		t.Fatalf("legacy compatibility read failure = %v", err)
+// The startup migration neither reads nor writes the retired admins table.
+func TestMigrateAdminCompatibilityDoesNotUseAdminsTable(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		statements []string
+	}{
+		{name: "table dropped", statements: []string{`DROP TABLE admins`}},
+		{name: "writes rejected", statements: []string{
+			`CREATE TRIGGER reject_admins_insert BEFORE INSERT ON admins BEGIN SELECT RAISE(ABORT,'admins insert blocked'); END`,
+			`CREATE TRIGGER reject_admins_update BEFORE UPDATE ON admins BEGIN SELECT RAISE(ABORT,'admins update blocked'); END`,
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := openTestStore(t)
+			now := time.Now().UTC()
+			if err := s.SaveAdmin(ctx, Admin{Username: "admin", DisplayName: "Old name", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.DB.ExecContext(ctx, `UPDATE users SET display_name=?,totp_secret=?,totp_enabled=1 WHERE id=?`, "Current name", "JBSWY3DPEHPK3PXP", LegacyAdminUserID); err != nil {
+				t.Fatal(err)
+			}
+			for _, statement := range tc.statements {
+				if _, err := s.DB.ExecContext(ctx, statement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.MigrateAdminCompatibility(ctx); err != nil {
+				t.Fatalf("compatibility migration: %v", err)
+			}
+			admin, err := s.GetAdmin(ctx)
+			if err != nil || admin.DisplayName != "Current name" || admin.TOTPSecret != "JBSWY3DPEHPK3PXP" || !strings.HasPrefix(admin.TOTPSecretStored, authCiphertextV2) {
+				t.Fatalf("administrator after the compatibility migration = %#v, %v", admin, err)
+			}
+		})
 	}
 }
 
@@ -425,7 +460,7 @@ func TestMigrateAdminCompatibilityReturnsBeginError(t *testing.T) {
 	}
 }
 
-func TestMigrateAdminCompatibilitySkipsAlreadySynchronizedRow(t *testing.T) {
+func TestMigrateAdminCompatibilityIsANoOpWithoutLegacySecret(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -433,25 +468,7 @@ func TestMigrateAdminCompatibilitySkipsAlreadySynchronizedRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := s.MigrateAdminCompatibility(ctx); err != nil {
-		t.Fatalf("already-synchronized compatibility row: %v", err)
-	}
-}
-
-func TestMigrateAdminCompatibilityReportsLegacySyncFailure(t *testing.T) {
-	ctx := context.Background()
-	s := openTestStore(t)
-	now := time.Now().UTC()
-	if err := s.SaveAdmin(ctx, Admin{Username: "admin", DisplayName: "Old name", PasswordHash: "old-hash", CreatedAt: now, UpdatedAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET display_name=? WHERE id=?`, "Current name", LegacyAdminUserID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER reject_admin_compatibility_sync BEFORE UPDATE ON admins BEGIN SELECT RAISE(ABORT,'sync blocked'); END`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.MigrateAdminCompatibility(ctx); err == nil || !strings.Contains(err.Error(), "synchronize legacy administrator compatibility row") {
-		t.Fatalf("legacy compatibility sync failure = %v", err)
+		t.Fatalf("compatibility migration without a legacy secret: %v", err)
 	}
 }
 
@@ -470,73 +487,24 @@ func TestMigrateAdminCompatibilityRejectsUnreadableSecret(t *testing.T) {
 	}
 }
 
-func TestMigrateAdminCompatibilityUpgradesLegacyOnlySecret(t *testing.T) {
+func TestMigrateAdminCompatibilityReportsSecretSealFailure(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
 	if err := s.SaveAdmin(ctx, Admin{Username: "admin", DisplayName: "Admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `DELETE FROM users WHERE id=?`, LegacyAdminUserID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=?,totp_enabled=1 WHERE id=1`, "JBSWY3DPEHPK3PXP"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.MigrateAdminCompatibility(ctx); err != nil {
-		t.Fatalf("upgrade legacy-only TOTP secret: %v", err)
-	}
-	var stored string
-	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret FROM admins WHERE id=1`).Scan(&stored); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.HasPrefix(stored, authCiphertextV2) {
-		t.Fatalf("legacy-only administrator secret was not upgraded: %q", stored)
-	}
-	secret, migrate, err := s.openTOTPSecretForOwner(LegacyAdminUserID, stored)
-	if err != nil || migrate || secret != "JBSWY3DPEHPK3PXP" {
-		t.Fatalf("upgraded legacy-only secret = %q, migrate=%v, err=%v", secret, migrate, err)
-	}
-}
-
-func TestMigrateAdminCompatibilityReportsLegacySecretWriteFailure(t *testing.T) {
-	ctx := context.Background()
-	s := openTestStore(t)
-	now := time.Now().UTC()
-	if err := s.SaveAdmin(ctx, Admin{Username: "admin", DisplayName: "Admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `DELETE FROM users WHERE id=?`, LegacyAdminUserID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=?,totp_enabled=1 WHERE id=1`, "JBSWY3DPEHPK3PXP"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER reject_legacy_totp_update BEFORE UPDATE OF totp_secret ON admins BEGIN SELECT RAISE(ABORT,'legacy secret update blocked'); END`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.MigrateAdminCompatibility(ctx); err == nil || !strings.Contains(err.Error(), "store upgraded legacy administrator TOTP secret") {
-		t.Fatalf("legacy administrator secret write failure = %v", err)
-	}
-}
-
-func TestMigrateAdminCompatibilityReportsLegacySecretSealFailure(t *testing.T) {
-	ctx := context.Background()
-	s := openTestStore(t)
-	now := time.Now().UTC()
-	if err := s.SaveAdmin(ctx, Admin{Username: "admin", DisplayName: "Admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `DELETE FROM users WHERE id=?`, LegacyAdminUserID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=?,totp_enabled=1 WHERE id=1`, "JBSWY3DPEHPK3PXP"); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET totp_secret=?,totp_enabled=1 WHERE id=?`, "JBSWY3DPEHPK3PXP", LegacyAdminUserID); err != nil {
 		t.Fatal(err)
 	}
 	s.authAutoKey = false
 	s.authKeyPath = filepath.Join(t.TempDir(), "missing", "auth.key")
-	if err := s.MigrateAdminCompatibility(ctx); err == nil || !strings.Contains(err.Error(), "upgrade legacy administrator TOTP secret") {
-		t.Fatalf("legacy administrator secret seal failure = %v", err)
+	if err := s.MigrateAdminCompatibility(ctx); err == nil || !strings.Contains(err.Error(), "upgrade administrator TOTP secret") {
+		t.Fatalf("administrator secret seal failure = %v", err)
+	}
+	var stored string
+	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret FROM users WHERE id=?`, LegacyAdminUserID).Scan(&stored); err != nil || stored != "JBSWY3DPEHPK3PXP" {
+		t.Fatalf("failed upgrade changed the secret: %q, %v", stored, err)
 	}
 }
 
@@ -557,7 +525,7 @@ func TestPasswordUpgradeRaceReturnsTypedConflict(t *testing.T) {
 	}
 }
 
-func TestConditionalSessionPrimitivesCoverCredentialGuardsAndLegacyFallback(t *testing.T) {
+func TestConditionalSessionPrimitivesCoverCredentialGuardsWithoutLegacyFallback(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
@@ -619,30 +587,33 @@ func TestConditionalSessionPrimitivesCoverCredentialGuardsAndLegacyFallback(t *t
 		t.Fatalf("missing-user guard = %v", err)
 	}
 
+	// Schema 52 retired the admins row: without its users row the original
+	// administrator cannot start a session, even with matching admins
+	// credentials.
 	if err := s.SaveAdmin(ctx, Admin{Username: "legacy-admin", DisplayName: "Legacy Admin", PasswordHash: "legacy-hash", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM users WHERE id=?`, LegacyAdminUserID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSessionForUserIfCurrent(ctx, LegacyAdminUserID, "legacy-hash", 0, false, "legacy-fallback-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); err != nil {
-		t.Fatalf("legacy compatibility session = %v", err)
+	insertLegacyAdminsRow(t, s, "legacy-admin", "legacy-hash")
+	if err := s.CreateSessionForUserIfCurrent(ctx, LegacyAdminUserID, "legacy-hash", 0, false, "legacy-fallback-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); !errors.Is(err, ErrSessionCredentialsChanged) {
+		t.Fatalf("session from the admins row = %v, want ErrSessionCredentialsChanged", err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `DELETE FROM admins WHERE id=1`); err != nil {
+	if _, err := s.GetSession(ctx, "legacy-fallback-session"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("session from the admins row was created: %v", err)
+	}
+	// A failed read is reported instead of being treated as a changed
+	// credential.
+	if _, err := s.DB.ExecContext(ctx, `DROP TABLE users`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSessionForUserIfCurrent(ctx, LegacyAdminUserID, "legacy-hash", 0, false, "missing-legacy-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); !errors.Is(err, ErrSessionCredentialsChanged) {
-		t.Fatalf("missing legacy guard = %v", err)
-	}
-	if _, err := s.DB.ExecContext(ctx, `DROP TABLE admins`); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.CreateSessionForUserIfCurrent(ctx, LegacyAdminUserID, "legacy-hash", 0, false, "missing-admin-table-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); err == nil || !strings.Contains(strings.ToLower(err.Error()), "no such table") {
-		t.Fatalf("missing admin table error = %v", err)
+	if err := s.CreateSessionForUserIfCurrent(ctx, LegacyAdminUserID, "legacy-hash", 0, false, "missing-users-table-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); err == nil || errors.Is(err, ErrSessionCredentialsChanged) || !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+		t.Fatalf("missing users table error = %v", err)
 	}
 }
 
-func TestConditionalPasswordUpgradeCoversRevisionAndCompatibilityPaths(t *testing.T) {
+func TestConditionalPasswordUpgradeCoversRevisionWithoutLegacyFallback(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Date(2026, 9, 17, 13, 0, 0, 0, time.UTC)
@@ -678,17 +649,21 @@ func TestConditionalPasswordUpgradeCoversRevisionAndCompatibilityPaths(t *testin
 	if err := s.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, LegacyAdminUserID, "legacy-old", "legacy-new", legacy.Revision, false, "legacy-upgrade-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); err != nil {
 		t.Fatalf("legacy authoritative upgrade = %v", err)
 	}
+	// Without its users row, the original administrator's admins row neither
+	// signs in nor has its password upgraded.
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM users WHERE id=?`, LegacyAdminUserID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE admins SET password_hash=? WHERE id=1`, "fallback-old"); err != nil {
-		t.Fatal(err)
+	insertLegacyAdminsRow(t, s, "legacy-admin", "fallback-old")
+	if err := s.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, LegacyAdminUserID, "fallback-old", "fallback-new", 0, false, "legacy-fallback-upgrade-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); !errors.Is(err, ErrSessionCredentialsChanged) {
+		t.Fatalf("upgrade from the admins row = %v, want ErrSessionCredentialsChanged", err)
 	}
-	if err := s.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, LegacyAdminUserID, "fallback-old", "fallback-new", 0, false, "legacy-fallback-upgrade-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); err != nil {
-		t.Fatalf("legacy fallback upgrade = %v", err)
+	var legacyHash string
+	if err := s.DB.QueryRowContext(ctx, `SELECT password_hash FROM admins WHERE id=1`).Scan(&legacyHash); err != nil || legacyHash != "fallback-old" {
+		t.Fatalf("admins password after a refused upgrade = %q, %v", legacyHash, err)
 	}
-	if err := s.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, LegacyAdminUserID, "not-current", "unused", 0, false, "legacy-stale-upgrade-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); !errors.Is(err, ErrSessionCredentialsChanged) {
-		t.Fatalf("legacy stale upgrade guard = %v", err)
+	if _, err := s.GetSession(ctx, "legacy-fallback-upgrade-session"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("session from the admins row was created: %v", err)
 	}
 }
 
@@ -708,35 +683,27 @@ func TestConditionalPasswordUpgradeFailurePaths(t *testing.T) {
 		t.Fatal("password-upgrade trigger failure was swallowed")
 	}
 
-	legacyFailure := openTestStore(t)
-	if err := legacyFailure.SaveAdmin(ctx, Admin{Username: "legacy-admin", DisplayName: "Legacy Admin", PasswordHash: "legacy-old", CreatedAt: now, UpdatedAt: now}); err != nil {
+	// The original administrator's upgrade writes only its users row: a
+	// rejected admins write cannot fail it.
+	legacyUpgrade := openTestStore(t)
+	if err := legacyUpgrade.SaveAdmin(ctx, Admin{Username: "legacy-admin", DisplayName: "Legacy Admin", PasswordHash: "legacy-old", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := legacyFailure.GetUser(ctx, LegacyAdminUserID)
+	legacy, err := legacyUpgrade.GetUser(ctx, LegacyAdminUserID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := legacyFailure.DB.ExecContext(ctx, `CREATE TRIGGER fail_admin_sync BEFORE UPDATE OF password_hash ON admins WHEN NEW.password_hash='trigger-fail' BEGIN SELECT RAISE(ABORT, 'legacy sync unavailable'); END`); err != nil {
+	if _, err := legacyUpgrade.DB.ExecContext(ctx, `CREATE TRIGGER fail_admin_sync BEFORE UPDATE ON admins BEGIN SELECT RAISE(ABORT, 'legacy sync unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if err := legacyFailure.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, LegacyAdminUserID, "legacy-old", "trigger-fail", legacy.Revision, false, "legacy-sync-failure-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); err == nil {
-		t.Fatal("legacy compatibility update failure was swallowed")
+	if err := legacyUpgrade.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, LegacyAdminUserID, "legacy-old", "legacy-new", legacy.Revision, false, "legacy-upgrade-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); err != nil {
+		t.Fatalf("administrator upgrade = %v", err)
+	}
+	if upgraded, err := legacyUpgrade.GetUser(ctx, LegacyAdminUserID); err != nil || upgraded.PasswordHash != "legacy-new" {
+		t.Fatalf("upgraded administrator = %#v, %v", upgraded, err)
 	}
 
-	fallbackFailure := openTestStore(t)
-	if err := fallbackFailure.SaveAdmin(ctx, Admin{Username: "fallback-admin", DisplayName: "Fallback Admin", PasswordHash: "fallback-old", CreatedAt: now, UpdatedAt: now}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fallbackFailure.DB.ExecContext(ctx, `DELETE FROM users WHERE id=?`, LegacyAdminUserID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := fallbackFailure.DB.ExecContext(ctx, `CREATE TRIGGER fail_fallback_sync BEFORE UPDATE OF password_hash ON admins WHEN NEW.password_hash='trigger-fail' BEGIN SELECT RAISE(ABORT, 'fallback sync unavailable'); END`); err != nil {
-		t.Fatal(err)
-	}
-	if err := fallbackFailure.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, LegacyAdminUserID, "fallback-old", "trigger-fail", 0, false, "fallback-sync-failure-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); err == nil {
-		t.Fatal("legacy fallback update failure was swallowed")
-	}
-
+	// A failed read is reported instead of falling back to the admins row.
 	noUsers := openTestStore(t)
 	if err := noUsers.SaveAdmin(ctx, Admin{Username: "no-users-admin", DisplayName: "No Users Admin", PasswordHash: "no-users-old", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
@@ -744,7 +711,8 @@ func TestConditionalPasswordUpgradeFailurePaths(t *testing.T) {
 	if _, err := noUsers.DB.ExecContext(ctx, `DROP TABLE users`); err != nil {
 		t.Fatal(err)
 	}
-	if err := noUsers.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, LegacyAdminUserID, "no-users-old", "no-users-new", 0, false, "no-users-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); err != nil {
-		t.Fatalf("pre-users compatibility upgrade = %v", err)
+	insertLegacyAdminsRow(t, noUsers, "no-users-admin", "no-users-old")
+	if err := noUsers.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, LegacyAdminUserID, "no-users-old", "no-users-new", 0, false, "no-users-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); err == nil || errors.Is(err, ErrSessionCredentialsChanged) || !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+		t.Fatalf("upgrade without a users table = %v", err)
 	}
 }

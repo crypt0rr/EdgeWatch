@@ -108,7 +108,7 @@ func (s *Store) createManagedNotificationWithAuditsAndSelection(ctx context.Cont
 		return ManagedNotification{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO managed_notifications(id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at) VALUES(?,?,?,?,?,?,1,1,?,?)`, id, name, provider, ciphertext, nonce, boolInt(enabled), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO managed_notifications(id,tenant_id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,1,?,?)`, id, DefaultTenantID, name, provider, ciphertext, nonce, boolInt(enabled), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return ManagedNotification{}, err
 	}
 	if selection != nil {

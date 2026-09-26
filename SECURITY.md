@@ -128,7 +128,7 @@ database together, or delete and recreate the affected destinations after
 confirming that the old credentials are revoked. After restoring a key, run
 `notify test` or the console notification test: it fails while any enabled
 web-managed destination is still locked. A database upgraded to schema
-51 must not be opened by an older EdgeWatch binary; downgrade by restoring the
+52 must not be opened by an older EdgeWatch binary; downgrade by restoring the
 complete pre-upgrade `./data` backup before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
 refuse a schema newer than the binary supports before they write anything.
@@ -136,7 +136,12 @@ Schema 51 keeps every security audit record, attributes it to the default
 tenant, and adds a category derived from its action. Update alert routing and
 the public status publication move to the default tenant unchanged: alerts go
 to the same destinations, and the public page still shows only the explicitly
-published hosts.
+published hosts. Schema 52 rebuilds the users, jobs, scanner profiles, and
+notification destinations tables with the tenant that owns each row, and
+removes the legacy administrator row. Sign-in, password and TOTP
+confirmation, first setup, and the host recovery commands use only the users
+table, so a leftover legacy row can no longer authenticate or recreate an
+administrator. Back up the complete `./data` directory before the upgrade.
 
 Recovery codes are stored in the salted `v2` representation. Schema 38 removes
 legacy unsalted SHA-256 recovery-code digests and records only their count in

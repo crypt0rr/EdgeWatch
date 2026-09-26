@@ -118,7 +118,7 @@ func baselineSearchSnapshot(prefix, count int) model.Snapshot {
 
 func insertBaselineSearchJob(t *testing.T, s *Store, id, name string) {
 	t.Helper()
-	if _, err := s.DB.ExecContext(context.Background(), `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?,'{}',1,0,1,'now','now')`, id, name); err != nil {
+	if _, err := s.DB.ExecContext(context.Background(), `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?,?,'{}',1,0,1,'now','now')`, id, DefaultTenantID, name); err != nil {
 		t.Fatal(err)
 	}
 }

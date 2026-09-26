@@ -185,7 +185,7 @@ func (s *Store) ImportDeploymentNotifications(ctx context.Context, items []Deplo
 		if err != nil {
 			return DeploymentNotificationImportResult{}, err
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO managed_notifications(id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at) VALUES(?,?,?,?,?,1,1,1,?,?)`, item.ID, name, item.Provider, item.Ciphertext, item.Nonce, stamp, stamp); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO managed_notifications(id,tenant_id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at) VALUES(?,?,?,?,?,?,1,1,1,?,?)`, item.ID, DefaultTenantID, name, item.Provider, item.Ciphertext, item.Nonce, stamp, stamp); err != nil {
 			return DeploymentNotificationImportResult{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE deployment_notification_ids SET managed_notification_id=?,imported_at=? WHERE legacy_hash=?`, item.ID, stamp, item.LegacyHash); err != nil {

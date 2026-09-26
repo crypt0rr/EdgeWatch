@@ -37,7 +37,7 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, strings.NewReader(string(body)))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
-		server.updateJob(rec, req, admin, record.ID)
+		server.jobRoute(rec, req, admin, record.ID)
 		return rec
 	}
 
@@ -147,7 +147,7 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 	delete := httptest.NewRecorder()
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/?permanent=true", strings.NewReader(`{"confirm_name":"update-coverage"}`))
 	deleteRequest.Header.Set("Content-Type", "application/json")
-	server.permanentDelete(delete, deleteRequest, nonAdmin, record.ID)
+	server.jobRoute(delete, deleteRequest, nonAdmin, record.ID)
 	if delete.Code != http.StatusForbidden {
 		t.Fatalf("non-admin permanent delete = %d", delete.Code)
 	}
@@ -284,9 +284,9 @@ func TestJobResponsesRedactActiveScanCycleStoreFailures(t *testing.T) {
 		case path == "/api/v1/jobs" && method == http.MethodPost:
 			server.createJob(rec, req, admin)
 		case path == "/api/v1/jobs/"+record.ID && method == http.MethodGet:
-			server.getJob(rec, req, record.ID)
+			server.jobRoute(rec, req, admin, record.ID)
 		case path == "/api/v1/jobs/"+record.ID && method == http.MethodPut:
-			server.updateJob(rec, req, admin, record.ID)
+			server.jobRoute(rec, req, admin, record.ID)
 		default:
 			t.Fatalf("unexpected request %s %s", method, path)
 		}

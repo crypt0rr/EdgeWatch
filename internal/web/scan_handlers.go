@@ -129,7 +129,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		}
 		return
 	}
-	if !s.validateNotificationSelection(w, r, job) {
+	if !s.validateNotificationSelection(w, r, ts, job) {
 		return
 	}
 	// Routing is additive to the job API. Older clients that do not send the
@@ -166,7 +166,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 	var destinations []string
 	var err error
 	if scopeChanged && p.ConfirmRebaseline {
-		destinations, err = s.App.Notifier.QueueDestinationsForJob(r.Context(), job)
+		destinations, err = s.App.Notifier.Tenant(ts).QueueDestinationsForJob(r.Context(), job)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 			return
@@ -799,7 +799,7 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session 
 	var destinations []string
 	var err error
 	if s.App != nil && s.App.Notifier != nil {
-		destinations, err = s.App.Notifier.QueueDestinationsForJob(r.Context(), record.Job)
+		destinations, err = s.App.Notifier.Tenant(ts).QueueDestinationsForJob(r.Context(), record.Job)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
 			return
@@ -819,7 +819,7 @@ func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, sessio
 	var destinations []string
 	var err error
 	if s.App != nil && s.App.Notifier != nil {
-		destinations, err = s.App.Notifier.QueueDestinationsForJob(r.Context(), record.Job)
+		destinations, err = s.App.Notifier.Tenant(ts).QueueDestinationsForJob(r.Context(), record.Job)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
 			return
@@ -939,7 +939,7 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session s
 	if input.ExpectedBaselineModified != nil {
 		expected.Modified, expected.ModifiedSet = *input.ExpectedBaselineModified, true
 	}
-	destinations, err := s.App.Notifier.QueueDestinationsForJob(r.Context(), record.Job)
+	destinations, err := s.App.Notifier.Tenant(ts).QueueDestinationsForJob(r.Context(), record.Job)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 		return
@@ -1003,7 +1003,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 		writeError(w, 400, "invalid_scan", "scan does not belong to this job or current scope", nil)
 		return
 	}
-	destinations, err := s.App.Notifier.QueueDestinationsForJob(r.Context(), record.Job)
+	destinations, err := s.App.Notifier.Tenant(ts).QueueDestinationsForJob(r.Context(), record.Job)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
 		return

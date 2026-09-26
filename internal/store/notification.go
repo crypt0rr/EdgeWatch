@@ -17,7 +17,10 @@ import (
 // web-managed Shoutrrr destination. The store deliberately has no knowledge
 // of the encryption format; that boundary belongs to the notify package.
 type ManagedNotification struct {
-	ID         string
+	ID string
+	// TenantID is the tenant that owns the destination, or "" for a
+	// platform destination.
+	TenantID   string
 	Name       string
 	Provider   string
 	Ciphertext []byte
@@ -28,11 +31,23 @@ type ManagedNotification struct {
 	UpdatedAt  time.Time
 }
 
-func scanManagedNotification(scanner interface{ Scan(...any) error }) (ManagedNotification, error) {
+// managedNotificationColumns are the columns that scanManagedNotification
+// reads, in order.
+const managedNotificationColumns = `id,name,provider,ciphertext,nonce,enabled,revision,created_at,updated_at`
+
+// ownedDestinationSQL limits a statement on the outbox to the deliveries of a
+// destination that the tenant owns. It takes two arguments, the destination
+// ID and the tenant ID. Each write that uses it has already found the
+// destination in the tenant in the same transaction; the predicate keeps the
+// tenant check in the statement that changes the deliveries.
+const ownedDestinationSQL = ` AND EXISTS (SELECT 1 FROM managed_notifications AS owner WHERE owner.id=? AND owner.tenant_id=?)`
+
+func scanManagedNotification(scanner interface{ Scan(...any) error }, tail ...any) (ManagedNotification, error) {
 	var destination ManagedNotification
 	var enabled int
 	var created, updated string
-	if err := scanner.Scan(&destination.ID, &destination.Name, &destination.Provider, &destination.Ciphertext, &destination.Nonce, &enabled, &destination.Revision, &created, &updated); err != nil {
+	columns := append([]any{&destination.ID, &destination.Name, &destination.Provider, &destination.Ciphertext, &destination.Nonce, &enabled, &destination.Revision, &created, &updated}, tail...)
+	if err := scanner.Scan(columns...); err != nil {
 		return destination, err
 	}
 	destination.Enabled = enabled != 0
@@ -41,8 +56,21 @@ func scanManagedNotification(scanner interface{ Scan(...any) error }) (ManagedNo
 	return destination, nil
 }
 
+// ListManagedNotifications returns the destinations, ordered by name.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.ListManagedNotifications.
 func (s *Store) ListManagedNotifications(ctx context.Context) ([]ManagedNotification, error) {
-	rows, err := s.reader().QueryContext(ctx, `SELECT id,name,provider,ciphertext,nonce,enabled,revision,created_at,updated_at FROM managed_notifications ORDER BY name`)
+	return s.Tenant(DefaultTenantScope()).ListManagedNotifications(ctx)
+}
+
+// ListManagedNotifications returns the tenant's destinations, ordered by
+// name. Another tenant's destinations and the platform's are never listed.
+func (ts *TenantStore) ListManagedNotifications(ctx context.Context) ([]ManagedNotification, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	rows, err := ts.store.reader().QueryContext(ctx, `SELECT `+managedNotificationColumns+` FROM managed_notifications WHERE tenant_id=? ORDER BY name`, ts.scope.id)
 	if err != nil {
 		return nil, err
 	}
@@ -53,46 +81,150 @@ func (s *Store) ListManagedNotifications(ctx context.Context) ([]ManagedNotifica
 		if scanErr != nil {
 			return nil, scanErr
 		}
+		destination.TenantID = ts.scope.id
 		out = append(out, destination)
 	}
-	return out, rows.Err()
-}
-
-func (s *Store) GetManagedNotification(ctx context.Context, id string) (ManagedNotification, error) {
-	row := s.reader().QueryRowContext(ctx, `SELECT id,name,provider,ciphertext,nonce,enabled,revision,created_at,updated_at FROM managed_notifications WHERE id=?`, id)
-	destination, err := scanManagedNotification(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return destination, fmt.Errorf("%w: notification %s", ErrNotFound, id)
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
-	return destination, err
+	return out, nil
 }
 
+// ListManagedNotifications returns the destinations of every tenant and of
+// the platform, ordered by name, each with its owner in TenantID. The
+// notifier decrypts them all, because its delivery worker delivers the
+// alerts of every tenant, and it checks that the encryption key opens every
+// destination before it creates or imports with a key.
+func (ss *SystemStore) ListManagedNotifications(ctx context.Context) ([]ManagedNotification, error) {
+	rows, err := ss.store.reader().QueryContext(ctx, `SELECT `+managedNotificationColumns+`,COALESCE(tenant_id,'') FROM managed_notifications ORDER BY name, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ManagedNotification
+	for rows.Next() {
+		var tenantID string
+		destination, scanErr := scanManagedNotification(rows, &tenantID)
+		if scanErr != nil {
+			return nil, scanErr
+		}
+		destination.TenantID = tenantID
+		out = append(out, destination)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// GetManagedNotification returns one destination.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.GetManagedNotification.
+func (s *Store) GetManagedNotification(ctx context.Context, id string) (ManagedNotification, error) {
+	return s.Tenant(DefaultTenantScope()).GetManagedNotification(ctx, id)
+}
+
+// GetManagedNotification returns one of the tenant's destinations. A
+// destination of another tenant or of the platform is ErrNotFound, exactly as
+// an unknown ID.
+func (ts *TenantStore) GetManagedNotification(ctx context.Context, id string) (ManagedNotification, error) {
+	if err := ts.ready(); err != nil {
+		return ManagedNotification{}, err
+	}
+	destination, err := scanManagedNotification(ts.store.reader().QueryRowContext(ctx, `SELECT `+managedNotificationColumns+` FROM managed_notifications WHERE id=? AND tenant_id=?`, id, ts.scope.id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ManagedNotification{}, fmt.Errorf("%w: notification %s", ErrNotFound, id)
+	}
+	if err != nil {
+		return ManagedNotification{}, err
+	}
+	destination.TenantID = ts.scope.id
+	return destination, nil
+}
+
+// OwnsDeploymentNotifications reports whether the tenant owns the
+// notification URLs that config.yaml lists and the daemon has not imported.
+// Those URLs were the installation's destinations before tenants existed,
+// and the import moves them into the default tenant, so they are delivered
+// as the default tenant's destinations: only that tenant sees, selects,
+// tests and counts them.
+func (ts *TenantStore) OwnsDeploymentNotifications(_ context.Context) (bool, error) {
+	if err := ts.ready(); err != nil {
+		return false, err
+	}
+	return ts.scope.id == DefaultTenantID, nil
+}
+
+// CreateManagedNotification creates a destination.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.CreateManagedNotification.
 func (s *Store) CreateManagedNotification(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool) (ManagedNotification, error) {
-	return s.createManagedNotificationWithAuditsAndSelection(ctx, id, name, provider, ciphertext, nonce, enabled, nil, nil)
+	return s.Tenant(DefaultTenantScope()).CreateManagedNotification(ctx, id, name, provider, ciphertext, nonce, enabled)
+}
+
+// CreateManagedNotification creates a destination in the tenant. Names are
+// unique within a tenant, so another tenant may use the same name.
+func (ts *TenantStore) CreateManagedNotification(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool) (ManagedNotification, error) {
+	return ts.createManagedNotificationWithAuditsAndSelection(ctx, id, name, provider, ciphertext, nonce, enabled, nil, nil)
 }
 
 // CreateManagedNotificationWithAudit commits a new encrypted destination and
-// its audit record together. The URL ciphertext is never included in the
-// audit detail; callers provide only a redacted action description.
+// its audit record together.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.CreateManagedNotificationWithAudit.
 func (s *Store) CreateManagedNotificationWithAudit(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool, audit AuditEntry) (ManagedNotification, error) {
-	return s.createManagedNotificationWithAuditsAndSelection(ctx, id, name, provider, ciphertext, nonce, enabled, nil, []AuditEntry{audit})
+	return s.Tenant(DefaultTenantScope()).CreateManagedNotificationWithAudit(ctx, id, name, provider, ciphertext, nonce, enabled, audit)
+}
+
+// CreateManagedNotificationWithAudit commits a new encrypted destination of
+// the tenant and its audit record together. The URL ciphertext is never
+// included in the audit detail; callers provide only a redacted action
+// description.
+func (ts *TenantStore) CreateManagedNotificationWithAudit(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool, audit AuditEntry) (ManagedNotification, error) {
+	return ts.createManagedNotificationWithAuditsAndSelection(ctx, id, name, provider, ciphertext, nonce, enabled, nil, []AuditEntry{audit})
 }
 
 // CreateManagedNotificationWithLegacySelection creates a destination and
-// freezes jobs that still use the pre-routing global fallback in the same
-// transaction. The selection must describe destinations that existed before
-// the new destination; this keeps the new endpoint opt-in for existing jobs.
+// freezes the jobs that still use the pre-routing global fallback.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.CreateManagedNotificationWithLegacySelection.
 func (s *Store) CreateManagedNotificationWithLegacySelection(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool, selection []string) (ManagedNotification, error) {
-	return s.createManagedNotificationWithAuditsAndSelection(ctx, id, name, provider, ciphertext, nonce, enabled, cloneNotificationSelection(selection), nil)
+	return s.Tenant(DefaultTenantScope()).CreateManagedNotificationWithLegacySelection(ctx, id, name, provider, ciphertext, nonce, enabled, selection)
+}
+
+// CreateManagedNotificationWithLegacySelection creates a destination in the
+// tenant and freezes the tenant's jobs that still use the pre-routing global
+// fallback in the same transaction. The selection must describe the
+// tenant's destinations that existed before the new destination; this keeps
+// the new endpoint opt-in for existing jobs. Other tenants' jobs are never
+// changed.
+func (ts *TenantStore) CreateManagedNotificationWithLegacySelection(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool, selection []string) (ManagedNotification, error) {
+	return ts.createManagedNotificationWithAuditsAndSelection(ctx, id, name, provider, ciphertext, nonce, enabled, cloneNotificationSelection(selection), nil)
 }
 
 // CreateManagedNotificationWithLegacySelectionAndAudit is the audited variant
 // of CreateManagedNotificationWithLegacySelection.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.CreateManagedNotificationWithLegacySelectionAndAudit.
 func (s *Store) CreateManagedNotificationWithLegacySelectionAndAudit(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool, selection []string, audit AuditEntry) (ManagedNotification, error) {
-	return s.createManagedNotificationWithAuditsAndSelection(ctx, id, name, provider, ciphertext, nonce, enabled, cloneNotificationSelection(selection), []AuditEntry{audit})
+	return s.Tenant(DefaultTenantScope()).CreateManagedNotificationWithLegacySelectionAndAudit(ctx, id, name, provider, ciphertext, nonce, enabled, selection, audit)
 }
 
-func (s *Store) createManagedNotificationWithAuditsAndSelection(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool, selection []string, audits []AuditEntry) (ManagedNotification, error) {
+// CreateManagedNotificationWithLegacySelectionAndAudit is the audited variant
+// of TenantStore.CreateManagedNotificationWithLegacySelection.
+func (ts *TenantStore) CreateManagedNotificationWithLegacySelectionAndAudit(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool, selection []string, audit AuditEntry) (ManagedNotification, error) {
+	return ts.createManagedNotificationWithAuditsAndSelection(ctx, id, name, provider, ciphertext, nonce, enabled, cloneNotificationSelection(selection), []AuditEntry{audit})
+}
+
+func (ts *TenantStore) createManagedNotificationWithAuditsAndSelection(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool, selection []string, audits []AuditEntry) (ManagedNotification, error) {
+	if err := ts.ready(); err != nil {
+		return ManagedNotification{}, err
+	}
 	if name == "" {
 		return ManagedNotification{}, errors.New("notification name is required")
 	}
@@ -103,16 +235,16 @@ func (s *Store) createManagedNotificationWithAuditsAndSelection(ctx context.Cont
 		id = uuid.NewString()
 	}
 	now := time.Now().UTC()
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return ManagedNotification{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO managed_notifications(id,tenant_id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,1,?,?)`, id, DefaultTenantID, name, provider, ciphertext, nonce, boolInt(enabled), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO managed_notifications(id,tenant_id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,1,1,?,?)`, id, ts.scope.id, name, provider, ciphertext, nonce, boolInt(enabled), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return ManagedNotification{}, err
 	}
 	if selection != nil {
-		if _, err := materializeLegacyNotificationSelectionsTx(ctx, tx, selection); err != nil {
+		if _, err := materializeLegacyNotificationSelectionsTx(ctx, tx, ts.scope.id, selection); err != nil {
 			return ManagedNotification{}, err
 		}
 	}
@@ -122,24 +254,38 @@ func (s *Store) createManagedNotificationWithAuditsAndSelection(ctx context.Cont
 	if err := tx.Commit(); err != nil {
 		return ManagedNotification{}, err
 	}
-	return ManagedNotification{ID: id, Name: name, Provider: provider, Ciphertext: append([]byte(nil), ciphertext...), Nonce: append([]byte(nil), nonce...), Enabled: enabled, Revision: 1, CreatedAt: now, UpdatedAt: now}, nil
+	return ManagedNotification{ID: id, TenantID: ts.scope.id, Name: name, Provider: provider, Ciphertext: append([]byte(nil), ciphertext...), Nonce: append([]byte(nil), nonce...), Enabled: enabled, Revision: 1, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 // MaterializeLegacyNotificationSelections freezes every job whose routing is
-// still nil to the supplied global destination set. A nil slice means that
-// no destinations existed, so it is deliberately converted to a non-nil
-// empty selection. The operation appends a job revision for each changed job
-// without changing its effective scope: when normalization canonicalizes a
-// legacy port spelling, the stored baseline and cycle scope hashes move from
-// the legacy alias to the canonical hash in the same transaction.
+// still nil to the supplied destination set.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.MaterializeLegacyNotificationSelections.
 func (s *Store) MaterializeLegacyNotificationSelections(ctx context.Context, selection []string) (int, error) {
+	return s.Tenant(DefaultTenantScope()).MaterializeLegacyNotificationSelections(ctx, selection)
+}
+
+// MaterializeLegacyNotificationSelections freezes every job of the tenant
+// whose routing is still nil to the supplied destination set, which names
+// the tenant's destinations. A nil slice means that no destinations existed,
+// so it is deliberately converted to a non-nil empty selection. The
+// operation appends a job revision for each changed job without changing its
+// effective scope: when normalization canonicalizes a legacy port spelling,
+// the stored baseline and cycle scope hashes move from the legacy alias to
+// the canonical hash in the same transaction. Other tenants' jobs are never
+// changed.
+func (ts *TenantStore) MaterializeLegacyNotificationSelections(ctx context.Context, selection []string) (int, error) {
+	if err := ts.ready(); err != nil {
+		return 0, err
+	}
 	selection = cloneNotificationSelection(selection)
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	count, err := materializeLegacyNotificationSelectionsTx(ctx, tx, selection)
+	count, err := materializeLegacyNotificationSelectionsTx(ctx, tx, ts.scope.id, selection)
 	if err != nil {
 		return 0, err
 	}
@@ -155,8 +301,10 @@ type legacyNotificationJob struct {
 	revision int64
 }
 
-func materializeLegacyNotificationSelectionsTx(ctx context.Context, tx *sql.Tx, selection []string) (int, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id,definition_json,revision FROM jobs ORDER BY id`)
+// materializeLegacyNotificationSelectionsTx freezes the nil selection of the
+// jobs of one tenant.
+func materializeLegacyNotificationSelectionsTx(ctx context.Context, tx *sql.Tx, tenantID string, selection []string) (int, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id,definition_json,revision FROM jobs WHERE tenant_id=? ORDER BY id`, tenantID)
 	if err != nil {
 		return 0, err
 	}
@@ -202,7 +350,7 @@ func materializeLegacyNotificationSelectionsTx(ctx context.Context, tx *sql.Tx, 
 			return 0, err
 		}
 		next := item.revision + 1
-		result, err := tx.ExecContext(ctx, `UPDATE jobs SET definition_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, raw, next, now.Format(time.RFC3339Nano), item.id, item.revision)
+		result, err := tx.ExecContext(ctx, `UPDATE jobs SET definition_json=?,revision=?,updated_at=? WHERE id=? AND revision=? AND tenant_id=?`, raw, next, now.Format(time.RFC3339Nano), item.id, item.revision, tenantID)
 		if err != nil {
 			return 0, err
 		}
@@ -242,28 +390,51 @@ func pendingManagedDeliveryDiscardAudit(audits []AuditEntry, id string, count in
 	return entry
 }
 
-// UpdateManagedNotification atomically updates metadata/ciphertext. Metadata
-// only changes keep pending delivery intents by moving the current revision
-// selector to the new revision. Credential changes deliberately discard
-// pending intents so a queued event can never be sent with stale credentials;
-// the discard is recorded as a redacted security-audit event.
+// UpdateManagedNotification atomically updates metadata and ciphertext.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.UpdateManagedNotification.
 func (s *Store) UpdateManagedNotification(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool) (ManagedNotification, error) {
-	return s.updateManagedNotificationWithAudits(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, nil)
+	return s.Tenant(DefaultTenantScope()).UpdateManagedNotification(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled)
+}
+
+// UpdateManagedNotification atomically updates the metadata and ciphertext
+// of one of the tenant's destinations. Metadata only changes keep pending
+// delivery intents by moving the current revision selector to the new
+// revision. Credential changes deliberately discard pending intents so a
+// queued event can never be sent with stale credentials; the discard is
+// recorded as a redacted security-audit event. A destination of another
+// tenant or of the platform is ErrNotFound, and nothing changes.
+func (ts *TenantStore) UpdateManagedNotification(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool) (ManagedNotification, error) {
+	return ts.updateManagedNotificationWithAudits(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, nil)
 }
 
 // UpdateManagedNotificationWithAudit atomically updates an encrypted
 // destination, invalidates old pending deliveries, and records the action.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.UpdateManagedNotificationWithAudit.
 func (s *Store) UpdateManagedNotificationWithAudit(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool, audit AuditEntry) (ManagedNotification, error) {
-	return s.updateManagedNotificationWithAudits(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, []AuditEntry{audit})
+	return s.Tenant(DefaultTenantScope()).UpdateManagedNotificationWithAudit(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, audit)
 }
 
-func (s *Store) updateManagedNotificationWithAudits(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool, audits []AuditEntry) (ManagedNotification, error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
+// UpdateManagedNotificationWithAudit atomically updates one of the tenant's
+// encrypted destinations, invalidates old pending deliveries, and records
+// the action.
+func (ts *TenantStore) UpdateManagedNotificationWithAudit(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool, audit AuditEntry) (ManagedNotification, error) {
+	return ts.updateManagedNotificationWithAudits(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, []AuditEntry{audit})
+}
+
+func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool, audits []AuditEntry) (ManagedNotification, error) {
+	if err := ts.ready(); err != nil {
+		return ManagedNotification{}, err
+	}
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return ManagedNotification{}, err
 	}
 	defer tx.Rollback()
-	current, err := scanManagedNotification(tx.QueryRowContext(ctx, `SELECT id,name,provider,ciphertext,nonce,enabled,revision,created_at,updated_at FROM managed_notifications WHERE id=?`, id))
+	current, err := scanManagedNotification(tx.QueryRowContext(ctx, `SELECT `+managedNotificationColumns+` FROM managed_notifications WHERE id=? AND tenant_id=?`, id, ts.scope.id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return ManagedNotification{}, fmt.Errorf("%w: notification %s", ErrNotFound, id)
 	}
@@ -287,7 +458,7 @@ func (s *Store) updateManagedNotificationWithAudits(ctx context.Context, id stri
 	// credential_revision advances only with the credentials, so an alert that
 	// captured an earlier metadata revision can still be queued (see
 	// resolveManagedIntentTx).
-	result, err := tx.ExecContext(ctx, `UPDATE managed_notifications SET name=?,provider=?,ciphertext=?,nonce=?,enabled=?,revision=?,credential_revision=CASE WHEN ? THEN ? ELSE credential_revision END,updated_at=? WHERE id=? AND revision=?`, name, provider, ciphertext, nonce, boolInt(enabled), next, boolInt(credentialsChanged), next, now.Format(time.RFC3339Nano), id, expectedRevision)
+	result, err := tx.ExecContext(ctx, `UPDATE managed_notifications SET name=?,provider=?,ciphertext=?,nonce=?,enabled=?,revision=?,credential_revision=CASE WHEN ? THEN ? ELSE credential_revision END,updated_at=? WHERE id=? AND revision=? AND tenant_id=?`, name, provider, ciphertext, nonce, boolInt(enabled), next, boolInt(credentialsChanged), next, now.Format(time.RFC3339Nano), id, expectedRevision, ts.scope.id)
 	if err != nil {
 		return ManagedNotification{}, err
 	}
@@ -296,10 +467,10 @@ func (s *Store) updateManagedNotificationWithAudits(ctx context.Context, id stri
 	}
 	if credentialsChanged {
 		var pending int64
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination LIKE ? AND sent_at IS NULL AND terminal_at=''`, "managed:"+id+":%").Scan(&pending); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination LIKE ? AND sent_at IS NULL AND terminal_at=''`+ownedDestinationSQL, "managed:"+id+":%", id, ts.scope.id).Scan(&pending); err != nil {
 			return ManagedNotification{}, err
 		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE destination LIKE ? AND sent_at IS NULL`, "managed:"+id+":%"); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE destination LIKE ? AND sent_at IS NULL`+ownedDestinationSQL, "managed:"+id+":%", id, ts.scope.id); err != nil {
 			return ManagedNotification{}, err
 		}
 		if pending > 0 {
@@ -309,7 +480,7 @@ func (s *Store) updateManagedNotificationWithAudits(ctx context.Context, id stri
 		// A rename, provider-neutral enable/disable, or other metadata-only
 		// edit does not invalidate an alert. Keep the row id and claim state so
 		// an in-flight delivery can finish safely while its selector advances.
-		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET destination=? WHERE destination=? AND sent_at IS NULL AND terminal_at=''`, newKey, oldKey); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE outbox SET destination=? WHERE destination=? AND sent_at IS NULL AND terminal_at=''`+ownedDestinationSQL, newKey, oldKey, id, ts.scope.id); err != nil {
 			return ManagedNotification{}, err
 		}
 	}
@@ -319,31 +490,55 @@ func (s *Store) updateManagedNotificationWithAudits(ctx context.Context, id stri
 	if err := tx.Commit(); err != nil {
 		return ManagedNotification{}, err
 	}
-	return ManagedNotification{ID: id, Name: name, Provider: provider, Ciphertext: append([]byte(nil), ciphertext...), Nonce: append([]byte(nil), nonce...), Enabled: enabled, Revision: next, CreatedAt: current.CreatedAt, UpdatedAt: now}, nil
+	return ManagedNotification{ID: id, TenantID: ts.scope.id, Name: name, Provider: provider, Ciphertext: append([]byte(nil), ciphertext...), Nonce: append([]byte(nil), nonce...), Enabled: enabled, Revision: next, CreatedAt: current.CreatedAt, UpdatedAt: now}, nil
 }
 
+// DeleteManagedNotification removes a destination.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.DeleteManagedNotification.
 func (s *Store) DeleteManagedNotification(ctx context.Context, id string, expectedRevision int64) error {
-	_, err := s.deleteManagedNotificationWithAudits(ctx, id, expectedRevision, nil)
+	return s.Tenant(DefaultTenantScope()).DeleteManagedNotification(ctx, id, expectedRevision)
+}
+
+// DeleteManagedNotification removes one of the tenant's destinations, as
+// DeleteManagedNotificationWithAudit does, without an audit record.
+func (ts *TenantStore) DeleteManagedNotification(ctx context.Context, id string, expectedRevision int64) error {
+	_, err := ts.deleteManagedNotificationWithAudits(ctx, id, expectedRevision, nil)
 	return err
 }
 
-// DeleteManagedNotificationWithAudit removes a destination, pending delivery
-// intents, and its audit row in one transaction. The same transaction removes
-// the destination from every job's routing and from the application update
-// routing, so no saved selection keeps pointing at it. It returns the IDs of
-// the jobs whose routing changed.
+// DeleteManagedNotificationWithAudit removes a destination with its audit
+// row.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.DeleteManagedNotificationWithAudit.
 func (s *Store) DeleteManagedNotificationWithAudit(ctx context.Context, id string, expectedRevision int64, audit AuditEntry) ([]string, error) {
-	return s.deleteManagedNotificationWithAudits(ctx, id, expectedRevision, []AuditEntry{audit})
+	return s.Tenant(DefaultTenantScope()).DeleteManagedNotificationWithAudit(ctx, id, expectedRevision, audit)
 }
 
-func (s *Store) deleteManagedNotificationWithAudits(ctx context.Context, id string, expectedRevision int64, audits []AuditEntry) ([]string, error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
+// DeleteManagedNotificationWithAudit removes one of the tenant's
+// destinations, its pending delivery intents, and its audit row in one
+// transaction. The same transaction removes the destination from the routing
+// of every job of the tenant and from the tenant's application update
+// routing, so no saved selection keeps pointing at it. It returns the IDs of
+// the jobs whose routing changed. A destination of another tenant or of the
+// platform is ErrNotFound, and nothing changes.
+func (ts *TenantStore) DeleteManagedNotificationWithAudit(ctx context.Context, id string, expectedRevision int64, audit AuditEntry) ([]string, error) {
+	return ts.deleteManagedNotificationWithAudits(ctx, id, expectedRevision, []AuditEntry{audit})
+}
+
+func (ts *TenantStore) deleteManagedNotificationWithAudits(ctx context.Context, id string, expectedRevision int64, audits []AuditEntry) ([]string, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 	var revision int64
-	err = tx.QueryRowContext(ctx, `SELECT revision FROM managed_notifications WHERE id=?`, id).Scan(&revision)
+	err = tx.QueryRowContext(ctx, `SELECT revision FROM managed_notifications WHERE id=? AND tenant_id=?`, id, ts.scope.id).Scan(&revision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: notification %s", ErrNotFound, id)
 	}
@@ -353,10 +548,10 @@ func (s *Store) deleteManagedNotificationWithAudits(ctx context.Context, id stri
 	if revision != expectedRevision {
 		return nil, ErrConflict
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE destination LIKE ? AND sent_at IS NULL`, "managed:"+id+":%"); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE destination LIKE ? AND sent_at IS NULL`+ownedDestinationSQL, "managed:"+id+":%", id, ts.scope.id); err != nil {
 		return nil, err
 	}
-	result, err := tx.ExecContext(ctx, `DELETE FROM managed_notifications WHERE id=? AND revision=?`, id, expectedRevision)
+	result, err := tx.ExecContext(ctx, `DELETE FROM managed_notifications WHERE id=? AND revision=? AND tenant_id=?`, id, expectedRevision, ts.scope.id)
 	if err != nil {
 		return nil, err
 	}
@@ -364,11 +559,11 @@ func (s *Store) deleteManagedNotificationWithAudits(ctx context.Context, id stri
 		return nil, ErrConflict
 	}
 	now := time.Now().UTC()
-	changedJobs, err := removeNotificationDestinationFromJobsTx(ctx, tx, id, now)
+	changedJobs, err := removeNotificationDestinationFromJobsTx(ctx, tx, ts.scope.id, id, now)
 	if err != nil {
 		return nil, err
 	}
-	routingChanged, err := removeApplicationUpdateDestinationTx(ctx, tx, id)
+	routingChanged, err := removeApplicationUpdateDestinationTx(ctx, tx, ts.scope.id, id)
 	if err != nil {
 		return nil, err
 	}
@@ -406,11 +601,12 @@ type routedNotificationJob struct {
 	revision int64
 }
 
-// jobsSelectingNotificationDestinationTx reads every job, archived or not,
-// whose saved routing selects any of the given destination selectors. The
-// rows are closed before the caller writes to the same transaction.
-func jobsSelectingNotificationDestinationTx(ctx context.Context, tx *sql.Tx, ids ...string) ([]routedNotificationJob, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id,definition_json,revision FROM jobs ORDER BY id`)
+// jobsSelectingNotificationDestinationTx reads every job of the tenant,
+// archived or not, whose saved routing selects any of the given destination
+// selectors. The rows are closed before the caller writes to the same
+// transaction.
+func jobsSelectingNotificationDestinationTx(ctx context.Context, tx *sql.Tx, tenantID string, ids ...string) ([]routedNotificationJob, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id,definition_json,revision FROM jobs WHERE tenant_id=? ORDER BY id`, tenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -436,11 +632,11 @@ func jobsSelectingNotificationDestinationTx(ctx context.Context, tx *sql.Tx, ids
 }
 
 // removeNotificationDestinationFromJobsTx drops a deleted destination from
-// every job that selected it, including archived jobs, and appends a job
-// revision for each change. Routing is not part of the security scope, so the
-// baseline and any in-flight scan are unaffected.
-func removeNotificationDestinationFromJobsTx(ctx context.Context, tx *sql.Tx, id string, now time.Time) ([]string, error) {
-	affected, err := jobsSelectingNotificationDestinationTx(ctx, tx, id)
+// every job of the tenant that selected it, including archived jobs, and
+// appends a job revision for each change. Routing is not part of the
+// security scope, so the baseline and any in-flight scan are unaffected.
+func removeNotificationDestinationFromJobsTx(ctx context.Context, tx *sql.Tx, tenantID, id string, now time.Time) ([]string, error) {
+	affected, err := jobsSelectingNotificationDestinationTx(ctx, tx, tenantID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -456,7 +652,7 @@ func removeNotificationDestinationFromJobsTx(ctx context.Context, tx *sql.Tx, id
 			return nil, err
 		}
 		next := item.revision + 1
-		result, err := tx.ExecContext(ctx, `UPDATE jobs SET definition_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, raw, next, now.Format(time.RFC3339Nano), item.id, item.revision)
+		result, err := tx.ExecContext(ctx, `UPDATE jobs SET definition_json=?,revision=?,updated_at=? WHERE id=? AND revision=? AND tenant_id=?`, raw, next, now.Format(time.RFC3339Nano), item.id, item.revision, tenantID)
 		if err != nil {
 			return nil, err
 		}
@@ -477,20 +673,21 @@ func removeNotificationDestinationFromJobsTx(ctx context.Context, tx *sql.Tx, id
 }
 
 // replaceNotificationDestinationsInJobsTx applies replacements, a map from an
-// old destination selector to its replacement, to every job that selects any
-// of the old selectors, including archived jobs. Each changed job gets one new
-// revision, however many of its selectors change. It mirrors
-// removeNotificationDestinationFromJobsTx: a nil selection is never selected,
-// so it keeps following every enabled destination, and routing is not part of
-// the security scope, so baselines and in-flight scans are unaffected. The
-// selection stays sorted and free of duplicates, as a normalized job
-// definition is. It returns, per changed job, the old selectors it replaced.
-func replaceNotificationDestinationsInJobsTx(ctx context.Context, tx *sql.Tx, replacements map[string]string, now time.Time) ([]replacedJobSelection, error) {
+// old destination selector to its replacement, to every job of the tenant
+// that selects any of the old selectors, including archived jobs. Each
+// changed job gets one new revision, however many of its selectors change.
+// It mirrors removeNotificationDestinationFromJobsTx: a nil selection is
+// never selected, so it keeps following every enabled destination, and
+// routing is not part of the security scope, so baselines and in-flight
+// scans are unaffected. The selection stays sorted and free of duplicates,
+// as a normalized job definition is. It returns, per changed job, the old
+// selectors it replaced.
+func replaceNotificationDestinationsInJobsTx(ctx context.Context, tx *sql.Tx, tenantID string, replacements map[string]string, now time.Time) ([]replacedJobSelection, error) {
 	selectors := make([]string, 0, len(replacements))
 	for selector := range replacements {
 		selectors = append(selectors, selector)
 	}
-	affected, err := jobsSelectingNotificationDestinationTx(ctx, tx, selectors...)
+	affected, err := jobsSelectingNotificationDestinationTx(ctx, tx, tenantID, selectors...)
 	if err != nil {
 		return nil, err
 	}
@@ -504,7 +701,7 @@ func replaceNotificationDestinationsInJobsTx(ctx context.Context, tx *sql.Tx, re
 			return nil, err
 		}
 		next := item.revision + 1
-		result, err := tx.ExecContext(ctx, `UPDATE jobs SET definition_json=?,revision=?,updated_at=? WHERE id=? AND revision=?`, raw, next, now.Format(time.RFC3339Nano), item.id, item.revision)
+		result, err := tx.ExecContext(ctx, `UPDATE jobs SET definition_json=?,revision=?,updated_at=? WHERE id=? AND revision=? AND tenant_id=?`, raw, next, now.Format(time.RFC3339Nano), item.id, item.revision, tenantID)
 		if err != nil {
 			return nil, err
 		}

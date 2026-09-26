@@ -98,6 +98,7 @@ func buildTenantFixture(t *testing.T) (string, tenantFixtureIDs) {
 	}
 	insertSecondTenant(t, s)
 	addTenantProfiles(t, s)
+	addTenantNotifications(t, s)
 	insertSecondTenantJob(t, s, jobA.ID, tenantFixtureJobB)
 	insertSecondTenantJob(t, s, archivedA.ID, tenantFixtureArchivedB)
 	ids := tenantFixtureIDs{jobA: jobA.ID, jobB: tenantFixtureJobB, archivedA: archivedA.ID, archivedB: tenantFixtureArchivedB, scanA: "scan-tenant-a", scanB: "scan-tenant-b"}

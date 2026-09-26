@@ -167,22 +167,36 @@ func jobJSONFromStateSummary(record store.JobRecord, summary store.RuntimeStateS
 }
 
 func (s *Server) jobJSONWithCycle(ctx context.Context, ts *store.TenantStore, record store.JobRecord, state model.JobState) map[string]any {
-	value := s.addNotificationRouting(jobJSON(record, state))
+	value := s.addNotificationRouting(ctx, s.tenantNotifier(ts), jobJSON(record, state))
 	return s.addJobCycleAndProfile(ctx, ts, record, value)
+}
+
+// tenantNotifier returns the notifier of the tenant of ts, or nil when the
+// server runs without one.
+func (s *Server) tenantNotifier(ts *store.TenantStore) *notify.TenantNotifier {
+	if s.App == nil || s.App.Notifier == nil {
+		return nil
+	}
+	return s.App.Notifier.Tenant(ts)
 }
 
 // addNotificationRouting reports a job's routing as the console can use it.
 // Legacy deployment digests are shown as the current opaque selector. Saved
-// selectors that no longer identify a destination, for example after a
-// deployment URL changed, are also listed in missing_notification_destinations
-// so the console can show them and let an operator remove them. The job
-// already exposes these selectors to the same readers; no URL is added.
-func (s *Server) addNotificationRouting(value map[string]any) map[string]any {
+// selectors that no longer identify a destination of the job's tenant, for
+// example after a deployment URL changed, are also listed in
+// missing_notification_destinations so the console can show them and let an
+// operator remove them. The job already exposes these selectors to the same
+// readers; no URL is added. When the destinations cannot be read, the saved
+// selection is shown as it is.
+func (s *Server) addNotificationRouting(ctx context.Context, notifier *notify.TenantNotifier, value map[string]any) map[string]any {
 	payload, ok := value["job"].(jobPayload)
-	if !ok || payload.NotificationDestinations == nil || s.App == nil || s.App.Notifier == nil {
+	if !ok || payload.NotificationDestinations == nil || notifier == nil {
 		return value
 	}
-	selection, missing := s.App.Notifier.CanonicalSelection(*payload.NotificationDestinations)
+	selection, missing, err := notifier.CanonicalSelection(ctx, *payload.NotificationDestinations)
+	if err != nil {
+		return value
+	}
 	payload.NotificationDestinations = &selection
 	value["job"] = payload
 	if len(missing) > 0 {
@@ -319,8 +333,9 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request, ts *store.Tena
 		profileRevisions = nil
 	}
 	out := make([]map[string]any, 0, len(jobs))
+	notifier := s.tenantNotifier(ts)
 	for _, j := range jobs {
-		value := s.addNotificationRouting(jobJSONFromStateSummary(j, summaries[j.ID]))
+		value := s.addNotificationRouting(r.Context(), notifier, jobJSONFromStateSummary(j, summaries[j.ID]))
 		if payload, ok := value["job"].(jobPayload); ok && payload.TCP != nil && payload.TCP.ProfileID != "" && profileErr == nil {
 			if revision := profileRevisions[payload.TCP.ProfileID]; revision > payload.TCP.ProfileRevision {
 				payload.TCP.ProfileUpdateAvailable = true
@@ -368,7 +383,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 		}
 		return
 	}
-	if !s.validateNotificationSelection(w, r, job) {
+	if !s.validateNotificationSelection(w, r, ts, job) {
 		return
 	}
 	enabled := true
@@ -438,11 +453,14 @@ func cloneStringMap(values map[string]string) map[string]string {
 	return cloned
 }
 
-func (s *Server) validateNotificationSelection(w http.ResponseWriter, r *http.Request, job config.Job) bool {
+// validateNotificationSelection accepts a job's routing only when it selects
+// destinations of the job's tenant. Another tenant's destination is refused
+// exactly as an unknown one.
+func (s *Server) validateNotificationSelection(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job config.Job) bool {
 	if job.NotificationDestinations == nil {
 		return true
 	}
-	if err := s.App.Notifier.ValidateDestinationSelection(r.Context(), job.NotificationDestinations); err != nil {
+	if err := s.App.Notifier.Tenant(ts).ValidateDestinationSelection(r.Context(), job.NotificationDestinations); err != nil {
 		if errors.Is(err, notify.ErrInvalidDestinationSelection) {
 			writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]string{"notification_destinations": err.Error()})
 		} else {

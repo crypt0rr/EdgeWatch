@@ -828,21 +828,11 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 		return nil
 	}
 	now := sqliteTimestamp(time.Now())
-	resolved := make(map[string]string, len(destinations))
+	// A managed destination is resolved once for each owner of the events,
+	// because an alert may only go to its own tenant's destinations.
+	type intent struct{ destination, owner string }
+	resolved := make(map[intent]managedIntent, len(destinations))
 	var discarded managedIntentDiscards
-	for _, destination := range destinations {
-		key := destination
-		if strings.HasPrefix(destination, "managed:") {
-			var reason string
-			var err error
-			key, reason, err = resolveManagedIntentTx(ctx, tx, destination)
-			if err != nil {
-				return err
-			}
-			discarded.add(destination, reason, len(events))
-		}
-		resolved[destination] = key
-	}
 	for _, event := range events {
 		bounded, payload, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
 		if err != nil {
@@ -852,7 +842,19 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 		// A delivery belongs to the tenant of its event.
 		tenantSQL, tenantArgs := eventTenantSQL(event)
 		for _, destination := range destinations {
-			key := resolved[destination]
+			key := destination
+			if strings.HasPrefix(destination, "managed:") {
+				selector := intent{destination: destination, owner: eventOwner(event)}
+				resolution, known := resolved[selector]
+				if !known {
+					if resolution.key, resolution.discardReason, err = resolveManagedIntentTx(ctx, tx, destination, event); err != nil {
+						return err
+					}
+					resolved[selector] = resolution
+				}
+				discarded.add(destination, resolution.discardReason, 1)
+				key = resolution.key
+			}
 			if key == "" {
 				continue
 			}
@@ -888,8 +890,14 @@ const (
 //   - a destination paused in the meantime is skipped without an audit, as
 //     alerts raised while it is paused are.
 //
+// The alert of a job, or of a config.yaml job, goes only to a destination of
+// the job's tenant: a destination of another tenant or of the platform is
+// handled exactly as a deleted one, so the alert never reaches it. An update
+// alert belongs to the platform, which routes it through the update routing
+// of a tenant or of the platform, so its destination may belong to either.
+//
 // An empty key means that no row is created.
-func resolveManagedIntentTx(ctx context.Context, tx *sql.Tx, destination string) (key, discardReason string, err error) {
+func resolveManagedIntentTx(ctx context.Context, tx *sql.Tx, destination string, event model.Event) (key, discardReason string, err error) {
 	parts := strings.Split(destination, ":")
 	if len(parts) != 3 || parts[0] != "managed" || parts[1] == "" {
 		return "", "", nil
@@ -900,7 +908,13 @@ func resolveManagedIntentTx(ctx context.Context, tx *sql.Tx, destination string)
 	}
 	var enabled int
 	var revision, credentialRevision int64
-	err = tx.QueryRowContext(ctx, `SELECT enabled,revision,credential_revision FROM managed_notifications WHERE id=?`, parts[1]).Scan(&enabled, &revision, &credentialRevision)
+	var row *sql.Row
+	if platformEvent(event) {
+		row = tx.QueryRowContext(ctx, `SELECT enabled,revision,credential_revision FROM managed_notifications WHERE id=?`, parts[1])
+	} else {
+		row = tx.QueryRowContext(ctx, `SELECT enabled,revision,credential_revision FROM managed_notifications WHERE id=? AND tenant_id=`+jobTenantSQL, parts[1], event.JobID)
+	}
+	err = row.Scan(&enabled, &revision, &credentialRevision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", managedIntentDeleted, nil
 	}

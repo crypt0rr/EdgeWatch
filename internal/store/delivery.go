@@ -90,7 +90,7 @@ func (s *Store) QueueEvent(ctx context.Context, destination string, event model.
 	}
 	defer func() { _ = tx.Rollback() }()
 	if strings.HasPrefix(destination, "managed:") {
-		key, reason, resolveErr := resolveManagedIntentTx(ctx, tx, destination)
+		key, reason, resolveErr := resolveManagedIntentTx(ctx, tx, destination, event)
 		if resolveErr != nil {
 			return resolveErr
 		}

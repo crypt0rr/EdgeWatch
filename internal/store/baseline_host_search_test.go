@@ -157,7 +157,7 @@ func TestBaselineHostSearchQueriesUseRowidLookups(t *testing.T) {
 		{name: "short", query: "80", want: "="},
 		{name: "filtered short", query: "8", protocol: "tcp", hasOpen: &open, want: "="},
 	} {
-		queries := baselineHostsPageQueries("plan-job", tc.query, tc.protocol, tc.hasOpen, 50, 0)
+		queries := baselineHostsPageQueries(DefaultTenantID, "plan-job", tc.query, tc.protocol, tc.hasOpen, 50, 0)
 		for _, statement := range []struct {
 			kind string
 			sql  string

@@ -15,9 +15,21 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
+// RuntimeState returns the runtime state of a job.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.RuntimeState.
 func (s *Store) RuntimeState(ctx context.Context, jobID string) (model.JobState, error) {
-	var raw []byte
-	err := s.reader().QueryRowContext(ctx, `SELECT state_json FROM job_runtime WHERE job_id=?`, jobID).Scan(&raw)
+	return s.Tenant(DefaultTenantScope()).RuntimeState(ctx, jobID)
+}
+
+// RuntimeState returns the runtime state of one of the tenant's jobs. A job
+// without runtime state, an unknown job, and a job of another tenant all
+// read as an empty state.
+func (ts *TenantStore) RuntimeState(ctx context.Context, jobID string) (model.JobState, error) {
+	if err := ts.ready(); err != nil {
+		return model.JobState{}, err
+	}
+	raw, err := ts.runtimeStateJSON(ctx, jobID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return emptyState(), nil
 	}
@@ -30,6 +42,15 @@ func (s *Store) RuntimeState(ctx context.Context, jobID string) (model.JobState,
 	}
 	ensureMaps(&state)
 	return state, nil
+}
+
+// runtimeStateJSON reads the stored runtime JSON of one of the tenant's
+// jobs, or sql.ErrNoRows when the tenant has no such job or the job has no
+// runtime row.
+func (ts *TenantStore) runtimeStateJSON(ctx context.Context, jobID string) ([]byte, error) {
+	var raw []byte
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT r.state_json FROM job_runtime r JOIN jobs j ON j.id=r.job_id AND j.tenant_id=? WHERE r.job_id=?`, ts.scope.id, jobID).Scan(&raw)
+	return raw, err
 }
 
 // RuntimeBaselineInfo is the compact baseline marker used by host read
@@ -60,16 +81,29 @@ func (e BaselineExpectation) matches(state model.JobState) bool {
 	return !e.ModifiedSet || e.Modified == state.BaselineModified
 }
 
-// RuntimeBaselineInfo reads compact baseline metadata. A missing metadata row
-// is a legacy marker: fall back to the runtime JSON once so databases written
-// before the metadata migration remain readable. Current rows always carry a
-// metadata_version and never take this path.
+// RuntimeBaselineInfo reads the compact baseline metadata of a job.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.RuntimeBaselineInfo.
 func (s *Store) RuntimeBaselineInfo(ctx context.Context, jobID string) (RuntimeBaselineInfo, error) {
+	return s.Tenant(DefaultTenantScope()).RuntimeBaselineInfo(ctx, jobID)
+}
+
+// RuntimeBaselineInfo reads the compact baseline metadata of one of the
+// tenant's jobs. A missing metadata row is a legacy marker: fall back to the
+// runtime JSON once so databases written before the metadata migration
+// remain readable. Current rows always carry a metadata_version and never
+// take this path. An unknown job and a job of another tenant have no
+// metadata and read as zero.
+func (ts *TenantStore) RuntimeBaselineInfo(ctx context.Context, jobID string) (RuntimeBaselineInfo, error) {
+	if err := ts.ready(); err != nil {
+		return RuntimeBaselineInfo{}, err
+	}
 	var info RuntimeBaselineInfo
 	var metadataVersion int
 	var scanID, configHash sql.NullString
 	var modified, projectionVersion, baselineEpoch sql.NullInt64
-	err := s.reader().QueryRowContext(ctx, `SELECT metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,baseline_epoch FROM job_runtime_meta WHERE job_id=?`, jobID).Scan(&metadataVersion, &scanID, &configHash, &modified, &projectionVersion, &baselineEpoch)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT m.metadata_version,m.baseline_scan_id,m.baseline_config_hash,m.baseline_modified,m.projection_version,m.baseline_epoch FROM job_runtime_meta m JOIN jobs j ON j.id=m.job_id AND j.tenant_id=? WHERE m.job_id=?`, ts.scope.id, jobID).Scan(&metadataVersion, &scanID, &configHash, &modified, &projectionVersion, &baselineEpoch)
 	if err == nil && metadataVersion > 0 {
 		info.BaselineScanID = scanID.String
 		info.BaselineConfigHash = configHash.String
@@ -84,8 +118,7 @@ func (s *Store) RuntimeBaselineInfo(ctx context.Context, jobID string) (RuntimeB
 	// Legacy rows (or a fixture that writes job_runtime directly) have no
 	// compact marker. Preserve the historical missing/null marker semantics
 	// while limiting the expensive decode to this compatibility path.
-	var raw []byte
-	stateErr := s.reader().QueryRowContext(ctx, `SELECT state_json FROM job_runtime WHERE job_id=?`, jobID).Scan(&raw)
+	raw, stateErr := ts.runtimeStateJSON(ctx, jobID)
 	if errors.Is(stateErr, sql.ErrNoRows) {
 		return info, nil
 	}
@@ -119,11 +152,24 @@ func (s *Store) RuntimeBaselineInfo(ctx context.Context, jobID string) (RuntimeB
 	return info, nil
 }
 
-// RuntimeBaselineEpoch returns the monotonic epoch used to fence resumable
-// cycles from a reset or accepted baseline mutation. Legacy rows start at zero.
+// RuntimeBaselineEpoch returns the baseline epoch of a job.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.RuntimeBaselineEpoch.
 func (s *Store) RuntimeBaselineEpoch(ctx context.Context, jobID string) (int64, error) {
+	return s.Tenant(DefaultTenantScope()).RuntimeBaselineEpoch(ctx, jobID)
+}
+
+// RuntimeBaselineEpoch returns the monotonic epoch used to fence resumable
+// cycles of one of the tenant's jobs from a reset or accepted baseline
+// mutation. Legacy rows start at zero, and so do an unknown job and a job of
+// another tenant.
+func (ts *TenantStore) RuntimeBaselineEpoch(ctx context.Context, jobID string) (int64, error) {
+	if err := ts.ready(); err != nil {
+		return 0, err
+	}
 	var epoch sql.NullInt64
-	err := s.reader().QueryRowContext(ctx, `SELECT baseline_epoch FROM job_runtime_meta WHERE job_id=?`, jobID).Scan(&epoch)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT m.baseline_epoch FROM job_runtime_meta m JOIN jobs j ON j.id=m.job_id AND j.tenant_id=? WHERE m.job_id=?`, ts.scope.id, jobID).Scan(&epoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
 	}
@@ -150,14 +196,29 @@ type RuntimeStateSummary struct {
 	BaselineHostCount           int
 }
 
+// RuntimeStateSummary returns the bounded state projection of a job.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.RuntimeStateSummary.
 func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeStateSummary, error) {
+	return s.Tenant(DefaultTenantScope()).RuntimeStateSummary(ctx, jobID)
+}
+
+// RuntimeStateSummary returns the bounded state projection of one of the
+// tenant's jobs. An unknown job and a job of another tenant have no state
+// and read as a zero summary.
+func (ts *TenantStore) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeStateSummary, error) {
+	if err := ts.ready(); err != nil {
+		return RuntimeStateSummary{}, err
+	}
 	var summary RuntimeStateSummary
 	var metadataVersion int
 	var scanID, configHash sql.NullString
 	var projectionVersion sql.NullInt64
 	var modified, candidateCount, candidateAttempts, incompleteCandidateAttempts, pendingCount sql.NullInt64
 	var metaUpdated, runtimeUpdated string
-	err := s.reader().QueryRowContext(ctx, `SELECT m.metadata_version,m.projection_version,m.baseline_scan_id,m.baseline_config_hash,m.baseline_modified,m.candidate_count,m.candidate_attempts,m.incomplete_candidate_attempts,m.pending_count,m.updated_at,COALESCE(r.updated_at,'') FROM job_runtime_meta m LEFT JOIN job_runtime r ON r.job_id=m.job_id WHERE m.job_id=?`, jobID).
+	reader := ts.store.reader()
+	err := reader.QueryRowContext(ctx, `SELECT m.metadata_version,m.projection_version,m.baseline_scan_id,m.baseline_config_hash,m.baseline_modified,m.candidate_count,m.candidate_attempts,m.incomplete_candidate_attempts,m.pending_count,m.updated_at,COALESCE(r.updated_at,'') FROM job_runtime_meta m JOIN jobs j ON j.id=m.job_id AND j.tenant_id=? LEFT JOIN job_runtime r ON r.job_id=m.job_id WHERE m.job_id=?`, ts.scope.id, jobID).
 		Scan(&metadataVersion, &projectionVersion, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incompleteCandidateAttempts, &pendingCount, &metaUpdated, &runtimeUpdated)
 	if err == nil && metadataVersion > 0 && (runtimeUpdated == "" || metaUpdated >= runtimeUpdated) {
 		summary.HasBaseline = projectionVersion.Int64 > 0 || (scanID.Valid && scanID.String != "")
@@ -167,10 +228,10 @@ func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeS
 		summary.CandidateAttempts = int(candidateAttempts.Int64)
 		summary.IncompleteCandidateAttempts = int(incompleteCandidateAttempts.Int64)
 		summary.PendingCount = int(pendingCount.Int64)
-		if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents WHERE job_id=?`, jobID).Scan(&summary.IncidentCount); err != nil {
+		if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM runtime_incidents i JOIN jobs j ON j.id=i.job_id AND j.tenant_id=? WHERE i.job_id=?`, ts.scope.id, jobID).Scan(&summary.IncidentCount); err != nil {
 			return summary, err
 		}
-		return s.completeRuntimeSummary(ctx, jobID, summary)
+		return ts.completeRuntimeSummary(ctx, jobID, summary)
 	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return summary, err
@@ -180,21 +241,21 @@ func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeS
 	// to old rows; current writes always use the scalar projection above.
 	var baselineType sql.NullString
 	var incidentCount, hostArrayCount, unitAddressCount sql.NullInt64
-	err = s.reader().QueryRowContext(ctx, `SELECT
- json_type(state_json,'$.baseline'),
- json_extract(state_json,'$.baseline_scan_id'),
- json_extract(state_json,'$.baseline_config_hash'),
- COALESCE(json_extract(state_json,'$.baseline_modified'),0),
- COALESCE(json_extract(state_json,'$.candidate_count'),0),
- COALESCE(json_extract(state_json,'$.candidate_attempts'),0),
- COALESCE(json_extract(state_json,'$.incomplete_candidate_attempts'),0),
- COALESCE((SELECT COUNT(*) FROM json_each(state_json,'$.incidents')),0),
- COALESCE((SELECT COUNT(*) FROM json_each(state_json,'$.pending')),0),
- COALESCE(json_array_length(state_json,'$.baseline.hosts'),-1),
+	err = reader.QueryRowContext(ctx, `SELECT
+ json_type(r.state_json,'$.baseline'),
+ json_extract(r.state_json,'$.baseline_scan_id'),
+ json_extract(r.state_json,'$.baseline_config_hash'),
+ COALESCE(json_extract(r.state_json,'$.baseline_modified'),0),
+ COALESCE(json_extract(r.state_json,'$.candidate_count'),0),
+ COALESCE(json_extract(r.state_json,'$.candidate_attempts'),0),
+ COALESCE(json_extract(r.state_json,'$.incomplete_candidate_attempts'),0),
+ COALESCE((SELECT COUNT(*) FROM json_each(r.state_json,'$.incidents')),0),
+ COALESCE((SELECT COUNT(*) FROM json_each(r.state_json,'$.pending')),0),
+ COALESCE(json_array_length(r.state_json,'$.baseline.hosts'),-1),
  COALESCE((SELECT COUNT(DISTINCT addresses.value)
-   FROM json_each(state_json,'$.baseline.units') AS units
+   FROM json_each(r.state_json,'$.baseline.units') AS units
    JOIN json_each(units.value,'$.addresses') AS addresses),0)
-	 FROM job_runtime WHERE job_id=?`, jobID).Scan(&baselineType, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incompleteCandidateAttempts, &incidentCount, &pendingCount, &hostArrayCount, &unitAddressCount)
+	 FROM job_runtime r JOIN jobs j ON j.id=r.job_id AND j.tenant_id=? WHERE r.job_id=?`, ts.scope.id, jobID).Scan(&baselineType, &scanID, &configHash, &modified, &candidateCount, &candidateAttempts, &incompleteCandidateAttempts, &incidentCount, &pendingCount, &hostArrayCount, &unitAddressCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return summary, nil
 	}
@@ -212,7 +273,7 @@ func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeS
 	// A detailed baseline may be represented by an indexed source scan. The
 	// count stays in SQLite and never requires decoding its JSON snapshot.
 	if summary.BaselineScanID != "" {
-		if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, summary.BaselineScanID).Scan(&summary.BaselineHostCount); err != nil {
+		if summary.BaselineHostCount, err = ts.baselineScanHostCount(ctx, jobID, summary.BaselineScanID); err != nil {
 			return summary, err
 		}
 	}
@@ -220,7 +281,7 @@ func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeS
 	// available. The JSON array fallback is only for old databases that predate
 	// migration 29 or contain a legacy snapshot without scan_hosts rows.
 	if summary.BaselineModified {
-		if countErr := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM baseline_hosts WHERE job_id=?`, jobID).Scan(&summary.BaselineHostCount); countErr != nil && !errors.Is(countErr, sql.ErrNoRows) {
+		if countErr := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM baseline_hosts b JOIN jobs j ON j.id=b.job_id AND j.tenant_id=? WHERE b.job_id=?`, ts.scope.id, jobID).Scan(&summary.BaselineHostCount); countErr != nil && !errors.Is(countErr, sql.ErrNoRows) {
 			return summary, countErr
 		}
 	}
@@ -236,11 +297,24 @@ func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeS
 	return summary, nil
 }
 
-// RuntimeStateSummaries returns the job-list baseline projections in one
-// bounded query. The legacy JSON fallback stays inside SQLite and counts only
-// each job's runtime arrays; it never loads scan snapshots or unmarshals the
-// runtime JSON into Go.
+// RuntimeStateSummaries returns the job-list baseline projections.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.RuntimeStateSummaries.
 func (s *Store) RuntimeStateSummaries(ctx context.Context, includeArchived bool) (map[string]RuntimeStateSummary, error) {
+	return s.Tenant(DefaultTenantScope()).RuntimeStateSummaries(ctx, includeArchived)
+}
+
+// RuntimeStateSummaries returns the job-list baseline projections of the
+// tenant's jobs in one bounded query. The legacy JSON fallback stays inside
+// SQLite and counts only each job's runtime arrays; it never loads scan
+// snapshots or unmarshals the runtime JSON into Go. The tenant predicate is
+// on the jobs; every other count is correlated with one of those jobs or its
+// runtime rows, including the host count of the job's baseline scan.
+func (ts *TenantStore) RuntimeStateSummaries(ctx context.Context, includeArchived bool) (map[string]RuntimeStateSummary, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
 	const query = `SELECT
  j.id,
  COALESCE(m.metadata_version,0), COALESCE(m.projection_version,0),
@@ -272,8 +346,8 @@ func (s *Store) RuntimeStateSummaries(ctx context.Context, includeArchived bool)
  FROM jobs j
  LEFT JOIN job_runtime_meta m ON m.job_id=j.id
  LEFT JOIN job_runtime r ON r.job_id=j.id
- WHERE ?=1 OR j.archived=0`
-	rows, err := s.reader().QueryContext(ctx, query, boolInt(includeArchived))
+ WHERE j.tenant_id=? AND (?=1 OR j.archived=0)`
+	rows, err := ts.store.reader().QueryContext(ctx, query, ts.scope.id, boolInt(includeArchived))
 	if err != nil {
 		return nil, err
 	}
@@ -358,18 +432,20 @@ func legacyRuntimeHostCount(hostArrayCount, unitAddressCount sql.NullInt64) int 
 	return 0
 }
 
-func (s *Store) completeRuntimeSummary(ctx context.Context, jobID string, summary RuntimeStateSummary) (RuntimeStateSummary, error) {
+// completeRuntimeSummary adds the baseline host count to the summary of one
+// of the tenant's jobs.
+func (ts *TenantStore) completeRuntimeSummary(ctx context.Context, jobID string, summary RuntimeStateSummary) (RuntimeStateSummary, error) {
 	var projectedCount int
-	var projected bool
-	if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*),EXISTS(SELECT 1 FROM baseline_hosts WHERE job_id=?) FROM baseline_hosts WHERE job_id=?`, jobID, jobID).Scan(&projectedCount, &projected); err != nil {
+	if err := ts.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM baseline_hosts b JOIN jobs j ON j.id=b.job_id AND j.tenant_id=? WHERE b.job_id=?`, ts.scope.id, jobID).Scan(&projectedCount); err != nil {
 		return summary, err
 	}
-	if projected {
+	if projectedCount > 0 {
 		summary.BaselineHostCount = projectedCount
 		return summary, nil
 	}
 	if summary.BaselineScanID != "" {
-		if err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts WHERE scan_id=?`, summary.BaselineScanID).Scan(&summary.BaselineHostCount); err != nil {
+		var err error
+		if summary.BaselineHostCount, err = ts.baselineScanHostCount(ctx, jobID, summary.BaselineScanID); err != nil {
 			return summary, err
 		}
 		if summary.BaselineHostCount > 0 {
@@ -380,7 +456,7 @@ func (s *Store) completeRuntimeSummary(ctx context.Context, jobID string, summar
 	// before the resumable scan-host backfill has populated scan_hosts. Keep the
 	// fast path bounded to this job while recovering the host count from the
 	// JSON baseline instead of reporting zero until backfill catches up.
-	if count, present, err := s.legacyRuntimeBaselineHostCount(ctx, jobID); err != nil {
+	if count, present, err := ts.legacyRuntimeBaselineHostCount(ctx, jobID); err != nil {
 		return summary, err
 	} else if present {
 		summary.BaselineHostCount = count
@@ -388,21 +464,34 @@ func (s *Store) completeRuntimeSummary(ctx context.Context, jobID string, summar
 	return summary, nil
 }
 
-// legacyRuntimeBaselineHostCount returns the host count from the current job's
-// JSON runtime state when indexed host projections have not been populated.
-// It intentionally reads no scan snapshots or rows for other jobs. A valid
-// baseline object with no hosts is present=true and therefore remains an
-// authoritative zero rather than falling through to a stale unit count.
-func (s *Store) legacyRuntimeBaselineHostCount(ctx context.Context, jobID string) (count int, present bool, err error) {
+// baselineScanHostCount counts the indexed hosts of the baseline scan of one
+// of the tenant's jobs; the hosts of a job of another tenant are not
+// counted. The scan ID comes from the job's own runtime rows, which only the
+// daemon and the tenant's baseline approval write, from a scan of the job.
+// The statement is guarded by the job's tenant, as RuntimeStateSummaries is,
+// rather than by scans.tenant_id, which is stored after the scan's snapshot.
+func (ts *TenantStore) baselineScanHostCount(ctx context.Context, jobID, scanID string) (int, error) {
+	var count int
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM scan_hosts h JOIN jobs j ON j.id=? AND j.tenant_id=? WHERE h.scan_id=?`, jobID, ts.scope.id, scanID).Scan(&count)
+	return count, err
+}
+
+// legacyRuntimeBaselineHostCount returns the host count from the JSON runtime
+// state of one of the tenant's jobs when indexed host projections have not
+// been populated. It intentionally reads no scan snapshots or rows for other
+// jobs. A valid baseline object with no hosts is present=true and therefore
+// remains an authoritative zero rather than falling through to a stale unit
+// count.
+func (ts *TenantStore) legacyRuntimeBaselineHostCount(ctx context.Context, jobID string) (count int, present bool, err error) {
 	var baselineType sql.NullString
 	var hostArrayCount, unitAddressCount sql.NullInt64
-	err = s.reader().QueryRowContext(ctx, `SELECT
-CASE WHEN json_valid(state_json) THEN json_type(state_json,'$.baseline') ELSE '' END,
-CASE WHEN json_valid(state_json) AND json_type(state_json,'$.baseline')='object' THEN json_array_length(state_json,'$.baseline.hosts') END,
-CASE WHEN json_valid(state_json) AND json_type(state_json,'$.baseline')='object' THEN COALESCE((SELECT COUNT(DISTINCT addresses.value)
-  FROM json_each(state_json,'$.baseline.units') AS units
+	err = ts.store.reader().QueryRowContext(ctx, `SELECT
+CASE WHEN json_valid(r.state_json) THEN json_type(r.state_json,'$.baseline') ELSE '' END,
+CASE WHEN json_valid(r.state_json) AND json_type(r.state_json,'$.baseline')='object' THEN json_array_length(r.state_json,'$.baseline.hosts') END,
+CASE WHEN json_valid(r.state_json) AND json_type(r.state_json,'$.baseline')='object' THEN COALESCE((SELECT COUNT(DISTINCT addresses.value)
+  FROM json_each(r.state_json,'$.baseline.units') AS units
   JOIN json_each(units.value,'$.addresses') AS addresses),0) ELSE 0 END
-FROM job_runtime WHERE job_id=?`, jobID).Scan(&baselineType, &hostArrayCount, &unitAddressCount)
+FROM job_runtime r JOIN jobs j ON j.id=r.job_id AND j.tenant_id=? WHERE r.job_id=?`, ts.scope.id, jobID).Scan(&baselineType, &hostArrayCount, &unitAddressCount)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -421,76 +510,82 @@ FROM job_runtime WHERE job_id=?`, jobID).Scan(&baselineType, &hostArrayCount, &u
 	return 0, true, nil
 }
 
-// RuntimeBaselineMeta retains the small compatibility API used by callers
-// that need only baseline identifiers. Current rows are served from the
-// compact metadata projection; legacy rows use the bounded fallback.
+// RuntimeBaselineMeta returns the baseline identifiers of a job.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.RuntimeBaselineMeta.
 func (s *Store) RuntimeBaselineMeta(ctx context.Context, jobID string) (scanID, configHash string, err error) {
-	info, err := s.RuntimeBaselineInfo(ctx, jobID)
+	return s.Tenant(DefaultTenantScope()).RuntimeBaselineMeta(ctx, jobID)
+}
+
+// RuntimeBaselineMeta retains the small compatibility API used by callers
+// that need only baseline identifiers of one of the tenant's jobs. Current
+// rows are served from the compact metadata projection; legacy rows use the
+// bounded fallback.
+func (ts *TenantStore) RuntimeBaselineMeta(ctx context.Context, jobID string) (scanID, configHash string, err error) {
+	info, err := ts.RuntimeBaselineInfo(ctx, jobID)
 	if err != nil {
 		return "", "", err
 	}
 	return info.BaselineScanID, info.BaselineConfigHash, nil
 }
 
-// RuntimeBaselineModified reports whether the current comparison baseline has
-// been changed independently of its immutable source scan. Legacy rows without
-// the compact marker are treated conservatively as modified when the JSON
-// marker is missing or null so host pages cannot render stale indexed evidence.
+// RuntimeBaselineModified reports whether the baseline of a job was changed
+// independently of its source scan.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.RuntimeBaselineModified.
 func (s *Store) RuntimeBaselineModified(ctx context.Context, jobID string) (bool, error) {
-	info, err := s.RuntimeBaselineInfo(ctx, jobID)
+	return s.Tenant(DefaultTenantScope()).RuntimeBaselineModified(ctx, jobID)
+}
+
+// RuntimeBaselineModified reports whether the current comparison baseline of
+// one of the tenant's jobs has been changed independently of its immutable
+// source scan. Legacy rows without the compact marker are treated
+// conservatively as modified when the JSON marker is missing or null so host
+// pages cannot render stale indexed evidence.
+func (ts *TenantStore) RuntimeBaselineModified(ctx context.Context, jobID string) (bool, error) {
+	info, err := ts.RuntimeBaselineInfo(ctx, jobID)
 	if err != nil {
 		return false, err
 	}
 	return info.BaselineModified, nil
 }
 
+// UpdateRuntime applies a runtime transition to a job of any tenant.
 func (s *Store) UpdateRuntime(ctx context.Context, jobID string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	return s.updateRuntime(ctx, jobID, "", nil, fn)
+	return s.System().UpdateRuntime(ctx, jobID, fn)
 }
 
+// UpdateRuntime applies a runtime transition and persists its events in one
+// transaction. It is the daemon's writer and reaches a job of any tenant.
+func (ss *SystemStore) UpdateRuntime(ctx context.Context, jobID string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	return ss.updateRuntime(ctx, jobID, "", nil, fn)
+}
+
+// UpdateRuntimeWithOutbox applies a runtime transition to a job of any
+// tenant and queues its events.
 func (s *Store) UpdateRuntimeWithOutbox(ctx context.Context, jobID string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	return s.updateRuntime(ctx, jobID, "", destinations, fn)
+	return s.System().UpdateRuntimeWithOutbox(ctx, jobID, destinations, fn)
 }
 
-func (s *Store) updateRuntime(ctx context.Context, jobID, securityHash string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	return s.updateRuntimeWithOutboxAndAudits(ctx, jobID, securityHash, destinations, nil, fn)
+// UpdateRuntimeWithOutbox applies a runtime transition and queues its events
+// for the destinations in one transaction. It reaches a job of any tenant.
+func (ss *SystemStore) UpdateRuntimeWithOutbox(ctx context.Context, jobID string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	return ss.updateRuntime(ctx, jobID, "", destinations, fn)
 }
 
-func (s *Store) updateRuntimeWithOutboxAndAudits(ctx context.Context, jobID, securityHash string, destinations []string, audits []AuditEntry, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	return s.updateRuntimeWithOutboxAndAuditsGuarded(ctx, jobID, securityHash, destinations, audits, false, fn)
-}
-
-// updateRuntimeWithOutboxAndAuditsGuarded is the common transactional runtime
-// mutation path. Some operator actions replace the complete comparison state
-// (rather than applying one incident) and therefore need the same active-scan
-// exclusion as incident actions. Scan finalization deliberately uses the
-// unguarded path so it can commit its own result while its lease is held.
-func (s *Store) updateRuntimeWithOutboxAndAuditsGuarded(ctx context.Context, jobID, securityHash string, destinations []string, audits []AuditEntry, rejectActive bool, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	return s.updateRuntimeWithOutboxAndAuditsGuardedPost(ctx, jobID, securityHash, destinations, audits, rejectActive, nil, fn)
-}
-
-// updateRuntimeWithOutboxAndAuditsGuardedPost is the same transactional path
-// with an optional post-transition hook. The hook runs before commit while the
-// final state is still protected by the writer transaction, which lets
-// baseline projections stay in lockstep with reset/accept operations.
-func (s *Store) updateRuntimeWithOutboxAndAuditsGuardedPost(ctx context.Context, jobID, securityHash string, destinations []string, audits []AuditEntry, rejectActive bool, post func(*sql.Tx, *model.JobState) error, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
+// updateRuntime is the daemon's transactional runtime mutation path. A
+// non-empty securityHash must match the job's current scope, checked in the
+// same transaction as the write. Scan finalization uses this path, without
+// the active-scan exclusion of the operator actions, so it can commit its
+// own result while its lease is held.
+func (ss *SystemStore) updateRuntime(ctx context.Context, jobID, securityHash string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if rejectActive {
-		if _, err := getJobTx(ctx, tx, jobID); err != nil {
-			return nil, err
-		}
-		active, err := jobActiveTx(ctx, tx, jobID, time.Now().UTC())
-		if err != nil {
-			return nil, err
-		}
-		if active {
-			return nil, ErrJobScanActive
-		}
-	}
 	if securityHash != "" {
 		var raw []byte
 		if err := tx.QueryRowContext(ctx, `SELECT definition_json FROM jobs WHERE id=?`, jobID).Scan(&raw); err != nil {
@@ -507,29 +602,20 @@ func (s *Store) updateRuntimeWithOutboxAndAuditsGuardedPost(ctx context.Context,
 			return nil, ErrJobRevisionChanged
 		}
 	}
-	var resultingState *model.JobState
-	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, destinations, func(state *model.JobState) ([]model.Event, error) {
-		events, err := fn(state)
-		if err == nil {
-			resultingState = state
-		}
-		return events, err
-	})
+	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, destinations, fn)
 	if err != nil {
-		return nil, err
-	}
-	if post != nil && resultingState != nil {
-		if err := post(tx, resultingState); err != nil {
-			return nil, err
-		}
-	}
-	if err = insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 		return nil, err
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
 	return events, nil
+}
+
+// UpdateRuntimeForScan applies a scan's runtime transition to a job of any
+// tenant.
+func (s *Store) UpdateRuntimeForScan(ctx context.Context, jobID, securityHash string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	return s.System().UpdateRuntimeForScan(ctx, jobID, securityHash, fn)
 }
 
 // UpdateRuntimeForScan applies a runtime transition only when the scan was
@@ -539,16 +625,22 @@ func (s *Store) updateRuntimeWithOutboxAndAuditsGuardedPost(ctx context.Context,
 // must never allow an in-flight result from the previous scope to seed or
 // mutate the new baseline. The security-hash check and state write share one
 // transaction so an edit cannot slip between validation and persistence.
-func (s *Store) UpdateRuntimeForScan(ctx context.Context, jobID, securityHash string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	return s.updateRuntime(ctx, jobID, securityHash, nil, fn)
+func (ss *SystemStore) UpdateRuntimeForScan(ctx context.Context, jobID, securityHash string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	return ss.updateRuntime(ctx, jobID, securityHash, nil, fn)
+}
+
+// UpdateRuntimeForScanWithOutbox applies a scan's runtime transition to a
+// job of any tenant and queues its events.
+func (s *Store) UpdateRuntimeForScanWithOutbox(ctx context.Context, jobID, securityHash string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	return s.System().UpdateRuntimeForScanWithOutbox(ctx, jobID, securityHash, destinations, fn)
 }
 
 // UpdateRuntimeForScanWithOutbox persists the state transition, event rows,
 // and destination-specific outbox rows in one transaction. Destinations are
 // captured before the transaction by the notifier and contain only opaque
 // destination identifiers, never URLs.
-func (s *Store) UpdateRuntimeForScanWithOutbox(ctx context.Context, jobID, securityHash string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	return s.updateRuntime(ctx, jobID, securityHash, destinations, fn)
+func (ss *SystemStore) UpdateRuntimeForScanWithOutbox(ctx context.Context, jobID, securityHash string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	return ss.updateRuntime(ctx, jobID, securityHash, destinations, fn)
 }
 
 // migrateLegacyScopeHashTx updates only the scope marker written by the old
@@ -584,13 +676,20 @@ func migrateLegacyScopeHashTx(ctx context.Context, tx *sql.Tx, jobID, legacyHash
 	return err
 }
 
+// FinalizeManagedScan persists a managed scan of a job of any tenant and its
+// runtime transition.
+func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID, securityHash string, destinations []string, fn func(*model.JobState, *model.Scan) ([]model.Event, error)) ([]model.Event, error) {
+	return s.System().FinalizeManagedScan(ctx, scan, jobID, securityHash, destinations, fn)
+}
+
 // FinalizeManagedScan persists a managed scan and its runtime transition on the
 // same SQLite transaction. The runtime state is read while the transaction's
 // database connection is held, so baseline reset/approval cannot slip between
 // comparison capture and the state transition. If the job's security scope
 // changed while the scanner was running, the scan is retained as immutable
-// history but the runtime state is left untouched.
-func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID, securityHash string, destinations []string, fn func(*model.JobState, *model.Scan) ([]model.Event, error)) ([]model.Event, error) {
+// history but the runtime state is left untouched. It is the daemon's writer
+// and reaches a job of any tenant; the scan takes the job's tenant.
+func (ss *SystemStore) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID, securityHash string, destinations []string, fn func(*model.JobState, *model.Scan) ([]model.Event, error)) ([]model.Event, error) {
 	if scan == nil {
 		return nil, errors.New("scan is required")
 	}
@@ -600,7 +699,7 @@ func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID
 	if fn == nil {
 		return nil, errors.New("scan finalizer is required")
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1078,37 +1177,103 @@ func persistRuntimeTxWithOutbox(ctx context.Context, tx *sql.Tx, jobID string, s
 	return events, nil
 }
 
+// ResetRuntime clears the comparison state of a job.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ResetRuntime.
 func (s *Store) ResetRuntime(ctx context.Context, jobID, name string) ([]model.Event, error) {
-	return s.ResetRuntimeWithOutbox(ctx, jobID, name, nil)
+	return s.Tenant(DefaultTenantScope()).ResetRuntime(ctx, jobID, name)
 }
 
-// ResetRuntimeWithOutbox persists the baseline reset event and its notification
-// intent in the same transaction.
+// ResetRuntime clears the comparison state of one of the tenant's jobs
+// without queueing notifications.
+func (ts *TenantStore) ResetRuntime(ctx context.Context, jobID, name string) ([]model.Event, error) {
+	return ts.ResetRuntimeWithOutbox(ctx, jobID, name, nil)
+}
+
+// ResetRuntimeWithOutbox clears the comparison state of a job and queues the
+// reset event.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.ResetRuntimeWithOutbox.
 func (s *Store) ResetRuntimeWithOutbox(ctx context.Context, jobID, name string, destinations []string) ([]model.Event, error) {
-	return s.resetRuntimeWithAudits(ctx, jobID, name, destinations, nil, BaselineExpectation{})
+	return s.Tenant(DefaultTenantScope()).ResetRuntimeWithOutbox(ctx, jobID, name, destinations)
 }
 
-// ResetRuntimeWithOutboxAndAudit clears comparison state, persists any reset
-// notification intent, and records the administrator action atomically.
+// ResetRuntimeWithOutbox persists the baseline reset event of one of the
+// tenant's jobs and its notification intent in the same transaction.
+func (ts *TenantStore) ResetRuntimeWithOutbox(ctx context.Context, jobID, name string, destinations []string) ([]model.Event, error) {
+	return ts.resetRuntimeWithAudits(ctx, jobID, name, destinations, nil, BaselineExpectation{})
+}
+
+// ResetRuntimeWithOutboxAndAudit clears the comparison state of a job, queues
+// the reset event, and records the action.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.ResetRuntimeWithOutboxAndAudit.
 func (s *Store) ResetRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name string, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.resetRuntimeWithAudits(ctx, jobID, name, destinations, []AuditEntry{audit}, BaselineExpectation{})
+	return s.Tenant(DefaultTenantScope()).ResetRuntimeWithOutboxAndAudit(ctx, jobID, name, destinations, audit)
+}
+
+// ResetRuntimeWithOutboxAndAudit clears the comparison state of one of the
+// tenant's jobs, persists any reset notification intent, and records the
+// administrator action atomically.
+func (ts *TenantStore) ResetRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name string, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return ts.resetRuntimeWithAudits(ctx, jobID, name, destinations, []AuditEntry{audit}, BaselineExpectation{})
+}
+
+// ResetRuntimeWithExpectationAndAudit clears the comparison state of a job
+// only if it still matches the expectation.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.ResetRuntimeWithExpectationAndAudit.
+func (s *Store) ResetRuntimeWithExpectationAndAudit(ctx context.Context, jobID, name string, destinations []string, audit AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
+	return s.Tenant(DefaultTenantScope()).ResetRuntimeWithExpectationAndAudit(ctx, jobID, name, destinations, audit, expected)
 }
 
 // ResetRuntimeWithExpectationAndAudit is the stale-view-safe baseline reset
 // entry point used by the web API. The comparison is made inside the same
 // writer transaction that clears the state, so two administrators cannot both
 // mutate a baseline they loaded before the other action committed.
-func (s *Store) ResetRuntimeWithExpectationAndAudit(ctx context.Context, jobID, name string, destinations []string, audit AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
-	return s.resetRuntimeWithAudits(ctx, jobID, name, destinations, []AuditEntry{audit}, expected)
+func (ts *TenantStore) ResetRuntimeWithExpectationAndAudit(ctx context.Context, jobID, name string, destinations []string, audit AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
+	return ts.resetRuntimeWithAudits(ctx, jobID, name, destinations, []AuditEntry{audit}, expected)
 }
 
-func (s *Store) resetRuntimeWithAudits(ctx context.Context, jobID, name string, destinations []string, audits []AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
-	return s.updateRuntimeWithOutboxAndAuditsGuardedPost(ctx, jobID, "", destinations, audits, true, func(tx *sql.Tx, _ *model.JobState) error {
-		if err := clearBaselineHostProjectionTx(ctx, tx, jobID); err != nil {
-			return err
-		}
-		return discardUnpromotedCyclesTx(ctx, tx, jobID, "baseline reset", time.Now().UTC())
-	}, func(state *model.JobState) ([]model.Event, error) {
+// rejectActiveScanTx refuses an operator action that replaces the complete
+// comparison state while the job is scanning, as incident actions are.
+func rejectActiveScanTx(ctx context.Context, tx *sql.Tx, jobID string) error {
+	active, err := jobActiveTx(ctx, tx, jobID, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if active {
+		return ErrJobScanActive
+	}
+	return nil
+}
+
+// resetRuntimeWithAudits clears the comparison state of one of the tenant's
+// jobs in one transaction. The transaction first finds the job with the
+// tenant predicate, so a job of another tenant is ErrNotFound, as an unknown
+// job is, and nothing is written; the later statements name only that job.
+// The job must not be scanning. The baseline host projection and the
+// resumable cycles follow the reset before commit, while the writer
+// transaction still protects the final state.
+func (ts *TenantStore) resetRuntimeWithAudits(ctx context.Context, jobID, name string, destinations []string, audits []AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := getTenantJobTx(ctx, tx, ts.scope, jobID); err != nil {
+		return nil, err
+	}
+	if err := rejectActiveScanTx(ctx, tx, jobID); err != nil {
+		return nil, err
+	}
+	events, err := updateRuntimeTxWithOutbox(ctx, tx, jobID, destinations, func(state *model.JobState) ([]model.Event, error) {
 		if (expected.ScanIDSet || expected.ModifiedSet) && !expected.matches(*state) {
 			return nil, ErrConflict
 		}
@@ -1128,49 +1293,116 @@ func (s *Store) resetRuntimeWithAudits(ctx context.Context, jobID, name string, 
 		state.FingerprintCandidates = map[string]model.ValueCount{}
 		return []model.Event{{Type: "baseline-reset", Job: name, Message: "Baseline collection reset", CreatedAt: time.Now().UTC()}}, nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	if err := clearBaselineHostProjectionTx(ctx, tx, jobID); err != nil {
+		return nil, err
+	}
+	if err := discardUnpromotedCyclesTx(ctx, tx, jobID, "baseline reset", time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return events, nil
 }
 
+// ApproveRuntime makes a successful scan the baseline of a job.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ApproveRuntime.
 func (s *Store) ApproveRuntime(ctx context.Context, jobID, name string, scan model.Scan) ([]model.Event, error) {
-	return s.ApproveRuntimeWithOutbox(ctx, jobID, name, scan, nil)
+	return s.Tenant(DefaultTenantScope()).ApproveRuntime(ctx, jobID, name, scan)
 }
 
-// ApproveRuntimeWithOutbox persists a manual baseline approval and notification
-// intent together, while retaining the current-scope validation.
+// ApproveRuntime makes a successful scan the baseline of one of the tenant's
+// jobs without queueing notifications.
+func (ts *TenantStore) ApproveRuntime(ctx context.Context, jobID, name string, scan model.Scan) ([]model.Event, error) {
+	return ts.ApproveRuntimeWithOutbox(ctx, jobID, name, scan, nil)
+}
+
+// ApproveRuntimeWithOutbox makes a successful scan the baseline of a job and
+// queues the approval event.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.ApproveRuntimeWithOutbox.
 func (s *Store) ApproveRuntimeWithOutbox(ctx context.Context, jobID, name string, scan model.Scan, destinations []string) ([]model.Event, error) {
-	return s.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, nil, BaselineExpectation{})
+	return s.Tenant(DefaultTenantScope()).ApproveRuntimeWithOutbox(ctx, jobID, name, scan, destinations)
 }
 
-// ApproveRuntimeWithOutboxAndAudit applies a manual baseline approval and its
-// notification intent/audit row in one transaction.
+// ApproveRuntimeWithOutbox persists a manual baseline approval of one of the
+// tenant's jobs and notification intent together, while retaining the
+// current-scope validation.
+func (ts *TenantStore) ApproveRuntimeWithOutbox(ctx context.Context, jobID, name string, scan model.Scan, destinations []string) ([]model.Event, error) {
+	return ts.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, nil, BaselineExpectation{})
+}
+
+// ApproveRuntimeWithOutboxAndAudit makes a successful scan the baseline of a
+// job, queues the approval event, and records the action.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.ApproveRuntimeWithOutboxAndAudit.
 func (s *Store) ApproveRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, []AuditEntry{audit}, BaselineExpectation{})
+	return s.Tenant(DefaultTenantScope()).ApproveRuntimeWithOutboxAndAudit(ctx, jobID, name, scan, destinations, audit)
 }
 
-// ApproveRuntimeWithExpectationAndAudit applies a manual baseline approval
-// only if the caller's baseline marker still matches the committed runtime.
+// ApproveRuntimeWithOutboxAndAudit applies a manual baseline approval of one
+// of the tenant's jobs and its notification intent/audit row in one
+// transaction.
+func (ts *TenantStore) ApproveRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audit AuditEntry) ([]model.Event, error) {
+	return ts.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, []AuditEntry{audit}, BaselineExpectation{})
+}
+
+// ApproveRuntimeWithExpectationAndAudit makes a successful scan the baseline
+// of a job only if the baseline still matches the expectation.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.ApproveRuntimeWithExpectationAndAudit.
 func (s *Store) ApproveRuntimeWithExpectationAndAudit(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audit AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
-	return s.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, []AuditEntry{audit}, expected)
+	return s.Tenant(DefaultTenantScope()).ApproveRuntimeWithExpectationAndAudit(ctx, jobID, name, scan, destinations, audit, expected)
 }
 
-func (s *Store) approveRuntimeWithAudits(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audits []AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
+// ApproveRuntimeWithExpectationAndAudit applies a manual baseline approval of
+// one of the tenant's jobs only if the caller's baseline marker still matches
+// the committed runtime.
+func (ts *TenantStore) ApproveRuntimeWithExpectationAndAudit(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audit AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
+	return ts.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, []AuditEntry{audit}, expected)
+}
+
+// approveRuntimeWithAudits makes a successful scan of one of the tenant's
+// jobs its baseline in one transaction. The transaction first finds the job
+// with the tenant predicate, so a job of another tenant is ErrNotFound, as
+// an unknown job is, and nothing is written. The job must not be scanning,
+// and the scan must be a successful scan of the job's current scope; a scan
+// of another tenant is refused with the error of an unknown scan.
+func (ts *TenantStore) approveRuntimeWithAudits(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audits []AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
 	if scan.ID == "" {
 		return nil, errors.New("scan ID is required")
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	record, err := getJobTx(ctx, tx, jobID)
+	record, err := getTenantJobTx(ctx, tx, ts.scope, jobID)
 	if err != nil {
 		return nil, err
 	}
-	active, err := jobActiveTx(ctx, tx, jobID, time.Now().UTC())
-	if err != nil {
+	if err := rejectActiveScanTx(ctx, tx, jobID); err != nil {
 		return nil, err
 	}
-	if active {
-		return nil, ErrJobScanActive
+	// getScanTx reads a scan of any tenant, and returns sql.ErrNoRows for an
+	// unknown one. Check the tenant first, so another tenant's scan gets
+	// that same error instead of the scope mismatch below.
+	var owned int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM scans WHERE id=? AND tenant_id=?`, scan.ID, ts.scope.id).Scan(&owned); err != nil {
+		return nil, err
 	}
 	stored, err := getScanTx(ctx, tx, scan.ID)
 	if err != nil {

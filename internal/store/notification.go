@@ -248,7 +248,7 @@ func (ts *TenantStore) createManagedNotificationWithAuditsAndSelection(ctx conte
 			return ManagedNotification{}, err
 		}
 	}
-	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return ManagedNotification{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -484,7 +484,7 @@ func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, 
 			return ManagedNotification{}, err
 		}
 	}
-	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return ManagedNotification{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -573,7 +573,7 @@ func (ts *TenantStore) deleteManagedNotificationWithAudits(ctx context.Context, 
 	if routingChanged {
 		audits = append(audits, deletedDestinationRoutingAudit(audits, "notifications.update_routing", fmt.Sprintf("removed deleted notification destination %s from application update notification routing", id)))
 	}
-	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

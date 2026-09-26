@@ -710,6 +710,10 @@ func insertRestoreAuditTx(ctx context.Context, tx *sql.Tx, policy PendingDeliver
 	if columns["tenant_id"] {
 		names, values = append(names, "tenant_id"), append(values, DefaultTenantID)
 	}
+	if columns["actor_kind"] {
+		// The restore runs from the host CLI.
+		names, values = append(names, "actor_kind"), append(values, AuditActorHost)
+	}
 	names, values = append(names, "created_at"), append(values, restoredAt.Format(time.RFC3339Nano))
 	query := `INSERT INTO security_audit(` + strings.Join(names, ",") + `) VALUES(?` + strings.Repeat(",?", len(names)-1) + `)`
 	if _, err := tx.ExecContext(ctx, query, values...); err != nil {

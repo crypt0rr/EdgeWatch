@@ -70,6 +70,11 @@ var daemonTenantLeakCases = map[string]tenantLeakCase{
 		if a.Events <= b.Events || a.OutboxPending <= b.OutboxPending {
 			t.Errorf("the default tenant does not count the platform's history: %+v", a)
 		}
+		// The database holds every tenant's data, so only the default
+		// tenant reports its size, the deployment's.
+		if a.DatabaseBytes <= 0 || a.DatabaseBytes != deployment.DatabaseBytes || b.DatabaseBytes != 0 {
+			t.Errorf("database size: tenant A %d, tenant B %d, deployment %d", a.DatabaseBytes, b.DatabaseBytes, deployment.DatabaseBytes)
+		}
 	}},
 }
 

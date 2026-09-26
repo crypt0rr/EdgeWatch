@@ -238,7 +238,7 @@ func (ts *TenantStore) SetApplicationUpdateDestinations(ctx context.Context, des
 		return err
 	}
 	if audit.Action != "" {
-		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
+		if err := ts.insertAuditEntry(ctx, tx, audit, time.Now().UTC()); err != nil {
 			return err
 		}
 	}

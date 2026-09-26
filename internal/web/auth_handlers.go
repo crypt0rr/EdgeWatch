@@ -31,17 +31,23 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "setup status requests are temporarily rate limited", nil)
 		return
 	}
-	configured, err := s.Store.HasAdministrator(r.Context())
+	configured, err := s.Store.Platform().HasAdministrator(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", "setup status could not be loaded", nil)
 		return
 	}
 	status := map[string]any{"configured": configured, "username": "admin", "password_requirements": auth.PasswordRequirements()}
-	if dashboard, dashboardErr := s.Store.GetPublicDashboard(r.Context()); dashboardErr == nil {
+	// Sign-in serves the legacy /public page, the default tenant's, so the
+	// flag reads it through that public scope. The scope finds only a page
+	// that anonymous visitors may see; a page that is not published is
+	// ErrNotFound, which is the false the flag has always reported.
+	if dashboard, dashboardErr := s.Store.Public(store.DefaultPublicScope()).GetPublicDashboard(r.Context()); dashboardErr == nil {
 		status["public_dashboard_enabled"] = dashboard.Enabled
+	} else if errors.Is(dashboardErr, store.ErrNotFound) {
+		status["public_dashboard_enabled"] = false
 	}
 	if !configured {
-		if token, tokenErr := s.Store.GetSetupToken(r.Context()); tokenErr == nil {
+		if token, tokenErr := s.Store.Platform().GetSetupToken(r.Context()); tokenErr == nil {
 			status["setup_available"] = !token.Used && time.Now().UTC().Before(token.ExpiresAt)
 		}
 	}
@@ -52,7 +58,7 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 // Keeping this separate from setupStatus prevents pre-auth callers from
 // learning notification state, scheduler capacity, or legacy job names.
 func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
-	user, err := s.Store.GetUser(r.Context(), session.UserID)
+	user, err := ts.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "user_missing", "account could not be loaded", nil)
 		return
@@ -71,21 +77,26 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	if reloadErr := s.App.Notifier.Reload(r.Context()); reloadErr != nil {
 		s.Log.Warn("notification state refresh failed", "error", reloadErr)
 	}
-	notificationStatus := s.App.Notifier.StatusContext(r.Context())
 	status := map[string]any{
-		"configured":                true,
-		"username":                  user.Username,
-		"display_name":              user.DisplayName,
-		"role":                      user.Role,
-		"permissions":               auth.PermissionsForRole(user.Role),
-		"version":                   s.Version,
-		"notification_destinations": notificationStatus["active"],
-		"notifications":             notificationStatus,
-		"retention":                 s.App.Config.Retention.Value().String(),
-		"max_concurrent_scans":      s.App.Config.Scheduler.MaxConcurrent,
-		"max_probe_count":           s.App.Config.Scheduler.MaxProbeCount,
-		"max_naabu_probe_count":     s.App.Config.Scheduler.MaxNaabuProbeCount,
-		"rdap_enabled":              s.App.Config.RDAPEnabled(),
+		"configured":            true,
+		"username":              user.Username,
+		"display_name":          user.DisplayName,
+		"role":                  user.Role,
+		"permissions":           auth.PermissionsForRole(user.Role),
+		"version":               s.Version,
+		"retention":             s.App.Config.Retention.Value().String(),
+		"max_concurrent_scans":  s.App.Config.Scheduler.MaxConcurrent,
+		"max_probe_count":       s.App.Config.Scheduler.MaxProbeCount,
+		"max_naabu_probe_count": s.App.Config.Scheduler.MaxNaabuProbeCount,
+		"rdap_enabled":          s.App.Config.RDAPEnabled(),
+	}
+	// The destination counts and delivery totals are the tenant's own. Like
+	// the telemetry below, they are left out when they cannot be read.
+	if notificationStatus, notificationErr := s.App.Notifier.Tenant(ts).Status(r.Context()); notificationErr != nil {
+		s.Log.Warn("notification status refresh failed", "error", notificationErr)
+	} else {
+		status["notification_destinations"] = notificationStatus["active"]
+		status["notifications"] = notificationStatus
 	}
 	s.addVersionReleaseURL(status)
 	if user.Role != store.RoleViewer && len(s.App.Config.Jobs) > 0 {
@@ -99,7 +110,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	status["live_updates"] = map[string]any{"history_size": len(s.history), "dropped_events": s.dropped}
 	s.mu.Unlock()
 	status["updates"] = s.applicationUpdateStatus(r.Context())
-	if telemetry, telemetryErr := s.cachedDeploymentTelemetry(r.Context()); telemetryErr != nil {
+	if telemetry, telemetryErr := s.cachedTenantTelemetry(r.Context(), ts); telemetryErr != nil {
 		s.Log.Warn("deployment telemetry refresh failed", "error", telemetryErr)
 	} else {
 		status["telemetry"] = telemetry
@@ -109,27 +120,50 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 
 const deploymentTelemetryTTL = 30 * time.Second
 
-// cachedDeploymentTelemetry keeps status polling cheap while still reflecting
-// normal scan and retention activity promptly. Concurrent requests share one
-// refresh instead of issuing duplicate aggregate queries.
-func (s *Server) cachedDeploymentTelemetry(ctx context.Context) (store.DeploymentTelemetry, error) {
-	if s.Store == nil {
-		return store.DeploymentTelemetry{}, errors.New("store is unavailable")
+// tenantTelemetryCache is one tenant's cached telemetry and its single-flight
+// refresh gate.
+type tenantTelemetryCache struct {
+	value   store.TenantTelemetry
+	at      time.Time
+	valid   bool
+	running bool
+	done    chan struct{}
+}
+
+// cachedTenantTelemetry keeps status polling cheap while still reflecting
+// normal scan and retention activity promptly. Each tenant has its own cache
+// entry, keyed by the tenant of ts itself, so a tenant never reads another's
+// counters. Concurrent requests of one tenant share one refresh instead of
+// issuing duplicate aggregate queries.
+func (s *Server) cachedTenantTelemetry(ctx context.Context, ts *store.TenantStore) (store.TenantTelemetry, error) {
+	// The public scope of ts names the tenant of ts; it is only the key here.
+	scope, err := ts.PublicScope()
+	if err != nil {
+		return store.TenantTelemetry{}, err
 	}
+	key := scope.TenantID()
 	for {
 		s.telemetryMu.Lock()
-		if s.telemetry != nil && time.Since(s.telemetryAt) < deploymentTelemetryTTL {
-			value := *s.telemetry
+		if s.telemetry == nil {
+			s.telemetry = map[string]*tenantTelemetryCache{}
+		}
+		entry := s.telemetry[key]
+		if entry == nil {
+			entry = &tenantTelemetryCache{}
+			s.telemetry[key] = entry
+		}
+		if entry.valid && time.Since(entry.at) < deploymentTelemetryTTL {
+			value := entry.value
 			s.telemetryMu.Unlock()
 			return value, nil
 		}
-		if !s.telemetryRun {
-			s.telemetryRun = true
-			s.telemetryDone = make(chan struct{})
-			done := s.telemetryDone
+		if !entry.running {
+			entry.running = true
+			entry.done = make(chan struct{})
+			done := entry.done
 			s.telemetryMu.Unlock()
 
-			var value store.DeploymentTelemetry
+			var value store.TenantTelemetry
 			var err error
 			// Always release the single-flight gate, including when a storage
 			// implementation panics. net/http recovers a handler panic, but
@@ -141,24 +175,23 @@ func (s *Server) cachedDeploymentTelemetry(ctx context.Context) (store.Deploymen
 					}
 					s.telemetryMu.Lock()
 					if err == nil {
-						s.telemetry = &value
-						s.telemetryAt = time.Now()
+						entry.value, entry.at, entry.valid = value, time.Now(), true
 					}
-					s.telemetryRun = false
+					entry.running = false
 					close(done)
 					s.telemetryMu.Unlock()
 				}()
-				value, err = s.Store.DeploymentTelemetry(ctx)
+				value, err = ts.Telemetry(ctx)
 			}()
 			return value, err
 		}
-		done := s.telemetryDone
+		done := entry.done
 		s.telemetryMu.Unlock()
 		select {
 		case <-done:
 			continue
 		case <-ctx.Done():
-			return store.DeploymentTelemetry{}, ctx.Err()
+			return store.TenantTelemetry{}, ctx.Err()
 		}
 	}
 }
@@ -345,8 +378,10 @@ func (s *Server) logout(w http.ResponseWriter, r *http.Request, session store.Se
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
+// session describes the signed-in account. It needs no tenant: the account
+// comes from the session that authentication verified, whatever its tenant.
 func (s *Server) session(w http.ResponseWriter, r *http.Request, session store.Session) {
-	user, err := s.Store.GetUser(r.Context(), session.UserID)
+	user, err := s.Store.GetAccount(r.Context(), session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "user_missing", "account could not be loaded", nil)
 		return
@@ -386,7 +421,7 @@ func validateDisplayName(value string) (string, error) {
 	return name, nil
 }
 
-func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	var input struct {
 		DisplayName string `json:"display_name"`
 	}
@@ -398,7 +433,7 @@ func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, sessi
 		writeError(w, http.StatusBadRequest, "invalid_display_name", err.Error(), map[string]string{"display_name": err.Error()})
 		return
 	}
-	user, err := s.Store.GetUser(r.Context(), session.UserID)
+	user, err := ts.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "user_missing", "account could not be loaded", nil)
 		return
@@ -412,7 +447,7 @@ func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, sessi
 		auditAction = "admin.display_name_changed"
 		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, nil, false, false, store.AuditEntry{Action: auditAction, Detail: "administrator display name changed", ActorUserID: session.UserID, ActorUsername: session.Username})
 	} else {
-		saveErr = s.Store.UpdateUser(r.Context(), user, false, store.AuditEntry{Action: auditAction, Detail: "display name changed", ActorUserID: session.UserID, ActorUsername: session.Username})
+		saveErr = ts.UpdateUser(r.Context(), user, false, store.AuditEntry{Action: auditAction, Detail: "display name changed", ActorUserID: session.UserID, ActorUsername: session.Username})
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
@@ -428,7 +463,7 @@ func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, sessi
 	writeJSON(w, http.StatusOK, map[string]string{"display_name": displayName})
 }
 
-func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	var input struct {
 		Current  string `json:"current_password"`
 		Password string `json:"new_password"`
@@ -436,7 +471,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	user, err := s.Store.GetUser(r.Context(), session.UserID)
+	user, err := ts.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		s.writePasswordConfirmationError(w, err, "current password is incorrect")
 		return
@@ -458,7 +493,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 		auditAction = "admin.password_changed"
 		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, nil, false, true, store.AuditEntry{Action: auditAction, Detail: "password changed", ActorUserID: session.UserID, ActorUsername: session.Username})
 	} else {
-		saveErr = s.Store.UpdateUser(r.Context(), user, true, store.AuditEntry{Action: auditAction, Detail: "password changed", ActorUserID: session.UserID, ActorUsername: session.Username})
+		saveErr = ts.UpdateUser(r.Context(), user, true, store.AuditEntry{Action: auditAction, Detail: "password changed", ActorUserID: session.UserID, ActorUsername: session.Username})
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
@@ -475,7 +510,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
-func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	var input struct {
 		Password string `json:"password"`
 		Code     string `json:"code"`
@@ -484,7 +519,7 @@ func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	user, err := s.Store.GetUser(r.Context(), session.UserID)
+	user, err := ts.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		s.writePasswordConfirmationError(w, err, "password is incorrect")
 		return
@@ -514,7 +549,7 @@ func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store
 	writeJSON(w, http.StatusOK, map[string]any{"secret": secret, "otpauth": "otpauth://totp/EdgeWatch:" + url.QueryEscape(user.Username) + "?secret=" + secret + "&issuer=EdgeWatch"})
 }
 
-func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	var input struct {
 		Code string `json:"code"`
 	}
@@ -545,7 +580,7 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 		writeError(w, http.StatusInternalServerError, "totp_failed", "recovery codes could not be generated", nil)
 		return
 	}
-	user, err := s.Store.GetUser(r.Context(), session.UserID)
+	user, err := ts.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "totp_failed", "account could not be loaded for TOTP setup", nil)
 		return
@@ -559,7 +594,7 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 		auditAction = "admin.totp_enabled"
 		saveErr = s.Store.SaveAdminSecurityWithAuditPreservingSession(r.Context(), admin, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username}, preserveSessionHash)
 	} else {
-		saveErr = s.Store.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username}, preserveSessionHash)
+		saveErr = ts.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username}, preserveSessionHash)
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
@@ -606,7 +641,7 @@ func (s *Server) verifyPendingTOTP(key, code string, now time.Time) (pendingTOTP
 	return pendingTOTP{}, remaining, false
 }
 
-func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	var input struct {
 		Password string `json:"password"`
 		Code     string `json:"code"`
@@ -615,7 +650,7 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	user, err := s.Store.GetUser(r.Context(), session.UserID)
+	user, err := ts.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		s.writePasswordConfirmationError(w, err, "password is incorrect")
 		return
@@ -638,7 +673,7 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 		auditAction = "admin.totp_disabled"
 		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, []string{}, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP disabled", ActorUserID: session.UserID, ActorUsername: session.Username})
 	} else {
-		saveErr = s.Store.SaveUserSecurity(r.Context(), user, []string{}, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP disabled", ActorUserID: session.UserID, ActorUsername: session.Username})
+		saveErr = ts.SaveUserSecurity(r.Context(), user, []string{}, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP disabled", ActorUserID: session.UserID, ActorUsername: session.Username})
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
@@ -659,7 +694,7 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 // existing hashes. Both the password and the currently configured factor are
 // required, and the current browser session is preserved so the newly issued
 // codes can be copied before the page is left.
-func (s *Server) totpRecoveryCodes(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) totpRecoveryCodes(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	var input struct {
 		Password string `json:"password"`
 		Code     string `json:"code"`
@@ -668,7 +703,7 @@ func (s *Server) totpRecoveryCodes(w http.ResponseWriter, r *http.Request, sessi
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	user, err := s.Store.GetUser(r.Context(), session.UserID)
+	user, err := ts.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "totp_failed", "account could not be loaded for recovery-code rotation", nil)
 		return
@@ -703,7 +738,7 @@ func (s *Server) totpRecoveryCodes(w http.ResponseWriter, r *http.Request, sessi
 		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Revision: user.Revision}
 		saveErr = s.Store.SaveAdminSecurityWithAuditPreservingSession(r.Context(), admin, hashes, true, true, actorAudit(session, auditAction, "TOTP recovery codes rotated"), preserve)
 	} else {
-		saveErr = s.Store.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, actorAudit(session, auditAction, "TOTP recovery codes rotated"), preserve)
+		saveErr = ts.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, actorAudit(session, auditAction, "TOTP recovery codes rotated"), preserve)
 	}
 	if saveErr != nil {
 		if s.writeAuditUnavailable(w, saveErr, auditAction) {

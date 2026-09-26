@@ -218,16 +218,23 @@ func (s *Server) writeInternalError(w http.ResponseWriter, r *http.Request, code
 	writeError(w, http.StatusInternalServerError, code, "internal server error", details)
 }
 
+// auditRecorder writes one audit record. A tenant's request passes its
+// TenantStore, which records the entry in that tenant whatever the entry
+// names; only a request without a tenant passes the Store.
+type auditRecorder interface {
+	AuditEntry(context.Context, store.AuditEntry) error
+}
+
 func (s *Server) auditOptional(ctx context.Context, action, detail string) {
-	s.auditOptionalEntry(ctx, store.AuditEntry{Action: action, Detail: detail})
+	s.auditOptionalEntry(ctx, s.Store, store.AuditEntry{Action: action, Detail: detail})
 }
 
 func actorAudit(session store.Session, action, detail string) store.AuditEntry {
 	return store.AuditEntry{Action: action, Detail: detail, ActorUserID: session.UserID, ActorUsername: session.Username, SourceIP: session.SourceIP}
 }
 
-func (s *Server) auditOptionalEntry(ctx context.Context, entry store.AuditEntry) {
-	if err := s.Store.AuditEntry(ctx, entry); err != nil {
+func (s *Server) auditOptionalEntry(ctx context.Context, recorder auditRecorder, entry store.AuditEntry) {
+	if err := recorder.AuditEntry(ctx, entry); err != nil {
 		s.auditFailure(err, entry.Action)
 	}
 }
@@ -269,11 +276,11 @@ func writeSecurityMutationError(w http.ResponseWriter, err error, fallbackCode, 
 }
 
 func (s *Server) requireAudit(ctx context.Context, w http.ResponseWriter, action, detail string) bool {
-	return s.requireAuditEntry(ctx, w, store.AuditEntry{Action: action, Detail: detail})
+	return s.requireAuditEntry(ctx, w, s.Store, store.AuditEntry{Action: action, Detail: detail})
 }
 
-func (s *Server) requireAuditEntry(ctx context.Context, w http.ResponseWriter, entry store.AuditEntry) bool {
-	if err := s.Store.AuditEntry(ctx, entry); err != nil {
+func (s *Server) requireAuditEntry(ctx context.Context, w http.ResponseWriter, recorder auditRecorder, entry store.AuditEntry) bool {
+	if err := recorder.AuditEntry(ctx, entry); err != nil {
 		s.auditFailure(err, entry.Action)
 		writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "the action completed but its security audit record could not be written; verify the state before retrying", nil)
 		return false

@@ -110,6 +110,7 @@ func buildTenantFixture(t *testing.T) (string, tenantFixtureIDs) {
 	}
 	addTenantHistory(t, s, ids)
 	addTenantRuntime(t, s, ids)
+	addTenantAccounts(t, s)
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}

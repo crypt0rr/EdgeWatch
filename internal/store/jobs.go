@@ -134,7 +134,7 @@ func (ts *TenantStore) createJobWithAudits(ctx context.Context, job config.Job, 
 	if err = upsertJobSilenceStateTx(ctx, tx, id, now); err != nil {
 		return JobRecord{}, err
 	}
-	if err = insertAuditEntries(ctx, tx, audits, now); err != nil {
+	if err = ts.insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return JobRecord{}, err
 	}
 	if err = tx.Commit(); err != nil {
@@ -426,7 +426,7 @@ func (ts *TenantStore) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context
 	if err = queueEventsTx(ctx, tx, events, destinations); err != nil {
 		return JobRecord{}, false, nil, err
 	}
-	if err = insertAuditEntries(ctx, tx, audits, now); err != nil {
+	if err = ts.insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return JobRecord{}, false, nil, err
 	}
 	if current.Enabled != enabled || current.Archived != archived {
@@ -522,7 +522,7 @@ func (ts *TenantStore) setJobArchived(ctx context.Context, id string, archived b
 		}
 	}
 	if current.Archived == archived {
-		if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
+		if err := ts.insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -550,7 +550,7 @@ func (ts *TenantStore) setJobArchived(ctx context.Context, id string, archived b
 	if err := updateJobSilenceLifecycleTx(ctx, tx, id, current.Enabled, current.Archived, enabled, archived, now); err != nil {
 		return err
 	}
-	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -630,7 +630,7 @@ func (ts *TenantStore) setJobEnabled(ctx context.Context, id string, enabled boo
 		}
 	}
 	if current.Enabled == enabled {
-		if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
+		if err := ts.insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -654,7 +654,7 @@ func (ts *TenantStore) setJobEnabled(ctx context.Context, id string, enabled boo
 	if err := updateJobSilenceLifecycleTx(ctx, tx, id, current.Enabled, current.Archived, enabled, current.Archived, now); err != nil {
 		return err
 	}
-	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -769,7 +769,7 @@ func (ts *TenantStore) deleteJobWithAudits(ctx context.Context, id string, audit
 	if n, _ := result.RowsAffected(); n == 0 {
 		return fmt.Errorf("%w: job %s", ErrNotFound, id)
 	}
-	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 		return err
 	}
 	return tx.Commit()

@@ -379,14 +379,14 @@ func digest(v string) string {
 }
 
 func (m *Manager) EnsureSetupToken(ctx context.Context) (string, error) {
-	configured, err := m.Store.HasAdministrator(ctx)
+	configured, err := m.Store.Platform().HasAdministrator(ctx)
 	if err != nil {
 		return "", err
 	}
 	if configured {
 		return "", nil
 	}
-	if token, err := m.Store.GetSetupToken(ctx); err == nil && !token.Used && m.now().Before(token.ExpiresAt) {
+	if token, err := m.Store.Platform().GetSetupToken(ctx); err == nil && !token.Used && m.now().Before(token.ExpiresAt) {
 		// The clear token is intentionally only emitted when generated. It is
 		// never persisted or returned by the API.
 		return "", nil
@@ -397,7 +397,7 @@ func (m *Manager) EnsureSetupToken(ctx context.Context) (string, error) {
 	}
 	plain := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw)
 	now := m.now()
-	if err := m.Store.PutSetupTokenAt(ctx, digest(plain), now.Add(15*time.Minute), now); err != nil {
+	if err := m.Store.Platform().PutSetupTokenAt(ctx, digest(plain), now.Add(15*time.Minute), now); err != nil {
 		return "", err
 	}
 	return plain, nil
@@ -407,7 +407,7 @@ func (m *Manager) EnsureSetupToken(ctx context.Context) (string, error) {
 // store performs the administrator-exists check, persists the issue time for a
 // cross-process rate limit, and records an opaque audit event.
 func (m *Manager) ReissueSetupToken(ctx context.Context) (string, error) {
-	configured, err := m.Store.HasAdministrator(ctx)
+	configured, err := m.Store.Platform().HasAdministrator(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -420,7 +420,7 @@ func (m *Manager) ReissueSetupToken(ctx context.Context) (string, error) {
 	}
 	plain := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw)
 	now := m.now()
-	if err := m.Store.ReissueSetupToken(ctx, digest(plain), now.Add(15*time.Minute), now); err != nil {
+	if err := m.Store.Platform().ReissueSetupToken(ctx, digest(plain), now.Add(15*time.Minute), now); err != nil {
 		return "", err
 	}
 	return plain, nil
@@ -484,7 +484,7 @@ func (m *Manager) Setup(ctx context.Context, token, password string) error {
 		return err
 	}
 	now := m.now()
-	return m.Store.CompleteSetup(ctx, digest(token), store.Admin{Username: "admin", PasswordHash: hash, CreatedAt: now, UpdatedAt: now}, now)
+	return m.Store.Platform().CompleteSetup(ctx, digest(token), store.Admin{Username: "admin", PasswordHash: hash, CreatedAt: now, UpdatedAt: now}, now)
 }
 
 // SetupRequest applies the same short-lived per-client failure budget as
@@ -498,7 +498,7 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 		return ErrRateLimited
 	}
 	defer m.releaseScoped(source, account)
-	usable, checkErr := m.Store.SetupTokenUsable(ctx, digest(strings.TrimSpace(token)), m.now())
+	usable, checkErr := m.Store.Platform().SetupTokenUsable(ctx, digest(strings.TrimSpace(token)), m.now())
 	if checkErr != nil {
 		m.auditAuthFailure(ctx, "auth.setup_failed", "setup", request)
 		return errors.New("administrator setup could not be completed")
@@ -632,7 +632,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			}
 			return "", user, err
 		}
-		m.auditAuthFailure(ctx, "auth.login_failed", identity, request)
+		m.auditAccountFailure(ctx, "auth.login_failed", identity, user.TenantID, request)
 		return "", user, errors.New("invalid credentials")
 	}
 	var passwordValid bool
@@ -647,7 +647,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	}
 	if !passwordValid {
 		m.failedScoped(source, account, "", false)
-		m.auditAuthFailure(ctx, "auth.login_failed", identity, request)
+		m.auditAccountFailure(ctx, "auth.login_failed", identity, user.TenantID, request)
 		return "", user, errors.New("invalid credentials")
 	}
 	totpAccepted := false
@@ -671,12 +671,12 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		if !valid && recovery != "" {
 			valid, err = m.Store.ConsumeRecoveryCodeTextForUser(ctx, user.ID, recovery, m.now())
 			if valid {
-				m.auditAuthFailure(ctx, "auth.recovery_code_used", identity, request)
+				m.auditAccountFailure(ctx, "auth.recovery_code_used", identity, user.TenantID, request)
 			}
 		}
 		if !valid {
 			m.failedScoped(source, account, "", false)
-			m.auditAuthFailure(ctx, "auth.totp_failed", identity, request)
+			m.auditAccountFailure(ctx, "auth.totp_failed", identity, user.TenantID, request)
 			return "", user, errors.New("one-time code is required")
 		}
 	}
@@ -720,6 +720,14 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		return m.Store.CreateSessionForUserIfCurrent(ctx, candidate.ID, candidate.PasswordHash, revision, totpEnabled, digest(session), csrf, now, now.Add(SessionTTL), audit)
 	}
 	if err := createSession(user, upgradedHash, user.Revision, user.TOTPEnabled); err != nil {
+		if errors.Is(err, store.ErrTenantNotActive) {
+			// A tenant that is disabled or being deleted stops sign-in. The
+			// answer is the one a wrong password gets, so it does not tell
+			// the caller that the password was right.
+			m.failedScoped(source, account, "", false)
+			m.auditAccountFailure(ctx, "auth.login_failed", identity, user.TenantID, request)
+			return "", user, errors.New("invalid credentials")
+		}
 		if !errors.Is(err, store.ErrSessionCredentialsChanged) && !errors.Is(err, store.ErrPasswordChangedDuringLogin) {
 			return "", user, err
 		}
@@ -727,7 +735,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		// the authoritative row and repeat both checks before retrying; otherwise
 		// a stale login could create a session after a password, TOTP, or disable
 		// operation won the race.
-		current, readErr := m.Store.GetUser(ctx, user.ID)
+		current, readErr := m.Store.GetAccount(ctx, user.ID)
 		if readErr != nil || !current.Enabled {
 			if readErr != nil {
 				return "", user, readErr
@@ -802,7 +810,7 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 		return ErrRateLimited
 	}
 	defer m.releaseScoped(source, account)
-	user, err := m.Store.GetUser(ctx, userID)
+	user, err := m.Store.GetAccount(ctx, userID)
 	var passwordValid bool
 	if err == nil && user.Enabled {
 		if verifyErr := m.withArgon2(ctx, func() error {
@@ -818,7 +826,7 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 	}
 	if err != nil || !user.Enabled || !passwordValid {
 		m.failedScoped(source, account, "", false)
-		m.auditAuthFailure(ctx, "auth.password_confirmation_failed", userID, request)
+		m.auditAccountFailure(ctx, "auth.password_confirmation_failed", userID, user.TenantID, request)
 		return errors.New("password confirmation failed")
 	}
 	m.clearScoped(source, account, "")
@@ -837,7 +845,7 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 		return ErrRateLimited
 	}
 	defer m.releaseScoped(source, account)
-	user, err := m.Store.GetUser(ctx, userID)
+	user, err := m.Store.GetAccount(ctx, userID)
 	valid := false
 	if err == nil && user.Enabled && user.TOTPEnabled && user.TOTPSecretError == nil {
 		if step, stepValid := VerifyTOTPAtStep(user.TOTPSecret, otp, m.now()); stepValid {
@@ -856,7 +864,7 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 	}
 	if !valid {
 		m.failedScoped(source, account, "", false)
-		m.auditAuthFailure(ctx, "auth.totp_confirmation_failed", userID, request)
+		m.auditAccountFailure(ctx, "auth.totp_confirmation_failed", userID, user.TenantID, request)
 		return errors.New("current one-time code is required")
 	}
 	m.clearScoped(source, account, "")
@@ -866,7 +874,18 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 // auditAuthFailure records an authentication security event without allowing
 // an unavailable audit table to alter the response to the original request.
 // Values are bounded and never contain passwords, OTPs, or recovery codes.
+// The event names no known account, so it belongs to the default tenant,
+// whose console serves sign-in.
 func (m *Manager) auditAuthFailure(ctx context.Context, action, subject string, request *http.Request) {
+	m.auditAccountFailure(ctx, action, subject, "", request)
+}
+
+// auditAccountFailure is auditAuthFailure for an event about a known
+// account: the record belongs to the account's tenant, tenantID, so that
+// tenant's administrators see the attempts on its accounts. An empty
+// tenantID records the event in the default tenant. The request comes from
+// a tenant's console without a session, so the actor is a unit actor.
+func (m *Manager) auditAccountFailure(ctx context.Context, action, subject, tenantID string, request *http.Request) {
 	subject = strings.TrimSpace(subject)
 	if len(subject) > 80 {
 		subject = subject[:80]
@@ -876,6 +895,8 @@ func (m *Manager) auditAuthFailure(ctx context.Context, action, subject string, 
 		Detail:        "authentication event for " + subject,
 		ActorUsername: subject,
 		SourceIP:      m.ClientIP(request),
+		TenantID:      tenantID,
+		ActorKind:     store.AuditActorUnit,
 	}); err != nil {
 		// Authentication failure records are deliberately best-effort so they do
 		// not change the generic response contract, but a storage failure must
@@ -1367,8 +1388,11 @@ func (m *Manager) authenticate(ctx context.Context, r *http.Request, touch bool)
 	if session.UserID == "" {
 		session.UserID = store.LegacyAdminUserID
 	}
-	user, err := m.Store.GetUser(ctx, session.UserID)
-	if err != nil || !user.Enabled {
+	// The account is read globally: authentication runs before any tenant
+	// scope exists. Its tenant, read from users as GetSession and
+	// TenantScopeForSession read it, must be the session's.
+	user, err := m.Store.GetAccount(ctx, session.UserID)
+	if err != nil || !user.Enabled || user.TenantID != session.TenantID {
 		return store.Session{}, false
 	}
 	now := m.now()

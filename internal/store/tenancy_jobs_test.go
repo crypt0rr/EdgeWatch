@@ -38,13 +38,13 @@ var tenantJobTables = []struct{ table, predicate string }{
 	{"scans", "tenant_id=?1"},
 	{"events", "tenant_id=?1"},
 	{"outbox", "tenant_id=?1"},
+	{"security_audit", "tenant_id=?1"},
 }
 
 // tenantJobDigest returns a digest of every row of tenantJobTables that
 // belongs to the tenant, so a test can show that a write through another
-// tenant left them unchanged. Audit rows are left out: every audit row is
-// attributed to the default tenant until the audit writes move to
-// TenantStore.
+// tenant left them unchanged, its audit records included: a TenantStore
+// records its audit in its own tenant.
 func tenantJobDigest(t *testing.T, s *Store, tenant TenantScope) string {
 	t.Helper()
 	digest := sha256.New()

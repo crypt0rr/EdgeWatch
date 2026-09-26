@@ -569,5 +569,5 @@ func TestServerStaticSSEAndAuditHelpers(t *testing.T) {
 		t.Fatalf("required audit response = %d", auditResponse.Code)
 	}
 	server.auditOptional(context.Background(), "test.optional", "safe detail")
-	server.auditOptionalEntry(context.Background(), store.AuditEntry{Action: "test.optional.entry", Detail: "safe detail"})
+	server.auditOptionalEntry(context.Background(), server.Store, store.AuditEntry{Action: "test.optional.entry", Detail: "safe detail"})
 }

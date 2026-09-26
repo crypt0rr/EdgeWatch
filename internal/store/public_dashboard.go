@@ -380,7 +380,7 @@ func (ts *TenantStore) savePublicDashboard(ctx context.Context, expectedUpdatedA
 		}
 	}
 	if audit.Action != "" {
-		if err := insertAuditEntryExec(ctx, tx, audit, now); err != nil {
+		if err := ts.insertAuditEntry(ctx, tx, audit, now); err != nil {
 			return err
 		}
 	}

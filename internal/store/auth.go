@@ -43,8 +43,37 @@ type AuditEntry struct {
 	ActorUsername string
 	SourceIP      string
 	RequestID     string
+	// TenantID is the tenant the record belongs to. A TenantStore sets it
+	// to its own tenant, which is also the tenant of the account that an
+	// account action changes. When it is empty, the record takes the tenant
+	// of the account in ActorUserID, which for a console action is the
+	// session's tenant, and a record without an account belongs to the
+	// default tenant.
+	TenantID string
+	// ActorKind says who acted: AuditActorUnit, AuditActorHost,
+	// AuditActorSystem, or AuditActorPlatform. When it is empty, a record
+	// with an ActorUserID takes the kind of that account, and a record
+	// without one is the daemon's.
+	ActorKind string
 }
 
+// Audit actor kinds, as security_audit.actor_kind stores them. A record
+// written before schema 51 has an empty kind.
+const (
+	// AuditActorUnit is an account of a tenant, or a request to a tenant's
+	// console that has not signed in.
+	AuditActorUnit = "unit"
+	// AuditActorHost is the host CLI.
+	AuditActorHost = "host"
+	// AuditActorSystem is the daemon acting on its own.
+	AuditActorSystem = "system"
+	// AuditActorPlatform is a platform administrator.
+	AuditActorPlatform = "platform"
+)
+
+// Admin is the original administrator: the account with LegacyAdminUserID,
+// which setup creates in the default tenant. The Admin methods of Store are
+// compatibility methods for that one account, bound to the default tenant.
 type Admin struct {
 	// Username is the stable administrator identity used for authentication.
 	Username string
@@ -72,10 +101,15 @@ type Session struct {
 	Username    string
 	DisplayName string
 	Role        string
-	CreatedAt   time.Time
-	LastSeenAt  time.Time
-	ExpiresAt   time.Time
-	CSRFToken   string
+	// TenantID is the tenant of the session's account, read from users as
+	// TenantScopeForSession reads it, so the session row cannot choose it.
+	// It is empty for a platform administrator and for an account that no
+	// longer exists.
+	TenantID   string
+	CreatedAt  time.Time
+	LastSeenAt time.Time
+	ExpiresAt  time.Time
+	CSRFToken  string
 	// SourceIP is populated by the HTTP authentication layer after resolving
 	// a trusted proxy chain. It is not persisted in the session row.
 	SourceIP string
@@ -88,14 +122,15 @@ type SetupToken struct {
 }
 
 // GetAdmin returns the original administrator, the users row with
-// LegacyAdminUserID, without mutating the database. Schema 52 retired the
-// legacy admins row, so a missing users row is ErrNotFound. TOTP ciphertext
-// upgrades are performed by MigrateAdminCompatibility during daemon startup.
+// LegacyAdminUserID in the default tenant, without mutating the database.
+// Schema 52 retired the legacy admins row, so a missing users row is
+// ErrNotFound. TOTP ciphertext upgrades are performed by
+// MigrateAdminCompatibility during daemon startup.
 func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	var a Admin
 	var stored, created, updated string
 	var totp int
-	err := s.reader().QueryRowContext(ctx, `SELECT username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at,revision FROM users WHERE id=?`, LegacyAdminUserID).
+	err := s.reader().QueryRowContext(ctx, `SELECT username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at,revision FROM users WHERE id=? AND tenant_id=?`, LegacyAdminUserID, DefaultTenantID).
 		Scan(&a.Username, &a.DisplayName, &a.PasswordHash, &stored, &totp, &created, &updated, &a.Revision)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Admin{}, ErrNotFound
@@ -116,12 +151,21 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	return a, nil
 }
 
-// HasAdministrator reports whether an administrator account exists. Only
+// HasAdministrator reports whether an administrator account exists.
+//
+// Deprecated: use Store.Platform().HasAdministrator.
+func (s *Store) HasAdministrator(ctx context.Context) (bool, error) {
+	return s.Platform().HasAdministrator(ctx)
+}
+
+// HasAdministrator reports whether the installation is configured: whether
+// an administrator account exists in any tenant. Setup creates the first
+// one, so setup stays closed once any tenant has an administrator. Only
 // users counts: schema 52 retired the legacy admins row, and a database
 // without a users table is an error rather than an unconfigured one.
-func (s *Store) HasAdministrator(ctx context.Context) (bool, error) {
+func (ps *PlatformStore) HasAdministrator(ctx context.Context) (bool, error) {
 	var present int
-	err := s.reader().QueryRowContext(ctx, `SELECT 1 FROM users WHERE role=? LIMIT 1`, RoleAdministrator).Scan(&present)
+	err := ps.store.reader().QueryRowContext(ctx, `SELECT 1 FROM users WHERE role=? LIMIT 1`, RoleAdministrator).Scan(&present)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
@@ -161,7 +205,7 @@ func saveAdminExec(ctx context.Context, execer contextExecer, a Admin, stored st
 	}
 	expectedRevision := a.Revision
 	if expectedRevision > 0 {
-		result, updateErr := execer.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,password_hash=?,totp_secret=?,totp_enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND revision=?`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.UpdatedAt.UTC().Format(time.RFC3339Nano), LegacyAdminUserID, expectedRevision)
+		result, updateErr := execer.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,password_hash=?,totp_secret=?,totp_enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND tenant_id=? AND revision=?`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.UpdatedAt.UTC().Format(time.RFC3339Nano), LegacyAdminUserID, DefaultTenantID, expectedRevision)
 		if updateErr != nil {
 			return updateErr
 		}
@@ -173,8 +217,21 @@ func saveAdminExec(ctx context.Context, execer contextExecer, a Admin, stored st
 		}
 		return nil
 	}
-	_, err := execer.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,password_hash=?,totp_secret=?,totp_enabled=?,updated_at=?,revision=revision+1 WHERE id=?`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.UpdatedAt.UTC().Format(time.RFC3339Nano), LegacyAdminUserID)
-	return err
+	result, err := execer.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,password_hash=?,totp_secret=?,totp_enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND tenant_id=?`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.UpdatedAt.UTC().Format(time.RFC3339Nano), LegacyAdminUserID, DefaultTenantID)
+	if err != nil {
+		return err
+	}
+	// The insert above creates the row when it can. An original
+	// administrator that is still missing, because another account holds
+	// the username, or that is outside the default tenant, is not updated
+	// and is reported instead of being skipped silently.
+	if affected, affectedErr := result.RowsAffected(); affectedErr != nil || affected != 1 {
+		if affectedErr != nil {
+			return affectedErr
+		}
+		return ErrNotFound
+	}
+	return nil
 }
 
 func adminDisplayName(a Admin) string {
@@ -245,6 +302,8 @@ func (s *Store) SaveAdminSecurityWithAuditPreservingSession(ctx context.Context,
 		}
 	}
 	if audit.Action != "" {
+		// The record belongs to the account's tenant, the default tenant.
+		audit.TenantID = DefaultTenantID
 		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
 			return err
 		}
@@ -265,23 +324,49 @@ func (s *Store) adminTOTPForSave(a Admin) (string, error) {
 	return s.sealTOTPSecretForOwner(LegacyAdminUserID, a.TOTPSecret)
 }
 
+// PutSetupToken stores a fresh setup token issued now.
+//
+// Deprecated: use Store.Platform().PutSetupToken.
 func (s *Store) PutSetupToken(ctx context.Context, hash string, expires time.Time) error {
-	return s.PutSetupTokenAt(ctx, hash, expires, time.Now().UTC())
+	return s.Platform().PutSetupToken(ctx, hash, expires)
+}
+
+// PutSetupToken stores a fresh setup token issued now. The setup token is
+// the installation's one-time credential for creating the first
+// administrator, so it belongs to the platform.
+func (ps *PlatformStore) PutSetupToken(ctx context.Context, hash string, expires time.Time) error {
+	return ps.PutSetupTokenAt(ctx, hash, expires, time.Now().UTC())
+}
+
+// PutSetupTokenAt stores a fresh setup token and records when it was issued.
+//
+// Deprecated: use Store.Platform().PutSetupTokenAt.
+func (s *Store) PutSetupTokenAt(ctx context.Context, hash string, expires, issuedAt time.Time) error {
+	return s.Platform().PutSetupTokenAt(ctx, hash, expires, issuedAt)
 }
 
 // PutSetupTokenAt stores a fresh setup token and records when it was issued.
 // The timestamp is persisted so host recovery commands can enforce a rate
 // limit across short-lived CLI processes.
-func (s *Store) PutSetupTokenAt(ctx context.Context, hash string, expires, issuedAt time.Time) error {
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO setup_tokens(id,token_hash,expires_at,used_at,issued_at) VALUES(1,?,?,NULL,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at,used_at=NULL,issued_at=excluded.issued_at`, hash, expires.UTC().Format(time.RFC3339Nano), issuedAt.UTC().Format(time.RFC3339Nano))
+func (ps *PlatformStore) PutSetupTokenAt(ctx context.Context, hash string, expires, issuedAt time.Time) error {
+	_, err := ps.store.DB.ExecContext(ctx, `INSERT INTO setup_tokens(id,token_hash,expires_at,used_at,issued_at) VALUES(1,?,?,NULL,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at,used_at=NULL,issued_at=excluded.issued_at`, hash, expires.UTC().Format(time.RFC3339Nano), issuedAt.UTC().Format(time.RFC3339Nano))
 	return err
 }
 
+// GetSetupToken returns the state of the setup token.
+//
+// Deprecated: use Store.Platform().GetSetupToken.
 func (s *Store) GetSetupToken(ctx context.Context) (SetupToken, error) {
+	return s.Platform().GetSetupToken(ctx)
+}
+
+// GetSetupToken returns the state of the setup token, or ErrNotFound when
+// none was issued.
+func (ps *PlatformStore) GetSetupToken(ctx context.Context) (SetupToken, error) {
 	var expires string
 	var issued string
 	var used sql.NullString
-	err := s.reader().QueryRowContext(ctx, `SELECT expires_at,used_at,issued_at FROM setup_tokens WHERE id=1`).Scan(&expires, &used, &issued)
+	err := ps.store.reader().QueryRowContext(ctx, `SELECT expires_at,used_at,issued_at FROM setup_tokens WHERE id=1`).Scan(&expires, &used, &issued)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SetupToken{}, ErrNotFound
 	}
@@ -293,12 +378,19 @@ func (s *Store) GetSetupToken(ctx context.Context) (SetupToken, error) {
 
 var ErrSetupTokenRateLimited = errors.New("setup token was issued too recently; try again later")
 
+// ReissueSetupToken replaces the setup token while no administrator exists.
+//
+// Deprecated: use Store.Platform().ReissueSetupToken.
+func (s *Store) ReissueSetupToken(ctx context.Context, hash string, expires, now time.Time) error {
+	return s.Platform().ReissueSetupToken(ctx, hash, expires, now)
+}
+
 // ReissueSetupToken atomically replaces the one-time setup token, but only
 // while no administrator exists. It is intended for a host-authorized CLI
 // recovery path; the token itself is returned only to that caller and never
 // enters an API response or audit detail.
-func (s *Store) ReissueSetupToken(ctx context.Context, hash string, expires, now time.Time) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
+func (ps *PlatformStore) ReissueSetupToken(ctx context.Context, hash string, expires, now time.Time) error {
+	tx, err := ps.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -317,7 +409,9 @@ func (s *Store) ReissueSetupToken(ctx context.Context, hash string, expires, now
 	if _, err = tx.ExecContext(ctx, `INSERT INTO setup_tokens(id,token_hash,expires_at,used_at,issued_at) VALUES(1,?,?,NULL,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at,used_at=NULL,issued_at=excluded.issued_at`, hash, expires.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
-	if err = insertAuditExec(ctx, tx, "admin.setup_token_reissued", "setup token reissued from host CLI", now.UTC()); err != nil {
+	// The token creates the default tenant's first administrator, so the
+	// record belongs to that tenant, as it did before tenants existed.
+	if err = insertAuditEntryExec(ctx, tx, AuditEntry{Action: "admin.setup_token_reissued", Detail: "setup token reissued from host CLI", TenantID: DefaultTenantID, ActorKind: AuditActorHost}, now.UTC()); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -336,15 +430,22 @@ func requireNoAdministratorTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
+// CompleteSetup consumes the token and creates the first administrator.
+//
+// Deprecated: use Store.Platform().CompleteSetup.
+func (s *Store) CompleteSetup(ctx context.Context, tokenHash string, admin Admin, now time.Time) error {
+	return s.Platform().CompleteSetup(ctx, tokenHash, admin, now)
+}
+
 // CompleteSetup consumes the token and creates the one permitted administrator
 // in the default tenant in one transaction, preventing a token race from
 // creating two accounts.
-func (s *Store) CompleteSetup(ctx context.Context, tokenHash string, admin Admin, now time.Time) error {
-	storedSecret, err := s.adminTOTPForSave(admin)
+func (ps *PlatformStore) CompleteSetup(ctx context.Context, tokenHash string, admin Admin, now time.Time) error {
+	storedSecret, err := ps.store.adminTOTPForSave(admin)
 	if err != nil {
 		return err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ps.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -372,14 +473,24 @@ func (s *Store) CompleteSetup(ctx context.Context, tokenHash string, admin Admin
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return errors.New("setup token expired or already used")
 	}
-	if err = insertAuditExec(ctx, tx, "admin.setup", "administrator created", now.UTC()); err != nil {
+	// Setup is a request to the console that creates the default tenant's
+	// first administrator, so the record belongs to that tenant.
+	if err = insertAuditEntryExec(ctx, tx, AuditEntry{Action: "admin.setup", Detail: "administrator created", TenantID: DefaultTenantID, ActorKind: AuditActorUnit}, now.UTC()); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
+// ConsumeSetupToken marks a valid setup token used.
+//
+// Deprecated: use Store.Platform().ConsumeSetupToken.
 func (s *Store) ConsumeSetupToken(ctx context.Context, hash string, now time.Time) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
+	return s.Platform().ConsumeSetupToken(ctx, hash, now)
+}
+
+// ConsumeSetupToken marks a valid, unexpired setup token used.
+func (ps *PlatformStore) ConsumeSetupToken(ctx context.Context, hash string, now time.Time) error {
+	tx, err := ps.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -424,6 +535,31 @@ func (s *Store) CreateSessionForUserWithAudit(ctx context.Context, userID, idHas
 	return s.CreateSessionForUserWithAuditEntry(ctx, userID, idHash, csrf, created, expires, AuditEntry{Action: action, Detail: detail, ActorUserID: userID})
 }
 
+// ErrTenantNotActive reports that an account belongs to a tenant that is
+// not active. A tenant that is disabled or being deleted stops sign-in and
+// the redemption of its activation links.
+var ErrTenantNotActive = errors.New("the account's tenant is not active")
+
+// requireActiveAccountTenantTx fails with ErrTenantNotActive when the
+// account belongs to a tenant that is not active. It reads the tenant from
+// users, as TenantScopeForSession does. An account without a tenant, a
+// platform administrator, has no tenant to check, and neither has an
+// unknown account; the caller's own checks refuse those.
+func requireActiveAccountTenantTx(ctx context.Context, tx *sql.Tx, userID string) error {
+	var state string
+	err := tx.QueryRowContext(ctx, `SELECT t.state FROM users AS u JOIN tenants AS t ON t.id=u.tenant_id WHERE u.id=?`, userID).Scan(&state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if state != TenantStateActive {
+		return ErrTenantNotActive
+	}
+	return nil
+}
+
 // CreateSessionForUserWithAuditEntry is the actor-aware login primitive. The
 // session and its authentication audit record are committed together so a
 // successful login cannot be returned without evidence.
@@ -433,6 +569,9 @@ func (s *Store) CreateSessionForUserWithAuditEntry(ctx context.Context, userID, 
 		return err
 	}
 	defer tx.Rollback()
+	if err := requireActiveAccountTenantTx(ctx, tx, userID); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, created.UTC().Format(time.RFC3339Nano), created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
 		return err
 	}
@@ -468,6 +607,9 @@ func (s *Store) CreateSessionForUserIfCurrent(ctx context.Context, userID, expec
 	if enabled == 0 || revision != expectedRevision || passwordHash != expectedPasswordHash || (totpEnabled != 0) != expectedTOTPEnabled {
 		return ErrSessionCredentialsChanged
 	}
+	if err := requireActiveAccountTenantTx(ctx, tx, userID); err != nil {
+		return err
+	}
 	stamp := created.UTC().Format(time.RFC3339Nano)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, stamp, stamp, expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
 		return err
@@ -492,6 +634,9 @@ func (s *Store) CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx context.Con
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := requireActiveAccountTenantTx(ctx, tx, userID); err != nil {
+		return err
+	}
 	stamp := created.UTC().Format(time.RFC3339Nano)
 	result, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,last_login_at=?,updated_at=?,revision=revision+1 WHERE id=? AND password_hash=? AND revision=? AND totp_enabled=? AND enabled=1`, upgradedHash, stamp, stamp, userID, previousHash, expectedRevision, boolInt(expectedTOTPEnabled))
 	if err != nil {
@@ -524,6 +669,9 @@ func (s *Store) CreateSessionForUserWithPasswordUpgrade(ctx context.Context, use
 		return err
 	}
 	defer tx.Rollback()
+	if err := requireActiveAccountTenantTx(ctx, tx, userID); err != nil {
+		return err
+	}
 
 	stamp := created.UTC().Format(time.RFC3339Nano)
 	result, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,last_login_at=?,updated_at=?,revision=revision+1 WHERE id=? AND password_hash=?`, upgradedHash, stamp, stamp, userID, previousHash)
@@ -544,10 +692,15 @@ func (s *Store) CreateSessionForUserWithPasswordUpgrade(ctx context.Context, use
 	return tx.Commit()
 }
 
+// GetSession returns the session with the given hash, with the tenant of
+// its account. It stays global: authentication reads it before any tenant
+// scope exists. The tenant comes from users, as TenantScopeForSession reads
+// it; a session row from before accounts existed, with no user ID, belongs
+// to the original administrator.
 func (s *Store) GetSession(ctx context.Context, idHash string) (Session, error) {
 	var v Session
 	var created, lastSeen, expires string
-	err := s.reader().QueryRowContext(ctx, `SELECT id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token FROM sessions WHERE id_hash=?`, idHash).Scan(&v.IDHash, &v.UserID, &created, &lastSeen, &expires, &v.CSRFToken)
+	err := s.reader().QueryRowContext(ctx, `SELECT s.id_hash,s.user_id,s.created_at,s.last_seen_at,s.expires_at,s.csrf_token,COALESCE(u.tenant_id,'') FROM sessions AS s LEFT JOIN users AS u ON u.id=CASE WHEN s.user_id='' THEN ? ELSE s.user_id END WHERE s.id_hash=?`, LegacyAdminUserID, idHash).Scan(&v.IDHash, &v.UserID, &created, &lastSeen, &expires, &v.CSRFToken, &v.TenantID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return v, ErrNotFound
 	}
@@ -748,6 +901,8 @@ func recoveryCodeMatches(stored, code string) bool {
 	return hmac.Equal(h.Sum(nil), expected)
 }
 
+// Audit records a security event without an actor outside a transaction.
+// The record belongs to the default tenant and to the daemon.
 func (s *Store) Audit(ctx context.Context, action, detail string) error {
 	persistCtx, cancel := auditPersistenceContext(ctx)
 	defer cancel()
@@ -758,19 +913,89 @@ func (s *Store) Audit(ctx context.Context, action, detail string) error {
 // kept as a small convenience wrapper for mutations that cannot share a
 // transaction with their state change (for example, a failed notification
 // delivery or a host-initiated recovery action).
+//
+// It is global, for callers without a tenant scope: authentication, which
+// runs before a scope exists, and the host CLI. The record belongs to
+// entry.TenantID, or else to the tenant of the account in ActorUserID, or
+// else to the default tenant; see AuditEntry. A caller that holds a
+// TenantStore uses TenantStore.AuditEntry, which records in the store's
+// tenant.
 func (s *Store) AuditEntry(ctx context.Context, entry AuditEntry) error {
 	persistCtx, cancel := auditPersistenceContext(ctx)
 	defer cancel()
 	return insertAuditEntryExec(persistCtx, s.DB, entry, time.Now().UTC())
 }
 
+// Audit records a security event of the tenant without an actor, outside a
+// transaction. The record belongs to the store's tenant and to the daemon.
+func (ts *TenantStore) Audit(ctx context.Context, action, detail string) error {
+	return ts.AuditEntry(ctx, AuditEntry{Action: action, Detail: detail})
+}
+
+// AuditEntry records a security event of the tenant outside a transaction,
+// for an action that cannot share one with its state change. The record
+// belongs to the store's tenant, whatever tenant the entry names, so a
+// tenant cannot write into another tenant's audit.
+func (ts *TenantStore) AuditEntry(ctx context.Context, entry AuditEntry) error {
+	if err := ts.ready(); err != nil {
+		return err
+	}
+	persistCtx, cancel := auditPersistenceContext(ctx)
+	defer cancel()
+	return ts.insertAuditEntry(persistCtx, ts.store.DB, entry, time.Now().UTC())
+}
+
+// insertAuditEntry writes an audit record of the store's tenant. The audit
+// writes of TenantStore methods go through it or insertAuditEntries, so each
+// record belongs to the tenant whose data the method read or changed,
+// whatever tenant the entry names. The actor kind still comes from the
+// entry or its actor: a platform administrator acting on a tenant is
+// recorded in that tenant as a platform actor.
+func (ts *TenantStore) insertAuditEntry(ctx context.Context, execer contextExecer, entry AuditEntry, now time.Time) error {
+	entry.TenantID = ts.scope.id
+	return insertAuditEntryExec(ctx, execer, entry, now)
+}
+
+// insertAuditEntries writes the entries that have an action, each as
+// insertAuditEntry does.
+func (ts *TenantStore) insertAuditEntries(ctx context.Context, execer contextExecer, entries []AuditEntry, now time.Time) error {
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.Action) == "" {
+			continue
+		}
+		if err := ts.insertAuditEntry(ctx, execer, entry, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func insertAuditExec(ctx context.Context, execer contextExecer, action, detail string, now time.Time) error {
 	return insertAuditEntryExec(ctx, execer, AuditEntry{Action: action, Detail: detail}, now)
 }
 
+// auditInsertSQL writes one audit record. Its tenant and actor kind come
+// from the entry when the entry names them. Otherwise they come from the
+// account in actor_user_id, read in the same statement: the account's
+// tenant, which is NULL for a platform administrator, and the platform kind
+// for a platform administrator or the unit kind for any other account. A
+// record without an account belongs to the default tenant and to the
+// daemon. The last three arguments are the entry's tenant, actor kind, and
+// actor account.
+const auditInsertSQL = `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,category,created_at,tenant_id,actor_kind) ` +
+	`SELECT ?,?,?,?,?,?,?,?,` +
+	`CASE WHEN entry.tenant<>'' THEN entry.tenant WHEN actor.id IS NOT NULL THEN actor.tenant_id ELSE '` + DefaultTenantID + `' END,` +
+	`CASE WHEN entry.kind<>'' THEN entry.kind WHEN actor.role='` + RolePlatformAdmin + `' THEN '` + AuditActorPlatform + `' WHEN entry.actor<>'' THEN '` + AuditActorUnit + `' ELSE '` + AuditActorSystem + `' END ` +
+	`FROM (SELECT ? AS tenant,? AS kind,? AS actor) AS entry LEFT JOIN users AS actor ON actor.id=entry.actor`
+
 func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry AuditEntry, now time.Time) error {
 	if strings.TrimSpace(entry.Action) == "" {
 		return nil
+	}
+	switch entry.ActorKind {
+	case "", AuditActorUnit, AuditActorHost, AuditActorSystem, AuditActorPlatform:
+	default:
+		return fmt.Errorf("%w: unknown audit actor kind %q", ErrAuditUnavailable, entry.ActorKind)
 	}
 	requestContext := auditContextFromContext(ctx)
 	if strings.TrimSpace(entry.RequestID) == "" {
@@ -780,15 +1005,32 @@ func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry Audit
 		entry.SourceIP = requestContext.SourceIP
 	}
 	createdAt := now.UTC().Format(time.RFC3339Nano)
-	// Every record belongs to the default tenant, the only tenant for now.
-	_, err := execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,category,tenant_id,created_at) VALUES(?,?,?,?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, auditCategory(entry.Action), DefaultTenantID, createdAt)
+	_, err := execer.ExecContext(ctx, auditInsertSQL, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, auditCategory(entry.Action), createdAt, entry.TenantID, entry.ActorKind, entry.ActorUserID)
 	if err != nil {
 		// Host commands open the database without migrating it, for example
-		// the restored copy of an older backup. Before schema 51 the table
-		// has no category or tenant_id column; record the entry without
-		// them, and the migration categorizes and attributes it later.
-		if legacy, checkErr := auditTableLacksCategory(ctx, execer); checkErr == nil && legacy {
+		// the restored copy of an older backup, so the record may have to
+		// fit an older schema.
+		switch schema, checkErr := auditSchemaOf(ctx, execer); {
+		case checkErr != nil:
+		case schema == auditSchemaBefore51:
+			// The table has no category, tenant_id, or actor_kind column;
+			// record the entry without them, and the migration categorizes
+			// and attributes it later.
 			_, err = execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,created_at) VALUES(?,?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, createdAt)
+		case schema == auditSchemaBefore52:
+			// Accounts have no tenant before schema 52: each one belongs
+			// to the default tenant, and none is a platform administrator.
+			tenant, kind := entry.TenantID, entry.ActorKind
+			if tenant == "" {
+				tenant = DefaultTenantID
+			}
+			if kind == "" {
+				kind = AuditActorSystem
+				if entry.ActorUserID != "" {
+					kind = AuditActorUnit
+				}
+			}
+			_, err = execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,category,created_at,tenant_id,actor_kind) VALUES(?,?,?,?,?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, auditCategory(entry.Action), createdAt, tenant, kind)
 		}
 	}
 	if err != nil {
@@ -797,22 +1039,43 @@ func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry Audit
 	return nil
 }
 
-// auditTableLacksCategory reports whether security_audit exists without the
-// category column that schema 51 adds.
-func auditTableLacksCategory(ctx context.Context, execer contextExecer) (bool, error) {
+// The schemas an audit record may have to fit, from auditSchemaOf.
+const (
+	// auditSchemaCurrent is schema 52 or later.
+	auditSchemaCurrent = iota
+	// auditSchemaBefore51 has no category, tenant_id, or actor_kind column
+	// in security_audit.
+	auditSchemaBefore51
+	// auditSchemaBefore52 has those columns, but its accounts have no
+	// tenant.
+	auditSchemaBefore52
+)
+
+// auditSchemaOf reports which schema the audit table and the accounts
+// have. An execer that cannot query reports the current schema.
+func auditSchemaOf(ctx context.Context, execer contextExecer) (int, error) {
 	queryer, ok := execer.(interface {
 		QueryRowContext(context.Context, string, ...any) *sql.Row
 	})
 	if !ok {
-		return false, nil
+		return auditSchemaCurrent, nil
 	}
-	var columns, categories int
-	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(name='category'),0) FROM pragma_table_info('security_audit')`).Scan(&columns, &categories); err != nil {
-		return false, err
+	var columns, categories, accountTenants int
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(name='category'),0),(SELECT COUNT(*) FROM pragma_table_info('users') WHERE name='tenant_id') FROM pragma_table_info('security_audit')`).Scan(&columns, &categories, &accountTenants); err != nil {
+		return auditSchemaCurrent, err
 	}
-	return columns > 0 && categories == 0, nil
+	switch {
+	case columns > 0 && categories == 0:
+		return auditSchemaBefore51, nil
+	case columns > 0 && accountTenants == 0:
+		return auditSchemaBefore52, nil
+	}
+	return auditSchemaCurrent, nil
 }
 
+// insertAuditEntries writes the entries that have an action. A TenantStore
+// method uses TenantStore.insertAuditEntries instead, which records them in
+// its tenant.
 func insertAuditEntries(ctx context.Context, execer contextExecer, entries []AuditEntry, now time.Time) error {
 	for _, entry := range entries {
 		if strings.TrimSpace(entry.Action) == "" {

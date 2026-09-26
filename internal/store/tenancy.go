@@ -52,6 +52,9 @@ func (scope TenantScope) Valid() bool { return scope.id != "" }
 // It reads the account's tenant from users, so a session row cannot choose
 // the tenant. A platform administrator has no tenant, and a tenant that is
 // not active lends no scope; both are refused with ErrNoTenantScope.
+// GetSession reads Session.TenantID from users in the same way. A session
+// that names another tenant than its account has now is refused too, so a
+// request never acts in a tenant other than the one it authenticated in.
 func (s *Store) TenantScopeForSession(ctx context.Context, session Session) (TenantScope, error) {
 	if session.Role == RolePlatformAdmin || session.UserID == "" {
 		return TenantScope{}, ErrNoTenantScope
@@ -64,7 +67,7 @@ func (s *Store) TenantScopeForSession(ctx context.Context, session Session) (Ten
 	if err != nil {
 		return TenantScope{}, err
 	}
-	if role == RolePlatformAdmin || tenantID == "" || state != TenantStateActive {
+	if role == RolePlatformAdmin || tenantID == "" || state != TenantStateActive || (session.TenantID != "" && session.TenantID != tenantID) {
 		return TenantScope{}, fmt.Errorf("%w: user %s", ErrNoTenantScope, session.UserID)
 	}
 	return TenantScope{id: tenantID}, nil

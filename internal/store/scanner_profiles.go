@@ -22,6 +22,26 @@ const (
 // built-in profile. It is a caller error, not a storage failure.
 var errBuiltinScannerProfileImmutable = NewValidationError(errors.New("built-in scanner profiles are immutable"))
 
+// ErrScannerProfileNameInUse rejects a custom profile named like a built-in
+// profile. Schema 52 makes custom profile names unique per tenant and gives
+// the built-ins a namespace of their own, so the unique index no longer
+// rejects that name; the store keeps it reserved, as the global unique name
+// did before.
+var ErrScannerProfileNameInUse = errors.New("scanner profile name is already in use")
+
+// requireCustomScannerProfileNameTx fails when name, compared without case,
+// is the name of a built-in profile.
+func requireCustomScannerProfileNameTx(ctx context.Context, tx *sql.Tx, name string) error {
+	var builtins int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM scanner_profiles WHERE built_in=1 AND name=?`, name).Scan(&builtins); err != nil {
+		return err
+	}
+	if builtins > 0 {
+		return ErrScannerProfileNameInUse
+	}
+	return nil
+}
+
 // ScannerProfileRecord is the durable, revisioned profile exposed to the
 // authenticated console. Definition is the complete effective, validated
 // profile; arguments are never written to audit records.
@@ -93,7 +113,7 @@ func ensureBuiltinScannerProfilesContext(ctx context.Context, db *sql.DB) error 
 		var builtIn, currentRevision int
 		rowErr := tx.QueryRowContext(ctx, `SELECT definition_json,built_in,revision FROM scanner_profiles WHERE id=?`, builtin.id).Scan(&currentRaw, &builtIn, &currentRevision)
 		if errors.Is(rowErr, sql.ErrNoRows) {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profiles(id,name,description,definition_json,built_in,archived,revision,created_by,updated_by,created_at,updated_at) VALUES(?,?,?,?,1,0,1,'system','system',?,?)`, builtin.id, builtin.name, builtin.value.Description, raw, now, now); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profiles(id,tenant_id,name,description,definition_json,built_in,archived,revision,created_by,updated_by,created_at,updated_at) VALUES(?,NULL,?,?,?,1,0,1,'system','system',?,?)`, builtin.id, builtin.name, builtin.value.Description, raw, now, now); err != nil {
 				return err
 			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) VALUES(?,?,?,'system',?)`, builtin.id, 1, raw, now); err != nil {
@@ -379,7 +399,10 @@ func (s *Store) CreateScannerProfile(ctx context.Context, name, description stri
 		return ScannerProfileRecord{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profiles(id,name,description,definition_json,built_in,archived,revision,created_by,updated_by,created_at,updated_at) VALUES(?,?,?, ?,0,0,1,?,?,?,?)`, id, name, strings.TrimSpace(description), raw, actor, actor, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+	if err := requireCustomScannerProfileNameTx(ctx, tx, name); err != nil {
+		return ScannerProfileRecord{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profiles(id,tenant_id,name,description,definition_json,built_in,archived,revision,created_by,updated_by,created_at,updated_at) VALUES(?,?,?,?, ?,0,0,1,?,?,?,?)`, id, DefaultTenantID, name, strings.TrimSpace(description), raw, actor, actor, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return ScannerProfileRecord{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) VALUES(?,?,?, ?,?)`, id, 1, raw, actor, now.Format(time.RFC3339Nano)); err != nil {
@@ -423,6 +446,9 @@ func (s *Store) UpdateScannerProfile(ctx context.Context, id string, expectedRev
 	}
 	if builtIn != 0 {
 		return ScannerProfileRecord{}, errBuiltinScannerProfileImmutable
+	}
+	if err := requireCustomScannerProfileNameTx(ctx, tx, name); err != nil {
+		return ScannerProfileRecord{}, err
 	}
 	next := current.Revision + 1
 	result, err := tx.ExecContext(ctx, `UPDATE scanner_profiles SET name=?,description=?,definition_json=?,revision=?,updated_by=?,updated_at=? WHERE id=? AND revision=?`, name, strings.TrimSpace(description), raw, next, actor, now.Format(time.RFC3339Nano), id, expectedRevision)

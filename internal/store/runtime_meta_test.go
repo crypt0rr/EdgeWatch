@@ -48,7 +48,7 @@ func TestRuntimeMetadataMigrationBackfillsLegacyRows(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `DROP TABLE job_runtime_meta; PRAGMA user_version = 36`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('legacy-meta','legacy-meta','{}',1,0,1,?,?)`, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('legacy-meta',?,'legacy-meta','{}',1,0,1,?,?)`, DefaultTenantID, time.Now().UTC().Format(time.RFC3339Nano), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?)`, "legacy-meta", []byte(`{"baseline_scan_id":"old-scan","baseline_config_hash":"old-hash","baseline_modified":1}`), time.Now().UTC().Format(time.RFC3339Nano)); err != nil {

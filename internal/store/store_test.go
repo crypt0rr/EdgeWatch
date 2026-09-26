@@ -197,7 +197,7 @@ func TestScanHostIndexSupportsFilteringPaginationAndLatestRows(t *testing.T) {
 			{Address: "2001:db8::20", AddressFamily: "IPv6", SourceTargets: []string{"2001:db8::20"}, Protocols: []model.ProtocolObservation{{Protocol: "udp", ScannedPorts: "53", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 53, State: "open|filtered"}}}}},
 		}},
 	}
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('job-1','edge','{}',1,0,1,?,?)`, time.Unix(1, 0).UTC().Format(time.RFC3339Nano), time.Unix(1, 0).UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('job-1',?,'edge','{}',1,0,1,?,?)`, DefaultTenantID, time.Unix(1, 0).UTC().Format(time.RFC3339Nano), time.Unix(1, 0).UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SaveScan(ctx, job); err != nil {

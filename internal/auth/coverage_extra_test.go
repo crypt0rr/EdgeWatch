@@ -107,7 +107,23 @@ func TestVerifyPasswordRejectsMalformedEncodings(t *testing.T) {
 	}
 }
 
-func TestLoginLegacyFallbackAndAuthenticationFailureModes(t *testing.T) {
+// replaceAdministratorWithAdminsRow deletes the original administrator's
+// users row and writes its credentials to the admins row that schema 52
+// retired, as a database changed by hand could hold them.
+func replaceAdministratorWithAdminsRow(t *testing.T, db *store.Store) {
+	t.Helper()
+	ctx := context.Background()
+	for _, statement := range []string{
+		`INSERT INTO admins(id,username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at) SELECT 1,username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at FROM users WHERE id=?`,
+		`DELETE FROM users WHERE id=?`,
+	} {
+		if _, err := db.DB.ExecContext(ctx, statement, store.LegacyAdminUserID); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestLoginAfterAdminsRetirementAndAuthenticationFailureModes(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -119,19 +135,27 @@ func TestLoginLegacyFallbackAndAuthenticationFailureModes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if token == "" {
+		t.Fatal("a fresh install did not issue a setup token")
+	}
 	if err := m.Setup(ctx, token, "administrator password"); err != nil {
 		t.Fatal(err)
 	}
-	// Remove only the migrated authoritative row to exercise the compatibility
-	// lookup against the legacy admins table.
-	if _, err := db.DB.ExecContext(ctx, "DELETE FROM users WHERE id=?", store.LegacyAdminUserID); err != nil {
-		t.Fatal(err)
+	// The first setup creates the administrator in users only, in the
+	// default tenant, and login uses that row.
+	var legacyRows int
+	var tenant string
+	if err := db.DB.QueryRowContext(ctx, `SELECT (SELECT COUNT(*) FROM admins),(SELECT tenant_id FROM users WHERE id=?)`, store.LegacyAdminUserID).Scan(&legacyRows, &tenant); err != nil || legacyRows != 0 || tenant != store.DefaultTenantID {
+		t.Fatalf("after setup: admins rows = %d, administrator tenant = %q, %v", legacyRows, tenant, err)
+	}
+	if again, err := m.EnsureSetupToken(ctx); err != nil || again != "" {
+		t.Fatalf("setup token after setup = %q, %v", again, err)
 	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
 	request.RemoteAddr = "203.0.113.20:9000"
 	raw, user, err := m.LoginAs(ctx, request, " ADMIN ", "administrator password", "", "")
 	if err != nil || raw == "" || user.ID != store.LegacyAdminUserID || user.Role != store.RoleAdministrator {
-		t.Fatalf("legacy login = %q %#v, %v", raw, user, err)
+		t.Fatalf("administrator login = %q %#v, %v", raw, user, err)
 	}
 
 	if _, ok := m.Authenticate(ctx, httptest.NewRequest(http.MethodGet, "/", nil)); ok {
@@ -148,18 +172,10 @@ func TestLoginLegacyFallbackAndAuthenticationFailureModes(t *testing.T) {
 		t.Fatal("unknown authentication cookie was accepted")
 	}
 
-	// Restore the migrated row so the session identity can be resolved.
-	admin, err := db.GetAdmin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.SaveAdmin(ctx, admin); err != nil {
-		t.Fatal(err)
-	}
 	valid := httptest.NewRequest(http.MethodGet, "/", nil)
 	valid.AddCookie(&http.Cookie{Name: SessionCookie, Value: raw})
 	if _, ok := m.Authenticate(ctx, valid); !ok {
-		t.Fatal("legacy session did not authenticate after migration row restore")
+		t.Fatal("administrator session did not authenticate")
 	}
 
 	now := time.Now().UTC()
@@ -180,9 +196,25 @@ func TestLoginLegacyFallbackAndAuthenticationFailureModes(t *testing.T) {
 	if _, ok := m.Authenticate(ctx, idle); ok {
 		t.Fatal("idle session was accepted")
 	}
+
+	// Without its users row the administrator cannot sign in, even when an
+	// admins row still holds the same credentials: that row has no tenant.
+	replaceAdministratorWithAdminsRow(t, db)
+	m.Now = time.Now
+	fallback := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	fallback.RemoteAddr = "203.0.113.21:9000"
+	if raw, user, err := m.LoginAs(ctx, fallback, "admin", "administrator password", "", ""); err == nil || raw != "" || user.ID != "" {
+		t.Fatalf("login from the admins row = %q %#v, %v; want invalid credentials", raw, user, err)
+	}
+	if _, ok := m.Authenticate(ctx, valid); ok {
+		t.Fatal("session of the removed administrator was accepted")
+	}
 }
 
-func TestConfirmPasswordLegacyAdministratorFallback(t *testing.T) {
+// Password and TOTP confirmation use the users row only. A missing users row
+// fails even for the original administrator's ID, whatever the admins row
+// holds.
+func TestConfirmationRequiresTheUsersRow(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
 	if err != nil {
@@ -197,16 +229,17 @@ func TestConfirmPasswordLegacyAdministratorFallback(t *testing.T) {
 	if err := m.Setup(ctx, token, "administrator password"); err != nil {
 		t.Fatal(err)
 	}
-	// A database upgraded in stages can temporarily retain only the legacy
-	// administrator row. Password confirmation must remain usable for that
-	// stable compatibility identity while refusing arbitrary missing users.
-	if _, err := db.DB.ExecContext(ctx, `DELETE FROM users WHERE id=?`, store.LegacyAdminUserID); err != nil {
-		t.Fatal(err)
-	}
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations", nil)
 	request.RemoteAddr = "198.51.100.240:8080"
 	if err := m.ConfirmPasswordForUser(ctx, request, store.LegacyAdminUserID, "administrator password"); err != nil {
-		t.Fatalf("legacy administrator confirmation failed: %v", err)
+		t.Fatalf("administrator confirmation failed: %v", err)
+	}
+	replaceAdministratorWithAdminsRow(t, db)
+	if err := m.ConfirmPasswordForUser(ctx, request, store.LegacyAdminUserID, "administrator password"); err == nil {
+		t.Fatal("password confirmation from the admins row was accepted")
+	}
+	if err := m.ConfirmTOTPForUser(ctx, request, store.LegacyAdminUserID, "000000", "RECOVERY"); err == nil {
+		t.Fatal("TOTP confirmation from the admins row was accepted")
 	}
 	if err := m.ConfirmPasswordForUser(ctx, request, "missing-user", "administrator password"); err == nil {
 		t.Fatal("missing arbitrary user was accepted")

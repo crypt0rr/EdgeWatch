@@ -81,10 +81,6 @@ func TestDaemonCompatibilityMigrationUsesConfiguredAuthKey(t *testing.T) {
 					seed.Close()
 					t.Fatal(err)
 				}
-				if _, err := seed.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=? WHERE id=1`, seedSecret); err != nil {
-					seed.Close()
-					t.Fatal(err)
-				}
 			}
 			if err := seed.Close(); err != nil {
 				t.Fatal(err)

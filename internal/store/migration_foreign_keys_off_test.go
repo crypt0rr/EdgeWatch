@@ -530,6 +530,16 @@ func TestSQLiteTableRebuildStatements(t *testing.T) {
 		t.Fatalf("statements:\n got %q\nwant %q", got, want)
 	}
 
+	owned := sqliteTableRebuild{
+		table:      "parents",
+		definition: "id TEXT PRIMARY KEY, name TEXT NOT NULL, owner TEXT NOT NULL, kind TEXT",
+		columns:    []string{"id", "name"},
+		fill:       []sqliteRebuildFill{{column: "owner", expression: "'default'"}, {column: "kind", expression: "CASE WHEN name='alpha' THEN NULL ELSE 'custom' END"}},
+	}
+	if got, want := owned.statements()[1], "INSERT INTO parents_next(rowid, id, name, owner, kind) SELECT rowid, id, name, 'default', CASE WHEN name='alpha' THEN NULL ELSE 'custom' END FROM parents"; got != want {
+		t.Fatalf("fill copy = %q, want %q", got, want)
+	}
+
 	for _, test := range []struct {
 		name    string
 		rebuild sqliteTableRebuild
@@ -540,6 +550,10 @@ func TestSQLiteTableRebuildStatements(t *testing.T) {
 		{"no columns", sqliteTableRebuild{table: "users", definition: "id TEXT"}, "no columns to copy"},
 		{"rowid column", sqliteTableRebuild{table: "users", definition: "id TEXT", columns: []string{"id", "ROWID"}}, `invalid column name "ROWID"`},
 		{"column name", sqliteTableRebuild{table: "users", definition: "id TEXT", columns: []string{"id, secret"}}, `invalid column name "id, secret"`},
+		{"fill column name", sqliteTableRebuild{table: "users", definition: "id TEXT", columns: []string{"id"}, fill: []sqliteRebuildFill{{column: "tenant; DROP TABLE jobs", expression: "'x'"}}}, `invalid fill column "tenant; DROP TABLE jobs"`},
+		{"fill of a copied column", sqliteTableRebuild{table: "users", definition: "id TEXT", columns: []string{"id"}, fill: []sqliteRebuildFill{{column: "ID", expression: "'x'"}}}, `invalid fill column "ID"`},
+		{"fill of rowid", sqliteTableRebuild{table: "users", definition: "id TEXT", columns: []string{"id"}, fill: []sqliteRebuildFill{{column: "rowid", expression: "1"}}}, `invalid fill column "rowid"`},
+		{"empty fill expression", sqliteTableRebuild{table: "users", definition: "id TEXT", columns: []string{"id"}, fill: []sqliteRebuildFill{{column: "tenant_id", expression: " "}}}, "empty fill expression for tenant_id"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			defer func() {

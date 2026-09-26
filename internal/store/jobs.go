@@ -94,7 +94,7 @@ func (s *Store) createJobWithAudits(ctx context.Context, job config.Job, enabled
 		return JobRecord{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err = tx.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?,?, ?,0,1,?,?)`, id, job.Name, raw, boolInt(enabled), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?,?,?, ?,0,1,?,?)`, id, DefaultTenantID, job.Name, raw, boolInt(enabled), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return JobRecord{}, err
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO job_revisions(job_id,revision,definition_json,security_hash,created_at) VALUES(?,?,?,?,?)`, id, 1, raw, hash, now.Format(time.RFC3339Nano)); err != nil {

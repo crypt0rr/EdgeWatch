@@ -382,7 +382,7 @@ func (s *Server) createScannerProfile(w http.ResponseWriter, r *http.Request, se
 		if s.writeAuditUnavailable(w, err, "scanner_profile.created") {
 			return
 		}
-		if isUnique(err) {
+		if isUnique(err) || errors.Is(err, store.ErrScannerProfileNameInUse) {
 			writeError(w, http.StatusConflict, "conflict", "scanner profile name is already in use", nil)
 		} else {
 			s.writeStoreWriteError(w, r, err, "scanner profile not found")
@@ -414,7 +414,7 @@ func (s *Server) updateScannerProfile(w http.ResponseWriter, r *http.Request, se
 		return
 	}
 	if err != nil {
-		if isUnique(err) {
+		if isUnique(err) || errors.Is(err, store.ErrScannerProfileNameInUse) {
 			writeError(w, http.StatusConflict, "conflict", "scanner profile name is already in use", nil)
 		} else {
 			s.writeStoreWriteError(w, r, err, "scanner profile not found")

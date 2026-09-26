@@ -24,7 +24,7 @@ func TestTOTPSecretIsEncryptedAndReloadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stored string
-	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret FROM admins WHERE id=1`).Scan(&stored); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret FROM users WHERE id=?`, LegacyAdminUserID).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(stored, authCiphertextV2) || strings.Contains(stored, secret) {
@@ -97,7 +97,7 @@ func TestTOTPSecretKeyLossFailsClosedAndPreservesCiphertext(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stored string
-	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret FROM admins WHERE id=1`).Scan(&stored); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret FROM users WHERE id=?`, LegacyAdminUserID).Scan(&stored); err != nil {
 		t.Fatal(err)
 	}
 	if stored == "" || !strings.HasPrefix(stored, authCiphertextV2) {
@@ -122,9 +122,6 @@ func TestTOTPSecretLegacyValuesMigrateToOwnerBoundCiphertext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE admins SET totp_secret=? WHERE id=1`, legacy); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET totp_secret=? WHERE id=?`, legacy, LegacyAdminUserID); err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +133,7 @@ func TestTOTPSecretLegacyValuesMigrateToOwnerBoundCiphertext(t *testing.T) {
 		t.Fatalf("legacy admin secret = %#v, err=%v", got, err)
 	}
 	var migrated string
-	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret FROM admins WHERE id=1`).Scan(&migrated); err != nil {
+	if err := s.DB.QueryRowContext(ctx, `SELECT totp_secret FROM users WHERE id=?`, LegacyAdminUserID).Scan(&migrated); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasPrefix(migrated, authCiphertextV2) {

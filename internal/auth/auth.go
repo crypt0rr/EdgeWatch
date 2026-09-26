@@ -590,18 +590,9 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		return "", store.User{}, m.rateLimitError(source, account)
 	}
 	defer m.releaseScoped(source, account)
+	// Only a users row can sign in. Schema 52 retired the legacy admins row,
+	// so the original administrator is the users row with LegacyAdminUserID.
 	user, err := m.Store.GetUserByUsername(ctx, identity)
-	if errors.Is(err, store.ErrNotFound) && strings.EqualFold(strings.TrimSpace(username), "admin") {
-		// Databases created by older test fixtures may not have the migrated
-		// users row yet. Preserve the original administrator behavior while the
-		// normal Open path always creates it through migration 12.
-		admin, adminErr := m.Store.GetAdmin(ctx)
-		if adminErr != nil {
-			return "", store.User{}, errors.New("administrator is not configured")
-		}
-		user = store.User{ID: store.LegacyAdminUserID, Username: admin.Username, DisplayName: admin.DisplayName, Role: store.RoleAdministrator, PasswordHash: admin.PasswordHash, TOTPSecret: admin.TOTPSecret, TOTPSecretStored: admin.TOTPSecretStored, TOTPSecretError: admin.TOTPSecretError, TOTPEnabled: admin.TOTPEnabled, Enabled: true, CreatedAt: admin.CreatedAt, UpdatedAt: admin.UpdatedAt}
-		err = nil
-	}
 	if err != nil {
 		if !sharedLoopbackLoginSource(source, account) {
 			if !m.allowUnknownSource(unknownSource) {
@@ -812,16 +803,6 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 	}
 	defer m.releaseScoped(source, account)
 	user, err := m.Store.GetUser(ctx, userID)
-	if errors.Is(err, store.ErrNotFound) && userID == store.LegacyAdminUserID {
-		// Keep password-confirmation compatible with a pre-RBAC database while
-		// its legacy administrator row is being migrated into users. The normal
-		// daemon path has an authoritative users row; this fallback is limited to
-		// the stable legacy ID and never applies to a missing arbitrary user.
-		if admin, adminErr := m.Store.GetAdmin(ctx); adminErr == nil {
-			user = store.User{ID: store.LegacyAdminUserID, Username: admin.Username, DisplayName: admin.DisplayName, Role: store.RoleAdministrator, PasswordHash: admin.PasswordHash, TOTPSecret: admin.TOTPSecret, TOTPSecretStored: admin.TOTPSecretStored, TOTPSecretError: admin.TOTPSecretError, TOTPEnabled: admin.TOTPEnabled, Enabled: true, CreatedAt: admin.CreatedAt, UpdatedAt: admin.UpdatedAt}
-			err = nil
-		}
-	}
 	var passwordValid bool
 	if err == nil && user.Enabled {
 		if verifyErr := m.withArgon2(ctx, func() error {
@@ -857,12 +838,6 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 	}
 	defer m.releaseScoped(source, account)
 	user, err := m.Store.GetUser(ctx, userID)
-	if errors.Is(err, store.ErrNotFound) && userID == store.LegacyAdminUserID {
-		if admin, adminErr := m.Store.GetAdmin(ctx); adminErr == nil {
-			user = store.User{ID: store.LegacyAdminUserID, Username: admin.Username, PasswordHash: admin.PasswordHash, TOTPSecret: admin.TOTPSecret, TOTPSecretStored: admin.TOTPSecretStored, TOTPSecretError: admin.TOTPSecretError, TOTPEnabled: admin.TOTPEnabled, Enabled: true}
-			err = nil
-		}
-	}
 	valid := false
 	if err == nil && user.Enabled && user.TOTPEnabled && user.TOTPSecretError == nil {
 		if step, stepValid := VerifyTOTPAtStep(user.TOTPSecret, otp, m.now()); stepValid {

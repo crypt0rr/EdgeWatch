@@ -45,14 +45,18 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 51
+const schemaVersion = 52
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
 // reference with ON DELETE CASCADE, such as users, jobs, scanner_profiles or
-// managed_notifications. No version needs it yet. Add a version here in the
-// same change that adds its rebuild statements.
-var foreignKeysOffMigrations = map[int]bool{}
+// managed_notifications. Add a version here in the same change that adds its
+// rebuild statements.
+var foreignKeysOffMigrations = map[int]bool{
+	// Schema 52 rebuilds users, jobs, scanner_profiles and
+	// managed_notifications with a tenant_id column.
+	52: true,
+}
 
 // newerSchemaError is the refusal for a database that a newer release has
 // upgraded. Migrations are forward-only, so an older binary must not write to
@@ -1219,6 +1223,9 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 		// setup token purposes, and audit attribution moved to the default
 		// tenant. See migration51Statements.
 		51: migration51Statements(),
+		// The root tables gain their tenant, and the legacy admins row is
+		// retired. See migration52Statements.
+		52: migration52Statements(),
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an
@@ -1571,8 +1578,12 @@ type sqliteTableRebuild struct {
 	// references the table itself names X, not X_next.
 	definition string
 	// columns lists the columns copied from the old table. Each must exist in
-	// both definitions. New columns take their DEFAULT.
+	// both definitions. New columns take their DEFAULT unless fill sets them.
 	columns []string
+	// fill sets new columns from an SQL expression over the old row, for a
+	// column that must not have a DEFAULT, such as the owner of a row. The
+	// expression is part of the migration source, never user input.
+	fill []sqliteRebuildFill
 	// dropDependents drops the views, and the triggers on other tables, whose
 	// SQL references X. ALTER TABLE ... RENAME re-parses the whole schema and
 	// fails while any of them refers to the dropped table. Triggers on X itself
@@ -1581,6 +1592,15 @@ type sqliteTableRebuild struct {
 	// recreate runs after the rename. It creates the indexes and triggers of X
 	// and the views and triggers removed by dropDependents.
 	recreate []string
+}
+
+// sqliteRebuildFill sets one new column of a rebuilt table.
+type sqliteRebuildFill struct {
+	// column is the new column. It must not exist in the old table.
+	column string
+	// expression computes the value from the old row, for example a string
+	// literal or a CASE over the copied columns.
+	expression string
 }
 
 // statements returns the rebuild in migration order. It panics on an invalid
@@ -1601,13 +1621,24 @@ func (r sqliteTableRebuild) statements() []string {
 			panic(fmt.Sprintf("table rebuild of %s: invalid column name %q", r.table, column))
 		}
 	}
+	targets := slices.Clone(r.columns)
+	values := slices.Clone(r.columns)
+	for _, fill := range r.fill {
+		if !validMigrationIdentifier(fill.column) || strings.EqualFold(fill.column, "rowid") || slices.ContainsFunc(targets, func(column string) bool { return strings.EqualFold(column, fill.column) }) {
+			panic(fmt.Sprintf("table rebuild of %s: invalid fill column %q", r.table, fill.column))
+		}
+		if strings.TrimSpace(fill.expression) == "" {
+			panic(fmt.Sprintf("table rebuild of %s: empty fill expression for %s", r.table, fill.column))
+		}
+		targets = append(targets, fill.column)
+		values = append(values, fill.expression)
+	}
 	next := r.table + "_next"
-	columns := strings.Join(r.columns, ", ")
 	statements := make([]string, 0, len(r.dropDependents)+4+len(r.recreate))
 	statements = append(statements, r.dropDependents...)
 	statements = append(statements,
 		"CREATE TABLE "+next+" ("+r.definition+")",
-		"INSERT INTO "+next+"(rowid, "+columns+") SELECT rowid, "+columns+" FROM "+r.table,
+		"INSERT INTO "+next+"(rowid, "+strings.Join(targets, ", ")+") SELECT rowid, "+strings.Join(values, ", ")+" FROM "+r.table,
 		"DROP TABLE "+r.table,
 		"ALTER TABLE "+next+" RENAME TO "+r.table,
 	)

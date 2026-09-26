@@ -138,3 +138,31 @@ func TestScannerProfilesRouteLifecycleAndValidationBranches(t *testing.T) {
 		t.Fatalf("historical profile error = %v", err)
 	}
 }
+
+// Profile names stay unique among the custom profiles and cannot take a
+// built-in profile's name, which schema 52 keeps in a namespace of its own.
+func TestScannerProfileNameConflictsReturnConflict(t *testing.T) {
+	server, _, admin := newUsersTestServer(t)
+	created := scannerProfileRequest(server, admin, http.MethodPost, "", `{"name":"Route A","engine":"nmap","password":"administrator password"}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create status = %d: %s", created.Code, created.Body.String())
+	}
+	var profile struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &profile); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, method, rest, body string
+	}{
+		{"duplicate custom name", http.MethodPost, "", `{"name":"route a","engine":"nmap","password":"administrator password"}`},
+		{"built-in name", http.MethodPost, "", `{"name":"NMAP STANDARD","engine":"nmap","password":"administrator password"}`},
+		{"rename to a built-in name", http.MethodPut, profile.ID, `{"name":"Naabu full TCP → Nmap","engine":"nmap","password":"administrator password","revision":1}`},
+	} {
+		got := scannerProfileRequest(server, admin, tc.method, tc.rest, tc.body)
+		if got.Code != http.StatusConflict || !strings.Contains(got.Body.String(), "scanner profile name is already in use") {
+			t.Fatalf("%s = %d: %s", tc.name, got.Code, got.Body.String())
+		}
+	}
+}

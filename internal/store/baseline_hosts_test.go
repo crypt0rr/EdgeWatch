@@ -17,7 +17,7 @@ func TestBaselineHostProjectionPaginatesAcceptedOverlay(t *testing.T) {
 		{Address: "198.51.100.2", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Product: "nginx"}}}}}},
 		{Address: "198.51.100.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 22, State: "open"}}}}},
 	}}
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('overlay-job','overlay','{}',1,0,1,'now','now')`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('overlay-job',?,'overlay','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ReplaceBaselineHostProjection(ctx, "overlay-job", snapshot); err != nil {
@@ -58,7 +58,7 @@ func TestBaselineHostProjectionSearchAcceptsShortQueries(t *testing.T) {
 		{Address: "192.0.2.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 80, State: "open"}}}}},
 		{Address: "192.0.2.3", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open"}}}}},
 	}}
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('short-search','short-search','{}',1,0,1,'now','now')`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('short-search',?,'short-search','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.ReplaceBaselineHostProjection(ctx, "short-search", snapshot); err != nil {
@@ -92,7 +92,7 @@ func TestBaselineHostProjectionSearchAcceptsShortQueries(t *testing.T) {
 func TestRuntimeStateSummaryUsesProjectionCounts(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('summary-job','summary','{}',1,0,1,'now','now')`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('summary-job',?,'summary','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
 		t.Fatal(err)
 	}
 	state := []byte(`{"baseline":{"hosts":[{"address":"198.51.100.1"}]},"baseline_scan_id":"scan-1","baseline_config_hash":"hash","candidate_count":2,"candidate_attempts":3,"incidents":{"one":{}},"pending":{"two":{}}}`)
@@ -123,7 +123,7 @@ func TestRuntimeStateSummaryUsesProjectionCounts(t *testing.T) {
 func TestRuntimeStateSummaryUsesBaselineProjectionCounts(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('projected-summary','projected-summary','{}',1,0,1,'now','now')`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('projected-summary',?,'projected-summary','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
 		t.Fatal(err)
 	}
 	state := []byte(`{"baseline":{"hosts":[{"address":"198.51.100.20"}]},"baseline_scan_id":"projected-baseline"}`)
@@ -149,7 +149,7 @@ func TestRuntimeStateSummaryUsesBaselineProjectionCounts(t *testing.T) {
 func TestRuntimeStateSummaryFallsBackToLegacyUnitsWithMetadata(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('unit-metadata-summary','unit-metadata-summary','{}',1,0,1,'now','now')`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('unit-metadata-summary',?,'unit-metadata-summary','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
 		t.Fatal(err)
 	}
 	state := []byte(`{"baseline":{"units":[{"addresses":["198.51.100.30","198.51.100.31"]}]}}`)
@@ -173,7 +173,7 @@ func TestRuntimeStateSummaryHandlesMetadataWithoutLegacyBaseline(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	for _, jobID := range []string{"metadata-no-runtime", "metadata-no-baseline"} {
-		if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?,?,1,0,1,'now','now')`, jobID, jobID, `{}`); err != nil {
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?,?,?,1,0,1,'now','now')`, jobID, DefaultTenantID, jobID, `{}`); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, jobID, 1, "", "", 0, 0, 0, 0, 0, 0, "now"); err != nil {
@@ -198,7 +198,7 @@ func TestRuntimeStateSummaryHandlesMetadataWithoutLegacyBaseline(t *testing.T) {
 func TestRuntimeStateSummaryPreservesLegacyHostsOnMetadataFastPath(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('legacy-metadata-summary','legacy-metadata-summary','{}',1,0,1,'now','now')`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('legacy-metadata-summary',?,'legacy-metadata-summary','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
 		t.Fatal(err)
 	}
 	state := []byte(`{"baseline":{"hosts":[{"address":"198.51.100.10"},{"address":"198.51.100.11"}]},"baseline_scan_id":"legacy-baseline","baseline_config_hash":"hash"}`)
@@ -221,7 +221,7 @@ func TestRuntimeStateSummaryPreservesLegacyHostsOnMetadataFastPath(t *testing.T)
 func TestRuntimeStateSummaryCountsLegacyUnitAddresses(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('legacy-summary-job','legacy-summary','{}',1,0,1,'now','now')`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('legacy-summary-job',?,'legacy-summary','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
 		t.Fatal(err)
 	}
 	state := []byte(`{"baseline":{"units":[{"target":"dns.example","protocol":"tcp","addresses":["198.51.100.1","198.51.100.2"]}]},"candidate_count":1}`)
@@ -253,7 +253,7 @@ func TestRuntimeStateSummariesMatchSingleJobSummariesAndArchiveScope(t *testing.
 	}
 	insertJob := func(id string, archived bool) {
 		t.Helper()
-		if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?, '{}',1,?,1,'now','now')`, id, id, boolInt(archived)); err != nil {
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?,?, '{}',1,?,1,'now','now')`, id, DefaultTenantID, id, boolInt(archived)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -355,7 +355,7 @@ func TestRuntimeStateSummariesMatchSingleJobSummariesAndArchiveScope(t *testing.
 func TestRuntimeStateSummariesReportsInvalidLegacyRuntimeJSON(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('invalid-json','invalid-json','{}',1,0,1,'now','now')`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('invalid-json',?,'invalid-json','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES('invalid-json','{invalid','2')`); err != nil {
@@ -383,7 +383,7 @@ func TestRuntimeStateSummariesReportsQueryAndScanErrors(t *testing.T) {
 	t.Run("scan", func(t *testing.T) {
 		s := openTestStore(t)
 		ctx := context.Background()
-		if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('bad-count','bad-count','{}',1,0,1,'now','now')`); err != nil {
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('bad-count',?,'bad-count','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,candidate_count,updated_at) VALUES('bad-count',1,'not-a-number','now')`); err != nil {

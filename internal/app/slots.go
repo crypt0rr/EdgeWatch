@@ -5,14 +5,16 @@ import (
 	"context"
 	"errors"
 	"sync"
+
+	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
-// defaultSlotKey is the scan-slot key every job uses while jobs have no
-// tenant. It is the default tenant's fixed ID, so a single key keeps the
+// defaultSlotKey is the scan-slot key every job uses. It is the default
+// tenant, which owns every job for now, so a single key keeps the
 // deployment's scheduling identical to one FIFO semaphore.
 //
-// TODO(#839): use the job's tenant ID once jobs record one.
-const defaultSlotKey = "00000000-0000-0000-0000-000000000100"
+// TODO(#839): use the job's tenant ID once job records carry it.
+const defaultSlotKey = store.DefaultTenantID
 
 // errSlotWaitFailed is returned to waiters that FailWaiters removed without
 // giving a reason.

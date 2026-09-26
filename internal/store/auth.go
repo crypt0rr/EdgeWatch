@@ -87,47 +87,26 @@ type SetupToken struct {
 	Used      bool
 }
 
-// GetAdmin returns the legacy administrator projection without mutating either
-// authentication table. Compatibility synchronization and ciphertext upgrades
-// are performed by MigrateAdminCompatibility during daemon startup.
+// GetAdmin returns the original administrator, the users row with
+// LegacyAdminUserID, without mutating the database. Schema 52 retired the
+// legacy admins row, so a missing users row is ErrNotFound. TOTP ciphertext
+// upgrades are performed by MigrateAdminCompatibility during daemon startup.
 func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	var a Admin
-	var stored string
+	var stored, created, updated string
 	var totp int
-	var created, updated string
-	// The users row is authoritative after migration 12. Read it first so a
-	// database restored from a newer backup that no longer contains the legacy
-	// admins compatibility row remains fully usable. Older/pre-migration
-	// fixtures may not have users yet, in which case we fall back to admins.
-	var userTotp int
-	var userCreated, userUpdated string
-	var userRevision int64
-	reader := s.reader()
-	userErr := reader.QueryRowContext(ctx, `SELECT username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at,revision FROM users WHERE id=?`, LegacyAdminUserID).
-		Scan(&a.Username, &a.DisplayName, &a.PasswordHash, &stored, &userTotp, &userCreated, &userUpdated, &userRevision)
-	authoritative := userErr == nil
-	if authoritative {
-		a.DisplayName = adminDisplayName(a)
-		a.TOTPEnabled = userTotp != 0
-		a.CreatedAt, a.UpdatedAt = scanTime(userCreated), scanTime(userUpdated)
-		a.TOTPSecretStored = stored
-		a.Revision = userRevision
-	} else if errors.Is(userErr, sql.ErrNoRows) || strings.Contains(strings.ToLower(userErr.Error()), "no such table") {
-		legacyErr := reader.QueryRowContext(ctx, `SELECT username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at FROM admins WHERE id=1`).
-			Scan(&a.Username, &a.DisplayName, &a.PasswordHash, &stored, &totp, &created, &updated)
-		if errors.Is(legacyErr, sql.ErrNoRows) {
-			return a, ErrNotFound
-		}
-		if legacyErr != nil {
-			return a, legacyErr
-		}
-		a.DisplayName = adminDisplayName(a)
-		a.TOTPEnabled = totp != 0
-		a.CreatedAt, a.UpdatedAt = scanTime(created), scanTime(updated)
-		a.TOTPSecretStored = stored
-	} else {
-		return a, userErr
+	err := s.reader().QueryRowContext(ctx, `SELECT username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at,revision FROM users WHERE id=?`, LegacyAdminUserID).
+		Scan(&a.Username, &a.DisplayName, &a.PasswordHash, &stored, &totp, &created, &updated, &a.Revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Admin{}, ErrNotFound
 	}
+	if err != nil {
+		return Admin{}, err
+	}
+	a.DisplayName = adminDisplayName(a)
+	a.TOTPEnabled = totp != 0
+	a.CreatedAt, a.UpdatedAt = scanTime(created), scanTime(updated)
+	a.TOTPSecretStored = stored
 	secret, _, secretErr := s.openTOTPSecretForOwner(LegacyAdminUserID, stored)
 	if secretErr != nil {
 		a.TOTPSecretError = secretErr
@@ -137,33 +116,23 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	return a, nil
 }
 
-// HasAdministrator reports whether an administrator identity has ever been
-// configured. The users table is authoritative for multi-user installations;
-// the legacy admins row is retained as a compatibility fallback for databases
-// opened by an older binary or a partially completed migration.
+// HasAdministrator reports whether an administrator account exists. Only
+// users counts: schema 52 retired the legacy admins row, and a database
+// without a users table is an error rather than an unconfigured one.
 func (s *Store) HasAdministrator(ctx context.Context) (bool, error) {
 	var present int
 	err := s.reader().QueryRowContext(ctx, `SELECT 1 FROM users WHERE role=? LIMIT 1`, RoleAdministrator).Scan(&present)
-	if err == nil {
-		return true, nil
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		// A pre-migration fixture may not have the users table yet. Fall through
-		// to the legacy row so host recovery and compatibility callers still work.
-		if !strings.Contains(strings.ToLower(err.Error()), "no such table") {
-			return false, err
-		}
-	}
-	_, legacyErr := s.GetAdmin(ctx)
-	if legacyErr == nil {
-		return true, nil
-	}
-	if errors.Is(legacyErr, ErrNotFound) {
+	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	}
-	return false, legacyErr
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
+// SaveAdmin writes the original administrator to its users row, and creates
+// that row in the default tenant when it is missing.
 func (s *Store) SaveAdmin(ctx context.Context, a Admin) error {
 	stored, err := s.adminTOTPForSave(a)
 	if err != nil {
@@ -185,13 +154,9 @@ type contextExecer interface {
 }
 
 func saveAdminExec(ctx context.Context, execer contextExecer, a Admin, stored string) error {
-	_, err := execer.ExecContext(ctx, `INSERT INTO admins(id,username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET username=excluded.username,display_name=excluded.display_name,password_hash=excluded.password_hash,totp_secret=excluded.totp_secret,totp_enabled=excluded.totp_enabled,updated_at=excluded.updated_at`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return err
-	}
-	// Keep the compatibility administrator row and the authoritative users row
-	// synchronized while older callers continue using SaveAdmin.
-	if _, err = execer.ExecContext(ctx, `INSERT OR IGNORE INTO users(id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, LegacyAdminUserID, a.Username, adminDisplayName(a), RoleAdministrator, a.PasswordHash, stored, boolInt(a.TOTPEnabled), 1, a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano), ""); err != nil {
+	// Create the users row when it is missing. The update below writes the
+	// values in both cases.
+	if _, err := execer.ExecContext(ctx, `INSERT OR IGNORE INTO users(id,tenant_id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, LegacyAdminUserID, DefaultTenantID, a.Username, adminDisplayName(a), RoleAdministrator, a.PasswordHash, stored, boolInt(a.TOTPEnabled), 1, a.CreatedAt.UTC().Format(time.RFC3339Nano), a.UpdatedAt.UTC().Format(time.RFC3339Nano), ""); err != nil {
 		return err
 	}
 	expectedRevision := a.Revision
@@ -208,7 +173,7 @@ func saveAdminExec(ctx context.Context, execer contextExecer, a Admin, stored st
 		}
 		return nil
 	}
-	_, err = execer.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,password_hash=?,totp_secret=?,totp_enabled=?,updated_at=?,revision=revision+1 WHERE id=?`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.UpdatedAt.UTC().Format(time.RFC3339Nano), LegacyAdminUserID)
+	_, err := execer.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,password_hash=?,totp_secret=?,totp_enabled=?,updated_at=?,revision=revision+1 WHERE id=?`, a.Username, adminDisplayName(a), a.PasswordHash, stored, boolInt(a.TOTPEnabled), a.UpdatedAt.UTC().Format(time.RFC3339Nano), LegacyAdminUserID)
 	return err
 }
 
@@ -338,16 +303,7 @@ func (s *Store) ReissueSetupToken(ctx context.Context, hash string, expires, now
 		return err
 	}
 	defer tx.Rollback()
-	var username string
-	if err = tx.QueryRowContext(ctx, `SELECT username FROM admins WHERE id=1`).Scan(&username); err == nil {
-		return errors.New("administrator is already configured")
-	} else if !errors.Is(err, sql.ErrNoRows) {
-		return err
-	}
-	var userCount int
-	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=?`, RoleAdministrator).Scan(&userCount); err == nil && userCount > 0 {
-		return errors.New("administrator is already configured")
-	} else if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+	if err := requireNoAdministratorTx(ctx, tx); err != nil {
 		return err
 	}
 	var issued string
@@ -367,8 +323,22 @@ func (s *Store) ReissueSetupToken(ctx context.Context, hash string, expires, now
 	return tx.Commit()
 }
 
+// requireNoAdministratorTx fails when an administrator account exists. It is
+// the in-transaction form of HasAdministrator for the setup token writers.
+func requireNoAdministratorTx(ctx context.Context, tx *sql.Tx) error {
+	var administrators int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=?`, RoleAdministrator).Scan(&administrators); err != nil {
+		return err
+	}
+	if administrators > 0 {
+		return errors.New("administrator is already configured")
+	}
+	return nil
+}
+
 // CompleteSetup consumes the token and creates the one permitted administrator
-// in one transaction, preventing a token race from creating two accounts.
+// in the default tenant in one transaction, preventing a token race from
+// creating two accounts.
 func (s *Store) CompleteSetup(ctx context.Context, tokenHash string, admin Admin, now time.Time) error {
 	storedSecret, err := s.adminTOTPForSave(admin)
 	if err != nil {
@@ -389,22 +359,10 @@ func (s *Store) CompleteSetup(ctx context.Context, tokenHash string, admin Admin
 	if used.Valid || !now.Before(scanTime(expires)) {
 		return errors.New("setup token expired or already used")
 	}
-	var existing string
-	if err = tx.QueryRowContext(ctx, `SELECT username FROM admins WHERE id=1`).Scan(&existing); err == nil {
-		return errors.New("administrator is already configured")
-	} else if !errors.Is(err, sql.ErrNoRows) {
+	if err := requireNoAdministratorTx(ctx, tx); err != nil {
 		return err
 	}
-	var userCount int
-	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=?`, RoleAdministrator).Scan(&userCount); err == nil && userCount > 0 {
-		return errors.New("administrator is already configured")
-	} else if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO admins(id,username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at) VALUES(1,?,?,?,?,?,?,?)`, admin.Username, adminDisplayName(admin), admin.PasswordHash, storedSecret, boolInt(admin.TOTPEnabled), admin.CreatedAt.UTC().Format(time.RFC3339Nano), admin.UpdatedAt.UTC().Format(time.RFC3339Nano)); err != nil {
-		return err
-	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO users(id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, LegacyAdminUserID, admin.Username, adminDisplayName(admin), RoleAdministrator, admin.PasswordHash, storedSecret, boolInt(admin.TOTPEnabled), 1, admin.CreatedAt.UTC().Format(time.RFC3339Nano), admin.UpdatedAt.UTC().Format(time.RFC3339Nano), ""); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO users(id,tenant_id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, LegacyAdminUserID, DefaultTenantID, admin.Username, adminDisplayName(admin), RoleAdministrator, admin.PasswordHash, storedSecret, boolInt(admin.TOTPEnabled), 1, admin.CreatedAt.UTC().Format(time.RFC3339Nano), admin.UpdatedAt.UTC().Format(time.RFC3339Nano), ""); err != nil {
 		return err
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1 AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano))
@@ -501,22 +459,10 @@ func (s *Store) CreateSessionForUserIfCurrent(ctx context.Context, userID, expec
 	var totpEnabled, enabled int
 	var revision int64
 	err = tx.QueryRowContext(ctx, `SELECT password_hash,totp_enabled,enabled,revision FROM users WHERE id=?`, userID).Scan(&passwordHash, &totpEnabled, &enabled, &revision)
-	if errors.Is(err, sql.ErrNoRows) || (err != nil && strings.Contains(strings.ToLower(err.Error()), "no such table")) {
-		// Very old databases (and compatibility fixtures) may only have the
-		// legacy administrator row. Keep that account able to sign in while the
-		// normal migration path restores the authoritative users row.
-		if userID != LegacyAdminUserID {
-			return ErrSessionCredentialsChanged
-		}
-		err = tx.QueryRowContext(ctx, `SELECT password_hash,totp_enabled FROM admins WHERE id=1`).Scan(&passwordHash, &totpEnabled)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ErrSessionCredentialsChanged
-		}
-		if err != nil {
-			return err
-		}
-		enabled, revision = 1, 0
-	} else if err != nil {
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrSessionCredentialsChanged
+	}
+	if err != nil {
 		return err
 	}
 	if enabled == 0 || revision != expectedRevision || passwordHash != expectedPasswordHash || (totpEnabled != 0) != expectedTOTPEnabled {
@@ -548,48 +494,11 @@ func (s *Store) CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx context.Con
 	defer func() { _ = tx.Rollback() }()
 	stamp := created.UTC().Format(time.RFC3339Nano)
 	result, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,last_login_at=?,updated_at=?,revision=revision+1 WHERE id=? AND password_hash=? AND revision=? AND totp_enabled=? AND enabled=1`, upgradedHash, stamp, stamp, userID, previousHash, expectedRevision, boolInt(expectedTOTPEnabled))
-	if err != nil && !strings.Contains(strings.ToLower(err.Error()), "no such table") {
+	if err != nil {
 		return err
 	}
-	if err == nil {
-		if affected, _ := result.RowsAffected(); affected != 1 {
-			// A partially migrated legacy database can have the users table but
-			// still keep the administrator only in the compatibility row. Fall
-			// back only when the authoritative row is genuinely absent; a
-			// present-but-mismatched row must fail closed and may not be bypassed
-			// by the legacy credential.
-			var present int
-			lookupErr := tx.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id=?`, userID).Scan(&present)
-			if userID != LegacyAdminUserID || !errors.Is(lookupErr, sql.ErrNoRows) {
-				return ErrSessionCredentialsChanged
-			}
-			legacyResult, legacyErr := tx.ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at=? WHERE id=1 AND password_hash=? AND totp_enabled=?`, upgradedHash, stamp, previousHash, boolInt(expectedTOTPEnabled))
-			if legacyErr != nil {
-				return legacyErr
-			}
-			if legacyAffected, _ := legacyResult.RowsAffected(); legacyAffected != 1 {
-				return ErrSessionCredentialsChanged
-			}
-		}
-		if userID == LegacyAdminUserID {
-			if _, err := tx.ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at=? WHERE id=1 AND password_hash=?`, upgradedHash, stamp, previousHash); err != nil {
-				return err
-			}
-		}
-	} else {
-		// Compatibility path for a pre-users schema. The legacy administrator
-		// has no revision or enabled columns, so the password hash is the
-		// conditional credential marker in this fallback.
-		if userID != LegacyAdminUserID {
-			return ErrSessionCredentialsChanged
-		}
-		legacyResult, legacyErr := tx.ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at=? WHERE id=1 AND password_hash=? AND totp_enabled=?`, upgradedHash, stamp, previousHash, boolInt(expectedTOTPEnabled))
-		if legacyErr != nil {
-			return legacyErr
-		}
-		if affected, _ := legacyResult.RowsAffected(); affected != 1 {
-			return ErrSessionCredentialsChanged
-		}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrSessionCredentialsChanged
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, stamp, stamp, expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
 		return err
@@ -605,8 +514,7 @@ func (s *Store) CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx context.Con
 // CreateSessionForUserWithPasswordUpgrade atomically upgrades a verified
 // password hash with the login session and its audit record. The conditional
 // update protects against overwriting a password changed concurrently while
-// the login was in progress. The compatibility admins row is kept in sync for
-// the legacy administrator identity.
+// the login was in progress.
 func (s *Store) CreateSessionForUserWithPasswordUpgrade(ctx context.Context, userID, previousHash, upgradedHash, idHash, csrf string, created, expires time.Time, audit AuditEntry) error {
 	if strings.TrimSpace(upgradedHash) == "" {
 		return errors.New("upgraded password hash is required")
@@ -624,11 +532,6 @@ func (s *Store) CreateSessionForUserWithPasswordUpgrade(ctx context.Context, use
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrPasswordChangedDuringLogin
-	}
-	if userID == LegacyAdminUserID {
-		if _, err := tx.ExecContext(ctx, `UPDATE admins SET password_hash=?,updated_at=? WHERE id=1 AND password_hash=?`, upgradedHash, stamp, previousHash); err != nil {
-			return err
-		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, stamp, stamp, expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
 		return err

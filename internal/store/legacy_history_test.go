@@ -11,6 +11,7 @@ import (
 func TestListLegacySuccessfulScanSnapshotsPageFiltersIndexedRows(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	insertJobRows(t, s, "job-indexed", "job-legacy")
 	now := time.Now().UTC().Truncate(time.Second)
 	indexed := model.Scan{
 		ID:         "indexed-snapshot",

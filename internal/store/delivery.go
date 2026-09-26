@@ -68,7 +68,8 @@ func (s *Store) UpdateState(ctx context.Context, job string, fn func(*model.JobS
 		}
 		events[i] = bounded
 		event := events[i]
-		if _, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at) VALUES(?,?,?,?,?)`, event.Type, event.Job, event.ScanID, payload, sqliteTimestamp(event.CreatedAt)); err != nil {
+		tenantSQL, tenantArgs := eventTenantSQL(event)
+		if _, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at,tenant_id) VALUES(?,?,?,?,?,`+tenantSQL+`)`, append([]any{event.Type, event.Job, event.ScanID, payload, sqliteTimestamp(event.CreatedAt)}, tenantArgs...)...); err != nil {
 			return nil, err
 		}
 	}
@@ -104,7 +105,9 @@ func (s *Store) QueueEvent(ctx context.Context, destination string, event model.
 		destination = key
 	}
 	now := time.Now().UTC()
-	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, destination, b, now.Format(time.RFC3339Nano))
+	// A delivery belongs to the tenant of its event.
+	tenantSQL, tenantArgs := eventTenantSQL(event)
+	result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at,tenant_id) VALUES(?,?,?,`+tenantSQL+`)`, append([]any{destination, b, now.Format(time.RFC3339Nano)}, tenantArgs...)...)
 	if err != nil {
 		return err
 	}
@@ -263,7 +266,7 @@ WHERE id=? AND sent_at IS NULL AND terminal_at='' AND attempts<? AND deferrals=?
 			return err
 		}
 		if terminal {
-			if err := insertTerminalDeliveryEventTx(ctx, tx, item.destination, ErrDeliveryDestinationLocked, "locked destination grace period", now); err != nil {
+			if err := insertTerminalDeliveryEventTx(ctx, tx, item.id, item.destination, ErrDeliveryDestinationLocked, "locked destination grace period", now); err != nil {
 				return err
 			}
 		}
@@ -461,7 +464,7 @@ func (s *Store) DeliveryResultClaim(ctx context.Context, id int64, claim string,
 			return err
 		}
 		if terminal {
-			if err := insertTerminalDeliveryEventTx(ctx, tx, destination, sendErr, "indeterminate deferral limit", now); err != nil {
+			if err := insertTerminalDeliveryEventTx(ctx, tx, id, destination, sendErr, "indeterminate deferral limit", now); err != nil {
 				return err
 			}
 		}
@@ -485,21 +488,23 @@ func (s *Store) DeliveryResultClaim(ctx context.Context, id int64, claim string,
 		return err
 	}
 	if terminal {
-		if err := insertTerminalDeliveryEventTx(ctx, tx, destination, sendErr, "retry limit", now); err != nil {
+		if err := insertTerminalDeliveryEventTx(ctx, tx, id, destination, sendErr, "retry limit", now); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-func insertTerminalDeliveryEventTx(ctx context.Context, tx *sql.Tx, destination string, sendErr error, reason string, now time.Time) error {
+// insertTerminalDeliveryEventTx records that the outbox row outboxID was
+// dropped. The event belongs to the tenant of the dropped delivery.
+func insertTerminalDeliveryEventTx(ctx context.Context, tx *sql.Tx, outboxID int64, destination string, sendErr error, reason string, now time.Time) error {
 	fingerprint := deliveryErrorFingerprint(sendErr)
 	event := model.Event{Type: "notification-delivery-terminal", Message: fmt.Sprintf("Notification delivery dropped after %s (destination fingerprint %s; error code %s; error fingerprint %s)", reason, deliverySelectorFingerprint(destination), deliveryErrorCode(sendErr), fingerprint), CreatedAt: now}
 	bounded, payload, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
 	if err != nil {
 		return err
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at) VALUES(?,?,?,?,?)`, bounded.Type, "", "", payload, sqliteTimestamp(now))
+	_, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,scan_id,payload_json,created_at,tenant_id) VALUES(?,?,?,?,?,(SELECT tenant_id FROM outbox WHERE id=?))`, bounded.Type, "", "", payload, sqliteTimestamp(now), outboxID)
 	return err
 }
 
@@ -587,7 +592,7 @@ func (s *Store) DeferDeliveryWithError(ctx context.Context, id int64, claim stri
 		return err
 	}
 	if terminal {
-		if err := insertTerminalDeliveryEventTx(ctx, tx, destination, reason, "deferral limit", now); err != nil {
+		if err := insertTerminalDeliveryEventTx(ctx, tx, id, destination, reason, "deferral limit", now); err != nil {
 			return err
 		}
 	}

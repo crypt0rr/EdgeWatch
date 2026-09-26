@@ -51,6 +51,7 @@ func TestSeededPerformanceRegressionInvariants(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	defer s.Close()
+	insertJobRows(t, s, "seed-public-job")
 	seedLatestHostsForPerformance(t, s, seededPerformanceHostCount)
 
 	hasOpen := true

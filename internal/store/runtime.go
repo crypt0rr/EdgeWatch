@@ -750,12 +750,14 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 			return err
 		}
 		event = bounded
+		// A delivery belongs to the tenant of its event.
+		tenantSQL, tenantArgs := eventTenantSQL(event)
 		for _, destination := range destinations {
 			key := resolved[destination]
 			if key == "" {
 				continue
 			}
-			result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at) VALUES(?,?,?)`, key, payload, now)
+			result, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO outbox(destination,payload_json,next_at,tenant_id) VALUES(?,?,?,`+tenantSQL+`)`, append([]any{key, payload, now}, tenantArgs...)...)
 			if err != nil {
 				return err
 			}
@@ -991,7 +993,7 @@ func persistRuntimeTx(ctx context.Context, tx *sql.Tx, jobID string, state model
 			return nil, err
 		}
 		events[i] = bounded
-		if _, err = tx.ExecContext(ctx, `INSERT INTO events(type,job,job_id,scan_id,payload_json,created_at) VALUES(?,?,?,?,?,?)`, events[i].Type, events[i].Job, events[i].JobID, events[i].ScanID, payload, sqliteTimestamp(events[i].CreatedAt)); err != nil {
+		if err = insertEventExec(ctx, tx, events[i], payload, events[i].CreatedAt); err != nil {
 			return nil, err
 		}
 	}

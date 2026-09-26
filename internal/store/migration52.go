@@ -22,9 +22,10 @@ package store
 // The rebuilds keep each row's rowid, column values, indexes and defaults.
 // Other tables reference all four tables with ON DELETE CASCADE, so the
 // version runs through applyMigrationForeignKeysOff, see
-// foreignKeysOffMigrations. None of the four tables has a view or a trigger
-// that references it. The tenant_id columns have no default: every INSERT
-// names its tenant.
+// foreignKeysOffMigrations. At schema 51 no view or trigger references the
+// four tables; the triggers that schema 53 adds on other tables to read jobs
+// are dropped before the jobs rebuild. The tenant_id columns have no
+// default: every INSERT names its tenant.
 //
 // The table guards create the schema-51 shape of the tables that the
 // migration reads, because some recovery databases carry the schema marker
@@ -185,6 +186,11 @@ SELECT '` + LegacyAdminUserID + `',username,COALESCE(display_name,username),'adm
 `,
 			columns: []string{"id", "name", "definition_json", "enabled", "archived", "revision", "created_at", "updated_at"},
 			fill:    []sqliteRebuildFill{{column: "tenant_id", expression: defaultTenant}},
+			// Schema 53 adds triggers on other tables that read jobs. They
+			// do not exist when this migration first runs, but they do when
+			// it runs again, and they would make the rename fail. Schema 53
+			// runs next and creates them again.
+			dropDependents: jobsReaderTriggerDrops(),
 			recreate: []string{
 				"CREATE INDEX jobs_active ON jobs(archived, enabled, name)",
 			},

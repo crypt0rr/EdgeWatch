@@ -583,7 +583,7 @@ The service therefore starts at once after a restore, and a repeated restore
 onto the stopped service is not refused. The active-daemon check reads only
 the lease in the database that is being replaced.
 
-The current schema is version 52. Database migrations are forward-only. An
+The current schema is version 53. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,
@@ -621,6 +621,13 @@ administrator row, which the original administrator's user account already
 replaces. The rebuild runs once at startup in one transaction, and on a large
 database its foreign key check can take a while. Back up ./data before
 upgrading. Sign-in, setup, and the host recovery commands behave as before.
+
+Schema 53 records the tenant of each scan, event, and notification delivery;
+every existing row belongs to the default tenant. Adding the column does not
+rewrite the stored scan results or event payloads, but the migration builds
+two new indexes on the scan and event history in one transaction at startup,
+which can take a while on a large history. The console, API, CLI, public
+status page, and notifications behave as before.
 
 ## Useful commands
 

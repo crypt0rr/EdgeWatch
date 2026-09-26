@@ -87,7 +87,7 @@ func TestEventTimestampMigrationRepairsSchema45Rows(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	base := time.Date(2026, time.September, 22, 13, 14, 15, 500000000, time.UTC)
-	insertRawEvent(t, s.DB, "legacy-event-job", base.Format(time.RFC3339Nano))
+	insertRawEvent(t, s.DB, "", base.Format(time.RFC3339Nano))
 	if _, err := s.DB.ExecContext(ctx, `UPDATE timestamp_normalization_state SET complete=1 WHERE id=1; PRAGMA user_version=45`); err != nil {
 		t.Fatal(err)
 	}

@@ -12,6 +12,7 @@ import (
 func TestRebuildLatestScanHostsWrapperRecreatesProjection(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	insertJobRows(t, s, "job-wrapper")
 	scan := model.Scan{
 		ID: "projection-wrapper", JobID: "job-wrapper", Job: "wrapper", StartedAt: time.Unix(100, 0).UTC(), FinishedAt: time.Unix(100, 0).UTC(), Status: "success",
 		Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.90", AddressFamily: "IPv4", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}}},

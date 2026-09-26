@@ -528,6 +528,21 @@ func applyRestoreDeliveryPolicy(ctx context.Context, path string, policy Pending
 	if exists, err := tableExistsTx(ctx, tx, "outbox"); err != nil {
 		return 0, err
 	} else if exists {
+		columns, err := restoreTableColumnsTx(ctx, tx, "outbox")
+		if err != nil {
+			return 0, err
+		}
+		// From schema 53 each delivery has a tenant, and a quarantined
+		// delivery keeps it. A backup from before schema 53 has no tenant
+		// column in either table; the migration after the restore attributes
+		// both to the default tenant.
+		tenant := ""
+		if columns["tenant_id"] {
+			if err := ensureRestoreQuarantineTenantTx(ctx, tx); err != nil {
+				return 0, err
+			}
+			tenant = ",tenant_id"
+		}
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL`).Scan(&pending); err != nil {
 			return 0, fmt.Errorf("count pending deliveries: %w", err)
 		}
@@ -537,16 +552,12 @@ func applyRestoreDeliveryPolicy(ctx context.Context, path string, policy Pending
 				return 0, fmt.Errorf("discard pending deliveries: %w", err)
 			}
 		case PendingDeliveriesQuarantine:
-			columns, err := restoreTableColumnsTx(ctx, tx, "outbox")
-			if err != nil {
-				return 0, err
-			}
 			deferrals := "0"
 			if columns["deferrals"] {
 				deferrals = "COALESCE(deferrals,0)"
 			}
-			query := `INSERT INTO restore_quarantined_deliveries(restore_epoch,destination,payload_json,attempts,deferrals,next_at,last_error,quarantined_at)
-SELECT ?,destination,payload_json,attempts,` + deferrals + `,next_at,last_error,? FROM outbox WHERE sent_at IS NULL`
+			query := `INSERT INTO restore_quarantined_deliveries(restore_epoch,destination,payload_json,attempts,deferrals,next_at,last_error,quarantined_at` + tenant + `)
+SELECT ?,destination,payload_json,attempts,` + deferrals + `,next_at,last_error,?` + tenant + ` FROM outbox WHERE sent_at IS NULL`
 			if _, err := tx.ExecContext(ctx, query, epoch, restoredAt.Format(time.RFC3339Nano)); err != nil {
 				return 0, fmt.Errorf("quarantine pending deliveries: %w", err)
 			}
@@ -624,6 +635,21 @@ func clearRestoredLeasesTx(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, lease.query); err != nil {
 			return fmt.Errorf("clear restored %s: %w", lease.table, err)
 		}
+	}
+	return nil
+}
+
+// ensureRestoreQuarantineTenantTx gives the quarantine the schema 53 tenant
+// column when the staged database has the column on its outbox but created
+// the quarantine table only now, in its schema-35 shape. The migration does
+// not run again on a restored database that is already at schema 53.
+func ensureRestoreQuarantineTenantTx(ctx context.Context, tx *sql.Tx) error {
+	columns, err := restoreTableColumnsTx(ctx, tx, "restore_quarantined_deliveries")
+	if err != nil || columns["tenant_id"] {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE restore_quarantined_deliveries ADD COLUMN tenant_id TEXT DEFAULT '`+DefaultTenantID+`'`); err != nil {
+		return fmt.Errorf("add restore quarantine tenant: %w", err)
 	}
 	return nil
 }

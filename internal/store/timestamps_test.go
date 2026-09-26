@@ -88,7 +88,7 @@ func TestTimestampNormalizationHandlesMarkerStatesAndInvalidValues(t *testing.T)
 	if err := normalizePersistedTimestampsContext(ctx, s.DB); err != nil {
 		t.Fatalf("completed marker: %v", err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job_id,job,started_at,finished_at,status,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?)`, "invalid-timestamp", "missing-job", "missing", "not-a-timestamp", "not-a-timestamp", "success", "", `{}`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job_id,job,started_at,finished_at,status,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?)`, "invalid-timestamp", "", "missing", "not-a-timestamp", "not-a-timestamp", "success", "", `{}`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE timestamp_normalization_state SET complete=0 WHERE id=1`); err != nil {

@@ -238,6 +238,7 @@ func TestScanHostIndexSupportsFilteringPaginationAndLatestRows(t *testing.T) {
 func TestHostSearchShortQueriesEscapeLikeWildcards(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	insertJobRows(t, s, "job-underscore", "job-underscore-x", "job-wildcard")
 	for _, scan := range []model.Scan{
 		{ID: "literal-underscore", JobID: "job-underscore", Job: "edge_core", StartedAt: time.Unix(100, 0).UTC(), FinishedAt: time.Unix(100, 0).UTC(), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1"}}}},
 		{ID: "literal-underscore-x", JobID: "job-underscore-x", Job: "edge_x", StartedAt: time.Unix(101, 0).UTC(), FinishedAt: time.Unix(101, 0).UTC(), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.2"}}}},
@@ -269,6 +270,7 @@ func TestHostSearchShortQueriesEscapeLikeWildcards(t *testing.T) {
 func TestLatestScanHostProjectionPreservesSuccessfulOrdering(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	insertJobRows(t, s, "job")
 	host := func(address, state string) model.HostObservation {
 		return model.HostObservation{Address: address, AddressFamily: "IPv4", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: state}}}}}
 	}
@@ -297,6 +299,7 @@ func TestLatestScanHostProjectionPreservesSuccessfulOrdering(t *testing.T) {
 func TestLatestScanHostProjectionRebuildsAfterSourceRemoval(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	insertJobRows(t, s, "job")
 	makeScan := func(id string, finished time.Time, state string) model.Scan {
 		return model.Scan{ID: id, JobID: "job", Job: "edge", StartedAt: finished, FinishedAt: finished, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.8", AddressFamily: "IPv4", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: state}}}}}}}}
 	}
@@ -331,6 +334,7 @@ func TestLatestScanHostProjectionRebuildsAfterSourceRemoval(t *testing.T) {
 func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	insertJobRows(t, s, "search-job")
 	job := model.Scan{
 		ID: "search-scan", JobID: "search-job", Job: "Production edge", StartedAt: time.Unix(500, 0).UTC(), FinishedAt: time.Unix(500, 0).UTC(), Status: "success",
 		Snapshot: model.Snapshot{Hosts: []model.HostObservation{
@@ -557,6 +561,7 @@ func TestScanComparisonMetadataRoundTrips(t *testing.T) {
 func TestScanComparisonQueryDoesNotLoadSnapshot(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	insertJobRows(t, s, "job")
 	now := time.Now().UTC()
 	large := model.Snapshot{Units: []model.Unit{{Target: "127.0.0.1", Protocol: "tcp", Ports: make([]model.PortState, 4096)}}}
 	for i := range large.Units[0].Ports {
@@ -578,6 +583,7 @@ func TestScanComparisonQueryDoesNotLoadSnapshot(t *testing.T) {
 func TestScanChangesPagePaginatesWithoutLoadingSnapshot(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	insertJobRows(t, s, "job")
 	now := time.Now().UTC()
 	changes := []model.Change{
 		{Key: "port|127.0.0.1|tcp|1", Kind: "port", Severity: "critical", Target: "127.0.0.1", Protocol: "tcp", Port: 1, Old: "closed", New: "open"},
@@ -600,6 +606,7 @@ func TestScanChangesPagePaginatesWithoutLoadingSnapshot(t *testing.T) {
 func TestScanResultsPagePaginatesSnapshotUnits(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	insertJobRows(t, s, "job")
 	now := time.Now().UTC()
 	units := []model.Unit{
 		{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}},

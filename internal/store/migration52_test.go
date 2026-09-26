@@ -89,15 +89,16 @@ var schema51RootTables = []sqliteTableRebuild{
 }
 
 // schema51FixtureStatements turn a current database into the schema-51
-// shape: the root tables lose tenant_id and get their schema-51 constraints
-// and indexes back, and the original administrator gets back the admins row
-// that schema 52 retired. They run with foreign keys off, as
-// execFixtureStatements does, so the rebuilds keep the child rows.
+// shape. They first undo schema 53, see schema52FixtureStatements. Then the
+// root tables lose tenant_id and get their schema-51 constraints and indexes
+// back, and the original administrator gets back the admins row that schema
+// 52 retired. They run with foreign keys off, as execFixtureStatements does,
+// so the rebuilds keep the child rows.
 var schema51FixtureStatements = func() []string {
-	statements := []string{
+	statements := slices.Concat(schema52FixtureStatements, []string{
 		`INSERT INTO admins(id,username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at)
 SELECT 1,username,display_name,password_hash,totp_secret,totp_enabled,created_at,updated_at FROM users WHERE id='` + LegacyAdminUserID + `'`,
-	}
+	})
 	for _, rebuild := range schema51RootTables {
 		statements = append(statements, rebuild.statements()...)
 	}
@@ -272,11 +273,14 @@ func schema52RowSnapshot(t *testing.T, db *sql.DB) string {
 }
 
 // schemaObjectsSnapshot renders every schema object that is not one of the
-// rebuilt tables or their indexes.
+// rebuilt tables or their indexes. It also leaves out what schema 53 changes
+// next: the definitions of the tables that gain tenant_id, and the tenant
+// indexes and guard triggers. migration53_test.go checks those.
 func schemaObjectsSnapshot(t *testing.T, db *sql.DB) string {
 	t.Helper()
+	schema53Objects := slices.Concat(schema53Tables, schema53Triggers, []string{"scans_tenant_id_time", "events_tenant_id_time"})
 	var out strings.Builder
-	if err := snapshotRows(db, `SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master WHERE tbl_name NOT IN ('users','jobs','scanner_profiles','managed_notifications') ORDER BY type,name`, &out); err != nil {
+	if err := snapshotRows(db, `SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_master WHERE tbl_name NOT IN ('users','jobs','scanner_profiles','managed_notifications') AND name NOT IN ('`+strings.Join(schema53Objects, "','")+`') ORDER BY type,name`, &out); err != nil {
 		t.Fatal(err)
 	}
 	return out.String()
@@ -379,8 +383,8 @@ func TestMigration52GivesRootTablesTheDefaultTenant(t *testing.T) {
 		t.Fatalf("upgrade from schema 51: %v", err)
 	}
 	defer s.Close()
-	if version := countRows(t, s.DB, `PRAGMA user_version`); version != 52 {
-		t.Fatalf("schema version = %d, want 52", version)
+	if version := countRows(t, s.DB, `PRAGMA user_version`); version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
 	}
 
 	// Every row keeps its rowid and values, and no child row is lost.
@@ -589,8 +593,8 @@ func TestMigration52UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 				t.Fatalf("upgrade without %v: %v", tc.missing, err)
 			}
 			defer s.Close()
-			if version := countRows(t, s.DB, `PRAGMA user_version`); version != 52 {
-				t.Fatalf("schema version = %d, want 52", version)
+			if version := countRows(t, s.DB, `PRAGMA user_version`); version != schemaVersion {
+				t.Fatalf("schema version = %d, want %d", version, schemaVersion)
 			}
 			if got := countRows(t, s.DB, `SELECT COUNT(*) FROM tenants WHERE id=? AND is_default=1`, DefaultTenantID); got != 1 {
 				t.Fatalf("default tenant rows = %d", got)

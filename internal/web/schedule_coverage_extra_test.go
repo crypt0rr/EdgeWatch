@@ -33,7 +33,7 @@ func TestScheduleSuggestionValidationAndFiltering(t *testing.T) {
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	call := func(query string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
-		server.scheduleSuggestion(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/schedule-suggestion?"+query, nil))
+		server.scheduleSuggestion(rec, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/schedule-suggestion?"+query, nil), defaultTenantStore(server))
 		return rec
 	}
 	if rec := call("timezone=UTC"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "schedule") {

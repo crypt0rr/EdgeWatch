@@ -34,7 +34,7 @@ func TestScheduleSuggestionUsesNearestActiveJobAndSafeMinuteShift(t *testing.T) 
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/schedule-suggestion?schedule=0+%2A%2F6+%2A+%2A+%2A&timezone=UTC", nil)
-	server.scheduleSuggestion(recorder, request)
+	server.scheduleSuggestion(recorder, request, defaultTenantStore(server))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status %d: %s", recorder.Code, recorder.Body.String())
 	}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/robfig/cron/v3"
 )
 
@@ -35,7 +36,7 @@ type scheduleReference struct {
 // next run of every active, non-archived managed job. The endpoint intentionally
 // has no mutation side effects and does not include job definitions beyond the
 // schedule metadata needed by the editor.
-func (s *Server) scheduleSuggestion(w http.ResponseWriter, r *http.Request) {
+func (s *Server) scheduleSuggestion(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	schedule := strings.TrimSpace(r.URL.Query().Get("schedule"))
 	timezone := strings.TrimSpace(r.URL.Query().Get("timezone"))
 	if schedule == "" {
@@ -62,7 +63,7 @@ func (s *Server) scheduleSuggestion(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobs, err := s.Store.ListJobs(r.Context(), false)
+	jobs, err := ts.ListJobs(r.Context(), false)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return

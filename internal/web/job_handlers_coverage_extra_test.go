@@ -161,7 +161,7 @@ func TestJobListAndAPIDispatchCoverage(t *testing.T) {
 		t.Fatal(err)
 	}
 	list := httptest.NewRecorder()
-	server.listJobs(list, httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil))
+	server.listJobs(list, httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil), defaultTenantStore(server))
 	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), "dispatch") {
 		t.Fatalf("job list = %d: %s", list.Code, list.Body.String())
 	}
@@ -208,7 +208,7 @@ func TestJobListAndAPIDispatchCoverage(t *testing.T) {
 	closedServer, closedDB, _ := newUsersTestServer(t)
 	_ = closedDB.Close()
 	closed := httptest.NewRecorder()
-	closedServer.listJobs(closed, httptest.NewRequest(http.MethodGet, "/", nil))
+	closedServer.listJobs(closed, httptest.NewRequest(http.MethodGet, "/", nil), defaultTenantStore(closedServer))
 	if closed.Code != http.StatusInternalServerError {
 		t.Fatalf("closed list jobs = %d", closed.Code)
 	}
@@ -280,7 +280,7 @@ func TestJobResponsesRedactActiveScanCycleStoreFailures(t *testing.T) {
 		rec := httptest.NewRecorder()
 		switch {
 		case path == "/api/v1/jobs" && method == http.MethodGet:
-			server.listJobs(rec, req)
+			server.listJobs(rec, req, defaultTenantStore(server))
 		case path == "/api/v1/jobs" && method == http.MethodPost:
 			server.createJob(rec, req, admin)
 		case path == "/api/v1/jobs/"+record.ID && method == http.MethodGet:
@@ -374,7 +374,7 @@ func TestJobListBatchesProfileAndActiveCycleSummaries(t *testing.T) {
 	}
 
 	response := httptest.NewRecorder()
-	server.listJobs(response, httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil))
+	server.listJobs(response, httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil), defaultTenantStore(server))
 	if response.Code != http.StatusOK {
 		t.Fatalf("job list = %d: %s", response.Code, response.Body.String())
 	}
@@ -424,7 +424,7 @@ func TestJobListKeepsReadableResponseWhenCycleAndProfileReadsFail(t *testing.T) 
 	}
 
 	response := httptest.NewRecorder()
-	server.listJobs(response, httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil))
+	server.listJobs(response, httptest.NewRequest(http.MethodGet, "/api/v1/jobs", nil), defaultTenantStore(server))
 	if response.Code != http.StatusOK {
 		t.Fatalf("job list with optional projection failures = %d: %s", response.Code, response.Body.String())
 	}

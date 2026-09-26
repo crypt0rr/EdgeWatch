@@ -112,12 +112,24 @@ func (s *Store) createJobWithAudits(ctx context.Context, job config.Job, enabled
 	return JobRecord{ID: id, Job: job, Enabled: enabled, Revision: 1, CreatedAt: now, UpdatedAt: now}, nil
 }
 
+// GetJob returns the job with the given ID.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetJob.
 func (s *Store) GetJob(ctx context.Context, id string) (JobRecord, error) {
+	return s.Tenant(DefaultTenantScope()).GetJob(ctx, id)
+}
+
+// GetJob returns the tenant's job with the given ID. A job of another tenant
+// is ErrNotFound.
+func (ts *TenantStore) GetJob(ctx context.Context, id string) (JobRecord, error) {
+	if err := ts.ready(); err != nil {
+		return JobRecord{}, err
+	}
 	var r JobRecord
 	var raw []byte
 	var created, updated string
 	var enabled, archived int
-	err := s.reader().QueryRowContext(ctx, `SELECT id,name,definition_json,enabled,archived,revision,created_at,updated_at FROM jobs WHERE id=?`, id).
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT id,name,definition_json,enabled,archived,revision,created_at,updated_at FROM jobs WHERE id=? AND tenant_id=?`, id, ts.scope.id).
 		Scan(&r.ID, &r.Job.Name, &raw, &enabled, &archived, &r.Revision, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, fmt.Errorf("%w: job %s", ErrNotFound, id)
@@ -162,28 +174,54 @@ func getJobTx(ctx context.Context, tx *sql.Tx, id string) (JobRecord, error) {
 	return r, nil
 }
 
+// GetJobByName returns the job with the given name.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetJobByName.
 func (s *Store) GetJobByName(ctx context.Context, name string) (JobRecord, error) {
+	return s.Tenant(DefaultTenantScope()).GetJobByName(ctx, name)
+}
+
+// GetJobByName returns the tenant's job with the given name. Job names are
+// unique per tenant, so another tenant's job with the same name is never
+// returned.
+func (ts *TenantStore) GetJobByName(ctx context.Context, name string) (JobRecord, error) {
+	if err := ts.ready(); err != nil {
+		return JobRecord{}, err
+	}
 	var id string
-	err := s.reader().QueryRowContext(ctx, `SELECT id FROM jobs WHERE name=?`, name).Scan(&id)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT id FROM jobs WHERE tenant_id=? AND name=?`, ts.scope.id, name).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return JobRecord{}, fmt.Errorf("%w: job %s", ErrNotFound, name)
 	}
 	if err != nil {
 		return JobRecord{}, err
 	}
-	return s.GetJob(ctx, id)
+	return ts.GetJob(ctx, id)
 }
 
+// ListJobs returns the jobs, without archived jobs unless includeArchived is
+// set.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListJobs.
 func (s *Store) ListJobs(ctx context.Context, includeArchived bool) ([]JobRecord, error) {
-	query := `SELECT id,name,definition_json,enabled,archived,revision,created_at,updated_at FROM jobs`
+	return s.Tenant(DefaultTenantScope()).ListJobs(ctx, includeArchived)
+}
+
+// ListJobs returns the tenant's jobs, without archived jobs unless
+// includeArchived is set.
+func (ts *TenantStore) ListJobs(ctx context.Context, includeArchived bool) ([]JobRecord, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	query := `SELECT id,name,definition_json,enabled,archived,revision,created_at,updated_at FROM jobs WHERE tenant_id=?`
 	if !includeArchived {
-		query += ` WHERE archived=0`
+		query += ` AND archived=0`
 	}
 	// Keep archived jobs grouped after active and paused jobs. The web console
 	// requests archived records so they can be restored, and ordering only by
 	// name otherwise lets an archived job appear between active entries.
 	query += ` ORDER BY archived ASC, name, id`
-	rows, err := s.reader().QueryContext(ctx, query)
+	rows, err := ts.store.reader().QueryContext(ctx, query, ts.scope.id)
 	if err != nil {
 		return nil, err
 	}

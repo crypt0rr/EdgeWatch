@@ -85,6 +85,11 @@ func backfillLegacyScanHostsContextWithLoggerAndProgress(ctx context.Context, db
 	if limits.maxHostRows <= 0 {
 		limits.maxHostRows = legacyHostBackfillBatchHostRows
 	}
+	// Legacy scans update latest_scan_hosts, which refuses those writes until
+	// the schema 54 copy completes.
+	if err := awaitLatestScanHostsTenantRekeyContext(ctx, db); err != nil {
+		return err
+	}
 	total, err := countLegacyHostBackfillCandidates(ctx, db)
 	if err != nil {
 		return err

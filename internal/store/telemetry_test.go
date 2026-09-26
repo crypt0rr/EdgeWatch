@@ -14,7 +14,7 @@ func TestDeploymentTelemetryReportsBoundedCounts(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scan_hosts(scan_id,address,job,host_json) VALUES(?,?,?,?)`, "telemetry-scan", "192.0.2.1", job.Job.Name, []byte(`{"address":"192.0.2.1"}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO latest_scan_hosts(address,scan_id,job_id,job,finished_at,host_json) VALUES(?,?,?,?,?,?)`, "192.0.2.1", "telemetry-scan", job.ID, job.Job.Name, now, []byte(`{"address":"192.0.2.1"}`)); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO latest_scan_hosts(tenant_id,address,scan_id,job_id,job,finished_at,host_json) VALUES(?,?,?,?,?,?,?)`, DefaultTenantID, "192.0.2.1", "telemetry-scan", job.ID, job.Job.Name, now, []byte(`{"address":"192.0.2.1"}`)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO events(type,job,payload_json,created_at) VALUES(?,?,?,?)`, "telemetry-event", job.Job.Name, []byte(`{}`), now); err != nil {

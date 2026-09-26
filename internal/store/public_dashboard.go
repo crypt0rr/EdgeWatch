@@ -225,10 +225,11 @@ func (s *Store) savePublicDashboard(ctx context.Context, expectedUpdatedAt *time
 }
 
 // GetLatestSuccessfulJobHosts returns the newest successful observation for
-// each selected job/address. The maintained latest_scan_hosts projection
-// answers the common case without ranking retained history. A selection can
-// still miss that projection when the same address is monitored by more than
-// one job (the projection is address-keyed), so those misses are resolved
+// each selected job/address. The maintained latest_scan_hosts projection,
+// read under the tenant of the selected job, answers the common case without
+// ranking retained history. A selection can still miss that projection when
+// the same address is monitored by more than one job of the tenant (the
+// projection is keyed by tenant and address), so those misses are resolved
 // through a bounded history query.
 func (s *Store) GetLatestSuccessfulJobHosts(ctx context.Context, selections []PublicDashboardHost) ([]PublicDashboardHostResult, error) {
 	if len(selections) == 0 {
@@ -268,8 +269,9 @@ SELECT selected.job_id,selected.address,h.scan_id,h.data_quality,h.host_json,
        sc.cycle_id,sc.cycle_attempt,sc.cycle_status,sc.resumable,sc.completed_probes,sc.total_probes,sc.completed_units,sc.total_units,sc.no_progress_attempts,
        sc.baseline_scan_id,sc.baseline_config_hash,sc.scanner_engine,sc.scanner_profile_id,sc.scanner_profile_revision,sc.naabu_version,sc.discovery_ports,sc.confirmed_ports,sc.discovery_duration_ms,sc.enrichment_duration_ms
 FROM selected
-JOIN latest_scan_hosts h ON h.address=selected.address AND h.job_id=selected.job_id
-JOIN scans sc ON sc.id=h.scan_id AND sc.job_id=selected.job_id AND sc.status='success'
+JOIN jobs j ON j.id=selected.job_id
+JOIN latest_scan_hosts h ON h.tenant_id=j.tenant_id AND h.address=selected.address AND h.job_id=selected.job_id
+JOIN scans sc ON sc.id=h.scan_id AND sc.tenant_id=h.tenant_id AND sc.job_id=selected.job_id AND sc.status='success'
 ORDER BY selected.address,selected.job_id`
 	rows, err := s.reader().QueryContext(ctx, projectionQuery, args...)
 	if err != nil {

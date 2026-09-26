@@ -228,7 +228,7 @@ INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config
 	for _, statement := range []string{
 		`DELETE FROM scan_host_search`,
 		`DELETE FROM latest_host_search`,
-		`UPDATE fts_backfill_state SET last_rowid=0,processed_rows=0,initialized=1,complete=0`,
+		`UPDATE fts_backfill_state SET last_rowid=0,processed_rows=0,initialized=1,complete=0 WHERE table_name IN ('scan_hosts','latest_scan_hosts','baseline_hosts')`,
 	} {
 		if _, err := s.DB.ExecContext(ctx, statement); err != nil {
 			t.Fatal(err)

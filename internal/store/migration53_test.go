@@ -33,10 +33,11 @@ var schema53Triggers = []string{
 var schema53Tables = []string{"scans", "events", "outbox", "restore_quarantined_deliveries"}
 
 // schema52FixtureStatements turn a current database into the schema-52
-// shape: the guard triggers, the tenant indexes and the tenant_id columns of
-// schema 53 are removed.
+// shape. They first undo schema 54, see schema53FixtureStatements. Then the
+// guard triggers, the tenant indexes and the tenant_id columns of schema 53
+// are removed.
 var schema52FixtureStatements = func() []string {
-	var statements []string
+	statements := slices.Clone(schema53FixtureStatements)
 	for _, trigger := range schema53Triggers {
 		statements = append(statements, "DROP TRIGGER "+trigger)
 	}
@@ -336,8 +337,10 @@ func TestMigration53AttributesHistoryToTheDefaultTenant(t *testing.T) {
 	// payloads, are not rewritten. The database uses auto-vacuum, where a new
 	// index takes the lowest free page number for its root page: SQLite moves
 	// the page that holds that number, unchanged, and updates the one pointer
-	// to it. So each of the two new indexes can change two pages, while
-	// rewriting the rows would change nearly every page.
+	// to it. So each of the two new indexes, and each of the five b-trees of
+	// the tenant-keyed latest host projection that the upgrade to schema 54
+	// creates next, can change two pages, while rewriting the rows would
+	// change nearly every page.
 	open = false
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -352,7 +355,7 @@ func TestMigration53AttributesHistoryToTheDefaultTenant(t *testing.T) {
 			changed = append(changed, page)
 		}
 	}
-	if len(pagesBefore) < 50 || len(changed) > 4 {
+	if len(pagesBefore) < 50 || len(changed) > 2*(2+5) {
 		t.Fatalf("%d of %d scans and events pages changed: %v", len(changed), len(pagesBefore), changed)
 	}
 	s, err = Open(fixture.path)

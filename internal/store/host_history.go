@@ -187,11 +187,10 @@ func scanHostsPageQueries(scanID, query, protocol string, hasOpen *bool, limit, 
 func latestScanHostsPageQueries(query, protocol string, hasOpen *bool, limit, offset int) scanPageQueries {
 	limit, offset = normalizePage(limit, offset)
 	filter := buildHostFilter(query, protocol, hasOpen)
-	where := append([]string(nil), filter.where...)
-	if len(where) == 0 {
-		where = []string{"1=1"}
-	}
-	args := append([]any(nil), filter.args...)
+	// The host inventory shows the default tenant's projection until requests
+	// carry a tenant scope. It is the only tenant, so the rows are the same.
+	where := append([]string{"h.tenant_id=?"}, filter.where...)
+	args := append([]any{DefaultTenantID}, filter.args...)
 	// latest_host_search mirrors latest_scan_hosts.rowid for the same bounded
 	// rowid-scoped lookup used by the per-scan history query.
 	join, predicate, searchArgs := hostSearchPredicate(filter, "latest_host_search", "hs.rowid=h.rowid")

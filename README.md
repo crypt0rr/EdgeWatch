@@ -583,7 +583,7 @@ The service therefore starts at once after a restore, and a repeated restore
 onto the stopped service is not refused. The active-daemon check reads only
 the lease in the database that is being replaced.
 
-The current schema is version 53. Database migrations are forward-only. An
+The current schema is version 54. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,
@@ -628,6 +628,18 @@ rewrite the stored scan results or event payloads, but the migration builds
 two new indexes on the scan and event history in one transaction at startup,
 which can take a while on a large history. The console, API, CLI, public
 status page, and notifications behave as before.
+
+Schema 54 keys the latest-host projection behind the Hosts view by tenant and
+address, so each tenant keeps its own newest observation of an address. The
+migration only swaps the table; the daemon then rebuilds the projection at
+startup by copying it in resumable batches of 500 hosts. Each host keeps its
+host search entry, so the search index is not rebuilt. While the copy runs, `edgewatch
+health` reports the `tenant-latest-hosts` phase with its progress, `edgewatch
+verify` lists its `latest_scan_hosts_tenant_rekey` checkpoint, and a restart
+resumes after the last committed batch. Until the copy completes, a host
+command that saves a successful scan is refused; start the daemon to finish
+the upgrade. The console, API, CLI, public status page, and notifications
+behave as before.
 
 ## Useful commands
 

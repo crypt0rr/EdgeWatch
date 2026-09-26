@@ -36,6 +36,10 @@ type scannerProfilePayload struct {
 // administrator-controlled rollback; operator writes must use the profile's
 // current active revision.
 //
+// The profile is resolved through the request's tenant store: every tenant
+// may select a built-in profile, but another tenant's custom profile is not
+// found, with the same error as an unknown ID.
+//
 // Selection problems are returned as store.ValidationError values. Storage
 // failures are returned unchanged so the caller reports them as internal
 // errors instead of echoing SQLite text as a validation message.
@@ -43,7 +47,7 @@ func (s *Server) applySelectedScannerProfile(ctx context.Context, ts *store.Tena
 	if job == nil || job.TCP == nil || strings.TrimSpace(job.TCP.ProfileID) == "" {
 		return nil
 	}
-	profile, err := s.Store.GetScannerProfile(ctx, job.TCP.ProfileID)
+	profile, err := ts.GetScannerProfile(ctx, job.TCP.ProfileID)
 	if errors.Is(err, store.ErrNotFound) {
 		return invalidProfileSelection("selected scanner profile was not found")
 	}
@@ -62,7 +66,7 @@ func (s *Server) applySelectedScannerProfile(ctx context.Context, ts *store.Tena
 	}
 	definition := profile.Definition
 	if requestedRevision != profile.Revision {
-		historical, revisionErr := s.Store.GetScannerProfileRevision(ctx, profile.ID, requestedRevision)
+		historical, revisionErr := ts.GetScannerProfileRevision(ctx, profile.ID, requestedRevision)
 		if errors.Is(revisionErr, store.ErrNotFound) {
 			return store.ErrConflict
 		}
@@ -245,7 +249,7 @@ func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, se
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) == 1 && parts[0] == "" {
 		if r.Method == http.MethodGet {
-			result, err := s.Store.ListScannerProfilesReport(r.Context(), r.URL.Query().Get("include_archived") == "true")
+			result, err := ts.ListScannerProfilesReport(r.Context(), r.URL.Query().Get("include_archived") == "true")
 			if err != nil {
 				s.writeInternalError(w, r, "store", err)
 				return
@@ -285,7 +289,7 @@ func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, se
 	}
 	id := parts[0]
 	if len(parts) == 1 && r.Method == http.MethodGet {
-		profile, err := s.Store.GetScannerProfile(r.Context(), id)
+		profile, err := ts.GetScannerProfile(r.Context(), id)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "not_found", "scanner profile not found", nil)
 			return
@@ -306,7 +310,7 @@ func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, se
 		return
 	}
 	if len(parts) == 2 && parts[1] == "revisions" && r.Method == http.MethodGet {
-		revisions, err := s.Store.ListScannerProfileRevisions(r.Context(), id)
+		revisions, err := ts.ListScannerProfileRevisions(r.Context(), id)
 		if err != nil {
 			writeError(w, http.StatusNotFound, "not_found", "scanner profile not found", nil)
 			return
@@ -377,7 +381,7 @@ func (s *Server) createScannerProfile(w http.ResponseWriter, r *http.Request, se
 		return
 	}
 	definition := payload.definition()
-	profile, err := s.Store.CreateScannerProfile(r.Context(), payload.Name, payload.Description, definition, session.Username, actorAudit(session, "scanner_profile.created", strings.TrimSpace(payload.Name)))
+	profile, err := ts.CreateScannerProfile(r.Context(), payload.Name, payload.Description, definition, session.Username, actorAudit(session, "scanner_profile.created", strings.TrimSpace(payload.Name)))
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "scanner_profile.created") {
 			return
@@ -405,7 +409,7 @@ func (s *Server) updateScannerProfile(w http.ResponseWriter, r *http.Request, se
 	if !s.confirmProfilePassword(w, r, session, payload.Password) {
 		return
 	}
-	profile, err := s.Store.UpdateScannerProfile(r.Context(), id, payload.Revision, payload.Name, payload.Description, payload.definition(), session.Username, actorAudit(session, "scanner_profile.updated", id))
+	profile, err := ts.UpdateScannerProfile(r.Context(), id, payload.Revision, payload.Name, payload.Description, payload.definition(), session.Username, actorAudit(session, "scanner_profile.updated", id))
 	if s.writeAuditUnavailable(w, err, "scanner_profile.updated") {
 		return
 	}
@@ -444,7 +448,7 @@ func (s *Server) setScannerProfileArchived(w http.ResponseWriter, r *http.Reques
 	if !archived {
 		action = "scanner_profile.restored"
 	}
-	err := s.Store.SetScannerProfileArchived(r.Context(), id, archived, payload.Revision, session.Username, actorAudit(session, action, id))
+	err := ts.SetScannerProfileArchived(r.Context(), id, archived, payload.Revision, session.Username, actorAudit(session, action, id))
 	if s.writeAuditUnavailable(w, err, action) {
 		return
 	}

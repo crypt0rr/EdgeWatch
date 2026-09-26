@@ -21,27 +21,36 @@ type notificationPayload struct {
 	Revision *int64  `json:"revision"`
 }
 
+// listNotificationDestinations lists the destinations of the session's
+// tenant, their status, and the tenant's update alert routing. Another
+// tenant's destinations and routing are never shown.
 func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	w.Header().Set("Cache-Control", "no-store")
-	if err := s.App.Notifier.Reload(r.Context()); err != nil {
+	notifier := s.App.Notifier.Tenant(ts)
+	views, err := notifier.Destinations(r.Context())
+	var status map[string]any
+	if err == nil {
+		status, err = notifier.Status(r.Context())
+	}
+	if err != nil {
 		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
 		return
 	}
 	routing := map[string]any{"configured": false, "destinations": []string{}}
-	if state, err := s.Store.GetApplicationUpdateState(r.Context()); err == nil {
+	if current, err := ts.ApplicationUpdateRouting(r.Context()); err == nil {
 		// Show legacy deployment digests as current selectors. The console
 		// drops selectors that are not in the destination list before saving.
-		destinations, _ := s.App.Notifier.CanonicalSelection(state.UpdateNotificationDestinations)
+		destinations, _, _ := notifier.CanonicalSelection(r.Context(), current.Destinations)
 		if destinations == nil {
 			destinations = []string{}
 		}
-		routing = map[string]any{"configured": state.UpdateNotificationDestinationsConfigured, "destinations": destinations}
+		routing = map[string]any{"configured": current.Configured, "destinations": destinations}
 	} else {
 		if s.Log != nil {
 			s.Log.Warn("application update routing state unavailable", "error", err)
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"destinations": s.App.Notifier.DestinationsContext(r.Context()), "status": s.App.Notifier.StatusContext(r.Context()), "update_routing": routing})
+	writeJSON(w, http.StatusOK, map[string]any{"destinations": views, "status": status, "update_routing": routing})
 }
 
 type updateNotificationRoutingPayload struct {
@@ -71,7 +80,9 @@ func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "validation_failed", "destinations must be an array", map[string]string{"destinations": "select zero or more configured destinations"})
 		return
 	}
-	if err := s.App.Notifier.ValidateDestinationSelection(r.Context(), input.Destinations); err != nil {
+	// The routing may select only the tenant's own destinations; another
+	// tenant's destination is refused as an unknown one.
+	if err := s.App.Notifier.Tenant(ts).ValidateDestinationSelection(r.Context(), input.Destinations); err != nil {
 		if errors.Is(err, notify.ErrInvalidDestinationSelection) {
 			writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]string{"destinations": err.Error()})
 		} else {
@@ -79,7 +90,7 @@ func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
-	if err := s.Store.SetApplicationUpdateDestinations(r.Context(), input.Destinations, store.AuditEntry{Action: "notifications.update_routing", Detail: "application update notification routing changed", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+	if err := ts.SetApplicationUpdateDestinations(r.Context(), input.Destinations, store.AuditEntry{Action: "notifications.update_routing", Detail: "application update notification routing changed", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
 		if s.writeAuditUnavailable(w, err, "notifications.update_routing") {
 			return
 		}
@@ -91,8 +102,8 @@ func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Reques
 	// store so the client and any other administrator sessions converge on the
 	// same representation.
 	destinations := input.Destinations
-	if state, err := s.Store.GetApplicationUpdateState(r.Context()); err == nil {
-		destinations = state.UpdateNotificationDestinations
+	if current, err := ts.ApplicationUpdateRouting(r.Context()); err == nil {
+		destinations = current.Destinations
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "destinations": destinations})
 }
@@ -119,7 +130,7 @@ func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Re
 		writeError(w, http.StatusBadRequest, "validation_failed", "notification URL is required", map[string]string{"url": "notification URL is required"})
 		return
 	}
-	view, err := s.App.Notifier.CreateManagedWithAudit(r.Context(), input.Name, *input.URL, enabled, store.AuditEntry{Action: "notifications.created", Detail: "managed notification created", ActorUserID: session.UserID, ActorUsername: session.Username})
+	view, err := s.App.Notifier.Tenant(ts).CreateManagedWithAudit(r.Context(), input.Name, *input.URL, enabled, store.AuditEntry{Action: "notifications.created", Detail: "managed notification created", ActorUserID: session.UserID, ActorUsername: session.Username})
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "notifications.created") {
 			return
@@ -145,7 +156,7 @@ func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "notification tests are temporarily rate limited", nil)
 			return
 		}
-		if err := s.App.Notifier.TestDestinationContext(r.Context(), id); err != nil {
+		if err := s.App.Notifier.Tenant(ts).TestDestination(r.Context(), id); err != nil {
 			s.auditOptionalEntry(r.Context(), store.AuditEntry{Action: "notifications.test_failed", Detail: "managed notification test failed: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
 			s.writeNotificationError(w, err)
 			return
@@ -163,7 +174,7 @@ func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Req
 	switch r.Method {
 	case http.MethodGet:
 		w.Header().Set("Cache-Control", "no-store")
-		view, err := s.App.Notifier.Destination(r.Context(), id)
+		view, err := s.App.Notifier.Tenant(ts).Destination(r.Context(), id)
 		if err != nil {
 			s.writeNotificationError(w, err)
 			return
@@ -196,7 +207,7 @@ func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationAuthError(w, err)
 		return
 	}
-	view, err := s.App.Notifier.UpdateManagedWithAudit(r.Context(), id, *input.Revision, input.Name, input.URL, input.Enabled, store.AuditEntry{Action: "notifications.updated", Detail: "managed notification updated: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
+	view, err := s.App.Notifier.Tenant(ts).UpdateManagedWithAudit(r.Context(), id, *input.Revision, input.Name, input.URL, input.Enabled, store.AuditEntry{Action: "notifications.updated", Detail: "managed notification updated: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "notifications.updated") {
 			return
@@ -226,7 +237,7 @@ func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationAuthError(w, err)
 		return
 	}
-	changedJobs, err := s.App.Notifier.DeleteManagedWithAudit(r.Context(), id, *input.Revision, store.AuditEntry{Action: "notifications.deleted", Detail: "managed notification deleted: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
+	changedJobs, err := s.App.Notifier.Tenant(ts).DeleteManagedWithAudit(r.Context(), id, *input.Revision, store.AuditEntry{Action: "notifications.deleted", Detail: "managed notification deleted: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "notifications.deleted") {
 			return
@@ -339,7 +350,7 @@ func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request, sessio
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "notification tests are temporarily rate limited", nil)
 		return
 	}
-	summary, err := s.App.Notifier.TestSummaryContext(r.Context())
+	summary, err := s.App.Notifier.Tenant(ts).TestSummary(r.Context())
 	if err != nil {
 		// Shoutrrr implementations may include destination details in an error;
 		// keep those credentials out of both API responses and logs.

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"strings"
 	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
 // DeliveryHealth is the redacted operational state for one notification
@@ -36,6 +38,20 @@ func deliveryIdentity(selector string) string {
 		}
 	}
 	return selector
+}
+
+// managedIntent is what resolveManagedIntentTx made of a managed selector for
+// one owner: the key of the outbox row, or "" and why no row is created.
+type managedIntent struct{ key, discardReason string }
+
+// eventOwner names whose destinations an event's alert may go to: the
+// platform's routing for a platform event, or the tenant of the event's job.
+// Events with the same owner resolve a managed selector the same way.
+func eventOwner(event model.Event) string {
+	if platformEvent(event) {
+		return ""
+	}
+	return "job:" + event.JobID
 }
 
 func deliveryErrorCode(err error) string {
@@ -123,11 +139,46 @@ ON CONFLICT(destination_identity) DO UPDATE SET
 	return err
 }
 
-// ListDeliveryHealth returns durable outcome metadata merged with the current
-// unsent outbox counts. It never reads notification payloads or credentials.
+// ListDeliveryHealth returns the delivery health of each destination.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListDeliveryHealth.
 func (s *Store) ListDeliveryHealth(ctx context.Context) (map[string]DeliveryHealth, error) {
+	return s.Tenant(DefaultTenantScope()).ListDeliveryHealth(ctx)
+}
+
+// Delivery health belongs to the tenant that owns the destination: a managed
+// identity ("managed:<id>") is joined to managed_notifications.tenant_id. The
+// default tenant also keeps every identity that names no current destination
+// of another tenant or of the platform: the config.yaml destinations, which
+// it owns, and the leftovers of deleted destinations, as the installation's
+// health did before tenants existed. Pending deliveries of a paused
+// destination are not counted. Each predicate takes one argument, the
+// tenant ID.
+const (
+	deliveryHealthColumns = `h.destination_identity,h.terminal_failures,h.last_success_at,h.last_failure_at,h.last_terminal_at,h.last_error_code,h.last_error_fingerprint`
+	tenantHealthSQL       = `h.destination_identity LIKE 'managed:%' AND EXISTS (SELECT 1 FROM managed_notifications AS m WHERE m.id=substr(h.destination_identity,9) AND m.tenant_id=?)`
+	defaultHealthSQL      = `NOT (h.destination_identity LIKE 'managed:%' AND EXISTS (SELECT 1 FROM managed_notifications AS m WHERE m.id=substr(h.destination_identity,9) AND m.tenant_id IS NOT ?))`
+	pendingOutboxColumns  = `o.destination,COUNT(*),COALESCE(SUM(CASE WHEN o.attempts > 0 THEN 1 ELSE 0 END),0),COALESCE(SUM(o.deferrals),0)`
+	tenantPendingSQL      = `o.destination LIKE 'managed:%' AND EXISTS (SELECT 1 FROM managed_notifications AS m WHERE o.destination LIKE 'managed:' || m.id || ':%' AND m.tenant_id=? AND m.enabled=1)`
+	defaultPendingSQL     = `NOT (o.destination LIKE 'managed:%' AND EXISTS (SELECT 1 FROM managed_notifications AS m WHERE o.destination LIKE 'managed:' || m.id || ':%' AND (m.tenant_id IS NOT ? OR m.enabled=0)))`
+)
+
+// ListDeliveryHealth returns the durable outcome metadata of the tenant's
+// destinations merged with their current unsent outbox counts. It never
+// reads notification payloads or credentials. The health of another
+// tenant's destinations or of the platform's is never returned.
+func (ts *TenantStore) ListDeliveryHealth(ctx context.Context) (map[string]DeliveryHealth, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	healthQuery := `SELECT ` + deliveryHealthColumns + ` FROM notification_delivery_health AS h WHERE ` + tenantHealthSQL
+	outboxQuery := `SELECT ` + pendingOutboxColumns + ` FROM outbox AS o WHERE o.sent_at IS NULL AND o.terminal_at='' AND o.attempts < ? AND ` + tenantPendingSQL + ` GROUP BY o.destination`
+	if ts.scope.id == DefaultTenantID {
+		healthQuery = `SELECT ` + deliveryHealthColumns + ` FROM notification_delivery_health AS h WHERE ` + defaultHealthSQL
+		outboxQuery = `SELECT ` + pendingOutboxColumns + ` FROM outbox AS o WHERE o.sent_at IS NULL AND o.terminal_at='' AND o.attempts < ? AND ` + defaultPendingSQL + ` GROUP BY o.destination`
+	}
 	out := map[string]DeliveryHealth{}
-	rows, err := s.reader().QueryContext(ctx, `SELECT destination_identity,terminal_failures,last_success_at,last_failure_at,last_terminal_at,last_error_code,last_error_fingerprint FROM notification_delivery_health`)
+	rows, err := ts.store.reader().QueryContext(ctx, healthQuery, ts.scope.id)
 	if err != nil {
 		return nil, err
 	}
@@ -151,14 +202,7 @@ func (s *Store) ListDeliveryHealth(ctx context.Context) (map[string]DeliveryHeal
 		return nil, err
 	}
 
-	rows, err = s.reader().QueryContext(ctx, `SELECT destination,COUNT(*),COALESCE(SUM(CASE WHEN attempts > 0 THEN 1 ELSE 0 END),0),COALESCE(SUM(deferrals),0)
-FROM outbox
-WHERE sent_at IS NULL AND terminal_at='' AND attempts < ?
-  AND NOT (destination LIKE 'managed:%' AND EXISTS (
-    SELECT 1 FROM managed_notifications m
-    WHERE destination LIKE 'managed:' || m.id || ':%' AND m.enabled=0
-  ))
-GROUP BY destination`, deliveryMaxAttempts)
+	rows, err = ts.store.reader().QueryContext(ctx, outboxQuery, deliveryMaxAttempts, ts.scope.id)
 	if err != nil {
 		return nil, err
 	}

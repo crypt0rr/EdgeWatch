@@ -146,7 +146,7 @@ func ImportConfiguredURLs(ctx context.Context, s *store.Store, urls []string, ke
 	// Refuse a key that cannot open the existing destinations. Importing
 	// under a replaced key would lock the imported destinations as soon as
 	// the original key is restored, while config.yaml no longer delivers.
-	existing, err := s.ListManagedNotifications(ctx)
+	existing, err := s.System().ListManagedNotifications(ctx)
 	if err != nil {
 		return result, configImportError(ConfigImportDatabaseError, err)
 	}

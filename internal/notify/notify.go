@@ -201,7 +201,10 @@ func validateManagedURL(raw string) (string, error) {
 
 // Reload refreshes managed metadata and decrypts destinations with the
 // current key. A missing/invalid key locks managed destinations but does not
-// stop scans or file-managed notifications.
+// stop scans or file-managed notifications. It reads the destinations of
+// every tenant and of the platform, because the delivery worker delivers
+// the alerts of all of them; each method that answers for a tenant uses only
+// that tenant's destinations.
 func (n *Notifier) Reload(ctx context.Context) error {
 	if n.Store == nil {
 		// Library-only notifier instances have no managed destinations to
@@ -212,10 +215,22 @@ func (n *Notifier) Reload(ctx context.Context) error {
 		n.mu.Unlock()
 		return nil
 	}
-	records, err := n.Store.ListManagedNotifications(ctx)
+	records, err := n.Store.System().ListManagedNotifications(ctx)
 	if err != nil {
 		return err
 	}
+	managed, keyErr := n.openManaged(records)
+	n.mu.Lock()
+	n.managed = managed
+	n.keyErr = keyErr
+	n.mu.Unlock()
+	return nil
+}
+
+// openManaged decrypts the records with the current key. A missing or
+// invalid key, or a record that the key cannot open, locks the destination
+// instead of failing; the key error is returned for the status view.
+func (n *Notifier) openManaged(records []store.ManagedNotification) (map[string]managedDestination, error) {
 	var key []byte
 	var keyErr error
 	if len(records) > 0 {
@@ -228,6 +243,7 @@ func (n *Notifier) Reload(ctx context.Context) error {
 			entry.locked = true
 			entry.code = keyErrorCode(keyErr)
 		} else {
+			var err error
 			entry.url, err = openURL(key, record.ID, record.Nonce, record.Ciphertext)
 			if err != nil {
 				entry.locked = true
@@ -239,11 +255,7 @@ func (n *Notifier) Reload(ctx context.Context) error {
 		}
 		managed[record.ID] = entry
 	}
-	n.mu.Lock()
-	n.managed = managed
-	n.keyErr = keyErr
-	n.mu.Unlock()
-	return nil
+	return managed, keyErr
 }
 
 func keyErrorCode(err error) string {
@@ -271,7 +283,7 @@ func (n *Notifier) ensureKey(ctx context.Context) ([]byte, error) {
 		// destination. Once ciphertext exists, however, a missing key must
 		// remain a hard lock: silently replacing it would make every existing
 		// credential unrecoverable and violate the backup/restore contract.
-		records, listErr := n.Store.ListManagedNotifications(ctx)
+		records, listErr := n.Store.System().ListManagedNotifications(ctx)
 		if listErr != nil {
 			return nil, listErr
 		}
@@ -288,7 +300,7 @@ func (n *Notifier) ensureKey(ctx context.Context) ([]byte, error) {
 		// first-start creation. Once encrypted destinations exist, even an
 		// empty invalid key must remain a hard lock: replacing it would split
 		// the key used by the existing ciphertext from the newly generated key.
-		records, listErr := n.Store.ListManagedNotifications(ctx)
+		records, listErr := n.Store.System().ListManagedNotifications(ctx)
 		if listErr != nil {
 			return nil, listErr
 		}
@@ -311,53 +323,27 @@ func (n *Notifier) ensureKey(ctx context.Context) ([]byte, error) {
 	return key, nil
 }
 
+// defaultTenant returns the notifier of the default tenant without reading
+// its destinations; the methods it serves read what they need themselves.
+func (n *Notifier) defaultTenant() *TenantNotifier {
+	return &TenantNotifier{n: n, ts: n.Store.Tenant(store.DefaultTenantScope())}
+}
+
+// CreateManaged creates a destination in the default tenant.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.CreateManagedWithAudit.
 func (n *Notifier) CreateManaged(ctx context.Context, name, rawURL string, enabled bool) (DestinationView, error) {
-	return n.createManaged(ctx, name, rawURL, enabled, nil)
+	return n.defaultTenant().createManaged(ctx, name, rawURL, enabled, nil)
 }
 
 // CreateManagedWithAudit is the administrator-facing variant. The encrypted
 // URL write and its redacted audit record share one store transaction.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.CreateManagedWithAudit.
 func (n *Notifier) CreateManagedWithAudit(ctx context.Context, name, rawURL string, enabled bool, audit store.AuditEntry) (DestinationView, error) {
-	return n.createManaged(ctx, name, rawURL, enabled, &audit)
-}
-
-func (n *Notifier) createManaged(ctx context.Context, name, rawURL string, enabled bool, audit *store.AuditEntry) (DestinationView, error) {
-	name = strings.TrimSpace(name)
-	if err := validateName(name); err != nil {
-		return DestinationView{}, err
-	}
-	provider, err := validateManagedURL(rawURL)
-	if err != nil {
-		return DestinationView{}, err
-	}
-	// Snapshot the destinations that exist before this endpoint is inserted.
-	// Legacy jobs with no saved routing selection are frozen to this snapshot
-	// transactionally, so the newly created endpoint remains opt-in.
-	if err := n.Reload(ctx); err != nil {
-		return DestinationView{}, err
-	}
-	legacySelection := n.LegacySelection()
-	key, err := n.ensureKey(ctx)
-	if err != nil {
-		return DestinationView{}, err
-	}
-	id := uuid.NewString()
-	nonce, ciphertext, err := sealURL(key, id, strings.TrimSpace(rawURL))
-	if err != nil {
-		return DestinationView{}, err
-	}
-	if audit == nil {
-		_, err = n.Store.CreateManagedNotificationWithLegacySelection(ctx, id, name, provider, ciphertext, nonce, enabled, legacySelection)
-	} else {
-		_, err = n.Store.CreateManagedNotificationWithLegacySelectionAndAudit(ctx, id, name, provider, ciphertext, nonce, enabled, legacySelection, *audit)
-	}
-	if err != nil {
-		return DestinationView{}, err
-	}
-	if err := n.Reload(ctx); err != nil {
-		return DestinationView{}, err
-	}
-	return n.view(id), nil
+	return n.defaultTenant().createManaged(ctx, name, rawURL, enabled, &audit)
 }
 
 func validateName(name string) error {
@@ -370,78 +356,29 @@ func validateName(name string) error {
 	return nil
 }
 
+// UpdateManaged updates a destination of the default tenant.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.UpdateManagedWithAudit.
 func (n *Notifier) UpdateManaged(ctx context.Context, id string, expectedRevision int64, name string, rawURL *string, enabled *bool) (DestinationView, error) {
-	return n.updateManaged(ctx, id, expectedRevision, name, rawURL, enabled, nil)
+	return n.defaultTenant().updateManaged(ctx, id, expectedRevision, name, rawURL, enabled, nil)
 }
 
 // UpdateManagedWithAudit atomically updates destination metadata/ciphertext
 // and records a redacted security event.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.UpdateManagedWithAudit.
 func (n *Notifier) UpdateManagedWithAudit(ctx context.Context, id string, expectedRevision int64, name string, rawURL *string, enabled *bool, audit store.AuditEntry) (DestinationView, error) {
-	return n.updateManaged(ctx, id, expectedRevision, name, rawURL, enabled, &audit)
+	return n.defaultTenant().updateManaged(ctx, id, expectedRevision, name, rawURL, enabled, &audit)
 }
 
-func (n *Notifier) updateManaged(ctx context.Context, id string, expectedRevision int64, name string, rawURL *string, enabled *bool, audit *store.AuditEntry) (DestinationView, error) {
-	name = strings.TrimSpace(name)
-	if err := validateName(name); err != nil {
-		return DestinationView{}, err
-	}
-	record, err := n.Store.GetManagedNotification(ctx, id)
-	if err != nil {
-		return DestinationView{}, err
-	}
-	// A locked destination can be renamed or disabled while its key is
-	// unavailable, but enabling it (or replacing its URL) must prove that the
-	// encryption key is usable. This keeps the database metadata from claiming
-	// an active destination that the notifier cannot safely decrypt.
-	if rawURL != nil || (enabled != nil && *enabled) {
-		if _, keyErr := n.ensureKey(ctx); keyErr != nil {
-			return DestinationView{}, keyErr
-		}
-		if rawURL == nil {
-			n.mu.RLock()
-			entry, present := n.managed[id]
-			n.mu.RUnlock()
-			if present && entry.locked {
-				return DestinationView{}, ErrManagedNotificationLocked
-			}
-		}
-	}
-	provider, ciphertext, nonce := record.Provider, record.Ciphertext, record.Nonce
-	if rawURL != nil {
-		provider, err = validateManagedURL(*rawURL)
-		if err != nil {
-			return DestinationView{}, err
-		}
-		key, keyErr := n.ensureKey(ctx)
-		if keyErr != nil {
-			return DestinationView{}, keyErr
-		}
-		nonce, ciphertext, err = sealURL(key, id, strings.TrimSpace(*rawURL))
-		if err != nil {
-			return DestinationView{}, err
-		}
-	}
-	nextEnabled := record.Enabled
-	if enabled != nil {
-		nextEnabled = *enabled
-	}
-	var updated store.ManagedNotification
-	if audit == nil {
-		updated, err = n.Store.UpdateManagedNotification(ctx, id, expectedRevision, name, provider, ciphertext, nonce, nextEnabled)
-	} else {
-		updated, err = n.Store.UpdateManagedNotificationWithAudit(ctx, id, expectedRevision, name, provider, ciphertext, nonce, nextEnabled, *audit)
-	}
-	if err != nil {
-		return DestinationView{}, err
-	}
-	if err := n.Reload(ctx); err != nil {
-		return DestinationView{}, err
-	}
-	return n.view(updated.ID), nil
-}
-
+// DeleteManaged removes a destination of the default tenant.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.DeleteManagedWithAudit.
 func (n *Notifier) DeleteManaged(ctx context.Context, id string, expectedRevision int64) error {
-	if err := n.Store.DeleteManagedNotification(ctx, id, expectedRevision); err != nil {
+	if err := n.Store.Tenant(store.DefaultTenantScope()).DeleteManagedNotification(ctx, id, expectedRevision); err != nil {
 		return err
 	}
 	return n.Reload(ctx)
@@ -450,12 +387,11 @@ func (n *Notifier) DeleteManaged(ctx context.Context, id string, expectedRevisio
 // DeleteManagedWithAudit removes a destination and records the action in the
 // same transaction. The destination is also removed from job and application
 // update routing; the returned IDs identify the jobs whose routing changed.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.DeleteManagedWithAudit.
 func (n *Notifier) DeleteManagedWithAudit(ctx context.Context, id string, expectedRevision int64, audit store.AuditEntry) ([]string, error) {
-	changedJobs, err := n.Store.DeleteManagedNotificationWithAudit(ctx, id, expectedRevision, audit)
-	if err != nil {
-		return nil, err
-	}
-	return changedJobs, n.Reload(ctx)
+	return n.defaultTenant().DeleteManagedWithAudit(ctx, id, expectedRevision, audit)
 }
 
 func (n *Notifier) view(id string) DestinationView {
@@ -471,19 +407,20 @@ func (n *Notifier) view(id string) DestinationView {
 // Destination returns one managed destination's redacted metadata. Deployment
 // destinations intentionally remain collection-only because they have no
 // mutable revision and are represented as a read-only aggregate in the UI.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.Destination.
 func (n *Notifier) Destination(ctx context.Context, id string) (DestinationView, error) {
 	if err := n.Reload(ctx); err != nil {
 		return DestinationView{}, err
 	}
-	n.mu.RLock()
-	entry, ok := n.managed[id]
-	n.mu.RUnlock()
+	entry, ok := n.defaultSet().managed[id]
 	if !ok {
 		return DestinationView{}, fmt.Errorf("%w: notification %s", store.ErrNotFound, id)
 	}
 	view := viewFromManaged(entry)
 	if n.Store != nil {
-		if health, healthErr := n.Store.ListDeliveryHealth(ctx); healthErr == nil {
+		if health, healthErr := n.Store.Tenant(store.DefaultTenantScope()).ListDeliveryHealth(ctx); healthErr == nil {
 			applyDeliveryHealth(&view, health["managed:"+id])
 		}
 	}
@@ -498,6 +435,10 @@ func viewFromRecord(record store.ManagedNotification, locked bool, code string) 
 	return DestinationView{ID: record.ID, Name: record.Name, Provider: record.Provider, Source: "web", Enabled: record.Enabled, Locked: locked, ReadOnly: false, Revision: record.Revision, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, ErrorCode: code}
 }
 
+// Destinations returns the default tenant's destinations.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.Destinations.
 func (n *Notifier) Destinations() []DestinationView {
 	return n.DestinationsContext(context.Background())
 }
@@ -505,34 +446,18 @@ func (n *Notifier) Destinations() []DestinationView {
 // DestinationsContext returns redacted destination metadata and the durable
 // delivery health for each current destination. Health is joined by stable
 // identity, so managed credential revisions share one operator-facing view.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.Destinations.
 func (n *Notifier) DestinationsContext(ctx context.Context) []DestinationView {
-	n.mu.RLock()
-	views := make([]DestinationView, 0, len(n.fileURLs)+len(n.managed))
-	for id, raw := range n.fileURLs {
-		views = append(views, DestinationView{ID: "file:" + id, Name: "Deployment destination", Provider: providerForURL(raw), Source: "deployment", Enabled: true, ReadOnly: true})
-	}
-	for _, entry := range n.managed {
-		views = append(views, viewFromManaged(entry))
-	}
-	n.mu.RUnlock()
+	views := n.defaultSet().views()
+	var health map[string]store.DeliveryHealth
 	if n.Store != nil {
-		if health, err := n.Store.ListDeliveryHealth(ctx); err == nil {
-			for i := range views {
-				identity := "managed:" + views[i].ID
-				if views[i].Source == "deployment" {
-					identity = strings.TrimPrefix(views[i].ID, "file:")
-				}
-				applyDeliveryHealth(&views[i], health[identity])
-			}
+		if current, err := n.Store.Tenant(store.DefaultTenantScope()).ListDeliveryHealth(ctx); err == nil {
+			health = current
 		}
 	}
-	sort.Slice(views, func(i, j int) bool {
-		if views[i].Source != views[j].Source {
-			return views[i].Source < views[j].Source
-		}
-		return strings.ToLower(views[i].Name) < strings.ToLower(views[j].Name)
-	})
-	return views
+	return finishViews(views, health)
 }
 
 func applyDeliveryHealth(view *DestinationView, health store.DeliveryHealth) {
@@ -560,91 +485,38 @@ func applyDeliveryHealth(view *DestinationView, health store.DeliveryHealth) {
 // participate in global delivery. It is used when a new endpoint is created
 // to freeze jobs that still rely on the legacy nil-selection behavior. The
 // returned slice is always non-nil, including when no destinations exist.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.LegacySelection.
 func (n *Notifier) LegacySelection() []string {
-	n.mu.RLock()
-	selection := make([]string, 0, len(n.fileURLs)+len(n.managed))
-	for id := range n.fileURLs {
-		selection = append(selection, "file:"+id)
-	}
-	for id, entry := range n.managed {
-		if entry.record.Enabled {
-			selection = append(selection, id)
-		}
-	}
-	n.mu.RUnlock()
-	sort.Strings(selection)
-	return selection
+	return n.defaultSet().legacySelection()
 }
 
+// ActiveCount returns the number of the default tenant's destinations that
+// can deliver now.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.Status.
 func (n *Notifier) ActiveCount() int {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	count := len(n.fileURLs)
-	for _, entry := range n.managed {
-		if entry.record.Enabled && !entry.locked {
-			count++
-		}
-	}
-	return count
+	return n.defaultSet().activeCount()
 }
 
+// Status returns the default tenant's notification status.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.Status.
 func (n *Notifier) Status() map[string]any {
 	return n.StatusContext(context.Background())
 }
 
+// StatusContext returns the default tenant's destination counts, key state,
+// config.yaml import outcome, and delivery totals, as the last Reload saw
+// them.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.Status.
 func (n *Notifier) StatusContext(ctx context.Context) map[string]any {
-	n.mu.RLock()
-	locked := 0
-	activeManaged := 0
-	managedCount := len(n.managed)
-	fileCount := len(n.fileURLs)
-	keyErr := n.keyErr
-	for _, entry := range n.managed {
-		if entry.locked {
-			locked++
-		}
-		if entry.record.Enabled && !entry.locked {
-			activeManaged++
-		}
-	}
-	n.mu.RUnlock()
-	keyState := "not_required"
-	if managedCount > 0 {
-		keyState = "ready"
-		if keyErr != nil {
-			keyState = keyErrorCode(keyErr)
-		} else if locked > 0 {
-			keyState = "decrypt_failed"
-		}
-	}
-	status := map[string]any{"deployment": fileCount, "managed": managedCount, "active": fileCount + activeManaged, "locked": locked, "key_state": keyState}
-	if n.Store != nil {
-		// Tell the console when config.yaml still lists URLs that were
-		// imported, or when their import failed and they are still delivered
-		// from config.yaml. Only the outcome is exposed, never a URL.
-		if state, err := n.Store.NotificationConfigImportState(ctx); err == nil {
-			switch {
-			case state.Status == store.NotificationConfigImportFailed:
-				status["config_import"] = store.NotificationConfigImportFailed
-			case state.ImportedURLs > 0:
-				status["config_import"] = store.NotificationConfigImportImported
-			}
-		}
-		if health, err := n.Store.ListDeliveryHealth(ctx); err == nil {
-			pending, retrying, deferrals, terminal := 0, 0, 0, 0
-			for _, item := range health {
-				pending += item.Pending
-				retrying += item.Retrying
-				deferrals += item.Deferrals
-				terminal += item.TerminalFailures
-			}
-			status["delivery_pending"] = pending
-			status["delivery_retrying"] = retrying
-			status["delivery_deferrals"] = deferrals
-			status["delivery_terminal_failures"] = terminal
-		}
-	}
-	return status
+	return n.completeStatus(ctx, n.defaultSet(), n.Store.Tenant(store.DefaultTenantScope()))
 }
 
 func (n *Notifier) destinationSnapshot() map[string]string {
@@ -721,27 +593,12 @@ func (n *Notifier) pausedDestinationKeys() []string {
 	return keys
 }
 
-// destinationKeys returns the destinations that were enabled when an event
-// was created. A managed destination may be locked because its encryption key
-// is temporarily unavailable; its durable outbox entry must still be created
-// so Drain can defer it until the key is restored.
-func (n *Notifier) destinationKeys() map[string]struct{} {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	out := make(map[string]struct{}, len(n.fileURLs)+len(n.managed))
-	for id := range n.fileURLs {
-		out[id] = struct{}{}
-	}
-	for id, entry := range n.managed {
-		if entry.record.Enabled {
-			out[managedKey(id, entry.record.Revision)] = struct{}{}
-		}
-	}
-	return out
-}
-
-// QueueDestinations reloads metadata and returns enabled destination keys for
-// an atomic event transition. Keys are opaque IDs or managed revisions.
+// QueueDestinations reloads metadata and returns the default tenant's enabled
+// destination keys for an atomic event transition. Keys are opaque IDs or
+// managed revisions.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.QueueDestinationsForSelection.
 func (n *Notifier) QueueDestinations(ctx context.Context) ([]string, error) {
 	return n.QueueDestinationsForSelection(ctx, nil)
 }
@@ -754,26 +611,24 @@ func (n *Notifier) QueueDestinations(ctx context.Context) ([]string, error) {
 // managed destination); legacy file hashes are translated at queue time, and
 // managed revision keys are resolved at queue time so a
 // credential update does not require editing every job.
+//
+// Deprecated: bound to the default tenant, whose destinations a nil
+// selection follows. Use Notifier.Tenant with the job's tenant store and
+// TenantNotifier.QueueDestinationsForJob.
 func (n *Notifier) QueueDestinationsForJob(ctx context.Context, job config.Job) ([]string, error) {
 	return n.QueueDestinationsForSelection(ctx, job.NotificationDestinations)
 }
 
+// QueueDestinationsForSelection resolves a selection of the default tenant's
+// destinations to queue keys.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.QueueDestinationsForSelection.
 func (n *Notifier) QueueDestinationsForSelection(ctx context.Context, selection []string) ([]string, error) {
 	if err := n.Reload(ctx); err != nil {
 		return nil, err
 	}
-	var keys map[string]struct{}
-	if selection == nil {
-		keys = n.destinationKeys()
-	} else {
-		keys = n.selectedDestinationKeys(selection)
-	}
-	out := make([]string, 0, len(keys))
-	for key := range keys {
-		out = append(out, key)
-	}
-	sort.Strings(out)
-	return out, nil
+	return n.defaultSet().queue(selection), nil
 }
 
 // ValidateDestinationSelection checks stable IDs at the API boundary without
@@ -781,6 +636,9 @@ func (n *Notifier) QueueDestinationsForSelection(ctx context.Context, selection 
 // managed destinations so an administrator can keep a job selection ready
 // while restoring a key or re-enabling delivery. The scan queue will simply
 // defer locked destinations and skip IDs removed after this validation.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.ValidateDestinationSelection.
 func (n *Notifier) ValidateDestinationSelection(ctx context.Context, selection []string) error {
 	if selection == nil {
 		return nil
@@ -788,23 +646,7 @@ func (n *Notifier) ValidateDestinationSelection(ctx context.Context, selection [
 	if err := n.Reload(ctx); err != nil {
 		return err
 	}
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	seen := make(map[string]struct{}, len(selection))
-	for _, selector := range selection {
-		selector = strings.TrimSpace(selector)
-		if selector == "" {
-			return fmt.Errorf("%w: notification destination ID cannot be empty", ErrInvalidDestinationSelection)
-		}
-		if _, exists := seen[selector]; exists {
-			continue
-		}
-		seen[selector] = struct{}{}
-		if !n.destinationSelectorExistsLocked(selector) {
-			return fmt.Errorf("%w: notification destination %q was not found", ErrInvalidDestinationSelection, selector)
-		}
-	}
-	return nil
+	return n.defaultSet().validate(selection)
 }
 
 // CanonicalSelection prepares a saved routing selection for display. A legacy
@@ -815,92 +657,26 @@ func (n *Notifier) ValidateDestinationSelection(ctx context.Context, selection [
 // deployment URL changes, because the changed URL is a new destination. Paused
 // and locked managed destinations still exist and are never reported missing.
 // The result reflects the last Reload; it never contains destination URLs.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.CanonicalSelection.
 func (n *Notifier) CanonicalSelection(selection []string) (canonical, missing []string) {
-	if selection == nil {
-		return nil, nil
-	}
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	canonical = make([]string, 0, len(selection))
-	seen := make(map[string]struct{}, len(selection))
-	for _, selector := range selection {
-		selector = strings.TrimSpace(selector)
-		if selector == "" {
-			continue
-		}
-		if id, ok := strings.CutPrefix(selector, "file:"); ok {
-			if _, current := n.fileURLs[id]; !current {
-				if opaque := n.fileLegacy[id]; opaque != "" {
-					selector = "file:" + opaque
-				}
-			}
-		}
-		if _, duplicate := seen[selector]; duplicate {
-			continue
-		}
-		seen[selector] = struct{}{}
-		canonical = append(canonical, selector)
-		if !n.destinationSelectorExistsLocked(selector) {
-			missing = append(missing, selector)
-		}
-	}
-	sort.Strings(canonical)
-	sort.Strings(missing)
-	return canonical, missing
+	return n.defaultSet().canonical(selection)
 }
 
-func (n *Notifier) selectedDestinationKeys(selection []string) map[string]struct{} {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	keys := make(map[string]struct{}, len(selection))
-	for _, selector := range selection {
-		selector = strings.TrimSpace(selector)
-		if key, ok := n.destinationKeyLocked(selector); ok {
-			keys[key] = struct{}{}
-		}
-	}
-	return keys
-}
-
-func (n *Notifier) destinationSelectorExistsLocked(selector string) bool {
-	if strings.HasPrefix(selector, "file:") {
-		id := strings.TrimPrefix(selector, "file:")
-		if id == "" {
-			return false
-		}
-		if _, ok := n.fileURLs[id]; ok {
-			return true
-		}
-		_, ok := n.fileLegacy[id]
-		return ok
-	}
-	_, ok := n.managed[selector]
-	return ok
-}
-
+// destinationKeyLocked resolves a selector of the default tenant to its
+// queue key. The caller holds n.mu.
 func (n *Notifier) destinationKeyLocked(selector string) (string, bool) {
-	if strings.HasPrefix(selector, "file:") {
-		id := strings.TrimPrefix(selector, "file:")
-		if _, ok := n.fileURLs[id]; ok && id != "" {
-			return id, true
-		}
-		if opaque, ok := n.fileLegacy[id]; ok && opaque != "" {
-			return opaque, true
-		}
-		return "", false
-	}
-	entry, ok := n.managed[selector]
-	if !ok || !entry.record.Enabled {
-		return "", false
-	}
-	return managedKey(entry.record.ID, entry.record.Revision), true
+	return n.defaultSetLocked().keyFor(selector)
 }
 
+// Queue queues events of config.yaml jobs, which belong to the default
+// tenant, to every enabled destination of that tenant.
 func (n *Notifier) Queue(ctx context.Context, events []model.Event) error {
 	if err := n.Reload(ctx); err != nil {
 		return err
 	}
-	destinations := n.destinationKeys()
+	destinations := n.defaultSet().keys()
 	for _, event := range events {
 		for destination := range destinations {
 			if err := n.Store.QueueEvent(ctx, destination, event); err != nil {
@@ -1234,12 +1010,19 @@ func sendContext(ctx context.Context, rawURL, message string) error {
 	}
 }
 
+// Test sends a test message to the default tenant's destinations.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.TestSummary.
 func (n *Notifier) Test() error {
 	return n.TestContext(context.Background())
 }
 
 // TestContext refreshes the managed destination cache first so an operator
 // restoring an external key can verify it without restarting the daemon.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.TestSummary.
 func (n *Notifier) TestContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -1267,11 +1050,20 @@ type TestSummary struct {
 // ErrManagedNotificationLocked, so restoring the wrong key is not reported as
 // a successful verification. Paused destinations are not tested, and an empty
 // configuration succeeds with nothing tested.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.TestSummary.
 func (n *Notifier) TestSummaryContext(ctx context.Context) (TestSummary, error) {
 	if err := n.Reload(ctx); err != nil {
 		return TestSummary{}, err
 	}
-	urls, locked := n.testDestinations()
+	return testSet(ctx, n.defaultSet())
+}
+
+// testSet sends one test message to each enabled destination of the set;
+// see TestSummaryContext.
+func testSet(ctx context.Context, set destinationSet) (TestSummary, error) {
+	urls, locked := set.testTargets()
 	summary := TestSummary{Tested: len(urls), Locked: len(locked)}
 	all := make([]error, 0, len(locked))
 	for _, entry := range locked {
@@ -1319,50 +1111,22 @@ func (n *Notifier) TestSummaryContext(ctx context.Context) (TestSummary, error) 
 	return summary, errors.Join(all...)
 }
 
-// testDestinations returns one URL per enabled, usable destination and the
-// enabled managed destinations that are locked. It deliberately does not use
-// destinationSnapshot: that map also carries the legacy digest alias of each
-// deployment URL, which exists only to route outbox rows created before
-// opaque IDs and must not add a second test message. URLs are not merged, so
-// a managed destination that shares a deployment URL is still tested.
-func (n *Notifier) testDestinations() (urls []string, locked []managedDestination) {
-	n.mu.RLock()
-	defer n.mu.RUnlock()
-	urls = make([]string, 0, len(n.fileURLs)+len(n.managed))
-	for _, raw := range n.fileURLs {
-		urls = append(urls, raw)
-	}
-	for _, entry := range n.managed {
-		if !entry.record.Enabled {
-			continue
-		}
-		if entry.locked {
-			locked = append(locked, entry)
-			continue
-		}
-		urls = append(urls, entry.url)
-	}
-	sort.Strings(urls)
-	sort.Slice(locked, func(i, j int) bool { return locked[i].record.ID < locked[j].record.ID })
-	return urls, locked
-}
-
+// TestDestination tests one of the default tenant's managed destinations.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.TestDestination.
 func (n *Notifier) TestDestination(id string) error {
 	return n.TestDestinationContext(context.Background(), id)
 }
 
+// TestDestinationContext tests one of the default tenant's managed
+// destinations after refreshing the managed destination cache.
+//
+// Deprecated: bound to the default tenant. Use Notifier.Tenant and
+// TenantNotifier.TestDestination.
 func (n *Notifier) TestDestinationContext(ctx context.Context, id string) error {
 	if err := n.Reload(ctx); err != nil {
 		return err
 	}
-	n.mu.RLock()
-	entry, ok := n.managed[id]
-	n.mu.RUnlock()
-	if !ok {
-		return store.ErrNotFound
-	}
-	if entry.locked {
-		return ErrManagedNotificationLocked
-	}
-	return safeSendContext(ctx, entry.url, "EdgeWatch notification test")
+	return n.defaultSet().testDestination(ctx, id)
 }

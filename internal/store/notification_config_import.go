@@ -210,7 +210,10 @@ func (s *Store) ImportDeploymentNotifications(ctx context.Context, items []Deplo
 		result.MergedDeliveries += merged
 	}
 	if len(replacements) > 0 {
-		changedJobs, err := replaceNotificationDestinationsInJobsTx(ctx, tx, replacements, now)
+		// The imported destinations belong to the default tenant, which owned
+		// the deployment destinations, so only its jobs and its update routing
+		// are rerouted.
+		changedJobs, err := replaceNotificationDestinationsInJobsTx(ctx, tx, DefaultTenantID, replacements, now)
 		if err != nil {
 			return DeploymentNotificationImportResult{}, err
 		}
@@ -220,7 +223,7 @@ func (s *Store) ImportDeploymentNotifications(ctx context.Context, items []Deplo
 				audits = append(audits, AuditEntry{Action: "job.notification_destination_replaced", Detail: fmt.Sprintf("%s: replaced deployment notification destination %s with imported destination %s", job.jobID, created.DeploymentID, created.ID)})
 			}
 		}
-		routed, err := replaceApplicationUpdateDestinationsTx(ctx, tx, replacements)
+		routed, err := replaceApplicationUpdateDestinationsTx(ctx, tx, DefaultTenantID, replacements)
 		if err != nil {
 			return DeploymentNotificationImportResult{}, err
 		}

@@ -47,7 +47,7 @@ type App struct {
 	runCancel           context.CancelFunc
 	runAccepting        bool
 	runStarted          bool
-	sem                 chan struct{}
+	slots               *slotPool
 	nmapVersion         string
 	naabuVersion        string
 	daemonOwnerMu       sync.RWMutex
@@ -392,7 +392,7 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, sem: make(chan struct{}, cfg.Scheduler.MaxConcurrent), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second, clock: time.Now}, nil
+	return &App{Version: "dev", Config: cfg, Store: s, Scanner: sc, Engine: &engine.Engine{Store: s}, Notifier: n, Logger: logger, ReleaseChecker: updatecheck.NewClient(), UpdateInterval: updatecheck.CheckInterval, slots: newSlotPool(cfg.Scheduler.MaxConcurrent, nil), nmapVersion: sc.Version(ctx), naabuVersion: sc.NaabuVersion(ctx), entries: map[string]cron.EntryID{}, scheduleSpecs: map[string]string{}, scheduleWake: make(chan struct{}, 1), deliveryWake: make(chan struct{}, 1), heartbeatInterval: 30 * time.Second, clock: time.Now}, nil
 }
 
 // importConfiguredNotifications imports the notification URLs in config.yaml
@@ -661,12 +661,11 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		return model.Scan{}, nil, scanner.ErrBusy
 	}
 	defer a.active.Delete(key)
-	select {
-	case a.sem <- struct{}{}:
-		defer func() { <-a.sem }()
-	case <-ctx.Done():
-		return model.Scan{}, nil, ctx.Err()
+	releaseSlot, slotErr := a.slots.Acquire(ctx, defaultSlotKey)
+	if slotErr != nil {
+		return model.Scan{}, nil, slotErr
 	}
+	defer releaseSlot()
 	if managed {
 		var queuedErr error
 		if job, revision, queuedErr = a.queuedManagedJob(ctx, job, jobID, revision, manual); queuedErr != nil {

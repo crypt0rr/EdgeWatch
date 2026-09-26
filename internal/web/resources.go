@@ -73,9 +73,10 @@ func (s *Server) resolveJob(w http.ResponseWriter, r *http.Request, ts *store.Te
 
 // resolveScanSummary loads a scan's metadata without its snapshot or change
 // payloads. When the scan cannot be loaded it writes the response selected by
-// failure and returns false.
+// failure and returns false. A scan of another tenant is not found, with the
+// same response as an unknown ID.
 func (s *Server) resolveScanSummary(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string, failure scanLookupFailure) (model.ScanSummary, bool) {
-	summary, err := s.Store.GetScanSummary(r.Context(), id)
+	summary, err := ts.GetScanSummary(r.Context(), id)
 	if err == nil {
 		return summary, true
 	}
@@ -110,10 +111,10 @@ func (s *Server) resolveJobAndScan(w http.ResponseWriter, r *http.Request, ts *s
 }
 
 // resolveScan loads the complete scan, including its snapshot and change
-// list, for the full-result /scans/{id} endpoint. Every failure is reported
-// as a missing scan.
+// list, for the full-result /scans/{id} endpoint. Every failure, including a
+// scan of another tenant, is reported as a missing scan.
 func (s *Server) resolveScan(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) (model.Scan, bool) {
-	scan, err := s.Store.GetScan(r.Context(), id)
+	scan, err := ts.GetScan(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return model.Scan{}, false

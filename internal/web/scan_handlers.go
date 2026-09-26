@@ -58,7 +58,7 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request, ts *store.Tenant
 // router's job lookup keeps the null response unambiguous: a known job with
 // no successful history is 200/null, while an unknown job remains 404.
 func (s *Server) latestSuccessfulScan(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job store.JobRecord) {
-	scan, err := s.Store.GetLatestSuccessfulJobScanSummary(r.Context(), job.ID)
+	scan, err := ts.GetLatestSuccessfulJobScanSummary(r.Context(), job.ID)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -550,7 +550,7 @@ func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, sessio
 func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job store.JobRecord) {
 	limit := queryLimit(r)
 	offset := queryOffset(r)
-	page, err := s.Store.ListJobScanSummariesPage(r.Context(), job.ID, limit, offset)
+	page, err := ts.ListJobScanSummariesPage(r.Context(), job.ID, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -575,7 +575,7 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, ts *store.Tenan
 	}
 	if comparable {
 		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
-			page, pageErr := s.Store.ListScanChangesPage(r.Context(), scanID, limit, offset)
+			page, pageErr := ts.ListScanChangesPage(r.Context(), scanID, limit, offset)
 			if pageErr != nil {
 				s.writeInternalError(w, r, "store", pageErr)
 				return
@@ -593,7 +593,7 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, ts *store.Tenan
 			// introduced retain the previous current-baseline behavior.
 			// Only this compatibility path needs the full snapshot. Managed scans
 			// always carry their immutable comparison in changes_json.
-			scan, scanErr := s.Store.GetScan(r.Context(), scanID)
+			scan, scanErr := ts.GetScan(r.Context(), scanID)
 			if scanErr != nil {
 				s.writeInternalError(w, r, "store", scanErr)
 				return
@@ -610,7 +610,7 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, ts *store.Tenan
 
 func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, summary model.ScanSummary) {
 	offset, limit := queryOffset(r), queryLimit(r)
-	resultPage, err := s.Store.ListScanResultsPage(r.Context(), summary.ID, limit, offset)
+	resultPage, err := ts.ListScanResultsPage(r.Context(), summary.ID, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -631,7 +631,7 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, ts *stor
 	comparisonState := "not_compared"
 	if summary.Status == "success" || summary.Status == "incomplete" {
 		if summary.BaselineScanID != "" || summary.BaselineConfigHash != "" {
-			page, pageErr := s.Store.ListScanChangesPage(r.Context(), scanID, limit, offset)
+			page, pageErr := ts.ListScanChangesPage(r.Context(), scanID, limit, offset)
 			if pageErr != nil {
 				s.writeInternalError(w, r, "store", pageErr)
 				return
@@ -640,7 +640,7 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, ts *stor
 			comparisonSource = "scan_time"
 			comparisonState = "compared"
 		} else if state, stateErr := s.Store.RuntimeState(r.Context(), id); stateErr == nil && state.Baseline != nil {
-			scan, scanErr := s.Store.GetScan(r.Context(), scanID)
+			scan, scanErr := ts.GetScan(r.Context(), scanID)
 			if scanErr != nil {
 				s.writeInternalError(w, r, "store", scanErr)
 				return
@@ -996,7 +996,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 	if input.ExpectedBaselineModified != nil {
 		expected.Modified, expected.ModifiedSet = *input.ExpectedBaselineModified, true
 	}
-	scan, err := s.Store.GetScan(r.Context(), input.ScanID)
+	scan, err := ts.GetScan(r.Context(), input.ScanID)
 	if err != nil || scan.JobID != id || scan.ConfigHash != record.Job.SecurityHash() {
 		writeError(w, 400, "invalid_scan", "scan does not belong to this job or current scope", nil)
 		return

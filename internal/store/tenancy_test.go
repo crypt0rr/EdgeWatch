@@ -14,7 +14,8 @@ import (
 
 // tenantFixture is a database with two tenants that look alike: each has an
 // active job named "edge" and an archived job named "edge-archived", and
-// the scan of each "edge" job found the same addresses. Tenant A is the
+// the scan of each "edge" job found the same addresses; only the changes and
+// units of the two scans differ (see tenantFixtureScan). Tenant A is the
 // default tenant; tenant B is created directly in SQL, because no product
 // API creates a tenant yet.
 type tenantFixture struct {
@@ -100,7 +101,7 @@ func buildTenantFixture(t *testing.T) (string, tenantFixtureIDs) {
 	ids := tenantFixtureIDs{jobA: jobA.ID, jobB: tenantFixtureJobB, archivedA: archivedA.ID, archivedB: tenantFixtureArchivedB, scanA: "scan-tenant-a", scanB: "scan-tenant-b"}
 	finished := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
 	for _, scan := range []struct{ id, job string }{{ids.scanA, ids.jobA}, {ids.scanB, ids.jobB}} {
-		if err := s.SaveScan(ctx, fixtureScan(scan.id, scan.job, "edge", finished, fixtureHosts(0, 3))); err != nil {
+		if err := s.System().SaveScan(ctx, tenantFixtureScan(scan.id, scan.job, finished)); err != nil {
 			t.Fatal(err)
 		}
 	}

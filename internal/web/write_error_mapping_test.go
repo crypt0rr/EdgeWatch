@@ -97,7 +97,7 @@ func TestJobWritesReportStorageFailuresAsInternalErrors(t *testing.T) {
 		requestID := "create-" + session.Role
 		body := `{"name":"created-` + session.Role + `","schedule":"0 * * * *","timezone":"UTC","targets":["192.0.2.11"],"tcp":{"ports":"80","mode":"connect","engine":"nmap"}}`
 		recorder := httptest.NewRecorder()
-		server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", body, requestID), session)
+		server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", body, requestID), session, defaultTenantStore(server))
 		assertRedactedInternalError(t, "create as "+session.Role, recorder, requestID, locked, &logs)
 	}
 	restoreInsert()
@@ -113,7 +113,7 @@ func TestJobWritesReportStorageFailuresAsInternalErrors(t *testing.T) {
 	for _, session := range []store.Session{admin, operator} {
 		requestID := "update-" + session.Role
 		recorder := httptest.NewRecorder()
-		server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), requestID), session, record.ID)
+		server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), requestID), session, defaultTenantStore(server), record.ID)
 		assertRedactedInternalError(t, "update as "+session.Role, recorder, requestID, locked, &logs)
 	}
 
@@ -127,7 +127,7 @@ func TestJobWritesReportStorageFailuresAsInternalErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
-	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "invalid-update"), operator, record.ID)
+	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "invalid-update"), operator, defaultTenantStore(server), record.ID)
 	if body := decodeAPIError(t, recorder); recorder.Code != http.StatusBadRequest || body.Error.Code != "validation_failed" || body.Error.Details["schedule"] == "" {
 		t.Fatalf("invalid schedule = %d %#v", recorder.Code, body.Error)
 	}
@@ -139,7 +139,7 @@ func TestJobWritesReportStorageFailuresAsInternalErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder = httptest.NewRecorder()
-	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "recovered-update"), operator, record.ID)
+	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "recovered-update"), operator, defaultTenantStore(server), record.ID)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("recovered update = %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -162,7 +162,7 @@ func TestJobProfileRevisionLookupFailureIsAnInternalError(t *testing.T) {
 	breakReadProjection(t, db, "scanner_profile_revisions")
 	body := `{"name":"historical-profile","schedule":"0 * * * *","timezone":"UTC","targets":["192.0.2.12"],"tcp":{"ports":"80","mode":"connect","engine":"nmap","profile_id":"` + profile.ID + `","profile_revision":1}}`
 	recorder := httptest.NewRecorder()
-	server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", body, "profile-revision"), admin)
+	server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", body, "profile-revision"), admin, defaultTenantStore(server))
 	assertRedactedInternalError(t, "historical profile create", recorder, "profile-revision", "no such table", &logs)
 }
 
@@ -188,7 +188,7 @@ func TestJobProfileSelectionErrorsRemainFieldValidation(t *testing.T) {
 	create := func(tcp string) *httptest.ResponseRecorder {
 		body := `{"name":"profile-selection","schedule":"0 * * * *","timezone":"UTC","targets":["192.0.2.40"],"tcp":` + tcp + `}`
 		recorder := httptest.NewRecorder()
-		server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", body, "profile-selection"), operator)
+		server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", body, "profile-selection"), operator, defaultTenantStore(server))
 		return recorder
 	}
 	for name, tc := range map[string]struct{ tcp, field string }{
@@ -217,7 +217,7 @@ func TestJobProfileSelectionErrorsRemainFieldValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
-	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "switch-profile"), operator, record.ID)
+	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "switch-profile"), operator, defaultTenantStore(server), record.ID)
 	if body := decodeAPIError(t, recorder); recorder.Code != http.StatusBadRequest || body.Error.Details["profile"] == "" {
 		t.Fatalf("switch to archived profile = %d %#v", recorder.Code, body.Error)
 	}
@@ -229,7 +229,7 @@ func TestJobProfileSelectionErrorsRemainFieldValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder = httptest.NewRecorder()
-	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "closed-store"), operator, record.ID)
+	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "closed-store"), operator, defaultTenantStore(server), record.ID)
 	assertRedactedInternalError(t, "update with a closed store", recorder, "closed-store", "database is closed", &logs)
 }
 
@@ -241,7 +241,7 @@ func TestScannerProfileWritesMapStorageFailuresAndMissingProfiles(t *testing.T) 
 	profileRequest := func(session store.Session, method, rest, body, requestID string) *httptest.ResponseRecorder {
 		request := jobWriteRequest(method, "/api/v1/scanner-profiles/"+rest, body, requestID)
 		recorder := httptest.NewRecorder()
-		server.scannerProfilesRoute(recorder, request, session, rest)
+		server.scannerProfilesRoute(recorder, request, session, defaultTenantStore(server), rest)
 		return recorder
 	}
 	profile, err := db.CreateScannerProfile(ctx, "Existing", "", config.BuiltinNmapProfile(), "admin")
@@ -302,7 +302,7 @@ func TestJobNamesAreBoundedAndRejectControlCharacters(t *testing.T) {
 	for _, session := range []store.Session{admin, operator} {
 		for name, value := range map[string]string{"too long": tooLong, "control character": "edge\u0007job", "line break": "edge\njob"} {
 			recorder := httptest.NewRecorder()
-			server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", jobBody(value), "name"), session)
+			server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", jobBody(value), "name"), session, defaultTenantStore(server))
 			body := decodeAPIError(t, recorder)
 			if recorder.Code != http.StatusBadRequest || body.Error.Code != "validation_failed" || body.Error.Details["name"] == "" {
 				t.Fatalf("%s create as %s = %d %#v", name, session.Role, recorder.Code, body.Error)
@@ -321,7 +321,7 @@ func TestJobNamesAreBoundedAndRejectControlCharacters(t *testing.T) {
 	// when every character takes four bytes.
 	longest := strings.Repeat("🙂", maxJobNameCharacters)
 	recorder := httptest.NewRecorder()
-	server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", jobBody(longest), "longest"), operator)
+	server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", jobBody(longest), "longest"), operator, defaultTenantStore(server))
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("maximum-length name create = %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -344,7 +344,7 @@ func TestJobNamesAreBoundedAndRejectControlCharacters(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder = httptest.NewRecorder()
-	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "rename"), operator, record.ID)
+	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "rename"), operator, defaultTenantStore(server), record.ID)
 	if body := decodeAPIError(t, recorder); recorder.Code != http.StatusBadRequest || body.Error.Details["name"] == "" {
 		t.Fatalf("over-long rename = %d %#v", recorder.Code, body.Error)
 	}
@@ -362,7 +362,7 @@ func TestMaximumLengthJobNameKeepsEventWritesWorking(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
-	server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", string(body), "max-name"), admin)
+	server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", string(body), "max-name"), admin, defaultTenantStore(server))
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("maximum-length job create = %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -378,7 +378,7 @@ func TestMaximumLengthJobNameKeepsEventWritesWorking(t *testing.T) {
 	}
 
 	reset := httptest.NewRecorder()
-	server.jobRoute(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, record.ID+"/baseline/reset")
+	server.jobRoute(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, defaultTenantStore(server), record.ID+"/baseline/reset")
 	if reset.Code != http.StatusOK || !strings.Contains(reset.Body.String(), "baseline-reset") {
 		t.Fatalf("maximum-length baseline reset = %d: %s", reset.Code, reset.Body.String())
 	}

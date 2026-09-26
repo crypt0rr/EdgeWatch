@@ -39,7 +39,7 @@ type scannerProfilePayload struct {
 // Selection problems are returned as store.ValidationError values. Storage
 // failures are returned unchanged so the caller reports them as internal
 // errors instead of echoing SQLite text as a validation message.
-func (s *Server) applySelectedScannerProfile(ctx context.Context, job *config.Job, allowArchived, allowHistorical bool) error {
+func (s *Server) applySelectedScannerProfile(ctx context.Context, ts *store.TenantStore, job *config.Job, allowArchived, allowHistorical bool) error {
 	if job == nil || job.TCP == nil || strings.TrimSpace(job.TCP.ProfileID) == "" {
 		return nil
 	}
@@ -241,7 +241,7 @@ func (s *Server) scannerCapabilities(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, capabilities)
 }
 
-func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, session store.Session, rest string) {
+func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) == 1 && parts[0] == "" {
 		if r.Method == http.MethodGet {
@@ -262,7 +262,7 @@ func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, se
 			return
 		}
 		if r.Method == http.MethodPost {
-			s.createScannerProfile(w, r, session)
+			s.createScannerProfile(w, r, session, ts)
 			return
 		}
 	}
@@ -294,15 +294,15 @@ func (s *Server) scannerProfilesRoute(w http.ResponseWriter, r *http.Request, se
 		return
 	}
 	if len(parts) == 1 && r.Method == http.MethodPut {
-		s.updateScannerProfile(w, r, session, id)
+		s.updateScannerProfile(w, r, session, ts, id)
 		return
 	}
 	if len(parts) == 1 && r.Method == http.MethodDelete {
-		s.setScannerProfileArchived(w, r, session, id, true)
+		s.setScannerProfileArchived(w, r, session, ts, id, true)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "restore" && r.Method == http.MethodPost {
-		s.setScannerProfileArchived(w, r, session, id, false)
+		s.setScannerProfileArchived(w, r, session, ts, id, false)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "revisions" && r.Method == http.MethodGet {
@@ -368,7 +368,7 @@ func (s *Server) confirmProfilePassword(w http.ResponseWriter, r *http.Request, 
 	return true
 }
 
-func (s *Server) createScannerProfile(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) createScannerProfile(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	var payload scannerProfilePayload
 	if !decodeJSON(w, r, &payload) {
 		return
@@ -393,7 +393,7 @@ func (s *Server) createScannerProfile(w http.ResponseWriter, r *http.Request, se
 	writeJSON(w, http.StatusCreated, scannerProfileJSON(profile, true))
 }
 
-func (s *Server) updateScannerProfile(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
+func (s *Server) updateScannerProfile(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string) {
 	var payload scannerProfilePayload
 	if !decodeJSON(w, r, &payload) {
 		return
@@ -425,7 +425,7 @@ func (s *Server) updateScannerProfile(w http.ResponseWriter, r *http.Request, se
 	writeJSON(w, http.StatusOK, scannerProfileJSON(profile, true))
 }
 
-func (s *Server) setScannerProfileArchived(w http.ResponseWriter, r *http.Request, session store.Session, id string, archived bool) {
+func (s *Server) setScannerProfileArchived(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string, archived bool) {
 	var payload struct {
 		Password string `json:"password"`
 		Revision int64  `json:"revision"`

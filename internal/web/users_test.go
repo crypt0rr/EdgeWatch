@@ -54,7 +54,7 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 		}
 		rec := httptest.NewRecorder()
-		server.usersRoute(rec, req, admin, strings.TrimPrefix(rest, "/"))
+		server.usersRoute(rec, req, admin, defaultTenantStore(server), strings.TrimPrefix(rest, "/"))
 		return rec
 	}
 
@@ -163,7 +163,7 @@ func TestUsersRouteValidationAndSessionRevocation(t *testing.T) {
 		req := httptest.NewRequest(method, "/api/v1/users"+rest, strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
-		server.usersRoute(rec, req, admin, strings.TrimPrefix(rest, "/"))
+		server.usersRoute(rec, req, admin, defaultTenantStore(server), strings.TrimPrefix(rest, "/"))
 		return rec
 	}
 	if rec := call(http.MethodPost, "", `{"username":"bad","role":"not-a-role","password":"administrator password"}`); rec.Code != http.StatusBadRequest {

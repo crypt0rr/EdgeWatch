@@ -64,19 +64,23 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 	}
 
 	if response := call("/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts", func(w http.ResponseWriter, r *http.Request) {
-		server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts")
+		server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/hosts")
 	}); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"data_quality":"detailed"`) {
 		t.Fatalf("job scan hosts = %d: %s", response.Code, response.Body.String())
 	}
-	if response := call("/api/v1/scans/"+scan.ID+"/hosts", func(w http.ResponseWriter, r *http.Request) { server.scanHostsRoute(w, r, scan.ID) }); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"hosts"`) {
+	if response := call("/api/v1/scans/"+scan.ID+"/hosts", func(w http.ResponseWriter, r *http.Request) {
+		server.scanHostsRoute(w, r, defaultTenantStore(server), scan.ID)
+	}); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"hosts"`) {
 		t.Fatalf("scan hosts route = %d: %s", response.Code, response.Body.String())
 	}
 	if response := call("/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.10", func(w http.ResponseWriter, r *http.Request) {
-		server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.10")
+		server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.10")
 	}); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"https"`) || !strings.Contains(response.Body.String(), `"expected"`) {
 		t.Fatalf("job scan host = %d: %s", response.Code, response.Body.String())
 	}
-	if response := call("/api/v1/scans/"+scan.ID+"/hosts/198.51.100.10", func(w http.ResponseWriter, r *http.Request) { server.scanHostRoute(w, r, scan.ID, "198.51.100.10") }); response.Code != http.StatusOK {
+	if response := call("/api/v1/scans/"+scan.ID+"/hosts/198.51.100.10", func(w http.ResponseWriter, r *http.Request) {
+		server.scanHostRoute(w, r, defaultTenantStore(server), scan.ID, "198.51.100.10")
+	}); response.Code != http.StatusOK {
 		t.Fatalf("scan host route = %d: %s", response.Code, response.Body.String())
 	}
 
@@ -85,11 +89,13 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 	server.RDAP = nil
 	for name, fn := range map[string]func(http.ResponseWriter, *http.Request){
 		"job scan RDAP": func(w http.ResponseWriter, r *http.Request) {
-			server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.10/rdap")
+			server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.10/rdap")
 		},
-		"scan RDAP": func(w http.ResponseWriter, r *http.Request) { server.scanHostRDAPRoute(w, r, scan.ID, "198.51.100.10") },
+		"scan RDAP": func(w http.ResponseWriter, r *http.Request) {
+			server.scanHostRDAPRoute(w, r, defaultTenantStore(server), scan.ID, "198.51.100.10")
+		},
 		"baseline RDAP": func(w http.ResponseWriter, r *http.Request) {
-			server.jobBaselineHostRDAP(w, r, record.ID, "198.51.100.10")
+			server.jobBaselineHostRDAP(w, r, defaultTenantStore(server), record.ID, "198.51.100.10")
 		},
 	} {
 		response := call("/api/v1/hosts/198.51.100.10/rdap", fn)
@@ -100,16 +106,16 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 
 	for name, fn := range map[string]func(http.ResponseWriter, *http.Request){
 		"missing scan host": func(w http.ResponseWriter, r *http.Request) {
-			server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.11")
+			server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.11")
 		},
 		"invalid scan host": func(w http.ResponseWriter, r *http.Request) {
-			server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/not-an-ip")
+			server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/hosts/not-an-ip")
 		},
 		"missing scan RDAP": func(w http.ResponseWriter, r *http.Request) {
-			server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.11/rdap")
+			server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.11/rdap")
 		},
 		"missing baseline RDAP": func(w http.ResponseWriter, r *http.Request) {
-			server.jobBaselineHostRDAP(w, r, record.ID, "198.51.100.11")
+			server.jobBaselineHostRDAP(w, r, defaultTenantStore(server), record.ID, "198.51.100.11")
 		},
 	} {
 		response := call("/api/v1/missing", fn)
@@ -123,7 +129,7 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 		"bad protocol":    "/api/v1/jobs/" + record.ID + "/scans/" + scan.ID + "/hosts?protocol=sctp",
 	} {
 		response := call(path, func(w http.ResponseWriter, r *http.Request) {
-			server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts")
+			server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/hosts")
 		})
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("%s status = %d: %s", name, response.Code, response.Body.String())
@@ -143,10 +149,14 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 		name string
 		fn   func(http.ResponseWriter, *http.Request)
 	}{
-		{"legacy hosts", func(w http.ResponseWriter, r *http.Request) { server.scanHostsRoute(w, r, legacy.ID) }},
-		{"legacy host", func(w http.ResponseWriter, r *http.Request) { server.scanHostRoute(w, r, legacy.ID, "2001:db8::20") }},
+		{"legacy hosts", func(w http.ResponseWriter, r *http.Request) {
+			server.scanHostsRoute(w, r, defaultTenantStore(server), legacy.ID)
+		}},
+		{"legacy host", func(w http.ResponseWriter, r *http.Request) {
+			server.scanHostRoute(w, r, defaultTenantStore(server), legacy.ID, "2001:db8::20")
+		}},
 		{"legacy RDAP", func(w http.ResponseWriter, r *http.Request) {
-			server.scanHostRDAPRoute(w, r, legacy.ID, "2001:db8::20")
+			server.scanHostRDAPRoute(w, r, defaultTenantStore(server), legacy.ID, "2001:db8::20")
 		}},
 	}
 	for _, item := range legacyCalls {
@@ -159,12 +169,14 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 		}
 	}
 
-	latest, err := server.latestScannedHosts(ctx)
+	latest, err := server.latestScannedHosts(ctx, defaultTenantStore(server))
 	if err != nil || len(latest) == 0 {
 		t.Fatalf("latest legacy hosts = %#v, %v", latest, err)
 	}
 	var decoded map[string]any
-	if err := json.Unmarshal(call("/api/v1", func(w http.ResponseWriter, r *http.Request) { server.scanHostsRoute(w, r, scan.ID) }).Body.Bytes(), &decoded); err != nil {
+	if err := json.Unmarshal(call("/api/v1", func(w http.ResponseWriter, r *http.Request) {
+		server.scanHostsRoute(w, r, defaultTenantStore(server), scan.ID)
+	}).Body.Bytes(), &decoded); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -201,7 +213,7 @@ func TestLatestScannedHostsWalksAllLegacyPagesAndSkipsMalformedRows(t *testing.T
 			t.Fatal(err)
 		}
 	}
-	latest, err := server.latestScannedHosts(ctx)
+	latest, err := server.latestScannedHosts(ctx, defaultTenantStore(server))
 	if err != nil {
 		t.Fatal(err)
 	}

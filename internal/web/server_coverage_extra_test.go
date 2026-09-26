@@ -145,7 +145,7 @@ func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			server.notificationDestinationRoute(recorder, httptest.NewRequest(test.method, "/api/v1/notifications/destinations/"+test.rest, nil), admin, test.rest)
+			server.notificationDestinationRoute(recorder, httptest.NewRequest(test.method, "/api/v1/notifications/destinations/"+test.rest, nil), admin, defaultTenantStore(server), test.rest)
 			if recorder.Code != http.StatusNotFound {
 				t.Fatalf("route status = %d, body = %s", recorder.Code, recorder.Body.String())
 			}
@@ -155,14 +155,14 @@ func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 	missing := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/missing/test", nil)
 	missing.RemoteAddr = "127.0.0.1:4001"
 	recorder := httptest.NewRecorder()
-	server.notificationDestinationRoute(recorder, missing, admin, "missing/test")
+	server.notificationDestinationRoute(recorder, missing, admin, defaultTenantStore(server), "missing/test")
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("missing destination test status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	limited := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/missing/test", nil)
 	limited.RemoteAddr = missing.RemoteAddr
 	recorder = httptest.NewRecorder()
-	server.notificationDestinationRoute(recorder, limited, admin, "missing/test")
+	server.notificationDestinationRoute(recorder, limited, admin, defaultTenantStore(server), "missing/test")
 	if recorder.Code != http.StatusTooManyRequests {
 		t.Fatalf("rate-limited destination test status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -186,7 +186,7 @@ func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 	// the ephemeral source port. Use a distinct client for the successful call.
 	testRequest.RemoteAddr = "127.0.0.2:4002"
 	recorder = httptest.NewRecorder()
-	server.notificationDestinationRoute(recorder, testRequest, admin, destination.ID+"/test")
+	server.notificationDestinationRoute(recorder, testRequest, admin, defaultTenantStore(server), destination.ID+"/test")
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"sent":1`) || calls.Load() != 1 {
 		t.Fatalf("successful destination test = %d %s (calls=%d)", recorder.Code, recorder.Body.String(), calls.Load())
 	}
@@ -209,7 +209,7 @@ func TestNotificationDestinationDeliveryFailureUsesGatewayStatus(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/api/v1/notifications/destinations/"+destination.ID+"/test", nil)
 	request.RemoteAddr = "127.0.0.3:4003"
 	recorder := httptest.NewRecorder()
-	server.notificationDestinationRoute(recorder, request, admin, destination.ID+"/test")
+	server.notificationDestinationRoute(recorder, request, admin, defaultTenantStore(server), destination.ID+"/test")
 	if recorder.Code != http.StatusBadGateway || !strings.Contains(recorder.Body.String(), `"code":"notification_failed"`) {
 		t.Fatalf("destination delivery failure = %d %s", recorder.Code, recorder.Body.String())
 	}
@@ -240,23 +240,23 @@ func TestServerSetupStatusAndRouteGuards(t *testing.T) {
 	}
 	for _, rest := range []string{"", "/unknown", "job/unknown"} {
 		recorder := httptest.NewRecorder()
-		server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+rest, nil), admin, rest)
+		server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+rest, nil), admin, defaultTenantStore(server), rest)
 		if recorder.Code != http.StatusNotFound {
 			t.Errorf("job route %q status = %d", rest, recorder.Code)
 		}
 	}
 	missing := httptest.NewRecorder()
-	server.jobRoute(missing, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing", nil), admin, "missing")
+	server.jobRoute(missing, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing", nil), admin, defaultTenantStore(server), "missing")
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("missing get job status = %d", missing.Code)
 	}
 	baseline := httptest.NewRecorder()
-	server.jobRoute(baseline, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing/baseline", nil), admin, "missing/baseline")
+	server.jobRoute(baseline, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing/baseline", nil), admin, defaultTenantStore(server), "missing/baseline")
 	if baseline.Code != http.StatusNotFound {
 		t.Fatalf("missing baseline status = %d", baseline.Code)
 	}
 	active := httptest.NewRecorder()
-	server.activeScans(active, httptest.NewRequest(http.MethodGet, "/api/v1/scans/active", nil))
+	server.activeScans(active, httptest.NewRequest(http.MethodGet, "/api/v1/scans/active", nil), defaultTenantStore(server))
 	if active.Code != http.StatusOK || !strings.Contains(active.Body.String(), `"scans":[]`) {
 		t.Fatalf("empty active scans = %d %s", active.Code, active.Body.String())
 	}
@@ -314,7 +314,7 @@ func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
 	server, db, admin := newUsersTestServer(t)
 	ctx := context.Background()
 	missing := httptest.NewRecorder()
-	server.jobRoute(missing, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/missing/run", nil), admin, "missing/run")
+	server.jobRoute(missing, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/missing/run", nil), admin, defaultTenantStore(server), "missing/run")
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("missing run status = %d", missing.Code)
 	}
@@ -327,7 +327,7 @@ func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	archived := httptest.NewRecorder()
-	server.jobRoute(archived, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/run", nil), admin, record.ID+"/run")
+	server.jobRoute(archived, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/run", nil), admin, defaultTenantStore(server), record.ID+"/run")
 	if archived.Code != http.StatusConflict {
 		t.Fatalf("archived run status = %d", archived.Code)
 	}
@@ -338,7 +338,7 @@ func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	active := httptest.NewRecorder()
-	server.jobRoute(active, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/run", nil), admin, record.ID+"/run")
+	server.jobRoute(active, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/run", nil), admin, defaultTenantStore(server), record.ID+"/run")
 	if active.Code != http.StatusConflict {
 		t.Fatalf("active run status = %d", active.Code)
 	}

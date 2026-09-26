@@ -26,7 +26,7 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 			req.Header.Set("Content-Type", "application/json")
 		}
 		rec := httptest.NewRecorder()
-		server.usersRoute(rec, req, admin, strings.TrimPrefix(rest, "/"))
+		server.usersRoute(rec, req, admin, defaultTenantStore(server), strings.TrimPrefix(rest, "/"))
 		return rec
 	}
 
@@ -82,7 +82,7 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	lastAdminRequest := httptest.NewRequest(http.MethodPatch, "/api/v1/users/"+store.LegacyAdminUserID, strings.NewReader(`{"role":"viewer","password":"administrator password"}`))
 	lastAdminRequest.Header.Set("Content-Type", "application/json")
 	lastAdmin := httptest.NewRecorder()
-	server.updateUser(lastAdmin, lastAdminRequest, otherActor, store.LegacyAdminUserID)
+	server.updateUser(lastAdmin, lastAdminRequest, otherActor, defaultTenantStore(server), store.LegacyAdminUserID)
 	if lastAdmin.Code != http.StatusUnauthorized || !strings.Contains(lastAdmin.Body.String(), "invalid_password") {
 		t.Fatalf("unverified actor demotion = %d: %s", lastAdmin.Code, lastAdmin.Body.String())
 	}
@@ -160,15 +160,15 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	}
 	for index, run := range []func(*httptest.ResponseRecorder){
 		func(w *httptest.ResponseRecorder) {
-			closedServer.listUsers(w, httptest.NewRequest(http.MethodGet, "/", nil))
+			closedServer.listUsers(w, httptest.NewRequest(http.MethodGet, "/", nil), defaultTenantStore(closedServer))
 		},
 		func(w *httptest.ResponseRecorder) {
-			closedServer.getUser(w, httptest.NewRequest(http.MethodGet, "/", nil), closedAdmin.UserID)
+			closedServer.getUser(w, httptest.NewRequest(http.MethodGet, "/", nil), defaultTenantStore(closedServer), closedAdmin.UserID)
 		},
 		func(w *httptest.ResponseRecorder) {
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"password":"administrator password"}`))
 			req.Header.Set("Content-Type", "application/json")
-			closedServer.issueActivation(w, req, closedAdmin, closedAdmin.UserID, "user.activation_issued")
+			closedServer.issueActivation(w, req, closedAdmin, defaultTenantStore(closedServer), closedAdmin.UserID, "user.activation_issued")
 		},
 	} {
 		rec := httptest.NewRecorder()
@@ -262,7 +262,7 @@ func TestUserMutationConfirmationGuards(t *testing.T) {
 		req.RemoteAddr = remote
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
-		server.usersRoute(rec, req, admin, strings.TrimPrefix(rest, "/"))
+		server.usersRoute(rec, req, admin, defaultTenantStore(server), strings.TrimPrefix(rest, "/"))
 		return rec
 	}
 	if rec := call(http.MethodPost, "", `{"username":"missing-confirmation"}`, "198.51.100.241:8000"); rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "password_required") {

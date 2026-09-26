@@ -458,7 +458,7 @@ func TestJobRoutesValidateRequestsBeforeResolvingTheJob(t *testing.T) {
 		request := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+id+"?permanent=true", strings.NewReader(`{"confirm_name":"x"}`))
 		request.Header.Set("Content-Type", "application/json")
 		recorder := httptest.NewRecorder()
-		f.server.jobRoute(recorder, request, operator, id)
+		f.server.jobRoute(recorder, request, operator, defaultTenantStore(f.server), id)
 		if want := wantErrorBody(t, "forbidden", "only an administrator can permanently delete a job", map[string]string{"permission": auth.PermissionJobsDelete}); recorder.Code != http.StatusForbidden || recorder.Body.String() != want {
 			t.Fatalf("operator permanent delete of %s = %d %q, want 403 %q", id, recorder.Code, recorder.Body.String(), want)
 		}
@@ -479,7 +479,7 @@ func TestJobRoutesValidateRequestsBeforeResolvingTheJob(t *testing.T) {
 	} {
 		f.lookups.reset()
 		recorder := httptest.NewRecorder()
-		f.server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+tc.rest, nil), store.Session{}, tc.rest)
+		f.server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+tc.rest, nil), store.Session{}, defaultTenantStore(f.server), tc.rest)
 		if recorder.Code != http.StatusNotFound || recorder.Body.String() != tc.body {
 			t.Fatalf("job route %q = %d %q, want 404 %q", tc.rest, recorder.Code, recorder.Body.String(), tc.body)
 		}

@@ -27,12 +27,12 @@ func TestOperatorCannotSelectSupersededScannerProfileRevision(t *testing.T) {
 	operator := admin
 	operator.Role = store.RoleOperator
 	historical := &config.Job{TCP: &config.Protocol{ProfileID: profile.ID, ProfileRevision: 1}}
-	if err := server.applySelectedScannerProfile(ctx, historical, false, auth.HasPermission(operator, auth.PermissionScannerProfilesManage)); !errors.Is(err, store.ErrConflict) {
+	if err := server.applySelectedScannerProfile(ctx, defaultTenantStore(server), historical, false, auth.HasPermission(operator, auth.PermissionScannerProfilesManage)); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("operator historical profile selection error = %v, want conflict", err)
 	}
 
 	current := &config.Job{TCP: &config.Protocol{ProfileID: profile.ID, ProfileRevision: 2}}
-	if err := server.applySelectedScannerProfile(ctx, current, false, true); err != nil {
+	if err := server.applySelectedScannerProfile(ctx, defaultTenantStore(server), current, false, true); err != nil {
 		t.Fatalf("administrator current profile selection: %v", err)
 	}
 	if current.TCP.ProfileRevision != 2 || current.TCP.Engine != config.EngineNmap {
@@ -42,7 +42,7 @@ func TestOperatorCannotSelectSupersededScannerProfileRevision(t *testing.T) {
 	// The administrator-only capability is what allows an intentional rollback;
 	// the operator session above must not be able to use the same revision.
 	rollback := &config.Job{TCP: &config.Protocol{ProfileID: profile.ID, ProfileRevision: 1}}
-	if err := server.applySelectedScannerProfile(ctx, rollback, false, auth.HasPermission(admin, auth.PermissionScannerProfilesManage)); err != nil {
+	if err := server.applySelectedScannerProfile(ctx, defaultTenantStore(server), rollback, false, auth.HasPermission(admin, auth.PermissionScannerProfilesManage)); err != nil {
 		t.Fatalf("administrator rollback selection: %v", err)
 	}
 }
@@ -63,7 +63,7 @@ func TestScannerProfileMutationsMapAuditUnavailableToServiceUnavailable(t *testi
 		request := httptest.NewRequest(method, "/api/v1/scanner-profiles/"+rest, strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		recorder := httptest.NewRecorder()
-		server.scannerProfilesRoute(recorder, request, admin, rest)
+		server.scannerProfilesRoute(recorder, request, admin, defaultTenantStore(server), rest)
 		return recorder
 	}
 	assertAuditUnavailable := func(name string, recorder *httptest.ResponseRecorder) {

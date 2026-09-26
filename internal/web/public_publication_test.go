@@ -124,7 +124,7 @@ func TestInFlightPublicBuildCannotServeAReplacedPublication(t *testing.T) {
 func publicDashboardToken(t *testing.T, server *Server, admin store.Session) string {
 	t.Helper()
 	recorder := httptest.NewRecorder()
-	server.publicDashboardRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/public-dashboard", nil), admin)
+	server.publicDashboardRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/public-dashboard", nil), admin, defaultTenantStore(server))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("public dashboard GET = %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -150,7 +150,7 @@ func TestPublicDashboardEditorRejectsStaleSaves(t *testing.T) {
 	get := func() publicDashboardConfigResponse {
 		t.Helper()
 		recorder := httptest.NewRecorder()
-		server.publicDashboardRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/public-dashboard", nil), admin)
+		server.publicDashboardRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/public-dashboard", nil), admin, defaultTenantStore(server))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("public dashboard GET = %d: %s", recorder.Code, recorder.Body.String())
 		}
@@ -164,7 +164,7 @@ func TestPublicDashboardEditorRejectsStaleSaves(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(body))
 		request.Header.Set("Content-Type", "application/json")
 		recorder := httptest.NewRecorder()
-		server.publicDashboardRoute(recorder, request, admin)
+		server.publicDashboardRoute(recorder, request, admin, defaultTenantStore(server))
 		return recorder
 	}
 	saved := func(recorder *httptest.ResponseRecorder) publicDashboardConfigResponse {

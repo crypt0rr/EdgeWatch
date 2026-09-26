@@ -12,7 +12,9 @@ import (
 // jobRoute does this for jobs; for scans, the API router calls getScan,
 // getScanSummary and the scan*Route functions, which resolve the scan and,
 // when it records one, its owning job. Scan cancellation is the exception: it
-// acts on the in-memory active scan and never loads a stored record.
+// acts on the in-memory active scan and never loads a stored record. The
+// resolvers and handlers take the request's tenant store, which the API
+// router resolves once from the session.
 //
 // Handlers never look the resource up again by its path ID, so these
 // resolvers are the one place where a per-object check can later apply to
@@ -51,8 +53,8 @@ const (
 
 // resolveJob loads the job with the given ID. When the job cannot be loaded it
 // writes the response selected by failure and returns false.
-func (s *Server) resolveJob(w http.ResponseWriter, r *http.Request, id string, failure jobLookupFailure) (store.JobRecord, bool) {
-	record, err := s.Store.GetJob(r.Context(), id)
+func (s *Server) resolveJob(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string, failure jobLookupFailure) (store.JobRecord, bool) {
+	record, err := ts.GetJob(r.Context(), id)
 	if err == nil {
 		return record, true
 	}
@@ -72,7 +74,7 @@ func (s *Server) resolveJob(w http.ResponseWriter, r *http.Request, id string, f
 // resolveScanSummary loads a scan's metadata without its snapshot or change
 // payloads. When the scan cannot be loaded it writes the response selected by
 // failure and returns false.
-func (s *Server) resolveScanSummary(w http.ResponseWriter, r *http.Request, id string, failure scanLookupFailure) (model.ScanSummary, bool) {
+func (s *Server) resolveScanSummary(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string, failure scanLookupFailure) (model.ScanSummary, bool) {
 	summary, err := s.Store.GetScanSummary(r.Context(), id)
 	if err == nil {
 		return summary, true
@@ -91,12 +93,12 @@ func (s *Server) resolveScanSummary(w http.ResponseWriter, r *http.Request, id s
 // resolveJobAndScan loads the job and then the scan named by a
 // /jobs/{id}/scans/{scan}/* route. A scan that belongs to another job, or to
 // no job, is reported as not found.
-func (s *Server) resolveJobAndScan(w http.ResponseWriter, r *http.Request, jobID string, jobFailure jobLookupFailure, scanID string, scanFailure scanLookupFailure) (store.JobRecord, model.ScanSummary, bool) {
-	job, ok := s.resolveJob(w, r, jobID, jobFailure)
+func (s *Server) resolveJobAndScan(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, jobID string, jobFailure jobLookupFailure, scanID string, scanFailure scanLookupFailure) (store.JobRecord, model.ScanSummary, bool) {
+	job, ok := s.resolveJob(w, r, ts, jobID, jobFailure)
 	if !ok {
 		return store.JobRecord{}, model.ScanSummary{}, false
 	}
-	summary, ok := s.resolveScanSummary(w, r, scanID, scanFailure)
+	summary, ok := s.resolveScanSummary(w, r, ts, scanID, scanFailure)
 	if !ok {
 		return store.JobRecord{}, model.ScanSummary{}, false
 	}
@@ -110,7 +112,7 @@ func (s *Server) resolveJobAndScan(w http.ResponseWriter, r *http.Request, jobID
 // resolveScan loads the complete scan, including its snapshot and change
 // list, for the full-result /scans/{id} endpoint. Every failure is reported
 // as a missing scan.
-func (s *Server) resolveScan(w http.ResponseWriter, r *http.Request, id string) (model.Scan, bool) {
+func (s *Server) resolveScan(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) (model.Scan, bool) {
 	scan, err := s.Store.GetScan(r.Context(), id)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)

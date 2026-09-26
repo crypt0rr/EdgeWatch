@@ -64,37 +64,37 @@ func decodeUserPassword(w http.ResponseWriter, r *http.Request) (string, bool) {
 	return input.Password, true
 }
 
-func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session store.Session, rest string) {
+func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		if r.Method == http.MethodGet {
-			s.listUsers(w, r)
+			s.listUsers(w, r, ts)
 			return
 		}
 		if r.Method == http.MethodPost {
-			s.createUser(w, r, session)
+			s.createUser(w, r, session, ts)
 			return
 		}
 	}
 	id := parts[0]
 	if len(parts) == 1 && r.Method == http.MethodGet {
-		s.getUser(w, r, id)
+		s.getUser(w, r, ts, id)
 		return
 	}
 	if len(parts) == 1 && r.Method == http.MethodPatch {
-		s.updateUser(w, r, session, id)
+		s.updateUser(w, r, session, ts, id)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "activation" && r.Method == http.MethodPost {
-		s.issueActivation(w, r, session, id, "user.activation_issued")
+		s.issueActivation(w, r, session, ts, id, "user.activation_issued")
 		return
 	}
 	if len(parts) == 2 && parts[1] == "activation" && r.Method == http.MethodDelete {
-		s.revokeActivation(w, r, session, id)
+		s.revokeActivation(w, r, session, ts, id)
 		return
 	}
 	if len(parts) == 2 && parts[1] == "password-reset" && r.Method == http.MethodPost {
-		s.issueActivation(w, r, session, id, "user.password_reset_issued")
+		s.issueActivation(w, r, session, ts, id, "user.password_reset_issued")
 		return
 	}
 	if len(parts) == 2 && parts[1] == "sessions" && r.Method == http.MethodDelete {
@@ -124,7 +124,7 @@ func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session stor
 	writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
 }
 
-func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
+func (s *Server) listUsers(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	w.Header().Set("Cache-Control", "no-store")
 	users, err := s.Store.ListUsers(r.Context())
 	if err != nil {
@@ -134,7 +134,7 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"users": users})
 }
 
-func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) getUser(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
 	w.Header().Set("Cache-Control", "no-store")
 	user, err := s.Store.GetUser(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
@@ -148,7 +148,7 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusOK, user.Summary())
 }
 
-func (s *Server) createUser(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) createUser(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	w.Header().Set("Cache-Control", "no-store")
 	var input userCreatePayload
 	if !decodeJSON(w, r, &input) {
@@ -213,7 +213,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, session stor
 	writeJSON(w, http.StatusCreated, map[string]any{"user": created.Summary(), "activation_token": plain, "activation_path": activationPath(plain)})
 }
 
-func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.Session, id string) {
+func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.Session, ts *store.TenantStore, id string) {
 	w.Header().Set("Cache-Control", "no-store")
 	user, err := s.Store.GetUser(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
@@ -318,7 +318,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 	writeJSON(w, http.StatusOK, user.Summary())
 }
 
-func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor store.Session, id, action string) {
+func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor store.Session, ts *store.TenantStore, id, action string) {
 	w.Header().Set("Cache-Control", "no-store")
 	password, ok := decodeUserPassword(w, r)
 	if !ok || !s.confirmUserMutation(w, r, actor, password) {
@@ -361,7 +361,7 @@ func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor s
 	writeJSON(w, http.StatusOK, map[string]any{"activation_token": plain, "activation_path": activationPath(plain), "expires_at": createdAt.Add(30 * time.Minute)})
 }
 
-func (s *Server) revokeActivation(w http.ResponseWriter, r *http.Request, actor store.Session, id string) {
+func (s *Server) revokeActivation(w http.ResponseWriter, r *http.Request, actor store.Session, ts *store.TenantStore, id string) {
 	w.Header().Set("Cache-Control", "no-store")
 	password, ok := decodeUserPassword(w, r)
 	if !ok || !s.confirmUserMutation(w, r, actor, password) {

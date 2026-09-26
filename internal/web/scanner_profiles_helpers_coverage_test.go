@@ -65,7 +65,7 @@ func TestScannerProfileJSONShapesAndCapabilities(t *testing.T) {
 	// The route accepts the session argument for symmetry with other scanner
 	// profile handlers; ensure a real profile listing can be serialized too.
 	list := httptest.NewRecorder()
-	server.scannerProfilesRoute(list, httptest.NewRequest(http.MethodGet, "/api/v1/scanner-profiles/", nil), admin, "")
+	server.scannerProfilesRoute(list, httptest.NewRequest(http.MethodGet, "/api/v1/scanner-profiles/", nil), admin, defaultTenantStore(server), "")
 	if list.Code != http.StatusOK {
 		t.Fatalf("profile list status = %d: %s", list.Code, list.Body.String())
 	}

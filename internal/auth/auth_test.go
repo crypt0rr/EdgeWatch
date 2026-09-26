@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -35,7 +36,7 @@ func TestPasswordHashAndVerification(t *testing.T) {
 
 func TestLoginRehashesWeakerArgon2Parameters(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +73,7 @@ func TestLoginRehashesWeakerArgon2Parameters(t *testing.T) {
 
 func TestLoginDoesNotRewriteCurrentArgon2Hash(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +154,7 @@ func TestReissueSetupTokenReplacesPreviousTokenAndIsRateLimited(t *testing.T) {
 }
 
 func TestSessionAuthenticationAndCSRF(t *testing.T) {
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +188,7 @@ func TestSessionAuthenticationAndCSRF(t *testing.T) {
 }
 
 func TestConfirmPasswordUsesGenericErrorsAndRateLimit(t *testing.T) {
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +287,7 @@ func TestArgon2WorkQueueBoundsConcurrentAdmission(t *testing.T) {
 }
 
 func TestUnknownUserAttemptsConsumeLoginBudget(t *testing.T) {
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +306,7 @@ func TestUnknownUserAttemptsConsumeLoginBudget(t *testing.T) {
 }
 
 func TestAuthLimiterBoundsRotatingSourcesAndExpiresEntries(t *testing.T) {
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +339,7 @@ func TestAuthLimiterBoundsRotatingSourcesAndExpiresEntries(t *testing.T) {
 }
 
 func TestSessionLifetimeRemainsAbsoluteWhenTouched(t *testing.T) {
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,7 +417,7 @@ func TestTOTPRejectsMissingOrTooShortSecrets(t *testing.T) {
 }
 
 func TestRecoveryCodeIsCaseInsensitiveAndSingleUse(t *testing.T) {
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +479,7 @@ func TestRecoveryCodesHaveSufficientEntropyAndSaltedStorage(t *testing.T) {
 
 func TestFailedLoginIsAuditedWithoutCredentials(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +508,7 @@ func TestFailedLoginIsAuditedWithoutCredentials(t *testing.T) {
 
 func TestLoginAsUserAndPasswordConfirmationAreScoped(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,7 +561,7 @@ func TestLoginAsUserAndPasswordConfirmationAreScoped(t *testing.T) {
 
 func TestLoginFailuresDoNotLockOutAnotherAccountBehindSameSource(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -599,7 +600,7 @@ func TestLoginFailuresDoNotLockOutAnotherAccountBehindSameSource(t *testing.T) {
 
 func TestLoginFailuresDoNotLockOutSameAccountFromAnotherSource(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,7 +635,7 @@ func TestLoginFailuresDoNotLockOutSameAccountFromAnotherSource(t *testing.T) {
 
 func TestSharedLoopbackLoginRecoversAfterCooldownAndIgnoresLegacyLockout(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

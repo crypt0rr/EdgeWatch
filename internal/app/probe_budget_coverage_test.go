@@ -16,6 +16,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 type budgetedProgressTestScanner struct {
@@ -45,7 +46,7 @@ func (s *budgetedProgressTestScanner) ScanWithProgressBudget(_ context.Context, 
 
 func TestRunJobUsesBudgetedScannerForDirectNaabuPipeline(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "budgeted-direct.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func TestRunJobUsesBudgetedScannerForDirectNaabuPipeline(t *testing.T) {
 
 func TestCheckScanCycleProbeBudgetCoversSplitAndHardLimits(t *testing.T) {
 	ctx := context.Background()
-	s, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +120,7 @@ func TestCheckScanCycleProbeBudgetCoversSplitAndHardLimits(t *testing.T) {
 	}
 	// SQLite's aggregate query intentionally treats an unknown cycle as an
 	// empty total. A closed store, however, must still surface the read error.
-	closedStore, err := store.Open(filepath.Join(t.TempDir(), "closed.db"))
+	closedStore, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +174,7 @@ func TestResolvedPlanProbeTotalsPreferConcreteUnits(t *testing.T) {
 
 func TestResolvedPlanBudgetRejectsExpandedWorkBeforeCycleCreation(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "resolved-budget.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +242,7 @@ func TestDirectScanRechecksProbeBudgetAfterResolvingAgain(t *testing.T) {
 	for _, managed := range []bool{true, false} {
 		t.Run(fmt.Sprintf("managed=%t", managed), func(t *testing.T) {
 			ctx := context.Background()
-			db, err := store.Open(filepath.Join(t.TempDir(), "direct-budget.db"))
+			db, err := store.Open(storetest.FreshPath(t))
 			if err != nil {
 				t.Fatal(err)
 			}

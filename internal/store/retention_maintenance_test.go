@@ -83,7 +83,7 @@ func TestPruneOptimizesFTSAndReclaimsPages(t *testing.T) {
 }
 
 func TestSearchMaintenanceHonorsCancellation(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "cancel.db"))
+	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestSearchMaintenanceHonorsCancellation(t *testing.T) {
 }
 
 func TestSearchMaintenanceReportsErrorsAndDefersBudgetExpiry(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "error.db"))
+	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestSearchMaintenanceReportsErrorsAndDefersBudgetExpiry(t *testing.T) {
 }
 
 func TestRetentionProtectionPreparationReportsClosedDatabase(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "protection-error.db"))
+	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

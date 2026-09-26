@@ -505,6 +505,7 @@ func TestMigration52GivesRootTablesTheDefaultTenant(t *testing.T) {
 // The admins row is copied into users only when the users row is missing,
 // and deleted once the users row exists.
 func TestMigration52RetiresTheAdminsRow(t *testing.T) {
+	base := newSchema51Fixture(t)
 	for _, tc := range []struct {
 		name  string
 		extra []string
@@ -530,7 +531,8 @@ func TestMigration52RetiresTheAdminsRow(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			fixture := newSchema51Fixture(t)
+			fixture := base
+			fixture.path = copyFixture(t, base.path)
 			execFixtureStatements(t, fixture.path, tc.extra)
 			s, err := Open(fixture.path)
 			if err != nil {
@@ -567,6 +569,7 @@ func TestMigration52RetiresTheAdminsRow(t *testing.T) {
 // Some recovery databases carry a schema marker without every table. The
 // migration creates the tables it reads, and the store works on the result.
 func TestMigration52UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
+	base := newSchema51Fixture(t)
 	for _, tc := range []struct {
 		name    string
 		missing []string
@@ -582,7 +585,8 @@ func TestMigration52UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			fixture := newSchema51Fixture(t)
+			fixture := base
+			fixture.path = copyFixture(t, base.path)
 			extra := make([]string, 0, len(tc.missing))
 			for _, table := range tc.missing {
 				extra = append(extra, "DROP TABLE "+table)

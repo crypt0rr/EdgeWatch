@@ -14,6 +14,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestUsageAndPrintValue(t *testing.T) {
@@ -196,8 +197,8 @@ func TestRunRejectsUnexpectedOperandsBeforeDestructiveActions(t *testing.T) {
 }
 
 func TestHealthDoesNotConstructScannerApplication(t *testing.T) {
-	dir := t.TempDir()
-	database := filepath.Join(dir, "edgewatch.db")
+	database := storetest.FreshPath(t)
+	dir := filepath.Dir(database)
 	s, err := store.Open(database)
 	if err != nil {
 		t.Fatal(err)
@@ -228,8 +229,8 @@ func TestHealthDoesNotConstructScannerApplication(t *testing.T) {
 }
 
 func TestRunStatusReportsUnknownManagedJob(t *testing.T) {
-	dir := t.TempDir()
-	database := filepath.Join(dir, "edgewatch.db")
+	database := storetest.FreshPath(t)
+	dir := filepath.Dir(database)
 	s, err := store.Open(database)
 	if err != nil {
 		t.Fatal(err)
@@ -249,8 +250,7 @@ func TestRunStatusReportsUnknownManagedJob(t *testing.T) {
 }
 
 func TestStatusFallsBackToUTCForInvalidTimezone(t *testing.T) {
-	dir := t.TempDir()
-	s, err := store.Open(filepath.Join(dir, "edgewatch.db"))
+	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,8 +268,8 @@ func TestStatusFallsBackToUTCForInvalidTimezone(t *testing.T) {
 
 func TestRunStatusHistoryAndBaselineForManagedJob(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	database := filepath.Join(dir, "edgewatch.db")
+	database := storetest.FreshPath(t)
+	dir := filepath.Dir(database)
 	s, err := store.Open(database)
 	if err != nil {
 		t.Fatal(err)

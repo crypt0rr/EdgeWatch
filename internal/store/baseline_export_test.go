@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -15,7 +14,7 @@ import (
 
 func TestExportBaselinesRoundTripsManagedAndLegacyEntries(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

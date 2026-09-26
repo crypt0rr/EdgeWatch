@@ -11,7 +11,7 @@ import (
 )
 
 func TestFileStoreUsesReadOnlyPoolForHistoryQueries(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestReadOnlyExistingSeesWALCommitsAfterOpen(t *testing.T) {
 }
 
 func TestHistoryReadsRemainAvailableWhileWriterTransactionIsHeld(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

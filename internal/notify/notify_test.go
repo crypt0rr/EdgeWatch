@@ -20,6 +20,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestQueueAndDeliverGenericWebhook(t *testing.T) {
@@ -34,7 +35,7 @@ func TestQueueAndDeliverGenericWebhook(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination := "generic://" + parsed.Host + "/edgewatch?disabletls=yes&template=json"
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +72,7 @@ func TestDrainProcessesMultipleBoundedBatches(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination := "generic://" + parsed.Host + "/edgewatch?disabletls=yes&template=json"
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +102,7 @@ func TestDrainProcessesMultipleBoundedBatches(t *testing.T) {
 
 func TestQueueDestinationsForJobUsesStableSelection(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +167,7 @@ func TestQueueDestinationsForJobUsesStableSelection(t *testing.T) {
 
 func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +237,7 @@ func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
 
 func TestQueueDestinationsForJobTracksManagedRevision(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +280,7 @@ func TestConcurrentDrainsDoNotDuplicateDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	destination := "generic://" + parsed.Host + "/edgewatch?disabletls=yes&template=json"
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -430,7 +431,7 @@ func TestLockedDestinationDoesNotStarveHealthyDelivery(t *testing.T) {
 
 func TestCanceledBatchReleasesUnsentClaims(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +469,7 @@ func TestCanceledBatchReleasesUnsentClaims(t *testing.T) {
 
 func TestCanceledDeliveryReleasesClaimWithoutBudget(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,7 +500,7 @@ func TestCanceledDeliveryReleasesClaimWithoutBudget(t *testing.T) {
 }
 
 func TestInvalidURLDoesNotLeakSecret(t *testing.T) {
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -690,7 +691,7 @@ func TestManagedNotificationCRUDEncryptsAndCancelsOldDeliveries(t *testing.T) {
 
 func TestManagedNotificationLocksWhenKeyIsUnavailable(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -776,7 +777,7 @@ func boolPtr(value bool) *bool { return &value }
 
 func TestManagedNotificationWrongKeyIsReportedAsDecryptFailure(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -811,7 +812,7 @@ func TestManagedNotificationWrongKeyIsReportedAsDecryptFailure(t *testing.T) {
 
 func TestNotifierDoesNotReplaceInvalidKeyWhenManagedDestinationsExist(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -859,7 +860,7 @@ func TestNotifierDoesNotReplaceInvalidKeyWhenManagedDestinationsExist(t *testing
 
 func TestExplicitKeyPathIsNotGenerated(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

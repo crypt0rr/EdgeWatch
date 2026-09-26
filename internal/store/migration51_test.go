@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -54,6 +55,36 @@ func execFixtureStatements(t *testing.T, path string, statements []string) {
 			t.Fatalf("fixture statement %s: %v", statement, err)
 		}
 	}
+}
+
+// copyFixture copies the closed database at path, with the key files beside
+// it, to a new temporary directory. A test builds a fixture once and gives
+// each subtest its own copy, because building a fixture migrates a new
+// database.
+func copyFixture(t *testing.T, path string) string {
+	t.Helper()
+	if info, err := os.Stat(path + "-wal"); err == nil && info.Size() > 0 {
+		t.Fatalf("fixture %s has %d bytes in its WAL; close it before copying", path, info.Size())
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.Type().IsRegular() || strings.HasSuffix(name, "-wal") || strings.HasSuffix(name, "-shm") || strings.HasSuffix(name, "-journal") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(filepath.Dir(path), name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return filepath.Join(dir, filepath.Base(path))
 }
 
 type schema50Fixture struct {
@@ -436,6 +467,7 @@ func TestMigration51IsANoOpWhenRepeated(t *testing.T) {
 // Some recovery databases carry a schema marker without every table. The
 // migration creates the tables it reads, and the store works on the result.
 func TestMigration51UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
+	base := newSchema50Fixture(t, nil)
 	for _, tc := range []struct {
 		name    string
 		missing []string
@@ -448,7 +480,8 @@ func TestMigration51UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
-			fixture := newSchema50Fixture(t, nil)
+			fixture := base
+			fixture.path = copyFixture(t, base.path)
 			extra := make([]string, 0, len(tc.missing))
 			for _, table := range tc.missing {
 				extra = append(extra, "DROP TABLE "+table)

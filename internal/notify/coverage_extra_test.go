@@ -16,6 +16,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 func TestNotificationValidationAndSecretCryptoBranches(t *testing.T) {
@@ -155,7 +156,7 @@ func TestRemoveInterruptedKeyOnlyRemovesExpectedEmptyFiles(t *testing.T) {
 
 func TestNotifierRecoversInterruptedKeyAndResolvesManagedSelectors(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +217,7 @@ func TestNotifierDeploymentSelectorCompatibilityBranches(t *testing.T) {
 	}
 	withoutStore.mu.Unlock()
 
-	db, err := store.Open(filepath.Join(t.TempDir(), "closed.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +231,7 @@ func TestNotifierDeploymentSelectorCompatibilityBranches(t *testing.T) {
 
 func TestNotifierLockedAndErrorBranches(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +303,7 @@ func TestNotifierLockedAndErrorBranches(t *testing.T) {
 
 func TestNotifierDeliveryFailureAndCancellationBranches(t *testing.T) {
 	ctx := context.Background()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

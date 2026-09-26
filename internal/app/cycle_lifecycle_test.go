@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/scanner"
 	"github.com/crypt0rr/edgewatch/internal/store"
+	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
 // lifecycleScanner is a deterministic resumable scanner. Unit 1 fails with a
@@ -71,7 +71,7 @@ func (s *lifecycleScanner) lastJob() config.Job {
 
 func newLifecycleTestApp(t *testing.T, sc Scanner, logs io.Writer) (*App, *store.Store) {
 	t.Helper()
-	db, err := store.Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

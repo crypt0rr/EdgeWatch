@@ -99,6 +99,8 @@ Report the checks you ran and any failures or checks you could not run.
 - Preserve secret redaction in logs and API responses, including the write-only contract for notification URLs.
 - Never commit notification URLs, authentication tokens, passwords, or encryption keys.
 - Use temporary databases in tests and preserve migration compatibility, transaction boundaries, and restore checks.
+  For a fresh database, use `openTestStore` in `internal/store` and `storetest.OpenFresh` or `storetest.FreshPath` elsewhere; these copy a migrated template.
+  Migrate from scratch only in tests that need it, such as migration, setup, and restore tests, because a full migration takes seconds under `-race`.
 - When the schema changes, update compatibility guidance in both `README.md` and `SECURITY.md`.
 - Keep runtime configuration, databases, keys, and generated assets out of source control.
 

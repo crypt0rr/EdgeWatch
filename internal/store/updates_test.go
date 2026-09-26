@@ -2,13 +2,12 @@ package store
 
 import (
 	"context"
-	"path/filepath"
 	"reflect"
 	"testing"
 )
 
 func TestApplicationUpdateStateAndNotificationDeduplication(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +58,7 @@ func TestApplicationUpdateStateAndNotificationDeduplication(t *testing.T) {
 }
 
 func TestApplicationUpdateNotificationDestinationsAreExplicitAndNormalized(t *testing.T) {
-	s, err := Open(filepath.Join(t.TempDir(), "edgewatch.db"))
+	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
 		t.Fatal(err)
 	}

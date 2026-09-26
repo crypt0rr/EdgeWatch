@@ -21,7 +21,7 @@ type notificationPayload struct {
 	Revision *int64  `json:"revision"`
 }
 
-func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Request) {
+func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	w.Header().Set("Cache-Control", "no-store")
 	if err := s.App.Notifier.Reload(r.Context()); err != nil {
 		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
@@ -53,7 +53,7 @@ type updateNotificationRoutingPayload struct {
 // configured destinations that receive application release/upgrade events.
 // A present empty array intentionally disables those notifications; omitting
 // the field is rejected so a browser cannot accidentally reset routing.
-func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	w.Header().Set("Cache-Control", "no-store")
 	var input updateNotificationRoutingPayload
 	if !decodeJSON(w, r, &input) {
@@ -97,7 +97,7 @@ func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "destinations": destinations})
 }
 
-func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	w.Header().Set("Cache-Control", "no-store")
 	var input notificationPayload
 	if !decodeJSON(w, r, &input) {
@@ -131,7 +131,7 @@ func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusCreated, view)
 }
 
-func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Request, session store.Session, rest string) {
+func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, rest string) {
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
 		writeError(w, http.StatusNotFound, "not_found", "notification destination not found", nil)
@@ -170,15 +170,15 @@ func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Req
 		}
 		writeJSON(w, http.StatusOK, view)
 	case http.MethodPut:
-		s.updateNotificationDestination(w, r, session, id)
+		s.updateNotificationDestination(w, r, session, ts, id)
 	case http.MethodDelete:
-		s.deleteNotificationDestination(w, r, session, id)
+		s.deleteNotificationDestination(w, r, session, ts, id)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "notification destination endpoint not found", nil)
 	}
 }
 
-func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
+func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string) {
 	w.Header().Set("Cache-Control", "no-store")
 	var input notificationPayload
 	if !decodeJSON(w, r, &input) {
@@ -208,7 +208,7 @@ func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, view)
 }
 
-func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
+func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string) {
 	w.Header().Set("Cache-Control", "no-store")
 	var input notificationPayload
 	if !decodeJSON(w, r, &input) {
@@ -333,7 +333,7 @@ func (s *Server) clientIP(r *http.Request) string {
 	return strings.TrimSpace(r.RemoteAddr)
 }
 
-func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	if !s.allowNotificationTest(r, "all") {
 		w.Header().Set("Retry-After", "5")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "notification tests are temporarily rate limited", nil)

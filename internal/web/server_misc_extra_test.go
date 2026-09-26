@@ -200,7 +200,7 @@ func TestStreamAppliesBoundedWriteDeadline(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(ctx)
 	done := make(chan struct{})
 	go func() {
-		server.stream(writer, request, session)
+		server.stream(writer, request, session, defaultTenantStore(server))
 		close(done)
 	}()
 	deadlineAt := time.Now().Add(time.Second)
@@ -238,7 +238,7 @@ func TestSSEWriteDeadlineReleasesStalledReader(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil)
 	done := make(chan struct{})
 	go func() {
-		server.stream(writer, request, session)
+		server.stream(writer, request, session, defaultTenantStore(server))
 		close(done)
 	}()
 	select {
@@ -261,7 +261,7 @@ func TestSSEShutdownInterruptsStalledWrite(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil)
 	done := make(chan struct{})
 	go func() {
-		server.stream(writer, request, session)
+		server.stream(writer, request, session, defaultTenantStore(server))
 		close(done)
 	}()
 	select {
@@ -318,7 +318,7 @@ func startTestSSEStream(server *Server, session store.Session) (context.CancelFu
 	response := &deadlineTrackingWriter{header: make(http.Header)}
 	done := make(chan struct{})
 	go func() {
-		server.stream(response, request, session)
+		server.stream(response, request, session, defaultTenantStore(server))
 		close(done)
 	}()
 	return cancel, done
@@ -336,7 +336,7 @@ func TestSSESubscriberLimits(t *testing.T) {
 	limitedRequest := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(limitedCtx)
 	limitedDone := make(chan struct{})
 	go func() {
-		server.stream(limited, limitedRequest, store.Session{IDHash: "session-c", UserID: "user-c"})
+		server.stream(limited, limitedRequest, store.Session{IDHash: "session-c", UserID: "user-c"}, defaultTenantStore(server))
 		close(limitedDone)
 	}()
 	select {
@@ -372,7 +372,7 @@ func TestSSESubscriberLimits(t *testing.T) {
 	perSessionRequest := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(perSessionCtx)
 	perSessionDone := make(chan struct{})
 	go func() {
-		server.stream(perSession, perSessionRequest, store.Session{IDHash: "same-session", UserID: "user"})
+		server.stream(perSession, perSessionRequest, store.Session{IDHash: "same-session", UserID: "user"}, defaultTenantStore(server))
 		close(perSessionDone)
 	}()
 	select {
@@ -504,7 +504,7 @@ func TestServerStaticSSEAndAuditHelpers(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil).WithContext(ctx)
 	request.Header.Set("Last-Event-ID", "1")
 	streamResponse := httptest.NewRecorder()
-	server.stream(streamResponse, request, session)
+	server.stream(streamResponse, request, session, defaultTenantStore(server))
 	if streamResponse.Code != http.StatusOK || streamResponse.Header().Get("Content-Type") != "text/event-stream" || !bytes.Contains(streamResponse.Body.Bytes(), []byte("second")) {
 		t.Fatalf("stream response = %d %s %q", streamResponse.Code, streamResponse.Header().Get("Content-Type"), streamResponse.Body.String())
 	}

@@ -17,7 +17,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
-func (s *Server) activeScans(w http.ResponseWriter, r *http.Request) {
+func (s *Server) activeScans(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	scans := s.App.ActiveScans()
 	if scans == nil {
 		scans = []model.ActiveScan{}
@@ -25,7 +25,7 @@ func (s *Server) activeScans(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"scans": scans})
 }
 
-func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
+func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string) {
 	if strings.TrimSpace(id) == "" {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
@@ -45,19 +45,19 @@ func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session stor
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "cancelling", "scan_id": id})
 }
 
-func (s *Server) getJob(w http.ResponseWriter, r *http.Request, record store.JobRecord) {
+func (s *Server) getJob(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
 	state, err := s.Store.RuntimeState(r.Context(), record.ID)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
 	}
-	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), record, state))
+	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), ts, record, state))
 }
 
 // latestSuccessfulScan returns only the newest completed scan summary. The
 // router's job lookup keeps the null response unambiguous: a known job with
 // no successful history is 200/null, while an unknown job remains 404.
-func (s *Server) latestSuccessfulScan(w http.ResponseWriter, r *http.Request, job store.JobRecord) {
+func (s *Server) latestSuccessfulScan(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job store.JobRecord) {
 	scan, err := s.Store.GetLatestSuccessfulJobScanSummary(r.Context(), job.ID)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
@@ -93,7 +93,7 @@ func decodeJobUpdate(w http.ResponseWriter, r *http.Request) (jobUpdateRequest, 
 // updateJob applies a validated update to the job the router loaded. The
 // write re-checks the revision inside its transaction, so an edit made after
 // the lookup is still reported as a conflict.
-func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store.Session, current store.JobRecord, update jobUpdateRequest) {
+func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, current store.JobRecord, update jobUpdateRequest) {
 	id, p, job := current.ID, update.payload, update.job
 	// High-cost approval is administrator-owned. Preserve it for older clients
 	// that omit the field until the immutable security scope is known below;
@@ -121,7 +121,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 	// revision as a new profile choice. Administrators may explicitly roll back
 	// to any retained revision.
 	allowHistoricalProfile := auth.HasPermission(session, auth.PermissionScannerProfilesManage) || allowArchivedProfile
-	if err := s.applySelectedScannerProfile(r.Context(), &job, allowArchivedProfile, allowHistoricalProfile); err != nil {
+	if err := s.applySelectedScannerProfile(r.Context(), ts, &job, allowArchivedProfile, allowHistoricalProfile); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			writeError(w, http.StatusConflict, "profile_conflict", "scanner profile was modified; reload and select its current revision", nil)
 		} else {
@@ -211,7 +211,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 	s.App.RefreshSchedules()
 	state, _ := s.Store.RuntimeState(r.Context(), id)
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "job.updated", "job_id": id})
-	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), record, state))
+	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), ts, record, state))
 }
 
 // canOverrideHighCost deliberately reuses the administrator-only users.manage
@@ -328,7 +328,7 @@ func protocolSummary(p *config.Protocol) string {
 	return p.Ports
 }
 
-func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, session store.Session, id string, archive bool) {
+func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string, archive bool) {
 	var payload lifecyclePayload
 	if !decodeJSON(w, r, &payload) {
 		return
@@ -375,7 +375,7 @@ func decodePermanentDelete(w http.ResponseWriter, r *http.Request, session store
 	return input.ConfirmName, true
 }
 
-func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session store.Session, record store.JobRecord, confirmName string) {
+func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, record store.JobRecord, confirmName string) {
 	id := record.ID
 	if confirmName != record.Job.Name {
 		writeError(w, http.StatusBadRequest, "confirmation_required", "type the job name to permanently delete it", nil)
@@ -401,7 +401,7 @@ func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
-func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, session store.Session, id string, enabled bool) {
+func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string, enabled bool) {
 	var payload lifecyclePayload
 	if !decodeJSON(w, r, &payload) {
 		return
@@ -431,7 +431,7 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, session store
 	writeJSON(w, 204, nil)
 }
 
-func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Session, record store.JobRecord) {
+func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, record store.JobRecord) {
 	id := record.ID
 	if record.Archived {
 		writeError(w, 409, "archived", "archived jobs cannot run", nil)
@@ -500,7 +500,7 @@ func broadScan(job config.Job) bool {
 	return estimate.TCPPorts > 4096 || estimate.UDPPorts > 4096 || estimate.Probes > 65_536
 }
 
-func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, job store.JobRecord) {
+func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job store.JobRecord) {
 	cycle, err := s.Store.GetRecoverableScanCycle(r.Context(), job.ID)
 	if errors.Is(err, store.ErrNoScanCycle) {
 		writeJSON(w, http.StatusOK, map[string]any{"cycle": nil})
@@ -531,7 +531,7 @@ func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, job store.Job
 	}})
 }
 
-func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, session store.Session, job store.JobRecord, cycleID string) {
+func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, job store.JobRecord, cycleID string) {
 	id := job.ID
 	cycle, err := s.Store.GetScanCycle(r.Context(), cycleID)
 	if err != nil || cycle.JobID != id {
@@ -547,7 +547,7 @@ func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, sessio
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
-func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, job store.JobRecord) {
+func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job store.JobRecord) {
 	limit := queryLimit(r)
 	offset := queryOffset(r)
 	page, err := s.Store.ListJobScanSummariesPage(r.Context(), job.ID, limit, offset)
@@ -561,7 +561,7 @@ func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, job store.JobR
 	writeJSON(w, 200, map[string]any{"scans": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 
-func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, record store.JobRecord, summary model.ScanSummary) {
+func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord, summary model.ScanSummary) {
 	id, scanID := record.ID, summary.ID
 	offset, limit := queryOffset(r), queryLimit(r)
 	comparisonState := "not_compared"
@@ -608,7 +608,7 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, record store.Jo
 	writeJSON(w, http.StatusOK, value)
 }
 
-func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, summary model.ScanSummary) {
+func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, summary model.ScanSummary) {
 	offset, limit := queryOffset(r), queryLimit(r)
 	resultPage, err := s.Store.ListScanResultsPage(r.Context(), summary.ID, limit, offset)
 	if err != nil {
@@ -622,7 +622,7 @@ func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, summary 
 	writeJSON(w, http.StatusOK, map[string]any{"results": results, "pagination": paginationJSON(offset, limit, resultPage.Total)})
 }
 
-func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, job store.JobRecord, summary model.ScanSummary) {
+func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job store.JobRecord, summary model.ScanSummary) {
 	id, scanID := job.ID, summary.ID
 	offset, limit := queryOffset(r), queryLimit(r)
 	changes := []model.Change{}
@@ -662,7 +662,7 @@ func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, job stor
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"changes": items, "pagination": page, "comparison_source": comparisonSource, "comparison_state": comparisonState, "baseline_scan_id": summary.BaselineScanID})
 }
-func (s *Server) listScans(w http.ResponseWriter, r *http.Request) {
+func (s *Server) listScans(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	limit := queryLimit(r)
 	offset := queryOffset(r)
 	page, err := s.Store.ListScanSummariesPage(r.Context(), r.URL.Query().Get("job"), limit, offset)
@@ -676,8 +676,8 @@ func (s *Server) listScans(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"scans": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 
-func (s *Server) getScan(w http.ResponseWriter, r *http.Request, id string) {
-	if scan, ok := s.resolveScan(w, r, id); ok {
+func (s *Server) getScan(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
+	if scan, ok := s.resolveScan(w, r, ts, id); ok {
 		writeJSON(w, http.StatusOK, map[string]any{"scan": scan})
 	}
 }
@@ -685,13 +685,13 @@ func (s *Server) getScan(w http.ResponseWriter, r *http.Request, id string) {
 // getScanSummary serves metadata for historical scan views without decoding
 // or returning the potentially large snapshot and change payloads. The legacy
 // /scans/{id} endpoint remains the full-result compatibility endpoint.
-func (s *Server) getScanSummary(w http.ResponseWriter, r *http.Request, id string) {
-	if summary, ok := s.resolveScanSummary(w, r, id, scanStoreErrorInternal); ok {
+func (s *Server) getScanSummary(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
+	if summary, ok := s.resolveScanSummary(w, r, ts, id, scanStoreErrorInternal); ok {
 		writeJSON(w, http.StatusOK, map[string]any{"scan": summary})
 	}
 }
 
-func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request) {
+func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	offset, limit := queryOffset(r), queryLimit(r)
 	incidentPage, err := s.Store.ListIncidentsPage(r.Context(), limit, offset)
 	if err != nil {
@@ -705,7 +705,7 @@ func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"incidents": items, "pagination": paginationJSON(offset, limit, incidentPage.Total), "truncated": false})
 }
 
-func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, job string) {
+func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job string) {
 	if jobID := r.URL.Query().Get("job_id"); jobID != "" {
 		offset, limit := queryOffset(r), queryLimit(r)
 		page, err := s.Store.ListJobEventsPage(r.Context(), jobID, limit, offset)
@@ -720,7 +720,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, job string) 
 		return
 	}
 	if job != "" {
-		if record, err := s.Store.GetJobByName(r.Context(), job); err == nil {
+		if record, err := ts.GetJobByName(r.Context(), job); err == nil {
 			job = record.Job.Name
 		}
 	}
@@ -736,7 +736,7 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, job string) 
 	writeJSON(w, http.StatusOK, map[string]any{"events": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 
-func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, job store.JobRecord) {
+func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, job store.JobRecord) {
 	offset, limit := queryOffset(r), queryLimit(r)
 	page, err := s.Store.ListJobEventsPage(r.Context(), job.ID, limit, offset)
 	if err != nil {
@@ -748,7 +748,7 @@ func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, job store.Job
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
-func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, record store.JobRecord) {
+func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
 	id := record.ID
 	offset, limit := queryOffset(r), queryLimit(r)
 	incidentPage, err := s.Store.ListJobIncidentsPage(r.Context(), id, limit, offset)
@@ -792,7 +792,7 @@ func decodeIncidentAction(w http.ResponseWriter, r *http.Request) (incidentActio
 	return incidentAction{key: key, expected: *input.ExpectedChange}, true
 }
 
-func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session store.Session, record store.JobRecord, action incidentAction) {
+func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, record store.JobRecord, action incidentAction) {
 	id, key := record.ID, action.key
 	var destinations []string
 	var err error
@@ -812,7 +812,7 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session 
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
-func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, session store.Session, record store.JobRecord, action incidentAction) {
+func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, record store.JobRecord, action incidentAction) {
 	id, key := record.ID, action.key
 	var destinations []string
 	var err error
@@ -873,7 +873,7 @@ func (s *Server) broadcastIncidentEvents(ctx context.Context, audience sseAudien
 // to fetch the full job record. Baseline units are paginated because a broad
 // CIDR can produce a large snapshot; the scope metadata remains intact on
 // every page.
-func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, record store.JobRecord) {
+func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
 	id := record.ID
 	state, err := s.Store.RuntimeState(r.Context(), id)
 	if err != nil {
@@ -923,7 +923,7 @@ func decodeResetBaseline(w http.ResponseWriter, r *http.Request) (resetBaselineR
 	return input, true
 }
 
-func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session store.Session, record store.JobRecord, input resetBaselineRequest) {
+func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, record store.JobRecord, input resetBaselineRequest) {
 	id := record.ID
 	state, stateErr := s.Store.RuntimeState(r.Context(), id)
 	if stateErr != nil {
@@ -952,7 +952,7 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session s
 			return
 		}
 		if errors.Is(err, store.ErrConflict) {
-			s.writeBaselineConflict(w, r, id)
+			s.writeBaselineConflict(w, r, ts, id)
 			return
 		}
 		writeError(w, 500, "store", "baseline reset could not be completed", nil)
@@ -982,7 +982,7 @@ func decodeApproveBaseline(w http.ResponseWriter, r *http.Request) (approveBasel
 	return input, true
 }
 
-func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session store.Session, record store.JobRecord, input approveBaselineRequest) {
+func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, record store.JobRecord, input approveBaselineRequest) {
 	id := record.ID
 	state, stateErr := s.Store.RuntimeState(r.Context(), id)
 	if stateErr != nil {
@@ -1016,7 +1016,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 			return
 		}
 		if errors.Is(err, store.ErrConflict) {
-			s.writeBaselineConflict(w, r, id)
+			s.writeBaselineConflict(w, r, ts, id)
 			return
 		}
 		writeError(w, 400, "approve_failed", "baseline approval could not be completed", nil)
@@ -1029,7 +1029,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 	writeJSON(w, 200, map[string]any{"events": events})
 }
 
-func (s *Server) writeBaselineConflict(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) writeBaselineConflict(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
 	current := map[string]any{}
 	if info, err := s.Store.RuntimeBaselineInfo(r.Context(), id); err == nil {
 		current = map[string]any{"baseline_scan_id": info.BaselineScanID, "baseline_modified": info.BaselineModified, "baseline_config_hash": info.BaselineConfigHash}

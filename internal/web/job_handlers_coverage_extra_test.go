@@ -37,7 +37,7 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, strings.NewReader(string(body)))
 		req.Header.Set("Content-Type", "application/json")
 		rec := httptest.NewRecorder()
-		server.jobRoute(rec, req, admin, record.ID)
+		server.jobRoute(rec, req, admin, defaultTenantStore(server), record.ID)
 		return rec
 	}
 
@@ -115,22 +115,22 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 		{"archive missing revision", func(w *httptest.ResponseRecorder) {
 			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
 			request.Header.Set("Content-Type", "application/json")
-			server.archiveJob(w, request, admin, record.ID, true)
+			server.archiveJob(w, request, admin, defaultTenantStore(server), record.ID, true)
 		}},
 		{"restore stale revision", func(w *httptest.ResponseRecorder) {
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"revision":1}`))
 			req.Header.Set("Content-Type", "application/json")
-			server.archiveJob(w, req, admin, record.ID, false)
+			server.archiveJob(w, req, admin, defaultTenantStore(server), record.ID, false)
 		}},
 		{"pause missing revision", func(w *httptest.ResponseRecorder) {
 			request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
 			request.Header.Set("Content-Type", "application/json")
-			server.enableJob(w, request, admin, record.ID, false)
+			server.enableJob(w, request, admin, defaultTenantStore(server), record.ID, false)
 		}},
 		{"resume unknown job", func(w *httptest.ResponseRecorder) {
 			req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"revision":1}`))
 			req.Header.Set("Content-Type", "application/json")
-			server.enableJob(w, req, admin, "missing", true)
+			server.enableJob(w, req, admin, defaultTenantStore(server), "missing", true)
 		}},
 	} {
 		t.Run(invoke.name, func(t *testing.T) {
@@ -147,7 +147,7 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 	delete := httptest.NewRecorder()
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/?permanent=true", strings.NewReader(`{"confirm_name":"update-coverage"}`))
 	deleteRequest.Header.Set("Content-Type", "application/json")
-	server.jobRoute(delete, deleteRequest, nonAdmin, record.ID)
+	server.jobRoute(delete, deleteRequest, nonAdmin, defaultTenantStore(server), record.ID)
 	if delete.Code != http.StatusForbidden {
 		t.Fatalf("non-admin permanent delete = %d", delete.Code)
 	}
@@ -242,7 +242,7 @@ func TestHighCostOverrideRequiresAdministrator(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs", strings.NewReader(`{"name":"operator-high-cost","schedule":"0 * * * *","timezone":"UTC","targets":["192.0.2.1"],"tcp":{"ports":"1-65535","mode":"connect"},"allow_high_cost":true}`))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
-	server.createJob(rec, req, operator)
+	server.createJob(rec, req, operator, defaultTenantStore(server))
 	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "high_cost_admin_required") {
 		t.Fatalf("operator high-cost create = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -250,7 +250,7 @@ func TestHighCostOverrideRequiresAdministrator(t *testing.T) {
 	adminReq := httptest.NewRequest(http.MethodPost, "/api/v1/jobs", strings.NewReader(`{"name":"admin-high-cost","schedule":"0 * * * *","timezone":"UTC","targets":["192.0.2.1"],"tcp":{"ports":"1","mode":"connect"},"allow_high_cost":true}`))
 	adminReq.Header.Set("Content-Type", "application/json")
 	adminRec := httptest.NewRecorder()
-	server.createJob(adminRec, adminReq, admin)
+	server.createJob(adminRec, adminReq, admin, defaultTenantStore(server))
 	if adminRec.Code != http.StatusCreated {
 		t.Fatalf("administrator high-cost create = %d: %s", adminRec.Code, adminRec.Body.String())
 	}
@@ -282,11 +282,11 @@ func TestJobResponsesRedactActiveScanCycleStoreFailures(t *testing.T) {
 		case path == "/api/v1/jobs" && method == http.MethodGet:
 			server.listJobs(rec, req, defaultTenantStore(server))
 		case path == "/api/v1/jobs" && method == http.MethodPost:
-			server.createJob(rec, req, admin)
+			server.createJob(rec, req, admin, defaultTenantStore(server))
 		case path == "/api/v1/jobs/"+record.ID && method == http.MethodGet:
-			server.jobRoute(rec, req, admin, record.ID)
+			server.jobRoute(rec, req, admin, defaultTenantStore(server), record.ID)
 		case path == "/api/v1/jobs/"+record.ID && method == http.MethodPut:
-			server.jobRoute(rec, req, admin, record.ID)
+			server.jobRoute(rec, req, admin, defaultTenantStore(server), record.ID)
 		default:
 			t.Fatalf("unexpected request %s %s", method, path)
 		}

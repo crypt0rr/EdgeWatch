@@ -167,3 +167,59 @@ func TestRequestTenant(t *testing.T) {
 		t.Fatalf("closed store = %d, %v", closed.Code, ok)
 	}
 }
+
+// The job routes load the job named in the path through the store that the
+// API router resolved from the session. An account of another tenant does
+// not see the job in the list and cannot reach it, or its scans and
+// baseline, by ID.
+func TestJobRoutesUseTheSessionTenant(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	job := config.NormalizeJob(config.Job{Name: "tenant-a-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
+	record, err := db.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const otherTenantID = "00000000-0000-0000-0000-000000000200"
+	now := time.Now().UTC()
+	stamp := now.Format(time.RFC3339Nano)
+	if _, err := db.DB.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,created_at,updated_at) VALUES(?,'Other','other',?,?)`, otherTenantID, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	other, err := db.CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE users SET tenant_id=? WHERE id=?`, otherTenantID, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	cookies := map[string]string{}
+	for name, userID := range map[string]string{"own": admin.UserID, "other": other.ID} {
+		raw := "tenant-route-" + name
+		if err := db.CreateSessionForUserWithAudit(ctx, userID, digest(raw), "csrf-"+name, now, now.Add(time.Hour), "", ""); err != nil {
+			t.Fatal(err)
+		}
+		cookies[name] = raw
+	}
+	get := func(account, path string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.AddCookie(&http.Cookie{Name: "edgewatch_session", Value: cookies[account]})
+		rec := httptest.NewRecorder()
+		server.api(rec, req)
+		return rec
+	}
+	if rec := get("own", "/api/v1/jobs"); rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), job.Name) {
+		t.Fatalf("own tenant: job list = %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec := get("other", "/api/v1/jobs"); rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), job.Name) {
+		t.Fatalf("other tenant: job list = %d: %s", rec.Code, rec.Body.String())
+	}
+	for _, path := range []string{"/api/v1/jobs/" + record.ID, "/api/v1/jobs/" + record.ID + "/scans", "/api/v1/jobs/" + record.ID + "/baseline"} {
+		if rec := get("own", path); rec.Code != http.StatusOK {
+			t.Fatalf("own tenant: GET %s = %d: %s", path, rec.Code, rec.Body.String())
+		}
+		if rec := get("other", path); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "job not found") {
+			t.Fatalf("other tenant: GET %s = %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+}

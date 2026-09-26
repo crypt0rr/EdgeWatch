@@ -50,12 +50,12 @@ func TestHistoryAndIncidentHandlersExposeScopedPages(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans?limit=1", nil), store.Session{}, record.ID+"/scans")
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans?limit=1", nil), store.Session{}, defaultTenantStore(server), record.ID+"/scans")
 	if recorder.Code != http.StatusOK || !containsJSONField(recorder.Body.Bytes(), "scans") {
 		t.Fatalf("job scans = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/latest-successful", nil), store.Session{}, record.ID+"/scans/latest-successful")
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/latest-successful", nil), store.Session{}, defaultTenantStore(server), record.ID+"/scans/latest-successful")
 	if recorder.Code != http.StatusOK || !containsJSONField(recorder.Body.Bytes(), scan.ID) {
 		t.Fatalf("latest successful scan = %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -64,37 +64,37 @@ func TestHistoryAndIncidentHandlersExposeScopedPages(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder = httptest.NewRecorder()
-	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+noSuccess.ID+"/scans/latest-successful", nil), store.Session{}, noSuccess.ID+"/scans/latest-successful")
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+noSuccess.ID+"/scans/latest-successful", nil), store.Session{}, defaultTenantStore(server), noSuccess.ID+"/scans/latest-successful")
 	if recorder.Code != http.StatusOK || recorder.Body.String() == "" || !strings.Contains(recorder.Body.String(), `"scan":null`) {
 		t.Fatalf("no successful scan = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing/scans/latest-successful", nil), store.Session{}, "missing/scans/latest-successful")
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing/scans/latest-successful", nil), store.Session{}, defaultTenantStore(server), "missing/scans/latest-successful")
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("missing latest successful scan status = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID, nil), store.Session{}, record.ID+"/scans/"+scan.ID)
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID, nil), store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID)
 	if recorder.Code != http.StatusOK || !containsJSONField(recorder.Body.Bytes(), "scan_time") || !containsJSONField(recorder.Body.Bytes(), "changes") {
 		t.Fatalf("job scan = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/results?limit=1", nil), store.Session{}, record.ID+"/scans/"+scan.ID+"/results")
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/results?limit=1", nil), store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/results")
 	if recorder.Code != http.StatusOK || !containsJSONField(recorder.Body.Bytes(), "results") {
 		t.Fatalf("scan results = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/changes", nil), store.Session{}, record.ID+"/scans/"+scan.ID+"/changes")
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/changes", nil), store.Session{}, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/changes")
 	if recorder.Code != http.StatusOK || !containsJSONField(recorder.Body.Bytes(), "comparison_source") || !containsJSONField(recorder.Body.Bytes(), "scan_time") {
 		t.Fatalf("scan changes = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.listScans(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans?job="+job.Name, nil))
+	server.listScans(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans?job="+job.Name, nil), defaultTenantStore(server))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("all scans = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.getScan(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/"+scan.ID, nil), scan.ID)
+	server.getScan(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/"+scan.ID, nil), defaultTenantStore(server), scan.ID)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("scan detail = %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -117,7 +117,7 @@ func TestHistoryAndIncidentHandlersExposeScopedPages(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder = httptest.NewRecorder()
-	server.getScanSummary(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/"+scan.ID+"/summary", nil), scan.ID)
+	server.getScanSummary(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/"+scan.ID+"/summary", nil), defaultTenantStore(server), scan.ID)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("scan summary = %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -131,52 +131,52 @@ func TestHistoryAndIncidentHandlersExposeScopedPages(t *testing.T) {
 		t.Fatalf("scan summary payload = %#v, %v", summaryEnvelope, err)
 	}
 	recorder = httptest.NewRecorder()
-	server.getScanSummary(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/missing/summary", nil), "missing")
+	server.getScanSummary(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/missing/summary", nil), defaultTenantStore(server), "missing")
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("missing scan summary status = %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	recorder = httptest.NewRecorder()
-	server.listEvents(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/events?job_id="+record.ID, nil), "")
+	server.listEvents(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/events?job_id="+record.ID, nil), defaultTenantStore(server), "")
 	if recorder.Code != http.StatusOK || !containsJSONField(recorder.Body.Bytes(), "history-event") {
 		t.Fatalf("job-id events = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.listEvents(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/events?job="+job.Name, nil), job.Name)
+	server.listEvents(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/events?job="+job.Name, nil), defaultTenantStore(server), job.Name)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("name events = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/events", nil), store.Session{}, record.ID+"/events")
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/events", nil), store.Session{}, defaultTenantStore(server), record.ID+"/events")
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("job events = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.listIncidents(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil))
+	server.listIncidents(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/incidents", nil), defaultTenantStore(server))
 	if recorder.Code != http.StatusOK || !containsJSONField(recorder.Body.Bytes(), "incidents") {
 		t.Fatalf("all incidents = %d: %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/incidents", nil), store.Session{}, record.ID+"/incidents")
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/incidents", nil), store.Session{}, defaultTenantStore(server), record.ID+"/incidents")
 	if recorder.Code != http.StatusOK || !containsJSONField(recorder.Body.Bytes(), change.Key) {
 		t.Fatalf("job incidents = %d: %s", recorder.Code, recorder.Body.String())
 	}
 
 	for _, call := range []func(*httptest.ResponseRecorder){
 		func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, httptest.NewRequest(http.MethodGet, "/", nil), store.Session{}, "missing/scans")
+			server.jobRoute(w, httptest.NewRequest(http.MethodGet, "/", nil), store.Session{}, defaultTenantStore(server), "missing/scans")
 		},
 		func(w *httptest.ResponseRecorder) {
-			server.getScan(w, httptest.NewRequest(http.MethodGet, "/", nil), "missing")
+			server.getScan(w, httptest.NewRequest(http.MethodGet, "/", nil), defaultTenantStore(server), "missing")
 		},
 		func(w *httptest.ResponseRecorder) {
-			server.getScanSummary(w, httptest.NewRequest(http.MethodGet, "/", nil), "missing")
+			server.getScanSummary(w, httptest.NewRequest(http.MethodGet, "/", nil), defaultTenantStore(server), "missing")
 		},
 		func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, httptest.NewRequest(http.MethodGet, "/", nil), store.Session{}, "missing/events")
+			server.jobRoute(w, httptest.NewRequest(http.MethodGet, "/", nil), store.Session{}, defaultTenantStore(server), "missing/events")
 		},
 		func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, httptest.NewRequest(http.MethodGet, "/", nil), store.Session{}, "missing/incidents")
+			server.jobRoute(w, httptest.NewRequest(http.MethodGet, "/", nil), store.Session{}, defaultTenantStore(server), "missing/incidents")
 		},
 	} {
 		missing := httptest.NewRecorder()

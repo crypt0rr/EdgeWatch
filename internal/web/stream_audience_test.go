@@ -162,7 +162,7 @@ func TestSSEStreamReplaysAndDeliversOnlyItsAudience(t *testing.T) {
 	writer := &deadlineTrackingWriter{header: make(http.Header)}
 	done := make(chan struct{})
 	go func() {
-		server.stream(writer, request, session)
+		server.stream(writer, request, session, defaultTenantStore(server))
 		close(done)
 	}()
 	waitForSSEBody(t, writer, "replayed-last")

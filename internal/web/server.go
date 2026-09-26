@@ -468,8 +468,9 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	}
 	// The account's own routes under /auth/ need no tenant. Every other
 	// route reads or changes the data of the account's tenant, and its store
-	// is resolved once, here, from the session; handlers never choose a
-	// tenant. A nil store refuses every call.
+	// is resolved once, here, from the session. Each handler that reads or
+	// changes tenant data takes this store; handlers never choose a tenant.
+	// A nil store refuses every call.
 	var ts *store.TenantStore
 	if !strings.HasPrefix(path, "/auth/") {
 		if ts, ok = s.requestTenant(w, r, session); !ok {
@@ -519,67 +520,67 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.revokeSSEUser(session.UserID)
 		writeJSON(w, http.StatusNoContent, nil)
 	case path == "/status" && r.Method == http.MethodGet:
-		s.adminStatus(w, r, session)
+		s.adminStatus(w, r, session, ts)
 	case path == "/scanner/capabilities" && r.Method == http.MethodGet:
 		s.scannerCapabilities(w, r)
 	case path == "/scanner-profiles" || strings.HasPrefix(path, "/scanner-profiles/"):
-		s.scannerProfilesRoute(w, r, session, strings.TrimPrefix(path, "/scanner-profiles"))
+		s.scannerProfilesRoute(w, r, session, ts, strings.TrimPrefix(path, "/scanner-profiles"))
 	case path == "/scanner/profiles" || strings.HasPrefix(path, "/scanner/profiles/"):
-		s.scannerProfilesRoute(w, r, session, strings.TrimPrefix(path, "/scanner/profiles"))
+		s.scannerProfilesRoute(w, r, session, ts, strings.TrimPrefix(path, "/scanner/profiles"))
 	case path == "/users" || strings.HasPrefix(path, "/users/"):
-		s.usersRoute(w, r, session, strings.TrimPrefix(path, "/users"))
+		s.usersRoute(w, r, session, ts, strings.TrimPrefix(path, "/users"))
 	case path == "/public-dashboard" && (r.Method == http.MethodGet || r.Method == http.MethodPut):
-		s.publicDashboardRoute(w, r, session)
+		s.publicDashboardRoute(w, r, session, ts)
 	case path == "/notifications/test" && r.Method == http.MethodPost:
-		s.notificationTest(w, r, session)
+		s.notificationTest(w, r, session, ts)
 	case path == "/notifications/destinations" && r.Method == http.MethodGet:
-		s.listNotificationDestinations(w, r)
+		s.listNotificationDestinations(w, r, ts)
 	case path == "/notifications/options" && r.Method == http.MethodGet:
-		s.listNotificationDestinations(w, r)
+		s.listNotificationDestinations(w, r, ts)
 	case path == "/notifications/update-routing" && r.Method == http.MethodPut:
-		s.updateNotificationRouting(w, r, session)
+		s.updateNotificationRouting(w, r, session, ts)
 	case path == "/notifications/destinations" && r.Method == http.MethodPost:
-		s.createNotificationDestination(w, r, session)
+		s.createNotificationDestination(w, r, session, ts)
 	case strings.HasPrefix(path, "/notifications/destinations/"):
-		s.notificationDestinationRoute(w, r, session, strings.TrimPrefix(path, "/notifications/destinations/"))
+		s.notificationDestinationRoute(w, r, session, ts, strings.TrimPrefix(path, "/notifications/destinations/"))
 	case path == "/stream" && r.Method == http.MethodGet:
-		s.stream(w, r, session)
+		s.stream(w, r, session, ts)
 	case path == "/jobs" && r.Method == http.MethodGet:
 		s.listJobs(w, r, ts)
 	case path == "/jobs" && r.Method == http.MethodPost:
-		s.createJob(w, r, session)
+		s.createJob(w, r, session, ts)
 	case path == "/jobs/schedule-suggestion" && r.Method == http.MethodGet:
 		s.scheduleSuggestion(w, r, ts)
 	case path == "/scans" && r.Method == http.MethodGet:
-		s.listScans(w, r)
+		s.listScans(w, r, ts)
 	case path == "/hosts" && r.Method == http.MethodGet:
-		s.listHosts(w, r)
+		s.listHosts(w, r, ts)
 	case path == "/scans/active" && r.Method == http.MethodGet:
-		s.activeScans(w, r)
+		s.activeScans(w, r, ts)
 	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/cancel") && r.Method == http.MethodPost:
-		s.cancelScan(w, r, session, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/cancel"))
+		s.cancelScan(w, r, session, ts, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/cancel"))
 	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/hosts") && r.Method == http.MethodGet:
-		s.scanHostsRoute(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/hosts"))
+		s.scanHostsRoute(w, r, ts, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/hosts"))
 	case strings.HasPrefix(path, "/scans/") && strings.Contains(strings.TrimPrefix(path, "/scans/"), "/hosts/") && r.Method == http.MethodGet:
 		if strings.HasSuffix(path, "/rdap") {
 			value := strings.TrimPrefix(path, "/scans/")
 			parts := strings.SplitN(value, "/hosts/", 2)
-			s.scanHostRDAPRoute(w, r, parts[0], strings.TrimSuffix(parts[1], "/rdap"))
+			s.scanHostRDAPRoute(w, r, ts, parts[0], strings.TrimSuffix(parts[1], "/rdap"))
 			break
 		}
 		value := strings.TrimPrefix(path, "/scans/")
 		parts := strings.SplitN(value, "/hosts/", 2)
-		s.scanHostRoute(w, r, parts[0], parts[1])
+		s.scanHostRoute(w, r, ts, parts[0], parts[1])
 	case strings.HasPrefix(path, "/scans/") && strings.HasSuffix(path, "/summary") && r.Method == http.MethodGet:
-		s.getScanSummary(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/summary"))
+		s.getScanSummary(w, r, ts, strings.TrimSuffix(strings.TrimPrefix(path, "/scans/"), "/summary"))
 	case strings.HasPrefix(path, "/scans/") && r.Method == http.MethodGet:
-		s.getScan(w, r, strings.TrimPrefix(path, "/scans/"))
+		s.getScan(w, r, ts, strings.TrimPrefix(path, "/scans/"))
 	case path == "/incidents" && r.Method == http.MethodGet:
-		s.listIncidents(w, r)
+		s.listIncidents(w, r, ts)
 	case path == "/events" && r.Method == http.MethodGet:
-		s.listEvents(w, r, r.URL.Query().Get("job"))
+		s.listEvents(w, r, ts, r.URL.Query().Get("job"))
 	case strings.HasPrefix(path, "/jobs/"):
-		s.jobRoute(w, r, session, strings.TrimPrefix(path, "/jobs/"))
+		s.jobRoute(w, r, session, ts, strings.TrimPrefix(path, "/jobs/"))
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "endpoint not found", nil)
 	}

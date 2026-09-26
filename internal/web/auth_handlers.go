@@ -51,7 +51,7 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 // adminStatus contains operational details used by the authenticated console.
 // Keeping this separate from setupStatus prevents pre-auth callers from
 // learning notification state, scheduler capacity, or legacy job names.
-func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	user, err := s.Store.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "user_missing", "account could not be loaded", nil)

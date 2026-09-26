@@ -16,7 +16,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/webui"
 )
 
-func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Session) {
+func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeError(w, 500, "stream_unsupported", "streaming is unavailable", nil)

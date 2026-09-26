@@ -21,7 +21,7 @@ func TestWriteBaselineConflictReturnsSafeCurrentMarker(t *testing.T) {
 	server := &Server{Store: db}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/missing/baseline/reset", nil)
 	rec := httptest.NewRecorder()
-	server.writeBaselineConflict(rec, req, "missing")
+	server.writeBaselineConflict(rec, req, defaultTenantStore(server), "missing")
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"baseline_conflict"`) {
 		t.Fatalf("baseline conflict response = %d %s", rec.Code, rec.Body.String())
 	}
@@ -33,7 +33,7 @@ func TestWriteBaselineConflictReturnsSafeCurrentMarker(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec = httptest.NewRecorder()
-	server.writeBaselineConflict(rec, req, job.ID)
+	server.writeBaselineConflict(rec, req, defaultTenantStore(server), job.ID)
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"baseline_scan_id"`) {
 		t.Fatalf("current baseline conflict response = %d %s", rec.Code, rec.Body.String())
 	}

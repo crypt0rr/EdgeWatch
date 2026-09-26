@@ -52,9 +52,9 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, fn := range map[string]func(http.ResponseWriter, *http.Request){
-		"scans":     server.listScans,
-		"incidents": server.listIncidents,
-		"events":    func(w http.ResponseWriter, r *http.Request) { server.listEvents(w, r, "") },
+		"scans":     func(w http.ResponseWriter, r *http.Request) { server.listScans(w, r, defaultTenantStore(server)) },
+		"incidents": func(w http.ResponseWriter, r *http.Request) { server.listIncidents(w, r, defaultTenantStore(server)) },
+		"events":    func(w http.ResponseWriter, r *http.Request) { server.listEvents(w, r, defaultTenantStore(server), "") },
 	} {
 		if code := get(fn); code != http.StatusInternalServerError {
 			t.Errorf("%s status = %d", name, code)
@@ -62,10 +62,10 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	}
 	for name, fn := range map[string]func(http.ResponseWriter, *http.Request){
 		"archive": func(w http.ResponseWriter, r *http.Request) {
-			server.archiveJob(w, scanHandlerRequest(http.MethodPost, "/archive", `{"revision":1}`), admin, record.ID, true)
+			server.archiveJob(w, scanHandlerRequest(http.MethodPost, "/archive", `{"revision":1}`), admin, defaultTenantStore(server), record.ID, true)
 		},
 		"pause": func(w http.ResponseWriter, r *http.Request) {
-			server.enableJob(w, scanHandlerRequest(http.MethodPost, "/pause", `{"revision":1}`), admin, record.ID, false)
+			server.enableJob(w, scanHandlerRequest(http.MethodPost, "/pause", `{"revision":1}`), admin, defaultTenantStore(server), record.ID, false)
 		},
 	} {
 		if code := get(fn); code != http.StatusInternalServerError {
@@ -81,7 +81,9 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	breakReadProjection(t, db, "job_runtime")
-	if code := get(func(w http.ResponseWriter, r *http.Request) { server.jobRoute(w, r, admin, record.ID) }); code != http.StatusInternalServerError {
+	if code := get(func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, admin, defaultTenantStore(server), record.ID)
+	}); code != http.StatusInternalServerError {
 		t.Fatalf("job runtime failure status = %d", code)
 	}
 
@@ -92,12 +94,12 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	}
 	breakReadProjection(t, db, "scans")
 	if code := get(func(w http.ResponseWriter, r *http.Request) {
-		server.jobRoute(w, r, store.Session{}, record.ID+"/scans/latest-successful")
+		server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/scans/latest-successful")
 	}); code != http.StatusInternalServerError {
 		t.Fatalf("latest scan failure status = %d", code)
 	}
 	if code := get(func(w http.ResponseWriter, r *http.Request) {
-		server.jobRoute(w, r, store.Session{}, record.ID+"/scans")
+		server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/scans")
 	}); code != http.StatusInternalServerError {
 		t.Fatalf("job scans failure status = %d", code)
 	}
@@ -109,7 +111,7 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	}
 	breakReadProjection(t, db, "job_leases")
 	if code := get(func(w http.ResponseWriter, r *http.Request) {
-		server.jobRoute(w, scanHandlerRequest(http.MethodPost, "/run", `{}`), admin, record.ID+"/run")
+		server.jobRoute(w, scanHandlerRequest(http.MethodPost, "/run", `{}`), admin, defaultTenantStore(server), record.ID+"/run")
 	}); code != http.StatusInternalServerError {
 		t.Fatalf("manual run failure status = %d", code)
 	}
@@ -121,7 +123,7 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	}
 	breakReadProjection(t, db, "scan_cycles")
 	if code := get(func(w http.ResponseWriter, r *http.Request) {
-		server.jobRoute(w, r, store.Session{}, record.ID+"/scan-cycle")
+		server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/scan-cycle")
 	}); code != http.StatusInternalServerError {
 		t.Fatalf("scan cycle failure status = %d", code)
 	}
@@ -133,7 +135,7 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	}
 	breakReadProjection(t, db, "events")
 	if code := get(func(w http.ResponseWriter, r *http.Request) {
-		server.jobRoute(w, r, store.Session{}, record.ID+"/events")
+		server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/events")
 	}); code != http.StatusInternalServerError {
 		t.Fatalf("job events failure status = %d", code)
 	}
@@ -145,14 +147,16 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	}
 	breakReadProjection(t, db, "runtime_incidents")
 	if code := get(func(w http.ResponseWriter, r *http.Request) {
-		server.jobRoute(w, r, store.Session{}, record.ID+"/incidents")
+		server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/incidents")
 	}); code != http.StatusInternalServerError {
 		t.Fatalf("job incidents failure status = %d", code)
 	}
 
 	server, db, admin = newUsersTestServer(t)
 	breakReadProjection(t, db, "scanner_profiles")
-	if code := get(func(w http.ResponseWriter, r *http.Request) { server.scannerProfilesRoute(w, r, admin, "") }); code != http.StatusInternalServerError {
+	if code := get(func(w http.ResponseWriter, r *http.Request) {
+		server.scannerProfilesRoute(w, r, admin, defaultTenantStore(server), "")
+	}); code != http.StatusInternalServerError {
 		t.Fatalf("scanner profiles failure status = %d", code)
 	}
 
@@ -179,20 +183,22 @@ func TestScanHandlersRedactJobLookupFailures(t *testing.T) {
 	request := func() *http.Request { return scanHandlerRequest(http.MethodGet, "/api/v1", "") }
 	cases := map[string]func(http.ResponseWriter, *http.Request){
 		"scan cycle": func(w http.ResponseWriter, r *http.Request) {
-			server.jobRoute(w, r, store.Session{}, record.ID+"/scan-cycle")
+			server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/scan-cycle")
 		},
 		"discard cycle": func(w http.ResponseWriter, _ *http.Request) {
-			server.jobRoute(w, scanHandlerRequest(http.MethodDelete, "/api/v1", ""), admin, record.ID+"/scan-cycle/cycle")
+			server.jobRoute(w, scanHandlerRequest(http.MethodDelete, "/api/v1", ""), admin, defaultTenantStore(server), record.ID+"/scan-cycle/cycle")
 		},
 		"job scans": func(w http.ResponseWriter, r *http.Request) {
-			server.jobRoute(w, r, store.Session{}, record.ID+"/scans")
+			server.jobRoute(w, r, store.Session{}, defaultTenantStore(server), record.ID+"/scans")
 		},
-		"scan detail": func(w http.ResponseWriter, r *http.Request) { server.jobRoute(w, r, admin, record.ID+"/scans/scan") },
+		"scan detail": func(w http.ResponseWriter, r *http.Request) {
+			server.jobRoute(w, r, admin, defaultTenantStore(server), record.ID+"/scans/scan")
+		},
 		"scan results": func(w http.ResponseWriter, r *http.Request) {
-			server.jobRoute(w, r, admin, record.ID+"/scans/scan/results")
+			server.jobRoute(w, r, admin, defaultTenantStore(server), record.ID+"/scans/scan/results")
 		},
 		"scan changes": func(w http.ResponseWriter, r *http.Request) {
-			server.jobRoute(w, r, admin, record.ID+"/scans/scan/changes")
+			server.jobRoute(w, r, admin, defaultTenantStore(server), record.ID+"/scans/scan/changes")
 		},
 	}
 	for name, handler := range cases {
@@ -239,17 +245,17 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	selected := httptest.NewRecorder()
-	server.jobRoute(selected, scanHandlerRequest(http.MethodGet, "/scan?limit=10&offset=0", ""), admin, record.ID+"/scans/"+legacy.ID)
+	server.jobRoute(selected, scanHandlerRequest(http.MethodGet, "/scan?limit=10&offset=0", ""), admin, defaultTenantStore(server), record.ID+"/scans/"+legacy.ID)
 	if selected.Code != http.StatusOK || !strings.Contains(selected.Body.String(), "current_baseline_legacy") {
 		t.Fatalf("legacy scan detail = %d: %s", selected.Code, selected.Body.String())
 	}
 	changes := httptest.NewRecorder()
-	server.jobRoute(changes, scanHandlerRequest(http.MethodGet, "/changes?limit=1", ""), admin, record.ID+"/scans/"+legacy.ID+"/changes")
+	server.jobRoute(changes, scanHandlerRequest(http.MethodGet, "/changes?limit=1", ""), admin, defaultTenantStore(server), record.ID+"/scans/"+legacy.ID+"/changes")
 	if changes.Code != http.StatusOK || !strings.Contains(changes.Body.String(), "current_baseline_legacy") {
 		t.Fatalf("legacy scan changes = %d: %s", changes.Code, changes.Body.String())
 	}
 	results := httptest.NewRecorder()
-	server.jobRoute(results, scanHandlerRequest(http.MethodGet, "/results?limit=1", ""), admin, record.ID+"/scans/"+legacy.ID+"/results")
+	server.jobRoute(results, scanHandlerRequest(http.MethodGet, "/results?limit=1", ""), admin, defaultTenantStore(server), record.ID+"/scans/"+legacy.ID+"/results")
 	if results.Code != http.StatusOK || !strings.Contains(results.Body.String(), `"results"`) {
 		t.Fatalf("legacy scan results = %d: %s", results.Code, results.Body.String())
 	}
@@ -260,13 +266,13 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 	}
 	for name, fn := range map[string]func(*httptest.ResponseRecorder){
 		"failed detail": func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/scan", ""), admin, record.ID+"/scans/"+failed.ID)
+			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/scan", ""), admin, defaultTenantStore(server), record.ID+"/scans/"+failed.ID)
 		},
 		"failed changes": func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/changes", ""), admin, record.ID+"/scans/"+failed.ID+"/changes")
+			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/changes", ""), admin, defaultTenantStore(server), record.ID+"/scans/"+failed.ID+"/changes")
 		},
 		"empty results": func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/results", ""), admin, record.ID+"/scans/"+failed.ID+"/results")
+			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/results", ""), admin, defaultTenantStore(server), record.ID+"/scans/"+failed.ID+"/results")
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -280,16 +286,16 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 
 	for name, fn := range map[string]func(*httptest.ResponseRecorder){
 		"missing job detail": func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/", ""), admin, "missing/scans/"+legacy.ID)
+			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/", ""), admin, defaultTenantStore(server), "missing/scans/"+legacy.ID)
 		},
 		"wrong scan detail": func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/", ""), admin, record.ID+"/scans/missing")
+			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/", ""), admin, defaultTenantStore(server), record.ID+"/scans/missing")
 		},
 		"missing job results": func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/", ""), admin, "missing/scans/"+legacy.ID+"/results")
+			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/", ""), admin, defaultTenantStore(server), "missing/scans/"+legacy.ID+"/results")
 		},
 		"wrong scan changes": func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/", ""), admin, record.ID+"/scans/missing/changes")
+			server.jobRoute(w, scanHandlerRequest(http.MethodGet, "/", ""), admin, defaultTenantStore(server), record.ID+"/scans/missing/changes")
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -307,7 +313,7 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	corrupt := httptest.NewRecorder()
-	server.jobRoute(corrupt, scanHandlerRequest(http.MethodGet, "/", ""), admin, record.ID+"/scans/"+legacy.ID+"/changes")
+	server.jobRoute(corrupt, scanHandlerRequest(http.MethodGet, "/", ""), admin, defaultTenantStore(server), record.ID+"/scans/"+legacy.ID+"/changes")
 	if corrupt.Code != http.StatusInternalServerError {
 		t.Fatalf("corrupt runtime status = %d: %s", corrupt.Code, corrupt.Body.String())
 	}
@@ -324,13 +330,13 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 	// The action handlers reject incomplete requests before touching the store.
 	for _, fn := range []func(*httptest.ResponseRecorder){
 		func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, scanHandlerRequest(http.MethodPost, "/", `{"key":""}`), admin, record.ID+"/incidents/accept")
+			server.jobRoute(w, scanHandlerRequest(http.MethodPost, "/", `{"key":""}`), admin, defaultTenantStore(server), record.ID+"/incidents/accept")
 		},
 		func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, scanHandlerRequest(http.MethodPost, "/", `{"key":"port|x"}`), admin, record.ID+"/incidents/suppress")
+			server.jobRoute(w, scanHandlerRequest(http.MethodPost, "/", `{"key":"port|x"}`), admin, defaultTenantStore(server), record.ID+"/incidents/suppress")
 		},
 		func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, scanHandlerRequest(http.MethodPost, "/", `{}`), admin, "missing/incidents/accept")
+			server.jobRoute(w, scanHandlerRequest(http.MethodPost, "/", `{}`), admin, defaultTenantStore(server), "missing/incidents/accept")
 		},
 	} {
 		response := httptest.NewRecorder()
@@ -351,13 +357,13 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 	}
 	unsupportedBody := `{"key":"unsupported","expected_change":{"key":"unsupported","kind":"hostname","target":"192.0.2.10","old":"a","new":"b"}}`
 	unsupported := httptest.NewRecorder()
-	server.jobRoute(unsupported, scanHandlerRequest(http.MethodPost, "/", unsupportedBody), admin, record.ID+"/incidents/accept")
+	server.jobRoute(unsupported, scanHandlerRequest(http.MethodPost, "/", unsupportedBody), admin, defaultTenantStore(server), record.ID+"/incidents/accept")
 	if unsupported.Code != http.StatusBadRequest || !strings.Contains(unsupported.Body.String(), "incident_change_invalid") {
 		t.Fatalf("unsupported incident = %d: %s", unsupported.Code, unsupported.Body.String())
 	}
 	unknown := httptest.NewRecorder()
 	unknownBody := `{"key":"missing","expected_change":{"key":"missing","kind":"port","target":"192.0.2.10","protocol":"tcp","port":80,"old":"open","new":"closed"}}`
-	server.jobRoute(unknown, scanHandlerRequest(http.MethodPost, "/", unknownBody), admin, record.ID+"/incidents/suppress")
+	server.jobRoute(unknown, scanHandlerRequest(http.MethodPost, "/", unknownBody), admin, defaultTenantStore(server), record.ID+"/incidents/suppress")
 	if unknown.Code != http.StatusNotFound {
 		t.Fatalf("unknown incident = %d: %s", unknown.Code, unknown.Body.String())
 	}
@@ -376,7 +382,7 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 	suppressed := httptest.NewRecorder()
-	server.jobRoute(suppressed, scanHandlerRequest(http.MethodPost, "/", `{"key":"`+change.Key+`","expected_change":`+string(encodedChange)+`}`), admin, record.ID+"/incidents/suppress")
+	server.jobRoute(suppressed, scanHandlerRequest(http.MethodPost, "/", `{"key":"`+change.Key+`","expected_change":`+string(encodedChange)+`}`), admin, defaultTenantStore(server), record.ID+"/incidents/suppress")
 	if suppressed.Code != http.StatusNoContent {
 		t.Fatalf("suppress incident = %d: %s", suppressed.Code, suppressed.Body.String())
 	}
@@ -409,7 +415,7 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	update := httptest.NewRecorder()
-	server.jobRoute(update, request(http.MethodPut, "/jobs/"+record.ID, string(encoded)), admin, record.ID)
+	server.jobRoute(update, request(http.MethodPut, "/jobs/"+record.ID, string(encoded)), admin, defaultTenantStore(server), record.ID)
 	if update.Code != http.StatusInternalServerError {
 		t.Fatalf("job active lookup failure = %d: %s", update.Code, update.Body.String())
 	}
@@ -418,13 +424,13 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 	breakReadProjection(t, db, "job_runtime")
 	for name, invoke := range map[string]func(*httptest.ResponseRecorder){
 		"baseline": func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, request(http.MethodGet, "/baseline", ""), admin, record.ID+"/baseline")
+			server.jobRoute(w, request(http.MethodGet, "/baseline", ""), admin, defaultTenantStore(server), record.ID+"/baseline")
 		},
 		"reset": func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, httptest.NewRequest(http.MethodPost, "/reset", nil), admin, record.ID+"/baseline/reset")
+			server.jobRoute(w, httptest.NewRequest(http.MethodPost, "/reset", nil), admin, defaultTenantStore(server), record.ID+"/baseline/reset")
 		},
 		"approve": func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, request(http.MethodPost, "/approve", `{}`), admin, record.ID+"/baseline/approve")
+			server.jobRoute(w, request(http.MethodPost, "/approve", `{}`), admin, defaultTenantStore(server), record.ID+"/baseline/approve")
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -444,7 +450,7 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 	}
 	breakReadProjection(t, db, "scan_cycle_units")
 	cycleResponse := httptest.NewRecorder()
-	server.jobRoute(cycleResponse, request(http.MethodGet, "/cycle", ""), admin, record.ID+"/scan-cycle")
+	server.jobRoute(cycleResponse, request(http.MethodGet, "/cycle", ""), admin, defaultTenantStore(server), record.ID+"/scan-cycle")
 	if cycleResponse.Code != http.StatusInternalServerError {
 		t.Fatalf("cycle unit lookup failure = %d: %s", cycleResponse.Code, cycleResponse.Body.String())
 	}
@@ -461,10 +467,10 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 	}
 	for name, invoke := range map[string]func(*httptest.ResponseRecorder){
 		"changes": func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, request(http.MethodGet, "/changes", ""), admin, record.ID+"/scans/"+scan.ID+"/changes")
+			server.jobRoute(w, request(http.MethodGet, "/changes", ""), admin, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/changes")
 		},
 		"results": func(w *httptest.ResponseRecorder) {
-			server.jobRoute(w, request(http.MethodGet, "/results", ""), admin, record.ID+"/scans/"+scan.ID+"/results")
+			server.jobRoute(w, request(http.MethodGet, "/results", ""), admin, defaultTenantStore(server), record.ID+"/scans/"+scan.ID+"/results")
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -484,12 +490,12 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	accept := httptest.NewRecorder()
-	server.jobRoute(accept, request(http.MethodPost, "/incident", string(body)), admin, record.ID+"/incidents/accept")
+	server.jobRoute(accept, request(http.MethodPost, "/incident", string(body)), admin, defaultTenantStore(server), record.ID+"/incidents/accept")
 	if accept.Code != http.StatusInternalServerError {
 		t.Fatalf("accept job lookup failure = %d: %s", accept.Code, accept.Body.String())
 	}
 	suppress := httptest.NewRecorder()
-	server.jobRoute(suppress, request(http.MethodPost, "/incident", string(body)), admin, record.ID+"/incidents/suppress")
+	server.jobRoute(suppress, request(http.MethodPost, "/incident", string(body)), admin, defaultTenantStore(server), record.ID+"/incidents/suppress")
 	if suppress.Code != http.StatusInternalServerError {
 		t.Fatalf("suppress job lookup failure = %d: %s", suppress.Code, suppress.Body.String())
 	}
@@ -498,7 +504,7 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 	server.App.BeginRun(ctx)
 	server.App.StopRun()
 	shutdown := httptest.NewRecorder()
-	server.jobRoute(shutdown, request(http.MethodPost, "/run", `{}`), admin, record.ID+"/run")
+	server.jobRoute(shutdown, request(http.MethodPost, "/run", `{}`), admin, defaultTenantStore(server), record.ID+"/run")
 	if shutdown.Code != http.StatusServiceUnavailable {
 		t.Fatalf("shutdown run = %d: %s", shutdown.Code, shutdown.Body.String())
 	}
@@ -514,7 +520,7 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 	server, db, admin, record = newFixture(t)
 	reset := httptest.NewRecorder()
 	resetReq := request(http.MethodPost, "/reset", `{"expected_baseline_scan_id":"","expected_baseline_modified":false}`)
-	server.jobRoute(reset, resetReq, admin, record.ID+"/baseline/reset")
+	server.jobRoute(reset, resetReq, admin, defaultTenantStore(server), record.ID+"/baseline/reset")
 	if reset.Code != http.StatusOK {
 		t.Fatalf("conditional reset = %d: %s", reset.Code, reset.Body.String())
 	}
@@ -525,7 +531,7 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 	}
 	approve := httptest.NewRecorder()
 	approveReq := request(http.MethodPost, "/approve", `{"scan_id":"conditional-approval","expected_baseline_scan_id":"","expected_baseline_modified":false}`)
-	server.jobRoute(approve, approveReq, admin, record.ID+"/baseline/approve")
+	server.jobRoute(approve, approveReq, admin, defaultTenantStore(server), record.ID+"/baseline/approve")
 	if approve.Code != http.StatusOK {
 		t.Fatalf("conditional approval = %d: %s", approve.Code, approve.Body.String())
 	}
@@ -542,7 +548,7 @@ func TestScanRunAndCancellationGuards(t *testing.T) {
 	server.App.Scanner = fakeScanner{}
 	server.App.BeginRun(ctx)
 	accepted := httptest.NewRecorder()
-	server.jobRoute(accepted, scanHandlerRequest(http.MethodPost, "/run", "{}"), admin, record.ID+"/run")
+	server.jobRoute(accepted, scanHandlerRequest(http.MethodPost, "/run", "{}"), admin, defaultTenantStore(server), record.ID+"/run")
 	if accepted.Code != http.StatusAccepted || !strings.Contains(accepted.Body.String(), `"mode":"standard"`) {
 		t.Fatalf("accepted run = %d: %s", accepted.Code, accepted.Body.String())
 	}
@@ -550,7 +556,7 @@ func TestScanRunAndCancellationGuards(t *testing.T) {
 
 	for _, raw := range []string{"", "missing"} {
 		response := httptest.NewRecorder()
-		server.cancelScan(response, httptest.NewRequest(http.MethodPost, "/cancel", nil), admin, raw)
+		server.cancelScan(response, httptest.NewRequest(http.MethodPost, "/cancel", nil), admin, defaultTenantStore(server), raw)
 		want := http.StatusNotFound
 		if raw == "missing" {
 			want = http.StatusConflict

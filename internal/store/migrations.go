@@ -1,11 +1,15 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -42,6 +46,13 @@ CREATE TABLE IF NOT EXISTS job_leases (
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
 const schemaVersion = 50
+
+// foreignKeysOffMigrations lists the schema versions that must run through
+// applyMigrationForeignKeysOff because they rebuild a table that other tables
+// reference with ON DELETE CASCADE, such as users, jobs, scanner_profiles or
+// managed_notifications. No version needs it yet. Add a version here in the
+// same change that adds its rebuild statements.
+var foreignKeysOffMigrations = map[int]bool{}
 
 // newerSchemaError is the refusal for a database that a newer release has
 // upgraded. Migrations are forward-only, so an older binary must not write to
@@ -1219,7 +1230,7 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 			markMigrationFailed(ctx, db, err)
 			return err
 		}
-		if err := applyMigration(db, next, statements); err != nil {
+		if err := runMigration(ctx, db, next, statements, foreignKeysOffMigrations[next]); err != nil {
 			markMigrationFailed(ctx, db, err)
 			return err
 		}
@@ -1322,6 +1333,281 @@ func applyMigration(db *sql.DB, version int, statements []string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// runMigration applies one schema version with the runner it needs: versions
+// listed in foreignKeysOffMigrations run with foreign key enforcement off,
+// and every other version uses the plain transactional runner.
+func runMigration(ctx context.Context, db *sql.DB, version int, statements []string, foreignKeysOff bool) error {
+	if foreignKeysOff {
+		return applyMigrationForeignKeysOff(ctx, db, version, statements)
+	}
+	return applyMigration(db, version, statements)
+}
+
+// foreignKeysRestoreTimeout bounds re-enabling foreign keys on a pinned
+// migration connection. The restore must still run when the migration context
+// has been cancelled, so it uses its own deadline.
+const foreignKeysRestoreTimeout = 5 * time.Second
+
+// maxReportedForeignKeyViolations bounds the examples in a rebuild error.
+const maxReportedForeignKeyViolations = 5
+
+// applyMigrationForeignKeysOff applies one schema version with foreign key
+// enforcement turned off. Use it, by listing the version in
+// foreignKeysOffMigrations, for every version that rebuilds a table that
+// other tables reference.
+//
+// applyMigration cannot run such a rebuild. Every pooled connection runs with
+// PRAGMA foreign_keys=ON, and SQLite ignores PRAGMA foreign_keys while a
+// transaction is open, so a statement in applyMigration cannot turn it off.
+// With enforcement on, DROP TABLE performs an implicit DELETE that fires the
+// ON DELETE CASCADE actions of the child tables, so rebuilding users, jobs,
+// scanner_profiles or managed_notifications there would delete rows such as
+// user_invites, totp_replay, the job history tables and
+// scanner_profile_revisions.
+//
+// This runner pins one connection and turns enforcement off on it before the
+// transaction starts. It records the existing PRAGMA foreign_key_check
+// violations, because old databases and recovery fixtures may already hold
+// orphaned rows. It then runs the statements through execMigrationStatement
+// in one transaction and checks the foreign keys again. The migration fails
+// and rolls back only when the statements added a violation. Last, the runner
+// turns enforcement back on and reads it back. A connection on which that
+// fails is closed instead of being returned to the pool.
+//
+// Write each rebuild in SQLite's documented order
+// (https://www.sqlite.org/lang_altertable.html#otheralter), which
+// sqliteTableRebuild generates:
+//
+//	DROP VIEW v; DROP TRIGGER t      -- views and other tables' triggers that reference X
+//	CREATE TABLE X_next (...)        -- the new definition
+//	INSERT INTO X_next(rowid, a, b) SELECT rowid, a, b FROM X
+//	DROP TABLE X
+//	ALTER TABLE X_next RENAME TO X
+//	CREATE INDEX ...; CREATE TRIGGER ...  -- X's indexes and triggers went with the old table
+//	CREATE VIEW v ...; CREATE TRIGGER t ...
+//
+// Do not rename X out of the way first (X to X_old, then X_next to X). SQLite
+// rewrites the REFERENCES clauses of the child tables to follow a rename, so
+// the children would point at X_old and lose their parent when it is dropped.
+func applyMigrationForeignKeysOff(ctx context.Context, db *sql.DB, version int, statements []string) (err error) {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("schema migration %d: pin connection: %w", version, err)
+	}
+	// Runs after the transaction below has been committed or rolled back.
+	defer func() {
+		err = errors.Join(err, releaseForeignKeysOffConn(ctx, conn, version))
+	}()
+	if err := setConnForeignKeys(ctx, conn, false); err != nil {
+		return fmt.Errorf("schema migration %d: turn off foreign keys: %w", version, err)
+	}
+	before, err := foreignKeyViolationCounts(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("schema migration %d: check foreign keys before the rebuild: %w", version, err)
+	}
+	// The transaction is deliberately not bound to ctx. database/sql rolls
+	// back a context-bound transaction from another goroutine when ctx is
+	// cancelled, and that rollback could still be pending when the deferred
+	// release turns foreign keys back on, which SQLite ignores inside a
+	// transaction. Cancellation is checked between statements instead, and
+	// the deferred rollback runs synchronously.
+	tx, err := conn.BeginTx(context.WithoutCancel(ctx), nil)
+	if err != nil {
+		return fmt.Errorf("schema migration %d: %w", version, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for _, statement := range statements {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("schema migration %d: %w", version, err)
+		}
+		if err := execMigrationStatement(tx, statement); err != nil {
+			return fmt.Errorf("schema migration %d: %w", version, err)
+		}
+	}
+	after, err := foreignKeyViolationCounts(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("schema migration %d: check foreign keys after the rebuild: %w", version, err)
+	}
+	if introduced := introducedForeignKeyViolations(before, after); len(introduced) > 0 {
+		return fmt.Errorf("schema migration %d rolled back: it would add %d foreign key violation(s): %s", version, len(introduced), describeForeignKeyViolations(introduced))
+	}
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
+		return fmt.Errorf("schema migration %d: %w", version, err)
+	}
+	return tx.Commit()
+}
+
+// releaseForeignKeysOffConn turns foreign key enforcement back on for a
+// connection pinned by applyMigrationForeignKeysOff and returns it to the
+// pool. When enforcement cannot be confirmed, it discards the connection
+// instead: database/sql closes a connection whose Raw callback reports
+// driver.ErrBadConn, and the connector turns enforcement on for any
+// replacement it opens. Either way no pooled connection keeps running with
+// foreign keys off.
+func releaseForeignKeysOffConn(ctx context.Context, conn *sql.Conn, version int) error {
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), foreignKeysRestoreTimeout)
+	defer cancel()
+	restoreErr := setConnForeignKeys(restoreCtx, conn, true)
+	if restoreErr == nil {
+		return conn.Close()
+	}
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	_ = conn.Close()
+	return fmt.Errorf("schema migration %d: turn foreign keys back on: %w; the connection was closed", version, restoreErr)
+}
+
+// setConnForeignKeys sets foreign key enforcement on one connection and reads
+// it back. SQLite silently ignores the PRAGMA inside a transaction, so only
+// the read-back proves the setting took effect.
+func setConnForeignKeys(ctx context.Context, conn *sql.Conn, enabled bool) error {
+	statement, want := "PRAGMA foreign_keys=OFF", 0
+	if enabled {
+		statement, want = "PRAGMA foreign_keys=ON", 1
+	}
+	if _, err := conn.ExecContext(ctx, statement); err != nil {
+		return err
+	}
+	var got int
+	if err := conn.QueryRowContext(ctx, "PRAGMA foreign_keys").Scan(&got); err != nil {
+		return err
+	}
+	if got != want {
+		return fmt.Errorf("PRAGMA foreign_keys is %d after setting it to %d", got, want)
+	}
+	return nil
+}
+
+// foreignKeyViolation identifies one row reported by PRAGMA foreign_key_check.
+// It leaves out the foreign key index on purpose: a rebuild may reorder a
+// table's constraints, which renumbers them without orphaning another row.
+// Counting each key still catches a second broken reference from the same row.
+// rowID is NULL for a WITHOUT ROWID table.
+type foreignKeyViolation struct {
+	table  string
+	rowID  sql.NullInt64
+	parent string
+}
+
+type migrationQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+// foreignKeyViolationCounts returns how often PRAGMA foreign_key_check reports
+// each violation.
+func foreignKeyViolationCounts(ctx context.Context, queryer migrationQueryer) (map[foreignKeyViolation]int, error) {
+	rows, err := queryer.QueryContext(ctx, "PRAGMA foreign_key_check")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	counts := make(map[foreignKeyViolation]int)
+	for rows.Next() {
+		var violation foreignKeyViolation
+		var foreignKey sql.NullInt64
+		if err := rows.Scan(&violation.table, &violation.rowID, &violation.parent, &foreignKey); err != nil {
+			return nil, err
+		}
+		counts[violation]++
+	}
+	return counts, rows.Err()
+}
+
+// introducedForeignKeyViolations returns the violations in after that before
+// did not already contain, in a stable order.
+func introducedForeignKeyViolations(before, after map[foreignKeyViolation]int) []foreignKeyViolation {
+	var introduced []foreignKeyViolation
+	for violation, count := range after {
+		for extra := count - before[violation]; extra > 0; extra-- {
+			introduced = append(introduced, violation)
+		}
+	}
+	slices.SortFunc(introduced, func(a, b foreignKeyViolation) int {
+		return cmp.Or(
+			cmp.Compare(a.table, b.table),
+			cmp.Compare(a.parent, b.parent),
+			cmp.Compare(a.rowID.Int64, b.rowID.Int64),
+		)
+	})
+	return introduced
+}
+
+func describeForeignKeyViolations(violations []foreignKeyViolation) string {
+	parts := make([]string, 0, min(len(violations), maxReportedForeignKeyViolations)+1)
+	for _, violation := range violations[:min(len(violations), maxReportedForeignKeyViolations)] {
+		row := "row"
+		if violation.rowID.Valid {
+			row = fmt.Sprintf("row %d", violation.rowID.Int64)
+		}
+		parts = append(parts, fmt.Sprintf("%s %s references a missing %s row", violation.table, row, violation.parent))
+	}
+	if hidden := len(violations) - maxReportedForeignKeyViolations; hidden > 0 {
+		parts = append(parts, fmt.Sprintf("and %d more", hidden))
+	}
+	return strings.Join(parts, "; ")
+}
+
+// sqliteTableRebuild describes one table rebuild in SQLite's documented order
+// (https://www.sqlite.org/lang_altertable.html#otheralter). A rebuild is the
+// only way to change a column's type or constraints, or a table's foreign
+// keys. Run its statements through applyMigrationForeignKeysOff: under
+// applyMigration, DROP TABLE would cascade into the child tables.
+//
+// The copy keeps each row's rowid, so rowid-keyed search projections and
+// violations that existed before the rebuild still line up afterwards. It
+// cannot rebuild a WITHOUT ROWID table, and it does not carry an
+// AUTOINCREMENT high-water mark over to the new table. The planned parent
+// tables use neither.
+type sqliteTableRebuild struct {
+	// table is the table to rebuild, X in the pattern.
+	table string
+	// definition is the body of the new CREATE TABLE statement: the column
+	// and constraint definitions between the parentheses. A foreign key that
+	// references the table itself names X, not X_next.
+	definition string
+	// columns lists the columns copied from the old table. Each must exist in
+	// both definitions. New columns take their DEFAULT.
+	columns []string
+	// dropDependents drops the views, and the triggers on other tables, whose
+	// SQL references X. ALTER TABLE ... RENAME re-parses the whole schema and
+	// fails while any of them refers to the dropped table. Triggers on X itself
+	// are dropped with it.
+	dropDependents []string
+	// recreate runs after the rename. It creates the indexes and triggers of X
+	// and the views and triggers removed by dropDependents.
+	recreate []string
+}
+
+// statements returns the rebuild in migration order. It panics on an invalid
+// description: the fields are constants in the migration source, so every
+// store test that migrates a database reports the mistake.
+func (r sqliteTableRebuild) statements() []string {
+	if !validMigrationIdentifier(r.table) {
+		panic(fmt.Sprintf("table rebuild: invalid table name %q", r.table))
+	}
+	if strings.TrimSpace(r.definition) == "" {
+		panic(fmt.Sprintf("table rebuild of %s: empty definition", r.table))
+	}
+	if len(r.columns) == 0 {
+		panic(fmt.Sprintf("table rebuild of %s: no columns to copy", r.table))
+	}
+	for _, column := range r.columns {
+		if !validMigrationIdentifier(column) || strings.EqualFold(column, "rowid") {
+			panic(fmt.Sprintf("table rebuild of %s: invalid column name %q", r.table, column))
+		}
+	}
+	next := r.table + "_next"
+	columns := strings.Join(r.columns, ", ")
+	statements := make([]string, 0, len(r.dropDependents)+4+len(r.recreate))
+	statements = append(statements, r.dropDependents...)
+	statements = append(statements,
+		"CREATE TABLE "+next+" ("+r.definition+")",
+		"INSERT INTO "+next+"(rowid, "+columns+") SELECT rowid, "+columns+" FROM "+r.table,
+		"DROP TABLE "+r.table,
+		"ALTER TABLE "+next+" RENAME TO "+r.table,
+	)
+	return append(statements, r.recreate...)
 }
 
 // execMigrationStatement handles the only intentionally repeatable DDL in

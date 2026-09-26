@@ -132,7 +132,7 @@ func TestRetentionProtectionPreparationReportsClosedDatabase(t *testing.T) {
 	if err := s.DB.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.deleteScanRetentionBatches(context.Background(), time.Now().UTC().Format(time.RFC3339Nano)); err == nil {
+	if _, err := s.System().deleteScanRetentionBatches(context.Background(), time.Now().UTC().Format(time.RFC3339Nano)); err == nil {
 		t.Fatal("closed database retention protection unexpectedly succeeded")
 	}
 }

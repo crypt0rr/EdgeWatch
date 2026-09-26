@@ -102,15 +102,22 @@ func importedDeploymentColumnExists(ctx context.Context, q interface {
 	return columns > 0, nil
 }
 
+// ImportedDeploymentNotifications reports the imported URL digests through
+// SystemStore.ImportedDeploymentNotifications, until its callers use
+// Store.System themselves.
+func (s *Store) ImportedDeploymentNotifications(ctx context.Context, legacyHashes []string) (map[string]bool, error) {
+	return s.System().ImportedDeploymentNotifications(ctx, legacyHashes)
+}
+
 // ImportedDeploymentNotifications returns the supplied URL digests that an
 // import has recorded, including those whose destination was deleted later.
 // Such a URL is no longer a deployment destination.
-func (s *Store) ImportedDeploymentNotifications(ctx context.Context, legacyHashes []string) (map[string]bool, error) {
+func (ss *SystemStore) ImportedDeploymentNotifications(ctx context.Context, legacyHashes []string) (map[string]bool, error) {
 	imported := make(map[string]bool, len(legacyHashes))
 	if len(legacyHashes) == 0 {
 		return imported, nil
 	}
-	reader := s.reader()
+	reader := ss.store.reader()
 	exists, err := importedDeploymentColumnExists(ctx, reader)
 	if err != nil || !exists {
 		return imported, err
@@ -136,13 +143,22 @@ func (s *Store) ImportedDeploymentNotifications(ctx context.Context, legacyHashe
 	return imported, rows.Err()
 }
 
+// ImportDeploymentNotifications imports the config.yaml notification URLs
+// through SystemStore.ImportDeploymentNotifications, until its callers use
+// Store.System themselves.
+func (s *Store) ImportDeploymentNotifications(ctx context.Context, items []DeploymentNotificationImport) (DeploymentNotificationImportResult, error) {
+	return s.System().ImportDeploymentNotifications(ctx, items)
+}
+
 // ImportDeploymentNotifications creates each sealed destination and moves every
 // reference to its deployment destination onto it in one transaction: job
 // selections, the application update routing, pending deliveries (including
 // rows queued under the legacy URL-digest alias), and delivery health. A URL
 // that an earlier import recorded is skipped, even when its destination has
-// since been deleted. Any error rolls the whole import back.
-func (s *Store) ImportDeploymentNotifications(ctx context.Context, items []DeploymentNotificationImport) (DeploymentNotificationImportResult, error) {
+// since been deleted. Any error rolls the whole import back. The config.yaml
+// URLs belong to the deployment's default tenant, so the new destinations do
+// too, and their names only have to be unique within it.
+func (ss *SystemStore) ImportDeploymentNotifications(ctx context.Context, items []DeploymentNotificationImport) (DeploymentNotificationImportResult, error) {
 	var result DeploymentNotificationImportResult
 	if len(items) == 0 {
 		return result, nil
@@ -160,7 +176,7 @@ func (s *Store) ImportDeploymentNotifications(ctx context.Context, items []Deplo
 	}
 	now := time.Now().UTC()
 	stamp := now.Format(time.RFC3339Nano)
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return result, err
 	}
@@ -181,7 +197,7 @@ func (s *Store) ImportDeploymentNotifications(ctx context.Context, items []Deplo
 			result.Skipped++
 			continue
 		}
-		name, err := uniqueManagedNotificationNameTx(ctx, tx, strings.TrimSpace(item.Name))
+		name, err := uniqueManagedNotificationNameTx(ctx, tx, DefaultTenantID, strings.TrimSpace(item.Name))
 		if err != nil {
 			return DeploymentNotificationImportResult{}, err
 		}
@@ -292,15 +308,17 @@ const maxImportedNameSuffix = 10000
 
 // uniqueManagedNotificationNameTx returns base, or base with the lowest free
 // numeric suffix ("Deployment destination 2"), so an import never collides
-// with the unique name of an existing web-managed destination.
-func uniqueManagedNotificationNameTx(ctx context.Context, tx *sql.Tx, base string) (string, error) {
+// with the unique name of an existing web-managed destination of the tenant.
+// Destination names are unique per tenant, so another tenant's destination
+// never takes a name from the import.
+func uniqueManagedNotificationNameTx(ctx context.Context, tx *sql.Tx, tenantID, base string) (string, error) {
 	for suffix := 1; suffix <= maxImportedNameSuffix; suffix++ {
 		candidate := base
 		if suffix > 1 {
 			candidate = fmt.Sprintf("%s %d", base, suffix)
 		}
 		var taken int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_notifications WHERE name=?`, candidate).Scan(&taken); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_notifications WHERE tenant_id=? AND name=?`, tenantID, candidate).Scan(&taken); err != nil {
 			return "", err
 		}
 		if taken == 0 {
@@ -488,22 +506,36 @@ func uniqueStrings(values []string) []string {
 	return out
 }
 
+// RecordNotificationConfigImport stores the import outcome through
+// SystemStore.RecordNotificationConfigImport, until the daemon uses
+// Store.System itself.
+func (s *Store) RecordNotificationConfigImport(ctx context.Context, state NotificationConfigImport) error {
+	return s.System().RecordNotificationConfigImport(ctx, state)
+}
+
 // RecordNotificationConfigImport stores the outcome of this daemon start's
 // import for the read-only health command and the console.
-func (s *Store) RecordNotificationConfigImport(ctx context.Context, state NotificationConfigImport) error {
+func (ss *SystemStore) RecordNotificationConfigImport(ctx context.Context, state NotificationConfigImport) error {
 	if state.UpdatedAt.IsZero() {
 		state.UpdatedAt = time.Now().UTC()
 	}
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO notification_config_import(id,status,configured_urls,imported_urls,error_code,updated_at) VALUES(1,?,?,?,?,?)
+	_, err := ss.store.DB.ExecContext(ctx, `INSERT INTO notification_config_import(id,status,configured_urls,imported_urls,error_code,updated_at) VALUES(1,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET status=excluded.status,configured_urls=excluded.configured_urls,imported_urls=excluded.imported_urls,error_code=excluded.error_code,updated_at=excluded.updated_at`,
 		state.Status, state.ConfiguredURLs, state.ImportedURLs, truncate(state.ErrorCode, 64), state.UpdatedAt.UTC().Format(time.RFC3339Nano))
 	return err
 }
 
+// NotificationConfigImportState reads the import outcome through
+// SystemStore.NotificationConfigImportState, until its callers use
+// Store.System themselves.
+func (s *Store) NotificationConfigImportState(ctx context.Context) (NotificationConfigImport, error) {
+	return s.System().NotificationConfigImportState(ctx)
+}
+
 // NotificationConfigImportState returns the recorded import outcome. A
 // database without the table, or without a recorded start, reports none.
-func (s *Store) NotificationConfigImportState(ctx context.Context) (NotificationConfigImport, error) {
-	return notificationConfigImportState(ctx, s.reader())
+func (ss *SystemStore) NotificationConfigImportState(ctx context.Context) (NotificationConfigImport, error) {
+	return notificationConfigImportState(ctx, ss.store.reader())
 }
 
 func notificationConfigImportState(ctx context.Context, reader interface {

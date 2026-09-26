@@ -11,6 +11,13 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
+// RecordJobSilenceAlert records a silence alert through
+// SystemStore.RecordJobSilenceAlert, until the daemon uses Store.System
+// itself.
+func (s *Store) RecordJobSilenceAlert(ctx context.Context, jobID, job string, createdAt, now time.Time, threshold time.Duration, destinations []string) (model.Event, bool, error) {
+	return s.System().RecordJobSilenceAlert(ctx, jobID, job, createdAt, now, threshold, destinations)
+}
+
 // RecordJobSilenceAlert records a deduplicated warning when a managed job has
 // not produced a successful scan within threshold. The latest successful
 // result, active lease, deduplication check, event, and notification outbox
@@ -21,15 +28,16 @@ import (
 // a scan. A zero reference means the job is not old enough to evaluate yet.
 // The location of now selects the timezone of the human-readable last-success
 // time in the alert text; persisted timestamps remain UTC.
-// The returned bool reports whether a new event was committed.
-func (s *Store) RecordJobSilenceAlert(ctx context.Context, jobID, job string, createdAt, now time.Time, threshold time.Duration, destinations []string) (model.Event, bool, error) {
+// The returned bool reports whether a new event was committed. A job of a
+// tenant that is not active is never due, as in JobSilenceDue.
+func (ss *SystemStore) RecordJobSilenceAlert(ctx context.Context, jobID, job string, createdAt, now time.Time, threshold time.Duration, destinations []string) (model.Event, bool, error) {
 	if jobID == "" || threshold <= 0 {
 		return model.Event{}, false, nil
 	}
 	display := now.Location()
 	now = now.UTC()
 	createdAt = createdAt.UTC()
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return model.Event{}, false, err
 	}
@@ -85,16 +93,31 @@ func (s *Store) RecordJobSilenceAlert(ctx context.Context, jobID, job string, cr
 	return bounded, true, nil
 }
 
+// JobSilenceDue runs the silence preflight through SystemStore.JobSilenceDue,
+// until the daemon uses Store.System itself.
+func (s *Store) JobSilenceDue(ctx context.Context, jobID string, createdAt, now time.Time, threshold time.Duration) (bool, error) {
+	return s.System().JobSilenceDue(ctx, jobID, createdAt, now, threshold)
+}
+
 // JobSilenceDue is a cheap preflight used by the application before it reloads
 // notification destinations. Destination decryption/reload is therefore only
 // performed for jobs that are actually overdue; RecordJobSilenceAlert repeats
 // the same decision in its write transaction before committing the event.
-func (s *Store) JobSilenceDue(ctx context.Context, jobID string, createdAt, now time.Time, threshold time.Duration) (bool, error) {
+// The jobs of a tenant that is not active are never due: a disabled tenant is
+// paused, so its jobs do not scan and its alerts are held.
+func (ss *SystemStore) JobSilenceDue(ctx context.Context, jobID string, createdAt, now time.Time, threshold time.Duration) (bool, error) {
 	if jobID == "" || threshold <= 0 {
 		return false, nil
 	}
-	decision, err := jobSilenceDecisionQuery(ctx, s.reader(), jobID, createdAt, now, threshold)
+	decision, err := jobSilenceDecisionQuery(ctx, ss.store.reader(), jobID, createdAt, now, threshold)
 	return decision.due, err
+}
+
+// JobSilenceReference reads the silence reference through
+// SystemStore.JobSilenceReference, until the daemon uses Store.System
+// itself.
+func (s *Store) JobSilenceReference(ctx context.Context, jobID string, createdAt, now time.Time) (time.Time, error) {
+	return s.System().JobSilenceReference(ctx, jobID, createdAt, now)
 }
 
 // JobSilenceReference returns the timestamp from which the watchdog should
@@ -103,11 +126,11 @@ func (s *Store) JobSilenceDue(ctx context.Context, jobID string, createdAt, now 
 // successful scan, and the denormalized last-success marker. Keeping this
 // read on the read pool lets the application derive a calendar-aware deadline
 // without making the silence decision itself non-transactional.
-func (s *Store) JobSilenceReference(ctx context.Context, jobID string, createdAt, now time.Time) (time.Time, error) {
+func (ss *SystemStore) JobSilenceReference(ctx context.Context, jobID string, createdAt, now time.Time) (time.Time, error) {
 	if jobID == "" {
 		return time.Time{}, nil
 	}
-	return jobSilenceReferenceQuery(ctx, s.reader(), jobID, createdAt, now)
+	return jobSilenceReferenceQuery(ctx, ss.store.reader(), jobID, createdAt, now)
 }
 
 type jobSilenceDecision struct {
@@ -160,6 +183,15 @@ func jobSilenceDecisionTx(ctx context.Context, tx *sql.Tx, jobID string, created
 
 func jobSilenceDecisionQuery(ctx context.Context, queryer rowQueryer, jobID string, createdAt, now time.Time, threshold time.Duration) (jobSilenceDecision, error) {
 	if jobID == "" || threshold <= 0 {
+		return jobSilenceDecision{}, nil
+	}
+	// A paused tenant's jobs are not expected to scan, so their silence is
+	// not an alert. The watchdog judges them again once the tenant is active.
+	var paused int
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*) FROM jobs JOIN tenants ON tenants.id=jobs.tenant_id WHERE jobs.id=? AND tenants.state<>?`, jobID, TenantStateActive).Scan(&paused); err != nil {
+		return jobSilenceDecision{}, err
+	}
+	if paused > 0 {
 		return jobSilenceDecision{}, nil
 	}
 	now = now.UTC()

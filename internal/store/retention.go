@@ -53,18 +53,38 @@ const ftsMergePageLimit = 128
 // runtime JSON while SQLite's writer is held.
 const retentionProtectedScans = "edgewatch_retention_protected_scans"
 
+// purgedTenantStates is the SQL list of the tenant states in which retention
+// leaves a tenant's rows to the tenant purge: a tenant that is being deleted,
+// and the tombstone of a deleted one. The purge erases those rows itself, so
+// retention neither deletes nor rewrites them. A disabled tenant is paused,
+// but its history keeps ageing out.
+const purgedTenantStates = `('` + TenantStateDeleting + `','` + TenantStateDeleted + `')`
+
 func (p PruneStats) Total() int64 {
 	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.Revisions + p.Cycles + p.RDAPCache
 }
 
-// Prune removes rows outside the configured retention window while preserving
-// every active baseline scan and the current revision of each job. Delivery
-// rows that are still pending (or have retry attempts remaining) are never
-// removed; only sent rows and terminal failures are eligible. Each bounded
-// batch is committed independently, making the operation resumable and
-// allowing cancellation between batches without holding the writer lock for
-// the whole retained history.
+// PruneWithStats runs a retention pass through SystemStore.PruneWithStats,
+// until the daemon uses Store.System itself.
 func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStats, error) {
+	return s.System().PruneWithStats(ctx, before)
+}
+
+// PruneWithStats removes rows outside the configured retention window while
+// preserving every active baseline scan and the current revision of each job.
+// Delivery rows that are still pending (or have retry attempts remaining) are
+// never removed; only sent rows and terminal failures are eligible. Each
+// bounded batch is committed independently, making the operation resumable
+// and allowing cancellation between batches without holding the writer lock
+// for the whole retained history.
+//
+// The pass covers every tenant, and a disabled tenant's history keeps ageing
+// out. The history of a tenant that is being deleted, or has been deleted, is
+// left alone, because the tenant purge owns it; the projection repair only
+// drops such a tenant's latest-host rows once the purge has removed their
+// scans. Events and deliveries without a tenant belong to the platform and
+// are pruned as before.
+func (ss *SystemStore) PruneWithStats(ctx context.Context, before time.Time) (PruneStats, error) {
 	var stats PruneStats
 	// Retained timestamps are stored with sqliteTimestamp's fixed-width
 	// fractional seconds. Keep the cutoff in that same representation so
@@ -75,7 +95,7 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	// NOT EXISTS avoids SQL's NULL semantics: most state rows do not yet have a
 	// baseline_scan_id, and a NOT IN subquery containing NULL would protect every
 	// old scan from pruning.
-	deletedScans, err := s.deleteScanRetentionBatches(ctx, cutoff)
+	deletedScans, err := ss.deleteScanRetentionBatches(ctx, cutoff)
 	if err != nil {
 		return stats, err
 	}
@@ -85,19 +105,22 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	// left dangling by an interrupted/older retention run cannot survive until
 	// another deletion happens to trigger cleanup. Each repair transaction is
 	// bounded by retentionBatchSize.
-	if err := s.repairLatestScanHosts(ctx); err != nil {
+	if err := ss.store.repairLatestScanHosts(ctx); err != nil {
 		return stats, err
 	}
 
-	stats.Events, err = s.deleteRetentionBatches(ctx, `DELETE FROM events WHERE rowid IN (SELECT rowid FROM events WHERE created_at < ? ORDER BY created_at,rowid LIMIT ?)`, cutoff)
+	stats.Events, err = ss.deleteRetentionBatches(ctx, `DELETE FROM events WHERE rowid IN (SELECT rowid FROM events AS event WHERE created_at < ?
+		AND NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id = event.tenant_id AND tenants.state IN `+purgedTenantStates+`) ORDER BY created_at,rowid LIMIT ?)`, cutoff)
 	if err != nil {
 		return stats, err
 	}
-	stats.SentOutbox, err = s.deleteRetentionBatches(ctx, `DELETE FROM outbox WHERE rowid IN (SELECT rowid FROM outbox WHERE sent_at IS NOT NULL AND sent_at < ? ORDER BY sent_at,rowid LIMIT ?)`, cutoff)
+	stats.SentOutbox, err = ss.deleteRetentionBatches(ctx, `DELETE FROM outbox WHERE rowid IN (SELECT rowid FROM outbox AS delivery WHERE sent_at IS NOT NULL AND sent_at < ?
+		AND NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id = delivery.tenant_id AND tenants.state IN `+purgedTenantStates+`) ORDER BY sent_at,rowid LIMIT ?)`, cutoff)
 	if err != nil {
 		return stats, err
 	}
-	stats.FailedOutbox, err = s.deleteRetentionBatches(ctx, `DELETE FROM outbox WHERE rowid IN (SELECT rowid FROM outbox WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '') AND next_at < ? ORDER BY next_at,rowid LIMIT ?)`, deliveryMaxAttempts, cutoff)
+	stats.FailedOutbox, err = ss.deleteRetentionBatches(ctx, `DELETE FROM outbox WHERE rowid IN (SELECT rowid FROM outbox AS delivery WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '') AND next_at < ?
+		AND NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id = delivery.tenant_id AND tenants.state IN `+purgedTenantStates+`) ORDER BY next_at,rowid LIMIT ?)`, deliveryMaxAttempts, cutoff)
 	if err != nil {
 		return stats, err
 	}
@@ -106,17 +129,18 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	// pruned. Once a merged scan already references a completed cycle, those
 	// per-unit snapshots are no longer needed for crash recovery; reclaim them
 	// during the regular retention pass while preserving unit metadata.
-	if err := s.clearCompletedCyclePayloads(ctx); err != nil {
+	if err := ss.clearCompletedCyclePayloads(ctx); err != nil {
 		return stats, err
 	}
 
 	// Keep the newest revision for every job regardless of age. Older revisions
 	// contain immutable historical definitions and may be discarded after their
 	// retention window because scans retain their own snapshots.
-	stats.Revisions, err = s.deleteRetentionBatches(ctx, `DELETE FROM job_revisions WHERE rowid IN (SELECT revision.rowid FROM job_revisions AS revision
+	stats.Revisions, err = ss.deleteRetentionBatches(ctx, `DELETE FROM job_revisions WHERE rowid IN (SELECT revision.rowid FROM job_revisions AS revision
 			WHERE created_at < ?
 			AND revision < COALESCE((SELECT MAX(current.revision) FROM jobs AS current WHERE current.id = revision.job_id), revision)
-			AND NOT EXISTS (SELECT 1 FROM scans WHERE scans.job_id = revision.job_id AND scans.job_revision = revision.revision) ORDER BY revision.created_at,revision.rowid LIMIT ?)`, cutoff)
+			AND NOT EXISTS (SELECT 1 FROM scans WHERE scans.job_id = revision.job_id AND scans.job_revision = revision.revision)
+			AND NOT EXISTS (SELECT 1 FROM jobs AS owner JOIN tenants ON tenants.id = owner.tenant_id WHERE owner.id = revision.job_id AND tenants.state IN `+purgedTenantStates+`) ORDER BY revision.created_at,revision.rowid LIMIT ?)`, cutoff)
 	if err != nil {
 		return stats, err
 	}
@@ -127,10 +151,11 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	// referencing scan fall outside retention, the unit checkpoints can be
 	// removed through the foreign-key cascade without leaving unbounded plan
 	// metadata behind.
-	stats.Cycles, err = s.deleteRetentionBatches(ctx, `DELETE FROM scan_cycles AS cycle WHERE cycle.rowid IN (SELECT candidate.rowid FROM scan_cycles AS candidate
+	stats.Cycles, err = ss.deleteRetentionBatches(ctx, `DELETE FROM scan_cycles AS cycle WHERE cycle.rowid IN (SELECT candidate.rowid FROM scan_cycles AS candidate
 		WHERE candidate.finished_at <> '' AND candidate.finished_at < ?
 		AND candidate.status IN ('completed','discarded','expired')
-		AND NOT EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id = candidate.id) ORDER BY candidate.finished_at,candidate.rowid LIMIT ?)`, cutoff)
+		AND NOT EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id = candidate.id)
+		AND NOT EXISTS (SELECT 1 FROM jobs AS owner JOIN tenants ON tenants.id = owner.tenant_id WHERE owner.id = candidate.job_id AND tenants.state IN `+purgedTenantStates+`) ORDER BY candidate.finished_at,candidate.rowid LIMIT ?)`, cutoff)
 	if err != nil {
 		return stats, err
 	}
@@ -139,12 +164,12 @@ func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStat
 	// retained scan history. Remove rows once their seven-day stale window has
 	// elapsed, even when the deployment retains scans for much longer.
 	rdapCutoff := sqliteTimestamp(time.Now())
-	stats.RDAPCache, err = s.deleteRetentionBatches(ctx, `DELETE FROM rdap_cache WHERE rowid IN (SELECT rowid FROM rdap_cache WHERE stale_until < ? ORDER BY stale_until,rowid LIMIT ?)`, rdapCutoff)
+	stats.RDAPCache, err = ss.deleteRetentionBatches(ctx, `DELETE FROM rdap_cache WHERE rowid IN (SELECT rowid FROM rdap_cache WHERE stale_until < ? ORDER BY stale_until,rowid LIMIT ?)`, rdapCutoff)
 	if err != nil {
 		return stats, err
 	}
 	if stats.Scans > 0 {
-		maintenance, maintenanceErr := s.maintainSearchIndexes(ctx)
+		maintenance, maintenanceErr := ss.store.maintainSearchIndexes(ctx)
 		stats.FTSOptimized = maintenance.Optimized
 		stats.FTSDeferred = maintenance.Deferred
 		stats.ReclaimedPages = maintenance.ReclaimedPages
@@ -230,9 +255,10 @@ func maintenanceError(ctx, maintenanceCtx context.Context, stats *searchMaintena
 // job_runtime_meta on current databases; the JSON fallbacks cover legacy rows
 // and hand-written recovery fixtures that have no metadata (or whose marker is
 // still empty).  Incident references are likewise expanded once, before the
-// retention loop, rather than once per candidate batch.
-func (s *Store) deleteScanRetentionBatches(ctx context.Context, cutoff string) (int64, error) {
-	if _, err := s.DB.ExecContext(ctx, "CREATE TEMP TABLE IF NOT EXISTS "+retentionProtectedScans+" (scan_id TEXT PRIMARY KEY); DELETE FROM "+retentionProtectedScans); err != nil {
+// retention loop, rather than once per candidate batch. The scans of a tenant
+// that the purge owns are never candidates.
+func (ss *SystemStore) deleteScanRetentionBatches(ctx context.Context, cutoff string) (int64, error) {
+	if _, err := ss.store.DB.ExecContext(ctx, "CREATE TEMP TABLE IF NOT EXISTS "+retentionProtectedScans+" (scan_id TEXT PRIMARY KEY); DELETE FROM "+retentionProtectedScans); err != nil {
 		return 0, fmt.Errorf("prepare retention protection: %w", err)
 	}
 	// The statements below are static and only insert non-empty identifiers.
@@ -249,24 +275,25 @@ func (s *Store) deleteScanRetentionBatches(ctx context.Context, cutoff string) (
 		"INSERT OR IGNORE INTO " + retentionProtectedScans + "(scan_id) SELECT json_extract(incident.value,'$.scan_id') FROM job_states AS legacy, json_each(CASE WHEN json_valid(legacy.state_json) THEN legacy.state_json ELSE '{}' END,'$.incidents') AS incident WHERE json_extract(incident.value,'$.scan_id') <> ''",
 	}
 	for _, query := range protectionQueries {
-		if _, err := s.DB.ExecContext(ctx, query); err != nil {
+		if _, err := ss.store.DB.ExecContext(ctx, query); err != nil {
 			return 0, fmt.Errorf("populate retention protection: %w", err)
 		}
 	}
-	return s.deleteRetentionBatches(ctx, `DELETE FROM scans AS scan WHERE scan.id IN (SELECT candidate.id FROM scans AS candidate WHERE candidate.finished_at < ?
-		AND NOT EXISTS (SELECT 1 FROM `+retentionProtectedScans+` AS protected WHERE protected.scan_id = candidate.id) ORDER BY candidate.finished_at,candidate.id LIMIT ? )`, cutoff)
+	return ss.deleteRetentionBatches(ctx, `DELETE FROM scans AS scan WHERE scan.id IN (SELECT candidate.id FROM scans AS candidate WHERE candidate.finished_at < ?
+		AND NOT EXISTS (SELECT 1 FROM `+retentionProtectedScans+` AS protected WHERE protected.scan_id = candidate.id)
+		AND NOT EXISTS (SELECT 1 FROM tenants WHERE tenants.id = candidate.tenant_id AND tenants.state IN `+purgedTenantStates+`) ORDER BY candidate.finished_at,candidate.id LIMIT ? )`, cutoff)
 }
 
 // deleteRetentionBatches repeatedly executes one bounded DELETE transaction.
 // The caller supplies only static SQL; the helper appends the batch limit to
 // each statement and therefore never interpolates data values into SQL.
-func (s *Store) deleteRetentionBatches(ctx context.Context, statement string, args ...any) (int64, error) {
+func (ss *SystemStore) deleteRetentionBatches(ctx context.Context, statement string, args ...any) (int64, error) {
 	var total int64
 	for {
 		if err := ctx.Err(); err != nil {
 			return total, err
 		}
-		tx, err := s.DB.BeginTx(ctx, nil)
+		tx, err := ss.store.DB.BeginTx(ctx, nil)
 		if err != nil {
 			return total, err
 		}
@@ -402,8 +429,12 @@ func danglingLatestScanHostKeys(ctx context.Context, tx *sql.Tx) ([]latestScanHo
 	return keys, rows.Err()
 }
 
-func (s *Store) clearCompletedCyclePayloads(ctx context.Context) error {
-	_, err := s.deleteRetentionBatches(ctx, `UPDATE scan_cycle_units SET snapshot_json='{}' WHERE rowid IN (SELECT unit.rowid FROM scan_cycle_units AS unit WHERE unit.snapshot_json <> '{}' AND unit.cycle_id IN (SELECT cycle.id FROM scan_cycles AS cycle WHERE cycle.status='completed' AND EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id=cycle.id AND scans.cycle_status='completed' AND scans.status IN ('success','incomplete'))) ORDER BY unit.rowid LIMIT ?)`)
+// clearCompletedCyclePayloads empties the unit checkpoints of completed
+// cycles whose merged scan was saved. A tenant that the purge owns keeps its
+// checkpoints for the purge.
+func (ss *SystemStore) clearCompletedCyclePayloads(ctx context.Context) error {
+	_, err := ss.deleteRetentionBatches(ctx, `UPDATE scan_cycle_units SET snapshot_json='{}' WHERE rowid IN (SELECT unit.rowid FROM scan_cycle_units AS unit WHERE unit.snapshot_json <> '{}' AND unit.cycle_id IN (SELECT cycle.id FROM scan_cycles AS cycle WHERE cycle.status='completed' AND EXISTS (SELECT 1 FROM scans WHERE scans.cycle_id=cycle.id AND scans.cycle_status='completed' AND scans.status IN ('success','incomplete'))
+		AND NOT EXISTS (SELECT 1 FROM jobs AS owner JOIN tenants ON tenants.id=owner.tenant_id WHERE owner.id=cycle.job_id AND tenants.state IN `+purgedTenantStates+`)) ORDER BY unit.rowid LIMIT ?)`)
 	return err
 }
 
@@ -425,15 +456,35 @@ FROM (
 	return err
 }
 
-// Prune is retained for callers that only need the total row count.
+// Prune runs a retention pass through SystemStore.Prune, until the daemon
+// uses Store.System itself.
 func (s *Store) Prune(ctx context.Context, before time.Time) (int64, error) {
-	stats, err := s.PruneWithStats(ctx, before)
+	return s.System().Prune(ctx, before)
+}
+
+// Prune is retained for callers that only need the total row count.
+func (ss *SystemStore) Prune(ctx context.Context, before time.Time) (int64, error) {
+	stats, err := ss.PruneWithStats(ctx, before)
 	return stats.Total(), err
 }
 
+// AcquireLease claims the daemon lease through SystemStore.AcquireLease,
+// until the daemon uses Store.System itself.
 func (s *Store) AcquireLease(ctx context.Context, owner string) error {
-	_, err := s.acquireLease(ctx, owner, false)
+	return s.System().AcquireLease(ctx, owner)
+}
+
+// AcquireLease claims the singleton daemon lease without reclaiming the job
+// leases of the daemon it replaces.
+func (ss *SystemStore) AcquireLease(ctx context.Context, owner string) error {
+	_, err := ss.acquireLease(ctx, owner, false)
 	return err
+}
+
+// AcquireDaemonLease claims the daemon lease through
+// SystemStore.AcquireDaemonLease, until the daemon uses Store.System itself.
+func (s *Store) AcquireDaemonLease(ctx context.Context, owner string) (int64, error) {
+	return s.System().AcquireDaemonLease(ctx, owner)
 }
 
 // AcquireDaemonLease claims the singleton daemon lease and, when replacing a
@@ -441,8 +492,8 @@ func (s *Store) AcquireLease(ctx context.Context, owner string) error {
 // that previous daemon instance. CLI/manual leases are deliberately left
 // untouched. The transaction makes the ownership decision and reclamation
 // atomic, so a second daemon cannot race the cleanup into stealing live work.
-func (s *Store) AcquireDaemonLease(ctx context.Context, owner string) (int64, error) {
-	return s.acquireLease(ctx, owner, true)
+func (ss *SystemStore) AcquireDaemonLease(ctx context.Context, owner string) (int64, error) {
+	return ss.acquireLease(ctx, owner, true)
 }
 
 var ErrDaemonLeaseBusy = errors.New("another EdgeWatch daemon holds the database lease")
@@ -457,16 +508,23 @@ type DaemonLeaseStatus struct {
 	Active    bool
 }
 
+// DaemonLeaseStatus reads the daemon lease through
+// SystemStore.DaemonLeaseStatus, until its callers use Store.System
+// themselves.
+func (s *Store) DaemonLeaseStatus(ctx context.Context) (DaemonLeaseStatus, error) {
+	return s.System().DaemonLeaseStatus(ctx)
+}
+
 // DaemonLeaseStatus reads the singleton daemon lease without running any
 // migrations or changing SQLite state. A missing table/row means that no
 // daemon has claimed this database. Malformed rows fail closed so callers do
 // not replace a database when liveness cannot be established reliably.
-func (s *Store) DaemonLeaseStatus(ctx context.Context) (DaemonLeaseStatus, error) {
+func (ss *SystemStore) DaemonLeaseStatus(ctx context.Context) (DaemonLeaseStatus, error) {
 	var status DaemonLeaseStatus
-	if s == nil || s.DB == nil {
+	if ss == nil || ss.store == nil || ss.store.DB == nil {
 		return status, errors.New("database is not open")
 	}
-	reader := s.reader()
+	reader := ss.store.reader()
 	var tableCount int
 	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='daemon_lease'`).Scan(&tableCount); err != nil {
 		return status, err
@@ -513,7 +571,7 @@ func CheckDaemonLeaseBeforeStartup(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	status, err := reader.DaemonLeaseStatus(ctx)
+	status, err := reader.System().DaemonLeaseStatus(ctx)
 	// Close removes the probe's WAL/SHM pair only when no other connection
 	// has the database open, so a live daemon keeps its files.
 	closeErr := reader.Close()
@@ -526,13 +584,13 @@ func CheckDaemonLeaseBeforeStartup(ctx context.Context, path string) error {
 	return closeErr
 }
 
-func (s *Store) acquireLease(ctx context.Context, owner string, reclaimPreviousDaemon bool) (int64, error) {
+func (ss *SystemStore) acquireLease(ctx context.Context, owner string, reclaimPreviousDaemon bool) (int64, error) {
 	if strings.TrimSpace(owner) == "" {
 		return 0, errors.New("daemon lease owner is required")
 	}
 	now := time.Now().UTC()
 	stale := now.Add(-2 * time.Minute).Format(time.RFC3339Nano)
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -580,8 +638,17 @@ func (s *Store) acquireLease(ctx context.Context, owner string, reclaimPreviousD
 	}
 	return reclaimed, nil
 }
+
+// Heartbeat renews the daemon lease through SystemStore.Heartbeat, until the
+// daemon uses Store.System itself.
 func (s *Store) Heartbeat(ctx context.Context, owner string) error {
-	r, err := s.DB.ExecContext(ctx, `UPDATE daemon_lease SET heartbeat=? WHERE id=1 AND owner=?`, time.Now().UTC().Format(time.RFC3339Nano), owner)
+	return s.System().Heartbeat(ctx, owner)
+}
+
+// Heartbeat renews the daemon lease that owner holds, or returns ErrLeaseLost
+// when another daemon has taken it over.
+func (ss *SystemStore) Heartbeat(ctx context.Context, owner string) error {
+	r, err := ss.store.DB.ExecContext(ctx, `UPDATE daemon_lease SET heartbeat=? WHERE id=1 AND owner=?`, time.Now().UTC().Format(time.RFC3339Nano), owner)
 	if err != nil {
 		return err
 	}
@@ -592,6 +659,13 @@ func (s *Store) Heartbeat(ctx context.Context, owner string) error {
 	return nil
 }
 
+// ReclaimExpiredJobLeases removes expired job leases through
+// SystemStore.ReclaimExpiredJobLeases, until the daemon uses Store.System
+// itself.
+func (s *Store) ReclaimExpiredJobLeases(ctx context.Context, now time.Time) (int64, error) {
+	return s.System().ReclaimExpiredJobLeases(ctx, now)
+}
+
 // ReclaimExpiredJobLeases removes only leases whose owner can no longer be
 // considered live. Every scan writes an opaque owner and a bounded expiry
 // before it starts work. Managed daemon leases are reclaimed earlier by
@@ -599,34 +673,65 @@ func (s *Store) Heartbeat(ctx context.Context, owner string) error {
 // this expiry-only fallback remains conservative for CLI/manual leases and
 // legacy rows whose owner cannot be tied to a daemon instance. Clean shutdowns
 // release the exact owner through ReleaseJobLease.
-func (s *Store) ReclaimExpiredJobLeases(ctx context.Context, now time.Time) (int64, error) {
+func (ss *SystemStore) ReclaimExpiredJobLeases(ctx context.Context, now time.Time) (int64, error) {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
-	result, err := s.DB.ExecContext(ctx, `DELETE FROM job_leases WHERE expires_at<=?`, now.UTC().Format(time.RFC3339Nano))
+	result, err := ss.store.DB.ExecContext(ctx, `DELETE FROM job_leases WHERE expires_at<=?`, now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
 }
 
+// ReleaseAllJobLeases reconciles job leases through
+// SystemStore.ReleaseAllJobLeases, until its callers use Store.System
+// themselves.
+func (s *Store) ReleaseAllJobLeases(ctx context.Context) (int64, error) {
+	return s.System().ReleaseAllJobLeases(ctx)
+}
+
 // ReleaseAllJobLeases is retained as a source-compatible wrapper for older
 // callers. Its historical delete-all behavior was unsafe across daemon and
 // CLI processes; it now performs the same expiry-only reconciliation as the
 // daemon startup path.
-func (s *Store) ReleaseAllJobLeases(ctx context.Context) (int64, error) {
-	return s.ReclaimExpiredJobLeases(ctx, time.Now().UTC())
+func (ss *SystemStore) ReleaseAllJobLeases(ctx context.Context) (int64, error) {
+	return ss.ReclaimExpiredJobLeases(ctx, time.Now().UTC())
 }
+
+// ReleaseLease releases the daemon lease through SystemStore.ReleaseLease,
+// until the daemon uses Store.System itself.
 func (s *Store) ReleaseLease(ctx context.Context, owner string) error {
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM daemon_lease WHERE id=1 AND owner=?`, owner)
-	return err
+	return s.System().ReleaseLease(ctx, owner)
 }
-func (s *Store) Healthy(ctx context.Context) error {
-	_, err := s.HealthStatus(ctx)
+
+// ReleaseLease releases the daemon lease if owner still holds it.
+func (ss *SystemStore) ReleaseLease(ctx context.Context, owner string) error {
+	_, err := ss.store.DB.ExecContext(ctx, `DELETE FROM daemon_lease WHERE id=1 AND owner=?`, owner)
 	return err
 }
 
+// Healthy checks the daemon's health through SystemStore.Healthy, until its
+// callers use Store.System themselves.
+func (s *Store) Healthy(ctx context.Context) error {
+	return s.System().Healthy(ctx)
+}
+
+// Healthy returns the error of HealthStatus, if any.
+func (ss *SystemStore) Healthy(ctx context.Context) error {
+	_, err := ss.HealthStatus(ctx)
+	return err
+}
+
+// AcquireJobLease claims a job lease through SystemStore.AcquireJobLease,
+// until the daemon uses Store.System itself.
 func (s *Store) AcquireJobLease(ctx context.Context, job, owner string, expires time.Time) error {
+	return s.System().AcquireJobLease(ctx, job, owner, expires)
+}
+
+// AcquireJobLease claims the lease of a job, of any tenant, for owner until
+// expires, unless another owner holds a lease that has not expired.
+func (ss *SystemStore) AcquireJobLease(ctx context.Context, job, owner string, expires time.Time) error {
 	if strings.TrimSpace(job) == "" {
 		return errors.New("job lease job is required")
 	}
@@ -637,7 +742,7 @@ func (s *Store) AcquireJobLease(ctx context.Context, job, owner string, expires 
 		return errors.New("job lease expiry must be in the future")
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	result, err := s.DB.ExecContext(ctx, `INSERT INTO job_leases(job,owner,expires_at) VALUES(?,?,?) ON CONFLICT(job) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at WHERE job_leases.expires_at < ?`, job, owner, expires.UTC().Format(time.RFC3339Nano), now)
+	result, err := ss.store.DB.ExecContext(ctx, `INSERT INTO job_leases(job,owner,expires_at) VALUES(?,?,?) ON CONFLICT(job) DO UPDATE SET owner=excluded.owner,expires_at=excluded.expires_at WHERE job_leases.expires_at < ?`, job, owner, expires.UTC().Format(time.RFC3339Nano), now)
 	if err != nil {
 		return err
 	}
@@ -648,12 +753,20 @@ func (s *Store) AcquireJobLease(ctx context.Context, job, owner string, expires 
 	return nil
 }
 
+// AcquireJobLeaseForRevision claims a job lease through
+// SystemStore.AcquireJobLeaseForRevision, until the daemon uses Store.System
+// itself.
+func (s *Store) AcquireJobLeaseForRevision(ctx context.Context, job, owner string, revision int64, expires time.Time) error {
+	return s.System().AcquireJobLeaseForRevision(ctx, job, owner, revision, expires)
+}
+
 // AcquireJobLeaseForRevision atomically verifies that the queued scan still
 // refers to the current managed job revision and acquires its lease. A job
 // edit and a scan start therefore cannot cross between the revision check and
 // the lease write: either the edit observes the lease, or the scan observes
-// the newer revision and is rejected before it can touch runtime state.
-func (s *Store) AcquireJobLeaseForRevision(ctx context.Context, job, owner string, revision int64, expires time.Time) error {
+// the newer revision and is rejected before it can touch runtime state. The
+// job may belong to any tenant: the daemon runs every tenant's jobs.
+func (ss *SystemStore) AcquireJobLeaseForRevision(ctx context.Context, job, owner string, revision int64, expires time.Time) error {
 	if strings.TrimSpace(job) == "" {
 		return errors.New("job lease job is required")
 	}
@@ -663,7 +776,7 @@ func (s *Store) AcquireJobLeaseForRevision(ctx context.Context, job, owner strin
 	if !expires.After(time.Now().UTC()) {
 		return errors.New("job lease expiry must be in the future")
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -695,26 +808,39 @@ func (s *Store) AcquireJobLeaseForRevision(ctx context.Context, job, owner strin
 	return tx.Commit()
 }
 
+// ReleaseJobLease releases a job lease through SystemStore.ReleaseJobLease,
+// until the daemon uses Store.System itself.
 func (s *Store) ReleaseJobLease(ctx context.Context, job, owner string) error {
+	return s.System().ReleaseJobLease(ctx, job, owner)
+}
+
+// ReleaseJobLease releases the lease of a job if owner still holds it.
+func (ss *SystemStore) ReleaseJobLease(ctx context.Context, job, owner string) error {
 	if strings.TrimSpace(job) == "" || strings.TrimSpace(owner) == "" {
 		return errors.New("job lease job and owner are required")
 	}
-	_, err := s.DB.ExecContext(ctx, `DELETE FROM job_leases WHERE job=? AND owner=?`, job, owner)
+	_, err := ss.store.DB.ExecContext(ctx, `DELETE FROM job_leases WHERE job=? AND owner=?`, job, owner)
 	return err
+}
+
+// RenewJobLease extends a job lease through SystemStore.RenewJobLease, until
+// the daemon uses Store.System itself.
+func (s *Store) RenewJobLease(ctx context.Context, job, owner string, expires time.Time) error {
+	return s.System().RenewJobLease(ctx, job, owner, expires)
 }
 
 // RenewJobLease extends an existing scan lease without allowing a different
 // owner to take it over. Long resumable scans can outlive their initial
 // timeout-plus-grace window while final scan promotion is still committing;
 // callers must renew immediately before that finalization boundary.
-func (s *Store) RenewJobLease(ctx context.Context, job, owner string, expires time.Time) error {
+func (ss *SystemStore) RenewJobLease(ctx context.Context, job, owner string, expires time.Time) error {
 	if strings.TrimSpace(job) == "" || strings.TrimSpace(owner) == "" {
 		return errors.New("job lease job and owner are required")
 	}
 	if !expires.After(time.Now().UTC()) {
 		return errors.New("job lease expiry must be in the future")
 	}
-	result, err := s.DB.ExecContext(ctx, `UPDATE job_leases SET expires_at=? WHERE job=? AND owner=?`, expires.UTC().Format(time.RFC3339Nano), job, owner)
+	result, err := ss.store.DB.ExecContext(ctx, `UPDATE job_leases SET expires_at=? WHERE job=? AND owner=?`, expires.UTC().Format(time.RFC3339Nano), job, owner)
 	if err != nil {
 		return err
 	}
@@ -724,14 +850,23 @@ func (s *Store) RenewJobLease(ctx context.Context, job, owner string, expires ti
 	return nil
 }
 
+// Approve approves a config.yaml job's baseline through SystemStore.Approve,
+// until its callers use Store.System themselves.
 func (s *Store) Approve(ctx context.Context, job string, scan model.Scan) ([]model.Event, error) {
+	return s.System().Approve(ctx, job, scan)
+}
+
+// Approve makes a successful scan the baseline of the config.yaml job with
+// the given name. Those jobs keep their state in job_states and belong to the
+// default tenant.
+func (ss *SystemStore) Approve(ctx context.Context, job string, scan model.Scan) ([]model.Event, error) {
 	if scan.Job != job {
 		return nil, fmt.Errorf("scan %s belongs to job %s", scan.ID, scan.Job)
 	}
 	if scan.Status != "success" {
 		return nil, fmt.Errorf("scan %s is not successful", scan.ID)
 	}
-	return s.UpdateState(ctx, job, func(state *model.JobState) ([]model.Event, error) {
+	return ss.UpdateState(ctx, job, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = &scan.Snapshot
 		state.BaselineScanID = scan.ID
 		state.BaselineConfigHash = scan.ConfigHash
@@ -749,8 +884,17 @@ func (s *Store) Approve(ctx context.Context, job string, scan model.Scan) ([]mod
 		return []model.Event{{Type: "baseline-approved", Job: job, ScanID: scan.ID, Message: "Baseline manually approved", CreatedAt: time.Now().UTC()}}, nil
 	})
 }
+
+// ResetBaseline resets a config.yaml job's baseline through
+// SystemStore.ResetBaseline, until its callers use Store.System themselves.
 func (s *Store) ResetBaseline(ctx context.Context, job string) ([]model.Event, error) {
-	return s.UpdateState(ctx, job, func(state *model.JobState) ([]model.Event, error) {
+	return s.System().ResetBaseline(ctx, job)
+}
+
+// ResetBaseline clears the baseline of the config.yaml job with the given
+// name, so it collects a new one.
+func (ss *SystemStore) ResetBaseline(ctx context.Context, job string) ([]model.Event, error) {
+	return ss.UpdateState(ctx, job, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = nil
 		state.BaselineScanID = ""
 		state.BaselineConfigHash = ""

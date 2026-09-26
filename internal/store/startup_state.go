@@ -113,16 +113,22 @@ func parseStartupTime(raw string) (time.Time, error) {
 	return value.UTC(), nil
 }
 
+// HealthStatus reads the daemon's health through SystemStore.HealthStatus,
+// until its callers use Store.System themselves.
+func (s *Store) HealthStatus(ctx context.Context) (HealthStatus, error) {
+	return s.System().HealthStatus(ctx)
+}
+
 // HealthStatus reads migration progress first, then falls back to the daemon
 // lease once startup work has completed. The migration state is considered
 // healthy while its heartbeat is recent; stale or failed migration state is a
 // hard error so a genuinely wedged process is still recoverable.
-func (s *Store) HealthStatus(ctx context.Context) (HealthStatus, error) {
+func (ss *SystemStore) HealthStatus(ctx context.Context) (HealthStatus, error) {
 	var status HealthStatus
-	if s == nil || s.DB == nil {
+	if ss == nil || ss.store == nil || ss.store.DB == nil {
 		return status, errors.New("database is not open")
 	}
-	reader := s.reader()
+	reader := ss.store.reader()
 	var tableCount int
 	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='startup_state'`).Scan(&tableCount); err != nil {
 		return status, err

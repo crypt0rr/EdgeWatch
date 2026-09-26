@@ -32,8 +32,18 @@ func ensureMaps(s *model.JobState) {
 	}
 }
 
+// UpdateState changes a config.yaml job's state through
+// SystemStore.UpdateState, until its callers use Store.System themselves.
 func (s *Store) UpdateState(ctx context.Context, job string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	tx, err := s.DB.BeginTx(ctx, nil)
+	return s.System().UpdateState(ctx, job, fn)
+}
+
+// UpdateState applies fn to the stored state of the config.yaml job with the
+// given name and records the events it returns, in one transaction. Those
+// jobs keep their state in job_states, and their events belong to the
+// default tenant.
+func (ss *SystemStore) UpdateState(ctx context.Context, job string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -79,12 +89,21 @@ func (s *Store) UpdateState(ctx context.Context, job string, fn func(*model.JobS
 	return events, nil
 }
 
+// QueueEvent queues a delivery through SystemStore.QueueEvent, until its
+// callers use Store.System themselves.
 func (s *Store) QueueEvent(ctx context.Context, destination string, event model.Event) error {
+	return s.System().QueueEvent(ctx, destination, event)
+}
+
+// QueueEvent queues the delivery of an event to one destination. The
+// delivery belongs to the tenant of the event's job, or to the platform for
+// an event without a job.
+func (ss *SystemStore) QueueEvent(ctx context.Context, destination string, event model.Event) error {
 	_, b, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
 	if err != nil {
 		return err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -126,10 +145,21 @@ type Delivery struct {
 	Attempts    int
 	Deferrals   int
 	ClaimToken  string
+	// TenantID is the tenant whose event the delivery carries, or "" for a
+	// platform delivery such as an update alert, so the delivery worker can
+	// resolve the destination in the tenant that queued it.
+	TenantID string
 }
 
+// DueDeliveries claims due deliveries through SystemStore.DueDeliveries,
+// until its callers use Store.System themselves.
 func (s *Store) DueDeliveries(ctx context.Context, limit int) ([]Delivery, error) {
-	return s.ClaimDueDeliveries(ctx, limit, uuid.NewString())
+	return s.System().DueDeliveries(ctx, limit)
+}
+
+// DueDeliveries claims up to limit due deliveries for a new owner.
+func (ss *SystemStore) DueDeliveries(ctx context.Context, limit int) ([]Delivery, error) {
+	return ss.ClaimDueDeliveries(ctx, limit, uuid.NewString())
 }
 
 var ErrDeliveryClaimLost = errors.New("notification delivery claim was lost")
@@ -157,19 +187,49 @@ const (
 	deliveryMaintenanceBatch = 256
 )
 
+// heldDeliverySQL holds back the outbox row aliased "due" while its tenant is
+// not active. A disabled tenant is paused: its alerts wait in the outbox,
+// with their retry and deferral budgets untouched, until the tenant is
+// enabled again. A platform delivery, such as an update alert, has no tenant
+// and is never held.
+const heldDeliverySQL = `(due.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants WHERE tenants.id=due.tenant_id AND tenants.state='` + TenantStateActive + `'))`
+
+// ClaimDueDeliveries claims due deliveries through
+// SystemStore.ClaimDueDeliveries, until its callers use Store.System
+// themselves.
+func (s *Store) ClaimDueDeliveries(ctx context.Context, limit int, owner string) ([]Delivery, error) {
+	return s.System().ClaimDueDeliveries(ctx, limit, owner)
+}
+
 // ClaimDueDeliveries atomically leases due outbox rows to one drain owner.
 // Expired claims can be recovered by a later process, while active claims are
-// invisible to concurrent drains until the owner records a result.
-func (s *Store) ClaimDueDeliveries(ctx context.Context, limit int, owner string) ([]Delivery, error) {
-	return s.claimDueDeliveries(ctx, limit, owner, nil)
+// invisible to concurrent drains until the owner records a result. The rows
+// of a tenant that is not active are held, as heldDeliverySQL describes.
+func (ss *SystemStore) ClaimDueDeliveries(ctx context.Context, limit int, owner string) ([]Delivery, error) {
+	return ss.claimDueDeliveries(ctx, limit, owner, nil)
+}
+
+// ClaimDueDeliveriesExcluding claims due deliveries through
+// SystemStore.ClaimDueDeliveriesExcluding, until its callers use
+// Store.System themselves.
+func (s *Store) ClaimDueDeliveriesExcluding(ctx context.Context, limit int, owner string, excluded []string) ([]Delivery, error) {
+	return s.System().ClaimDueDeliveriesExcluding(ctx, limit, owner, excluded)
 }
 
 // ClaimDueDeliveriesExcluding leases due outbox rows while skipping the
 // supplied destination identities. The notifier uses this for destinations
 // whose credentials are currently unavailable so one locked backlog cannot
-// occupy every delivery slot needed by healthy destinations.
-func (s *Store) ClaimDueDeliveriesExcluding(ctx context.Context, limit int, owner string, excluded []string) ([]Delivery, error) {
-	return s.claimDueDeliveries(ctx, limit, owner, excluded)
+// occupy every delivery slot needed by healthy destinations. The rows of a
+// tenant that is not active are held, as in ClaimDueDeliveries.
+func (ss *SystemStore) ClaimDueDeliveriesExcluding(ctx context.Context, limit int, owner string, excluded []string) ([]Delivery, error) {
+	return ss.claimDueDeliveries(ctx, limit, owner, excluded)
+}
+
+// AgeLockedDeliveries ages locked deliveries through
+// SystemStore.AgeLockedDeliveries, until its callers use Store.System
+// themselves.
+func (s *Store) AgeLockedDeliveries(ctx context.Context, destinations []string) error {
+	return s.System().AgeLockedDeliveries(ctx, destinations)
 }
 
 // AgeLockedDeliveries advances the separate deferral budget for outbox rows
@@ -178,8 +238,10 @@ func (s *Store) ClaimDueDeliveriesExcluding(ctx context.Context, limit int, owne
 // need an explicit, durable aging path or they would remain pending forever.
 // Aging is performed only when a row is due and is bounded to one maintenance
 // batch. It never consumes a provider-attempt budget; restoring the key before
-// the final deferral leaves the row claimable again.
-func (s *Store) AgeLockedDeliveries(ctx context.Context, destinations []string) error {
+// the final deferral leaves the row claimable again. The held rows of a
+// tenant that is not active do not age, so a paused tenant's alerts are not
+// dropped while it is paused.
+func (ss *SystemStore) AgeLockedDeliveries(ctx context.Context, destinations []string) error {
 	if len(destinations) == 0 {
 		return nil
 	}
@@ -205,10 +267,11 @@ func (s *Store) AgeLockedDeliveries(ctx context.Context, destinations []string) 
 	}
 	now := time.Now().UTC()
 	nowText := now.Format(time.RFC3339Nano)
-	query := `SELECT id,destination,deferrals FROM outbox
+	query := `SELECT id,destination,deferrals FROM outbox AS due
 WHERE sent_at IS NULL AND terminal_at='' AND next_at<=?
   AND attempts<? AND deferrals<?
   AND (claim_token='' OR claim_until='' OR claim_until<=?)
+  AND ` + heldDeliverySQL + `
   AND destination IN (` + strings.Join(placeholders, ",") + `)
 ORDER BY id LIMIT ?`
 	// The first timestamp is the due cutoff and the last timestamp before the
@@ -218,7 +281,7 @@ ORDER BY id LIMIT ?`
 		args = append(args, destination)
 	}
 	args = append(args, deliveryMaintenanceBatch)
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -274,12 +337,19 @@ WHERE id=? AND sent_at IS NULL AND terminal_at='' AND attempts<? AND deferrals=?
 	return tx.Commit()
 }
 
+// WakeLockedDeliveries wakes locked deliveries through
+// SystemStore.WakeLockedDeliveries, until its callers use Store.System
+// themselves.
+func (s *Store) WakeLockedDeliveries(ctx context.Context, destinations []string) error {
+	return s.System().WakeLockedDeliveries(ctx, destinations)
+}
+
 // WakeLockedDeliveries makes rows immediately due when a previously locked
 // managed destination becomes usable again. Locked aging uses a one-hour
 // cadence to avoid touching the same rows on every worker tick; clearing that
 // delay on recovery prevents an otherwise healthy destination from waiting
 // for the next aging interval before it can drain.
-func (s *Store) WakeLockedDeliveries(ctx context.Context, destinations []string) error {
+func (ss *SystemStore) WakeLockedDeliveries(ctx context.Context, destinations []string) error {
 	if len(destinations) == 0 {
 		return nil
 	}
@@ -312,11 +382,11 @@ WHERE sent_at IS NULL AND terminal_at='' AND last_error='destination_locked'
   AND (claim_token='' OR claim_until='' OR claim_until<=?)
   AND destination IN (` + strings.Join(placeholders, ",") + `)`
 	args = append([]any{nowText, nowText}, args...)
-	_, err := s.DB.ExecContext(ctx, query, args...)
+	_, err := ss.store.DB.ExecContext(ctx, query, args...)
 	return err
 }
 
-func (s *Store) claimDueDeliveries(ctx context.Context, limit int, owner string, excluded []string) ([]Delivery, error) {
+func (ss *SystemStore) claimDueDeliveries(ctx context.Context, limit int, owner string, excluded []string) ([]Delivery, error) {
 	if limit < 1 {
 		return nil, nil
 	}
@@ -324,7 +394,7 @@ func (s *Store) claimDueDeliveries(ctx context.Context, limit int, owner string,
 		owner = uuid.NewString()
 	}
 	now := time.Now().UTC()
-	query := `UPDATE outbox SET claim_token=?,claim_until=? WHERE id IN (SELECT id FROM outbox WHERE sent_at IS NULL AND terminal_at='' AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?)`
+	query := `UPDATE outbox SET claim_token=?,claim_until=? WHERE id IN (SELECT id FROM outbox AS due WHERE sent_at IS NULL AND terminal_at='' AND attempts < ? AND next_at <= ? AND (claim_token='' OR claim_until='' OR claim_until <= ?) AND ` + heldDeliverySQL
 	args := []any{owner, now.Add(deliveryClaimLease).Format(time.RFC3339Nano), deliveryMaxAttempts, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)}
 	if len(excluded) > 0 {
 		placeholders := make([]string, 0, len(excluded))
@@ -339,9 +409,9 @@ func (s *Store) claimDueDeliveries(ctx context.Context, limit int, owner string,
 			query += " AND destination NOT IN (" + strings.Join(placeholders, ",") + ")"
 		}
 	}
-	query += ` ORDER BY id LIMIT ?) RETURNING id,destination,payload_json,attempts,deferrals,claim_token`
+	query += ` ORDER BY id LIMIT ?) RETURNING id,destination,payload_json,attempts,deferrals,claim_token,COALESCE(tenant_id,'')`
 	args = append(args, limit)
-	rows, err := s.DB.QueryContext(ctx, query, args...)
+	rows, err := ss.store.DB.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +420,7 @@ func (s *Store) claimDueDeliveries(ctx context.Context, limit int, owner string,
 	for rows.Next() {
 		var d Delivery
 		var b []byte
-		if err := rows.Scan(&d.ID, &d.Destination, &b, &d.Attempts, &d.Deferrals, &d.ClaimToken); err != nil {
+		if err := rows.Scan(&d.ID, &d.Destination, &b, &d.Attempts, &d.Deferrals, &d.ClaimToken, &d.TenantID); err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal(b, &d.Event); err != nil {
@@ -361,16 +431,30 @@ func (s *Store) claimDueDeliveries(ctx context.Context, limit int, owner string,
 	return out, rows.Err()
 }
 
+// ReleaseDeliveryClaims clears the outbox leases through
+// SystemStore.ReleaseDeliveryClaims, until the daemon uses Store.System
+// itself.
+func (s *Store) ReleaseDeliveryClaims(ctx context.Context) (int64, error) {
+	return s.System().ReleaseDeliveryClaims(ctx)
+}
+
 // ReleaseDeliveryClaims clears all active outbox leases. It is used when a
 // daemon starts (or shuts down cleanly) so rows claimed by a previous process
 // do not remain unavailable for the full claim lease. Delivery attempts and
 // next-at timestamps are intentionally preserved; only ownership is reset.
-func (s *Store) ReleaseDeliveryClaims(ctx context.Context) (int64, error) {
-	result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET claim_token='',claim_until='' WHERE sent_at IS NULL AND claim_token<>''`)
+func (ss *SystemStore) ReleaseDeliveryClaims(ctx context.Context) (int64, error) {
+	result, err := ss.store.DB.ExecContext(ctx, `UPDATE outbox SET claim_token='',claim_until='' WHERE sent_at IS NULL AND claim_token<>''`)
 	if err != nil {
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// ReleaseDeliveryClaim releases one delivery claim through
+// SystemStore.ReleaseDeliveryClaim, until its callers use Store.System
+// themselves.
+func (s *Store) ReleaseDeliveryClaim(ctx context.Context, id int64, claim string, delay time.Duration) error {
+	return s.System().ReleaseDeliveryClaim(ctx, id, claim, delay)
 }
 
 // ReleaseDeliveryClaim returns one in-flight delivery to the due queue without
@@ -379,7 +463,7 @@ func (s *Store) ReleaseDeliveryClaims(ctx context.Context) (int64, error) {
 // lifecycle interruptions cannot exhaust the retry budgets reserved for real
 // provider failures. A positive delay is useful when the provider outcome is
 // indeterminate and an immediate retry could duplicate an accepted request.
-func (s *Store) ReleaseDeliveryClaim(ctx context.Context, id int64, claim string, delay time.Duration) error {
+func (ss *SystemStore) ReleaseDeliveryClaim(ctx context.Context, id int64, claim string, delay time.Duration) error {
 	if claim == "" {
 		return ErrDeliveryClaimLost
 	}
@@ -390,7 +474,7 @@ func (s *Store) ReleaseDeliveryClaim(ctx context.Context, id int64, claim string
 	if delay > 0 {
 		nextAt = nextAt.Add(delay)
 	}
-	result, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, nextAt.Format(time.RFC3339Nano), id, claim)
+	result, err := ss.store.DB.ExecContext(ctx, `UPDATE outbox SET next_at=?,claim_token='',claim_until='' WHERE id=? AND sent_at IS NULL AND terminal_at='' AND claim_token=?`, nextAt.Format(time.RFC3339Nano), id, claim)
 	if err != nil {
 		return err
 	}
@@ -400,21 +484,36 @@ func (s *Store) ReleaseDeliveryClaim(ctx context.Context, id int64, claim string
 	return nil
 }
 
-// DeliveryResult records the result for the current claim. It retains the
-// original API used by CLI/tests by looking up the row's active claim token.
+// DeliveryResult records a delivery result through
+// SystemStore.DeliveryResult, until its callers use Store.System themselves.
 func (s *Store) DeliveryResult(ctx context.Context, id int64, sendErr error) error {
-	var claim string
-	if err := s.reader().QueryRowContext(ctx, `SELECT claim_token FROM outbox WHERE id=?`, id).Scan(&claim); err != nil {
-		return err
-	}
-	return s.DeliveryResultClaim(ctx, id, claim, sendErr)
+	return s.System().DeliveryResult(ctx, id, sendErr)
 }
 
+// DeliveryResult records the result for the current claim. It retains the
+// original API used by CLI/tests by looking up the row's active claim token.
+func (ss *SystemStore) DeliveryResult(ctx context.Context, id int64, sendErr error) error {
+	var claim string
+	if err := ss.store.reader().QueryRowContext(ctx, `SELECT claim_token FROM outbox WHERE id=?`, id).Scan(&claim); err != nil {
+		return err
+	}
+	return ss.DeliveryResultClaim(ctx, id, claim, sendErr)
+}
+
+// DeliveryResultClaim records a delivery result through
+// SystemStore.DeliveryResultClaim, until its callers use Store.System
+// themselves.
 func (s *Store) DeliveryResultClaim(ctx context.Context, id int64, claim string, sendErr error) error {
+	return s.System().DeliveryResultClaim(ctx, id, claim, sendErr)
+}
+
+// DeliveryResultClaim records the outcome of the claimed delivery: sent, or
+// a failure that is retried later or ends the delivery for good.
+func (ss *SystemStore) DeliveryResultClaim(ctx context.Context, id int64, claim string, sendErr error) error {
 	if claim == "" {
 		return ErrDeliveryClaimLost
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -523,10 +622,16 @@ func deliveryRetryDelay(attempts int) time.Duration {
 	return delay
 }
 
+// DeferDelivery defers a delivery through SystemStore.DeferDelivery, until
+// its callers use Store.System themselves.
+func (s *Store) DeferDelivery(ctx context.Context, id int64, claim, reason string, delay time.Duration) error {
+	return s.System().DeferDelivery(ctx, id, claim, reason, delay)
+}
+
 // DeferDelivery releases a claim without consuming an attempt. This is used
 // when an encrypted managed destination is temporarily locked or unavailable.
-func (s *Store) DeferDelivery(ctx context.Context, id int64, claim, reason string, delay time.Duration) error {
-	return s.DeferDeliveryWithError(ctx, id, claim, legacyDeliveryError(reason), delay)
+func (ss *SystemStore) DeferDelivery(ctx context.Context, id int64, claim, reason string, delay time.Duration) error {
+	return ss.DeferDeliveryWithError(ctx, id, claim, legacyDeliveryError(reason), delay)
 }
 
 // legacyDeliveryError preserves the source-compatible string-based defer API
@@ -546,19 +651,26 @@ func legacyDeliveryError(reason string) error {
 	}
 }
 
+// DeferDeliveryWithError defers a delivery through
+// SystemStore.DeferDeliveryWithError, until its callers use Store.System
+// themselves.
+func (s *Store) DeferDeliveryWithError(ctx context.Context, id int64, claim string, reason error, delay time.Duration) error {
+	return s.System().DeferDeliveryWithError(ctx, id, claim, reason, delay)
+}
+
 // DeferDeliveryWithError releases a claim without consuming an ordinary
 // provider attempt. Deferrals are nevertheless bounded: after repeated
 // deferrals the row becomes terminal, is reflected in destination health, and
 // receives one redacted event so a locked or indeterminate destination cannot
 // remain silently pending forever.
-func (s *Store) DeferDeliveryWithError(ctx context.Context, id int64, claim string, reason error, delay time.Duration) error {
+func (ss *SystemStore) DeferDeliveryWithError(ctx context.Context, id int64, claim string, reason error, delay time.Duration) error {
 	if claim == "" {
 		return ErrDeliveryClaimLost
 	}
 	if delay < time.Minute {
 		delay = time.Minute
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ss.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}

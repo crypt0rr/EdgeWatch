@@ -876,10 +876,37 @@ func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry Audit
 	if strings.TrimSpace(entry.SourceIP) == "" {
 		entry.SourceIP = requestContext.SourceIP
 	}
-	if _, err := execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,created_at) VALUES(?,?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, now.UTC().Format(time.RFC3339Nano)); err != nil {
+	createdAt := now.UTC().Format(time.RFC3339Nano)
+	_, err := execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,category,created_at) VALUES(?,?,?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, auditCategory(entry.Action), createdAt)
+	if err != nil {
+		// Host commands open the database without migrating it, for example
+		// the restored copy of an older backup. Before schema 51 the table
+		// has no category column; record the entry without it, and the
+		// migration categorizes it later.
+		if legacy, checkErr := auditTableLacksCategory(ctx, execer); checkErr == nil && legacy {
+			_, err = execer.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,created_at) VALUES(?,?,?,?,?,?,?)`, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, createdAt)
+		}
+	}
+	if err != nil {
 		return fmt.Errorf("%w: %v", ErrAuditUnavailable, err)
 	}
 	return nil
+}
+
+// auditTableLacksCategory reports whether security_audit exists without the
+// category column that schema 51 adds.
+func auditTableLacksCategory(ctx context.Context, execer contextExecer) (bool, error) {
+	queryer, ok := execer.(interface {
+		QueryRowContext(context.Context, string, ...any) *sql.Row
+	})
+	if !ok {
+		return false, nil
+	}
+	var columns, categories int
+	if err := queryer.QueryRowContext(ctx, `SELECT COUNT(*),COALESCE(SUM(name='category'),0) FROM pragma_table_info('security_audit')`).Scan(&columns, &categories); err != nil {
+		return false, err
+	}
+	return columns > 0 && categories == 0, nil
 }
 
 func insertAuditEntries(ctx context.Context, execer contextExecer, entries []AuditEntry, now time.Time) error {

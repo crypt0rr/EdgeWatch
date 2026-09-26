@@ -85,7 +85,7 @@ func TestPublicDashboardRoundTripNormalizesAndDeduplicatesHosts(t *testing.T) {
 func TestPublicDashboardNotFoundAndLatestSuccessfulHostScope(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.DB.ExecContext(ctx, `DELETE FROM public_dashboard WHERE id=1`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM public_dashboards WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetPublicDashboard(ctx); !errors.Is(err, ErrNotFound) {
@@ -282,7 +282,7 @@ func TestSavePublicDashboardIfCurrentRejectsAStaleToken(t *testing.T) {
 	// Saves within one clock tick, or after the clock stepped back, still
 	// advance the token, so a stale editor cannot match a newer save.
 	future := time.Now().UTC().Add(time.Hour)
-	if _, err := s.DB.ExecContext(ctx, `UPDATE public_dashboard SET updated_at=? WHERE id=1`, future.Format(time.RFC3339Nano)); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE public_dashboards SET updated_at=? WHERE id=1`, future.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.SavePublicDashboardIfCurrent(ctx, future, PublicDashboard{Enabled: true, Title: "After clock step"}, nil, AuditEntry{}); err != nil {

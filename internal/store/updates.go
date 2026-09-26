@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
@@ -70,10 +71,43 @@ func scanApplicationUpdateState(scanner interface{ Scan(...any) error }) (Applic
 	return state, nil
 }
 
-const applicationUpdateStateColumns = `installed_version,latest_version,release_url,release_name,published_at,etag,last_checked_at,last_successful_check_at,check_status,last_error,announced_available_version,announced_upgrade_version,notification_destinations_json`
+// applicationUpdateStateColumns reads the update routing of the default
+// tenant. Since schema 51, application_update_state.notification_destinations_json
+// holds the routing to platform destinations only; with a single tenant there
+// are none, so the tenant routing is the complete update alert routing.
+const applicationUpdateStateColumns = `installed_version,latest_version,release_url,release_name,published_at,etag,last_checked_at,last_successful_check_at,check_status,last_error,announced_available_version,announced_upgrade_version,COALESCE((SELECT update_destinations_json FROM tenants WHERE id='` + DefaultTenantID + `'),'')`
 
 func applicationUpdateStateQuery() string {
 	return `SELECT ` + applicationUpdateStateColumns + ` FROM application_update_state WHERE id=1`
+}
+
+// insertApplicationUpdateStateRow creates the singleton row when it is
+// missing. Its notification_destinations_json is the platform routing, which
+// has no destinations.
+const insertApplicationUpdateStateRow = `INSERT OR IGNORE INTO application_update_state(id,check_status,notification_destinations_json) VALUES(1,'unknown','[]')`
+
+// readTenantUpdateDestinationsTx returns a tenant's raw update routing. An
+// empty value means that the routing was never configured.
+func readTenantUpdateDestinationsTx(ctx context.Context, tx *sql.Tx, tenantID string) (string, error) {
+	var destinationsJSON string
+	err := tx.QueryRowContext(ctx, `SELECT update_destinations_json FROM tenants WHERE id=?`, tenantID).Scan(&destinationsJSON)
+	return destinationsJSON, err
+}
+
+// writeTenantUpdateDestinationsTx replaces a tenant's update routing.
+func writeTenantUpdateDestinationsTx(ctx context.Context, tx *sql.Tx, tenantID, destinationsJSON string) error {
+	result, err := tx.ExecContext(ctx, `UPDATE tenants SET update_destinations_json=? WHERE id=?`, destinationsJSON, tenantID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed == 0 {
+		return fmt.Errorf("tenant %s: %w", tenantID, ErrNotFound)
+	}
+	return nil
 }
 
 func normalizeUpdateDestinations(values []string) []string {
@@ -98,7 +132,7 @@ func (s *Store) GetApplicationUpdateState(ctx context.Context) (ApplicationUpdat
 	readDB := s.reader()
 	state, err := scanApplicationUpdateState(readDB.QueryRowContext(ctx, applicationUpdateStateQuery()))
 	if errors.Is(err, sql.ErrNoRows) {
-		if _, insertErr := s.DB.ExecContext(ctx, `INSERT OR IGNORE INTO application_update_state(id,check_status) VALUES(1,'unknown')`); insertErr != nil {
+		if _, insertErr := s.DB.ExecContext(ctx, insertApplicationUpdateStateRow); insertErr != nil {
 			return state, insertErr
 		}
 		return scanApplicationUpdateState(readDB.QueryRowContext(ctx, applicationUpdateStateQuery()))
@@ -120,7 +154,7 @@ func (s *Store) SetApplicationUpdateDestinations(ctx context.Context, destinatio
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO application_update_state(id,notification_destinations_json,check_status) VALUES(1,?,'unknown') ON CONFLICT(id) DO UPDATE SET notification_destinations_json=excluded.notification_destinations_json`, string(raw)); err != nil {
+	if err := writeTenantUpdateDestinationsTx(ctx, tx, DefaultTenantID, string(raw)); err != nil {
 		return err
 	}
 	if audit.Action != "" {
@@ -136,8 +170,7 @@ func (s *Store) SetApplicationUpdateDestinations(ctx context.Context, destinatio
 // routing stays configured and empty, which keeps update alerts silent rather
 // than reverting to the legacy "every destination" fallback.
 func removeApplicationUpdateDestinationTx(ctx context.Context, tx *sql.Tx, id string) (bool, error) {
-	var destinationsJSON string
-	err := tx.QueryRowContext(ctx, `SELECT notification_destinations_json FROM application_update_state WHERE id=1`).Scan(&destinationsJSON)
+	destinationsJSON, err := readTenantUpdateDestinationsTx(ctx, tx, DefaultTenantID)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && strings.TrimSpace(destinationsJSON) == "") {
 		return false, nil
 	}
@@ -157,7 +190,7 @@ func removeApplicationUpdateDestinationTx(ctx context.Context, tx *sql.Tx, id st
 	if err != nil {
 		return false, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE application_update_state SET notification_destinations_json=? WHERE id=1`, string(raw)); err != nil {
+	if err := writeTenantUpdateDestinationsTx(ctx, tx, DefaultTenantID, string(raw)); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -169,8 +202,7 @@ func removeApplicationUpdateDestinationTx(ctx context.Context, tx *sql.Tx, id st
 // never configured keeps following every enabled destination, and an
 // explicitly empty routing stays silent.
 func replaceApplicationUpdateDestinationsTx(ctx context.Context, tx *sql.Tx, replacements map[string]string) ([]string, error) {
-	var destinationsJSON string
-	err := tx.QueryRowContext(ctx, `SELECT notification_destinations_json FROM application_update_state WHERE id=1`).Scan(&destinationsJSON)
+	destinationsJSON, err := readTenantUpdateDestinationsTx(ctx, tx, DefaultTenantID)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && strings.TrimSpace(destinationsJSON) == "") {
 		return nil, nil
 	}
@@ -198,7 +230,7 @@ func replaceApplicationUpdateDestinationsTx(ctx context.Context, tx *sql.Tx, rep
 	if err != nil {
 		return nil, err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE application_update_state SET notification_destinations_json=? WHERE id=1`, string(raw)); err != nil {
+	if err := writeTenantUpdateDestinationsTx(ctx, tx, DefaultTenantID, string(raw)); err != nil {
 		return nil, err
 	}
 	return replaced, nil
@@ -223,7 +255,7 @@ func (s *Store) RecordInstalledVersion(ctx context.Context, current, releaseURL 
 		if !errors.Is(err, sql.ErrNoRows) {
 			return nil, err
 		}
-		if _, err = tx.ExecContext(ctx, `INSERT INTO application_update_state(id,installed_version,check_status) VALUES(1,?,'unknown')`, current); err != nil {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO application_update_state(id,installed_version,check_status,notification_destinations_json) VALUES(1,?,'unknown','[]')`, current); err != nil {
 			return nil, err
 		}
 		if err = tx.Commit(); err != nil {
@@ -296,7 +328,7 @@ func (s *Store) RecordReleaseCheck(ctx context.Context, current, version, releas
 	if err := tx.QueryRowContext(ctx, `SELECT announced_available_version FROM application_update_state WHERE id=1`).Scan(&announced); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO application_update_state(id,installed_version,latest_version,release_url,release_name,published_at,etag,last_checked_at,last_successful_check_at,check_status,last_error) VALUES(?,?,?,?,?,?,?,?,?,'ok','') ON CONFLICT(id) DO UPDATE SET latest_version=excluded.latest_version,release_url=excluded.release_url,release_name=excluded.release_name,published_at=excluded.published_at,etag=excluded.etag,last_checked_at=excluded.last_checked_at,last_successful_check_at=excluded.last_successful_check_at,check_status='ok',last_error=''`, 1, current, version, releaseURL, releaseName, publishedAt, etag, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO application_update_state(id,installed_version,latest_version,release_url,release_name,published_at,etag,last_checked_at,last_successful_check_at,check_status,last_error,notification_destinations_json) VALUES(?,?,?,?,?,?,?,?,?,'ok','','[]') ON CONFLICT(id) DO UPDATE SET latest_version=excluded.latest_version,release_url=excluded.release_url,release_name=excluded.release_name,published_at=excluded.published_at,etag=excluded.etag,last_checked_at=excluded.last_checked_at,last_successful_check_at=excluded.last_successful_check_at,check_status='ok',last_error=''`, 1, current, version, releaseURL, releaseName, publishedAt, etag, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return nil, err
 	}
 	// The caller only invokes this method for a semantic-version newer than the

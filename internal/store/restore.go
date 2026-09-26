@@ -672,14 +672,18 @@ func insertRestoreAuditTx(ctx context.Context, tx *sql.Tx, policy PendingDeliver
 	if err != nil {
 		return err
 	}
-	detail := fmt.Sprintf("epoch=%s pending_deliveries=%s count=%d", epoch, policy, pending)
+	const action = "database.restore.pending_deliveries"
+	names := []string{"action", "detail"}
+	values := []any{action, fmt.Sprintf("epoch=%s pending_deliveries=%s count=%d", epoch, policy, pending)}
 	if columns["actor_username"] {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO security_audit(action,detail,actor_username,created_at) VALUES(?,?,?,?)`, "database.restore.pending_deliveries", detail, "host-cli", restoredAt.Format(time.RFC3339Nano)); err != nil {
-			return fmt.Errorf("record restore audit: %w", err)
-		}
-		return nil
+		names, values = append(names, "actor_username"), append(values, "host-cli")
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO security_audit(action,detail,created_at) VALUES(?,?,?)`, "database.restore.pending_deliveries", detail, restoredAt.Format(time.RFC3339Nano)); err != nil {
+	if columns["category"] {
+		names, values = append(names, "category"), append(values, auditCategory(action))
+	}
+	names, values = append(names, "created_at"), append(values, restoredAt.Format(time.RFC3339Nano))
+	query := `INSERT INTO security_audit(` + strings.Join(names, ",") + `) VALUES(?` + strings.Repeat(",?", len(names)-1) + `)`
+	if _, err := tx.ExecContext(ctx, query, values...); err != nil {
 		return fmt.Errorf("record restore audit: %w", err)
 	}
 	return nil

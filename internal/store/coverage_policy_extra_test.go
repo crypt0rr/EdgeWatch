@@ -94,13 +94,13 @@ func TestCoveragePolicySSEAndUpdateEdgeCases(t *testing.T) {
 	if err := s.DB.QueryRowContext(ctx, applicationUpdateStateQuery()).Scan(new(string), new(string), new(string), new(string), new(string), new(string), new(string), new(string), new(string), new(string), new(string), new(string), new(string)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE application_update_state SET notification_destinations_json=? WHERE id=1`, `not-json`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE tenants SET update_destinations_json=? WHERE is_default=1`, `not-json`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetApplicationUpdateState(ctx); err == nil {
 		t.Fatal("malformed update destinations were accepted")
 	}
-	if _, err := s.DB.ExecContext(ctx, `UPDATE application_update_state SET notification_destinations_json='' WHERE id=1`); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE tenants SET update_destinations_json='' WHERE is_default=1`); err != nil {
 		t.Fatal(err)
 	}
 	if state, err := s.GetApplicationUpdateState(ctx); err != nil || state.UpdateNotificationDestinationsConfigured {

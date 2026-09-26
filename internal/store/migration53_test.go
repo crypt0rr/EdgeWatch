@@ -740,8 +740,10 @@ func TestSchema53GuardTriggers(t *testing.T) {
 		{"move a host to the dashboard of another tenant", update(fmt.Sprintf(`UPDATE public_dashboard_hosts SET dashboard_id=%d WHERE job_id='%s'`, secondDashboard, jobA.ID)), hostTenant},
 		{"change the address of a host", update(`UPDATE public_dashboard_hosts SET address='192.0.2.20' WHERE job_id='` + jobA.ID + `'`), ""},
 	})
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{Enabled: true}, []PublicDashboardHost{{JobID: jobB, Address: "192.0.2.10"}}, AuditEntry{}); err == nil || !strings.Contains(err.Error(), hostTenant) {
-		t.Fatalf("publish a host of another tenant's job = %v, want %q", err, hostTenant)
+	// The store refuses such a host itself, as a host of an unknown job,
+	// before the trigger would.
+	if err := s.SavePublicDashboard(ctx, PublicDashboard{Enabled: true}, []PublicDashboardHost{{JobID: jobB, Address: "192.0.2.10"}}, AuditEntry{}); !errors.Is(err, ErrValidation) || err.Error() != errPublicDashboardHostJob.Error() {
+		t.Fatalf("publish a host of another tenant's job = %v, want %q", err, errPublicDashboardHostJob)
 	}
 }
 

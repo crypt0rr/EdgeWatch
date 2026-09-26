@@ -61,11 +61,14 @@ type Server struct {
 	publicMu         sync.Mutex
 	publicHits       map[string][]time.Time
 	publicCacheMu    sync.Mutex
-	publicCache      *publicDashboardCache
-	publicBuild      *publicDashboardBuild
-	publicFailure    *publicDashboardFailure
+	// publicPageCache caches the default tenant's page, which the legacy
+	// public URLs serve, and publicPages the page of any other tenant, by
+	// tenant ID. A request reads and fills only the cache of its public
+	// scope, so one tenant's page is never served for another's.
+	publicPageCache
+	publicPages map[string]*publicPageCache
 	// publicDashboardBuildFunc is used by deterministic tests to control the
-	// cache-fill workload. Production requests use publicDashboardResponse.
+	// cache-fill workload. Production requests use publicPageResponse.
 	publicDashboardBuildFunc func(context.Context, store.PublicDashboard) (publicDashboardResponse, error)
 	publicGen                uint64
 	telemetryMu              sync.Mutex

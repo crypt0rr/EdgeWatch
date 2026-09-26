@@ -684,8 +684,28 @@ func TestSchema54KeepsTheLatestHostOfEachTenant(t *testing.T) {
 	assertSearch("nginx", nil)
 	assertSearch("openssh", []string{secondTenantID})
 
-	// The public status lookup reads each job's row under its tenant.
-	results, err := s.GetLatestSuccessfulJobHosts(ctx, []PublicDashboardHost{{JobID: jobA.ID, Address: address}, {JobID: jobB, Address: address}})
+	// The public status lookup reads each job's row under its tenant's
+	// public scope, which resolves only its own job's selection.
+	scopes := map[string]PublicScope{jobA.ID: DefaultPublicScope(), jobB: {tenant: TenantScope{id: secondTenantID}}}
+	selections := []PublicDashboardHost{{JobID: jobA.ID, Address: address}, {JobID: jobB, Address: address}}
+	publicLookup := func() ([]PublicDashboardHostResult, error) {
+		t.Helper()
+		var results []PublicDashboardHostResult
+		for _, job := range []string{jobA.ID, jobB} {
+			found, err := s.Public(scopes[job]).GetLatestSuccessfulJobHosts(ctx, selections)
+			if err != nil {
+				return nil, err
+			}
+			for _, result := range found {
+				if result.Selection.JobID != job {
+					t.Fatalf("tenant %s resolved job %s's selection", scopes[job].TenantID(), result.Selection.JobID)
+				}
+			}
+			results = append(results, found...)
+		}
+		return results, nil
+	}
+	results, err := publicLookup()
 	if err != nil || len(results) != 2 {
 		t.Fatalf("public lookup = %#v, %v", results, err)
 	}
@@ -720,7 +740,7 @@ func TestSchema54KeepsTheLatestHostOfEachTenant(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM scan_hosts WHERE scan_id IN ('a1','b1')`); err != nil {
 		t.Fatal(err)
 	}
-	results, err = s.GetLatestSuccessfulJobHosts(ctx, []PublicDashboardHost{{JobID: jobA.ID, Address: address}, {JobID: jobB, Address: address}})
+	results, err = publicLookup()
 	if err != nil || len(results) != 2 {
 		t.Fatalf("public lookup from the projection = %#v, %v", results, err)
 	}

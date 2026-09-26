@@ -43,14 +43,48 @@ type publicDashboardCache struct {
 	payload    []byte
 }
 
+// publicPageCache is the cache of one tenant's public page: the rendered
+// payload, the shared build in flight, and a recent build failure.
+type publicPageCache struct {
+	publicCache   *publicDashboardCache
+	publicBuild   *publicDashboardBuild
+	publicFailure *publicDashboardFailure
+}
+
+// publicPage returns the cache of the scope's page. The default tenant's page
+// keeps the server's own cache, so with one tenant there is one cache, as
+// before tenants. The caller holds publicCacheMu.
+func (s *Server) publicPage(scope store.PublicScope) *publicPageCache {
+	if scope == store.DefaultPublicScope() {
+		return &s.publicPageCache
+	}
+	page := s.publicPages[scope.TenantID()]
+	if page == nil {
+		if s.publicPages == nil {
+			s.publicPages = map[string]*publicPageCache{}
+		}
+		page = &publicPageCache{}
+		s.publicPages[scope.TenantID()] = page
+	}
+	return page
+}
+
 // publicAPI is intentionally separate from /api/v1. It has no session
 // middleware and exposes one fixed, sanitized projection without resource
-// selectors that could be used to enumerate jobs or hosts.
+// selectors that could be used to enumerate jobs or hosts. Its URLs serve
+// the default tenant's page.
 func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet || strings.TrimSuffix(r.URL.Path, "/") != "/api/public/v1/dashboard" {
 		writeError(w, http.StatusNotFound, "not_found", "endpoint not found", nil)
 		return
 	}
+	s.servePublicPage(w, r, store.DefaultPublicScope())
+}
+
+// servePublicPage answers an anonymous request for the published page of the
+// scope's tenant. Every read goes through the scope's PublicStore, and the
+// payload is cached for that scope only.
+func (s *Server) servePublicPage(w http.ResponseWriter, r *http.Request, scope store.PublicScope) {
 	if !s.allowAnonymousRequest(r, "public-dashboard") {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "public status requests are temporarily rate limited", nil)
@@ -58,18 +92,21 @@ func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
-	if payload, ok := s.cachedPublicDashboardResponse(); ok {
+	if payload, ok := s.cachedPublicPageResponse(scope); ok {
 		writeJSON(w, http.StatusOK, json.RawMessage(payload))
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), publicDashboardBuildTimeout)
 	defer cancel()
+	public := s.Store.Public(scope)
 	for attempt := 1; ; attempt++ {
 		// Capture the generation before the read. A save that commits after
 		// this point bumps it, so a payload from the dashboard read below can
 		// neither be cached nor returned once the save has invalidated it.
 		generation := s.publicDashboardGeneration()
-		dashboard, err := s.Store.GetPublicDashboard(ctx)
+		// The read finds no page unless the tenant is active and its page
+		// is enabled.
+		dashboard, err := public.GetPublicDashboard(ctx)
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
 			return
@@ -86,7 +123,7 @@ func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
 			return
 		}
-		payload, err := s.cachedPublicDashboardPayload(ctx, generation, dashboard)
+		payload, err := s.cachedPublicPagePayload(ctx, scope, generation, dashboard)
 		if errors.Is(err, errPublicDashboardChanged) {
 			if attempt < publicDashboardReadAttempts {
 				continue
@@ -122,12 +159,12 @@ func publicDashboardCacheKey(dashboard store.PublicDashboard) string {
 	return string(raw)
 }
 
-// cachedPublicDashboardPayload returns the rendered payload for dashboard,
-// which the caller read under generation. It returns
+// cachedPublicPagePayload returns the rendered payload for dashboard, the
+// scope's page, which the caller read under generation. It returns
 // errPublicDashboardChanged as soon as a save has bumped the generation, so
 // the caller re-reads the publication instead of building, caching, or
 // returning content that the save withdrew.
-func (s *Server) cachedPublicDashboardPayload(ctx context.Context, generation uint64, dashboard store.PublicDashboard) ([]byte, error) {
+func (s *Server) cachedPublicPagePayload(ctx context.Context, scope store.PublicScope, generation uint64, dashboard store.PublicDashboard) ([]byte, error) {
 	key := publicDashboardCacheKey(dashboard)
 	for {
 		now := s.currentTime()
@@ -136,17 +173,18 @@ func (s *Server) cachedPublicDashboardPayload(ctx context.Context, generation ui
 			s.publicCacheMu.Unlock()
 			return nil, errPublicDashboardChanged
 		}
-		if cached := s.publicCache; cached != nil && cached.generation == generation && cached.key == key && now.Before(cached.expiresAt) {
+		page := s.publicPage(scope)
+		if cached := page.publicCache; cached != nil && cached.generation == generation && cached.key == key && now.Before(cached.expiresAt) {
 			payload := append([]byte(nil), cached.payload...)
 			s.publicCacheMu.Unlock()
 			return payload, nil
 		}
-		if failure := s.publicFailure; failure != nil && now.Before(failure.retryAt) {
+		if failure := page.publicFailure; failure != nil && now.Before(failure.retryAt) {
 			err := failure.err
 			s.publicCacheMu.Unlock()
 			return nil, err
 		}
-		if building := s.publicBuild; building != nil {
+		if building := page.publicBuild; building != nil {
 			s.publicCacheMu.Unlock()
 			select {
 			case <-building.done:
@@ -164,11 +202,11 @@ func (s *Server) cachedPublicDashboardPayload(ctx context.Context, generation ui
 			}
 		}
 		building := &publicDashboardBuild{done: make(chan struct{}), generation: generation}
-		s.publicBuild = building
+		page.publicBuild = building
 		s.publicCacheMu.Unlock()
 		// Strip cancellation and deadlines so this shared work outlives a
 		// disconnected requester. The helper applies its own bounded timeout.
-		go s.buildPublicDashboardPayload(context.WithoutCancel(ctx), building, generation, key, dashboard)
+		go s.buildPublicDashboardPayload(context.WithoutCancel(ctx), scope, page, building, generation, key, dashboard)
 		select {
 		case <-building.done:
 			if building.err != nil {
@@ -183,14 +221,18 @@ func (s *Server) cachedPublicDashboardPayload(ctx context.Context, generation ui
 	}
 }
 
-func (s *Server) buildPublicDashboardPayload(parent context.Context, building *publicDashboardBuild, generation uint64, key string, dashboard store.PublicDashboard) {
+// buildPublicDashboardPayload renders the scope's page from the scope's
+// PublicStore and caches the result in page, the scope's cache.
+func (s *Server) buildPublicDashboardPayload(parent context.Context, scope store.PublicScope, page *publicPageCache, building *publicDashboardBuild, generation uint64, key string, dashboard store.PublicDashboard) {
 	buildCtx, cancel := context.WithTimeout(parent, publicDashboardBuildTimeout)
 	defer cancel()
-	builder := s.publicDashboardResponse
+	var response publicDashboardResponse
+	var err error
 	if s.publicDashboardBuildFunc != nil {
-		builder = s.publicDashboardBuildFunc
+		response, err = s.publicDashboardBuildFunc(buildCtx, dashboard)
+	} else {
+		response, err = s.publicPageResponse(buildCtx, s.Store.Public(scope), dashboard)
 	}
-	response, err := builder(buildCtx, dashboard)
 	var payload []byte
 	if err == nil {
 		payload, err = json.Marshal(response)
@@ -200,39 +242,48 @@ func (s *Server) buildPublicDashboardPayload(parent context.Context, building *p
 	s.publicCacheMu.Lock()
 	building.err = err
 	if err == nil && generation == s.publicGen {
-		s.publicCache = &publicDashboardCache{key: key, generation: generation, expiresAt: now.Add(publicDashboardCacheTTL), payload: append([]byte(nil), payload...)}
-		s.publicFailure = nil
+		page.publicCache = &publicDashboardCache{key: key, generation: generation, expiresAt: now.Add(publicDashboardCacheTTL), payload: append([]byte(nil), payload...)}
+		page.publicFailure = nil
 	} else if err != nil && generation == s.publicGen {
 		// Short negative caching prevents a broken legacy snapshot or slow store
 		// from being rebuilt for every anonymous request. It expires quickly so a
 		// transient failure does not hide a recovered dashboard.
-		s.publicFailure = &publicDashboardFailure{retryAt: now.Add(time.Second), err: err}
+		page.publicFailure = &publicDashboardFailure{retryAt: now.Add(time.Second), err: err}
 	}
-	if s.publicBuild == building {
-		s.publicBuild = nil
+	if page.publicBuild == building {
+		page.publicBuild = nil
 		close(building.done)
 	}
 	s.publicCacheMu.Unlock()
 }
 
+// invalidatePublicDashboardCache drops the cached page of every tenant. The
+// publication generation is shared, so a save of any page also keeps a build
+// already in flight from caching or returning its result.
 func (s *Server) invalidatePublicDashboardCache() {
 	s.publicCacheMu.Lock()
 	s.publicGen++
 	s.publicCache = nil
 	s.publicFailure = nil
+	for _, page := range s.publicPages {
+		page.publicCache = nil
+		page.publicFailure = nil
+	}
 	s.publicCacheMu.Unlock()
 }
 
-// cachedPublicDashboardResponse is the anonymous fast path. It serves only an
-// unexpired entry built under the current publication generation.
-func (s *Server) cachedPublicDashboardResponse() ([]byte, bool) {
+// cachedPublicPageResponse is the anonymous fast path. It serves only an
+// unexpired entry of the scope's page built under the current publication
+// generation.
+func (s *Server) cachedPublicPageResponse(scope store.PublicScope) ([]byte, bool) {
 	now := s.currentTime()
 	s.publicCacheMu.Lock()
 	defer s.publicCacheMu.Unlock()
-	if s.publicCache == nil || s.publicCache.generation != s.publicGen || !now.Before(s.publicCache.expiresAt) {
+	cached := s.publicPage(scope).publicCache
+	if cached == nil || cached.generation != s.publicGen || !now.Before(cached.expiresAt) {
 		return nil, false
 	}
-	return append([]byte(nil), s.publicCache.payload...), true
+	return append([]byte(nil), cached.payload...), true
 }
 
 func (s *Server) allowAnonymousRequest(r *http.Request, namespace string) bool {
@@ -344,8 +395,12 @@ func publicDashboardTextError(title, introduction string) (string, map[string]st
 	return strings.Join(reasons, "; "), details
 }
 
+// publicDashboardRoute reads and saves the public page of the session's
+// tenant. A selection is checked through that tenant's public scope, the
+// reads its public page renders with, so only a host of the tenant's own jobs
+// can be published.
 func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
-	dashboard, err := s.Store.GetPublicDashboard(r.Context())
+	dashboard, err := ts.GetPublicDashboard(r.Context())
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusInternalServerError, "store", "public dashboard could not be loaded", nil)
 		return
@@ -395,7 +450,12 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 	// selections remain visible in the admin picker so they can be removed (or
 	// become publishable again if the job is restored), while the public
 	// response below deliberately omits them.
-	published, err := s.loadPublishedHosts(r.Context(), ts, selections, true)
+	scope, err := ts.PublicScope()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "store", "published hosts could not be checked", nil)
+		return
+	}
+	published, err := s.loadPublishedHosts(r.Context(), s.Store.Public(scope), selections, true)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", "published hosts could not be checked", nil)
 		return
@@ -410,7 +470,7 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 		hosts = append(hosts, selection)
 	}
 	dashboard.Enabled, dashboard.Title, dashboard.Introduction = input.Enabled, input.Title, input.Introduction
-	if err := s.Store.SavePublicDashboardIfCurrent(r.Context(), expectedUpdatedAt, dashboard, hosts, store.AuditEntry{Action: "public_dashboard.updated", Detail: fmt.Sprintf("dashboard updated by %s; enabled=%t; hosts=%d", session.Username, input.Enabled, len(hosts)), ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+	if err := ts.SavePublicDashboardIfCurrent(r.Context(), expectedUpdatedAt, dashboard, hosts, store.AuditEntry{Action: "public_dashboard.updated", Detail: fmt.Sprintf("dashboard updated by %s; enabled=%t; hosts=%d", session.Username, input.Enabled, len(hosts)), ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
 		if s.writeAuditUnavailable(w, err, "public_dashboard.updated") {
 			return
 		}
@@ -422,23 +482,12 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 		return
 	}
 	s.invalidatePublicDashboardCache()
-	result, err := s.Store.GetPublicDashboard(r.Context())
+	result, err := ts.GetPublicDashboard(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", "public dashboard could not be loaded after saving", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
-}
-
-func (s *Server) latestPublishedHost(ctx context.Context, jobID, address string) (store.ScanHost, error) {
-	lookup, err := s.loadPublishedHosts(ctx, s.Store, []store.PublicDashboardHost{{JobID: jobID, Address: address}}, false)
-	if err != nil {
-		return store.ScanHost{}, err
-	}
-	if item, ok := lookup[publicSelectionKey(jobID, canonicalHostAddress(address))]; ok {
-		return item.Host, nil
-	}
-	return store.ScanHost{}, store.ErrNotFound
 }
 
 type publicHostLookup struct {
@@ -451,24 +500,18 @@ func publicSelectionKey(jobID, address string) string {
 	return strings.TrimSpace(jobID) + "\x00" + canonicalHostAddress(address)
 }
 
-// publishedJobLister lists the jobs that published host selections may name.
-// The administrator's public status route passes the request's tenant store.
-// The anonymous public page has no session and therefore no tenant store: it
-// passes the Store, which reads the default tenant, until public reads move to
-// a PublicScope.
-type publishedJobLister interface {
-	ListJobs(ctx context.Context, includeArchived bool) ([]store.JobRecord, error)
-}
-
 // loadPublishedHosts resolves all selected addresses through bounded set-based
-// reads. Indexed observations are loaded in one query; only selections absent
-// from that projection use the bounded legacy fallback.
-func (s *Server) loadPublishedHosts(ctx context.Context, lister publishedJobLister, selections []store.PublicDashboardHost, includeArchived bool) (map[string]publicHostLookup, error) {
+// reads of one tenant's public scope: the anonymous page passes its scope's
+// store, and the administrator's route the store of the session tenant's
+// scope. A selection of another tenant's job resolves to nothing. Indexed
+// observations are loaded in one query; only selections absent from that
+// projection use the bounded legacy fallback.
+func (s *Server) loadPublishedHosts(ctx context.Context, public *store.PublicStore, selections []store.PublicDashboardHost, includeArchived bool) (map[string]publicHostLookup, error) {
 	lookup := map[string]publicHostLookup{}
 	if len(selections) == 0 {
 		return lookup, nil
 	}
-	jobs, err := lister.ListJobs(ctx, true)
+	jobs, err := public.ListJobs(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -491,7 +534,7 @@ func (s *Server) loadPublishedHosts(ctx context.Context, lister publishedJobList
 		seen[key] = struct{}{}
 		normalized = append(normalized, selection)
 	}
-	indexed, err := s.Store.GetLatestSuccessfulJobHosts(ctx, normalized)
+	indexed, err := public.GetLatestSuccessfulJobHosts(ctx, normalized)
 	if err != nil {
 		return nil, err
 	}
@@ -512,7 +555,7 @@ func (s *Server) loadPublishedHosts(ctx context.Context, lister publishedJobList
 			missing = append(missing, selection)
 		}
 	}
-	legacy, err := s.latestLegacyPublicHosts(ctx, missing)
+	legacy, err := legacyPublicHosts(ctx, public, missing)
 	if err != nil {
 		return nil, err
 	}
@@ -564,9 +607,11 @@ type publicRdapResponse struct {
 	Message      string      `json:"message,omitempty"`
 }
 
-func (s *Server) publicDashboardResponse(ctx context.Context, dashboard store.PublicDashboard) (publicDashboardResponse, error) {
+// publicPageResponse renders the published page from the reads of its
+// tenant's public scope.
+func (s *Server) publicPageResponse(ctx context.Context, public *store.PublicStore, dashboard store.PublicDashboard) (publicDashboardResponse, error) {
 	response := publicDashboardResponse{Title: dashboard.Title, Introduction: dashboard.Introduction, UpdatedAt: dashboard.UpdatedAt, Hosts: []publicHostResponse{}}
-	lookup, err := s.loadPublishedHosts(ctx, s.Store, dashboard.Hosts, false)
+	lookup, err := s.loadPublishedHosts(ctx, public, dashboard.Hosts, false)
 	if err != nil {
 		return response, err
 	}
@@ -580,20 +625,11 @@ func (s *Server) publicDashboardResponse(ctx context.Context, dashboard store.Pu
 	return response, nil
 }
 
-func (s *Server) latestLegacyPublicHost(ctx context.Context, jobID, address string) (store.ScanHost, model.ScanSummary, error) {
-	results, err := s.latestLegacyPublicHosts(ctx, []store.PublicDashboardHost{{JobID: jobID, Address: address}})
-	if err != nil {
-		return store.ScanHost{}, model.ScanSummary{}, err
-	}
-	if item, ok := results[publicSelectionKey(jobID, address)]; ok {
-		return item.Host, item.Summary, nil
-	}
-	return store.ScanHost{}, model.ScanSummary{}, store.ErrNotFound
-}
-
 const legacyPublicScanLimit = 1000
 
-func (s *Server) latestLegacyPublicHosts(ctx context.Context, selections []store.PublicDashboardHost) (map[string]store.PublicDashboardHostResult, error) {
+// legacyPublicHosts resolves selections from the legacy scans, which predate
+// the host index, of the public scope's jobs.
+func legacyPublicHosts(ctx context.Context, public *store.PublicStore, selections []store.PublicDashboardHost) (map[string]store.PublicDashboardHostResult, error) {
 	wanted := make(map[string]store.PublicDashboardHost, len(selections))
 	jobIDs := make([]string, 0, len(selections))
 	seenJobs := map[string]struct{}{}
@@ -621,7 +657,7 @@ func (s *Server) latestLegacyPublicHosts(ctx context.Context, selections []store
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		scans, err := s.Store.ListLegacyPublicScans(ctx, requestedJobID, legacyPublicScanLimit)
+		scans, err := public.ListLegacyPublicScans(ctx, requestedJobID, legacyPublicScanLimit)
 		if err != nil {
 			return nil, err
 		}

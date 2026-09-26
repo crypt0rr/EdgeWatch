@@ -92,6 +92,9 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	if s.sseUserKey == nil {
 		s.sseUserKey = map[chan sseMessage]string{}
 	}
+	if s.sseIdentity == nil {
+		s.sseIdentity = map[chan sseMessage]sseSubscriber{}
+	}
 	if channelClosed(shutdown) {
 		s.mu.Unlock()
 		return
@@ -108,8 +111,12 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 		writeSSELimit(w, flusher, "too many live streams for this session")
 		return
 	}
-	replay := s.replayLocked(lastID)
+	// Every stream is in the everyone audience today. A narrower audience
+	// derives the stream's viewer attributes from its session here.
+	subscriber := sseSubscriber{}
+	replay := s.replayForLocked(lastID, subscriber)
 	s.subscribers[ch] = struct{}{}
+	s.sseIdentity[ch] = subscriber
 	s.subscriberKey[ch] = subscriberKey
 	s.subscriberUse[subscriberKey]++
 	s.sseCancels[ch] = streamCancel
@@ -128,6 +135,7 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 	defer func() {
 		s.mu.Lock()
 		delete(s.subscribers, ch)
+		delete(s.sseIdentity, ch)
 		delete(s.subscriberKey, ch)
 		delete(s.sseCancels, ch)
 		delete(s.sseSessionKey, ch)
@@ -560,15 +568,50 @@ func (s *Server) runSSEReservationRetry(ctx context.Context) {
 	}
 }
 
-func (s *Server) broadcast(value map[string]any) {
-	s.broadcastContext(context.Background(), value)
+// sseAudience names the live-update streams that may receive a message. The
+// zero value names no stream: broadcastTo drops such a message rather than
+// sending it to everyone. Narrower audiences, such as one unit or the
+// platform administrators, add fields here and a matching rule to
+// sseSubscriber.matches.
+type sseAudience struct {
+	everyone bool
 }
 
-// broadcastContext preserves the caller's lifecycle context while attempting
-// to recover a durable event-ID range. Background daemon callbacks use the
-// compatibility wrapper above; request handlers should pass their request
-// context so a slow database cannot outlive the request unnecessarily.
-func (s *Server) broadcastContext(ctx context.Context, value map[string]any) {
+// audienceEveryone addresses every authorized live-update stream.
+func audienceEveryone() sseAudience {
+	return sseAudience{everyone: true}
+}
+
+// valid reports whether the audience names any stream at all.
+func (a sseAudience) valid() bool {
+	return a.everyone
+}
+
+// sseSubscriber is the stream side of audience matching. Each stream
+// registers one next to its channel, and both live delivery and replay ask it
+// whether a message is meant for the stream. It has no fields while every
+// audience is everyone; narrower audiences add the viewer attributes they
+// match against.
+type sseSubscriber struct{}
+
+// matches reports whether a stream may receive a message for audience.
+func (sseSubscriber) matches(audience sseAudience) bool {
+	return audience.everyone
+}
+
+// broadcastTo sends a live update to the streams in audience and keeps it for
+// their replay. A message without an audience is dropped and never widened to
+// every stream. ctx bounds only the recovery of a durable event-ID range. A
+// handler passes its request context, or context.WithoutCancel of it when a
+// client that disconnects must not cut that recovery short; daemon callbacks
+// and work that outlives a request pass a background context.
+func (s *Server) broadcastTo(ctx context.Context, audience sseAudience, value map[string]any) {
+	if !audience.valid() {
+		if s.Log != nil {
+			s.Log.Error("live update dropped because it has no audience", "type", value["type"])
+		}
+		return
+	}
 	payload := boundedSSEPayload(value)
 	// Reserve/recover outside the subscriber mutex. The reservation mutex also
 	// serializes ID allocation, preventing fallback IDs from racing a durable
@@ -610,7 +653,7 @@ func (s *Server) broadcastContext(ctx context.Context, value map[string]any) {
 		return
 	}
 	s.nextEventID++
-	message := sseMessage{id: s.nextEventID, payload: payload}
+	message := sseMessage{id: s.nextEventID, payload: payload, audience: audience}
 	s.history = append(s.history, message)
 	s.historyBytes += len(payload)
 	const maxHistory = 256
@@ -620,6 +663,11 @@ func (s *Server) broadcastContext(ctx context.Context, value map[string]any) {
 		s.history = s.history[1:]
 	}
 	for ch := range s.subscribers {
+		// A channel registered without an identity is matched as the zero
+		// subscriber, which receives only messages for everyone.
+		if !s.sseIdentity[ch].matches(audience) {
+			continue
+		}
 		select {
 		case ch <- message:
 		default:
@@ -633,7 +681,7 @@ func (s *Server) broadcastContext(ctx context.Context, value map[string]any) {
 			}
 			refresh := boundedSSEPayload(map[string]any{"type": "refresh_required", "after": message.id - 1})
 			select {
-			case ch <- sseMessage{id: message.id, payload: refresh}:
+			case ch <- sseMessage{id: message.id, payload: refresh, audience: audience}:
 			default:
 				s.dropped++
 			}
@@ -658,6 +706,22 @@ func boundedSSEPayload(value map[string]any) []byte {
 	return marker
 }
 
+// replayForLocked returns what one stream replays after lastID: the refresh
+// markers, which are meant for everyone, and the retained messages whose
+// audience the subscriber matches.
+func (s *Server) replayForLocked(lastID uint64, subscriber sseSubscriber) []sseMessage {
+	var replay []sseMessage
+	for _, message := range s.replayLocked(lastID) {
+		if subscriber.matches(message.audience) {
+			replay = append(replay, message)
+		}
+	}
+	return replay
+}
+
+// replayLocked returns every retained message after lastID, preceded by a
+// refresh marker when the history cannot cover the gap. Streams replay
+// through replayForLocked, which applies their audience.
 func (s *Server) replayLocked(lastID uint64) []sseMessage {
 	if lastID > s.nextEventID {
 		// Last-Event-ID is an untrusted replay request. A future marker can be
@@ -676,7 +740,7 @@ func (s *Server) replayLocked(lastID uint64) []sseMessage {
 		// silently leaving it on stale data.
 		if lastID < s.nextEventID {
 			payload, _ := json.Marshal(map[string]any{"type": "refresh_required", "after": lastID, "reason": "event_history_restarted"})
-			return []sseMessage{{id: s.nextEventID, payload: payload}}
+			return []sseMessage{{id: s.nextEventID, payload: payload, audience: audienceEveryone()}}
 		}
 		return nil
 	}
@@ -684,7 +748,7 @@ func (s *Server) replayLocked(lastID uint64) []sseMessage {
 	var replay []sseMessage
 	if oldest > 0 && lastID < oldest-1 {
 		payload, _ := json.Marshal(map[string]any{"type": "refresh_required", "after": lastID})
-		replay = append(replay, sseMessage{id: oldest - 1, payload: payload})
+		replay = append(replay, sseMessage{id: oldest - 1, payload: payload, audience: audienceEveryone()})
 	}
 	for _, message := range s.history {
 		if message.id > lastID {

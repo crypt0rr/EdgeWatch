@@ -389,7 +389,7 @@ func (s *Server) createScannerProfile(w http.ResponseWriter, r *http.Request, se
 		}
 		return
 	}
-	s.broadcast(map[string]any{"type": "scanner-profile.changed", "profile_id": profile.ID})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "scanner-profile.changed", "profile_id": profile.ID})
 	writeJSON(w, http.StatusCreated, scannerProfileJSON(profile, true))
 }
 
@@ -421,7 +421,7 @@ func (s *Server) updateScannerProfile(w http.ResponseWriter, r *http.Request, se
 		}
 		return
 	}
-	s.broadcast(map[string]any{"type": "scanner-profile.changed", "profile_id": id})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "scanner-profile.changed", "profile_id": id})
 	writeJSON(w, http.StatusOK, scannerProfileJSON(profile, true))
 }
 
@@ -456,6 +456,6 @@ func (s *Server) setScannerProfileArchived(w http.ResponseWriter, r *http.Reques
 		s.writeStoreWriteError(w, r, err, "scanner profile not found")
 		return
 	}
-	s.broadcast(map[string]any{"type": "scanner-profile.changed", "profile_id": id})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "scanner-profile.changed", "profile_id": id})
 	writeJSON(w, http.StatusNoContent, nil)
 }

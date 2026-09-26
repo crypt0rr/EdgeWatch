@@ -246,12 +246,12 @@ func TestServerSetupStatusAndRouteGuards(t *testing.T) {
 		}
 	}
 	missing := httptest.NewRecorder()
-	server.getJob(missing, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing", nil), "missing")
+	server.jobRoute(missing, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing", nil), admin, "missing")
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("missing get job status = %d", missing.Code)
 	}
 	baseline := httptest.NewRecorder()
-	server.jobBaseline(baseline, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing/baseline", nil), "missing")
+	server.jobRoute(baseline, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/missing/baseline", nil), admin, "missing/baseline")
 	if baseline.Code != http.StatusNotFound {
 		t.Fatalf("missing baseline status = %d", baseline.Code)
 	}
@@ -314,7 +314,7 @@ func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
 	server, db, admin := newUsersTestServer(t)
 	ctx := context.Background()
 	missing := httptest.NewRecorder()
-	server.runJob(missing, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/missing/run", nil), admin, "missing")
+	server.jobRoute(missing, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/missing/run", nil), admin, "missing/run")
 	if missing.Code != http.StatusNotFound {
 		t.Fatalf("missing run status = %d", missing.Code)
 	}
@@ -327,7 +327,7 @@ func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	archived := httptest.NewRecorder()
-	server.runJob(archived, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/run", nil), admin, record.ID)
+	server.jobRoute(archived, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/run", nil), admin, record.ID+"/run")
 	if archived.Code != http.StatusConflict {
 		t.Fatalf("archived run status = %d", archived.Code)
 	}
@@ -338,7 +338,7 @@ func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
 		t.Fatal(err)
 	}
 	active := httptest.NewRecorder()
-	server.runJob(active, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/run", nil), admin, record.ID)
+	server.jobRoute(active, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/run", nil), admin, record.ID+"/run")
 	if active.Code != http.StatusConflict {
 		t.Fatalf("active run status = %d", active.Code)
 	}

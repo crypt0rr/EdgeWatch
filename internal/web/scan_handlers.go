@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -40,17 +41,12 @@ func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session stor
 	// Cancellation is an operational action; keep its audit detail opaque and
 	// never include scanner command lines or target payloads.
 	s.auditOptionalEntry(r.Context(), actorAudit(session, "scan.cancel_requested", id))
-	s.broadcast(map[string]any{"type": "scan.cancellation_requested", "scan_id": id})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "scan.cancellation_requested", "scan_id": id})
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "cancelling", "scan_id": id})
 }
 
-func (s *Server) getJob(w http.ResponseWriter, r *http.Request, id string) {
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		writeError(w, 404, "not_found", "job not found", nil)
-		return
-	}
-	state, err := s.Store.RuntimeState(r.Context(), id)
+func (s *Server) getJob(w http.ResponseWriter, r *http.Request, record store.JobRecord) {
+	state, err := s.Store.RuntimeState(r.Context(), record.ID)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -59,14 +55,10 @@ func (s *Server) getJob(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 // latestSuccessfulScan returns only the newest completed scan summary. The
-// job existence check keeps the null response unambiguous: a known job with
+// router's job lookup keeps the null response unambiguous: a known job with
 // no successful history is 200/null, while an unknown job remains 404.
-func (s *Server) latestSuccessfulScan(w http.ResponseWriter, r *http.Request, id string) {
-	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-		return
-	}
-	scan, err := s.Store.GetLatestSuccessfulJobScanSummary(r.Context(), id)
+func (s *Server) latestSuccessfulScan(w http.ResponseWriter, r *http.Request, job store.JobRecord) {
+	scan, err := s.Store.GetLatestSuccessfulJobScanSummary(r.Context(), job.ID)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -74,29 +66,35 @@ func (s *Server) latestSuccessfulScan(w http.ResponseWriter, r *http.Request, id
 	writeJSON(w, http.StatusOK, map[string]any{"scan": scan})
 }
 
-func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
+// jobUpdateRequest is a job update that passed request validation.
+type jobUpdateRequest struct {
+	payload jobPayload
+	job     config.Job
+}
+
+// decodeJobUpdate validates a job update before the job is loaded.
+func decodeJobUpdate(w http.ResponseWriter, r *http.Request) (jobUpdateRequest, bool) {
 	var p jobPayload
 	if !decodeJSON(w, r, &p) {
-		return
+		return jobUpdateRequest{}, false
 	}
 	if p.Revision < 1 {
 		writeError(w, http.StatusBadRequest, "revision_required", "job revision is required", map[string]string{"revision": "job revision is required"})
-		return
+		return jobUpdateRequest{}, false
 	}
 	job, err := p.config()
 	if err != nil {
 		writeValidationError(w, err)
-		return
+		return jobUpdateRequest{}, false
 	}
-	current, err := s.Store.GetJob(r.Context(), id)
-	if errors.Is(err, store.ErrNotFound) {
-		writeError(w, 404, "not_found", "job not found", nil)
-		return
-	}
-	if err != nil {
-		s.writeInternalError(w, r, "store", err)
-		return
-	}
+	return jobUpdateRequest{payload: p, job: job}, true
+}
+
+// updateJob applies a validated update to the job the router loaded. The
+// write re-checks the revision inside its transaction, so an edit made after
+// the lookup is still reported as a conflict.
+func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store.Session, current store.JobRecord, update jobUpdateRequest) {
+	id, p, job := current.ID, update.payload, update.job
 	// High-cost approval is administrator-owned. Preserve it for older clients
 	// that omit the field until the immutable security scope is known below;
 	// any scope change then clears the approval unless an administrator
@@ -164,6 +162,7 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 		enabled = *p.Enabled
 	}
 	var destinations []string
+	var err error
 	if scopeChanged && p.ConfirmRebaseline {
 		destinations, err = s.App.Notifier.QueueDestinationsForJob(r.Context(), job)
 		if err != nil {
@@ -205,13 +204,13 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 	}
 	if changed {
 		for _, event := range events {
-			s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
+			s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
 		}
 		s.App.WakeDelivery()
 	}
 	s.App.RefreshSchedules()
 	state, _ := s.Store.RuntimeState(r.Context(), id)
-	s.broadcast(map[string]any{"type": "job.updated", "job_id": id})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "job.updated", "job_id": id})
 	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), record, state))
 }
 
@@ -355,27 +354,30 @@ func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, session stor
 		return
 	}
 	s.App.RefreshSchedules()
-	s.broadcastContext(r.Context(), map[string]any{"type": action, "job_id": id})
+	s.broadcastTo(r.Context(), audienceEveryone(), map[string]any{"type": action, "job_id": id})
 	writeJSON(w, 204, nil)
 }
 
-func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
+// decodePermanentDelete checks the administrator permission and reads the
+// typed confirmation before the job is loaded. The permission check stays
+// ahead of the lookup, so an operator never learns whether the job exists.
+func decodePermanentDelete(w http.ResponseWriter, r *http.Request, session store.Session) (string, bool) {
 	if !auth.HasPermission(session, auth.PermissionJobsDelete) {
 		writeError(w, http.StatusForbidden, "forbidden", "only an administrator can permanently delete a job", map[string]string{"permission": auth.PermissionJobsDelete})
-		return
+		return "", false
 	}
 	var input struct {
 		ConfirmName string `json:"confirm_name"`
 	}
 	if !decodeJSON(w, r, &input) {
-		return
+		return "", false
 	}
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-		return
-	}
-	if input.ConfirmName != record.Job.Name {
+	return input.ConfirmName, true
+}
+
+func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session store.Session, record store.JobRecord, confirmName string) {
+	id := record.ID
+	if confirmName != record.Job.Name {
 		writeError(w, http.StatusBadRequest, "confirmation_required", "type the job name to permanently delete it", nil)
 		return
 	}
@@ -395,7 +397,7 @@ func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session
 		return
 	}
 	s.App.RefreshSchedules()
-	s.broadcast(map[string]any{"type": "job.deleted", "job_id": id})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "job.deleted", "job_id": id})
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -425,16 +427,12 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	s.App.RefreshSchedules()
-	s.broadcastContext(r.Context(), map[string]any{"type": action, "job_id": id})
+	s.broadcastTo(r.Context(), audienceEveryone(), map[string]any{"type": action, "job_id": id})
 	writeJSON(w, 204, nil)
 }
 
-func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		writeError(w, 404, "not_found", "job not found", nil)
-		return
-	}
+func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Session, record store.JobRecord) {
+	id := record.ID
 	if record.Archived {
 		writeError(w, 409, "archived", "archived jobs cannot run", nil)
 		return
@@ -467,7 +465,7 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Se
 			}
 		}
 		if scan.ID != "" {
-			s.broadcast(map[string]any{"type": "scan.completed", "job_id": id, "scan_id": scan.ID, "status": scan.Status, "events": len(events)})
+			s.broadcastTo(context.Background(), audienceEveryone(), map[string]any{"type": "scan.completed", "job_id": id, "scan_id": scan.ID, "status": scan.Status, "events": len(events)})
 		}
 	}); runErr != nil {
 		if errors.Is(runErr, scanner.ErrBusy) {
@@ -502,37 +500,8 @@ func broadScan(job config.Job) bool {
 	return estimate.TCPPorts > 4096 || estimate.UDPPorts > 4096 || estimate.Probes > 65_536
 }
 
-func (s *Server) requireJob(w http.ResponseWriter, r *http.Request, id string) (*store.JobRecord, bool) {
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err == nil {
-		return &record, true
-	}
-	if hostStoreNotFound(err) {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-	} else {
-		s.writeInternalError(w, r, "store", err)
-	}
-	return nil, false
-}
-
-func (s *Server) requireScanSummary(w http.ResponseWriter, r *http.Request, scanID string) (model.ScanSummary, bool) {
-	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err == nil {
-		return summary, true
-	}
-	if hostStoreNotFound(err) {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-	} else {
-		s.writeInternalError(w, r, "store", err)
-	}
-	return model.ScanSummary{}, false
-}
-
-func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, id string) {
-	if _, ok := s.requireJob(w, r, id); !ok {
-		return
-	}
-	cycle, err := s.Store.GetRecoverableScanCycle(r.Context(), id)
+func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, job store.JobRecord) {
+	cycle, err := s.Store.GetRecoverableScanCycle(r.Context(), job.ID)
 	if errors.Is(err, store.ErrNoScanCycle) {
 		writeJSON(w, http.StatusOK, map[string]any{"cycle": nil})
 		return
@@ -562,10 +531,8 @@ func (s *Server) scanCycle(w http.ResponseWriter, r *http.Request, id string) {
 	}})
 }
 
-func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, session store.Session, id, cycleID string) {
-	if _, ok := s.requireJob(w, r, id); !ok {
-		return
-	}
+func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, session store.Session, job store.JobRecord, cycleID string) {
+	id := job.ID
 	cycle, err := s.Store.GetScanCycle(r.Context(), cycleID)
 	if err != nil || cycle.JobID != id {
 		writeError(w, http.StatusNotFound, "not_found", "scan cycle not found", nil)
@@ -576,17 +543,14 @@ func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 	s.auditOptionalEntry(r.Context(), actorAudit(session, "scan.cycle_discarded", cycleID))
-	s.broadcast(map[string]any{"type": "scan.cycle_discarded", "job_id": id, "cycle_id": cycleID})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "scan.cycle_discarded", "job_id": id, "cycle_id": cycleID})
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
-func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, id string) {
-	if _, ok := s.requireJob(w, r, id); !ok {
-		return
-	}
+func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, job store.JobRecord) {
 	limit := queryLimit(r)
 	offset := queryOffset(r)
-	page, err := s.Store.ListJobScanSummariesPage(r.Context(), id, limit, offset)
+	page, err := s.Store.ListJobScanSummariesPage(r.Context(), job.ID, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -597,19 +561,8 @@ func (s *Server) jobScans(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, 200, map[string]any{"scans": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 
-func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID string) {
-	record, ok := s.requireJob(w, r, id)
-	if !ok {
-		return
-	}
-	summary, ok := s.requireScanSummary(w, r, scanID)
-	if !ok {
-		return
-	}
-	if summary.JobID != id {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		return
-	}
+func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, record store.JobRecord, summary model.ScanSummary) {
+	id, scanID := record.ID, summary.ID
 	offset, limit := queryOffset(r), queryLimit(r)
 	comparisonState := "not_compared"
 	value := map[string]any{"scan": summary, "changes": []model.Change{}, "changes_pagination": paginationJSON(offset, limit, 0), "comparison_source": "none", "comparison_state": comparisonState}
@@ -655,20 +608,9 @@ func (s *Server) jobScan(w http.ResponseWriter, r *http.Request, id, scanID stri
 	writeJSON(w, http.StatusOK, value)
 }
 
-func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, id, scanID string) {
-	if _, ok := s.requireJob(w, r, id); !ok {
-		return
-	}
-	summary, ok := s.requireScanSummary(w, r, scanID)
-	if !ok {
-		return
-	}
-	if summary.JobID != id {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		return
-	}
+func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, summary model.ScanSummary) {
 	offset, limit := queryOffset(r), queryLimit(r)
-	resultPage, err := s.Store.ListScanResultsPage(r.Context(), scanID, limit, offset)
+	resultPage, err := s.Store.ListScanResultsPage(r.Context(), summary.ID, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -680,18 +622,8 @@ func (s *Server) jobScanResults(w http.ResponseWriter, r *http.Request, id, scan
 	writeJSON(w, http.StatusOK, map[string]any{"results": results, "pagination": paginationJSON(offset, limit, resultPage.Total)})
 }
 
-func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, id, scanID string) {
-	if _, ok := s.requireJob(w, r, id); !ok {
-		return
-	}
-	summary, ok := s.requireScanSummary(w, r, scanID)
-	if !ok {
-		return
-	}
-	if summary.JobID != id {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		return
-	}
+func (s *Server) jobScanChanges(w http.ResponseWriter, r *http.Request, job store.JobRecord, summary model.ScanSummary) {
+	id, scanID := job.ID, summary.ID
 	offset, limit := queryOffset(r), queryLimit(r)
 	changes := []model.Change{}
 	var total int
@@ -745,28 +677,18 @@ func (s *Server) listScans(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getScan(w http.ResponseWriter, r *http.Request, id string) {
-	scan, err := s.Store.GetScan(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		return
+	if scan, ok := s.resolveScan(w, r, id); ok {
+		writeJSON(w, http.StatusOK, map[string]any{"scan": scan})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"scan": scan})
 }
 
 // getScanSummary serves metadata for historical scan views without decoding
 // or returning the potentially large snapshot and change payloads. The legacy
 // /scans/{id} endpoint remains the full-result compatibility endpoint.
 func (s *Server) getScanSummary(w http.ResponseWriter, r *http.Request, id string) {
-	summary, err := s.Store.GetScanSummary(r.Context(), id)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		} else {
-			s.writeInternalError(w, r, "store", err)
-		}
-		return
+	if summary, ok := s.resolveScanSummary(w, r, id, scanStoreErrorInternal); ok {
+		writeJSON(w, http.StatusOK, map[string]any{"scan": summary})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"scan": summary})
 }
 
 func (s *Server) listIncidents(w http.ResponseWriter, r *http.Request) {
@@ -814,13 +736,9 @@ func (s *Server) listEvents(w http.ResponseWriter, r *http.Request, job string) 
 	writeJSON(w, http.StatusOK, map[string]any{"events": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
 
-func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, id string) {
-	if _, err := s.Store.GetJob(r.Context(), id); err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-		return
-	}
+func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, job store.JobRecord) {
 	offset, limit := queryOffset(r), queryLimit(r)
-	page, err := s.Store.ListJobEventsPage(r.Context(), id, limit, offset)
+	page, err := s.Store.ListJobEventsPage(r.Context(), job.ID, limit, offset)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
@@ -830,12 +748,8 @@ func (s *Server) jobEvents(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": page.Items, "pagination": paginationJSON(offset, limit, page.Total)})
 }
-func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, id string) {
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		writeError(w, 404, "not_found", "job not found", nil)
-		return
-	}
+func (s *Server) jobIncidents(w http.ResponseWriter, r *http.Request, record store.JobRecord) {
+	id := record.ID
 	offset, limit := queryOffset(r), queryLimit(r)
 	incidentPage, err := s.Store.ListJobIncidentsPage(r.Context(), id, limit, offset)
 	if err != nil {
@@ -854,30 +768,34 @@ type incidentActionRequest struct {
 	ExpectedChange *model.Change `json:"expected_change"`
 }
 
-func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
+// incidentAction is an accept or suppress request that passed validation.
+type incidentAction struct {
+	key      string
+	expected model.Change
+}
+
+// decodeIncidentAction validates an incident action before the job is loaded.
+func decodeIncidentAction(w http.ResponseWriter, r *http.Request) (incidentAction, bool) {
 	var input incidentActionRequest
 	if !decodeJSON(w, r, &input) {
-		return
+		return incidentAction{}, false
 	}
 	key := strings.TrimSpace(input.Key)
 	if key == "" {
 		writeError(w, http.StatusBadRequest, "key_required", "incident key is required", map[string]string{"key": "incident key is required"})
-		return
+		return incidentAction{}, false
 	}
 	if input.ExpectedChange == nil {
 		writeError(w, http.StatusBadRequest, "expected_change_required", "the reviewed incident change is required; refresh before retrying", map[string]string{"expected_change": "reload the incident before confirming this action"})
-		return
+		return incidentAction{}, false
 	}
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-			return
-		}
-		s.writeInternalError(w, r, "store", err)
-		return
-	}
+	return incidentAction{key: key, expected: *input.ExpectedChange}, true
+}
+
+func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session store.Session, record store.JobRecord, action incidentAction) {
+	id, key := record.ID, action.key
 	var destinations []string
+	var err error
 	if s.App != nil && s.App.Notifier != nil {
 		destinations, err = s.App.Notifier.QueueDestinationsForJob(r.Context(), record.Job)
 		if err != nil {
@@ -885,39 +803,19 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session 
 			return
 		}
 	}
-	events, err := s.Store.AcceptIncidentWithExpectedOutboxAndAudit(r.Context(), id, record.Job.Name, key, &store.IncidentExpectation{Change: *input.ExpectedChange}, destinations, actorAudit(session, "incident.accepted", id+":"+key))
+	events, err := s.Store.AcceptIncidentWithExpectedOutboxAndAudit(r.Context(), id, record.Job.Name, key, &store.IncidentExpectation{Change: action.expected}, destinations, actorAudit(session, "incident.accepted", id+":"+key))
 	if err != nil {
 		s.writeIncidentActionErrorWithRequest(w, r, err, "incident.accepted")
 		return
 	}
-	s.broadcastIncidentEvents(id, events)
+	s.broadcastIncidentEvents(context.WithoutCancel(r.Context()), audienceEveryone(), id, events)
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
-func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
-	var input incidentActionRequest
-	if !decodeJSON(w, r, &input) {
-		return
-	}
-	key := strings.TrimSpace(input.Key)
-	if key == "" {
-		writeError(w, http.StatusBadRequest, "key_required", "incident key is required", map[string]string{"key": "incident key is required"})
-		return
-	}
-	if input.ExpectedChange == nil {
-		writeError(w, http.StatusBadRequest, "expected_change_required", "the reviewed incident change is required; refresh before retrying", map[string]string{"expected_change": "reload the incident before confirming this action"})
-		return
-	}
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-			return
-		}
-		s.writeInternalError(w, r, "store", err)
-		return
-	}
+func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, session store.Session, record store.JobRecord, action incidentAction) {
+	id, key := record.ID, action.key
 	var destinations []string
+	var err error
 	if s.App != nil && s.App.Notifier != nil {
 		destinations, err = s.App.Notifier.QueueDestinationsForJob(r.Context(), record.Job)
 		if err != nil {
@@ -925,12 +823,12 @@ func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, sessio
 			return
 		}
 	}
-	events, err := s.Store.SuppressIncidentWithExpectedOutboxAndAudit(r.Context(), id, record.Job.Name, key, &store.IncidentExpectation{Change: *input.ExpectedChange}, destinations, actorAudit(session, "incident.suppressed", id+":"+key))
+	events, err := s.Store.SuppressIncidentWithExpectedOutboxAndAudit(r.Context(), id, record.Job.Name, key, &store.IncidentExpectation{Change: action.expected}, destinations, actorAudit(session, "incident.suppressed", id+":"+key))
 	if err != nil {
 		s.writeIncidentActionErrorWithRequest(w, r, err, "incident.suppressed")
 		return
 	}
-	s.broadcastIncidentEvents(id, events)
+	s.broadcastIncidentEvents(context.WithoutCancel(r.Context()), audienceEveryone(), id, events)
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -965,9 +863,9 @@ func (s *Server) writeIncidentActionErrorWithRequest(w http.ResponseWriter, r *h
 	}
 }
 
-func (s *Server) broadcastIncidentEvents(jobID string, events []model.Event) {
+func (s *Server) broadcastIncidentEvents(ctx context.Context, audience sseAudience, jobID string, events []model.Event) {
 	for _, event := range events {
-		s.broadcast(map[string]any{"type": event.Type, "job_id": jobID, "job": event.Job, "scan_id": event.ScanID, "message": event.Message, "changes": event.Changes})
+		s.broadcastTo(ctx, audience, map[string]any{"type": event.Type, "job_id": jobID, "job": event.Job, "scan_id": event.ScanID, "message": event.Message, "changes": event.Changes})
 	}
 }
 
@@ -975,12 +873,8 @@ func (s *Server) broadcastIncidentEvents(jobID string, events []model.Event) {
 // to fetch the full job record. Baseline units are paginated because a broad
 // CIDR can produce a large snapshot; the scope metadata remains intact on
 // every page.
-func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, id string) {
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-		return
-	}
+func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, record store.JobRecord) {
+	id := record.ID
 	state, err := s.Store.RuntimeState(r.Context(), id)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
@@ -1011,21 +905,26 @@ func (s *Server) jobBaseline(w http.ResponseWriter, r *http.Request, id string) 
 	writeJSON(w, http.StatusOK, value)
 }
 
-func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
-	var input struct {
-		ExpectedBaselineScanID   *string `json:"expected_baseline_scan_id"`
-		ExpectedBaselineModified *bool   `json:"expected_baseline_modified"`
-	}
+// resetBaselineRequest names the baseline the operator reviewed. Both fields
+// are optional, and the request body itself may be empty.
+type resetBaselineRequest struct {
+	ExpectedBaselineScanID   *string `json:"expected_baseline_scan_id"`
+	ExpectedBaselineModified *bool   `json:"expected_baseline_modified"`
+}
+
+// decodeResetBaseline reads an optional reset request before the job is loaded.
+func decodeResetBaseline(w http.ResponseWriter, r *http.Request) (resetBaselineRequest, bool) {
+	var input resetBaselineRequest
 	if r.Body != nil && r.Body != http.NoBody {
 		if !decodeJSON(w, r, &input) {
-			return
+			return resetBaselineRequest{}, false
 		}
 	}
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		writeError(w, 404, "not_found", "job not found", nil)
-		return
-	}
+	return input, true
+}
+
+func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session store.Session, record store.JobRecord, input resetBaselineRequest) {
+	id := record.ID
 	state, stateErr := s.Store.RuntimeState(r.Context(), id)
 	if stateErr != nil {
 		writeError(w, http.StatusInternalServerError, "store", "baseline state could not be loaded", nil)
@@ -1061,25 +960,30 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session s
 	}
 	s.App.WakeDelivery()
 	for _, event := range events {
-		s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
+		s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
 	}
 	writeJSON(w, 200, map[string]any{"events": events})
 }
 
-func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
-	var input struct {
-		ScanID                   string  `json:"scan_id"`
-		ExpectedBaselineScanID   *string `json:"expected_baseline_scan_id"`
-		ExpectedBaselineModified *bool   `json:"expected_baseline_modified"`
-	}
+// approveBaselineRequest names the scan to approve and the baseline the
+// operator reviewed.
+type approveBaselineRequest struct {
+	ScanID                   string  `json:"scan_id"`
+	ExpectedBaselineScanID   *string `json:"expected_baseline_scan_id"`
+	ExpectedBaselineModified *bool   `json:"expected_baseline_modified"`
+}
+
+// decodeApproveBaseline reads an approval request before the job is loaded.
+func decodeApproveBaseline(w http.ResponseWriter, r *http.Request) (approveBaselineRequest, bool) {
+	var input approveBaselineRequest
 	if !decodeJSON(w, r, &input) {
-		return
+		return approveBaselineRequest{}, false
 	}
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		writeError(w, 404, "not_found", "job not found", nil)
-		return
-	}
+	return input, true
+}
+
+func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session store.Session, record store.JobRecord, input approveBaselineRequest) {
+	id := record.ID
 	state, stateErr := s.Store.RuntimeState(r.Context(), id)
 	if stateErr != nil {
 		writeError(w, http.StatusInternalServerError, "store", "baseline state could not be loaded", nil)
@@ -1120,7 +1024,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 	}
 	s.App.WakeDelivery()
 	for _, event := range events {
-		s.broadcast(map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
+		s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
 	}
 	writeJSON(w, 200, map[string]any{"events": events})
 }

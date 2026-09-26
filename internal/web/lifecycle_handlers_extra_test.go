@@ -25,7 +25,7 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	}
 
 	reset := httptest.NewRecorder()
-	server.resetBaseline(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, record.ID)
+	server.jobRoute(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, record.ID+"/baseline/reset")
 	if reset.Code != http.StatusOK || !strings.Contains(reset.Body.String(), "baseline-reset") {
 		t.Fatalf("baseline reset = %d: %s", reset.Code, reset.Body.String())
 	}
@@ -38,14 +38,14 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	approveRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/approve", approveBody)
 	approveRequest.Header.Set("Content-Type", "application/json")
 	approve := httptest.NewRecorder()
-	server.approveBaseline(approve, approveRequest, admin, record.ID)
+	server.jobRoute(approve, approveRequest, admin, record.ID+"/baseline/approve")
 	if approve.Code != http.StatusOK || !strings.Contains(approve.Body.String(), "baseline-approved") {
 		t.Fatalf("baseline approval = %d: %s", approve.Code, approve.Body.String())
 	}
 	invalidApproveRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/approve", strings.NewReader(`{"scan_id":"missing"}`))
 	invalidApproveRequest.Header.Set("Content-Type", "application/json")
 	invalidApprove := httptest.NewRecorder()
-	server.approveBaseline(invalidApprove, invalidApproveRequest, admin, record.ID)
+	server.jobRoute(invalidApprove, invalidApproveRequest, admin, record.ID+"/baseline/approve")
 	if invalidApprove.Code != http.StatusBadRequest {
 		t.Fatalf("invalid baseline approval status = %d", invalidApprove.Code)
 	}
@@ -56,18 +56,18 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 		t.Fatal(err)
 	}
 	cycleResponse := httptest.NewRecorder()
-	server.scanCycle(cycleResponse, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scan-cycle", nil), record.ID)
+	server.jobRoute(cycleResponse, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scan-cycle", nil), admin, record.ID+"/scan-cycle")
 	if cycleResponse.Code != http.StatusOK || !strings.Contains(cycleResponse.Body.String(), cycle.ID) || !strings.Contains(cycleResponse.Body.String(), `"units"`) {
 		t.Fatalf("scan cycle response = %d: %s", cycleResponse.Code, cycleResponse.Body.String())
 	}
-	discardRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/scan-cycle/"+cycle.ID+"/discard", nil)
+	discardRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+record.ID+"/scan-cycle/"+cycle.ID, nil)
 	discard := httptest.NewRecorder()
-	server.discardScanCycle(discard, discardRequest, admin, record.ID, cycle.ID)
+	server.jobRoute(discard, discardRequest, admin, record.ID+"/scan-cycle/"+cycle.ID)
 	if discard.Code != http.StatusNoContent {
 		t.Fatalf("cycle discard = %d: %s", discard.Code, discard.Body.String())
 	}
 	noCycle := httptest.NewRecorder()
-	server.scanCycle(noCycle, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scan-cycle", nil), record.ID)
+	server.jobRoute(noCycle, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scan-cycle", nil), admin, record.ID+"/scan-cycle")
 	if noCycle.Code != http.StatusOK || !strings.Contains(noCycle.Body.String(), `"cycle":null`) {
 		t.Fatalf("empty cycle response = %d: %s", noCycle.Code, noCycle.Body.String())
 	}
@@ -100,16 +100,16 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 		t.Fatal(err)
 	}
 	wrongName := httptest.NewRecorder()
-	wrongRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID, strings.NewReader(`{"confirm_name":"wrong"}`))
+	wrongRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID+"?permanent=true", strings.NewReader(`{"confirm_name":"wrong"}`))
 	wrongRequest.Header.Set("Content-Type", "application/json")
-	server.permanentDelete(wrongName, wrongRequest, admin, second.ID)
+	server.jobRoute(wrongName, wrongRequest, admin, second.ID)
 	if wrongName.Code != http.StatusBadRequest {
 		t.Fatalf("wrong delete confirmation = %d", wrongName.Code)
 	}
 	activeName := httptest.NewRecorder()
-	activeRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID, strings.NewReader(`{"confirm_name":"delete-me"}`))
+	activeRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID+"?permanent=true", strings.NewReader(`{"confirm_name":"delete-me"}`))
 	activeRequest.Header.Set("Content-Type", "application/json")
-	server.permanentDelete(activeName, activeRequest, admin, second.ID)
+	server.jobRoute(activeName, activeRequest, admin, second.ID)
 	if activeName.Code != http.StatusConflict {
 		t.Fatalf("unarchived delete = %d: %s", activeName.Code, activeName.Body.String())
 	}
@@ -120,10 +120,10 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	if archiveSecond.Code != http.StatusNoContent {
 		t.Fatalf("second archive = %d: %s", archiveSecond.Code, archiveSecond.Body.String())
 	}
-	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID, strings.NewReader(`{"confirm_name":"delete-me"}`))
+	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID+"?permanent=true", strings.NewReader(`{"confirm_name":"delete-me"}`))
 	deleteRequest.Header.Set("Content-Type", "application/json")
 	deleted := httptest.NewRecorder()
-	server.permanentDelete(deleted, deleteRequest, admin, second.ID)
+	server.jobRoute(deleted, deleteRequest, admin, second.ID)
 	if deleted.Code != http.StatusNoContent {
 		t.Fatalf("permanent delete = %d: %s", deleted.Code, deleted.Body.String())
 	}
@@ -267,7 +267,7 @@ func TestBaselineMutationsRejectActiveJobs(t *testing.T) {
 	defer func() { _ = db.ReleaseJobLease(ctx, record.ID, "active-baseline-test") }()
 
 	reset := httptest.NewRecorder()
-	server.resetBaseline(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, record.ID)
+	server.jobRoute(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, record.ID+"/baseline/reset")
 	if reset.Code != http.StatusConflict || !strings.Contains(reset.Body.String(), `"code":"job_active"`) {
 		t.Fatalf("active baseline reset = %d: %s", reset.Code, reset.Body.String())
 	}
@@ -275,7 +275,7 @@ func TestBaselineMutationsRejectActiveJobs(t *testing.T) {
 	approveRequest := httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/approve", strings.NewReader(`{"scan_id":"`+scan.ID+`"}`))
 	approveRequest.Header.Set("Content-Type", "application/json")
 	approve := httptest.NewRecorder()
-	server.approveBaseline(approve, approveRequest, admin, record.ID)
+	server.jobRoute(approve, approveRequest, admin, record.ID+"/baseline/approve")
 	if approve.Code != http.StatusConflict || !strings.Contains(approve.Body.String(), `"code":"job_active"`) {
 		t.Fatalf("active baseline approval = %d: %s", approve.Code, approve.Body.String())
 	}

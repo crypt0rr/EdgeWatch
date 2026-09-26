@@ -909,16 +909,8 @@ func parseHostProtocol(raw string) (string, error) {
 	return value, nil
 }
 
-func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, id string) {
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-		} else {
-			s.writeInternalError(w, r, "store", err)
-		}
-		return
-	}
+func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, record store.JobRecord) {
+	id := record.ID
 	limit, offset, err := parseHostPagination(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_pagination", err.Error(), nil)
@@ -1017,16 +1009,8 @@ func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, id str
 	writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": record.Job.Name, "source_scan": source, "data_quality": quality, "hosts": items, "pagination": paginationJSON(offset, limit, total)})
 }
 
-func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, id, rawAddress string) {
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-		} else {
-			s.writeInternalError(w, r, "store", err)
-		}
-		return
-	}
+func (s *Server) jobBaselineHost(w http.ResponseWriter, r *http.Request, record store.JobRecord, rawAddress string) {
+	id := record.ID
 	address, err := normalizedHostAddress(rawAddress)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "host not found", nil)
@@ -1195,33 +1179,14 @@ func rdapUnavailable(address string) rdap.Result {
 	return rdap.Result{Status: "unavailable", Address: address, Message: "RDAP lookup is not available"}
 }
 
-func (s *Server) jobScanHosts(w http.ResponseWriter, r *http.Request, id, scanID string) {
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-		} else {
-			s.writeInternalError(w, r, "store", err)
-		}
-		return
-	}
-	s.renderScanHosts(w, r, id, record.Job.Name, scanID)
+func (s *Server) jobScanHosts(w http.ResponseWriter, r *http.Request, record store.JobRecord, summary model.ScanSummary) {
+	s.renderScanHosts(w, r, record.ID, record.Job.Name, summary)
 }
 
-func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, id, jobName, scanID string) {
-	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		} else {
-			s.writeInternalError(w, r, "store", err)
-		}
-		return
-	}
-	if id != "" && summary.JobID != id {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		return
-	}
+// renderScanHosts lists the hosts of a resolved scan. id is the owning job's
+// ID, or empty for a legacy scan that only records its job name.
+func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, id, jobName string, summary model.ScanSummary) {
+	scanID := summary.ID
 	limit, offset, err := parseHostPagination(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_pagination", err.Error(), nil)
@@ -1267,85 +1232,30 @@ func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, id, job
 
 // scanHostsRoute is the additive top-level historical-results form. The job
 // nested route remains available for callers that already scope every request
-// by job ID; both paths enforce the same ownership check.
+// by job ID; both paths enforce the same ownership check. A scan that records
+// its job ID is listed under that job; a legacy scan keeps its job name.
 func (s *Server) scanHostsRoute(w http.ResponseWriter, r *http.Request, scanID string) {
-	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		} else {
-			s.writeInternalError(w, r, "store", err)
-		}
+	summary, ok := s.resolveScanSummary(w, r, scanID, scanStoreErrorInternal)
+	if !ok {
 		return
 	}
-	if summary.JobID != "" {
-		s.jobScanHosts(w, r, summary.JobID, scanID)
+	if summary.JobID == "" {
+		s.renderScanHosts(w, r, "", summary.Job, summary)
 		return
 	}
-	s.renderScanHosts(w, r, "", summary.Job, scanID)
+	if job, ok := s.resolveJob(w, r, summary.JobID, jobStoreErrorInternal); ok {
+		s.renderScanHosts(w, r, job.ID, job.Job.Name, summary)
+	}
 }
 
-func (s *Server) jobScanHost(w http.ResponseWriter, r *http.Request, id, scanID, rawAddress string) {
-	record, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-		} else {
-			writeError(w, http.StatusInternalServerError, "store", "job detail could not be loaded", nil)
-		}
-		return
-	}
-	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		} else {
-			writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
-		}
-		return
-	}
-	if summary.JobID != id {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		return
-	}
-	s.renderScanHostWithSummary(w, r, id, record.Job.Name, scanID, rawAddress, summary, &record)
+func (s *Server) jobScanHost(w http.ResponseWriter, r *http.Request, record store.JobRecord, summary model.ScanSummary, rawAddress string) {
+	s.renderScanHostWithSummary(w, r, record.ID, record.Job.Name, rawAddress, summary, &record)
 }
 
-func (s *Server) renderScanHost(w http.ResponseWriter, r *http.Request, id, jobName, scanID, rawAddress string) {
-	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		} else {
-			writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
-		}
-		return
-	}
-	if id != "" && summary.JobID != id {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		return
-	}
-	var record *store.JobRecord
-	expectedJobID := id
-	if expectedJobID == "" {
-		expectedJobID = summary.JobID
-	}
-	if expectedJobID != "" {
-		loaded, recordErr := s.Store.GetJob(r.Context(), expectedJobID)
-		if recordErr != nil {
-			if hostStoreNotFound(recordErr) {
-				writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-			} else {
-				writeError(w, http.StatusInternalServerError, "store", "job detail could not be loaded", nil)
-			}
-			return
-		}
-		record = &loaded
-	}
-	s.renderScanHostWithSummary(w, r, id, jobName, scanID, rawAddress, summary, record)
-}
-
-func (s *Server) renderScanHostWithSummary(w http.ResponseWriter, r *http.Request, id, jobName, scanID, rawAddress string, summary model.ScanSummary, record *store.JobRecord) {
+// renderScanHostWithSummary shows one host of a resolved scan. id and record
+// name the owning job, or are empty and nil for a legacy scan.
+func (s *Server) renderScanHostWithSummary(w http.ResponseWriter, r *http.Request, id, jobName, rawAddress string, summary model.ScanSummary, record *store.JobRecord) {
+	scanID := summary.ID
 	address, err := normalizedHostAddress(rawAddress)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "host not found", nil)
@@ -1422,75 +1332,29 @@ func (s *Server) renderScanHostWithSummary(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) scanHostRoute(w http.ResponseWriter, r *http.Request, scanID, rawAddress string) {
-	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		} else {
-			writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
-		}
+	summary, ok := s.resolveScanSummary(w, r, scanID, scanStoreErrorDetail)
+	if !ok {
 		return
 	}
-	if summary.JobID != "" {
-		record, recordErr := s.Store.GetJob(r.Context(), summary.JobID)
-		if recordErr != nil {
-			if hostStoreNotFound(recordErr) {
-				writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-			} else {
-				writeError(w, http.StatusInternalServerError, "store", "job detail could not be loaded", nil)
-			}
-			return
-		}
-		s.renderScanHostWithSummary(w, r, summary.JobID, record.Job.Name, scanID, rawAddress, summary, &record)
+	if summary.JobID == "" {
+		s.renderScanHostWithSummary(w, r, "", summary.Job, rawAddress, summary, nil)
 		return
 	}
-	s.renderScanHostWithSummary(w, r, "", summary.Job, scanID, rawAddress, summary, nil)
+	if job, ok := s.resolveJob(w, r, summary.JobID, jobStoreErrorJobDetail); ok {
+		s.renderScanHostWithSummary(w, r, job.ID, job.Job.Name, rawAddress, summary, &job)
+	}
 }
 
-func (s *Server) jobScanHostRDAP(w http.ResponseWriter, r *http.Request, id, scanID, rawAddress string) {
-	_, err := s.Store.GetJob(r.Context(), id)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-		} else {
-			writeError(w, http.StatusInternalServerError, "store", "host detail could not be loaded", nil)
-		}
-		return
-	}
-	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		} else {
-			writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
-		}
-		return
-	}
-	if summary.JobID != id {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		return
-	}
-	s.renderScanHostRDAPWithSummary(w, r, id, scanID, rawAddress, summary)
+// jobScanHostRDAP serves /jobs/{id}/scans/{scan}/hosts/{address}/rdap. The
+// router has already confirmed that the scan belongs to the job.
+func (s *Server) jobScanHostRDAP(w http.ResponseWriter, r *http.Request, summary model.ScanSummary, rawAddress string) {
+	s.renderScanHostRDAPWithSummary(w, r, summary, rawAddress)
 }
 
-func (s *Server) renderScanHostRDAP(w http.ResponseWriter, r *http.Request, id, scanID, rawAddress string) {
-	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		} else {
-			writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
-		}
-		return
-	}
-	if id != "" && summary.JobID != id {
-		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		return
-	}
-	s.renderScanHostRDAPWithSummary(w, r, id, scanID, rawAddress, summary)
-}
-
-func (s *Server) renderScanHostRDAPWithSummary(w http.ResponseWriter, r *http.Request, id, scanID, rawAddress string, summary model.ScanSummary) {
+// renderScanHostRDAPWithSummary answers an RDAP request for a host that the
+// resolved scan observed.
+func (s *Server) renderScanHostRDAPWithSummary(w http.ResponseWriter, r *http.Request, summary model.ScanSummary, rawAddress string) {
+	scanID := summary.ID
 	address, err := normalizedHostAddress(rawAddress)
 	if err != nil {
 		writeError(w, http.StatusNotFound, "not_found", "host not found", nil)
@@ -1539,26 +1403,14 @@ func (s *Server) renderScanHostRDAPWithSummary(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) scanHostRDAPRoute(w http.ResponseWriter, r *http.Request, scanID, rawAddress string) {
-	summary, err := s.Store.GetScanSummary(r.Context(), scanID)
-	if err != nil {
-		if hostStoreNotFound(err) {
-			writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
-		} else {
-			writeError(w, http.StatusInternalServerError, "store", "scan detail could not be loaded", nil)
-		}
+	summary, ok := s.resolveScanSummary(w, r, scanID, scanStoreErrorDetail)
+	if !ok {
 		return
 	}
 	if summary.JobID != "" {
-		if _, jobErr := s.Store.GetJob(r.Context(), summary.JobID); jobErr != nil {
-			if hostStoreNotFound(jobErr) {
-				writeError(w, http.StatusNotFound, "not_found", "job not found", nil)
-			} else {
-				writeError(w, http.StatusInternalServerError, "store", "host detail could not be loaded", nil)
-			}
+		if _, ok := s.resolveJob(w, r, summary.JobID, jobStoreErrorHostDetail); !ok {
 			return
 		}
-		s.renderScanHostRDAPWithSummary(w, r, summary.JobID, scanID, rawAddress, summary)
-		return
 	}
-	s.renderScanHostRDAPWithSummary(w, r, "", scanID, rawAddress, summary)
+	s.renderScanHostRDAPWithSummary(w, r, summary, rawAddress)
 }

@@ -119,19 +119,29 @@ func TestHostHandlersRejectInvalidOwnershipAndPagination(t *testing.T) {
 		fn(recorder, httptest.NewRequest(http.MethodGet, path, nil))
 		return recorder
 	}
-	if got := call(func(w http.ResponseWriter, r *http.Request) { server.jobBaselineHosts(w, r, "missing") }, "/api/v1/jobs/missing/baseline/hosts"); got.Code != http.StatusNotFound {
+	if got := call(func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, "missing/baseline/hosts")
+	}, "/api/v1/jobs/missing/baseline/hosts"); got.Code != http.StatusNotFound {
 		t.Fatalf("missing baseline job status = %d", got.Code)
 	}
-	if got := call(func(w http.ResponseWriter, r *http.Request) { server.jobBaselineHosts(w, r, record.ID) }, "/api/v1/jobs/"+record.ID+"/baseline/hosts?limit=bad"); got.Code != http.StatusBadRequest {
+	if got := call(func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, record.ID+"/baseline/hosts")
+	}, "/api/v1/jobs/"+record.ID+"/baseline/hosts?limit=bad"); got.Code != http.StatusBadRequest {
 		t.Fatalf("invalid baseline pagination status = %d", got.Code)
 	}
-	if got := call(func(w http.ResponseWriter, r *http.Request) { server.jobBaselineHosts(w, r, record.ID) }, "/api/v1/jobs/"+record.ID+"/baseline/hosts?protocol=icmp"); got.Code != http.StatusBadRequest {
+	if got := call(func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, record.ID+"/baseline/hosts")
+	}, "/api/v1/jobs/"+record.ID+"/baseline/hosts?protocol=icmp"); got.Code != http.StatusBadRequest {
 		t.Fatalf("invalid baseline protocol status = %d", got.Code)
 	}
-	if got := call(func(w http.ResponseWriter, r *http.Request) { server.jobBaselineHost(w, r, record.ID, "not-an-ip") }, "/api/v1/jobs/"+record.ID+"/baseline/hosts/not-an-ip"); got.Code != http.StatusNotFound {
+	if got := call(func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, record.ID+"/baseline/hosts/not-an-ip")
+	}, "/api/v1/jobs/"+record.ID+"/baseline/hosts/not-an-ip"); got.Code != http.StatusNotFound {
 		t.Fatalf("invalid baseline host status = %d", got.Code)
 	}
-	if got := call(func(w http.ResponseWriter, r *http.Request) { server.jobBaselineHost(w, r, record.ID, "198.51.100.1") }, "/api/v1/jobs/"+record.ID+"/baseline/hosts/198.51.100.1"); got.Code != http.StatusNotFound {
+	if got := call(func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, record.ID+"/baseline/hosts/198.51.100.1")
+	}, "/api/v1/jobs/"+record.ID+"/baseline/hosts/198.51.100.1"); got.Code != http.StatusNotFound {
 		t.Fatalf("host without baseline status = %d", got.Code)
 	}
 	if got := call(func(w http.ResponseWriter, r *http.Request) { server.jobBaselineHostRDAP(w, r, record.ID, "not-an-ip") }, "/api/v1/jobs/"+record.ID+"/baseline/hosts/not-an-ip/rdap"); got.Code != http.StatusNotFound {
@@ -142,7 +152,9 @@ func TestHostHandlersRejectInvalidOwnershipAndPagination(t *testing.T) {
 	}, "/api/v1/jobs/missing/baseline/hosts/198.51.100.1/rdap"); got.Code != http.StatusNotFound {
 		t.Fatalf("missing RDAP job status = %d", got.Code)
 	}
-	if got := call(func(w http.ResponseWriter, r *http.Request) { server.jobScanHosts(w, r, "missing", "scan") }, "/api/v1/jobs/missing/scans/scan/hosts"); got.Code != http.StatusNotFound {
+	if got := call(func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, "missing/scans/scan/hosts")
+	}, "/api/v1/jobs/missing/scans/scan/hosts"); got.Code != http.StatusNotFound {
 		t.Fatalf("missing scan job status = %d", got.Code)
 	}
 	if got := call(func(w http.ResponseWriter, r *http.Request) { server.scanHostsRoute(w, r, "missing") }, "/api/v1/scans/missing/hosts"); got.Code != http.StatusNotFound {
@@ -162,14 +174,13 @@ func TestHostHandlersRejectInvalidOwnershipAndPagination(t *testing.T) {
 func TestHistoricalHostWrapperRoutesHandleMissingAndInvalidEvidence(t *testing.T) {
 	server, db, record := newHostHandlerServer(t)
 	ctx := context.Background()
+	route := func(rest string) func(http.ResponseWriter, *http.Request) {
+		return func(w http.ResponseWriter, r *http.Request) { server.jobRoute(w, r, store.Session{}, rest) }
+	}
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/missing/hosts/bad", nil)
 	for name, fn := range map[string]func(http.ResponseWriter, *http.Request){
-		"scan host": func(w http.ResponseWriter, r *http.Request) {
-			server.renderScanHost(w, r, record.ID, record.Job.Name, "missing", "198.51.100.1")
-		},
-		"scan rdap": func(w http.ResponseWriter, r *http.Request) {
-			server.renderScanHostRDAP(w, r, record.ID, "missing", "198.51.100.1")
-		},
+		"scan host": route(record.ID + "/scans/missing/hosts/198.51.100.1"),
+		"scan rdap": route(record.ID + "/scans/missing/hosts/198.51.100.1/rdap"),
 	} {
 		response := httptest.NewRecorder()
 		fn(response, req.Clone(req.Context()))
@@ -182,24 +193,20 @@ func TestHistoricalHostWrapperRoutesHandleMissingAndInvalidEvidence(t *testing.T
 	if err := db.SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
+	other, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "other-host-handler", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.4"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, fn := range map[string]func(http.ResponseWriter, *http.Request){
-		"invalid host": func(w http.ResponseWriter, r *http.Request) {
-			server.renderScanHost(w, r, record.ID, record.Job.Name, scan.ID, "not-an-ip")
-		},
-		"wrong job host": func(w http.ResponseWriter, r *http.Request) {
-			server.renderScanHost(w, r, "wrong-job", record.Job.Name, scan.ID, "198.51.100.1")
-		},
+		"invalid host":   route(record.ID + "/scans/" + scan.ID + "/hosts/not-an-ip"),
+		"wrong job host": route(other.ID + "/scans/" + scan.ID + "/hosts/198.51.100.1"),
 		"global invalid host": func(w http.ResponseWriter, r *http.Request) {
-			server.renderScanHost(w, r, "", "", scan.ID, "not-an-ip")
+			server.scanHostRoute(w, r, scan.ID, "not-an-ip")
 		},
-		"invalid rdap host": func(w http.ResponseWriter, r *http.Request) {
-			server.renderScanHostRDAP(w, r, record.ID, scan.ID, "not-an-ip")
-		},
-		"wrong job rdap": func(w http.ResponseWriter, r *http.Request) {
-			server.renderScanHostRDAP(w, r, "wrong-job", scan.ID, "198.51.100.1")
-		},
+		"invalid rdap host": route(record.ID + "/scans/" + scan.ID + "/hosts/not-an-ip/rdap"),
+		"wrong job rdap":    route(other.ID + "/scans/" + scan.ID + "/hosts/198.51.100.1/rdap"),
 		"global invalid rdap host": func(w http.ResponseWriter, r *http.Request) {
-			server.renderScanHostRDAP(w, r, "", scan.ID, "not-an-ip")
+			server.scanHostRDAPRoute(w, r, scan.ID, "not-an-ip")
 		},
 	} {
 		response := httptest.NewRecorder()
@@ -226,22 +233,22 @@ func TestHostRoutesClassifyStoreFailuresWithoutLeakingDetails(t *testing.T) {
 		call func(*httptest.ResponseRecorder)
 	}{
 		{name: "baseline hosts", call: func(w *httptest.ResponseRecorder) {
-			server.jobBaselineHosts(w, httptest.NewRequest(http.MethodGet, "/baseline", nil), record.ID)
+			server.jobRoute(w, httptest.NewRequest(http.MethodGet, "/baseline", nil), store.Session{}, record.ID+"/baseline/hosts")
 		}},
 		{name: "baseline host", call: func(w *httptest.ResponseRecorder) {
-			server.jobBaselineHost(w, httptest.NewRequest(http.MethodGet, "/baseline", nil), record.ID, "198.51.100.1")
+			server.jobRoute(w, httptest.NewRequest(http.MethodGet, "/baseline", nil), store.Session{}, record.ID+"/baseline/hosts/198.51.100.1")
 		}},
 		{name: "baseline rdap", call: func(w *httptest.ResponseRecorder) {
 			server.jobBaselineHostRDAP(w, httptest.NewRequest(http.MethodGet, "/baseline", nil), record.ID, "198.51.100.1")
 		}},
 		{name: "scan hosts", call: func(w *httptest.ResponseRecorder) {
-			server.jobScanHosts(w, httptest.NewRequest(http.MethodGet, "/scan", nil), record.ID, "scan")
+			server.jobRoute(w, httptest.NewRequest(http.MethodGet, "/scan", nil), store.Session{}, record.ID+"/scans/scan/hosts")
 		}},
 		{name: "scan host", call: func(w *httptest.ResponseRecorder) {
-			server.jobScanHost(w, httptest.NewRequest(http.MethodGet, "/scan", nil), record.ID, "scan", "198.51.100.1")
+			server.jobRoute(w, httptest.NewRequest(http.MethodGet, "/scan", nil), store.Session{}, record.ID+"/scans/scan/hosts/198.51.100.1")
 		}},
 		{name: "scan rdap", call: func(w *httptest.ResponseRecorder) {
-			server.jobScanHostRDAP(w, httptest.NewRequest(http.MethodGet, "/scan", nil), record.ID, "scan", "198.51.100.1")
+			server.jobRoute(w, httptest.NewRequest(http.MethodGet, "/scan", nil), store.Session{}, record.ID+"/scans/scan/hosts/198.51.100.1/rdap")
 		}},
 		{name: "global scan hosts", call: func(w *httptest.ResponseRecorder) {
 			server.scanHostsRoute(w, httptest.NewRequest(http.MethodGet, "/scan", nil), "scan")
@@ -329,27 +336,37 @@ func TestHostRoutesCoverNestedStoreFailureBranches(t *testing.T) {
 	// the nested error branches while leaving the earlier ownership lookup valid.
 	server, db, record = newCase(t)
 	drop(t, db, "job_runtime_meta")
-	call(t, "baseline-meta", server, func(w http.ResponseWriter, r *http.Request) { server.jobBaselineHosts(w, r, record.ID) }, http.StatusInternalServerError)
+	call(t, "baseline-meta", server, func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, record.ID+"/baseline/hosts")
+	}, http.StatusInternalServerError)
 	server, db, record = newCase(t)
 	scan := saveHostScan(t, db, record, "baseline-index-error")
 	setBaseline(t, db, record, scan.ID, false)
 	drop(t, db, "scan_hosts")
-	call(t, "baseline-index", server, func(w http.ResponseWriter, r *http.Request) { server.jobBaselineHosts(w, r, record.ID) }, http.StatusInternalServerError)
+	call(t, "baseline-index", server, func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, record.ID+"/baseline/hosts")
+	}, http.StatusInternalServerError)
 	server, db, record = newCase(t)
 	scan = saveHostScan(t, db, record, "baseline-list-error")
 	setBaseline(t, db, record, scan.ID, false)
 	if _, err := db.DB.ExecContext(ctx, `UPDATE scan_hosts SET host_json='{' WHERE scan_id=?`, scan.ID); err != nil {
 		t.Fatal(err)
 	}
-	call(t, "baseline-list", server, func(w http.ResponseWriter, r *http.Request) { server.jobBaselineHosts(w, r, record.ID) }, http.StatusInternalServerError)
+	call(t, "baseline-list", server, func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, record.ID+"/baseline/hosts")
+	}, http.StatusInternalServerError)
 	server, db, record = newCase(t)
 	setBaseline(t, db, record, "overlay-error", true)
 	drop(t, db, "baseline_hosts")
-	call(t, "baseline-overlay-exists", server, func(w http.ResponseWriter, r *http.Request) { server.jobBaselineHosts(w, r, record.ID) }, http.StatusInternalServerError)
+	call(t, "baseline-overlay-exists", server, func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, record.ID+"/baseline/hosts")
+	}, http.StatusInternalServerError)
 	server, db, record = newCase(t)
 	setBaseline(t, db, record, "runtime-error", false)
 	drop(t, db, "job_runtime")
-	call(t, "baseline-runtime", server, func(w http.ResponseWriter, r *http.Request) { server.jobBaselineHosts(w, r, record.ID) }, http.StatusInternalServerError)
+	call(t, "baseline-runtime", server, func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, record.ID+"/baseline/hosts")
+	}, http.StatusInternalServerError)
 
 	// Detail and RDAP routes perform the same ownership checks independently;
 	// a broken scan projection must remain a generic 500 on each endpoint.
@@ -357,7 +374,9 @@ func TestHostRoutesCoverNestedStoreFailureBranches(t *testing.T) {
 	scan = saveHostScan(t, db, record, "detail-index-error")
 	setBaseline(t, db, record, scan.ID, false)
 	drop(t, db, "scan_hosts")
-	call(t, "baseline-host-index", server, func(w http.ResponseWriter, r *http.Request) { server.jobBaselineHost(w, r, record.ID, "198.51.100.1") }, http.StatusInternalServerError)
+	call(t, "baseline-host-index", server, func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, record.ID+"/baseline/hosts/198.51.100.1")
+	}, http.StatusInternalServerError)
 	call(t, "baseline-rdap-index", server, func(w http.ResponseWriter, r *http.Request) {
 		server.jobBaselineHostRDAP(w, r, record.ID, "198.51.100.1")
 	}, http.StatusInternalServerError)
@@ -368,10 +387,10 @@ func TestHostRoutesCoverNestedStoreFailureBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	call(t, "scan-host-decode", server, func(w http.ResponseWriter, r *http.Request) {
-		server.jobScanHost(w, r, record.ID, scan.ID, "198.51.100.1")
+		server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1")
 	}, http.StatusInternalServerError)
 	call(t, "scan-rdap-decode", server, func(w http.ResponseWriter, r *http.Request) {
-		server.jobScanHostRDAP(w, r, record.ID, scan.ID, "198.51.100.1")
+		server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1/rdap")
 	}, http.StatusInternalServerError)
 }
 
@@ -384,17 +403,17 @@ func TestHistoricalHostHandlersUseLegacyFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
-	server.jobScanHosts(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts?has_open_ports=true", nil), record.ID, scan.ID)
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts?has_open_ports=true", nil), store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts")
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"data_quality":"legacy"`) {
 		t.Fatalf("legacy host list = %d %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.jobScanHost(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1", nil), record.ID, scan.ID, "198.51.100.1")
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1", nil), store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.1")
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"legacy"`) {
 		t.Fatalf("legacy host detail = %d %s", recorder.Code, recorder.Body.String())
 	}
 	recorder = httptest.NewRecorder()
-	server.jobScanHost(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.99", nil), record.ID, scan.ID, "198.51.100.99")
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.99", nil), store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.99")
 	if recorder.Code != http.StatusNotFound {
 		t.Fatalf("unknown legacy host status = %d", recorder.Code)
 	}
@@ -414,7 +433,7 @@ func TestHostRDAPUnavailableForKnownHistoricalHost(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
-	server.jobScanHostRDAP(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.12/rdap", nil), record.ID, scan.ID, "198.51.100.12")
+	server.jobRoute(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.12/rdap", nil), store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.12/rdap")
 	if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-store" || !strings.Contains(recorder.Body.String(), "rdap") {
 		t.Fatalf("historical RDAP response = %d %s", recorder.Code, recorder.Body.String())
 	}

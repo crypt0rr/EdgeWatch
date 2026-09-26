@@ -113,7 +113,7 @@ func TestJobWritesReportStorageFailuresAsInternalErrors(t *testing.T) {
 	for _, session := range []store.Session{admin, operator} {
 		requestID := "update-" + session.Role
 		recorder := httptest.NewRecorder()
-		server.updateJob(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), requestID), session, record.ID)
+		server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), requestID), session, record.ID)
 		assertRedactedInternalError(t, "update as "+session.Role, recorder, requestID, locked, &logs)
 	}
 
@@ -127,7 +127,7 @@ func TestJobWritesReportStorageFailuresAsInternalErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
-	server.updateJob(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "invalid-update"), operator, record.ID)
+	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "invalid-update"), operator, record.ID)
 	if body := decodeAPIError(t, recorder); recorder.Code != http.StatusBadRequest || body.Error.Code != "validation_failed" || body.Error.Details["schedule"] == "" {
 		t.Fatalf("invalid schedule = %d %#v", recorder.Code, body.Error)
 	}
@@ -139,7 +139,7 @@ func TestJobWritesReportStorageFailuresAsInternalErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder = httptest.NewRecorder()
-	server.updateJob(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "recovered-update"), operator, record.ID)
+	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "recovered-update"), operator, record.ID)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("recovered update = %d: %s", recorder.Code, recorder.Body.String())
 	}
@@ -217,7 +217,7 @@ func TestJobProfileSelectionErrorsRemainFieldValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
-	server.updateJob(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "switch-profile"), operator, record.ID)
+	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "switch-profile"), operator, record.ID)
 	if body := decodeAPIError(t, recorder); recorder.Code != http.StatusBadRequest || body.Error.Details["profile"] == "" {
 		t.Fatalf("switch to archived profile = %d %#v", recorder.Code, body.Error)
 	}
@@ -229,7 +229,7 @@ func TestJobProfileSelectionErrorsRemainFieldValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder = httptest.NewRecorder()
-	server.updateJob(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "closed-store"), operator, record.ID)
+	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "closed-store"), operator, record.ID)
 	assertRedactedInternalError(t, "update with a closed store", recorder, "closed-store", "database is closed", &logs)
 }
 
@@ -344,7 +344,7 @@ func TestJobNamesAreBoundedAndRejectControlCharacters(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder = httptest.NewRecorder()
-	server.updateJob(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "rename"), operator, record.ID)
+	server.jobRoute(recorder, jobWriteRequest(http.MethodPut, "/api/v1/jobs/"+record.ID, string(raw), "rename"), operator, record.ID)
 	if body := decodeAPIError(t, recorder); recorder.Code != http.StatusBadRequest || body.Error.Details["name"] == "" {
 		t.Fatalf("over-long rename = %d %#v", recorder.Code, body.Error)
 	}
@@ -378,7 +378,7 @@ func TestMaximumLengthJobNameKeepsEventWritesWorking(t *testing.T) {
 	}
 
 	reset := httptest.NewRecorder()
-	server.resetBaseline(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, record.ID)
+	server.jobRoute(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, record.ID+"/baseline/reset")
 	if reset.Code != http.StatusOK || !strings.Contains(reset.Body.String(), "baseline-reset") {
 		t.Fatalf("maximum-length baseline reset = %d: %s", reset.Code, reset.Body.String())
 	}

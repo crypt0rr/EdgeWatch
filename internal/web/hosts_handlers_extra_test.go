@@ -63,14 +63,16 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 		return recorder
 	}
 
-	if response := call("/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts", func(w http.ResponseWriter, r *http.Request) { server.jobScanHosts(w, r, record.ID, scan.ID) }); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"data_quality":"detailed"`) {
+	if response := call("/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts", func(w http.ResponseWriter, r *http.Request) {
+		server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts")
+	}); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"data_quality":"detailed"`) {
 		t.Fatalf("job scan hosts = %d: %s", response.Code, response.Body.String())
 	}
 	if response := call("/api/v1/scans/"+scan.ID+"/hosts", func(w http.ResponseWriter, r *http.Request) { server.scanHostsRoute(w, r, scan.ID) }); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"hosts"`) {
 		t.Fatalf("scan hosts route = %d: %s", response.Code, response.Body.String())
 	}
 	if response := call("/api/v1/jobs/"+record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.10", func(w http.ResponseWriter, r *http.Request) {
-		server.jobScanHost(w, r, record.ID, scan.ID, "198.51.100.10")
+		server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.10")
 	}); response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"https"`) || !strings.Contains(response.Body.String(), `"expected"`) {
 		t.Fatalf("job scan host = %d: %s", response.Code, response.Body.String())
 	}
@@ -83,7 +85,7 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 	server.RDAP = nil
 	for name, fn := range map[string]func(http.ResponseWriter, *http.Request){
 		"job scan RDAP": func(w http.ResponseWriter, r *http.Request) {
-			server.jobScanHostRDAP(w, r, record.ID, scan.ID, "198.51.100.10")
+			server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.10/rdap")
 		},
 		"scan RDAP": func(w http.ResponseWriter, r *http.Request) { server.scanHostRDAPRoute(w, r, scan.ID, "198.51.100.10") },
 		"baseline RDAP": func(w http.ResponseWriter, r *http.Request) {
@@ -98,13 +100,13 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 
 	for name, fn := range map[string]func(http.ResponseWriter, *http.Request){
 		"missing scan host": func(w http.ResponseWriter, r *http.Request) {
-			server.jobScanHost(w, r, record.ID, scan.ID, "198.51.100.11")
+			server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.11")
 		},
 		"invalid scan host": func(w http.ResponseWriter, r *http.Request) {
-			server.jobScanHost(w, r, record.ID, scan.ID, "not-an-ip")
+			server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/not-an-ip")
 		},
 		"missing scan RDAP": func(w http.ResponseWriter, r *http.Request) {
-			server.jobScanHostRDAP(w, r, record.ID, scan.ID, "198.51.100.11")
+			server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts/198.51.100.11/rdap")
 		},
 		"missing baseline RDAP": func(w http.ResponseWriter, r *http.Request) {
 			server.jobBaselineHostRDAP(w, r, record.ID, "198.51.100.11")
@@ -120,7 +122,9 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 		"bad open filter": "/api/v1/jobs/" + record.ID + "/scans/" + scan.ID + "/hosts?has_open_ports=maybe",
 		"bad protocol":    "/api/v1/jobs/" + record.ID + "/scans/" + scan.ID + "/hosts?protocol=sctp",
 	} {
-		response := call(path, func(w http.ResponseWriter, r *http.Request) { server.jobScanHosts(w, r, record.ID, scan.ID) })
+		response := call(path, func(w http.ResponseWriter, r *http.Request) {
+			server.jobRoute(w, r, store.Session{}, record.ID+"/scans/"+scan.ID+"/hosts")
+		})
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("%s status = %d: %s", name, response.Code, response.Body.String())
 		}

@@ -35,7 +35,7 @@ func TestScannerProfileRoutesUseTheSessionTenant(t *testing.T) {
 	if err := server.applySelectedScannerProfile(ctx, own, &pinnedA, false, false); err != nil {
 		t.Fatal(err)
 	}
-	jobA, err := db.CreateJob(ctx, pinnedA)
+	jobA, err := own.CreateJob(ctx, pinnedA)
 	if err != nil {
 		t.Fatal(err)
 	}

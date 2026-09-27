@@ -132,9 +132,12 @@ function platformAccount(overrides: Record<string, unknown>) {
  * Install a deterministic API surface for browser acceptance tests. The
  * fixture intentionally models the same role/permission contract as the Go
  * authorization table and exposes mutation failures on demand so every
- * high-risk console flow has a browser-level error path.
+ * high-risk console flow has a browser-level error path. With businessUnits
+ * false, a platform administrator is served as while
+ * experimental.business_units is off: its session has no scope and lists
+ * only account.self, and the platform routes are refused.
  */
-export async function mockConsole(page: Page, role: ConsoleRole = 'administrator'): Promise<ConsoleMockControls> {
+export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', { businessUnits = true }: { businessUnits?: boolean } = {}): Promise<ConsoleMockControls> {
   let incidents: any[] = [{
     job_id: 'job-1',
     job: 'fixture-job',
@@ -205,9 +208,17 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/setup/status') { await json({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 } }); return }
     if (path === '/auth/session') {
       // A platform administrator's session names the platform console, as
-      // the server's does while business units are on.
-      const scope = role === 'platform_admin' ? { scope: 'platform', unit: null, multi_unit: true } : {}
-      await json({ user_id: `user-${role}`, username: role === 'administrator' ? 'admin' : role === 'platform_admin' ? 'platform' : role, display_name: role, role, permissions: rolePermissions[role], csrf_token: 'fixture-csrf', totp_enabled: role === 'platform_admin', password_requirements: { minimum_length: 12 }, ...scope })
+      // the server's does while business units are on. While they are off it
+      // has no scope and holds only its own account's self-service.
+      const scope = role === 'platform_admin' && businessUnits ? { scope: 'platform', unit: null, multi_unit: true } : {}
+      const permissions = role === 'platform_admin' && !businessUnits ? ['account.self'] : rolePermissions[role]
+      await json({ user_id: `user-${role}`, username: role === 'administrator' ? 'admin' : role === 'platform_admin' ? 'platform' : role, display_name: role, role, permissions, csrf_token: 'fixture-csrf', totp_enabled: role === 'platform_admin', password_requirements: { minimum_length: 12 }, ...scope })
+      return
+    }
+    if (!businessUnits && path.startsWith('/platform/')) {
+      // The platform routes do not exist while business units are off.
+      record('platform-data', `${method} ${path}`)
+      await json({ error: { code: 'forbidden', message: 'your account is not allowed to perform this action', details: { permission: 'route' } } }, 403)
       return
     }
     if (role === 'platform_admin' && !path.startsWith('/platform/') && !path.startsWith('/auth/')) {

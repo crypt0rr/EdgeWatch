@@ -138,6 +138,25 @@ func (budget probeBudget) limits(job config.Job) (nmap, naabu int64) {
 	return budget.nmap, budget.naabu
 }
 
+// TenantCapacityLimits returns the scan capacity that applies to the jobs of
+// the tenant of ts, as the scheduler enforces it: the deployment's scan
+// slots and probe budgets, each lowered to the tenant's own setting where
+// that is lower. A tenant without settings gets the deployment's. The
+// high-cost ceiling is not among them. No limits are returned with an
+// error.
+func (a *App) TenantCapacityLimits(ctx context.Context, ts *store.TenantStore) (store.CapacityLimits, error) {
+	capacity, err := ts.Capacity(ctx)
+	if err != nil {
+		return store.CapacityLimits{}, err
+	}
+	budget := a.deploymentProbeBudget().forTenant(capacity)
+	limits := store.CapacityLimits{MaxConcurrentScans: a.Config.Scheduler.MaxConcurrent, MaxProbeCount: budget.nmap, MaxNaabuProbeCount: budget.naabu}
+	if capacity.MaxConcurrentScans != nil {
+		limits.MaxConcurrentScans = slotLimit(limits.MaxConcurrentScans, *capacity.MaxConcurrentScans)
+	}
+	return limits, nil
+}
+
 // tenantProbeBudget reads the probe budget of the tenant of ts: the
 // deployment's budget, lowered to the tenant's settings. A failure wraps
 // ErrProbeBudgetUnavailable, and no budget is returned with it.

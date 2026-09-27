@@ -38,7 +38,8 @@ func (s *Server) businessUnitsEnabled() bool {
 // offeredPermissions returns the permissions that the deployment's routes
 // grant: while experimental.business_units is off, those that only the
 // business unit routes grant are left out, so a single-unit installation
-// lists exactly what it did before.
+// lists exactly what it did before, and a platform administrator lists only
+// account.self.
 func (s *Server) offeredPermissions(permissions []string) []string {
 	if s.businessUnitsEnabled() {
 		return permissions

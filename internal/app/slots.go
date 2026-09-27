@@ -197,16 +197,22 @@ func (p *slotPool) CapacitySnapshot() slotSnapshot {
 	return snapshot
 }
 
-// limitLocked returns the most slots key may hold: its cap when that is set
-// and below the global capacity, otherwise the global capacity.
+// limitLocked returns the most slots key may hold; see slotLimit.
 func (p *slotPool) limitLocked(key string) int {
-	limit := p.capacity
-	if p.capFor != nil {
-		if keyCap := p.capFor(key); keyCap > 0 && keyCap < limit {
-			limit = keyCap
-		}
+	if p.capFor == nil {
+		return p.capacity
 	}
-	return limit
+	return slotLimit(p.capacity, p.capFor(key))
+}
+
+// slotLimit returns the most slots a key may hold under the global capacity
+// and the key's cap: the cap when it is set (above 0) and below the
+// capacity, otherwise the capacity.
+func slotLimit(capacity, keyCap int) int {
+	if keyCap > 0 && keyCap < capacity {
+		return keyCap
+	}
+	return capacity
 }
 
 // dispatchLocked grants free slots, one at a time, to the head waiter of the

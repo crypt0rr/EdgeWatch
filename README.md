@@ -621,7 +621,10 @@ recovery path, and the account then enrols again.
   unit's scan slots and its Nmap and Naabu probe budgets below those limits,
   or keep the deployment's setting. A slot cap is a limit, not a reservation:
   free slots go in turn to the units that have queued scans, up to each
-  unit's cap. The high-cost ceiling is the most probes that a job approved
+  unit's cap. A unit's **Overview** shows its own limit, the cap where it has
+  one and the deployment's setting otherwise, as "N scans at a time", and
+  the API's status reports the unit's own slots and probe budgets the same
+  way. The high-cost ceiling is the most probes that a job approved
   for high-cost work may send. A new unit's ceiling starts at the lower of
   the deployment's two probe budgets, so such an approval raises nothing
   until a platform administrator raises the ceiling. The default unit keeps
@@ -664,7 +667,9 @@ their jobs keep working, stored capacity caps keep applying, a deletion in
 progress completes, and administrators still need TOTP while more than one
 unit exists. The platform console, the platform setup, the unit audit,
 `--tenant`, and the /public/<slug> pages are unavailable until the flag is
-on again.
+on again. A platform administrator can still sign in, but its session holds
+only its own account's settings, and the console shows it only a notice that
+business units are turned off, with sign-out.
 
 ### Limits
 

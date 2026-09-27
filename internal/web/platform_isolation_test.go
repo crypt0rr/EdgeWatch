@@ -491,6 +491,59 @@ func TestBusinessUnitsOffKeepsSessionResponses(t *testing.T) {
 	}
 }
 
+// With business units off, a platform administrator holds only its own
+// account's self-service. The session and sign-in responses list account.self
+// alone, every business unit route and the unit status are refused to it
+// like an unknown route, and its own account's routes keep working. Turning
+// the flag on again lists the platform permissions.
+func TestPlatformAdministratorHoldsOnlyItsAccountWhenOff(t *testing.T) {
+	server, accounts := newRouteMatrixSessions(t)
+	platform := accounts[3]
+	if platform.role != store.RolePlatformAdmin {
+		t.Fatalf("fixture account 3 = %s", platform.role)
+	}
+	selfService := toAnySlice([]string{auth.PermissionAccountSelf})
+	response := callAPI(t, server, platform, http.MethodGet, "/auth/session", "")
+	expectResponse(t, response, http.StatusOK, "platform session", nil)
+	payload, keys := sessionKeys(t, response.Body.Bytes())
+	if payload["role"] != store.RolePlatformAdmin || !reflect.DeepEqual(payload["permissions"], selfService) || slices.Contains(keys, "scope") {
+		t.Fatalf("platform session with business units off = %s", response.Body.String())
+	}
+	login := httptest.NewRequest(http.MethodPost, consoleAPIBase+"/auth/login", strings.NewReader(`{"username":"platform","password":"platform administrator password"}`))
+	login.RemoteAddr = "127.0.0.1:9000"
+	login.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	server.api(recorder, login)
+	if loginPayload, _ := sessionKeys(t, recorder.Body.Bytes()); recorder.Code != http.StatusOK || !reflect.DeepEqual(loginPayload["permissions"], selfService) {
+		t.Fatalf("platform sign-in with business units off = %d %s", recorder.Code, recorder.Body.String())
+	}
+	var checked int
+	for _, route := range apiRoutes {
+		if !route.BusinessUnits || route.Access == routeUnauthenticated {
+			continue
+		}
+		for _, csrf := range []bool{false, true} {
+			got := serveRouteMatrixRequest(t, server.api, route.Method, routeMatrixTarget(route), &platform, csrf, "")
+			unknown := serveRouteMatrixRequest(t, server.api, route.Method, consoleAPIBase+"/unknown-route", &platform, csrf, "")
+			if got.status != unknown.status || got.body != unknown.body {
+				t.Errorf("%s as a platform administrator (csrf %t) with business units off = %d %s, want the unknown route's %d %s", routeInventoryName(route), csrf, got.status, got.body, unknown.status, unknown.body)
+			}
+		}
+		checked++
+	}
+	if checked == 0 {
+		t.Fatal("no platform route was checked")
+	}
+	expectResponse(t, callAPI(t, server, platform, http.MethodGet, "/status", ""), http.StatusForbidden, "platform status", nil)
+	expectResponse(t, callAPI(t, server, platform, http.MethodPut, "/auth/display-name", `{"display_name":"Platform Root"}`), http.StatusOK, "platform display name", nil)
+
+	enableBusinessUnits(server)
+	payload, _ = sessionKeys(t, callAPI(t, server, platform, http.MethodGet, "/auth/session", "").Body.Bytes())
+	if !reflect.DeepEqual(payload["permissions"], toAnySlice(auth.PermissionsForRole(store.RolePlatformAdmin))) || payload["scope"] != "platform" {
+		t.Fatalf("platform session with business units on = %v", payload)
+	}
+}
+
 func toAnySlice(values []string) []any {
 	out := make([]any, 0, len(values))
 	for _, value := range values {

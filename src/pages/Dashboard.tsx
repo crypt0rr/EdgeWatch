@@ -28,7 +28,10 @@ export function Dashboard() {
   const activeJobs = jobs.data?.jobs.filter(j => j.enabled && !j.archived).length ?? 0
   const notificationCount = setup.data?.notification_destinations ?? 0
   const displayName = setup.data?.display_name ?? setup.data?.username ?? 'admin'
-  const policy = setup.data?.retention ? `Retention ${formatRetention(setup.data.retention)} · ${setup.data.max_concurrent_scans ?? 1} scan${setup.data.max_concurrent_scans === 1 ? '' : 's'} at a time.` : ''
+  // The scan slots are the unit's own limit. The status leaves them out when
+  // they cannot be read, and the line then names only the retention.
+  const slots = setup.data?.max_concurrent_scans
+  const policy = setup.data?.retention ? `Retention ${formatRetention(setup.data.retention)}${slots === undefined ? '' : ` · ${slots} scan${slots === 1 ? '' : 's'} at a time`}.` : ''
   const telemetry = setup.data?.telemetry
   const jobsMetricState = metricState(jobs)
   const scansMetricState = metricState(scans, canReadScans && !!session.data)

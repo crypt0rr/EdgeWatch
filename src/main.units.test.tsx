@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { adminStatus, getPublicDashboard, getPublicDashboardConfig, getSession, listHosts, listIncidents, listJobs, listUnits, platformStatus, recordActivity, setupStatus, unitAudit } from './api'
@@ -147,5 +147,46 @@ describe('business units in the console', () => {
     renderApp('/platform/units')
     expect(await screen.findByRole('heading', { name: 'Set up an authenticator' })).toBeInTheDocument()
     expect(listUnits).not.toHaveBeenCalled()
+  })
+
+  it('gives a platform administrator only a notice and sign-out while business units are off', async () => {
+    // Business units off: the session has no scope, unit, or multi_unit, and
+    // lists only the account's self-service.
+    const { scope: _scope, unit: _unit, multi_unit: _multiUnit, ...offSession } = platformSession({ permissions: ['account.self'] })
+    vi.mocked(getSession).mockResolvedValue(offSession)
+    for (const route of ['/platform/units', '/jobs', '/']) {
+      const onLogout = vi.fn(async () => {})
+      const view = renderWithProviders(<><ProtectedApp onLogout={onLogout} /><CurrentPath /></>, { route: [route] })
+      expect(await screen.findByRole('heading', { name: 'Business units are turned off' })).toBeInTheDocument()
+      expect(screen.getByText('Morgan Reyes')).toBeInTheDocument()
+      expect(screen.getByTestId('current-path')).toHaveTextContent(new RegExp(`^${route}$`))
+      expect(screen.queryByRole('complementary', { name: 'Primary navigation', hidden: true })).not.toBeInTheDocument()
+      expect(screen.queryByRole('link')).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
+      expect(onLogout).toHaveBeenCalledTimes(1)
+      view.unmount()
+    }
+    for (const request of [listIncidents, listJobs, adminStatus, listUnits, platformStatus, recordActivity]) expect(request).not.toHaveBeenCalled()
+    expect(EventSourceStub.instances).toBe(0)
+  })
+
+  it('redirects a session without jobs.read to a page it can open, and stops there', async () => {
+    const locations: string[] = []
+    function LocationLog() {
+      const location = useLocation()
+      locations.push(`${location.pathname}#${location.key}`)
+      return null
+    }
+    vi.mocked(getSession).mockResolvedValue(unitAdministrator({ role: 'operator', permissions: ['account.self'] }))
+    for (const route of ['/jobs', '/', '/incidents', '/unknown']) {
+      locations.length = 0
+      const view = renderWithProviders(<><ProtectedApp onLogout={async () => {}} /><CurrentPath /><LocationLog /></>, { route: [route] })
+      expect(await screen.findByRole('heading', { name: 'Security' })).toBeInTheDocument()
+      expect(screen.getByTestId('current-path')).toHaveTextContent('/security')
+      // One navigation from the requested page to Security, and no further.
+      expect(new Set(locations).size).toBe(2)
+      view.unmount()
+    }
+    expect(listJobs).not.toHaveBeenCalled()
   })
 })

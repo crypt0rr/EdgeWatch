@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
+	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -329,6 +330,61 @@ func TestPlatformUnitCapacity(t *testing.T) {
 	expectError(t, f.call(t, actorPlatform, http.MethodGet, "/platform/units/00000000-0000-0000-0000-00000000dead/capacity", ""), http.StatusNotFound, "not_found", "read capacity of an unknown unit")
 	if !containsRecord(auditRecords(t, f.db, f.unitB), "tenant.capacity_changed/"+store.AuditActorPlatform+"/") {
 		t.Fatalf("unit B audit has no capacity change: %v", auditRecords(t, f.db, f.unitB))
+	}
+}
+
+// A unit's status reports the scan capacity that the scheduler enforces for
+// the unit: its own caps where it has them, the deployment's settings
+// otherwise. A unit without caps reports exactly the deployment's settings,
+// with one unit or several, and the caps keep applying, and are reported,
+// with business units off. A viewer's status still has no capacity.
+func TestUnitStatusReportsTheUnitsCapacity(t *testing.T) {
+	statusCapacity := func(t *testing.T, server *Server, account routeMatrixSession) store.CapacityLimits {
+		t.Helper()
+		var status struct {
+			Slots  *int   `json:"max_concurrent_scans"`
+			Probes *int64 `json:"max_probe_count"`
+			Naabu  *int64 `json:"max_naabu_probe_count"`
+		}
+		response := callAPI(t, server, account, http.MethodGet, "/status", "")
+		expectResponse(t, response, http.StatusOK, "status", &status)
+		if status.Slots == nil || status.Probes == nil || status.Naabu == nil {
+			t.Fatalf("status without capacity: %s", response.Body.String())
+		}
+		return store.CapacityLimits{MaxConcurrentScans: *status.Slots, MaxProbeCount: *status.Probes, MaxNaabuProbeCount: *status.Naabu}
+	}
+	f := newPlatformFixture(t)
+	scheduler := &f.server.App.Config.Scheduler
+	scheduler.MaxProbeCount, scheduler.MaxNaabuProbeCount = config.DefaultMaxProbeCount, config.DefaultNaabuMaxProbeCount
+	deployment := store.CapacityLimits{MaxConcurrentScans: scheduler.MaxConcurrent, MaxProbeCount: scheduler.MaxProbeCount, MaxNaabuProbeCount: scheduler.MaxNaabuProbeCount}
+	for _, actor := range []string{actorAdminA, actorOperatorA, actorAdminB} {
+		if got := statusCapacity(t, f.server, f.sessions[actor]); got != deployment {
+			t.Errorf("capacity as %s without caps = %+v, want %+v", actor, got, deployment)
+		}
+	}
+	expectResponse(t, f.call(t, actorPlatform, http.MethodPatch, "/platform/units/"+f.unitB+"/capacity", `{"max_concurrent_scans":1,"max_probe_count":1000,"max_naabu_probe_count":3000}`), http.StatusOK, "cap unit B", nil)
+	capped := store.CapacityLimits{MaxConcurrentScans: 1, MaxProbeCount: 1000, MaxNaabuProbeCount: 3000}
+	for _, businessUnits := range []bool{true, false} {
+		f.server.App.Config.Experimental.BusinessUnits = businessUnits
+		if got := statusCapacity(t, f.server, f.sessions[actorAdminB]); got != capped {
+			t.Errorf("capacity of capped unit B with business units on %t = %+v, want %+v", businessUnits, got, capped)
+		}
+		if got := statusCapacity(t, f.server, f.sessions[actorAdminA]); got != deployment {
+			t.Errorf("capacity of unit A beside capped unit B with business units on %t = %+v, want %+v", businessUnits, got, deployment)
+		}
+	}
+	if body := f.call(t, actorViewerA, http.MethodGet, "/status", "").Body.String(); strings.Contains(body, "max_concurrent_scans") || strings.Contains(body, "probe_count") {
+		t.Fatalf("viewer status = %s", body)
+	}
+
+	server, _, _ := newUsersTestServer(t)
+	server.App.Config.Scheduler = config.Scheduler{MaxConcurrent: 3, MaxProbeCount: 4_000_000, MaxNaabuProbeCount: 30_000_000}
+	admin := signIn(t, server, store.RoleAdministrator, "admin", "administrator password", "")
+	response := callAPI(t, server, admin, http.MethodGet, "/status", "")
+	for _, field := range []string{`"max_concurrent_scans":3,`, `"max_probe_count":4000000,`, `"max_naabu_probe_count":30000000,`} {
+		if !strings.Contains(response.Body.String(), field) {
+			t.Errorf("single-unit status has no %s: %s", field, response.Body.String())
+		}
 	}
 }
 

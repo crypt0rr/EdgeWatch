@@ -47,6 +47,7 @@ const frontendReport = (overrides = {}) => {
     'src/pages/platform/PlatformNotifications.tsx',
     'src/pages/platform/PlatformShell.tsx',
     'src/pages/platform/PlatformStatus.tsx',
+    'src/pages/platform/PlatformUnavailable.tsx',
     'src/pages/platform/UnitAccounts.tsx',
     'src/pages/platform/UnitDetail.tsx',
     'src/pages/platform/Units.tsx',

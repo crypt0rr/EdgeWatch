@@ -84,7 +84,10 @@ route of a unit's console refuses it except its own account's password,
 TOTP, session, and sign-out routes. The platform console's API, under
 `/api/v1/platform/`, and the unit audit, `/api/v1/audit`, exist only while
 the flag is on; otherwise every request to them is refused exactly like an
-unknown route. Only a platform administrator reaches the platform routes,
+unknown route. With the flag off, a platform administrator can still sign
+in, but its session holds only its own account's self-service, and the
+console shows it only a notice that business units are turned off, with
+sign-out. Only a platform administrator reaches the platform routes,
 and they never return a unit's data: a unit appears with its name, slug,
 state, and counts of its accounts, administrators, jobs, and scan slots in
 use; its accounts as summaries without credentials; and its capacity as
@@ -205,11 +208,13 @@ Some signals cross units by design:
 - Behind a proxy that is not listed in `web.trusted_proxies`, the shared
   sign-in cooldown applies to the accounts of every unit.
 
-Other signals are closed. While the flag is on and more than one unit
-exists, a unit's status leaves out the deployment-wide live-update counters.
-A unit's status counts, notification totals, and telemetry cover its own rows
-only, the Hosts view keeps each unit's newest observation of an address
-apart, and a public slug does not reveal whether a unit has it.
+Other signals are closed. Once more than one unit exists, a unit's status
+leaves out the deployment-wide live-update counters, whether the flag is on
+or off, and it leaves them out too when the units cannot be counted. A
+unit's status counts, notification totals, and telemetry cover its own rows
+only, its scan slots and probe budgets are its own limits, the Hosts view
+keeps each unit's newest observation of an address apart, and a public slug
+does not reveal whether a unit has it.
 
 ## Live-update streams and session revocation
 
@@ -256,8 +261,8 @@ from gaps in its event IDs that other units received updates, but not what
 they were, and a burst in another unit can shorten its replay window, after
 which a reconnecting browser receives a full-refresh marker instead. The
 deployment-wide replay counters (`live_updates` in `/api/v1/status`) are
-left out of a unit's status while business units are on and more than one
-unit exists.
+left out of a unit's status once more than one unit exists, whether business
+units are on or off, and when the units cannot be counted.
 
 Other authenticated API reads, including the status and page-polling requests,
 also validate sessions without refreshing their idle timestamp. Actual browser

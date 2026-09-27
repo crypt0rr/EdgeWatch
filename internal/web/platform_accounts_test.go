@@ -127,12 +127,15 @@ func assertOnlySelfService(t *testing.T, server *Server, account *routeMatrixSes
 // refused to a platform administrator, which holds no unit permission, with
 // business units off and on; only its own account's self-service routes,
 // and with business units on its platform console's routes, are open to
-// it.
+// it. Its session lists the platform permissions only while business units
+// are on; with them off it lists only its own account's self-service.
 func TestRouteInventoryDeniesPlatformAdministratorsUnitData(t *testing.T) {
 	for _, businessUnits := range []bool{false, true} {
 		server, accounts := newRouteMatrixSessions(t)
+		wantPermissions := []string{auth.PermissionAccountSelf}
 		if businessUnits {
 			enableBusinessUnits(server)
+			wantPermissions = auth.PermissionsForRole(store.RolePlatformAdmin)
 		}
 		platform := &accounts[len(accounts)-1]
 		if platform.role != store.RolePlatformAdmin || platform.session.TenantID != "" {
@@ -140,7 +143,7 @@ func TestRouteInventoryDeniesPlatformAdministratorsUnitData(t *testing.T) {
 		}
 		assertOnlySelfService(t, server, platform)
 		payload := readSession(t, server, *platform)
-		if payload.Role != store.RolePlatformAdmin || !reflect.DeepEqual(payload.Permissions, auth.PermissionsForRole(store.RolePlatformAdmin)) || payload.Enrollment != nil {
+		if payload.Role != store.RolePlatformAdmin || !reflect.DeepEqual(payload.Permissions, wantPermissions) || payload.Enrollment != nil {
 			t.Fatalf("platform administrator session with business units %t = %+v", businessUnits, payload)
 		}
 	}

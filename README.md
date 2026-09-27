@@ -674,7 +674,23 @@ docker compose exec edgewatch edgewatch history \
 # Test configured notification delivery
 docker compose exec edgewatch edgewatch notify test \
   --config /etc/edgewatch/config.yaml
+
+# With the experimental business units on, act on one unit by its slug
+docker compose exec edgewatch edgewatch status \
+  --config /etc/edgewatch/config.yaml --tenant UNIT_SLUG --output json
 ```
+
+`scan`, `status`, `history`, `baseline approve|reset|export`, and `notify test`
+act on the default business unit. With `experimental.business_units` on,
+`--tenant UNIT_SLUG` makes them act on that unit's jobs, scans, baselines, and
+destinations instead, and record their audit entries in that unit. A disabled
+unit can still be read with `status`, `history`, and `baseline export`; the
+other commands refuse it until it is enabled, and every command refuses a unit
+that is being deleted. `admin reset-password` and `admin disable-totp` find the
+account by `--username` in any unit; with business units on they print the
+account's unit and role before they act, and `--tenant UNIT_SLUG` makes them
+stop without a change unless the account belongs to that unit. Every other
+command, and every command while business units are off, refuses `--tenant`.
 
 `health` exits non-zero when migrations or the daemon heartbeat are unhealthy.
 Its `warnings` list actions that do not stop EdgeWatch, such as removing

@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, deleteUnit, disableUnit, enableUnit, getUnit, getUnitCapacity, inviteUnitAdmin, listUnitAccounts, renameUnit, resetUnitAdminPassword, revokeUnitAccountSessions, updateUnitCapacity } from '../../api'
@@ -33,8 +33,11 @@ function row(username: string) {
 
 async function confirmWithPassword(password = 'my-password') {
   const dialog = await screen.findByRole('dialog')
-  fireEvent.change(within(dialog).getByLabelText('Your password'), { target: { value: password } })
-  fireEvent.submit(within(dialog).getByLabelText('Your password').closest('form')!)
+  await act(async () => {
+    fireEvent.change(within(dialog).getByLabelText('Your password'), { target: { value: password } })
+    fireEvent.submit(within(dialog).getByLabelText('Your password').closest('form')!)
+    await Promise.resolve()
+  })
   return dialog
 }
 

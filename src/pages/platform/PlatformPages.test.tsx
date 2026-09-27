@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, createPlatformNotification, deletePlatformNotification, getSession, invitePlatformAdmin, listPlatformAdmins, listPlatformNotifications, listUnits, platformAudit, platformStatus, setPlatformAdminEnabled, updatePlatformNotification, updatePlatformNotificationRouting } from '../../api'
 import type { AuditEntry, NotificationDestination, UserSummary } from '../../api'
@@ -30,8 +30,11 @@ function auditEntry(id: number, overrides: Partial<AuditEntry> = {}): AuditEntry
 
 async function confirmWithPassword(label = 'Your password', password = 'my-password') {
   const dialog = await screen.findByRole('dialog')
-  fireEvent.change(within(dialog).getByLabelText(label), { target: { value: password } })
-  fireEvent.submit(within(dialog).getByLabelText(label).closest('form')!)
+  await act(async () => {
+    fireEvent.change(within(dialog).getByLabelText(label), { target: { value: password } })
+    fireEvent.submit(within(dialog).getByLabelText(label).closest('form')!)
+    await Promise.resolve()
+  })
   return dialog
 }
 
@@ -64,7 +67,10 @@ describe('platform administrators', () => {
     fireEvent.click(within(screen.getByTestId('admin-sam')).getByRole('button', { name: 'Disable' }))
     const dialog = await confirmWithPassword()
     expect(await within(dialog).findByText('the platform keeps at least one enabled platform administrator')).toBeInTheDocument()
-    fireEvent.submit(within(dialog).getByLabelText('Your password').closest('form')!)
+    await act(async () => {
+      fireEvent.submit(within(dialog).getByLabelText('Your password').closest('form')!)
+      await Promise.resolve()
+    })
     await waitFor(() => expect(setPlatformAdminEnabled).toHaveBeenLastCalledWith('acct-sam', false, 3, 'my-password'))
     expect(await screen.findByText('sam disabled and signed out.')).toBeInTheDocument()
     fireEvent.click(within(screen.getByTestId('admin-kim')).getByRole('button', { name: 'Enable' }))
@@ -120,7 +126,10 @@ describe('platform notifications', () => {
     fireEvent.change(screen.getByLabelText(/^Name/), { target: { value: 'Pager' } })
     fireEvent.change(screen.getByLabelText(/^Shoutrrr URL/), { target: { value: 'generic://pager.example.test/hook' } })
     fireEvent.change(screen.getByLabelText(/^Password confirmation/), { target: { value: 'my-password' } })
-    fireEvent.submit(screen.getByLabelText(/^Name/).closest('form')!)
+    await act(async () => {
+      fireEvent.submit(screen.getByLabelText(/^Name/).closest('form')!)
+      await Promise.resolve()
+    })
     await waitFor(() => expect(createPlatformNotification).toHaveBeenCalledWith('Pager', 'generic://pager.example.test/hook', 'my-password', true))
     expect(await screen.findByText(/The URL is stored encrypted and will not be shown again/)).toBeInTheDocument()
 

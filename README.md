@@ -580,10 +580,10 @@ Then invite the unit's first administrator from the unit's **Accounts** tab.
 
 The platform administrator invites and resets only unit administrators, and
 receives each one-time link to pass on. The unit's administrators invite and
-manage its operators and viewers on **Users**, and cannot reach another
-unit's accounts or a platform administrator. Each unit keeps at least one
-enabled administrator. Usernames are unique across every unit and the
-platform.
+manage every account of their unit on **Users**, including further
+administrators, operators, and viewers, and cannot reach another unit's
+accounts or a platform administrator. Each unit keeps at least one enabled
+administrator. Usernames are unique across every unit and the platform.
 
 Once more than one unit exists, counting disabled units and units being
 deleted, every unit administrator and platform administrator must use TOTP.

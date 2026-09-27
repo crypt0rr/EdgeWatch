@@ -97,7 +97,7 @@ func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "notification", "application update notification routing could not be saved", nil)
 		return
 	}
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "notification.changed"})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed"})
 	// Return the normalized, deterministic selector order persisted by the
 	// store so the client and any other administrator sessions converge on the
 	// same representation.
@@ -138,7 +138,7 @@ func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationError(w, err)
 		return
 	}
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "notification.changed", "notification_id": view.ID})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed", "notification_id": view.ID})
 	writeJSON(w, http.StatusCreated, view)
 }
 
@@ -215,7 +215,7 @@ func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationError(w, err)
 		return
 	}
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "notification.changed", "notification_id": id})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed", "notification_id": id})
 	writeJSON(w, http.StatusOK, view)
 }
 
@@ -245,11 +245,11 @@ func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationError(w, err)
 		return
 	}
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "notification.changed", "notification_id": id})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed", "notification_id": id})
 	// The delete also removed the destination from these jobs' routing and
 	// gave each a new revision. Let open editors reload before they save.
 	for _, jobID := range changedJobs {
-		s.broadcastTo(r.Context(), audienceEveryone(), map[string]any{"type": "job.updated", "job_id": jobID})
+		s.broadcastTo(r.Context(), audienceTenant(ts), map[string]any{"type": "job.updated", "job_id": jobID})
 	}
 	writeJSON(w, http.StatusNoContent, nil)
 }

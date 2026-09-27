@@ -27,7 +27,9 @@ const platformDestinationID = "00000000-0000-0000-0000-0000000000f1"
 // its own routing to its own destinations: the default unit's configured
 // selection, and the other unit's routing that was never configured, which
 // takes its every destination. A paused unit gets no copy. Each unit lists
-// its own copy, and the live update carries the platform's copy, once.
+// its own copy, and each copy is published as a live update once, naming
+// its owner, so the web console sends each unit only its own copy and the
+// platform only the platform's.
 func TestUpdateAlertsFanOutToEachBusinessUnit(t *testing.T) {
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
@@ -98,8 +100,12 @@ func TestUpdateAlertsFanOutToEachBusinessUnit(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(live) != 1 || live[0].TenantID != "" {
-		t.Fatalf("live updates = %+v, want the platform's copy once", live)
+	var owners []string
+	for _, event := range live {
+		owners = append(owners, event.TenantID)
+	}
+	if want := []string{"", store.DefaultTenantID, secondTenantID}; !slices.Equal(owners, want) {
+		t.Fatalf("live update owners = %q, want the platform's copy and each active unit's copy once: %q", owners, want)
 	}
 }
 

@@ -72,10 +72,8 @@ type Server struct {
 	publicDashboardBuildFunc func(context.Context, store.PublicDashboard) (publicDashboardResponse, error)
 	publicGen                uint64
 	telemetryMu              sync.Mutex
-	telemetry                *store.DeploymentTelemetry
-	telemetryAt              time.Time
-	telemetryRun             bool
-	telemetryDone            chan struct{}
+	// telemetry caches each tenant's status telemetry by tenant ID.
+	telemetry map[string]*tenantTelemetryCache
 	// writeTimeout bounds ordinary HTTP responses. SSE clears this deadline
 	// explicitly in stream because that endpoint is intentionally long-lived.
 	// It is configurable only for deterministic server tests; production uses
@@ -469,13 +467,14 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "your account is not allowed to perform this action", details)
 		return
 	}
-	// The account's own routes under /auth/ need no tenant. Every other
-	// route reads or changes the data of the account's tenant, and its store
-	// is resolved once, here, from the session. Each handler that reads or
-	// changes tenant data takes this store; handlers never choose a tenant.
-	// A nil store refuses every call.
+	// Recording activity and signing out need no tenant. Every other route
+	// reads or changes the data of the account's tenant, including the
+	// account's own routes under /auth/ that change the account, which
+	// belongs to the tenant. Its store is resolved once, here, from the
+	// session. Each handler that reads or changes tenant data takes this
+	// store; handlers never choose a tenant. A nil store refuses every call.
 	var ts *store.TenantStore
-	if !strings.HasPrefix(path, "/auth/") {
+	if path != "/auth/activity" && path != "/auth/logout" {
 		if ts, ok = s.requestTenant(w, r, session); !ok {
 			return
 		}
@@ -494,23 +493,23 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/auth/logout" && r.Method == http.MethodPost:
 		s.logout(w, r, session)
 	case path == "/auth/display-name" && r.Method == http.MethodPut:
-		s.changeDisplayName(w, r, session)
+		s.changeDisplayName(w, r, session, ts)
 	case path == "/auth/password" && r.Method == http.MethodPut:
-		s.changePassword(w, r, session)
+		s.changePassword(w, r, session, ts)
 	case path == "/auth/totp/setup" && r.Method == http.MethodPost:
-		s.totpSetup(w, r, session)
+		s.totpSetup(w, r, session, ts)
 	case path == "/auth/totp/enable" && r.Method == http.MethodPost:
-		s.totpEnable(w, r, session)
+		s.totpEnable(w, r, session, ts)
 	case path == "/auth/totp/recovery-codes" && r.Method == http.MethodPost:
-		s.totpRecoveryCodes(w, r, session)
+		s.totpRecoveryCodes(w, r, session, ts)
 	case path == "/auth/totp" && r.Method == http.MethodDelete:
-		s.totpDisable(w, r, session)
+		s.totpDisable(w, r, session, ts)
 	case path == "/auth/sessions" && r.Method == http.MethodDelete:
 		action := "user.sessions_revoked"
 		if session.Role == store.RoleAdministrator {
 			action = "admin.sessions_revoked"
 		}
-		if err := s.Auth.Store.DeleteUserSessionsWithAudit(r.Context(), session.UserID, actorAudit(session, action, "all sessions revoked")); err != nil {
+		if err := ts.DeleteUserSessionsWithAudit(r.Context(), session.UserID, actorAudit(session, action, "all sessions revoked")); err != nil {
 			if errors.Is(err, store.ErrAuditUnavailable) {
 				s.revokeSSEUser(session.UserID)
 				s.auditFailure(err, action)

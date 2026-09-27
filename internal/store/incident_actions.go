@@ -374,7 +374,7 @@ func (ts *TenantStore) updateIncidentAction(ctx context.Context, jobID string, d
 			return nil, err
 		}
 	}
-	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

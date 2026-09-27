@@ -852,7 +852,7 @@ func queueEventsTx(ctx context.Context, tx *sql.Tx, events []model.Event, destin
 					}
 					resolved[selector] = resolution
 				}
-				discarded.add(destination, resolution.discardReason, 1)
+				discarded.add(event, destination, resolution.discardReason, 1)
 				key = resolution.key
 			}
 			if key == "" {
@@ -936,11 +936,13 @@ func parseManagedRevision(value string) (int64, bool) {
 	return revision, err == nil && revision >= 1
 }
 
-// managedIntentDiscards counts discarded managed intents per destination and
-// reason, so one event transaction writes one bounded audit entry for each.
-type managedIntentDiscards map[[2]string]int
+// managedIntentDiscards counts discarded managed intents per job, destination
+// and reason, so one event transaction writes one bounded audit entry for
+// each. The job names the tenant whose audit records the discard; an event
+// without a job ID, from config.yaml or the platform, has the empty job.
+type managedIntentDiscards map[[3]string]int
 
-func (d *managedIntentDiscards) add(destination, reason string, count int) {
+func (d *managedIntentDiscards) add(event model.Event, destination, reason string, count int) {
 	if reason == "" || count == 0 {
 		return
 	}
@@ -948,30 +950,45 @@ func (d *managedIntentDiscards) add(destination, reason string, count int) {
 		*d = managedIntentDiscards{}
 	}
 	id := strings.Split(destination, ":")[1]
-	(*d)[[2]string{id, reason}] += count
+	(*d)[[3]string{event.JobID, id, reason}] += count
 }
 
 // audit records discarded intents like the pending deliveries discarded by a
 // credential change. Only the stable destination ID and a count are recorded.
+// The record belongs to the tenant of the event's job, read in the same
+// transaction, since the discard follows that tenant's action or scan. An
+// event without a job ID keeps the default tenant.
 func (d managedIntentDiscards) audit(ctx context.Context, tx *sql.Tx) error {
 	if len(d) == 0 {
 		return nil
 	}
-	keys := make([][2]string, 0, len(d))
+	keys := make([][3]string, 0, len(d))
 	for key := range d {
 		keys = append(keys, key)
 	}
 	sort.Slice(keys, func(i, j int) bool {
-		if keys[i][0] != keys[j][0] {
-			return keys[i][0] < keys[j][0]
+		for part := range keys[i] {
+			if keys[i][part] != keys[j][part] {
+				return keys[i][part] < keys[j][part]
+			}
 		}
-		return keys[i][1] < keys[j][1]
+		return false
 	})
+	tenants := map[string]string{}
 	entries := make([]AuditEntry, 0, len(keys))
 	for _, key := range keys {
+		jobID := key[0]
+		tenant, known := tenants[jobID]
+		if !known && jobID != "" {
+			if err := tx.QueryRowContext(ctx, `SELECT tenant_id FROM jobs WHERE id=?`, jobID).Scan(&tenant); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
+			tenants[jobID] = tenant
+		}
 		entries = append(entries, AuditEntry{
-			Action: "notifications.pending_discarded",
-			Detail: fmt.Sprintf("discarded %d new deliveries for managed notification %s after %s", d[key], key[0], key[1]),
+			Action:   "notifications.pending_discarded",
+			Detail:   fmt.Sprintf("discarded %d new deliveries for managed notification %s after %s", d[key], key[1], key[2]),
+			TenantID: tenant,
 		})
 	}
 	return insertAuditEntries(ctx, tx, entries, time.Now().UTC())
@@ -1316,7 +1333,7 @@ func (ts *TenantStore) resetRuntimeWithAudits(ctx context.Context, jobID, name s
 	if err := discardUnpromotedCyclesTx(ctx, tx, jobID, "baseline reset", time.Now().UTC()); err != nil {
 		return nil, err
 	}
-	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1454,7 +1471,7 @@ func (ts *TenantStore) approveRuntimeWithAudits(ctx context.Context, jobID, name
 	if err := discardUnpromotedCyclesTx(ctx, tx, jobID, "baseline approved", time.Now().UTC()); err != nil {
 		return nil, err
 	}
-	if err := insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, audits, time.Now().UTC()); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {

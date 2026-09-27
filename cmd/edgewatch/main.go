@@ -373,6 +373,13 @@ func adminActionForUser(ctx context.Context, action string, s *store.Store, pass
 	if err != nil {
 		return fmt.Errorf("user %q is not configured", username)
 	}
+	// The host may recover an account of any tenant. The change goes through
+	// the store of the account's own tenant, as the console's would.
+	scope, err := s.TenantScopeByID(ctx, user.TenantID)
+	if err != nil {
+		return fmt.Errorf("user %q is not configured", username)
+	}
+	accounts := s.Tenant(scope)
 	switch action {
 	case "reset-password":
 		if passwordFile == "" {
@@ -395,9 +402,9 @@ func adminActionForUser(ctx context.Context, action string, s *store.Store, pass
 				return adminErr
 			}
 			admin.PasswordHash, admin.UpdatedAt = hash, user.UpdatedAt
-			return s.SaveAdminSecurityWithAudit(ctx, admin, nil, false, true, store.AuditEntry{Action: "admin.password_reset", Detail: "password reset from host CLI", ActorUsername: "host-cli"})
+			return s.SaveAdminSecurityWithAudit(ctx, admin, nil, false, true, store.AuditEntry{Action: "admin.password_reset", Detail: "password reset from host CLI", ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
 		}
-		return s.SaveUserSecurity(ctx, user, nil, false, true, store.AuditEntry{Action: "user.password_reset", Detail: "password reset from host CLI", ActorUsername: "host-cli"})
+		return accounts.SaveUserSecurity(ctx, user, nil, false, true, store.AuditEntry{Action: "user.password_reset", Detail: "password reset from host CLI", ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
 	case "disable-totp":
 		user.TOTPEnabled, user.TOTPSecret, user.UpdatedAt = false, "", time.Now().UTC()
 		if user.ID == store.LegacyAdminUserID {
@@ -406,9 +413,9 @@ func adminActionForUser(ctx context.Context, action string, s *store.Store, pass
 				return adminErr
 			}
 			admin.TOTPEnabled, admin.TOTPSecret, admin.UpdatedAt = false, "", user.UpdatedAt
-			return s.SaveAdminSecurityWithAudit(ctx, admin, []string{}, true, true, store.AuditEntry{Action: "admin.totp_disabled", Detail: "TOTP disabled from host CLI", ActorUsername: "host-cli"})
+			return s.SaveAdminSecurityWithAudit(ctx, admin, []string{}, true, true, store.AuditEntry{Action: "admin.totp_disabled", Detail: "TOTP disabled from host CLI", ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
 		}
-		return s.SaveUserSecurity(ctx, user, []string{}, true, true, store.AuditEntry{Action: "user.totp_disabled", Detail: "TOTP disabled from host CLI", ActorUsername: "host-cli"})
+		return accounts.SaveUserSecurity(ctx, user, []string{}, true, true, store.AuditEntry{Action: "user.totp_disabled", Detail: "TOTP disabled from host CLI", ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
 	default:
 		return errors.New("expected: admin reset-password|disable-totp")
 	}
@@ -693,6 +700,7 @@ func baseline(ctx context.Context, action string, s *store.Store, a *app.App, jo
 				Detail:        record.ID + ":" + scan.ID,
 				ActorUserID:   store.LegacyAdminUserID,
 				ActorUsername: "host-cli",
+				ActorKind:     store.AuditActorHost,
 			})
 		case "reset":
 			events, err = s.ResetRuntimeWithOutboxAndAudit(ctx, record.ID, record.Job.Name, destinations, store.AuditEntry{
@@ -700,6 +708,7 @@ func baseline(ctx context.Context, action string, s *store.Store, a *app.App, jo
 				Detail:        record.ID,
 				ActorUserID:   store.LegacyAdminUserID,
 				ActorUsername: "host-cli",
+				ActorKind:     store.AuditActorHost,
 			})
 		default:
 			return errors.New("expected: baseline approve|reset")

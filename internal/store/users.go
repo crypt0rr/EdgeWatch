@@ -27,17 +27,29 @@ const (
 	RoleReadOnly = RoleViewer
 )
 
+// validUserRoles are the roles of a tenant's account. A platform
+// administrator is a separate account with no tenant, and no tenant's
+// account management creates or grants that role.
 var validUserRoles = map[string]bool{
 	RoleAdministrator: true,
 	RoleOperator:      true,
 	RoleViewer:        true,
 }
 
+// ErrUsernameUnavailable reports that an account already has the username.
+// Usernames are unique across every tenant, and the error does not say
+// which tenant holds the name.
+var ErrUsernameUnavailable = errors.New("username is not available")
+
 // User is the durable identity used by the web console. TOTPSecret is only
 // populated when the local encryption key is available; TOTPSecretStored lets
 // unrelated profile edits preserve an encrypted value when it is locked.
 type User struct {
-	ID               string
+	ID string
+	// TenantID is the account's tenant, as users stores it, and empty for a
+	// platform administrator. UserSummary leaves it out, so no response
+	// names a tenant.
+	TenantID         string
 	Username         string
 	DisplayName      string
 	Role             string
@@ -106,24 +118,42 @@ func NormalizeUsername(username string) (string, error) {
 	return strings.ToLower(username), nil
 }
 
-// GetUser returns the persisted user and decrypted TOTP projection without
-// upgrading ciphertext or otherwise mutating the database. Legacy secret
-// upgrades are handled by the explicit startup migration.
-func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
+// userColumns are the users columns that scanUser reads, in its order.
+const userColumns = `id,COALESCE(tenant_id,''),username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision`
+
+// tenantUserSQL is the ID of the tenant's account with the given ID, or
+// NULL when the tenant has no such account. It takes two arguments, the
+// account ID and the tenant ID. The TenantStore methods name the rows of an
+// account's sessions, invites, and recovery codes through it, so a
+// statement cannot reach another tenant's account even if the check before
+// it were skipped.
+const tenantUserSQL = `(SELECT id FROM users WHERE id=? AND tenant_id=?)`
+
+// scanUser reads a row of userColumns without decrypting the TOTP secret.
+func scanUser(row interface{ Scan(...any) error }) (User, error) {
 	var u User
 	var totp, enabled int
 	var created, updated, lastLogin string
-	err := s.reader().QueryRowContext(ctx, `SELECT id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision FROM users WHERE id=?`, id).
-		Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PasswordHash, &u.TOTPSecretStored, &totp, &enabled, &created, &updated, &lastLogin, &u.Revision)
+	if err := row.Scan(&u.ID, &u.TenantID, &u.Username, &u.DisplayName, &u.Role, &u.PasswordHash, &u.TOTPSecretStored, &totp, &enabled, &created, &updated, &lastLogin, &u.Revision); err != nil {
+		return User{}, err
+	}
+	u.TOTPEnabled, u.Enabled = totp != 0, enabled != 0
+	u.CreatedAt, u.UpdatedAt, u.LastLoginAt = scanTime(created), scanTime(updated), scanTime(lastLogin)
+	return u, nil
+}
+
+// readUser returns the one account that the query of userColumns finds, with
+// its decrypted TOTP projection, without upgrading ciphertext or otherwise
+// mutating the database. Legacy secret upgrades are handled by the explicit
+// startup migration. No account is ErrNotFound.
+func (s *Store) readUser(ctx context.Context, query string, args ...any) (User, error) {
+	u, err := scanUser(s.reader().QueryRowContext(ctx, query, args...))
 	if errors.Is(err, sql.ErrNoRows) {
-		return u, ErrNotFound
+		return User{}, ErrNotFound
 	}
 	if err != nil {
-		return u, err
+		return User{}, err
 	}
-	u.TOTPEnabled = totp != 0
-	u.Enabled = enabled != 0
-	u.CreatedAt, u.UpdatedAt, u.LastLoginAt = scanTime(created), scanTime(updated), scanTime(lastLogin)
 	secret, _, secretErr := s.openTOTPSecretForOwner(u.ID, u.TOTPSecretStored)
 	if secretErr != nil {
 		u.TOTPSecretError = secretErr
@@ -136,24 +166,58 @@ func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
 	return u, nil
 }
 
+// GetUser returns an account of the default tenant.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetUser, or
+// GetAccount before a tenant scope exists.
+func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
+	return s.Tenant(DefaultTenantScope()).GetUser(ctx, id)
+}
+
+// GetUser returns the tenant's account with the given ID and its decrypted
+// TOTP projection. Another tenant's account is ErrNotFound, as an unknown
+// ID is.
+func (ts *TenantStore) GetUser(ctx context.Context, id string) (User, error) {
+	if err := ts.ready(); err != nil {
+		return User{}, err
+	}
+	return ts.store.readUser(ctx, `SELECT `+userColumns+` FROM users WHERE id=? AND tenant_id=?`, id, ts.scope.id)
+}
+
+// GetAccount returns the account with the given ID, whatever its tenant,
+// with the tenant in User.TenantID. It stays global for authentication,
+// which knows the account from a verified session, sign-in, or password
+// confirmation before any tenant scope exists. Managing accounts goes
+// through TenantStore.GetUser, which finds only the tenant's own.
+func (s *Store) GetAccount(ctx context.Context, id string) (User, error) {
+	return s.readUser(ctx, `SELECT `+userColumns+` FROM users WHERE id=?`, id)
+}
+
+// GetUserByUsername returns the account with the username, whatever its
+// tenant, with the tenant in User.TenantID. It stays global: sign-in and the
+// host CLI name an account before any tenant scope exists, and usernames are
+// unique across tenants.
 func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, error) {
 	normalized, err := NormalizeUsername(username)
 	if err != nil {
 		return User{}, err
 	}
-	var id string
-	err = s.reader().QueryRowContext(ctx, `SELECT id FROM users WHERE username=? COLLATE NOCASE`, normalized).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return User{}, ErrNotFound
-	}
-	if err != nil {
-		return User{}, err
-	}
-	return s.GetUser(ctx, id)
+	return s.readUser(ctx, `SELECT `+userColumns+` FROM users WHERE username=? COLLATE NOCASE`, normalized)
 }
 
+// ListUsers lists the default tenant's accounts.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListUsers.
 func (s *Store) ListUsers(ctx context.Context) ([]UserSummary, error) {
-	rows, err := s.reader().QueryContext(ctx, `SELECT id,username,display_name,role,password_hash,enabled,totp_enabled,created_at,updated_at,last_login_at,revision FROM users ORDER BY username COLLATE NOCASE`)
+	return s.Tenant(DefaultTenantScope()).ListUsers(ctx)
+}
+
+// ListUsers lists the tenant's accounts by username.
+func (ts *TenantStore) ListUsers(ctx context.Context) ([]UserSummary, error) {
+	if err := ts.ready(); err != nil {
+		return nil, err
+	}
+	rows, err := ts.store.reader().QueryContext(ctx, `SELECT id,username,display_name,role,password_hash,enabled,totp_enabled,created_at,updated_at,last_login_at,revision FROM users WHERE tenant_id=? ORDER BY username COLLATE NOCASE`, ts.scope.id)
 	if err != nil {
 		return nil, err
 	}
@@ -174,8 +238,19 @@ func (s *Store) ListUsers(ctx context.Context) ([]UserSummary, error) {
 	return result, rows.Err()
 }
 
+// CreateUser creates an account in the default tenant.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.CreateUser.
 func (s *Store) CreateUser(ctx context.Context, u User, audit AuditEntry) (User, error) {
-	return s.createUser(ctx, u, nil, audit)
+	return s.Tenant(DefaultTenantScope()).CreateUser(ctx, u, audit)
+}
+
+// CreateUser creates an account in the tenant, with its audit record.
+func (ts *TenantStore) CreateUser(ctx context.Context, u User, audit AuditEntry) (User, error) {
+	if err := ts.ready(); err != nil {
+		return User{}, err
+	}
+	return ts.createUser(ctx, u, nil, audit)
 }
 
 type userInviteRecord struct {
@@ -184,20 +259,35 @@ type userInviteRecord struct {
 	expires time.Time
 }
 
+// CreateUserWithInvite creates a pending account in the default tenant.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.CreateUserWithInvite.
+func (s *Store) CreateUserWithInvite(ctx context.Context, u User, idHash string, created, expires time.Time, audit AuditEntry) (User, error) {
+	return s.Tenant(DefaultTenantScope()).CreateUserWithInvite(ctx, u, idHash, created, expires, audit)
+}
+
 // CreateUserWithInvite commits the pending account, one-time activation
 // invite, and audit entry together. This avoids leaving an unusable account
 // behind when invite persistence or the required audit write fails.
-func (s *Store) CreateUserWithInvite(ctx context.Context, u User, idHash string, created, expires time.Time, audit AuditEntry) (User, error) {
+func (ts *TenantStore) CreateUserWithInvite(ctx context.Context, u User, idHash string, created, expires time.Time, audit AuditEntry) (User, error) {
+	if err := ts.ready(); err != nil {
+		return User{}, err
+	}
 	if strings.TrimSpace(idHash) == "" {
 		return User{}, errors.New("activation token hash is required")
 	}
 	if !expires.After(created) {
 		return User{}, errors.New("activation token expiry must be after creation")
 	}
-	return s.createUser(ctx, u, &userInviteRecord{idHash: idHash, created: created, expires: expires}, audit)
+	return ts.createUser(ctx, u, &userInviteRecord{idHash: idHash, created: created, expires: expires}, audit)
 }
 
-func (s *Store) createUser(ctx context.Context, u User, invite *userInviteRecord, audit AuditEntry) (User, error) {
+// createUser creates the account in the store's tenant. Only the roles of a
+// tenant's account are accepted, so a platform administrator is never
+// created here. Usernames are unique across tenants; a name that any
+// account holds is ErrUsernameUnavailable, which does not say where.
+func (ts *TenantStore) createUser(ctx context.Context, u User, invite *userInviteRecord, audit AuditEntry) (User, error) {
 	if u.ID == "" {
 		u.ID = uuid.NewString()
 	}
@@ -212,6 +302,7 @@ func (s *Store) createUser(ctx context.Context, u User, invite *userInviteRecord
 		return User{}, err
 	}
 	u.Username = username
+	u.TenantID = ts.scope.id
 	if strings.TrimSpace(u.DisplayName) == "" {
 		u.DisplayName = username
 	}
@@ -230,25 +321,25 @@ func (s *Store) createUser(ctx context.Context, u User, invite *userInviteRecord
 		// explicit to both the API and the administration UI.
 		u.Enabled = false
 	}
-	stored, err := s.userTOTPForSave(u)
+	stored, err := ts.store.userTOTPForSave(u)
 	if err != nil {
 		return User{}, err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return User{}, err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,tenant_id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, u.ID, DefaultTenantID, u.Username, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.CreatedAt.UTC().Format(time.RFC3339Nano), u.UpdatedAt.UTC().Format(time.RFC3339Nano), "", u.Revision); err != nil {
-		return User{}, err
+	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,tenant_id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, u.ID, ts.scope.id, u.Username, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.CreatedAt.UTC().Format(time.RFC3339Nano), u.UpdatedAt.UTC().Format(time.RFC3339Nano), "", u.Revision); err != nil {
+		return User{}, usernameConflict(err)
 	}
 	if invite != nil {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at,used_at) VALUES(?,?,?,?,?,NULL)`, invite.idHash, u.ID, audit.ActorUserID, invite.created.UTC().Format(time.RFC3339Nano), invite.expires.UTC().Format(time.RFC3339Nano)); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at,used_at) SELECT ?,id,?,?,?,NULL FROM users WHERE id=? AND tenant_id=?`, invite.idHash, audit.ActorUserID, invite.created.UTC().Format(time.RFC3339Nano), invite.expires.UTC().Format(time.RFC3339Nano), u.ID, ts.scope.id); err != nil {
 			return User{}, err
 		}
 	}
 	if audit.Action != "" {
-		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
+		if err := ts.insertAuditEntry(ctx, tx, audit, time.Now().UTC()); err != nil {
 			return User{}, err
 		}
 	}
@@ -259,7 +350,31 @@ func (s *Store) createUser(ctx context.Context, u User, invite *userInviteRecord
 	return u, nil
 }
 
+// usernameConflict returns ErrUsernameUnavailable for a write that the
+// unique username refused, and any other error unchanged. SQLite's own
+// message names only the column, but the store's error names neither the
+// column nor the account that holds the name.
+func usernameConflict(err error) error {
+	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed: users.username") {
+		return ErrUsernameUnavailable
+	}
+	return err
+}
+
+// UpdateUser updates an account of the default tenant.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.UpdateUser.
 func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, audit AuditEntry) error {
+	return s.Tenant(DefaultTenantScope()).UpdateUser(ctx, u, revokeSessions, audit)
+}
+
+// UpdateUser updates the tenant's account, at its revision when the value
+// names one. Another tenant's account is ErrNotFound, as an unknown ID is,
+// and nothing is written.
+func (ts *TenantStore) UpdateUser(ctx context.Context, u User, revokeSessions bool, audit AuditEntry) error {
+	if err := ts.ready(); err != nil {
+		return err
+	}
 	if _, err := uuid.Parse(u.ID); err != nil {
 		return errors.New("user id must be a UUID")
 	}
@@ -277,11 +392,11 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	if u.UpdatedAt.IsZero() {
 		u.UpdatedAt = time.Now().UTC()
 	}
-	stored, err := s.userTOTPForSave(u)
+	stored, err := ts.store.userTOTPForSave(u)
 	if err != nil {
 		return err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -289,7 +404,7 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	var currentUsername, currentDisplayName, currentRole, currentPasswordHash string
 	var currentEnabled, currentTOTPEnabled int
 	var currentRevision int64
-	if err := tx.QueryRowContext(ctx, `SELECT username,display_name,role,password_hash,totp_enabled,enabled,revision FROM users WHERE id=?`, u.ID).Scan(&currentUsername, &currentDisplayName, &currentRole, &currentPasswordHash, &currentTOTPEnabled, &currentEnabled, &currentRevision); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT username,display_name,role,password_hash,totp_enabled,enabled,revision FROM users WHERE id=? AND tenant_id=?`, u.ID, ts.scope.id).Scan(&currentUsername, &currentDisplayName, &currentRole, &currentPasswordHash, &currentTOTPEnabled, &currentEnabled, &currentRevision); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
@@ -304,7 +419,7 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	// Keep the last enabled administrator invariant inside the same write
 	// transaction as the role/state update. This is the authoritative guard;
 	// callers should validate request shape, then map ErrLastAdministrator.
-	if err := ensureLastAdministratorTx(ctx, tx, u.ID, currentRole, currentEnabled != 0, u.Role, u.Enabled); err != nil {
+	if err := ts.ensureLastAdministratorTx(ctx, tx, u.ID, currentRole, currentEnabled != 0, u.Role, u.Enabled); err != nil {
 		return err
 	}
 	if expectedRevision == 0 {
@@ -322,9 +437,9 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	if currentUsername == u.Username && currentDisplayName == u.DisplayName && currentRole == u.Role && (currentEnabled != 0) == u.Enabled && currentPasswordHash == u.PasswordHash && (currentTOTPEnabled != 0) == u.TOTPEnabled {
 		audit.Action = ""
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND revision=?`, u.Username, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID, expectedRevision)
+	result, err := tx.ExecContext(ctx, `UPDATE users SET username=?,display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND tenant_id=? AND revision=?`, u.Username, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID, ts.scope.id, expectedRevision)
 	if err != nil {
-		return err
+		return usernameConflict(err)
 	}
 	if count, _ := result.RowsAffected(); count != 1 {
 		return ErrConflict
@@ -335,7 +450,7 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	// display-name-only edits remain session preserving.
 	securityTransition := currentRole != u.Role || (currentEnabled != 0) != u.Enabled
 	if revokeSessions || securityTransition {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, u.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=`+tenantUserSQL, u.ID, ts.scope.id); err != nil {
 			return err
 		}
 	}
@@ -346,49 +461,83 @@ func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, aud
 	// Revocation is a transition, not a property of the resulting row. Pending
 	// invitees are intentionally disabled while their password hash carries a
 	// sentinel; editing their display name or role must not kill the invite.
-	if err := revokeUserInvitesOnDisableTx(ctx, tx, u.ID, currentEnabled != 0, currentPasswordHash, u.Enabled, u.UpdatedAt); err != nil {
+	if err := ts.revokeUserInvitesOnDisableTx(ctx, tx, u.ID, currentEnabled != 0, currentPasswordHash, u.Enabled, u.UpdatedAt); err != nil {
 		return err
 	}
 	// Invitations issued by an administrator must not outlive the issuer's
 	// administrative privilege. Revoke them on demotion or disablement, while
 	// retaining the issuer identity for audit and recovery diagnostics.
 	if currentRole == RoleAdministrator && (u.Role != RoleAdministrator || !u.Enabled) {
-		if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE issuer_user_id=? AND used_at IS NULL`, u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE issuer_user_id=`+tenantUserSQL+` AND used_at IS NULL`, u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID, ts.scope.id); err != nil {
 			return err
 		}
 	}
 	if audit.Action != "" {
-		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
+		if err := ts.insertAuditEntry(ctx, tx, audit, time.Now().UTC()); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
+// SetUserLastLogin records a successful sign-in. It stays global: sign-in
+// knows the account before any tenant scope exists.
 func (s *Store) SetUserLastLogin(ctx context.Context, id string, at time.Time) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE users SET last_login_at=?,updated_at=? WHERE id=?`, at.UTC().Format(time.RFC3339Nano), at.UTC().Format(time.RFC3339Nano), id)
 	return err
 }
 
+// SetUserPassword sets the password of an account of the default tenant.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.SetUserPassword.
 func (s *Store) SetUserPassword(ctx context.Context, id, hash string, revokeSessions bool, audit AuditEntry) error {
-	u, err := s.GetUser(ctx, id)
+	return s.Tenant(DefaultTenantScope()).SetUserPassword(ctx, id, hash, revokeSessions, audit)
+}
+
+// SetUserPassword sets the password hash of the tenant's account. Another
+// tenant's account is ErrNotFound.
+func (ts *TenantStore) SetUserPassword(ctx context.Context, id, hash string, revokeSessions bool, audit AuditEntry) error {
+	u, err := ts.GetUser(ctx, id)
 	if err != nil {
 		return err
 	}
 	u.PasswordHash = hash
 	u.UpdatedAt = time.Now().UTC()
-	return s.UpdateUser(ctx, u, revokeSessions, audit)
+	return ts.UpdateUser(ctx, u, revokeSessions, audit)
 }
 
+// SaveUserSecurity saves the security state of an account of the default
+// tenant.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.SaveUserSecurity.
 func (s *Store) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry) error {
-	return s.SaveUserSecurityPreservingSession(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, "")
+	return s.Tenant(DefaultTenantScope()).SaveUserSecurity(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit)
+}
+
+// SaveUserSecurity saves the security state of the tenant's account and
+// revokes all of its sessions when asked.
+func (ts *TenantStore) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry) error {
+	return ts.SaveUserSecurityPreservingSession(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, "")
+}
+
+// SaveUserSecurityPreservingSession saves the security state of an account
+// of the default tenant.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.SaveUserSecurityPreservingSession.
+func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string) error {
+	return s.Tenant(DefaultTenantScope()).SaveUserSecurityPreservingSession(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, preserveSessionHash)
 }
 
 // SaveUserSecurityPreservingSession is the actor-aware security mutation used
 // by TOTP enrollment. It revokes every other session while optionally keeping
 // the browser that is receiving the one-time recovery-code response alive.
-// Passing an empty hash preserves the original revoke-all behavior.
-func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string) error {
+// Passing an empty hash preserves the original revoke-all behavior. Another
+// tenant's account is ErrNotFound, and nothing is written.
+func (ts *TenantStore) SaveUserSecurityPreservingSession(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string) error {
+	if err := ts.ready(); err != nil {
+		return err
+	}
 	if _, err := uuid.Parse(u.ID); err != nil {
 		return err
 	}
@@ -401,11 +550,11 @@ func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, r
 	if u.UpdatedAt.IsZero() {
 		u.UpdatedAt = time.Now().UTC()
 	}
-	stored, err := s.userTOTPForSave(u)
+	stored, err := ts.store.userTOTPForSave(u)
 	if err != nil {
 		return err
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
@@ -413,7 +562,7 @@ func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, r
 	var currentRole, currentPasswordHash string
 	var currentEnabled int
 	var currentRevision int64
-	if err := tx.QueryRowContext(ctx, `SELECT role,password_hash,enabled,revision FROM users WHERE id=?`, u.ID).Scan(&currentRole, &currentPasswordHash, &currentEnabled, &currentRevision); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT role,password_hash,enabled,revision FROM users WHERE id=? AND tenant_id=?`, u.ID, ts.scope.id).Scan(&currentRole, &currentPasswordHash, &currentEnabled, &currentRevision); errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	} else if err != nil {
 		return err
@@ -424,13 +573,13 @@ func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, r
 	}
 	// TOTP and host-recovery writes use the same transactional invariant as
 	// profile updates. Keeping one guard prevents the two paths from drifting.
-	if err := ensureLastAdministratorTx(ctx, tx, u.ID, currentRole, currentEnabled != 0, u.Role, u.Enabled); err != nil {
+	if err := ts.ensureLastAdministratorTx(ctx, tx, u.ID, currentRole, currentEnabled != 0, u.Role, u.Enabled); err != nil {
 		return err
 	}
 	if expectedRevision == 0 {
 		expectedRevision = currentRevision
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE users SET display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND revision=?`, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID, expectedRevision)
+	result, err := tx.ExecContext(ctx, `UPDATE users SET display_name=?,role=?,password_hash=?,totp_secret=?,totp_enabled=?,enabled=?,updated_at=?,revision=revision+1 WHERE id=? AND tenant_id=? AND revision=?`, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.UpdatedAt.UTC().Format(time.RFC3339Nano), u.ID, ts.scope.id, expectedRevision)
 	if err != nil {
 		return err
 	}
@@ -438,11 +587,11 @@ func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, r
 		return ErrConflict
 	}
 	if replaceRecoveryCodes {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id=?`, u.ID); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id=`+tenantUserSQL, u.ID, ts.scope.id); err != nil {
 			return err
 		}
 		for _, hash := range recoveryCodes {
-			if _, err := tx.ExecContext(ctx, `INSERT INTO recovery_codes(id_hash,user_id) VALUES(?,?)`, hash, u.ID); err != nil {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO recovery_codes(id_hash,user_id) SELECT ?,id FROM users WHERE id=? AND tenant_id=?`, hash, u.ID, ts.scope.id); err != nil {
 				return err
 			}
 		}
@@ -450,10 +599,10 @@ func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, r
 	securityTransition := currentRole != u.Role || (currentEnabled != 0) != u.Enabled
 	if revokeSessions || securityTransition {
 		if preserveSessionHash = strings.TrimSpace(preserveSessionHash); preserveSessionHash == "" {
-			if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, u.ID); err != nil {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=`+tenantUserSQL, u.ID, ts.scope.id); err != nil {
 				return err
 			}
-		} else if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=? AND id_hash<>?`, u.ID, preserveSessionHash); err != nil {
+		} else if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=`+tenantUserSQL+` AND id_hash<>?`, u.ID, ts.scope.id, preserveSessionHash); err != nil {
 			return err
 		}
 	}
@@ -461,11 +610,11 @@ func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, r
 	// activation or password-reset link in the same transaction. Pending
 	// invitees intentionally remain eligible to redeem their first activation
 	// link even though their account starts disabled.
-	if err := revokeUserInvitesOnDisableTx(ctx, tx, u.ID, currentEnabled != 0, currentPasswordHash, u.Enabled, u.UpdatedAt); err != nil {
+	if err := ts.revokeUserInvitesOnDisableTx(ctx, tx, u.ID, currentEnabled != 0, currentPasswordHash, u.Enabled, u.UpdatedAt); err != nil {
 		return err
 	}
 	if audit.Action != "" {
-		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
+		if err := ts.insertAuditEntry(ctx, tx, audit, time.Now().UTC()); err != nil {
 			return err
 		}
 	}
@@ -475,13 +624,14 @@ func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, r
 // ensureLastAdministratorTx is the single persistence boundary for the
 // enabled-administrator invariant. It must be called while the caller owns a
 // write transaction so concurrent role/enable changes cannot both observe a
-// final administrator and then remove it.
-func ensureLastAdministratorTx(ctx context.Context, tx *sql.Tx, userID, currentRole string, currentEnabled bool, nextRole string, nextEnabled bool) error {
+// final administrator and then remove it. The invariant holds for each
+// tenant: another tenant's administrators do not count.
+func (ts *TenantStore) ensureLastAdministratorTx(ctx context.Context, tx *sql.Tx, userID, currentRole string, currentEnabled bool, nextRole string, nextEnabled bool) error {
 	if currentRole != RoleAdministrator || !currentEnabled || (nextRole == RoleAdministrator && nextEnabled) {
 		return nil
 	}
 	var otherAdministrators int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=? AND enabled=1 AND id<>?`, RoleAdministrator, userID).Scan(&otherAdministrators); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=? AND enabled=1 AND id<>? AND tenant_id=?`, RoleAdministrator, userID, ts.scope.id).Scan(&otherAdministrators); err != nil {
 		return err
 	}
 	if otherAdministrators == 0 {
@@ -494,11 +644,11 @@ func ensureLastAdministratorTx(ctx context.Context, tx *sql.Tx, userID, currentR
 // invalidating outstanding activation and password-reset links. Pending
 // invitees intentionally remain eligible for their first activation while an
 // already configured account must lose every outstanding link when disabled.
-func revokeUserInvitesOnDisableTx(ctx context.Context, tx *sql.Tx, userID string, currentEnabled bool, currentPasswordHash string, nextEnabled bool, at time.Time) error {
+func (ts *TenantStore) revokeUserInvitesOnDisableTx(ctx context.Context, tx *sql.Tx, userID string, currentEnabled bool, currentPasswordHash string, nextEnabled bool, at time.Time) error {
 	if !currentEnabled || nextEnabled || strings.HasPrefix(currentPasswordHash, "!pending") {
 		return nil
 	}
-	_, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL`, at.UTC().Format(time.RFC3339Nano), userID)
+	_, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=`+tenantUserSQL+` AND used_at IS NULL`, at.UTC().Format(time.RFC3339Nano), userID, ts.scope.id)
 	return err
 }
 
@@ -515,26 +665,70 @@ func (s *Store) userTOTPForSave(u User) (string, error) {
 	return s.sealTOTPSecretForOwner(u.ID, u.TOTPSecret)
 }
 
+// CountEnabledAdministrators counts the default tenant's enabled
+// administrators.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.CountEnabledAdministrators.
 func (s *Store) CountEnabledAdministrators(ctx context.Context) (int, error) {
+	return s.Tenant(DefaultTenantScope()).CountEnabledAdministrators(ctx)
+}
+
+// CountEnabledAdministrators counts the tenant's enabled administrators.
+func (ts *TenantStore) CountEnabledAdministrators(ctx context.Context) (int, error) {
+	if err := ts.ready(); err != nil {
+		return 0, err
+	}
 	var count int
-	err := s.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=? AND enabled=1`, RoleAdministrator).Scan(&count)
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE role=? AND enabled=1 AND tenant_id=?`, RoleAdministrator, ts.scope.id).Scan(&count)
 	return count, err
 }
 
+// requireTenantUserTx returns ErrNotFound unless the tenant has the account.
+func (ts *TenantStore) requireTenantUserTx(ctx context.Context, tx *sql.Tx, userID string) error {
+	var present int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id=? AND tenant_id=?`, userID, ts.scope.id).Scan(&present); errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	} else if err != nil {
+		return err
+	}
+	return nil
+}
+
+// DeleteUserSessionsWithAudit revokes the sessions of an account of the
+// default tenant.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.DeleteUserSessionsWithAudit.
 func (s *Store) DeleteUserSessionsWithAudit(ctx context.Context, userID string, audit AuditEntry) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
+	return s.Tenant(DefaultTenantScope()).DeleteUserSessionsWithAudit(ctx, userID, audit)
+}
+
+// DeleteUserSessionsWithAudit revokes every session of the tenant's account
+// with its audit record. Another tenant's account is ErrNotFound, as an
+// unknown ID is, and nothing is revoked or recorded. Revocation is
+// security-critical, so when only the audit write fails the sessions are
+// still revoked and the audit error is returned.
+func (ts *TenantStore) DeleteUserSessionsWithAudit(ctx context.Context, userID string, audit AuditEntry) error {
+	if err := ts.ready(); err != nil {
+		return err
+	}
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=?`, userID); err != nil {
+	if err := ts.requireTenantUserTx(ctx, tx, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=`+tenantUserSQL, userID, ts.scope.id); err != nil {
 		return err
 	}
 	if audit.Action != "" {
-		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
+		if err := ts.insertAuditEntry(ctx, tx, audit, time.Now().UTC()); err != nil {
 			_ = tx.Rollback()
 			persistCtx, cancel := auditPersistenceContext(ctx)
-			_, revokeErr := s.DB.ExecContext(persistCtx, `DELETE FROM sessions WHERE user_id=?`, userID)
+			_, revokeErr := ts.store.DB.ExecContext(persistCtx, `DELETE FROM sessions WHERE user_id=`+tenantUserSQL, userID, ts.scope.id)
 			cancel()
 			if revokeErr != nil {
 				return errors.Join(err, revokeErr)
@@ -545,62 +739,110 @@ func (s *Store) DeleteUserSessionsWithAudit(ctx context.Context, userID string, 
 	return tx.Commit()
 }
 
+// CreateUserInvite stores an activation link for an account of the default
+// tenant.
+//
+// Deprecated: bound to DefaultTenantScope. Use TenantStore.CreateUserInvite.
 func (s *Store) CreateUserInvite(ctx context.Context, idHash, userID string, created, expires time.Time) error {
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at,used_at) VALUES(?,?,?, ?,?,NULL)`, idHash, userID, "", created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano))
-	return err
+	return s.Tenant(DefaultTenantScope()).CreateUserInvite(ctx, idHash, userID, created, expires)
+}
+
+// CreateUserInvite stores an activation or password-reset link, by the hash
+// of its token, for the tenant's account. Another tenant's account is
+// ErrNotFound, and no link is stored.
+func (ts *TenantStore) CreateUserInvite(ctx context.Context, idHash, userID string, created, expires time.Time) error {
+	if err := ts.ready(); err != nil {
+		return err
+	}
+	result, err := ts.store.DB.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at,used_at) SELECT ?,id,'',?,?,NULL FROM users WHERE id=? AND tenant_id=?`, idHash, created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano), userID, ts.scope.id)
+	if err != nil {
+		return err
+	}
+	if affected, err := result.RowsAffected(); err != nil {
+		return err
+	} else if affected != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// CreateUserInviteWithAudit replaces the activation link of an account of
+// the default tenant.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.CreateUserInviteWithAudit.
+func (s *Store) CreateUserInviteWithAudit(ctx context.Context, idHash, userID string, created, expires time.Time, audit AuditEntry) error {
+	return s.Tenant(DefaultTenantScope()).CreateUserInviteWithAudit(ctx, idHash, userID, created, expires, audit)
 }
 
 // CreateUserInviteWithAudit stores a replacement activation/password-reset
 // token and its audit record atomically. The clear token never reaches this
-// method; only its SHA-256 digest is persisted.
-func (s *Store) CreateUserInviteWithAudit(ctx context.Context, idHash, userID string, created, expires time.Time, audit AuditEntry) error {
+// method; only its SHA-256 digest is persisted. Another tenant's account is
+// ErrNotFound, and its links stay as they are.
+func (ts *TenantStore) CreateUserInviteWithAudit(ctx context.Context, idHash, userID string, created, expires time.Time, audit AuditEntry) error {
+	if err := ts.ready(); err != nil {
+		return err
+	}
 	if strings.TrimSpace(idHash) == "" || strings.TrimSpace(userID) == "" {
 		return errors.New("activation token and user are required")
 	}
 	if !expires.After(created) {
 		return errors.New("activation token expiry must be after creation")
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := ts.requireTenantUserTx(ctx, tx, userID); err != nil {
+		return err
+	}
 	// Issuing a new activation/password-reset link invalidates any older
 	// outstanding link for the same account. This leaves a single recovery
 	// path and makes a copied, superseded token unusable.
-	if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL`, created.UTC().Format(time.RFC3339Nano), userID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=`+tenantUserSQL+` AND used_at IS NULL`, created.UTC().Format(time.RFC3339Nano), userID, ts.scope.id); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at,used_at) VALUES(?,?,?,?,?,NULL)`, idHash, userID, audit.ActorUserID, created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at,used_at) SELECT ?,id,?,?,?,NULL FROM users WHERE id=? AND tenant_id=?`, idHash, audit.ActorUserID, created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano), userID, ts.scope.id); err != nil {
 		return err
 	}
 	if audit.Action != "" {
-		if err := insertAuditEntryExec(ctx, tx, audit, created.UTC()); err != nil {
+		if err := ts.insertAuditEntry(ctx, tx, audit, created.UTC()); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
-// RevokeUserInvitesWithAudit invalidates every outstanding activation or
-// password-reset link for one account. Only the token hash is stored, and the
-// operation is audited atomically with the revocation.
+// RevokeUserInvitesWithAudit revokes the activation links of an account of
+// the default tenant.
+//
+// Deprecated: bound to DefaultTenantScope. Use
+// TenantStore.RevokeUserInvitesWithAudit.
 func (s *Store) RevokeUserInvitesWithAudit(ctx context.Context, userID string, now time.Time, audit AuditEntry) (int, error) {
+	return s.Tenant(DefaultTenantScope()).RevokeUserInvitesWithAudit(ctx, userID, now, audit)
+}
+
+// RevokeUserInvitesWithAudit invalidates every outstanding activation or
+// password-reset link for one of the tenant's accounts. Only the token hash
+// is stored, and the operation is audited atomically with the revocation.
+// Another tenant's account is ErrNotFound, and its links stay usable.
+func (ts *TenantStore) RevokeUserInvitesWithAudit(ctx context.Context, userID string, now time.Time, audit AuditEntry) (int, error) {
+	if err := ts.ready(); err != nil {
+		return 0, err
+	}
 	if strings.TrimSpace(userID) == "" {
 		return 0, errors.New("user is required")
 	}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
-	var present int
-	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id=?`, userID).Scan(&present); errors.Is(err, sql.ErrNoRows) {
-		return 0, ErrNotFound
-	} else if err != nil {
+	if err := ts.requireTenantUserTx(ctx, tx, userID); err != nil {
 		return 0, err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=? AND used_at IS NULL AND expires_at>?`, now.UTC().Format(time.RFC3339Nano), userID, now.UTC().Format(time.RFC3339Nano))
+	result, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=`+tenantUserSQL+` AND used_at IS NULL AND expires_at>?`, now.UTC().Format(time.RFC3339Nano), userID, ts.scope.id, now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}
@@ -614,7 +856,7 @@ func (s *Store) RevokeUserInvitesWithAudit(ctx context.Context, userID string, n
 		audit.Action = ""
 	}
 	if audit.Action != "" {
-		if err := insertAuditEntryExec(ctx, tx, audit, now.UTC()); err != nil {
+		if err := ts.insertAuditEntry(ctx, tx, audit, now.UTC()); err != nil {
 			return 0, err
 		}
 	}
@@ -627,6 +869,11 @@ func (s *Store) RevokeUserInvitesWithAudit(ctx context.Context, userID string, n
 // ActivateUser atomically consumes an invite and installs the new Argon2id
 // password. A failed audit write rolls the activation back so the token can
 // be retried after the audit store is repaired.
+//
+// It stays global: the token, not a tenant scope, names the account. The
+// returned account carries its tenant, and the audit record belongs to it.
+// An account whose tenant is not active cannot redeem a link; the token
+// stays unused.
 func (s *Store) ActivateUser(ctx context.Context, idHash, passwordHash string, now time.Time, audit AuditEntry) (User, error) {
 	if strings.TrimSpace(idHash) == "" || strings.TrimSpace(passwordHash) == "" {
 		return User{}, errors.New("activation token and password are required")
@@ -636,16 +883,19 @@ func (s *Store) ActivateUser(ctx context.Context, idHash, passwordHash string, n
 		return User{}, err
 	}
 	defer tx.Rollback()
-	var userID, expires, currentPasswordHash string
+	var userID, expires, currentPasswordHash, tenantID, tenantState string
 	var currentEnabled int
 	var used sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT i.user_id,i.expires_at,i.used_at,u.password_hash,u.enabled FROM user_invites i JOIN users u ON u.id=i.user_id WHERE i.id_hash=?`, idHash).Scan(&userID, &expires, &used, &currentPasswordHash, &currentEnabled); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT i.user_id,i.expires_at,i.used_at,u.password_hash,u.enabled,COALESCE(u.tenant_id,''),COALESCE(t.state,'') FROM user_invites i JOIN users u ON u.id=i.user_id LEFT JOIN tenants t ON t.id=u.tenant_id WHERE i.id_hash=?`, idHash).Scan(&userID, &expires, &used, &currentPasswordHash, &currentEnabled, &tenantID, &tenantState); errors.Is(err, sql.ErrNoRows) {
 		return User{}, errors.New("invalid activation token")
 	} else if err != nil {
 		return User{}, err
 	}
 	if used.Valid || !now.Before(scanTime(expires)) {
 		return User{}, errors.New("activation token expired or already used")
+	}
+	if tenantID != "" && tenantState != TenantStateActive {
+		return User{}, ErrTenantNotActive
 	}
 	// Pending users start disabled and have the sentinel password, so their
 	// first activation remains valid. A previously configured account that an
@@ -684,39 +934,45 @@ func (s *Store) ActivateUser(ctx context.Context, idHash, passwordHash string, n
 		_ = tx.QueryRowContext(ctx, `SELECT username FROM users WHERE id=?`, userID).Scan(&audit.ActorUsername)
 	}
 	if audit.Action != "" {
+		// The record belongs to the activated account's tenant, whatever
+		// the entry names; a platform administrator's has none, so its
+		// record takes the actor's, the platform.
+		audit.TenantID = tenantID
 		if err := insertAuditEntryExec(ctx, tx, audit, now.UTC()); err != nil {
 			return User{}, err
 		}
 	}
-	var u User
-	var totp, enabled int
-	var created, updatedAt, lastLogin string
-	if err := tx.QueryRowContext(ctx, `SELECT id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision FROM users WHERE id=?`, userID).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PasswordHash, &u.TOTPSecretStored, &totp, &enabled, &created, &updatedAt, &lastLogin, &u.Revision); err != nil {
+	u, err := scanUser(tx.QueryRowContext(ctx, `SELECT `+userColumns+` FROM users WHERE id=?`, userID))
+	if err != nil {
 		return User{}, err
 	}
-	u.TOTPEnabled, u.Enabled = totp != 0, enabled != 0
-	u.CreatedAt, u.UpdatedAt, u.LastLoginAt = scanTime(created), scanTime(updatedAt), scanTime(lastLogin)
 	if err := tx.Commit(); err != nil {
 		return User{}, err
 	}
 	return u, nil
 }
 
+// ConsumeUserInvite marks a valid invite used and returns its account, with
+// the account's tenant. It stays global, as ActivateUser does, and an
+// account whose tenant is not active cannot consume a link.
 func (s *Store) ConsumeUserInvite(ctx context.Context, idHash string, now time.Time) (User, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return User{}, err
 	}
 	defer tx.Rollback()
-	var userID, expires string
+	var userID, expires, tenantID, tenantState string
 	var used sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT user_id,expires_at,used_at FROM user_invites WHERE id_hash=?`, idHash).Scan(&userID, &expires, &used); errors.Is(err, sql.ErrNoRows) {
+	if err := tx.QueryRowContext(ctx, `SELECT i.user_id,i.expires_at,i.used_at,COALESCE(u.tenant_id,''),COALESCE(t.state,'') FROM user_invites i JOIN users u ON u.id=i.user_id LEFT JOIN tenants t ON t.id=u.tenant_id WHERE i.id_hash=?`, idHash).Scan(&userID, &expires, &used, &tenantID, &tenantState); errors.Is(err, sql.ErrNoRows) {
 		return User{}, errors.New("invalid activation token")
 	} else if err != nil {
 		return User{}, err
 	}
 	if used.Valid || !now.Before(scanTime(expires)) {
 		return User{}, errors.New("activation token expired or already used")
+	}
+	if tenantID != "" && tenantState != TenantStateActive {
+		return User{}, ErrTenantNotActive
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE id_hash=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), idHash)
 	if err != nil {
@@ -725,14 +981,10 @@ func (s *Store) ConsumeUserInvite(ctx context.Context, idHash string, now time.T
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return User{}, errors.New("activation token expired or already used")
 	}
-	var u User
-	var totp, enabled int
-	var created, updated, lastLogin string
-	if err := tx.QueryRowContext(ctx, `SELECT id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision FROM users WHERE id=?`, userID).Scan(&u.ID, &u.Username, &u.DisplayName, &u.Role, &u.PasswordHash, &u.TOTPSecretStored, &totp, &enabled, &created, &updated, &lastLogin, &u.Revision); err != nil {
+	u, err := scanUser(tx.QueryRowContext(ctx, `SELECT `+userColumns+` FROM users WHERE id=?`, userID))
+	if err != nil {
 		return User{}, err
 	}
-	u.TOTPEnabled, u.Enabled = totp != 0, enabled != 0
-	u.CreatedAt, u.UpdatedAt, u.LastLoginAt = scanTime(created), scanTime(updated), scanTime(lastLogin)
 	if err := tx.Commit(); err != nil {
 		return User{}, err
 	}

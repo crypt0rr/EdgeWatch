@@ -40,7 +40,7 @@ func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session stor
 	}
 	// Cancellation is an operational action; keep its audit detail opaque and
 	// never include scanner command lines or target payloads.
-	s.auditOptionalEntry(r.Context(), actorAudit(session, "scan.cancel_requested", id))
+	s.auditOptionalEntry(r.Context(), ts, actorAudit(session, "scan.cancel_requested", id))
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "scan.cancellation_requested", "scan_id": id})
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "cancelling", "scan_id": id})
 }
@@ -490,7 +490,7 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Se
 		cycleID = cycle.ID
 		mode = "resumable"
 	}
-	s.auditOptionalEntry(r.Context(), actorAudit(session, "scan.run_requested", id))
+	s.auditOptionalEntry(r.Context(), ts, actorAudit(session, "scan.run_requested", id))
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "accepted", "job_id": id, "mode": mode, "cycle_id": cycleID})
 }
 
@@ -544,7 +544,7 @@ func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, sessio
 		writeError(w, http.StatusConflict, "cycle_discard_failed", "scan cycle could not be discarded", nil)
 		return
 	}
-	s.auditOptionalEntry(r.Context(), actorAudit(session, "scan.cycle_discarded", cycleID))
+	s.auditOptionalEntry(r.Context(), ts, actorAudit(session, "scan.cycle_discarded", cycleID))
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "scan.cycle_discarded", "job_id": id, "cycle_id": cycleID})
 	writeJSON(w, http.StatusNoContent, nil)
 }

@@ -498,7 +498,7 @@ func (ts *TenantStore) CreateScannerProfile(ctx context.Context, name, descripti
 	if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) SELECT id,1,?,?,? FROM scanner_profiles WHERE id=? AND tenant_id=?`, raw, actor, now.Format(time.RFC3339Nano), id, ts.scope.id); err != nil {
 		return ScannerProfileRecord{}, err
 	}
-	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return ScannerProfileRecord{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -565,7 +565,7 @@ func (ts *TenantStore) UpdateScannerProfile(ctx context.Context, id string, expe
 	if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) SELECT id,?,?,?,? FROM scanner_profiles WHERE id=? AND tenant_id=?`, next, raw, actor, now.Format(time.RFC3339Nano), id, ts.scope.id); err != nil {
 		return ScannerProfileRecord{}, err
 	}
-	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return ScannerProfileRecord{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -609,7 +609,7 @@ func (ts *TenantStore) SetScannerProfileArchived(ctx context.Context, id string,
 		return ErrConflict
 	}
 	if currentArchived == boolInt(archived) {
-		if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
+		if err := ts.insertAuditEntries(ctx, tx, audits, now); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -623,7 +623,7 @@ func (ts *TenantStore) SetScannerProfileArchived(ctx context.Context, id string,
 	if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) SELECT id,?,definition_json,?,? FROM scanner_profiles WHERE id=? AND tenant_id=?`, next, actor, now.Format(time.RFC3339Nano), id, ts.scope.id); err != nil {
 		return err
 	}
-	if err := insertAuditEntries(ctx, tx, audits, now); err != nil {
+	if err := ts.insertAuditEntries(ctx, tx, audits, now); err != nil {
 		return err
 	}
 	return tx.Commit()

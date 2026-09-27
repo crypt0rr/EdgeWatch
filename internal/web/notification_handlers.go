@@ -157,11 +157,11 @@ func (s *Server) notificationDestinationRoute(w http.ResponseWriter, r *http.Req
 			return
 		}
 		if err := s.App.Notifier.Tenant(ts).TestDestination(r.Context(), id); err != nil {
-			s.auditOptionalEntry(r.Context(), store.AuditEntry{Action: "notifications.test_failed", Detail: "managed notification test failed: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
+			s.auditOptionalEntry(r.Context(), ts, store.AuditEntry{Action: "notifications.test_failed", Detail: "managed notification test failed: " + id, ActorUserID: session.UserID, ActorUsername: session.Username})
 			s.writeNotificationError(w, err)
 			return
 		}
-		if !s.requireAuditEntry(r.Context(), w, store.AuditEntry{Action: "notifications.test", Detail: "managed notification tested: " + id, ActorUserID: session.UserID, ActorUsername: session.Username}) {
+		if !s.requireAuditEntry(r.Context(), w, ts, store.AuditEntry{Action: "notifications.test", Detail: "managed notification tested: " + id, ActorUserID: session.UserID, ActorUsername: session.Username}) {
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]any{"sent": 1})
@@ -354,7 +354,7 @@ func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request, sessio
 	if err != nil {
 		// Shoutrrr implementations may include destination details in an error;
 		// keep those credentials out of both API responses and logs.
-		s.auditOptionalEntry(r.Context(), store.AuditEntry{Action: "notifications.test_failed", Detail: "configured destination test failed", ActorUserID: session.UserID, ActorUsername: session.Username})
+		s.auditOptionalEntry(r.Context(), ts, store.AuditEntry{Action: "notifications.test_failed", Detail: "configured destination test failed", ActorUserID: session.UserID, ActorUsername: session.Username})
 		if errors.Is(err, notify.ErrManagedNotificationLocked) {
 			writeError(w, http.StatusServiceUnavailable, "notification_key_unavailable", "one or more web-managed notification destinations are locked; restore the notification encryption key and test again", nil)
 			return
@@ -362,7 +362,7 @@ func (s *Server) notificationTest(w http.ResponseWriter, r *http.Request, sessio
 		writeError(w, http.StatusBadGateway, "notification_failed", "one or more notification destinations failed", nil)
 		return
 	}
-	if !s.requireAuditEntry(r.Context(), w, store.AuditEntry{Action: "notifications.test", Detail: "configured destinations tested", ActorUserID: session.UserID, ActorUsername: session.Username}) {
+	if !s.requireAuditEntry(r.Context(), w, ts, store.AuditEntry{Action: "notifications.test", Detail: "configured destinations tested", ActorUserID: session.UserID, ActorUsername: session.Username}) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sent": summary.Tested})

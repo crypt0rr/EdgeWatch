@@ -11,9 +11,10 @@ import (
 // ciphertext during daemon startup. It is intentionally separate from
 // GetAdmin so authentication reads remain safe on a query-only database
 // connection. Schema 52 retired the legacy admins row, so the users row is
-// the only administrator record and nothing else is synchronized. The upgrade
-// commits in one transaction; callers receive any decryption, encryption,
-// SQL, or commit failure.
+// the only administrator record and nothing else is synchronized. Like the
+// other Admin methods, it acts on that account in the default tenant. The
+// upgrade commits in one transaction; callers receive any decryption,
+// encryption, SQL, or commit failure.
 func (s *Store) MigrateAdminCompatibility(ctx context.Context) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -22,7 +23,7 @@ func (s *Store) MigrateAdminCompatibility(ctx context.Context) error {
 	defer func() { _ = tx.Rollback() }()
 
 	var stored string
-	err = tx.QueryRowContext(ctx, `SELECT totp_secret FROM users WHERE id=?`, LegacyAdminUserID).Scan(&stored)
+	err = tx.QueryRowContext(ctx, `SELECT totp_secret FROM users WHERE id=? AND tenant_id=?`, LegacyAdminUserID, DefaultTenantID).Scan(&stored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return tx.Commit()
 	}
@@ -39,7 +40,7 @@ func (s *Store) MigrateAdminCompatibility(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("upgrade administrator TOTP secret: %w", err)
 			}
-			if _, err = tx.ExecContext(ctx, `UPDATE users SET totp_secret=? WHERE id=?`, stored, LegacyAdminUserID); err != nil {
+			if _, err = tx.ExecContext(ctx, `UPDATE users SET totp_secret=? WHERE id=? AND tenant_id=?`, stored, LegacyAdminUserID, DefaultTenantID); err != nil {
 				return fmt.Errorf("store upgraded administrator TOTP secret: %w", err)
 			}
 		}

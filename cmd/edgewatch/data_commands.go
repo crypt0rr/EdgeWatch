@@ -27,6 +27,7 @@ func auditHostCommand(ctx context.Context, current *store.Store, entry store.Aud
 		return
 	}
 	entry.ActorUsername = hostCLIActor
+	entry.ActorKind = store.AuditActorHost
 	if err := current.AuditEntry(ctx, entry); err != nil {
 		logAuditFailure(entry.Action)
 	}

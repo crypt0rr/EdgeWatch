@@ -102,16 +102,20 @@ func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session stor
 		if !ok || !s.confirmUserMutation(w, r, session, password) {
 			return
 		}
-		if _, err := s.Store.GetUser(r.Context(), id); errors.Is(err, store.ErrNotFound) {
+		if _, err := ts.GetUser(r.Context(), id); errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
 			return
 		} else if err != nil {
 			writeError(w, http.StatusInternalServerError, "store", "user could not be loaded", nil)
 			return
 		}
-		if err := s.Store.DeleteUserSessionsWithAudit(r.Context(), id, store.AuditEntry{Action: "user.sessions_revoked", Detail: "user sessions revoked", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+		if err := ts.DeleteUserSessionsWithAudit(r.Context(), id, store.AuditEntry{Action: "user.sessions_revoked", Detail: "user sessions revoked", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
 			if s.writeAuditUnavailable(w, err, "user.sessions_revoked") {
 				s.revokeSSEUser(id)
+				return
+			}
+			if errors.Is(err, store.ErrNotFound) {
+				writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
 				return
 			}
 			writeError(w, http.StatusInternalServerError, "store", "user sessions could not be revoked", nil)
@@ -126,7 +130,7 @@ func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session stor
 
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	w.Header().Set("Cache-Control", "no-store")
-	users, err := s.Store.ListUsers(r.Context())
+	users, err := ts.ListUsers(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", "users could not be loaded", nil)
 		return
@@ -136,7 +140,7 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request, ts *store.Ten
 
 func (s *Server) getUser(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id string) {
 	w.Header().Set("Cache-Control", "no-store")
-	user, err := s.Store.GetUser(r.Context(), id)
+	user, err := ts.GetUser(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
 		return
@@ -197,10 +201,12 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, session stor
 		return
 	}
 	createdAt := time.Now().UTC()
-	created, err := s.Store.CreateUserWithInvite(r.Context(), user, digest, createdAt, createdAt.Add(30*time.Minute), store.AuditEntry{Action: "user.created", Detail: fmt.Sprintf("user %s created by %s", input.Username, session.Username), ActorUserID: session.UserID, ActorUsername: session.Username})
+	created, err := ts.CreateUserWithInvite(r.Context(), user, digest, createdAt, createdAt.Add(30*time.Minute), store.AuditEntry{Action: "user.created", Detail: fmt.Sprintf("user %s created by %s", input.Username, session.Username), ActorUserID: session.UserID, ActorUsername: session.Username})
 	if err != nil {
-		if isUnique(err) {
-			writeError(w, http.StatusConflict, "conflict", "username is already in use", map[string]string{"username": "username is already in use"})
+		// Usernames are unique across tenants. The conflict does not say
+		// which tenant, if any other, holds the name.
+		if errors.Is(err, store.ErrUsernameUnavailable) || isUnique(err) {
+			writeError(w, http.StatusConflict, "conflict", store.ErrUsernameUnavailable.Error(), map[string]string{"username": store.ErrUsernameUnavailable.Error()})
 			return
 		}
 		if errors.Is(err, store.ErrAuditUnavailable) {
@@ -215,7 +221,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, session stor
 
 func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.Session, ts *store.TenantStore, id string) {
 	w.Header().Set("Cache-Control", "no-store")
-	user, err := s.Store.GetUser(r.Context(), id)
+	user, err := ts.GetUser(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
 		return
@@ -283,7 +289,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 	if previousRole != user.Role || previousEnabled != user.Enabled {
 		detail = fmt.Sprintf("user %s updated by %s role=%s->%s enabled=%t->%t", user.Username, actor.Username, previousRole, user.Role, previousEnabled, user.Enabled)
 	}
-	if err := s.Store.UpdateUser(r.Context(), user, revokeSessions, store.AuditEntry{Action: "user.updated", Detail: detail, ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
+	if err := ts.UpdateUser(r.Context(), user, revokeSessions, store.AuditEntry{Action: "user.updated", Detail: detail, ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
 		if s.writeAuditUnavailable(w, err, "user.updated") {
 			return
 		}
@@ -292,7 +298,7 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 			return
 		}
 		if errors.Is(err, store.ErrConflict) {
-			current, readErr := s.Store.GetUser(r.Context(), id)
+			current, readErr := ts.GetUser(r.Context(), id)
 			if readErr == nil {
 				writeError(w, http.StatusConflict, "conflict", "user was modified; reload and try again", map[string]any{"current": current.Summary()})
 			} else {
@@ -300,8 +306,8 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 			}
 			return
 		}
-		if isUnique(err) {
-			writeError(w, http.StatusConflict, "conflict", "username is already in use", nil)
+		if errors.Is(err, store.ErrUsernameUnavailable) || isUnique(err) {
+			writeError(w, http.StatusConflict, "conflict", store.ErrUsernameUnavailable.Error(), nil)
 			return
 		}
 		if errors.Is(err, store.ErrTOTPSecretLocked) {
@@ -324,7 +330,7 @@ func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor s
 	if !ok || !s.confirmUserMutation(w, r, actor, password) {
 		return
 	}
-	user, err := s.Store.GetUser(r.Context(), id)
+	user, err := ts.GetUser(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
 		return
@@ -350,7 +356,7 @@ func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor s
 	if strings.TrimSpace(action) == "" {
 		action = "user.activation_issued"
 	}
-	if err := s.Store.CreateUserInviteWithAudit(r.Context(), digest, user.ID, createdAt, createdAt.Add(30*time.Minute), store.AuditEntry{Action: action, Detail: fmt.Sprintf("activation issued for %s", user.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
+	if err := ts.CreateUserInviteWithAudit(r.Context(), digest, user.ID, createdAt, createdAt.Add(30*time.Minute), store.AuditEntry{Action: action, Detail: fmt.Sprintf("activation issued for %s", user.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
 		if errors.Is(err, store.ErrAuditUnavailable) {
 			s.writeAuditUnavailable(w, err, action)
 			return
@@ -367,7 +373,7 @@ func (s *Server) revokeActivation(w http.ResponseWriter, r *http.Request, actor 
 	if !ok || !s.confirmUserMutation(w, r, actor, password) {
 		return
 	}
-	user, err := s.Store.GetUser(r.Context(), id)
+	user, err := ts.GetUser(r.Context(), id)
 	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
 		return
@@ -376,7 +382,7 @@ func (s *Server) revokeActivation(w http.ResponseWriter, r *http.Request, actor 
 		writeError(w, http.StatusInternalServerError, "store", "user could not be loaded", nil)
 		return
 	}
-	affected, err := s.Store.RevokeUserInvitesWithAudit(r.Context(), user.ID, time.Now().UTC(), store.AuditEntry{Action: "user.activation_revoked", Detail: fmt.Sprintf("activation links revoked for %s", user.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username})
+	affected, err := ts.RevokeUserInvitesWithAudit(r.Context(), user.ID, time.Now().UTC(), store.AuditEntry{Action: "user.activation_revoked", Detail: fmt.Sprintf("activation links revoked for %s", user.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username})
 	if err != nil {
 		if s.writeAuditUnavailable(w, err, "user.activation_revoked") {
 			return

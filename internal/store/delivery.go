@@ -115,7 +115,7 @@ func (ss *SystemStore) QueueEvent(ctx context.Context, destination string, event
 		}
 		if key == "" {
 			var discarded managedIntentDiscards
-			discarded.add(destination, reason, 1)
+			discarded.add(event, destination, reason, 1)
 			if err := discarded.audit(ctx, tx); err != nil {
 				return err
 			}

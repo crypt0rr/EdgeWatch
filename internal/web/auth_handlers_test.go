@@ -153,14 +153,14 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 	invalid := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", strings.NewReader(`{"current_password":"wrong password","new_password":"new administrator password"}`))
 	invalid.Header.Set("Content-Type", "application/json")
 	invalidRecorder := httptest.NewRecorder()
-	server.changePassword(invalidRecorder, invalid, admin)
+	server.changePassword(invalidRecorder, invalid, admin, defaultTenantStore(server))
 	if invalidRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("invalid password status = %d", invalidRecorder.Code)
 	}
 	short := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", strings.NewReader(`{"current_password":"administrator password","new_password":"short"}`))
 	short.Header.Set("Content-Type", "application/json")
 	shortRecorder := httptest.NewRecorder()
-	server.changePassword(shortRecorder, short, admin)
+	server.changePassword(shortRecorder, short, admin, defaultTenantStore(server))
 	if shortRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("short password status = %d", shortRecorder.Code)
 	}
@@ -170,7 +170,7 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 	change := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", strings.NewReader(`{"current_password":"administrator password","new_password":"new administrator password"}`))
 	change.Header.Set("Content-Type", "application/json")
 	changed := httptest.NewRecorder()
-	server.changePassword(changed, change, admin)
+	server.changePassword(changed, change, admin, defaultTenantStore(server))
 	if changed.Code != http.StatusNoContent {
 		t.Fatalf("password change status = %d: %s", changed.Code, changed.Body.String())
 	}
@@ -185,7 +185,7 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 	missingCookie := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/setup", strings.NewReader(`{"password":"new administrator password"}`))
 	missingCookie.Header.Set("Content-Type", "application/json")
 	missingRecorder := httptest.NewRecorder()
-	server.totpSetup(missingRecorder, missingCookie, admin)
+	server.totpSetup(missingRecorder, missingCookie, admin, defaultTenantStore(server))
 	if missingRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("missing-cookie TOTP setup status = %d", missingRecorder.Code)
 	}
@@ -193,14 +193,14 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 	setup.Header.Set("Content-Type", "application/json")
 	setup.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "totp-session"})
 	setupRecorder := httptest.NewRecorder()
-	server.totpSetup(setupRecorder, setup, admin)
+	server.totpSetup(setupRecorder, setup, admin, defaultTenantStore(server))
 	if setupRecorder.Code != http.StatusOK || !strings.Contains(setupRecorder.Body.String(), "otpauth://totp") {
 		t.Fatalf("TOTP setup response = %d: %s", setupRecorder.Code, setupRecorder.Body.String())
 	}
 	missingEnable := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/enable", strings.NewReader(`{"code":"000000"}`))
 	missingEnable.Header.Set("Content-Type", "application/json")
 	missingEnableRecorder := httptest.NewRecorder()
-	server.totpEnable(missingEnableRecorder, missingEnable, admin)
+	server.totpEnable(missingEnableRecorder, missingEnable, admin, defaultTenantStore(server))
 	if missingEnableRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("missing-cookie TOTP enable status = %d", missingEnableRecorder.Code)
 	}
@@ -208,14 +208,14 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 	invalidEnable.Header.Set("Content-Type", "application/json")
 	invalidEnable.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "totp-session"})
 	invalidEnableRecorder := httptest.NewRecorder()
-	server.totpEnable(invalidEnableRecorder, invalidEnable, admin)
+	server.totpEnable(invalidEnableRecorder, invalidEnable, admin, defaultTenantStore(server))
 	if invalidEnableRecorder.Code != http.StatusBadRequest {
 		t.Fatalf("invalid TOTP code status = %d", invalidEnableRecorder.Code)
 	}
 	disable := httptest.NewRequest(http.MethodDelete, "/api/v1/auth/totp", strings.NewReader(`{"password":"new administrator password"}`))
 	disable.Header.Set("Content-Type", "application/json")
 	disableRecorder := httptest.NewRecorder()
-	server.totpDisable(disableRecorder, disable, admin)
+	server.totpDisable(disableRecorder, disable, admin, defaultTenantStore(server))
 	if disableRecorder.Code != http.StatusNoContent {
 		t.Fatalf("TOTP disable status = %d: %s", disableRecorder.Code, disableRecorder.Body.String())
 	}
@@ -238,7 +238,7 @@ func TestTOTPEnablePreservesActingSessionForRecoveryCodes(t *testing.T) {
 	setupRequest.Header.Set("Content-Type", "application/json")
 	setupRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: actingCookie})
 	setupResponse := httptest.NewRecorder()
-	server.totpSetup(setupResponse, setupRequest, admin)
+	server.totpSetup(setupResponse, setupRequest, admin, defaultTenantStore(server))
 	if setupResponse.Code != http.StatusOK {
 		t.Fatalf("TOTP setup status = %d: %s", setupResponse.Code, setupResponse.Body.String())
 	}
@@ -253,7 +253,7 @@ func TestTOTPEnablePreservesActingSessionForRecoveryCodes(t *testing.T) {
 	enableRequest.Header.Set("Content-Type", "application/json")
 	enableRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: actingCookie})
 	enableResponse := httptest.NewRecorder()
-	server.totpEnable(enableResponse, enableRequest, admin)
+	server.totpEnable(enableResponse, enableRequest, admin, defaultTenantStore(server))
 	if enableResponse.Code != http.StatusOK || !strings.Contains(enableResponse.Body.String(), "recovery_codes") {
 		t.Fatalf("TOTP enable status = %d: %s", enableResponse.Code, enableResponse.Body.String())
 	}
@@ -287,7 +287,7 @@ func TestTOTPRecoveryCodeRotationRequiresCurrentFactorAndPreservesSession(t *tes
 	request.Header.Set("Content-Type", "application/json")
 	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
 	response := httptest.NewRecorder()
-	server.totpRecoveryCodes(response, request, session)
+	server.totpRecoveryCodes(response, request, session, defaultTenantStore(server))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "recovery_codes") {
 		t.Fatalf("recovery rotation = %d: %s", response.Code, response.Body.String())
 	}
@@ -299,7 +299,7 @@ func TestTOTPRecoveryCodeRotationRequiresCurrentFactorAndPreservesSession(t *tes
 	wrong.Header.Set("Content-Type", "application/json")
 	wrong.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
 	wrongResponse := httptest.NewRecorder()
-	server.totpRecoveryCodes(wrongResponse, wrong, session)
+	server.totpRecoveryCodes(wrongResponse, wrong, session, defaultTenantStore(server))
 	if wrongResponse.Code != http.StatusUnauthorized || !strings.Contains(wrongResponse.Body.String(), "totp_required") {
 		t.Fatalf("invalid factor response = %d: %s", wrongResponse.Code, wrongResponse.Body.String())
 	}
@@ -311,14 +311,14 @@ func TestTOTPRecoveryCodeRotationValidationBranches(t *testing.T) {
 	invalid := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader("{"))
 	invalid.Header.Set("Content-Type", "application/json")
 	invalidResponse := httptest.NewRecorder()
-	server.totpRecoveryCodes(invalidResponse, invalid, session)
+	server.totpRecoveryCodes(invalidResponse, invalid, session, defaultTenantStore(server))
 	if invalidResponse.Code != http.StatusBadRequest {
 		t.Fatalf("malformed recovery rotation status = %d", invalidResponse.Code)
 	}
 	disabled := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader(`{"password":"administrator password"}`))
 	disabled.Header.Set("Content-Type", "application/json")
 	disabledResponse := httptest.NewRecorder()
-	server.totpRecoveryCodes(disabledResponse, disabled, session)
+	server.totpRecoveryCodes(disabledResponse, disabled, session, defaultTenantStore(server))
 	if disabledResponse.Code != http.StatusBadRequest || !strings.Contains(disabledResponse.Body.String(), "totp_required") {
 		t.Fatalf("disabled recovery rotation = %d: %s", disabledResponse.Code, disabledResponse.Body.String())
 	}
@@ -334,7 +334,7 @@ func TestTOTPRecoveryCodeRotationValidationBranches(t *testing.T) {
 	wrongPassword := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/recovery-codes", strings.NewReader(`{"password":"wrong password","code":"000000"}`))
 	wrongPassword.Header.Set("Content-Type", "application/json")
 	wrongPasswordResponse := httptest.NewRecorder()
-	server.totpRecoveryCodes(wrongPasswordResponse, wrongPassword, session)
+	server.totpRecoveryCodes(wrongPasswordResponse, wrongPassword, session, defaultTenantStore(server))
 	if wrongPasswordResponse.Code != http.StatusBadRequest {
 		t.Fatalf("wrong password recovery rotation = %d: %s", wrongPasswordResponse.Code, wrongPasswordResponse.Body.String())
 	}
@@ -360,7 +360,7 @@ func TestPendingTOTPEnrolmentsExpireAndRemainBounded(t *testing.T) {
 	enable.Header.Set("Content-Type", "application/json")
 	enable.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "expired-session"})
 	enableResponse := httptest.NewRecorder()
-	server.totpEnable(enableResponse, enable, admin)
+	server.totpEnable(enableResponse, enable, admin, defaultTenantStore(server))
 	if enableResponse.Code != http.StatusBadRequest {
 		t.Fatalf("expired TOTP enable status = %d: %s", enableResponse.Code, enableResponse.Body.String())
 	}
@@ -382,7 +382,7 @@ func TestPendingTOTPEnrolmentsExpireAndRemainBounded(t *testing.T) {
 	setup.Header.Set("Content-Type", "application/json")
 	setup.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: "handler-totp-session"})
 	response := httptest.NewRecorder()
-	server.totpSetup(response, setup, admin)
+	server.totpSetup(response, setup, admin, defaultTenantStore(server))
 	if response.Code != http.StatusOK {
 		t.Fatalf("TOTP setup status = %d: %s", response.Code, response.Body.String())
 	}
@@ -408,7 +408,7 @@ func startTOTPEnrolment(t *testing.T, server *Server, db *store.Store, session s
 	request.Header.Set("Content-Type", "application/json")
 	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
 	response := httptest.NewRecorder()
-	server.totpSetup(response, request, session)
+	server.totpSetup(response, request, session, defaultTenantStore(server))
 	var payload struct {
 		Secret string `json:"secret"`
 	}
@@ -423,7 +423,7 @@ func submitTOTPEnable(server *Server, session store.Session, cookieValue, code s
 	request.Header.Set("Content-Type", "application/json")
 	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
 	response := httptest.NewRecorder()
-	server.totpEnable(response, request, session)
+	server.totpEnable(response, request, session, defaultTenantStore(server))
 	return response
 }
 
@@ -543,7 +543,7 @@ func TestPasswordConfirmationIsRateLimited(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", strings.NewReader(`{"current_password":"wrong password","new_password":"replacement password"}`))
 		request.Header.Set("Content-Type", "application/json")
 		response := httptest.NewRecorder()
-		server.changePassword(response, request, admin)
+		server.changePassword(response, request, admin, defaultTenantStore(server))
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("wrong password attempt %d returned %d: %s", attempt+1, response.Code, response.Body.String())
 		}
@@ -551,7 +551,7 @@ func TestPasswordConfirmationIsRateLimited(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPut, "/api/v1/auth/password", strings.NewReader(`{"current_password":"wrong password","new_password":"replacement password"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
-	server.changePassword(response, request, admin)
+	server.changePassword(response, request, admin, defaultTenantStore(server))
 	if response.Code != http.StatusTooManyRequests {
 		t.Fatalf("sixth wrong password attempt returned %d: %s", response.Code, response.Body.String())
 	}

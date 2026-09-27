@@ -171,7 +171,7 @@ func TestDisplayNameChangesAreAuditedForEveryAccount(t *testing.T) {
 		request := httptest.NewRequest(http.MethodPut, "/api/v1/auth/display-name", strings.NewReader(`{"display_name":"`+name+`"}`))
 		request.Header.Set("Content-Type", "application/json")
 		recorder := httptest.NewRecorder()
-		server.changeDisplayName(recorder, request, session)
+		server.changeDisplayName(recorder, request, session, defaultTenantStore(server))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("%s self rename = %d: %s", session.Role, recorder.Code, recorder.Body.String())
 		}

@@ -285,7 +285,7 @@ func TestServerAuthenticationAndAuditFailureResponses(t *testing.T) {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
-	if server.requireAuditEntry(context.Background(), recorder, store.AuditEntry{Action: "test"}) || recorder.Code != http.StatusServiceUnavailable {
+	if server.requireAuditEntry(context.Background(), recorder, server.Store, store.AuditEntry{Action: "test"}) || recorder.Code != http.StatusServiceUnavailable {
 		t.Fatalf("required audit failure = %d %s", recorder.Code, recorder.Body.String())
 	}
 	if _, err := db.DB.ExecContext(context.Background(), `DROP TRIGGER fail_web_audit`); err != nil {

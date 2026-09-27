@@ -183,7 +183,7 @@ func TestConsoleSetupLoginCreateAndRun(t *testing.T) {
 	resp.Body.Close()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		scans, scanErr := s.ListJobScans(ctx, created.ID, 5)
+		scans, scanErr := defaultTenant(s).ListJobScans(ctx, created.ID, 5)
 		if scanErr != nil {
 			t.Fatal(scanErr)
 		}
@@ -1135,7 +1135,7 @@ func TestSensitiveJobMutationFailsClosedWhenAuditUnavailable(t *testing.T) {
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("audit failure returned status %d", resp.StatusCode)
 	}
-	if _, err := s.GetJobByName(ctx, "audit-blocked"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := defaultTenant(s).GetJobByName(ctx, "audit-blocked"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("job committed despite audit failure: %v", err)
 	}
 }
@@ -1230,7 +1230,7 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 		}
 		deadline = time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
-			scans, scanErr := s.ListJobScans(ctx, created.ID, 5)
+			scans, scanErr := defaultTenant(s).ListJobScans(ctx, created.ID, 5)
 			if scanErr != nil {
 				t.Fatal(scanErr)
 			}
@@ -1286,7 +1286,7 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 	}
 	// Historical scan details must remain reproducible after the current
 	// baseline is reset or replaced.
-	scans, err := s.ListJobScans(ctx, created.ID, 5)
+	scans, err := defaultTenant(s).ListJobScans(ctx, created.ID, 5)
 	if err != nil || len(scans) < 2 {
 		t.Fatalf("scan history: %v (%d rows)", err, len(scans))
 	}
@@ -1306,11 +1306,11 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 		t.Fatalf("suppress status %d: %s", resp.StatusCode, body)
 	}
 	resp.Body.Close()
-	state, err := s.RuntimeState(ctx, created.ID)
+	state, err := defaultTenant(s).RuntimeState(ctx, created.ID)
 	if err != nil || len(state.Incidents) != 0 || state.Suppressed[incidentKey] != 1 {
 		t.Fatalf("suppression state: %#v (err=%v)", state, err)
 	}
-	if _, err := s.UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Incidents[incidentKey] = model.Incident{Change: changedScan.Changes[0], OpenedAt: time.Now().UTC(), LastSeenAt: time.Now().UTC()}
 		return nil, nil
 	}); err != nil {
@@ -1318,7 +1318,7 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 	}
 	// A scan can replace the observed value while the administrator's dialog
 	// remains open. The reviewed snapshot must then be rejected atomically.
-	if _, err := s.UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
 		current := state.Incidents[incidentKey]
 		current.Change.New = "open"
 		state.Incidents[incidentKey] = current
@@ -1345,7 +1345,7 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 	if conflict.Error.Code != "incident_conflict" {
 		t.Fatalf("stale accept code = %q", conflict.Error.Code)
 	}
-	if _, err := s.UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
 		current := state.Incidents[incidentKey]
 		current.Change = changedScan.Changes[0]
 		state.Incidents[incidentKey] = current
@@ -1360,11 +1360,11 @@ func TestConsoleBaselineChangeIncidentFlow(t *testing.T) {
 		t.Fatalf("accept status %d: %s", resp.StatusCode, body)
 	}
 	resp.Body.Close()
-	state, err = s.RuntimeState(ctx, created.ID)
+	state, err = defaultTenant(s).RuntimeState(ctx, created.ID)
 	if err != nil || len(state.Incidents) != 0 || state.Baseline == nil || len(state.Baseline.Units[0].Ports) != 0 {
 		t.Fatalf("acceptance state: %#v (err=%v)", state, err)
 	}
-	if _, err := s.ResetRuntime(ctx, created.ID, "incident-flow"); err != nil {
+	if _, err := defaultTenant(s).ResetRuntime(ctx, created.ID, "incident-flow"); err != nil {
 		t.Fatal(err)
 	}
 	resp = request(http.MethodGet, "/api/v1/jobs/"+created.ID+"/scans/"+changedScan.ID, "", "")
@@ -1436,16 +1436,16 @@ func TestHistoryEndpointsExposePaginationAndScopedResults(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "paged-api", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	record, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "paged-api", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	when := time.Now().UTC()
 	for i := 0; i < 3; i++ {
-		if err := s.SaveScan(ctx, model.Scan{ID: string(rune('a' + i)), JobID: record.ID, JobRevision: 1, Job: record.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", Snapshot: model.Snapshot{Units: []model.Unit{{Target: "127.0.0.1", Protocol: "tcp", Ports: []model.PortState{{Port: i + 1, State: "open"}}}}}}); err != nil {
+		if err := s.System().SaveScan(ctx, model.Scan{ID: string(rune('a' + i)), JobID: record.ID, JobRevision: 1, Job: record.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", Snapshot: model.Snapshot{Units: []model.Unit{{Target: "127.0.0.1", Protocol: "tcp", Ports: []model.PortState{{Port: i + 1, State: "open"}}}}}}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		if _, err := s.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 			return []model.Event{{Type: "history", Job: record.Job.Name, CreatedAt: when}}, nil
 		}); err != nil {
 			t.Fatal(err)
@@ -1487,7 +1487,7 @@ func TestHistoryEndpointsExposePaginationAndScopedResults(t *testing.T) {
 	if len(events.Events) != 2 || events.Pagination["total"] != float64(3) {
 		t.Fatalf("unexpected paginated events: %#v", events)
 	}
-	if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = &model.Snapshot{Units: []model.Unit{
 			{Target: "127.0.0.1", Protocol: "tcp"},
 			{Target: "127.0.0.2", Protocol: "tcp"},
@@ -1552,7 +1552,7 @@ func TestLifecycleEndpointsRequireCurrentRevision(t *testing.T) {
 	if login.CSRF == "" {
 		t.Fatal("missing CSRF token")
 	}
-	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "lifecycle-api", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	record, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "lifecycle-api", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1577,7 +1577,7 @@ func TestLifecycleEndpointsRequireCurrentRevision(t *testing.T) {
 	response.Body.Close()
 	changed := record.Job
 	changed.Timeout = config.Duration(2 * time.Minute)
-	updated, _, err := s.UpdateJob(ctx, record.ID, record.Revision, changed, true, false, false)
+	updated, _, err := defaultTenant(s).UpdateJob(ctx, record.ID, record.Revision, changed, true, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1618,7 +1618,7 @@ func TestNotificationAPIIsWriteOnlyAndUsesOptimisticConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyJob, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{
+	legacyJob, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name:     "legacy-notification-job",
 		Schedule: "0 * * * *",
 		Timezone: "UTC",
@@ -1683,7 +1683,7 @@ func TestNotificationAPIIsWriteOnlyAndUsesOptimisticConcurrency(t *testing.T) {
 	if created.ID == "" || created.Revision != 1 || created.Source != "web" {
 		t.Fatalf("unexpected created destination: %#v", created)
 	}
-	storedLegacy, err := s.GetJob(ctx, legacyJob.ID)
+	storedLegacy, err := defaultTenant(s).GetJob(ctx, legacyJob.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

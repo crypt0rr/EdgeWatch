@@ -75,10 +75,10 @@ func TestBaselineRoutesUseTheSessionTenant(t *testing.T) {
 	for jobID, marker := range map[string]string{jobA.ID: "tenant-a", jobB: "tenant-b"} {
 		hosts := []model.HostObservation{{Address: address, AddressFamily: "IPv4", DNSNames: []string{marker + ".example"}, Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}}
 		scan := model.Scan{ID: "scan-" + marker, JobID: jobID, Job: "edge", StartedAt: now.Add(-time.Minute), FinishedAt: now, Status: "success", ConfigHash: job.SecurityHash(), Snapshot: model.Snapshot{Hosts: hosts}}
-		if err := db.SaveScan(ctx, scan); err != nil {
+		if err := db.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
+		if _, err := db.System().UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
 			state.Baseline = &model.Snapshot{Hosts: hosts}
 			state.BaselineScanID, state.BaselineConfigHash, state.BaselineModified = scan.ID, job.SecurityHash(), true
 			state.Incidents[key] = model.Incident{Change: change, ScanID: scan.ID, OpenedAt: now, LastSeenAt: now}
@@ -87,7 +87,7 @@ func TestBaselineRoutesUseTheSessionTenant(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	other, err := db.CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}

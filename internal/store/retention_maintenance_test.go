@@ -44,7 +44,7 @@ func TestPruneOptimizesFTSAndReclaimsPages(t *testing.T) {
 				Ports:        []model.PortObservation{{Port: 443, State: "open"}},
 			}},
 		}
-		if err := s.SaveScan(ctx, model.Scan{
+		if err := s.System().SaveScan(ctx, model.Scan{
 			ID:         fmt.Sprintf("expired-%02d", i),
 			Job:        "retention-maintenance",
 			StartedAt:  old,
@@ -59,7 +59,7 @@ func TestPruneOptimizesFTSAndReclaimsPages(t *testing.T) {
 	if err := s.DB.QueryRowContext(ctx, "PRAGMA page_count").Scan(&beforePages); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := s.PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
+	stats, err := s.System().PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}

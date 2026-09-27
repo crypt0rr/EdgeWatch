@@ -20,33 +20,33 @@ func TestBaselineHostProjectionPaginatesAcceptedOverlay(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('overlay-job',?,'overlay','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReplaceBaselineHostProjection(ctx, "overlay-job", snapshot); err != nil {
+	if err := s.System().ReplaceBaselineHostProjection(ctx, "overlay-job", snapshot); err != nil {
 		t.Fatal(err)
 	}
 	open := true
-	page, err := s.ListBaselineHostsPage(ctx, "overlay-job", "198.51.100.1", "tcp", &open, 1, 0)
+	page, err := defaultTenant(s).ListBaselineHostsPage(ctx, "overlay-job", "198.51.100.1", "tcp", &open, 1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Host.Address != "198.51.100.1" {
 		t.Fatalf("baseline page = %#v", page)
 	}
-	page, err = s.ListBaselineHostsPage(ctx, "overlay-job", "nginx", "tcp", &open, 10, 0)
+	page, err = defaultTenant(s).ListBaselineHostsPage(ctx, "overlay-job", "nginx", "tcp", &open, 10, 0)
 	if err != nil || page.Total != 1 || page.Items[0].Host.Address != "198.51.100.2" {
 		t.Fatalf("baseline service search = %#v, %v", page, err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE jobs SET name='renamed-overlay' WHERE id='overlay-job'`); err != nil {
 		t.Fatal(err)
 	}
-	page, err = s.ListBaselineHostsPage(ctx, "overlay-job", "renamed-overlay", "", nil, 10, 0)
+	page, err = defaultTenant(s).ListBaselineHostsPage(ctx, "overlay-job", "renamed-overlay", "", nil, 10, 0)
 	if err != nil || page.Total != 2 {
 		t.Fatalf("baseline current job-name search = %#v, %v", page, err)
 	}
-	page, err = s.ListBaselineHostsPage(ctx, "overlay-job", "overlay-job", "", nil, 10, 0)
+	page, err = defaultTenant(s).ListBaselineHostsPage(ctx, "overlay-job", "overlay-job", "", nil, 10, 0)
 	if err != nil || page.Total != 0 {
 		t.Fatalf("stale baseline job-name search = %#v, %v", page, err)
 	}
-	if _, err := s.GetBaselineHost(ctx, "overlay-job", "198.51.100.2"); err != nil {
+	if _, err := defaultTenant(s).GetBaselineHost(ctx, "overlay-job", "198.51.100.2"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -61,7 +61,7 @@ func TestBaselineHostProjectionSearchAcceptsShortQueries(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('short-search',?,'short-search','{}',1,0,1,'now','now')`, DefaultTenantID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReplaceBaselineHostProjection(ctx, "short-search", snapshot); err != nil {
+	if err := s.System().ReplaceBaselineHostProjection(ctx, "short-search", snapshot); err != nil {
 		t.Fatal(err)
 	}
 	// Queries shorter than the FTS trigram length use the LIKE fallback. They
@@ -75,7 +75,7 @@ func TestBaselineHostProjectionSearchAcceptsShortQueries(t *testing.T) {
 		{query: "80", want: "192.0.2.1"},
 		{query: "44", want: "192.0.2.3"},
 	} {
-		page, err := s.ListBaselineHostsPage(ctx, "short-search", tc.query, "", nil, 10, 0)
+		page, err := defaultTenant(s).ListBaselineHostsPage(ctx, "short-search", tc.query, "", nil, 10, 0)
 		if err != nil {
 			t.Fatalf("short baseline search %q: %v", tc.query, err)
 		}
@@ -83,7 +83,7 @@ func TestBaselineHostProjectionSearchAcceptsShortQueries(t *testing.T) {
 			t.Fatalf("short baseline search %q = %#v, want only %s", tc.query, page, tc.want)
 		}
 	}
-	page, err := s.ListBaselineHostsPage(ctx, "short-search", "7", "", nil, 10, 0)
+	page, err := defaultTenant(s).ListBaselineHostsPage(ctx, "short-search", "7", "", nil, 10, 0)
 	if err != nil || page.Total != 0 || len(page.Items) != 0 {
 		t.Fatalf("unmatched short baseline search = %#v, %v", page, err)
 	}
@@ -111,7 +111,7 @@ func TestRuntimeStateSummaryUsesProjectionCounts(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO runtime_incidents(job_id,key,incident_json) VALUES(?,?,?)`, "summary-job", "one", `{}`); err != nil {
 		t.Fatal(err)
 	}
-	summary, err := s.RuntimeStateSummary(ctx, "summary-job")
+	summary, err := defaultTenant(s).RuntimeStateSummary(ctx, "summary-job")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,11 +133,11 @@ func TestRuntimeStateSummaryUsesBaselineProjectionCounts(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "projected-summary", 1, "projected-baseline", "", 0, 1, 0, 0, 0, 0, "now"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReplaceBaselineHostProjection(ctx, "projected-summary", model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.20"}, {Address: "198.51.100.21"}}}); err != nil {
+	if err := s.System().ReplaceBaselineHostProjection(ctx, "projected-summary", model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.20"}, {Address: "198.51.100.21"}}}); err != nil {
 		t.Fatal(err)
 	}
 
-	summary, err := s.RuntimeStateSummary(ctx, "projected-summary")
+	summary, err := defaultTenant(s).RuntimeStateSummary(ctx, "projected-summary")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestRuntimeStateSummaryFallsBackToLegacyUnitsWithMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	summary, err := s.RuntimeStateSummary(ctx, "unit-metadata-summary")
+	summary, err := defaultTenant(s).RuntimeStateSummary(ctx, "unit-metadata-summary")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestRuntimeStateSummaryHandlesMetadataWithoutLegacyBaseline(t *testing.T) {
 	}
 
 	for _, jobID := range []string{"metadata-no-runtime", "metadata-no-baseline"} {
-		summary, err := s.RuntimeStateSummary(ctx, jobID)
+		summary, err := defaultTenant(s).RuntimeStateSummary(ctx, jobID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -209,7 +209,7 @@ func TestRuntimeStateSummaryPreservesLegacyHostsOnMetadataFastPath(t *testing.T)
 		t.Fatal(err)
 	}
 
-	summary, err := s.RuntimeStateSummary(ctx, "legacy-metadata-summary")
+	summary, err := defaultTenant(s).RuntimeStateSummary(ctx, "legacy-metadata-summary")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestRuntimeStateSummaryCountsLegacyUnitAddresses(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime(job_id,state_json,updated_at) VALUES(?,?,?)`, "legacy-summary-job", state, "now"); err != nil {
 		t.Fatal(err)
 	}
-	summary, err := s.RuntimeStateSummary(ctx, "legacy-summary-job")
+	summary, err := defaultTenant(s).RuntimeStateSummary(ctx, "legacy-summary-job")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func TestRuntimeStateSummariesMatchSingleJobSummariesAndArchiveScope(t *testing.
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,baseline_scan_id,baseline_config_hash,baseline_modified,projection_version,candidate_count,candidate_attempts,incomplete_candidate_attempts,pending_count,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, "projected", 1, "", "current", 0, 1, 4, 5, 1, 2, "now"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReplaceBaselineHostProjection(ctx, "projected", model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.5"}, {Address: "198.51.100.6"}}}); err != nil {
+	if err := s.System().ReplaceBaselineHostProjection(ctx, "projected", model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.5"}, {Address: "198.51.100.6"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO runtime_incidents(job_id,key,incident_json) VALUES(?,?,?)`, "projected", "incident", `{}`); err != nil {
@@ -323,7 +323,7 @@ func TestRuntimeStateSummariesMatchSingleJobSummariesAndArchiveScope(t *testing.
 	}
 
 	for _, includeArchived := range []bool{false, true} {
-		got, err := s.RuntimeStateSummaries(ctx, includeArchived)
+		got, err := defaultTenant(s).RuntimeStateSummaries(ctx, includeArchived)
 		if err != nil {
 			t.Fatalf("RuntimeStateSummaries(includeArchived=%t): %v", includeArchived, err)
 		}
@@ -336,7 +336,7 @@ func TestRuntimeStateSummariesMatchSingleJobSummariesAndArchiveScope(t *testing.
 			t.Fatalf("summary count with includeArchived=%t = %d, want %d (%#v)", includeArchived, len(got), len(wantIDs), got)
 		}
 		for _, id := range wantIDs {
-			want, err := s.RuntimeStateSummary(ctx, id)
+			want, err := defaultTenant(s).RuntimeStateSummary(ctx, id)
 			if err != nil {
 				t.Fatalf("RuntimeStateSummary(%q): %v", id, err)
 			}
@@ -364,7 +364,7 @@ func TestRuntimeStateSummariesReportsInvalidLegacyRuntimeJSON(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,updated_at) VALUES('invalid-json',1,'1')`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RuntimeStateSummaries(ctx, false); err == nil {
+	if _, err := defaultTenant(s).RuntimeStateSummaries(ctx, false); err == nil {
 		t.Fatal("expected invalid stale runtime JSON to fail the batch summary")
 	}
 }
@@ -376,7 +376,7 @@ func TestRuntimeStateSummariesReportsQueryAndScanErrors(t *testing.T) {
 		if _, err := s.DB.ExecContext(ctx, `DROP TABLE job_runtime_meta`); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.RuntimeStateSummaries(ctx, false); err == nil {
+		if _, err := defaultTenant(s).RuntimeStateSummaries(ctx, false); err == nil {
 			t.Fatal("expected missing runtime metadata table to fail")
 		}
 	})
@@ -389,7 +389,7 @@ func TestRuntimeStateSummariesReportsQueryAndScanErrors(t *testing.T) {
 		if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_runtime_meta(job_id,metadata_version,candidate_count,updated_at) VALUES('bad-count',1,'not-a-number','now')`); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.RuntimeStateSummaries(ctx, false); err == nil {
+		if _, err := defaultTenant(s).RuntimeStateSummaries(ctx, false); err == nil {
 			t.Fatal("expected invalid runtime metadata integer to fail scanning")
 		}
 	})

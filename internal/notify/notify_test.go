@@ -54,7 +54,7 @@ func TestQueueAndDeliverGenericWebhook(t *testing.T) {
 	if calls.Load() != 1 {
 		t.Fatalf("received %d webhook calls", calls.Load())
 	}
-	due, err := db.DueDeliveries(context.Background(), 10)
+	due, err := db.System().DueDeliveries(context.Background(), 10)
 	if err != nil || len(due) != 0 {
 		t.Fatalf("delivery remains due: %#v %v", due, err)
 	}
@@ -94,7 +94,7 @@ func TestDrainProcessesMultipleBoundedBatches(t *testing.T) {
 	if calls.Load() != int32(len(events)) {
 		t.Fatalf("webhook calls = %d, want %d", calls.Load(), len(events))
 	}
-	due, err := db.DueDeliveries(context.Background(), 100)
+	due, err := db.System().DueDeliveries(context.Background(), 100)
 	if err != nil || len(due) != 0 {
 		t.Fatalf("deliveries remain after bounded multi-batch drain: %#v %v", due, err)
 	}
@@ -183,7 +183,7 @@ func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
 		Timeout:  config.Duration(time.Minute),
 		Timing:   "balanced",
 	})
-	createdJob, err := db.CreateJob(ctx, legacyJob)
+	createdJob, err := db.Tenant(store.DefaultTenantScope()).CreateJob(ctx, legacyJob)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stored, err := db.GetJob(ctx, createdJob.ID)
+	stored, err := db.Tenant(store.DefaultTenantScope()).GetJob(ctx, createdJob.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,7 +335,7 @@ func TestLockedManagedDeliveryIsDeferredWithoutAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueueEvent(ctx, managedKey(created.ID, created.Revision), model.Event{Type: "locked", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := db.System().QueueEvent(ctx, managedKey(created.ID, created.Revision), model.Event{Type: "locked", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(keyPath); err != nil {
@@ -387,11 +387,11 @@ func TestLockedDestinationDoesNotStarveHealthyDelivery(t *testing.T) {
 	healthy := "generic://" + parsed.Host + "/healthy?disabletls=yes&template=json"
 	managedDestination := managedKey(created.ID, created.Revision)
 	for i := 0; i < 10; i++ {
-		if err := db.QueueEvent(ctx, managedDestination, model.Event{Type: "locked", Job: "job", ScanID: fmt.Sprintf("locked-%d", i), CreatedAt: time.Now().UTC()}); err != nil {
+		if err := db.System().QueueEvent(ctx, managedDestination, model.Event{Type: "locked", Job: "job", ScanID: fmt.Sprintf("locked-%d", i), CreatedAt: time.Now().UTC()}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := db.QueueEvent(ctx, hashURL(healthy), model.Event{Type: "healthy", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := db.System().QueueEvent(ctx, hashURL(healthy), model.Event{Type: "healthy", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(keyPath); err != nil {
@@ -441,11 +441,11 @@ func TestCanceledBatchReleasesUnsentClaims(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < notificationBatchSize; i++ {
-		if err := db.QueueEvent(ctx, "destination", model.Event{Type: "cancel", Job: "job", ScanID: fmt.Sprintf("scan-%d", i), CreatedAt: time.Now().UTC()}); err != nil {
+		if err := db.System().QueueEvent(ctx, "destination", model.Event{Type: "cancel", Job: "job", ScanID: fmt.Sprintf("scan-%d", i), CreatedAt: time.Now().UTC()}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	deliveries, err := db.ClaimDueDeliveries(ctx, notificationBatchSize, "owner")
+	deliveries, err := db.System().ClaimDueDeliveries(ctx, notificationBatchSize, "owner")
 	if err != nil || len(deliveries) != notificationBatchSize {
 		t.Fatalf("claimed deliveries = %d, error = %v", len(deliveries), err)
 	}
@@ -478,10 +478,10 @@ func TestCanceledDeliveryReleasesClaimWithoutBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueueEvent(ctx, "destination", model.Event{Type: "cancel-one", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := db.System().QueueEvent(ctx, "destination", model.Event{Type: "cancel-one", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	due, err := db.ClaimDueDeliveries(ctx, 1, "owner")
+	due, err := db.System().ClaimDueDeliveries(ctx, 1, "owner")
 	if err != nil || len(due) != 1 {
 		t.Fatalf("claimed delivery = %#v, error = %v", due, err)
 	}
@@ -640,7 +640,7 @@ func TestManagedNotificationCRUDEncryptsAndCancelsOldDeliveries(t *testing.T) {
 	if strings.Contains(string(viewJSON), firstURL) || strings.Contains(string(viewJSON), `"url"`) {
 		t.Fatalf("destination view exposed a URL: %s", viewJSON)
 	}
-	record, err := db.GetManagedNotification(ctx, created.ID)
+	record, err := db.Tenant(store.DefaultTenantScope()).GetManagedNotification(ctx, created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -654,7 +654,7 @@ func TestManagedNotificationCRUDEncryptsAndCancelsOldDeliveries(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("key permissions = %o, want 600", info.Mode().Perm())
 	}
-	if err := db.QueueEvent(ctx, managedKey(created.ID, created.Revision), model.Event{Type: "test", Job: "ops", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := db.System().QueueEvent(ctx, managedKey(created.ID, created.Revision), model.Event{Type: "test", Job: "ops", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := notifier.UpdateManaged(ctx, created.ID, created.Revision, "Operations", &secondURL, boolPtr(true))
@@ -684,7 +684,7 @@ func TestManagedNotificationCRUDEncryptsAndCancelsOldDeliveries(t *testing.T) {
 	if err := restarted.DeleteManaged(ctx, created.ID, updated.Revision); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.GetManagedNotification(ctx, created.ID); !errors.Is(err, store.ErrNotFound) {
+	if _, err := db.Tenant(store.DefaultTenantScope()).GetManagedNotification(ctx, created.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("deleted destination lookup = %v", err)
 	}
 }

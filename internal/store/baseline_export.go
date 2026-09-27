@@ -55,14 +55,6 @@ type exportQueryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
-// ExportBaselines returns the current runtime baselines of the default
-// tenant's jobs.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ExportBaselines.
-func (s *Store) ExportBaselines(ctx context.Context, name string) (BaselineExport, error) {
-	return s.Tenant(DefaultTenantScope()).ExportBaselines(ctx, name)
-}
-
 // ExportBaselines returns the current runtime baseline for one of the
 // tenant's managed jobs, or every managed and legacy job of the tenant when
 // name is empty. Legacy job_states rows are included for portability but are
@@ -188,12 +180,6 @@ func (ts *TenantStore) ExportBaselines(ctx context.Context, name string) (Baseli
 	return result, nil
 }
 
-// exportLegacyBaseline exports the default tenant's config.yaml job state of
-// the given name.
-func (s *Store) exportLegacyBaseline(ctx context.Context, name string) (BaselineExportEntry, error) {
-	return exportLegacyBaselineForQuery(ctx, s.reader(), DefaultTenantID, name)
-}
-
 // exportLegacyBaselineForQuery exports the stored state of the config.yaml
 // job with the given name. Those jobs belong to the default tenant, so the
 // statement reads the state only for it; another tenant gets sql.ErrNoRows.
@@ -203,12 +189,6 @@ func exportLegacyBaselineForQuery(ctx context.Context, queryer exportQueryer, te
 		return BaselineExportEntry{}, err
 	}
 	return exportLegacyBaselineJSONForQuery(ctx, queryer, tenantID, name, raw)
-}
-
-// exportLegacyBaselineJSON exports a config.yaml job state of the default
-// tenant.
-func (s *Store) exportLegacyBaselineJSON(ctx context.Context, name string, raw []byte) (BaselineExportEntry, error) {
-	return exportLegacyBaselineJSONForQuery(ctx, s.reader(), DefaultTenantID, name, raw)
 }
 
 // exportLegacyBaselineJSONForQuery exports a config.yaml job state of the
@@ -228,12 +208,6 @@ func exportLegacyBaselineJSONForQuery(ctx context.Context, queryer exportQueryer
 		}
 	}
 	return entry, nil
-}
-
-// exportManagedBaseline exports the baseline of one of the default tenant's
-// jobs.
-func (s *Store) exportManagedBaseline(ctx context.Context, record JobRecord) (BaselineExportEntry, error) {
-	return exportManagedBaselineForQuery(ctx, s.reader(), DefaultTenantID, record)
 }
 
 // exportManagedBaselineForQuery exports the runtime baseline of one of the

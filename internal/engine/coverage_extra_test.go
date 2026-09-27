@@ -196,7 +196,7 @@ func TestEngineFinalizeManagedScanCoversExistingBaselineRecoveryAndFailure(t *te
 		t.Fatal(err)
 	}
 	defer db.Close()
-	record, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{
+	record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name: "finalize-coverage", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
 		TCP: &config.Protocol{Ports: "443", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced",
 		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},

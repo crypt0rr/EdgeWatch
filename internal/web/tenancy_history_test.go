@@ -25,7 +25,7 @@ func TestHistoryRoutesUseTheSessionTenant(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "edge", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}})
-	jobA, err := db.CreateJob(ctx, job)
+	jobA, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,10 +45,10 @@ func TestHistoryRoutesUseTheSessionTenant(t *testing.T) {
 	key := "port|192.0.2.10|tcp|443"
 	change := model.Change{Key: key, Kind: "port", Target: "192.0.2.10", Protocol: "tcp", Port: 443, Old: "not-open", New: "open", Severity: "critical"}
 	for jobID, marker := range map[string]string{jobA.ID: "tenant-a", jobB: "tenant-b"} {
-		if err := db.SaveScan(ctx, model.Scan{ID: "scan-" + marker, JobID: jobID, Job: "edge", StartedAt: now.Add(-time.Minute), FinishedAt: now, Status: "success"}); err != nil {
+		if err := db.System().SaveScan(ctx, model.Scan{ID: "scan-" + marker, JobID: jobID, Job: "edge", StartedAt: now.Add(-time.Minute), FinishedAt: now, Status: "success"}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := db.UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
+		if _, err := db.System().UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
 			state.Baseline = &model.Snapshot{Scopes: []model.Scope{{Target: "192.0.2.10", Protocol: "tcp", Ports: "443"}}}
 			state.Incidents[key] = model.Incident{Change: change, ScanID: "scan-" + marker, OpenedAt: now, LastSeenAt: now}
 			return []model.Event{{Type: "changes-detected", Job: "edge", ScanID: "scan-" + marker, Message: "event-" + marker, CreatedAt: now}}, nil
@@ -56,7 +56,7 @@ func TestHistoryRoutesUseTheSessionTenant(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	other, err := db.CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}

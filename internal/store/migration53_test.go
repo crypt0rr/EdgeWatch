@@ -102,40 +102,40 @@ func newSchema52Fixture(t *testing.T) schema52Fixture {
 	}
 	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
 	for i, name := range []string{"edge-a", "edge-b"} {
-		job, err := s.CreateJob(ctx, testJob(name))
+		job, err := defaultTenant(s).CreateJob(ctx, testJob(name))
 		if err != nil {
 			t.Fatal(err)
 		}
 		fixture.jobIDs = append(fixture.jobIDs, job.ID)
 		for j := range fixtureScansPerJob {
-			if err := s.SaveScan(ctx, largeSnapshotScan(fmt.Sprintf("scan-%s-%d", name, j), job.ID, name, now.Add(time.Duration(10*i+j)*time.Minute))); err != nil {
+			if err := s.System().SaveScan(ctx, largeSnapshotScan(fmt.Sprintf("scan-%s-%d", name, j), job.ID, name, now.Add(time.Duration(10*i+j)*time.Minute))); err != nil {
 				t.Fatal(err)
 			}
 		}
-		if _, err := s.ResetRuntimeWithOutbox(ctx, job.ID, name, []string{"deployment-alerts"}); err != nil {
+		if _, err := defaultTenant(s).ResetRuntimeWithOutbox(ctx, job.ID, name, []string{"deployment-alerts"}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	// A config.yaml job has no job ID: SaveScan stores NULL, and older
 	// releases stored an empty string.
-	if err := s.SaveScan(ctx, largeSnapshotScan("scan-legacy-null", "", "legacy", now.Add(time.Hour))); err != nil {
+	if err := s.System().SaveScan(ctx, largeSnapshotScan("scan-legacy-null", "", "legacy", now.Add(time.Hour))); err != nil {
 		t.Fatal(err)
 	}
 	exec(`INSERT INTO scans(id,job_id,job,started_at,finished_at,status,config_hash,snapshot_json) VALUES('scan-legacy-empty','','legacy',?,?,'failed','config-legacy','{}')`, sqliteTimestamp(now), sqliteTimestamp(now.Add(2*time.Hour)))
-	if _, err := s.UpdateState(ctx, "legacy", func(*model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateState(ctx, "legacy", func(*model.JobState) ([]model.Event, error) {
 		return []model.Event{{Type: "change", Job: "legacy", Message: "legacy change", CreatedAt: now}}, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.QueueEvent(ctx, "deployment-legacy", model.Event{Type: "change", Job: "legacy", Message: "legacy change", CreatedAt: now}); err != nil {
+	if err := s.System().QueueEvent(ctx, "deployment-legacy", model.Event{Type: "change", Job: "legacy", Message: "legacy change", CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.RecordReleaseCheck(ctx, "1.0.0", "1.1.0", "https://example.invalid/releases/1.1.0", "EdgeWatch 1.1.0", "", "etag", true, []string{"deployment-alerts"}); err != nil {
+	if _, err := s.Platform().RecordReleaseCheck(ctx, "1.0.0", "1.1.0", "https://example.invalid/releases/1.1.0", "EdgeWatch 1.1.0", "", "etag", true, []string{"deployment-alerts"}); err != nil {
 		t.Fatal(err)
 	}
 	exec(`INSERT INTO restore_quarantined_deliveries(restore_epoch,destination,payload_json,next_at,quarantined_at,tenant_id) VALUES('epoch-1','deployment-alerts','{"type":"job"}',?,?,?)`, sqliteTimestamp(now), sqliteTimestamp(now), DefaultTenantID)
 	exec(`INSERT INTO restore_quarantined_deliveries(restore_epoch,destination,payload_json,next_at,quarantined_at,tenant_id) VALUES('epoch-1','deployment-alerts','{"type":"platform"}',?,?,NULL)`, sqliteTimestamp(now), sqliteTimestamp(now))
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "Perimeter"}, []PublicDashboardHost{
+	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "Perimeter"}, []PublicDashboardHost{
 		{JobID: fixture.jobIDs[0], Address: "192.0.2.10"},
 		{JobID: fixture.jobIDs[1], Address: "192.0.2.11"},
 	}, AuditEntry{}); err != nil {
@@ -400,19 +400,19 @@ func TestMigration53AttributesHistoryToTheDefaultTenant(t *testing.T) {
 	assertForeignKeysClean(t, s.DB)
 
 	// The store reads the migrated rows as before.
-	scans, err := s.ListScanSummariesPage(ctx, "", 50, 0)
+	scans, err := defaultTenant(s).ListScanSummariesPage(ctx, "", 50, 0)
 	if err != nil || scans.Total != 2*fixtureScansPerJob+2 {
 		t.Fatalf("scan history = %d, %v; want %d", scans.Total, err, 2*fixtureScansPerJob+2)
 	}
-	events, err := s.ListEventsPage(ctx, "", 50, 0)
+	events, err := defaultTenant(s).ListEventsPage(ctx, "", 50, 0)
 	if err != nil || events.Total != 4 {
 		t.Fatalf("event history = %d, %v; want 4", events.Total, err)
 	}
-	dashboard, err := s.GetPublicDashboard(ctx)
+	dashboard, err := defaultTenant(s).GetPublicDashboard(ctx)
 	if err != nil || len(dashboard.Hosts) != 2 {
 		t.Fatalf("public dashboard = %#v, %v", dashboard, err)
 	}
-	scan, err := s.GetScan(ctx, "scan-edge-a-0")
+	scan, err := defaultTenant(s).GetScan(ctx, "scan-edge-a-0")
 	if err != nil || len(scan.Snapshot.Hosts) != largeSnapshotHosts || len(scan.Changes) != 1 {
 		t.Fatalf("scan after the upgrade = %d hosts, %d changes, %v", len(scan.Snapshot.Hosts), len(scan.Changes), err)
 	}
@@ -467,17 +467,17 @@ func TestMigration53UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 				}
 			}
 
-			job, err := s.CreateJob(ctx, testJob("recovered"))
+			job, err := defaultTenant(s).CreateJob(ctx, testJob("recovered"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := s.SaveScan(ctx, largeSnapshotScan("scan-recovered", job.ID, "recovered", time.Now().UTC())); err != nil {
+			if err := s.System().SaveScan(ctx, largeSnapshotScan("scan-recovered", job.ID, "recovered", time.Now().UTC())); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.ResetRuntimeWithOutbox(ctx, job.ID, "recovered", []string{"deployment-recovered"}); err != nil {
+			if _, err := defaultTenant(s).ResetRuntimeWithOutbox(ctx, job.ID, "recovered", []string{"deployment-recovered"}); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.SavePublicDashboard(ctx, PublicDashboard{Enabled: true}, []PublicDashboardHost{{JobID: job.ID, Address: "192.0.2.10"}}, AuditEntry{}); err != nil {
+			if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Enabled: true}, []PublicDashboardHost{{JobID: job.ID, Address: "192.0.2.10"}}, AuditEntry{}); err != nil {
 				t.Fatal(err)
 			}
 			for query, want := range map[string]int{
@@ -574,7 +574,7 @@ func TestSchema53GuardTriggers(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertSecondTenant(t, s)
-	jobA, err := s.CreateJob(ctx, testJob("edge"))
+	jobA, err := defaultTenant(s).CreateJob(ctx, testJob("edge"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -684,7 +684,7 @@ func TestSchema53GuardTriggers(t *testing.T) {
 
 	// The tenant of a history row, a job and a dashboard cannot change,
 	// even to the same value. Other columns stay writable.
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{}, nil, AuditEntry{}); err != nil {
+	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{}, nil, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
@@ -742,7 +742,7 @@ func TestSchema53GuardTriggers(t *testing.T) {
 	})
 	// The store refuses such a host itself, as a host of an unknown job,
 	// before the trigger would.
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{Enabled: true}, []PublicDashboardHost{{JobID: jobB, Address: "192.0.2.10"}}, AuditEntry{}); !errors.Is(err, ErrValidation) || err.Error() != errPublicDashboardHostJob.Error() {
+	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Enabled: true}, []PublicDashboardHost{{JobID: jobB, Address: "192.0.2.10"}}, AuditEntry{}); !errors.Is(err, ErrValidation) || err.Error() != errPublicDashboardHostJob.Error() {
 		t.Fatalf("publish a host of another tenant's job = %v, want %q", err, errPublicDashboardHostJob)
 	}
 }
@@ -764,7 +764,7 @@ func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertSecondTenant(t, s)
-	jobA, err := s.CreateJob(ctx, testJob("edge"))
+	jobA, err := defaultTenant(s).CreateJob(ctx, testJob("edge"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -776,11 +776,11 @@ func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
 	// Scans follow their job; a legacy scan without a job ID belongs to the
 	// default tenant; a scan of an unknown job is refused.
 	for id, jobID := range map[string]string{"scan-a": jobA.ID, "scan-b": jobB, "scan-legacy": ""} {
-		if err := s.SaveScan(ctx, largeSnapshotScan(id, jobID, "edge", now)); err != nil {
+		if err := s.System().SaveScan(ctx, largeSnapshotScan(id, jobID, "edge", now)); err != nil {
 			t.Fatalf("save %s: %v", id, err)
 		}
 	}
-	if err := s.SaveScan(ctx, largeSnapshotScan("scan-unknown", "00000000-0000-0000-0000-00000000dead", "edge", now)); err == nil || !strings.Contains(err.Error(), "scans.tenant_id must be the tenant of the scan's job") {
+	if err := s.System().SaveScan(ctx, largeSnapshotScan("scan-unknown", "00000000-0000-0000-0000-00000000dead", "edge", now)); err == nil || !strings.Contains(err.Error(), "scans.tenant_id must be the tenant of the scan's job") {
 		t.Fatalf("save a scan of an unknown job = %v", err)
 	}
 	for id, want := range map[string]string{"scan-a": DefaultTenantID, "scan-b": secondTenantID, "scan-legacy": DefaultTenantID} {
@@ -803,7 +803,7 @@ func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
 		}
 		destination = "silence-" + want
 		// Two days after the last successful scan.
-		if _, created, err := s.RecordJobSilenceAlert(ctx, jobID, "edge", now.Add(-24*time.Hour), now.Add(48*time.Hour), time.Hour, []string{destination}); err != nil || !created {
+		if _, created, err := s.System().RecordJobSilenceAlert(ctx, jobID, "edge", now.Add(-24*time.Hour), now.Add(48*time.Hour), time.Hour, []string{destination}); err != nil || !created {
 			t.Fatalf("silence alert = %v, %v", created, err)
 		}
 		if got := tenantOf(t, s.DB, `SELECT tenant_id FROM events WHERE type='job-silent' AND job_id=?`, jobID); got != want {
@@ -815,7 +815,7 @@ func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
 	}
 	job := testJob("edge")
 	job.Targets = []string{"192.0.2.20"}
-	if _, _, events, err := s.UpdateJobWithEventsWithOutbox(ctx, jobA.ID, jobA.Revision, job, true, false, true, []string{"job-update"}); err != nil || len(events) != 1 {
+	if _, _, events, err := defaultTenant(s).UpdateJobWithEventsWithOutbox(ctx, jobA.ID, jobA.Revision, job, true, false, true, []string{"job-update"}); err != nil || len(events) != 1 {
 		t.Fatalf("scope change events = %v, %v", events, err)
 	}
 	if got := tenantOf(t, s.DB, `SELECT tenant_id FROM outbox WHERE destination='job-update'`); got != DefaultTenantID {
@@ -827,13 +827,13 @@ func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
 
 	// Update alerts are platform events: neither they nor their deliveries
 	// have a tenant.
-	if _, err := s.RecordInstalledVersion(ctx, "1.0.0", "", false, nil); err != nil {
+	if _, err := s.Platform().RecordInstalledVersion(ctx, "1.0.0", "", false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if events, err := s.RecordInstalledVersion(ctx, "1.1.0", "https://example.invalid/1.1.0", true, []string{"updates"}); err != nil || len(events) != 1 {
+	if events, err := s.Platform().RecordInstalledVersion(ctx, "1.1.0", "https://example.invalid/1.1.0", true, []string{"updates"}); err != nil || len(events) != 1 {
 		t.Fatalf("upgrade alert = %v, %v", events, err)
 	}
-	if events, err := s.RecordReleaseCheck(ctx, "1.1.0", "1.2.0", "https://example.invalid/1.2.0", "EdgeWatch 1.2.0", "", "etag", true, []string{"updates"}); err != nil || len(events) != 1 {
+	if events, err := s.Platform().RecordReleaseCheck(ctx, "1.1.0", "1.2.0", "https://example.invalid/1.2.0", "EdgeWatch 1.2.0", "", "etag", true, []string{"updates"}); err != nil || len(events) != 1 {
 		t.Fatalf("update available alert = %v, %v", events, err)
 	}
 	for _, eventType := range []string{"application-updated", "application-update-available"} {
@@ -847,7 +847,7 @@ func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
 
 	// A config.yaml job's events and deliveries belong to the default
 	// tenant; a delivery queued directly follows its event.
-	if _, err := s.UpdateState(ctx, "legacy", func(*model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateState(ctx, "legacy", func(*model.JobState) ([]model.Event, error) {
 		return []model.Event{{Type: "legacy-change", Job: "legacy", CreatedAt: now}}, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -860,7 +860,7 @@ func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
 		"queued-job-b":    {Type: "change", JobID: jobB, Job: "edge", CreatedAt: now},
 		"queued-platform": {Type: "notice", Message: "platform", CreatedAt: now},
 	} {
-		if err := s.QueueEvent(ctx, destination, event); err != nil {
+		if err := s.System().QueueEvent(ctx, destination, event); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -876,11 +876,11 @@ func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
 			if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE destination=?`, sqliteTimestamp(time.Now().Add(-time.Minute)), destination); err != nil {
 				t.Fatal(err)
 			}
-			due, err := s.ClaimDueDeliveriesExcluding(ctx, 1, "terminal-owner", excludeAllBut(t, s, destination))
+			due, err := s.System().ClaimDueDeliveriesExcluding(ctx, 1, "terminal-owner", excludeAllBut(t, s, destination))
 			if err != nil || len(due) != 1 || due[0].Destination != destination {
 				t.Fatalf("claim %s attempt %d = %#v, %v", destination, attempt, due, err)
 			}
-			if err := s.DeliveryResultClaim(ctx, due[0].ID, due[0].ClaimToken, errors.New("provider failed")); err != nil {
+			if err := s.System().DeliveryResultClaim(ctx, due[0].ID, due[0].ClaimToken, errors.New("provider failed")); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -893,7 +893,7 @@ func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
 	// A tenant that is being deleted takes no new history, and the write
 	// that would add it fails as a whole.
 	setTenantState(t, s, secondTenantID, "deleting")
-	if err := s.SaveScan(ctx, largeSnapshotScan("scan-deleting", jobB, "edge", now)); err == nil || !strings.Contains(err.Error(), "must name an active or disabled tenant") {
+	if err := s.System().SaveScan(ctx, largeSnapshotScan("scan-deleting", jobB, "edge", now)); err == nil || !strings.Contains(err.Error(), "must name an active or disabled tenant") {
 		t.Fatalf("save a scan of a deleting tenant = %v", err)
 	}
 	if _, err := s.Tenant(TenantScope{id: secondTenantID}).ResetRuntimeWithOutbox(ctx, jobB, "edge", []string{"reset-deleting"}); err == nil || !strings.Contains(err.Error(), "must name an active or disabled tenant") {
@@ -948,7 +948,7 @@ func TestRestoreQuarantineKeepsTheDeliveryTenant(t *testing.T) {
 				t.Fatal(err)
 			}
 			insertSecondTenant(t, s)
-			jobA, err := s.CreateJob(ctx, testJob("edge"))
+			jobA, err := defaultTenant(s).CreateJob(ctx, testJob("edge"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -959,7 +959,7 @@ func TestRestoreQuarantineKeepsTheDeliveryTenant(t *testing.T) {
 				"queued-job-b":    {Type: "change", JobID: jobB, Job: "edge"},
 				"queued-platform": {Type: "notice", Message: "platform"},
 			} {
-				if err := s.QueueEvent(ctx, destination, event); err != nil {
+				if err := s.System().QueueEvent(ctx, destination, event); err != nil {
 					t.Fatal(err)
 				}
 			}

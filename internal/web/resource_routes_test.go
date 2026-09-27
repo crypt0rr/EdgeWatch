@@ -215,7 +215,7 @@ func newResourceRouteFixture(t *testing.T) *resourceRouteFixture {
 	server.RDAP = nil
 	fixture := &resourceRouteFixture{server: server, db: db, cookies: map[string]string{}, csrf: map[string]string{}, hostAddr: "192.0.2.10", missingID: "00000000-0000-4000-8000-000000000000", badID: "not a job'--"}
 	newJob := func(name string) store.JobRecord {
-		record, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{
+		record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{
 			Name: name, Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{fixture.hostAddr},
 			TCP: &config.Protocol{Ports: "443", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced",
 		}))
@@ -226,11 +226,11 @@ func newResourceRouteFixture(t *testing.T) *resourceRouteFixture {
 	}
 	fixture.active = newJob("resolve-once-active")
 	fixture.archived = newJob("resolve-once-archived")
-	if err := db.SetJobArchived(ctx, fixture.archived.ID, true); err != nil {
+	if err := defaultTenant(db).SetJobArchived(ctx, fixture.archived.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	var err error
-	if fixture.archived, err = db.GetJob(ctx, fixture.archived.ID); err != nil {
+	if fixture.archived, err = defaultTenant(db).GetJob(ctx, fixture.archived.ID); err != nil {
 		t.Fatal(err)
 	}
 	when := time.Now().UTC()
@@ -238,7 +238,7 @@ func newResourceRouteFixture(t *testing.T) *resourceRouteFixture {
 	fixture.scan = model.Scan{ID: "resolve-once-scan", JobID: fixture.active.ID, JobRevision: fixture.active.Revision, Job: fixture.active.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", ConfigHash: fixture.active.Job.SecurityHash(), Snapshot: model.Snapshot{Units: units}}
 	fixture.legacy = model.Scan{ID: "resolve-once-legacy", Job: "resolve-once-legacy-job", StartedAt: when.Add(-time.Hour), FinishedAt: when.Add(-time.Hour), Status: "success", Snapshot: model.Snapshot{Units: units}}
 	for _, scan := range []model.Scan{fixture.scan, fixture.legacy} {
-		if err := db.SaveScan(ctx, scan); err != nil {
+		if err := db.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -246,7 +246,7 @@ func newResourceRouteFixture(t *testing.T) *resourceRouteFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateUser(ctx, store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{}); err != nil {
+	if _, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	for username, password := range map[string]string{"admin": "administrator password", "operator": "operator account password"} {

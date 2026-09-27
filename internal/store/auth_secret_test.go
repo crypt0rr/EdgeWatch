@@ -145,11 +145,11 @@ func TestTOTPSecretCiphertextIsBoundToUserIdentity(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	secret := "JBSWY3DPEHPK3PXP"
-	first, err := s.CreateUser(ctx, User{Username: "first", Role: RoleViewer, PasswordHash: "hash", TOTPSecret: secret, TOTPEnabled: true, Enabled: true}, AuditEntry{})
+	first, err := defaultTenant(s).CreateUser(ctx, User{Username: "first", Role: RoleViewer, PasswordHash: "hash", TOTPSecret: secret, TOTPEnabled: true, Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := s.CreateUser(ctx, User{Username: "second", Role: RoleViewer, PasswordHash: "hash", TOTPSecret: secret, TOTPEnabled: true, Enabled: true}, AuditEntry{})
+	second, err := defaultTenant(s).CreateUser(ctx, User{Username: "second", Role: RoleViewer, PasswordHash: "hash", TOTPSecret: secret, TOTPEnabled: true, Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestTOTPSecretCiphertextIsBoundToUserIdentity(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE users SET totp_secret=? WHERE id=?`, firstCipher, second.ID); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := s.GetUser(ctx, second.ID)
+	loaded, err := defaultTenant(s).GetUser(ctx, second.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

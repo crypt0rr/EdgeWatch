@@ -64,12 +64,6 @@ func (p PruneStats) Total() int64 {
 	return p.Scans + p.Events + p.SentOutbox + p.FailedOutbox + p.Revisions + p.Cycles + p.RDAPCache
 }
 
-// PruneWithStats runs a retention pass through SystemStore.PruneWithStats,
-// until the daemon uses Store.System itself.
-func (s *Store) PruneWithStats(ctx context.Context, before time.Time) (PruneStats, error) {
-	return s.System().PruneWithStats(ctx, before)
-}
-
 // PruneWithStats removes rows outside the configured retention window while
 // preserving every active baseline scan and the current revision of each job.
 // Delivery rows that are still pending (or have retry attempts remaining) are
@@ -456,22 +450,10 @@ FROM (
 	return err
 }
 
-// Prune runs a retention pass through SystemStore.Prune, until the daemon
-// uses Store.System itself.
-func (s *Store) Prune(ctx context.Context, before time.Time) (int64, error) {
-	return s.System().Prune(ctx, before)
-}
-
 // Prune is retained for callers that only need the total row count.
 func (ss *SystemStore) Prune(ctx context.Context, before time.Time) (int64, error) {
 	stats, err := ss.PruneWithStats(ctx, before)
 	return stats.Total(), err
-}
-
-// AcquireLease claims the daemon lease through SystemStore.AcquireLease,
-// until the daemon uses Store.System itself.
-func (s *Store) AcquireLease(ctx context.Context, owner string) error {
-	return s.System().AcquireLease(ctx, owner)
 }
 
 // AcquireLease claims the singleton daemon lease without reclaiming the job
@@ -479,12 +461,6 @@ func (s *Store) AcquireLease(ctx context.Context, owner string) error {
 func (ss *SystemStore) AcquireLease(ctx context.Context, owner string) error {
 	_, err := ss.acquireLease(ctx, owner, false)
 	return err
-}
-
-// AcquireDaemonLease claims the daemon lease through
-// SystemStore.AcquireDaemonLease, until the daemon uses Store.System itself.
-func (s *Store) AcquireDaemonLease(ctx context.Context, owner string) (int64, error) {
-	return s.System().AcquireDaemonLease(ctx, owner)
 }
 
 // AcquireDaemonLease claims the singleton daemon lease and, when replacing a
@@ -506,13 +482,6 @@ type DaemonLeaseStatus struct {
 	Owner     string
 	Heartbeat time.Time
 	Active    bool
-}
-
-// DaemonLeaseStatus reads the daemon lease through
-// SystemStore.DaemonLeaseStatus, until its callers use Store.System
-// themselves.
-func (s *Store) DaemonLeaseStatus(ctx context.Context) (DaemonLeaseStatus, error) {
-	return s.System().DaemonLeaseStatus(ctx)
 }
 
 // DaemonLeaseStatus reads the singleton daemon lease without running any
@@ -639,12 +608,6 @@ func (ss *SystemStore) acquireLease(ctx context.Context, owner string, reclaimPr
 	return reclaimed, nil
 }
 
-// Heartbeat renews the daemon lease through SystemStore.Heartbeat, until the
-// daemon uses Store.System itself.
-func (s *Store) Heartbeat(ctx context.Context, owner string) error {
-	return s.System().Heartbeat(ctx, owner)
-}
-
 // Heartbeat renews the daemon lease that owner holds, or returns ErrLeaseLost
 // when another daemon has taken it over.
 func (ss *SystemStore) Heartbeat(ctx context.Context, owner string) error {
@@ -657,13 +620,6 @@ func (ss *SystemStore) Heartbeat(ctx context.Context, owner string) error {
 		return ErrLeaseLost
 	}
 	return nil
-}
-
-// ReclaimExpiredJobLeases removes expired job leases through
-// SystemStore.ReclaimExpiredJobLeases, until the daemon uses Store.System
-// itself.
-func (s *Store) ReclaimExpiredJobLeases(ctx context.Context, now time.Time) (int64, error) {
-	return s.System().ReclaimExpiredJobLeases(ctx, now)
 }
 
 // ReclaimExpiredJobLeases removes only leases whose owner can no longer be
@@ -684,13 +640,6 @@ func (ss *SystemStore) ReclaimExpiredJobLeases(ctx context.Context, now time.Tim
 	return result.RowsAffected()
 }
 
-// ReleaseAllJobLeases reconciles job leases through
-// SystemStore.ReleaseAllJobLeases, until its callers use Store.System
-// themselves.
-func (s *Store) ReleaseAllJobLeases(ctx context.Context) (int64, error) {
-	return s.System().ReleaseAllJobLeases(ctx)
-}
-
 // ReleaseAllJobLeases is retained as a source-compatible wrapper for older
 // callers. Its historical delete-all behavior was unsafe across daemon and
 // CLI processes; it now performs the same expiry-only reconciliation as the
@@ -699,34 +648,16 @@ func (ss *SystemStore) ReleaseAllJobLeases(ctx context.Context) (int64, error) {
 	return ss.ReclaimExpiredJobLeases(ctx, time.Now().UTC())
 }
 
-// ReleaseLease releases the daemon lease through SystemStore.ReleaseLease,
-// until the daemon uses Store.System itself.
-func (s *Store) ReleaseLease(ctx context.Context, owner string) error {
-	return s.System().ReleaseLease(ctx, owner)
-}
-
 // ReleaseLease releases the daemon lease if owner still holds it.
 func (ss *SystemStore) ReleaseLease(ctx context.Context, owner string) error {
 	_, err := ss.store.DB.ExecContext(ctx, `DELETE FROM daemon_lease WHERE id=1 AND owner=?`, owner)
 	return err
 }
 
-// Healthy checks the daemon's health through SystemStore.Healthy, until its
-// callers use Store.System themselves.
-func (s *Store) Healthy(ctx context.Context) error {
-	return s.System().Healthy(ctx)
-}
-
 // Healthy returns the error of HealthStatus, if any.
 func (ss *SystemStore) Healthy(ctx context.Context) error {
 	_, err := ss.HealthStatus(ctx)
 	return err
-}
-
-// AcquireJobLease claims a job lease through SystemStore.AcquireJobLease,
-// until the daemon uses Store.System itself.
-func (s *Store) AcquireJobLease(ctx context.Context, job, owner string, expires time.Time) error {
-	return s.System().AcquireJobLease(ctx, job, owner, expires)
 }
 
 // AcquireJobLease claims the lease of a job, of any tenant, for owner until
@@ -751,13 +682,6 @@ func (ss *SystemStore) AcquireJobLease(ctx context.Context, job, owner string, e
 		return fmt.Errorf("%w: %s", ErrJobBusy, job)
 	}
 	return nil
-}
-
-// AcquireJobLeaseForRevision claims a job lease through
-// SystemStore.AcquireJobLeaseForRevision, until the daemon uses Store.System
-// itself.
-func (s *Store) AcquireJobLeaseForRevision(ctx context.Context, job, owner string, revision int64, expires time.Time) error {
-	return s.System().AcquireJobLeaseForRevision(ctx, job, owner, revision, expires)
 }
 
 // AcquireJobLeaseForRevision atomically verifies that the queued scan still
@@ -814,12 +738,6 @@ func (ss *SystemStore) AcquireJobLeaseForRevision(ctx context.Context, job, owne
 	return tx.Commit()
 }
 
-// ReleaseJobLease releases a job lease through SystemStore.ReleaseJobLease,
-// until the daemon uses Store.System itself.
-func (s *Store) ReleaseJobLease(ctx context.Context, job, owner string) error {
-	return s.System().ReleaseJobLease(ctx, job, owner)
-}
-
 // ReleaseJobLease releases the lease of a job if owner still holds it.
 func (ss *SystemStore) ReleaseJobLease(ctx context.Context, job, owner string) error {
 	if strings.TrimSpace(job) == "" || strings.TrimSpace(owner) == "" {
@@ -827,12 +745,6 @@ func (ss *SystemStore) ReleaseJobLease(ctx context.Context, job, owner string) e
 	}
 	_, err := ss.store.DB.ExecContext(ctx, `DELETE FROM job_leases WHERE job=? AND owner=?`, job, owner)
 	return err
-}
-
-// RenewJobLease extends a job lease through SystemStore.RenewJobLease, until
-// the daemon uses Store.System itself.
-func (s *Store) RenewJobLease(ctx context.Context, job, owner string, expires time.Time) error {
-	return s.System().RenewJobLease(ctx, job, owner, expires)
 }
 
 // RenewJobLease extends an existing scan lease without allowing a different
@@ -854,12 +766,6 @@ func (ss *SystemStore) RenewJobLease(ctx context.Context, job, owner string, exp
 		return ErrLeaseLost
 	}
 	return nil
-}
-
-// Approve approves a config.yaml job's baseline through SystemStore.Approve,
-// until its callers use Store.System themselves.
-func (s *Store) Approve(ctx context.Context, job string, scan model.Scan) ([]model.Event, error) {
-	return s.System().Approve(ctx, job, scan)
 }
 
 // Approve makes a successful scan the baseline of the config.yaml job with
@@ -889,12 +795,6 @@ func (ss *SystemStore) Approve(ctx context.Context, job string, scan model.Scan)
 		state.FingerprintCandidates = map[string]model.ValueCount{}
 		return []model.Event{{Type: "baseline-approved", Job: job, ScanID: scan.ID, Message: "Baseline manually approved", CreatedAt: time.Now().UTC()}}, nil
 	})
-}
-
-// ResetBaseline resets a config.yaml job's baseline through
-// SystemStore.ResetBaseline, until its callers use Store.System themselves.
-func (s *Store) ResetBaseline(ctx context.Context, job string) ([]model.Event, error) {
-	return s.System().ResetBaseline(ctx, job)
 }
 
 // ResetBaseline clears the baseline of the config.yaml job with the given

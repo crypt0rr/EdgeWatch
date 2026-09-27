@@ -105,12 +105,12 @@ func TestDeletingManagedDestinationUnblocksJobEdits(t *testing.T) {
 	if updated.Code != http.StatusOK {
 		t.Fatalf("schedule-only edit after destination delete = %d: %s", updated.Code, updated.Body.String())
 	}
-	state, err := db.GetApplicationUpdateState(ctx)
+	updateRouting, err := defaultTenant(db).ApplicationUpdateRouting(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !state.UpdateNotificationDestinationsConfigured || len(state.UpdateNotificationDestinations) != 0 {
-		t.Fatalf("update routing after destination delete = %#v", state)
+	if !updateRouting.Configured || len(updateRouting.Destinations) != 0 {
+		t.Fatalf("update routing after destination delete = %#v", updateRouting)
 	}
 	if !broadcastJobUpdate {
 		t.Fatal("destination delete did not announce the job routing change to open consoles")
@@ -119,6 +119,17 @@ func TestDeletingManagedDestinationUnblocksJobEdits(t *testing.T) {
 
 // newRoutingTestServer starts a server on an existing database with the
 // supplied deployment URLs, as a daemon restart with an edited config.yaml does.
+// legacySelection returns the default tenant's destinations for a job
+// without routing of its own.
+func legacySelection(t *testing.T, server *Server) []string {
+	t.Helper()
+	selection, err := server.App.Notifier.Tenant(defaultTenantStore(server)).LegacySelection(context.Background())
+	if err != nil || len(selection) == 0 {
+		t.Fatalf("legacy selection = %v, %v", selection, err)
+	}
+	return selection
+}
+
 func newRoutingTestServer(t *testing.T, db *store.Store, urls ...string) *Server {
 	t.Helper()
 	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}, Notifications: config.Notifications{URLs: urls}}
@@ -132,13 +143,13 @@ func newRoutingTestServer(t *testing.T, db *store.Store, urls ...string) *Server
 func TestJobAPIReportsRoutingToRotatedDeploymentDestination(t *testing.T) {
 	ctx := context.Background()
 	_, db, admin := newUsersTestServer(t)
-	record, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "routed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect", Engine: "nmap"}, Timeout: config.Duration(time.Minute), Timing: "balanced", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}))
+	record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "routed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect", Engine: "nmap"}, Timeout: config.Duration(time.Minute), Timing: "balanced", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	oldURL := "generic://localhost/hook?token=old-secret&disabletls=yes&template=json"
 	newRoutingTestServer(t, db, oldURL)
-	frozen, err := db.GetJob(ctx, record.ID)
+	frozen, err := defaultTenant(db).GetJob(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +157,7 @@ func TestJobAPIReportsRoutingToRotatedDeploymentDestination(t *testing.T) {
 
 	newURL := "generic://localhost/hook?token=new-secret&disabletls=yes&template=json"
 	server := newRoutingTestServer(t, db, newURL)
-	newSelector := server.App.Notifier.LegacySelection()[0]
+	newSelector := legacySelection(t, server)[0]
 	if newSelector == oldSelector {
 		t.Fatalf("changed deployment URL kept selector %q", oldSelector)
 	}
@@ -189,15 +200,15 @@ func TestJobAPIShowsLegacyDeploymentDigestAsCurrentSelector(t *testing.T) {
 	url := "generic://localhost/hook?token=legacy&disabletls=yes&template=json"
 	digest := sha256.Sum256([]byte(url))
 	legacySelector := "file:" + hex.EncodeToString(digest[:])
-	record, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "legacy-digest", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect", Engine: "nmap"}, Timeout: config.Duration(time.Minute), Timing: "balanced", NotificationDestinations: []string{legacySelector}}))
+	record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "legacy-digest", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect", Engine: "nmap"}, Timeout: config.Duration(time.Minute), Timing: "balanced", NotificationDestinations: []string{legacySelector}}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetApplicationUpdateDestinations(ctx, []string{legacySelector}, store.AuditEntry{}); err != nil {
+	if err := defaultTenant(db).SetApplicationUpdateDestinations(ctx, []string{legacySelector}, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	server := newRoutingTestServer(t, db, url)
-	currentSelector := server.App.Notifier.LegacySelection()[0]
+	currentSelector := legacySelection(t, server)[0]
 	loaded := httptest.NewRecorder()
 	server.jobRoute(loaded, routingRequest(t, http.MethodGet, "/api/v1/jobs/"+record.ID, ""), admin, defaultTenantStore(server), record.ID)
 	job := decodeRoutingJob(t, loaded)

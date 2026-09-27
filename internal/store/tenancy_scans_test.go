@@ -99,8 +99,7 @@ func fixtureScanKeys(id string, units bool) []string {
 
 // scanTenantLeakCases show that tenant B cannot reach tenant A's scans and
 // hosts by scan ID, by job ID, or through the host inventory and its search,
-// although both tenants' scans found the same addresses. Each case also
-// checks that the deprecated Store wrapper reads the default tenant, A.
+// although both tenants' scans found the same addresses.
 var scanTenantLeakCases = map[string]tenantLeakCase{
 	"GetScan": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
@@ -116,9 +115,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 				t.Errorf("tenant %s: own scan = %s with %d hosts, %v", scope.ID(), scan.ID, len(scan.Snapshot.Hosts), err)
 			}
 		}
-		if _, err := f.store.GetScan(ctx, f.scanB); !errors.Is(err, ErrNotFound) {
-			t.Errorf("deprecated GetScan read tenant B's scan: %v", err)
-		}
 	}},
 	"GetScanSummary": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
@@ -130,9 +126,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 			if err != nil || summary.ID != want || summary.TenantID != scope.ID() {
 				t.Errorf("tenant %s: own scan summary = %+v, %v", scope.ID(), summary, err)
 			}
-		}
-		if _, err := f.store.GetScanSummary(ctx, f.scanB); !errors.Is(err, ErrNotFound) {
-			t.Errorf("deprecated GetScanSummary read tenant B's scan: %v", err)
 		}
 	}},
 	"GetScanComparison": {run: func(t *testing.T, f tenantFixture) {
@@ -150,9 +143,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 				t.Errorf("tenant %s: own comparison = %s (%q) with changes %v, %v", scope.ID(), summary.ID, summary.TenantID, keys, err)
 			}
 		}
-		if _, _, err := f.store.GetScanComparison(ctx, f.scanB); !errors.Is(err, ErrNotFound) {
-			t.Errorf("deprecated GetScanComparison read tenant B's scan: %v", err)
-		}
 	}},
 	"GetLatestSuccessfulJobScanSummary": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
@@ -164,9 +154,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 			if err != nil || summary == nil || summary.ID != want[1] || summary.TenantID != scope.ID() {
 				t.Errorf("tenant %s: latest scan of its job = %+v, %v", scope.ID(), summary, err)
 			}
-		}
-		if summary, err := f.store.GetLatestSuccessfulJobScanSummary(ctx, f.jobB); err != nil || summary != nil {
-			t.Errorf("deprecated GetLatestSuccessfulJobScanSummary read tenant B's job: %+v, %v", summary, err)
 		}
 	}},
 	"ListScanChangesPage": {run: func(t *testing.T, f tenantFixture) {
@@ -184,9 +171,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 				t.Errorf("tenant %s: own changes = %v (total %d), %v; want %v", scope.ID(), keys, page.Total, err, want)
 			}
 		}
-		if page, err := f.store.ListScanChangesPage(ctx, f.scanB, 50, 0); err != nil || page.Total != 0 {
-			t.Errorf("deprecated ListScanChangesPage read tenant B's changes: %+v, %v", page, err)
-		}
 	}},
 	"ListScanResultsPage": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
@@ -202,9 +186,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 			if want := fixtureScanKeys(id, true); err != nil || page.Total != len(want) || !reflect.DeepEqual(targets, want) {
 				t.Errorf("tenant %s: own results = %v (total %d), %v; want %v", scope.ID(), targets, page.Total, err, want)
 			}
-		}
-		if page, err := f.store.ListScanResultsPage(ctx, f.scanB, 50, 0); err != nil || page.Total != 0 {
-			t.Errorf("deprecated ListScanResultsPage read tenant B's results: %+v, %v", page, err)
 		}
 	}},
 	"ListScanHostsPage": {run: func(t *testing.T, f tenantFixture) {
@@ -225,9 +206,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 				t.Errorf("tenant %s: own scan host search = %v (total %d), %v; want %v", scope.ID(), got, page.Total, err, want)
 			}
 		}
-		if page, err := f.store.ListScanHostsPage(ctx, f.scanB, "", "", nil, 50, 0); err != nil || page.Total != 0 {
-			t.Errorf("deprecated ListScanHostsPage read tenant B's hosts: %+v, %v", page, err)
-		}
 	}},
 	"GetScanHost": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
@@ -241,9 +219,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 				t.Errorf("tenant %s: own scan host = %+v, %v", scope.ID(), host, err)
 			}
 		}
-		if _, err := f.store.GetScanHost(ctx, f.scanB, address); !errors.Is(err, ErrNotFound) {
-			t.Errorf("deprecated GetScanHost read tenant B's host: %v", err)
-		}
 	}},
 	"ScanHostIndexExists": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
@@ -255,9 +230,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 			if exists, err := f.store.Tenant(check.scope).ScanHostIndexExists(ctx, check.scanID); err != nil || exists != check.want {
 				t.Errorf("tenant %s: host index of %s = %v, %v; want %v", check.scope.ID(), check.scanID, exists, err, check.want)
 			}
-		}
-		if exists, err := f.store.ScanHostIndexExists(ctx, f.scanB); err != nil || exists {
-			t.Errorf("deprecated ScanHostIndexExists saw tenant B's scan: %v, %v", exists, err)
 		}
 	}},
 	"SuccessfulScanHostIndexExists": {writes: true, run: func(t *testing.T, f tenantFixture) {
@@ -271,9 +243,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 			if exists, err := f.store.Tenant(scope).SuccessfulScanHostIndexExists(ctx); err != nil || exists != want {
 				t.Errorf("tenant %s: successful host index = %v, %v; want %v", scope.ID(), exists, err, want)
 			}
-		}
-		if exists, err := f.store.SuccessfulScanHostIndexExists(ctx); err != nil || !exists {
-			t.Errorf("deprecated SuccessfulScanHostIndexExists = %v, %v; want tenant A's index", exists, err)
 		}
 	}},
 	"LegacySuccessfulScanExists": {writes: true, run: func(t *testing.T, f tenantFixture) {
@@ -289,8 +258,27 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 				t.Errorf("tenant %s: legacy successful scan = %v, %v; want %v", scope.ID(), exists, err, want)
 			}
 		}
-		if exists, err := f.store.LegacySuccessfulScanExists(ctx); err != nil || !exists {
-			t.Errorf("deprecated LegacySuccessfulScanExists = %v, %v; want tenant A's scan", exists, err)
+	}},
+	// The hosts page reads the snapshots of the scans without a host index
+	// through this list, so each tenant lists and counts only its own.
+	"ListLegacySuccessfulScanSnapshotsPage": {writes: true, run: func(t *testing.T, f tenantFixture) {
+		ctx := context.Background()
+		finished := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
+		own := map[TenantScope]string{f.a: "legacy-tenant-a", f.b: "legacy-tenant-b"}
+		for scope, job := range map[TenantScope]string{f.a: f.jobA, f.b: f.jobB} {
+			if err := f.store.System().SaveScan(ctx, fixtureScan(own[scope], job, "edge", finished, nil)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		for scope, want := range own {
+			page, err := f.store.Tenant(scope).ListLegacySuccessfulScanSnapshotsPage(ctx, 50, 0)
+			if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].ID != want {
+				t.Errorf("tenant %s: legacy snapshots = %+v, %v; want %s", scope.ID(), page, err, want)
+			}
+		}
+		// The other tenant's snapshots do not fill a page past B's own.
+		if page, err := f.store.Tenant(f.b).ListLegacySuccessfulScanSnapshotsPage(ctx, 50, 1); err != nil || page.Total != 1 || len(page.Items) != 0 {
+			t.Errorf("tenant B's second page of legacy snapshots = %+v, %v", page, err)
 		}
 	}},
 	"ListLatestScanHostsPage": {run: func(t *testing.T, f tenantFixture) {
@@ -310,10 +298,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 				}
 			}
 		}
-		page, err := f.store.ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
-		if got, want := hostOwners(page.Items, latestHostOwner), fixtureHostOwners(own[f.a], 0, 3); err != nil || !reflect.DeepEqual(got, want) {
-			t.Errorf("deprecated ListLatestScanHostsPage = %v, %v; want %v", got, err, want)
-		}
 	}},
 	"ListLatestScanHosts": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
@@ -322,10 +306,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 			if got, want := hostOwners(hosts, latestHostOwner), fixtureHostOwners(owner, 0, 3); err != nil || !reflect.DeepEqual(got, want) {
 				t.Errorf("tenant %s: inventory = %v, %v; want %v", scope.ID(), got, err, want)
 			}
-		}
-		hosts, err := f.store.ListLatestScanHosts(ctx)
-		if got, want := hostOwners(hosts, latestHostOwner), fixtureHostOwners(f.scanA+"@"+f.jobA, 0, 3); err != nil || !reflect.DeepEqual(got, want) {
-			t.Errorf("deprecated ListLatestScanHosts = %v, %v; want %v", got, err, want)
 		}
 	}},
 	"ListJobScans": {run: func(t *testing.T, f tenantFixture) {
@@ -340,9 +320,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 				t.Errorf("tenant %s: scans of job %s = %v, %v; want %v", check.scope.ID(), check.job, got, err, check.want)
 			}
 		}
-		if scans, err := f.store.ListJobScans(ctx, f.jobB, 10); err != nil || len(scans) != 0 {
-			t.Errorf("deprecated ListJobScans read tenant B's job: %v, %v", scanIDs(scans), err)
-		}
 	}},
 	"ListJobScansPage": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
@@ -356,9 +333,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 				t.Errorf("tenant %s: scan page of job %s = %v (total %d), %v; want %v", check.scope.ID(), check.job, got, page.Total, err, check.want)
 			}
 		}
-		if page, err := f.store.ListJobScansPage(ctx, f.jobB, 10, 0); err != nil || page.Total != 0 {
-			t.Errorf("deprecated ListJobScansPage read tenant B's job: %+v, %v", page, err)
-		}
 	}},
 	"ListJobScanSummariesPage": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
@@ -371,9 +345,6 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 			if got := summaryIDs(t, check.scope, page.Items); err != nil || page.Total != len(check.want) || !reflect.DeepEqual(got, check.want) {
 				t.Errorf("tenant %s: summary page of job %s = %v (total %d), %v; want %v", check.scope.ID(), check.job, got, page.Total, err, check.want)
 			}
-		}
-		if page, err := f.store.ListJobScanSummariesPage(ctx, f.jobB, 10, 0); err != nil || page.Total != 0 {
-			t.Errorf("deprecated ListJobScanSummariesPage read tenant B's job: %+v, %v", page, err)
 		}
 	}},
 }

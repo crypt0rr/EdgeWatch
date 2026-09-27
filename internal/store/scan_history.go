@@ -14,12 +14,6 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
-// SaveScan stores a finished scan with its host indexes through
-// SystemStore.SaveScan, until the daemon uses Store.System itself.
-func (s *Store) SaveScan(ctx context.Context, scan model.Scan) error {
-	return s.System().SaveScan(ctx, scan)
-}
-
 // SaveScan stores a finished scan with its host indexes. It is the daemon's
 // writer, and the caller does not name a tenant: the scan belongs to its
 // job's tenant, or to the default tenant when it has no job ID, which the
@@ -255,13 +249,6 @@ func scanNotFound(id string) error {
 	return fmt.Errorf("%w: scan %s", ErrNotFound, id)
 }
 
-// ListScanHostsPage reads indexed effective hosts for one scan.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListScanHostsPage.
-func (s *Store) ListScanHostsPage(ctx context.Context, scanID, query, protocol string, hasOpen *bool, limit, offset int) (Page[ScanHost], error) {
-	return s.Tenant(DefaultTenantScope()).ListScanHostsPage(ctx, scanID, query, protocol, hasOpen, limit, offset)
-}
-
 // ListScanHostsPage reads indexed effective hosts for one of the tenant's
 // scans; a scan of another tenant has none. The SQL predicates run before
 // LIMIT/OFFSET, so a page request never needs to load unrelated host
@@ -297,13 +284,6 @@ func (ts *TenantStore) ListScanHostsPage(ctx context.Context, scanID, query, pro
 	return page, rows.Err()
 }
 
-// ScanHostIndexExists reports whether a scan has the incremental host index.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ScanHostIndexExists.
-func (s *Store) ScanHostIndexExists(ctx context.Context, scanID string) (bool, error) {
-	return s.Tenant(DefaultTenantScope()).ScanHostIndexExists(ctx, scanID)
-}
-
 // ScanHostIndexExists reports whether one of the tenant's scans has the
 // incremental host index; a scan of another tenant has none. It is separate
 // from a filtered page's Total: a valid indexed scan can have zero matches
@@ -318,15 +298,6 @@ func (ts *TenantStore) ScanHostIndexExists(ctx context.Context, scanID string) (
 	return exists, err
 }
 
-// SuccessfulScanHostIndexExists reports whether a successful scan has the
-// incremental host index.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.SuccessfulScanHostIndexExists.
-func (s *Store) SuccessfulScanHostIndexExists(ctx context.Context) (bool, error) {
-	return s.Tenant(DefaultTenantScope()).SuccessfulScanHostIndexExists(ctx)
-}
-
 // SuccessfulScanHostIndexExists is the tenant-wide equivalent used by the
 // Hosts view to distinguish an indexed history (including a zero-match
 // filter) from a wholly legacy one. Only the tenant's scans count.
@@ -337,13 +308,6 @@ func (ts *TenantStore) SuccessfulScanHostIndexExists(ctx context.Context) (bool,
 	var exists bool
 	err := ts.store.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM scan_hosts h JOIN scans s ON s.id=h.scan_id WHERE s.tenant_id=? AND s.status='success')`, ts.scope.id).Scan(&exists)
 	return exists, err
-}
-
-// GetScanHost returns one indexed effective host of a scan.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetScanHost.
-func (s *Store) GetScanHost(ctx context.Context, scanID, address string) (ScanHost, error) {
-	return s.Tenant(DefaultTenantScope()).GetScanHost(ctx, scanID, address)
 }
 
 // GetScanHost returns one indexed effective host of the tenant's scan, or
@@ -372,15 +336,6 @@ func (ts *TenantStore) GetScanHost(ctx context.Context, scanID, address string) 
 	}
 	item.ScanID = scanID
 	return item, nil
-}
-
-// ListLatestScanHostsPage returns the newest successful observation of each
-// effective address.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ListLatestScanHostsPage.
-func (s *Store) ListLatestScanHostsPage(ctx context.Context, query, protocol string, hasOpen *bool, limit, offset int) (Page[LatestScanHost], error) {
-	return s.Tenant(DefaultTenantScope()).ListLatestScanHostsPage(ctx, query, protocol, hasOpen, limit, offset)
 }
 
 // ListLatestScanHostsPage returns the maintained newest successful
@@ -421,13 +376,6 @@ func (ts *TenantStore) ListLatestScanHostsPage(ctx context.Context, query, proto
 	return page, rows.Err()
 }
 
-// ListLatestScanHosts returns the complete maintained projection.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListLatestScanHosts.
-func (s *Store) ListLatestScanHosts(ctx context.Context) ([]LatestScanHost, error) {
-	return s.Tenant(DefaultTenantScope()).ListLatestScanHosts(ctx)
-}
-
 // ListLatestScanHosts returns the tenant's complete maintained projection.
 // It is used only when the tenant's history still contains legacy successful
 // snapshots that cannot be represented by latest_scan_hosts; the normal Hosts
@@ -450,15 +398,6 @@ func (ts *TenantStore) ListLatestScanHosts(ctx context.Context) ([]LatestScanHos
 	}
 }
 
-// LegacySuccessfulScanExists reports whether a successful scan has no derived
-// host index.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.LegacySuccessfulScanExists.
-func (s *Store) LegacySuccessfulScanExists(ctx context.Context) (bool, error) {
-	return s.Tenant(DefaultTenantScope()).LegacySuccessfulScanExists(ctx)
-}
-
 // LegacySuccessfulScanExists reports whether at least one of the tenant's
 // successful scans has no derived host index or completed backfill
 // checkpoint. Such rows are expected in databases upgraded from a release
@@ -476,13 +415,6 @@ func (ts *TenantStore) LegacySuccessfulScanExists(ctx context.Context) (bool, er
 	  AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=s.id)
 )`, ts.scope.id).Scan(&exists)
 	return exists, err
-}
-
-// GetScan returns a complete scan, with its snapshot and change list.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetScan.
-func (s *Store) GetScan(ctx context.Context, id string) (model.Scan, error) {
-	return s.Tenant(DefaultTenantScope()).GetScan(ctx, id)
 }
 
 // GetScan returns one of the tenant's scans with its snapshot and change
@@ -528,13 +460,6 @@ func (ts *TenantStore) GetScan(ctx context.Context, id string) (model.Scan, erro
 	return v, nil
 }
 
-// GetScanSummary returns scan metadata without its snapshot or change list.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetScanSummary.
-func (s *Store) GetScanSummary(ctx context.Context, id string) (model.ScanSummary, error) {
-	return s.Tenant(DefaultTenantScope()).GetScanSummary(ctx, id)
-}
-
 // GetScanSummary returns the metadata of one of the tenant's scans without
 // reading either the snapshot or the serialized change list. History/detail
 // views use this method so a broad scan cannot cause a hidden full-result
@@ -570,15 +495,6 @@ func (ts *TenantStore) GetScanSummary(ctx context.Context, id string) (model.Sca
 }
 
 // GetLatestSuccessfulJobScanSummary returns the newest fully successful scan
-// of a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.GetLatestSuccessfulJobScanSummary.
-func (s *Store) GetLatestSuccessfulJobScanSummary(ctx context.Context, jobID string) (*model.ScanSummary, error) {
-	return s.Tenant(DefaultTenantScope()).GetLatestSuccessfulJobScanSummary(ctx, jobID)
-}
-
-// GetLatestSuccessfulJobScanSummary returns the newest fully successful scan
 // of one of the tenant's jobs without loading its snapshot or change payload.
 // The ordering is deterministic for scans that finish at the same instant
 // and is backed by the scans_job_id_time index. A job with no successful
@@ -611,13 +527,6 @@ func (ts *TenantStore) GetLatestSuccessfulJobScanSummary(ctx context.Context, jo
 	v.StartedAt, v.FinishedAt = scanTime(started), scanTime(finished)
 	v.TenantID = ts.scope.id
 	return &v, nil
-}
-
-// GetScanComparison returns scan metadata and the scan-time change list.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetScanComparison.
-func (s *Store) GetScanComparison(ctx context.Context, id string) (model.ScanSummary, []model.Change, error) {
-	return s.Tenant(DefaultTenantScope()).GetScanComparison(ctx, id)
 }
 
 // GetScanComparison returns the metadata and the immutable scan-time change
@@ -663,13 +572,6 @@ func (ts *TenantStore) GetScanComparison(ctx context.Context, id string) (model.
 	return v, changes, nil
 }
 
-// ListScanChangesPage reads one page of a scan's scan-time diff.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListScanChangesPage.
-func (s *Store) ListScanChangesPage(ctx context.Context, id string, limit, offset int) (Page[model.Change], error) {
-	return s.Tenant(DefaultTenantScope()).ListScanChangesPage(ctx, id, limit, offset)
-}
-
 // ListScanChangesPage reads only one page of the immutable scan-time diff of
 // one of the tenant's scans; a scan of another tenant has no changes.
 // Changes are stored as a JSON array for backwards-compatible scan records;
@@ -704,13 +606,6 @@ func (ts *TenantStore) ListScanChangesPage(ctx context.Context, id string, limit
 		page.Items = append(page.Items, change)
 	}
 	return page, rows.Err()
-}
-
-// ListScanResultsPage reads one page of a scan's snapshot units.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListScanResultsPage.
-func (s *Store) ListScanResultsPage(ctx context.Context, id string, limit, offset int) (Page[model.Unit], error) {
-	return s.Tenant(DefaultTenantScope()).ListScanResultsPage(ctx, id, limit, offset)
 }
 
 // ListScanResultsPage reads one page of snapshot units of one of the

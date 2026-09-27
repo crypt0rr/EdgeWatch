@@ -14,6 +14,12 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
+// defaultTenant returns the store of the default tenant, which owns every
+// job that a test creates without naming a tenant.
+func defaultTenant(s *store.Store) *store.TenantStore {
+	return s.Tenant(store.DefaultTenantScope())
+}
+
 func snapshot(state string) model.Snapshot {
 	s := model.Snapshot{Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}}}
 	if state != "" {
@@ -60,7 +66,7 @@ func TestManagedScanMigratesLegacyPortHashWithoutResettingBaseline(t *testing.T)
 		t.Fatal(err)
 	}
 	defer db.Close()
-	created, err := db.CreateJob(ctx, config.Job{
+	created, err := defaultTenant(db).CreateJob(ctx, config.Job{
 		Name: "legacy-managed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
 		TCP: &config.Protocol{Ports: "1-2", Mode: "connect"},
 	})
@@ -81,7 +87,7 @@ func TestManagedScanMigratesLegacyPortHashWithoutResettingBaseline(t *testing.T)
 		t.Fatal(err)
 	}
 	baseline := snapshotWithOpenPorts(1, 2)
-	if _, err := db.UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := db.System().UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = &baseline
 		state.BaselineScanID = "legacy-baseline"
 		state.BaselineConfigHash = legacyHash
@@ -89,7 +95,7 @@ func TestManagedScanMigratesLegacyPortHashWithoutResettingBaseline(t *testing.T)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	current, err := db.GetJob(ctx, created.ID)
+	current, err := defaultTenant(db).GetJob(ctx, created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +108,7 @@ func TestManagedScanMigratesLegacyPortHashWithoutResettingBaseline(t *testing.T)
 	if events, err := e.FinalizeManagedScan(ctx, created.ID, current.Job, &scan, nil); err != nil || len(events) != 0 {
 		t.Fatalf("finalize = events %#v, err %v", events, err)
 	}
-	state, err := db.RuntimeState(ctx, created.ID)
+	state, err := defaultTenant(db).RuntimeState(ctx, created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +127,7 @@ func TestLegacyNotificationMaterializationKeepsNewPortIncidentOpen(t *testing.T)
 		t.Fatal(err)
 	}
 	defer db.Close()
-	created, err := db.CreateJob(ctx, config.Job{
+	created, err := defaultTenant(db).CreateJob(ctx, config.Job{
 		Name: "legacy-notification-managed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
 		TCP:      &config.Protocol{Ports: "1-2", Mode: "connect"},
 		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
@@ -144,7 +150,7 @@ func TestLegacyNotificationMaterializationKeepsNewPortIncidentOpen(t *testing.T)
 		t.Fatal(err)
 	}
 	baseline := snapshotWithOpenPorts(1)
-	if _, err := db.UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := db.System().UpdateRuntime(ctx, created.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = &baseline
 		state.BaselineScanID = "legacy-baseline"
 		state.BaselineConfigHash = legacyHash
@@ -154,10 +160,10 @@ func TestLegacyNotificationMaterializationKeepsNewPortIncidentOpen(t *testing.T)
 	}
 	// Freezing the legacy nil selection only changes routing. It must not turn
 	// the next scan of the same effective scope into a scope change.
-	if count, err := db.MaterializeLegacyNotificationSelections(ctx, []string{}); err != nil || count != 1 {
+	if count, err := defaultTenant(db).MaterializeLegacyNotificationSelections(ctx, []string{}); err != nil || count != 1 {
 		t.Fatalf("materialized job count = %d, %v", count, err)
 	}
-	current, err := db.GetJob(ctx, created.ID)
+	current, err := defaultTenant(db).GetJob(ctx, created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +184,7 @@ func TestLegacyNotificationMaterializationKeepsNewPortIncidentOpen(t *testing.T)
 			}
 		}
 	}
-	state, err := db.RuntimeState(ctx, created.ID)
+	state, err := defaultTenant(db).RuntimeState(ctx, created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +268,7 @@ func TestTotalLossScanRequiresConfirmationBeforeOpeningIncidents(t *testing.T) {
 	if !strings.Contains(FormatEvent(events[0]), "awaiting confirmation") {
 		t.Fatalf("anomaly notification: %q", FormatEvent(events[0]))
 	}
-	state, err := db.State(ctx, job.Name)
+	state, err := defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +283,7 @@ func TestTotalLossScanRequiresConfirmationBeforeOpeningIncidents(t *testing.T) {
 	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" {
 		t.Fatalf("confirmed total-loss scan: %#v, %v", events, err)
 	}
-	state, err = db.State(ctx, job.Name)
+	state, err = defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +299,7 @@ func TestTotalLossScanRequiresConfirmationBeforeOpeningIncidents(t *testing.T) {
 			t.Fatalf("sustained total-loss scan %d: %#v, %v", i, events, err)
 		}
 	}
-	state, err = db.State(ctx, job.Name)
+	state, err = defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +313,7 @@ func TestTotalLossScanRequiresConfirmationBeforeOpeningIncidents(t *testing.T) {
 	if err != nil || len(events) != 1 || events[0].Type != "changes-recovered" {
 		t.Fatalf("restored scan: %#v, %v", events, err)
 	}
-	state, err = db.State(ctx, job.Name)
+	state, err = defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,7 +495,7 @@ func TestGradualPortReductionBypassesTotalLossGuard(t *testing.T) {
 	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" {
 		t.Fatalf("gradual reduction: %#v, %v", events, err)
 	}
-	state, err := db.State(ctx, job.Name)
+	state, err := defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,7 +523,7 @@ func TestSuppressedIncidentReopensAfterOneSuccessfulScan(t *testing.T) {
 		t.Fatalf("incident scan: %#v, %v", events, err)
 	}
 	key := "port|192.0.2.1|tcp|443"
-	if _, err := db.UpdateState(ctx, job.Name, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := db.System().UpdateState(ctx, job.Name, func(state *model.JobState) ([]model.Event, error) {
 		incident, ok := state.Incidents[key]
 		if !ok {
 			return nil, fmt.Errorf("incident %s not found", key)
@@ -532,7 +538,7 @@ func TestSuppressedIncidentReopensAfterOneSuccessfulScan(t *testing.T) {
 	if events, err := e.Success(ctx, job, scan("suppressed-scan", snapshot("open"))); err != nil || len(events) != 0 {
 		t.Fatalf("suppressed scan: %#v, %v", events, err)
 	}
-	state, err := db.State(ctx, job.Name)
+	state, err := defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -543,7 +549,7 @@ func TestSuppressedIncidentReopensAfterOneSuccessfulScan(t *testing.T) {
 	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" {
 		t.Fatalf("reopened scan: %#v, %v", events, err)
 	}
-	state, err = db.State(ctx, job.Name)
+	state, err = defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,7 +640,7 @@ func TestIncompleteFailuresDoNotChangeBaseline(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		e.Failure(ctx, "test", failed)
 	}
-	state, _ := db.State(ctx, "test")
+	state, _ := defaultTenant(db).State(ctx, "test")
 	if state.Baseline == nil || len(state.Baseline.Units) == 0 {
 		t.Fatal("failure modified baseline")
 	}
@@ -673,7 +679,7 @@ func TestUnreachableHostObservationDoesNotChangeBaseline(t *testing.T) {
 	if events, err := e.Success(ctx, job, scan("partial", partial)); err != nil || len(events) != 2 || events[0].Type != "changes-detected" || events[1].Type != "scan-incomplete" {
 		t.Fatalf("partial scan did not compare reachable evidence and report incomplete coverage: %#v, %v", events, err)
 	}
-	state, err := db.State(ctx, job.Name)
+	state, err := defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -765,7 +771,7 @@ func TestCompletedNaabuNoDiscoveryCanEstablishBaseline(t *testing.T) {
 	if err != nil || len(events) != 1 || events[0].Type != "baseline-complete" {
 		t.Fatalf("completed empty Naabu scan did not establish baseline: events=%#v err=%v", events, err)
 	}
-	state, err := db.State(ctx, job.Name)
+	state, err := defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -825,7 +831,7 @@ func TestIncompleteProtocolDoesNotSuppressCompleteProtocolChanges(t *testing.T) 
 	if len(events[0].Changes) != 1 || events[0].Changes[0].Key != "port|192.0.2.20|tcp|443" {
 		t.Fatalf("partial scan changes = %#v, want only complete TCP removal", events[0].Changes)
 	}
-	state, err := db.State(ctx, job.Name)
+	state, err := defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -879,7 +885,7 @@ func TestIncompleteDNSScanKeepsHealthySiblingAdditions(t *testing.T) {
 	if len(events[0].Changes) != 1 || events[0].Changes[0].Key != "port|edge.example|tcp|80" {
 		t.Fatalf("partial DNS changes = %#v, want only healthy port addition", events[0].Changes)
 	}
-	state, err := db.State(ctx, job.Name)
+	state, err := defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -937,7 +943,7 @@ func TestIncompleteDNSScanPreservesPendingHealthyAdditionUntilCompleteConfirmati
 	} else if len(events) != 0 {
 		t.Fatalf("first confirmation emitted events before the threshold: %#v", events)
 	}
-	state, err := db.State(ctx, job.Name)
+	state, err := defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -962,7 +968,7 @@ func TestIncompleteDNSScanPreservesPendingHealthyAdditionUntilCompleteConfirmati
 	if events, err := e.Success(ctx, job, scan("dns-pending-partial", partial)); err != nil || len(events) != 1 || events[0].Type != "scan-incomplete" {
 		t.Fatalf("partial DNS scan: %#v, %v", events, err)
 	}
-	state, err = db.State(ctx, job.Name)
+	state, err = defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,7 +991,7 @@ func TestIncompleteDNSScanPreservesPendingHealthyAdditionUntilCompleteConfirmati
 	if len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != "port|edge.example|tcp|80" {
 		t.Fatalf("final confirmation events = %#v, want one port change", events)
 	}
-	state, err = db.State(ctx, job.Name)
+	state, err = defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1040,7 +1046,7 @@ func TestEveryUnsuccessfulScanEmitsAnOutcomeEvent(t *testing.T) {
 		t.Fatalf("timed-out scan message = %q", events[0].Message)
 	}
 
-	state, err := db.State(ctx, job.Name)
+	state, err := defaultTenant(db).State(ctx, job.Name)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1056,7 +1062,7 @@ func TestFinalizeManagedScanRecordsInitialBaselineScanMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	record, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{
+	record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name: "managed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
 		TCP: &config.Protocol{Ports: "443", Mode: "connect"}, Timing: "balanced", Timeout: config.Duration(time.Minute),
 		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
@@ -1073,14 +1079,14 @@ func TestFinalizeManagedScanRecordsInitialBaselineScanMetadata(t *testing.T) {
 	if _, err := e.FinalizeManagedScan(ctx, record.ID, record.Job, &current, nil); err != nil {
 		t.Fatal(err)
 	}
-	stored, err := db.GetScan(ctx, current.ID)
+	stored, err := defaultTenant(db).GetScan(ctx, current.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stored.BaselineScanID != current.ID || stored.BaselineConfigHash != current.ConfigHash {
 		t.Fatalf("initial baseline metadata = %#v, want scan=%s hash=%s", stored, current.ID, current.ConfigHash)
 	}
-	if exists, err := db.BaselineHostProjectionExists(ctx, record.ID); err != nil || !exists {
+	if exists, err := defaultTenant(db).BaselineHostProjectionExists(ctx, record.ID); err != nil || !exists {
 		t.Fatalf("automatic baseline did not maintain host projection: exists=%v err=%v", exists, err)
 	}
 }
@@ -1097,7 +1103,7 @@ func TestFinalizeManagedScanMarksIncompleteAndKeepsReachableChanges(t *testing.T
 		TCP: &config.Protocol{Ports: "80,443", Mode: "connect"}, Timing: "balanced", Timeout: config.Duration(time.Minute),
 		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
 	})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1124,7 +1130,7 @@ func TestFinalizeManagedScanMarksIncompleteAndKeepsReachableChanges(t *testing.T
 	if err != nil || len(events) != 2 || events[0].Type != "changes-detected" || events[1].Type != "scan-incomplete" {
 		t.Fatalf("partial managed finalization = %#v, err=%v", events, err)
 	}
-	stored, err := db.GetScan(ctx, current.ID)
+	stored, err := defaultTenant(db).GetScan(ctx, current.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1134,7 +1140,7 @@ func TestFinalizeManagedScanMarksIncompleteAndKeepsReachableChanges(t *testing.T
 	if len(stored.Changes) != 1 || stored.Changes[0].Target != "192.0.2.1" || stored.Changes[0].Port != 80 {
 		t.Fatalf("stored reachable changes = %#v", stored.Changes)
 	}
-	state, err := db.RuntimeState(ctx, record.ID)
+	state, err := defaultTenant(db).RuntimeState(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1150,7 +1156,7 @@ func TestFinalizeManagedScanPersistsTheChangeSetAppliedByEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	record, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{
+	record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name: "fingerprint-consistency", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
 		TCP: &config.Protocol{Ports: "443", Mode: "connect", ServiceDetection: true}, Timing: "balanced", Timeout: config.Duration(time.Minute),
 		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
@@ -1190,21 +1196,21 @@ func TestFinalizeManagedScanPersistsTheChangeSetAppliedByEngine(t *testing.T) {
 	if len(events) != 0 {
 		t.Fatalf("fingerprint learning emitted a change event: %#v", events)
 	}
-	stored, err := db.GetScan(ctx, current.ID)
+	stored, err := defaultTenant(db).GetScan(ctx, current.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(stored.Changes) != 0 {
 		t.Fatalf("persisted changes = %#v, want the same empty set acted on by the engine", stored.Changes)
 	}
-	exists, err := db.BaselineHostProjectionExists(ctx, record.ID)
+	exists, err := defaultTenant(db).BaselineHostProjectionExists(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !exists {
 		t.Fatal("engine baseline mutation did not maintain the baseline host projection")
 	}
-	projected, err := db.GetBaselineHost(ctx, record.ID, "192.0.2.1")
+	projected, err := defaultTenant(db).GetBaselineHost(ctx, record.ID, "192.0.2.1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1232,14 +1238,14 @@ func TestFingerprintStabilizesWithoutBlockingPortBaseline(t *testing.T) {
 	if err != nil || len(events) != 1 || events[0].Type != "baseline-complete" {
 		t.Fatalf("fingerprint blocked baseline: %#v %v", events, err)
 	}
-	state, _ := db.State(ctx, "test")
+	state, _ := defaultTenant(db).State(ctx, "test")
 	if got := baselineService(*state.Baseline, "192.0.2.1", "tcp", 443); got != "" {
 		t.Fatalf("unstable service entered baseline: %q", got)
 	}
 	if events, _ = e.Success(ctx, job, scan("3", withService("service B"))); len(events) != 0 {
 		t.Fatalf("fingerprint learning generated alert: %#v", events)
 	}
-	state, _ = db.State(ctx, "test")
+	state, _ = defaultTenant(db).State(ctx, "test")
 	if got := baselineService(*state.Baseline, "192.0.2.1", "tcp", 443); got != "service B" {
 		t.Fatalf("stable service not learned: %q", got)
 	}
@@ -1301,7 +1307,7 @@ func TestNewPortServiceIncidentsAcceptInEitherOrder(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer db.Close()
-			record, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{
+			record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{
 				Name: "new-port-" + order, Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
 				TCP: &config.Protocol{Ports: "22,8080", Mode: "connect", ServiceDetection: true}, Timing: "balanced", Timeout: config.Duration(time.Minute),
 				Baseline: config.Baseline{Samples: 2}, Change: config.Change{Confirmations: 1},
@@ -1331,7 +1337,7 @@ func TestNewPortServiceIncidentsAcceptInEitherOrder(t *testing.T) {
 			}
 			accept := func(key string) []model.Event {
 				t.Helper()
-				events, err := db.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, key, store.AuditEntry{Action: "incident.accepted", Detail: record.ID + ":" + key})
+				events, err := defaultTenant(db).AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, key, store.AuditEntry{Action: "incident.accepted", Detail: record.ID + ":" + key})
 				if err != nil {
 					t.Fatalf("accept %s: %v", key, err)
 				}
@@ -1361,7 +1367,7 @@ func TestNewPortServiceIncidentsAcceptInEitherOrder(t *testing.T) {
 				if events := run(observe(ssh, http)); len(events) != 0 {
 					t.Fatalf("scan between acceptances emitted events: %#v", events)
 				}
-				state, err := db.RuntimeState(ctx, record.ID)
+				state, err := defaultTenant(db).RuntimeState(ctx, record.ID)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1383,7 +1389,7 @@ func TestNewPortServiceIncidentsAcceptInEitherOrder(t *testing.T) {
 					t.Fatalf("accepted observation emitted events: %#v", events)
 				}
 			}
-			state, err := db.RuntimeState(ctx, record.ID)
+			state, err := defaultTenant(db).RuntimeState(ctx, record.ID)
 			if err != nil {
 				t.Fatal(err)
 			}

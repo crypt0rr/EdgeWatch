@@ -60,7 +60,7 @@ func TestScanCycleRoutesUseTheSessionTenant(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	other, err := db.CreateUser(ctx, store.User{Username: "other-cycle-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "other-cycle-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -59,18 +59,18 @@ func managedIntentDiscardAudits(t *testing.T, s *Store) []string {
 func TestManagedIntentCapturedBeforeRenameIsQueuedUnderCurrentRevision(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, testJob("rename-window"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("rename-window"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
 		t.Fatal(err)
 	}
 	captured := []string{"managed:ops:1"}
-	if _, err := s.UpdateManagedNotificationWithAudit(ctx, "ops", 1, "Ops renamed", "generic", []byte{1}, []byte{2}, true, AuditEntry{Action: "notifications.updated", Detail: "renamed"}); err != nil {
+	if _, err := defaultTenant(s).UpdateManagedNotificationWithAudit(ctx, "ops", 1, "Ops renamed", "generic", []byte{1}, []byte{2}, true, AuditEntry{Action: "notifications.updated", Detail: "renamed"}); err != nil {
 		t.Fatal(err)
 	}
-	events, err := s.ResetRuntimeWithOutboxAndAudit(ctx, job.ID, job.Job.Name, captured, AuditEntry{Action: "baseline.reset", Detail: "reset"})
+	events, err := defaultTenant(s).ResetRuntimeWithOutboxAndAudit(ctx, job.ID, job.Job.Name, captured, AuditEntry{Action: "baseline.reset", Detail: "reset"})
 	if err != nil || len(events) != 1 {
 		t.Fatalf("reset events = %#v, %v", events, err)
 	}
@@ -83,10 +83,10 @@ func TestManagedIntentCapturedBeforeRenameIsQueuedUnderCurrentRevision(t *testin
 
 	// Several metadata edits still keep the credentials of the captured
 	// revision, and a direct queue follows the same rule.
-	if _, err := s.UpdateManagedNotification(ctx, "ops", 2, "Ops again", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(s).UpdateManagedNotification(ctx, "ops", 2, "Ops again", "generic", []byte{1}, []byte{2}, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.QueueEvent(ctx, "managed:ops:1", model.Event{Type: "direct", Job: job.Job.Name, CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, "managed:ops:1", model.Event{Type: "direct", Job: job.Job.Name, CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	if got := managedIntentOutbox(t, s); len(got) != 2 || got[0] != "managed:ops:3" || got[1] != "managed:ops:3" {
@@ -97,22 +97,22 @@ func TestManagedIntentCapturedBeforeRenameIsQueuedUnderCurrentRevision(t *testin
 func TestManagedIntentCapturedBeforeCredentialRotationIsDiscardedAndAudited(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, testJob("rotation-window"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("rotation-window"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
 		t.Fatal(err)
 	}
 	captured := []string{"managed:ops:1"}
-	if _, err := s.UpdateManagedNotification(ctx, "ops", 1, "Ops", "generic", []byte{3}, []byte{4}, true); err != nil {
+	if _, err := defaultTenant(s).UpdateManagedNotification(ctx, "ops", 1, "Ops", "generic", []byte{3}, []byte{4}, true); err != nil {
 		t.Fatal(err)
 	}
 	// A later rename does not make the pre-rotation intent current again.
-	if _, err := s.UpdateManagedNotification(ctx, "ops", 2, "Ops renamed", "generic", []byte{3}, []byte{4}, true); err != nil {
+	if _, err := defaultTenant(s).UpdateManagedNotification(ctx, "ops", 2, "Ops renamed", "generic", []byte{3}, []byte{4}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ResetRuntimeWithOutboxAndAudit(ctx, job.ID, job.Job.Name, captured, AuditEntry{Action: "baseline.reset", Detail: "reset"}); err != nil {
+	if _, err := defaultTenant(s).ResetRuntimeWithOutboxAndAudit(ctx, job.ID, job.Job.Name, captured, AuditEntry{Action: "baseline.reset", Detail: "reset"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := managedIntentOutbox(t, s); len(got) != 0 {
@@ -124,7 +124,7 @@ func TestManagedIntentCapturedBeforeCredentialRotationIsDiscardedAndAudited(t *t
 	}
 
 	// An intent captured after the rotation keeps following renames.
-	if _, err := s.UpdateRuntimeWithOutbox(ctx, job.ID, []string{"managed:ops:2"}, func(*model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntimeWithOutbox(ctx, job.ID, []string{"managed:ops:2"}, func(*model.JobState) ([]model.Event, error) {
 		return []model.Event{{Type: "alert", Job: job.Job.Name, CreatedAt: time.Now().UTC()}}, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -137,19 +137,19 @@ func TestManagedIntentCapturedBeforeCredentialRotationIsDiscardedAndAudited(t *t
 func TestManagedIntentCapturedBeforeDeletionIsDiscardedAndAudited(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, testJob("delete-window"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("delete-window"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
 		t.Fatal(err)
 	}
 	captured := []string{"managed:ops:1"}
-	if err := s.DeleteManagedNotification(ctx, "ops", 1); err != nil {
+	if err := defaultTenant(s).DeleteManagedNotification(ctx, "ops", 1); err != nil {
 		t.Fatal(err)
 	}
 	ctx = WithAuditContext(ctx, "request-1", "192.0.2.10")
-	if _, err := s.ResetRuntimeWithOutboxAndAudit(ctx, job.ID, job.Job.Name, captured, AuditEntry{Action: "baseline.reset", Detail: "reset"}); err != nil {
+	if _, err := defaultTenant(s).ResetRuntimeWithOutboxAndAudit(ctx, job.ID, job.Job.Name, captured, AuditEntry{Action: "baseline.reset", Detail: "reset"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := managedIntentOutbox(t, s); len(got) != 0 {
@@ -168,17 +168,17 @@ func TestManagedIntentCapturedBeforeDeletionIsDiscardedAndAudited(t *testing.T) 
 func TestManagedIntentCapturedBeforePauseIsSkippedWithoutDiscardAudit(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, testJob("pause-window"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("pause-window"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateManagedNotification(ctx, "ops", 1, "Ops", "generic", []byte{1}, []byte{2}, false); err != nil {
+	if _, err := defaultTenant(s).UpdateManagedNotification(ctx, "ops", 1, "Ops", "generic", []byte{1}, []byte{2}, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ResetRuntimeWithOutbox(ctx, job.ID, job.Job.Name, []string{"managed:ops:1"}); err != nil {
+	if _, err := defaultTenant(s).ResetRuntimeWithOutbox(ctx, job.ID, job.Job.Name, []string{"managed:ops:1"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := managedIntentOutbox(t, s); len(got) != 0 {
@@ -192,12 +192,12 @@ func TestManagedIntentCapturedBeforePauseIsSkippedWithoutDiscardAudit(t *testing
 func TestManagedIntentResolutionSkipsMalformedAndUnknownKeys(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
 		t.Fatal(err)
 	}
 	event := model.Event{Type: "direct", Job: "job", CreatedAt: time.Now().UTC()}
 	for _, key := range []string{"managed:ops", "managed::1", "managed:ops:x", "managed:ops:0"} {
-		if err := s.QueueEvent(ctx, key, event); err != nil {
+		if err := s.System().QueueEvent(ctx, key, event); err != nil {
 			t.Fatalf("queue malformed key %q: %v", key, err)
 		}
 	}
@@ -209,10 +209,10 @@ func TestManagedIntentResolutionSkipsMalformedAndUnknownKeys(t *testing.T) {
 	}
 	// A revision newer than the destination's (for example from a database
 	// restored behind the notifier) has unknown credentials.
-	if err := s.QueueEvent(ctx, "managed:ops:2", event); err != nil {
+	if err := s.System().QueueEvent(ctx, "managed:ops:2", event); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.QueueEvent(ctx, "managed:gone:1", event); err != nil {
+	if err := s.System().QueueEvent(ctx, "managed:gone:1", event); err != nil {
 		t.Fatal(err)
 	}
 	if got := managedIntentOutbox(t, s); len(got) != 0 {
@@ -234,17 +234,17 @@ func TestMigration49RecordsCurrentRevisionAsCredentialRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "ops", "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
 		s.Close()
 		t.Fatal(err)
 	}
 	for revision := int64(1); revision < 3; revision++ {
-		if _, err := s.UpdateManagedNotification(ctx, "ops", revision, "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
+		if _, err := defaultTenant(s).UpdateManagedNotification(ctx, "ops", revision, "Ops", "generic", []byte{1}, []byte{2}, true); err != nil {
 			s.Close()
 			t.Fatal(err)
 		}
 	}
-	job, err := s.CreateJob(ctx, testJob("credential-migration"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("credential-migration"))
 	if err != nil {
 		s.Close()
 		t.Fatal(err)
@@ -278,10 +278,10 @@ func TestMigration49RecordsCurrentRevisionAsCredentialRevision(t *testing.T) {
 	if revision != 3 || credentialRevision != 3 {
 		t.Fatalf("migrated revision/credential revision = %d/%d, want 3/3", revision, credentialRevision)
 	}
-	if _, err := upgraded.ResetRuntimeWithOutbox(ctx, job.ID, job.Job.Name, []string{"managed:ops:2"}); err != nil {
+	if _, err := defaultTenant(upgraded).ResetRuntimeWithOutbox(ctx, job.ID, job.Job.Name, []string{"managed:ops:2"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := upgraded.ResetRuntimeWithOutbox(ctx, job.ID, job.Job.Name, []string{"managed:ops:3"}); err != nil {
+	if _, err := defaultTenant(upgraded).ResetRuntimeWithOutbox(ctx, job.ID, job.Job.Name, []string{"managed:ops:3"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := managedIntentOutbox(t, upgraded); len(got) != 1 || got[0] != "managed:ops:3" {

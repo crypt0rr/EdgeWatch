@@ -39,7 +39,7 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "scan-error-handlers", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	// Recreate independent fixtures so each broken projection is reached after
 	// the route's ownership check has succeeded.
 	server, db, admin = newUsersTestServer(t)
-	record, err = db.CreateJob(ctx, job)
+	record, err = defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	}
 
 	server, db, _ = newUsersTestServer(t)
-	record, err = db.CreateJob(ctx, job)
+	record, err = defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +105,7 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	}
 
 	server, db, admin = newUsersTestServer(t)
-	record, err = db.CreateJob(ctx, job)
+	record, err = defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	}
 
 	server, db, _ = newUsersTestServer(t)
-	record, err = db.CreateJob(ctx, job)
+	record, err = defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	}
 
 	server, db, _ = newUsersTestServer(t)
-	record, err = db.CreateJob(ctx, job)
+	record, err = defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestScanAndLifecycleHandlersRedactStoreFailures(t *testing.T) {
 	}
 
 	server, db, _ = newUsersTestServer(t)
-	record, err = db.CreateJob(ctx, job)
+	record, err = defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestScanHandlersRedactJobLookupFailures(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "scan-job-lookup-failure", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.20"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 		Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "80,443", Mode: "connect"},
 		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
 	})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,10 +230,10 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 		StartedAt: now.Add(-time.Minute), FinishedAt: now.Add(-time.Minute), Status: "success", ConfigHash: job.SecurityHash(),
 		Snapshot: model.Snapshot{Scopes: []model.Scope{{Target: "192.0.2.10", Protocol: "tcp", Ports: "80,443"}}, Units: []model.Unit{{Target: "192.0.2.10", Protocol: "tcp", Addresses: []string{"192.0.2.10"}, Ports: []model.PortState{{Port: 80, State: "open"}}}}},
 	}
-	if err := db.SaveScan(ctx, baseline); err != nil {
+	if err := db.System().SaveScan(ctx, baseline); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ApproveRuntime(ctx, record.ID, job.Name, baseline); err != nil {
+	if _, err := defaultTenant(db).ApproveRuntime(ctx, record.ID, job.Name, baseline); err != nil {
 		t.Fatal(err)
 	}
 	legacy := model.Scan{
@@ -241,7 +241,7 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 		StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: job.SecurityHash(),
 		Snapshot: model.Snapshot{Units: []model.Unit{{Target: "192.0.2.10", Protocol: "tcp", Addresses: []string{"192.0.2.10"}, Ports: []model.PortState{{Port: 443, State: "open"}}}}},
 	}
-	if err := db.SaveScan(ctx, legacy); err != nil {
+	if err := db.System().SaveScan(ctx, legacy); err != nil {
 		t.Fatal(err)
 	}
 	selected := httptest.NewRecorder()
@@ -261,7 +261,7 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 	}
 
 	failed := model.Scan{ID: "failed-handler-scan", JobID: record.ID, JobRevision: record.Revision, Job: job.Name, StartedAt: now.Add(time.Minute), FinishedAt: now.Add(time.Minute), Status: "failed", Error: "scanner stopped", ConfigHash: job.SecurityHash(), Snapshot: model.Snapshot{}}
-	if err := db.SaveScan(ctx, failed); err != nil {
+	if err := db.System().SaveScan(ctx, failed); err != nil {
 		t.Fatal(err)
 	}
 	for name, fn := range map[string]func(*httptest.ResponseRecorder){
@@ -323,7 +323,7 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 	// Restore the valid comparison state after the corruption branch so the
 	// incident action checks exercise their baseline guards rather than the
 	// unrelated baseline-not-ready response.
-	if _, err := db.ApproveRuntime(ctx, record.ID, job.Name, baseline); err != nil {
+	if _, err := defaultTenant(db).ApproveRuntime(ctx, record.ID, job.Name, baseline); err != nil {
 		t.Fatal(err)
 	}
 
@@ -349,7 +349,7 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 	// Restore a valid state, then exercise unsupported and valid incident
 	// actions. The expected change is required so an old browser cannot apply a
 	// stale action to a newer incident.
-	if _, err := db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Incidents["unsupported"] = model.Incident{Change: model.Change{Key: "unsupported", Kind: "hostname", Target: "192.0.2.10", Old: "a", New: "b"}, ScanID: legacy.ID}
 		return nil, nil
 	}); err != nil {
@@ -371,7 +371,7 @@ func TestScanHandlersCoverLegacyComparisonAndFailures(t *testing.T) {
 	// Add a supported port incident and suppress it. This verifies the normal
 	// transactional route, including audit/event broadcast preparation.
 	change := model.Change{Key: "port|192.0.2.10|tcp|80", Kind: "port", Target: "192.0.2.10", Protocol: "tcp", Port: 80, Old: "open", New: "not-open", Severity: "critical"}
-	if _, err := db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Incidents[change.Key] = model.Incident{Change: change, ScanID: legacy.ID, OpenedAt: now, LastSeenAt: now}
 		return nil, nil
 	}); err != nil {
@@ -395,7 +395,7 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 		//nolint:contextcheck // the shared test fixture owns its background setup context.
 		server, db, admin := newUsersTestServer(t)
 		job := config.NormalizeJob(config.Job{Name: "failure-branches", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
-		record, err := db.CreateJob(ctx, job)
+		record, err := defaultTenant(db).CreateJob(ctx, job)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -444,7 +444,7 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 
 	server, db, _, record = newFixture(t)
 	plan := scanner.WorkPlan{Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Family: 4, Addresses: []string{"192.0.2.10"}, Ports: "1", PortCount: 1, Probes: 1}}}
-	cycle, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{ID: "failure-cycle", JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), Plan: plan})
+	cycle, err := db.System().CreateScanCycle(ctx, store.ScanCycleRecord{ID: "failure-cycle", JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +459,7 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 	server, db, _, record = newFixture(t)
 	now := time.Now().UTC()
 	scan := model.Scan{ID: "malformed-pages", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), BaselineScanID: "baseline", BaselineConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Units: []model.Unit{{Target: "192.0.2.10", Protocol: "tcp", Addresses: []string{"192.0.2.10"}, Ports: []model.PortState{{Port: 1, State: "open"}}}}}}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.DB.ExecContext(ctx, `UPDATE scans SET changes_json=?, snapshot_json=? WHERE id=?`, []byte(`{`), []byte(`{`), scan.ID); err != nil {
@@ -526,7 +526,7 @@ func TestScanHandlerStoreAndLifecycleFailureBranches(t *testing.T) {
 	}
 	now = time.Now().UTC()
 	scan = model.Scan{ID: "conditional-approval", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Units: []model.Unit{{Target: "192.0.2.10", Protocol: "tcp", Addresses: []string{"192.0.2.10"}, Ports: []model.PortState{{Port: 1, State: "open"}}}}}}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
 	approve := httptest.NewRecorder()
@@ -541,7 +541,7 @@ func TestScanRunAndCancellationGuards(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "run-handler-coverage", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}

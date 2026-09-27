@@ -741,7 +741,7 @@ func refuseActiveDaemon(ctx context.Context, destination string) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v; confirm EdgeWatch is stopped and rerun with unreadable-destination recovery", ErrRestoreDestinationUnreadable, err)
 	}
-	status, err := reader.DaemonLeaseStatus(ctx)
+	status, err := reader.System().DaemonLeaseStatus(ctx)
 	closeErr := reader.Close()
 	if err != nil {
 		return fmt.Errorf("%w: check destination daemon lease: %v; confirm EdgeWatch is stopped and rerun with unreadable-destination recovery", ErrRestoreDestinationUnreadable, err)

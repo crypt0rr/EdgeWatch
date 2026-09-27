@@ -22,7 +22,13 @@ import (
 // a handler directly pass it where the API router passes the request's
 // tenant store.
 func defaultTenantStore(server *Server) *store.TenantStore {
-	return server.Store.Tenant(store.DefaultTenantScope())
+	return defaultTenant(server.Store)
+}
+
+// defaultTenant returns the default tenant's store of a database, for the
+// tests that seed or check data without a server.
+func defaultTenant(s *store.Store) *store.TenantStore {
+	return s.Tenant(store.DefaultTenantScope())
 }
 
 // crossTenantScopeUses returns the places in the source where web code
@@ -105,12 +111,12 @@ func TestRequestTenant(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "tenant-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
-	if _, err := db.CreateJob(ctx, job); err != nil {
+	if _, err := defaultTenant(db).CreateJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
 	sessions := map[string]store.Session{store.RoleAdministrator: admin}
 	for _, role := range []string{store.RoleOperator, store.RoleViewer} {
-		user, err := db.CreateUser(ctx, store.User{Username: "tenant-" + role, DisplayName: role, Role: role, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+		user, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "tenant-" + role, DisplayName: role, Role: role, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -176,7 +182,7 @@ func TestJobRoutesUseTheSessionTenant(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "tenant-a-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +192,7 @@ func TestJobRoutesUseTheSessionTenant(t *testing.T) {
 	if _, err := db.DB.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,created_at,updated_at) VALUES(?,'Other','other',?,?)`, otherTenantID, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
-	other, err := db.CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}

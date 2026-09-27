@@ -34,7 +34,7 @@ func TestBackupCreatesVerifiableSnapshotsWithIndependentConnections(t *testing.T
 		t.Fatal(err)
 	}
 	defer backupStore.Close()
-	job, err := writer.CreateJob(ctx, config.NormalizeJob(config.Job{
+	job, err := defaultTenant(writer).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name: "backup-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.10"},
 		TCP: &config.Protocol{Ports: "443", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced",
 	}))
@@ -59,7 +59,7 @@ func TestBackupCreatesVerifiableSnapshotsWithIndependentConnections(t *testing.T
 			}
 			when := time.Unix(int64(index+1), 0).UTC()
 			scan := model.Scan{ID: "backup-scan-" + string(rune('a'+index)), JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{Units: []model.Unit{{Target: "198.51.100.10", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}}}}}}
-			if saveErr := writer.SaveScan(ctx, scan); saveErr != nil {
+			if saveErr := writer.System().SaveScan(ctx, scan); saveErr != nil {
 				writeDone <- saveErr
 				return
 			}

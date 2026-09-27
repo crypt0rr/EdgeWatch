@@ -104,7 +104,7 @@ func newHostHandlerServer(t *testing.T) (*Server, *store.Store, store.JobRecord)
 	}
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	job := config.NormalizeJob(config.Job{Name: "host-handler", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.0/30"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -174,7 +174,7 @@ func TestHostHandlersRejectInvalidOwnershipAndPagination(t *testing.T) {
 	}, "/api/v1/scans/missing/hosts/1.2.3.4/rdap"); got.Code != http.StatusNotFound {
 		t.Fatalf("missing scan RDAP status = %d", got.Code)
 	}
-	if _, err := db.RuntimeState(ctx, record.ID); err != nil {
+	if _, err := defaultTenant(db).RuntimeState(ctx, record.ID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -200,10 +200,10 @@ func TestHistoricalHostWrapperRoutesHandleMissingAndInvalidEvidence(t *testing.T
 	}
 	now := time.Now().UTC()
 	scan := model.Scan{ID: "wrapper-host-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1"}}}}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	other, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "other-host-handler", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.4"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
+	other, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "other-host-handler", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.4"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -310,14 +310,14 @@ func TestHostRoutesCoverNestedStoreFailureBranches(t *testing.T) {
 		t.Helper()
 		now := time.Now().UTC()
 		scan := model.Scan{ID: id, JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22", Ports: []model.PortObservation{{Port: 22, State: "open"}}}}}}}}
-		if err := db.SaveScan(ctx, scan); err != nil {
+		if err := db.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 		return scan
 	}
 	setBaseline := func(t *testing.T, db *store.Store, record store.JobRecord, scanID string, modified bool) {
 		t.Helper()
-		_, err := db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		_, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 			state.BaselineScanID = scanID
 			state.BaselineConfigHash = record.Job.SecurityHash()
 			state.BaselineModified = modified
@@ -409,7 +409,7 @@ func TestHistoricalHostHandlersUseLegacyFallback(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	scan := model.Scan{ID: "legacy-host-handler", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Units: []model.Unit{{Target: "198.51.100.1", Protocol: "tcp", Addresses: []string{"198.51.100.1"}, Ports: []model.PortState{{Port: 22, State: "open", Service: "ssh"}}}}, Scopes: []model.Scope{{Target: "198.51.100.1", Protocol: "tcp", Ports: "22"}}}}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
@@ -439,7 +439,7 @@ func TestHostRDAPUnavailableForKnownHistoricalHost(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 	scan := model.Scan{ID: "indexed-rdap-host", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.12", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}}}}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()

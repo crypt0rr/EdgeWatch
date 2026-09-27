@@ -110,23 +110,29 @@ func ensureBuiltinScannerProfilesContext(ctx context.Context, db *sql.DB) error 
 			return err
 		}
 		now := time.Now().UTC().Format(time.RFC3339Nano)
+		// Every statement names the built-in rows, whose tenant_id is NULL,
+		// so the seeding never reads or writes a tenant's profile.
 		var currentRaw []byte
-		var builtIn, currentRevision int
-		rowErr := tx.QueryRowContext(ctx, `SELECT definition_json,built_in,revision FROM scanner_profiles WHERE id=?`, builtin.id).Scan(&currentRaw, &builtIn, &currentRevision)
+		var currentRevision int
+		rowErr := tx.QueryRowContext(ctx, `SELECT definition_json,revision FROM scanner_profiles WHERE id=? AND tenant_id IS NULL`, builtin.id).Scan(&currentRaw, &currentRevision)
 		if errors.Is(rowErr, sql.ErrNoRows) {
+			var taken int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM scanner_profiles WHERE id=? AND tenant_id IS NOT NULL`, builtin.id).Scan(&taken); err != nil {
+				return err
+			}
+			if taken != 0 {
+				return fmt.Errorf("scanner profile %s conflicts with the built-in profile", builtin.id)
+			}
 			if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profiles(id,tenant_id,name,description,definition_json,built_in,archived,revision,created_by,updated_by,created_at,updated_at) VALUES(?,NULL,?,?,?,1,0,1,'system','system',?,?)`, builtin.id, builtin.name, builtin.value.Description, raw, now, now); err != nil {
 				return err
 			}
-			if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) VALUES(?,?,?,'system',?)`, builtin.id, 1, raw, now); err != nil {
+			if err := insertBuiltinProfileRevisionTx(ctx, tx, builtin.id, 1, raw, now); err != nil {
 				return err
 			}
 			continue
 		}
 		if rowErr != nil {
 			return rowErr
-		}
-		if builtIn == 0 {
-			return fmt.Errorf("scanner profile %s conflicts with the built-in profile", builtin.id)
 		}
 		if currentRevision < 1 {
 			currentRevision = 1
@@ -137,7 +143,7 @@ func ensureBuiltinScannerProfilesContext(ctx context.Context, db *sql.DB) error 
 		// change is always represented by a new immutable revision; existing
 		// jobs continue to use the revision they already pinned.
 		var revisionRaw []byte
-		revisionErr := tx.QueryRowContext(ctx, `SELECT definition_json FROM scanner_profile_revisions WHERE profile_id=? AND revision=?`, builtin.id, currentRevision).Scan(&revisionRaw)
+		revisionErr := tx.QueryRowContext(ctx, `SELECT r.definition_json FROM scanner_profile_revisions AS r JOIN scanner_profiles AS p ON p.id=r.profile_id AND p.tenant_id IS NULL WHERE r.profile_id=? AND r.revision=?`, builtin.id, currentRevision).Scan(&revisionRaw)
 		currentMatches := string(currentRaw) == string(raw)
 		revisionMatches := revisionErr == nil && string(revisionRaw) == string(raw)
 		if revisionErr != nil && !errors.Is(revisionErr, sql.ErrNoRows) {
@@ -150,21 +156,38 @@ func ensureBuiltinScannerProfilesContext(ctx context.Context, db *sql.DB) error 
 			// Repair a missing current revision without changing the profile's
 			// revision number. This is safe because no immutable history exists
 			// for that number yet.
-			if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) VALUES(?,?,?,'system',?)`, builtin.id, currentRevision, raw, now); err != nil {
+			if err := insertBuiltinProfileRevisionTx(ctx, tx, builtin.id, currentRevision, raw, now); err != nil {
 				return err
 			}
 			continue
 		}
 
 		nextRevision := currentRevision + 1
-		if _, err := tx.ExecContext(ctx, `INSERT INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) VALUES(?,?,?,'system',?)`, builtin.id, nextRevision, raw, now); err != nil {
+		if err := insertBuiltinProfileRevisionTx(ctx, tx, builtin.id, nextRevision, raw, now); err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE scanner_profiles SET name=?,description=?,definition_json=?,revision=?,updated_by='system',updated_at=? WHERE id=? AND revision=?`, builtin.name, builtin.value.Description, raw, nextRevision, now, builtin.id, currentRevision); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE scanner_profiles SET name=?,description=?,definition_json=?,revision=?,updated_by='system',updated_at=? WHERE id=? AND tenant_id IS NULL AND revision=?`, builtin.name, builtin.value.Description, raw, nextRevision, now, builtin.id, currentRevision); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// insertBuiltinProfileRevisionTx records a revision of a built-in profile.
+// The revision is inserted from the built-in row, whose tenant_id is NULL,
+// so it can never be attached to a tenant's profile.
+func insertBuiltinProfileRevisionTx(ctx context.Context, tx *sql.Tx, id string, revision int, raw []byte, now string) error {
+	result, err := tx.ExecContext(ctx, `INSERT INTO scanner_profile_revisions(profile_id,revision,definition_json,created_by,created_at) SELECT id,?,?,'system',? FROM scanner_profiles WHERE id=? AND tenant_id IS NULL`, revision, raw, now, id)
+	if err != nil {
+		return err
+	}
+	if inserted, err := result.RowsAffected(); err != nil || inserted != 1 {
+		if err == nil {
+			err = fmt.Errorf("%w: built-in scanner profile %s", ErrNotFound, id)
+		}
+		return err
+	}
+	return nil
 }
 
 // validateScannerProfileRecord returns only ValidationError values, so a
@@ -223,14 +246,6 @@ func profileTime(raw string) time.Time {
 	return scanTime(raw)
 }
 
-// ListScannerProfiles returns the valid profiles, without archived profiles
-// unless includeArchived is set.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListScannerProfiles.
-func (s *Store) ListScannerProfiles(ctx context.Context, includeArchived bool) ([]ScannerProfileRecord, error) {
-	return s.Tenant(DefaultTenantScope()).ListScannerProfiles(ctx, includeArchived)
-}
-
 // ListScannerProfiles returns the valid profiles the tenant can use: the
 // built-in profiles and the tenant's own. Archived profiles are left out
 // unless includeArchived is set.
@@ -240,15 +255,6 @@ func (ts *TenantStore) ListScannerProfiles(ctx context.Context, includeArchived 
 		return nil, err
 	}
 	return result.Profiles, nil
-}
-
-// ListScannerProfilesReport reads all requested profiles while isolating a
-// malformed definition to that row.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ListScannerProfilesReport.
-func (s *Store) ListScannerProfilesReport(ctx context.Context, includeArchived bool) (ScannerProfileList, error) {
-	return s.Tenant(DefaultTenantScope()).ListScannerProfilesReport(ctx, includeArchived)
 }
 
 // ListScannerProfilesReport reads the requested profiles that the tenant can
@@ -308,13 +314,6 @@ func safeProfileError(err error) string {
 	return message
 }
 
-// GetScannerProfile returns the profile with the given ID.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetScannerProfile.
-func (s *Store) GetScannerProfile(ctx context.Context, id string) (ScannerProfileRecord, error) {
-	return s.Tenant(DefaultTenantScope()).GetScannerProfile(ctx, id)
-}
-
 // GetScannerProfile returns a built-in profile or one of the tenant's own.
 // Another tenant's profile is ErrNotFound, exactly as an unknown ID, so a
 // job cannot select it either.
@@ -328,15 +327,6 @@ func (ts *TenantStore) GetScannerProfile(ctx context.Context, id string) (Scanne
 		return ScannerProfileRecord{}, fmt.Errorf("%w: scanner profile %s", ErrNotFound, id)
 	}
 	return profile, err
-}
-
-// CurrentScannerProfileRevisions returns the latest revision number of every
-// profile.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.CurrentScannerProfileRevisions.
-func (s *Store) CurrentScannerProfileRevisions(ctx context.Context) (map[string]int64, error) {
-	return s.Tenant(DefaultTenantScope()).CurrentScannerProfileRevisions(ctx)
 }
 
 // CurrentScannerProfileRevisions returns the latest revision number for the
@@ -365,14 +355,6 @@ func (ts *TenantStore) CurrentScannerProfileRevisions(ctx context.Context) (map[
 		return nil, err
 	}
 	return out, nil
-}
-
-// GetScannerProfileRevision returns an immutable historical definition.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.GetScannerProfileRevision.
-func (s *Store) GetScannerProfileRevision(ctx context.Context, id string, revision int64) (ScannerProfileRevision, error) {
-	return s.Tenant(DefaultTenantScope()).GetScannerProfileRevision(ctx, id, revision)
 }
 
 // GetScannerProfileRevision returns an immutable historical definition of a
@@ -414,15 +396,6 @@ func (ts *TenantStore) GetScannerProfileRevision(ctx context.Context, id string,
 	return result, nil
 }
 
-// ListScannerProfileRevisions returns the revisions of a profile, newest
-// first.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ListScannerProfileRevisions.
-func (s *Store) ListScannerProfileRevisions(ctx context.Context, id string) ([]ScannerProfileRevision, error) {
-	return s.Tenant(DefaultTenantScope()).ListScannerProfileRevisions(ctx, id)
-}
-
 // ListScannerProfileRevisions returns the revisions of a built-in profile or
 // one of the tenant's own, newest first. Another tenant's profile is
 // ErrNotFound.
@@ -456,14 +429,6 @@ func (ts *TenantStore) ListScannerProfileRevisions(ctx context.Context, id strin
 		revisions = append(revisions, revision)
 	}
 	return revisions, rows.Err()
-}
-
-// CreateScannerProfile creates a custom profile.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.CreateScannerProfile.
-func (s *Store) CreateScannerProfile(ctx context.Context, name, description string, definition config.ScannerProfile, actor string, audits ...AuditEntry) (ScannerProfileRecord, error) {
-	return s.Tenant(DefaultTenantScope()).CreateScannerProfile(ctx, name, description, definition, actor, audits...)
 }
 
 // CreateScannerProfile creates a custom profile in the tenant. Its name must
@@ -505,14 +470,6 @@ func (ts *TenantStore) CreateScannerProfile(ctx context.Context, name, descripti
 		return ScannerProfileRecord{}, err
 	}
 	return ScannerProfileRecord{ID: id, Name: name, Description: strings.TrimSpace(description), Definition: definition, Revision: 1, CreatedBy: actor, UpdatedBy: actor, CreatedAt: now, UpdatedAt: now}, nil
-}
-
-// UpdateScannerProfile writes a new revision of a custom profile.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.UpdateScannerProfile.
-func (s *Store) UpdateScannerProfile(ctx context.Context, id string, expectedRevision int64, name, description string, definition config.ScannerProfile, actor string, audits ...AuditEntry) (ScannerProfileRecord, error) {
-	return s.Tenant(DefaultTenantScope()).UpdateScannerProfile(ctx, id, expectedRevision, name, description, definition, actor, audits...)
 }
 
 // UpdateScannerProfile writes a new revision of one of the tenant's custom
@@ -572,14 +529,6 @@ func (ts *TenantStore) UpdateScannerProfile(ctx context.Context, id string, expe
 		return ScannerProfileRecord{}, err
 	}
 	return ScannerProfileRecord{ID: id, Name: name, Description: strings.TrimSpace(description), Definition: definition, Revision: next, CreatedBy: current.CreatedBy, UpdatedBy: actor, CreatedAt: profileTime(created), UpdatedAt: now, Archived: archived != 0}, nil
-}
-
-// SetScannerProfileArchived archives or restores a custom profile.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.SetScannerProfileArchived.
-func (s *Store) SetScannerProfileArchived(ctx context.Context, id string, archived bool, expectedRevision int64, actor string, audits ...AuditEntry) error {
-	return s.Tenant(DefaultTenantScope()).SetScannerProfileArchived(ctx, id, archived, expectedRevision, actor, audits...)
 }
 
 // SetScannerProfileArchived archives or restores one of the tenant's custom

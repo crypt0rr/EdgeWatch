@@ -403,7 +403,6 @@ var cycleTenantLeakCases = map[string]tenantLeakCase{
 func TestTenantCycles(t *testing.T) {
 	f := newCycleTenantFixture(t)
 	t.Run("unit reads use the unit index", func(t *testing.T) { assertTenantCycleUnitReadsUseTheIndex(t, f) })
-	t.Run("deprecated wrappers", func(t *testing.T) { assertDeprecatedCycleReadsUseTheDefaultTenant(t, f) })
 	t.Run("system writers", func(t *testing.T) { assertSystemCycleWritersReachEveryTenant(t, f) })
 }
 
@@ -414,57 +413,6 @@ func assertTenantCycleUnitReadsUseTheIndex(t *testing.T, f tenantFixture) {
 	plan := queryPlan(t, f.store.DB, query, secondTenantID, cyclesOf(f, f.b).active, 10, 0)
 	if !strings.Contains(plan, "sqlite_autoindex_scan_cycle_units_1") || strings.Contains(plan, "TEMP B-TREE") {
 		t.Errorf("unit page plan = %q, want the primary key without a sort", plan)
-	}
-}
-
-// The deprecated Store wrappers read and discard only the default tenant's
-// cycles.
-func assertDeprecatedCycleReadsUseTheDefaultTenant(t *testing.T, f tenantFixture) {
-	ctx := context.Background()
-	s := f.store
-	a, b := cyclesOf(f, f.a), cyclesOf(f, f.b)
-	for label, read := range map[string]func() (ScanCycleRecord, error){
-		"GetScanCycle":            func() (ScanCycleRecord, error) { return s.GetScanCycle(ctx, b.active) },
-		"GetActiveScanCycle":      func() (ScanCycleRecord, error) { return s.GetActiveScanCycle(ctx, f.jobB) },
-		"GetLatestScanCycle":      func() (ScanCycleRecord, error) { return s.GetLatestScanCycle(ctx, f.jobB) },
-		"GetRecoverableScanCycle": func() (ScanCycleRecord, error) { return s.GetRecoverableScanCycle(ctx, f.archivedB) },
-	} {
-		cycle, err := read()
-		assertNoScanCycle(t, label+" of tenant B", cycle, err)
-	}
-	for label, read := range map[string]func() (ScanCycleRecord, error){
-		"GetScanCycle":            func() (ScanCycleRecord, error) { return s.GetScanCycle(ctx, a.active) },
-		"GetActiveScanCycle":      func() (ScanCycleRecord, error) { return s.GetActiveScanCycle(ctx, f.jobA) },
-		"GetLatestScanCycle":      func() (ScanCycleRecord, error) { return s.GetLatestScanCycle(ctx, f.jobA) },
-		"GetRecoverableScanCycle": func() (ScanCycleRecord, error) { return s.GetRecoverableScanCycle(ctx, f.jobA) },
-	} {
-		if cycle, err := read(); err != nil || cycle.ID != a.active {
-			t.Errorf("%s of tenant A = %q, %v", label, cycle.ID, err)
-		}
-	}
-	if summaries, err := s.ListActiveScanCycleSummaries(ctx, true); err != nil || len(summaries) != 1 || summaries[f.jobA].ID != a.active {
-		t.Errorf("active cycle summaries = %+v, %v", summaries, err)
-	}
-	if units, err := s.ListScanCycleUnitSummaries(ctx, b.active); err != nil || len(units) != 0 {
-		t.Errorf("units of tenant B's cycle = %v, %v", unitCycles(units), err)
-	}
-	if page, err := s.ListScanCycleUnitSummariesPage(ctx, a.active, 10, 0); err != nil || page.Total != 2 {
-		t.Errorf("units of tenant A's cycle = %+v, %v", page, err)
-	}
-	if discovery, nmap, err := s.ScanCycleProbeTotals(ctx, b.active); err != nil || discovery != 0 || nmap != 0 {
-		t.Errorf("probes of tenant B's cycle = %d, %d, %v", discovery, nmap, err)
-	}
-	if found, err := s.ScanCycleExpiryNotified(ctx, b.expired); err != nil || found {
-		t.Errorf("expiry scan of tenant B's cycle = %v, %v", found, err)
-	}
-	if found, err := s.ScanCycleHasScan(ctx, a.promoted); err != nil || !found {
-		t.Errorf("scan of tenant A's cycle = %v, %v", found, err)
-	}
-	if err := s.DiscardScanCycle(ctx, b.active); !errors.Is(err, ErrNoScanCycle) {
-		t.Errorf("discard tenant B's cycle = %v", err)
-	}
-	if cycle, err := s.Tenant(f.b).GetScanCycle(ctx, b.active); err != nil || cycle.Status != "paused" {
-		t.Errorf("tenant B's cycle after the refused discard = %+v, %v", cycle, err)
 	}
 }
 

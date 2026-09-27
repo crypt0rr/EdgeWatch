@@ -127,14 +127,6 @@ func (ps *PublicStore) ListJobs(ctx context.Context, includeArchived bool) ([]Jo
 	return ps.store.Tenant(ps.scope.tenant).ListJobs(ctx, includeArchived)
 }
 
-// ListLegacyPublicScans lists the legacy scans of a default tenant's job.
-//
-// Deprecated: bound to DefaultPublicScope. Use
-// PublicStore.ListLegacyPublicScans.
-func (s *Store) ListLegacyPublicScans(ctx context.Context, jobID string, limit int) ([]LegacyPublicScan, error) {
-	return s.Public(DefaultPublicScope()).ListLegacyPublicScans(ctx, jobID, limit)
-}
-
 // ListLegacyPublicScans returns the successful scans of one of the tenant's
 // jobs that predate the indexed scan_hosts table, newest first and at most
 // limit (1000 when limit is out of range). A job of another tenant has none.
@@ -188,13 +180,6 @@ func normalizePublicAddress(address string) (string, error) {
 		return "", errors.New("address must be a valid IP")
 	}
 	return ip.String(), nil
-}
-
-// GetPublicDashboard returns the default tenant's public status page.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetPublicDashboard.
-func (s *Store) GetPublicDashboard(ctx context.Context) (PublicDashboard, error) {
-	return s.Tenant(DefaultTenantScope()).GetPublicDashboard(ctx)
 }
 
 // GetPublicDashboard returns the tenant's public status page, enabled or
@@ -257,22 +242,6 @@ func readPublicDashboard(ctx context.Context, reader *sql.DB, tenantID string, p
 		d.Hosts = []PublicDashboardHost{}
 	}
 	return d, rows.Err()
-}
-
-// SavePublicDashboard replaces the default tenant's publication.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.SavePublicDashboard.
-func (s *Store) SavePublicDashboard(ctx context.Context, dashboard PublicDashboard, hosts []PublicDashboardHost, audit AuditEntry) error {
-	return s.Tenant(DefaultTenantScope()).SavePublicDashboard(ctx, dashboard, hosts, audit)
-}
-
-// SavePublicDashboardIfCurrent replaces the default tenant's publication
-// while it is unchanged.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.SavePublicDashboardIfCurrent.
-func (s *Store) SavePublicDashboardIfCurrent(ctx context.Context, expectedUpdatedAt time.Time, dashboard PublicDashboard, hosts []PublicDashboardHost, audit AuditEntry) error {
-	return s.Tenant(DefaultTenantScope()).SavePublicDashboardIfCurrent(ctx, expectedUpdatedAt, dashboard, hosts, audit)
 }
 
 // SavePublicDashboard replaces the tenant's explicit publication set in one
@@ -385,15 +354,6 @@ func (ts *TenantStore) savePublicDashboard(ctx context.Context, expectedUpdatedA
 		}
 	}
 	return tx.Commit()
-}
-
-// GetLatestSuccessfulJobHosts resolves the selections of the default
-// tenant's jobs.
-//
-// Deprecated: bound to DefaultPublicScope. Use
-// PublicStore.GetLatestSuccessfulJobHosts.
-func (s *Store) GetLatestSuccessfulJobHosts(ctx context.Context, selections []PublicDashboardHost) ([]PublicDashboardHostResult, error) {
-	return s.Public(DefaultPublicScope()).GetLatestSuccessfulJobHosts(ctx, selections)
 }
 
 // GetLatestSuccessfulJobHosts returns the newest successful observation for
@@ -614,15 +574,6 @@ JOIN scan_hosts h ON h.address=selected.address
 JOIN scans sc ON sc.id=h.scan_id AND sc.job_id=selected.job_id AND sc.status='success'
 ORDER BY selected.address,selected.job_id`
 	return query, args
-}
-
-// GetLatestSuccessfulJobHost resolves one selection of a default tenant's
-// job.
-//
-// Deprecated: bound to DefaultPublicScope. Use
-// PublicStore.GetLatestSuccessfulJobHost.
-func (s *Store) GetLatestSuccessfulJobHost(ctx context.Context, jobID, address string) (ScanHost, model.ScanSummary, error) {
-	return s.Public(DefaultPublicScope()).GetLatestSuccessfulJobHost(ctx, jobID, address)
 }
 
 // GetLatestSuccessfulJobHost is deliberately scoped by the tenant, the job

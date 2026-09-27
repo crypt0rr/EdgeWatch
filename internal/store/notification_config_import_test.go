@@ -79,12 +79,12 @@ func TestImportDeploymentNotificationsRewritesEveryReference(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	digestA, digestB := testURLDigest("a"), testURLDigest("b")
-	ids, err := s.EnsureDeploymentNotificationIDs(ctx, []string{digestA})
+	ids, err := s.System().EnsureDeploymentNotificationIDs(ctx, []string{digestA})
 	if err != nil {
 		t.Fatal(err)
 	}
 	opaqueA := ids[digestA]
-	ops, err := s.CreateManagedNotification(ctx, "ops-destination", "Ops", "generic", []byte{1}, []byte{2}, true)
+	ops, err := defaultTenant(s).CreateManagedNotification(ctx, "ops-destination", "Ops", "generic", []byte{1}, []byte{2}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ func TestImportDeploymentNotificationsRewritesEveryReference(t *testing.T) {
 		t.Helper()
 		job := testJob(name)
 		job.NotificationDestinations = selection
-		record, createErr := s.CreateJob(ctx, job)
+		record, createErr := defaultTenant(s).CreateJob(ctx, job)
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
@@ -107,14 +107,14 @@ func TestImportDeploymentNotificationsRewritesEveryReference(t *testing.T) {
 	silent := create("silent", []string{})
 	unrelated := create("unrelated", []string{ops.ID})
 	archived := create("archived", []string{"file:" + opaqueA})
-	if err := s.SetJobArchived(ctx, archived.ID, true); err != nil {
+	if err := defaultTenant(s).SetJobArchived(ctx, archived.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	archived, err = s.GetJob(ctx, archived.ID)
+	archived, err = defaultTenant(s).GetJob(ctx, archived.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetApplicationUpdateDestinations(ctx, []string{"file:" + opaqueA, "file:" + digestB, ops.ID}, AuditEntry{}); err != nil {
+	if err := defaultTenant(s).SetApplicationUpdateDestinations(ctx, []string{"file:" + opaqueA, "file:" + digestB, ops.ID}, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -124,7 +124,7 @@ func TestImportDeploymentNotificationsRewritesEveryReference(t *testing.T) {
 		destination string
 		event       string
 	}{{opaqueA, "shared"}, {digestA, "legacy-only"}, {digestB, "digest-b"}, {opaqueA, "sent"}, {opaqueA, "terminal"}, {ops.ID, "unrelated"}} {
-		if err := s.QueueEvent(ctx, queued.destination, testImportEvent(queued.event)); err != nil {
+		if err := s.System().QueueEvent(ctx, queued.destination, testImportEvent(queued.event)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -159,7 +159,7 @@ func TestImportDeploymentNotificationsRewritesEveryReference(t *testing.T) {
 		}
 	}
 
-	result, err := s.ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digestA, "imported-a"), testImport(digestB, "imported-b")})
+	result, err := s.System().ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digestA, "imported-a"), testImport(digestB, "imported-b")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestImportDeploymentNotificationsRewritesEveryReference(t *testing.T) {
 		twoImports.ID:    {"imported-a", "imported-b"},
 	}
 	for _, before := range []JobRecord{shared, legacyDigest, bothSpellings, twoImports, archived} {
-		stored, err := s.GetJob(ctx, before.ID)
+		stored, err := defaultTenant(s).GetJob(ctx, before.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -232,7 +232,7 @@ func TestImportDeploymentNotificationsRewritesEveryReference(t *testing.T) {
 		}
 	}
 	for _, before := range []JobRecord{allDestinations, silent, unrelated} {
-		stored, err := s.GetJob(ctx, before.ID)
+		stored, err := defaultTenant(s).GetJob(ctx, before.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -241,12 +241,12 @@ func TestImportDeploymentNotificationsRewritesEveryReference(t *testing.T) {
 		}
 	}
 
-	state, err := s.GetApplicationUpdateState(ctx)
+	routing, err := defaultTenant(s).ApplicationUpdateRouting(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := sortedSelection("imported-a", "imported-b", ops.ID); !state.UpdateNotificationDestinationsConfigured || !slices.Equal(state.UpdateNotificationDestinations, want) {
-		t.Fatalf("update routing = %v, want %v", state.UpdateNotificationDestinations, want)
+	if want := sortedSelection("imported-a", "imported-b", ops.ID); !routing.Configured || !slices.Equal(routing.Destinations, want) {
+		t.Fatalf("update routing = %v, want %v", routing.Destinations, want)
 	}
 
 	pending := pendingDestinations(t, s)
@@ -266,7 +266,7 @@ func TestImportDeploymentNotificationsRewritesEveryReference(t *testing.T) {
 		t.Fatalf("sent and terminal history under the deployment ID = %d, %v; want both kept", history, err)
 	}
 
-	health, err := s.ListDeliveryHealth(ctx)
+	health, err := defaultTenant(s).ListDeliveryHealth(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,7 +313,7 @@ func TestImportDeploymentNotificationsRewritesEveryReference(t *testing.T) {
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit`).Scan(&auditsBefore); err != nil {
 		t.Fatal(err)
 	}
-	again, err := s.ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digestA, "imported-a-again"), testImport(digestB, "imported-b-again")})
+	again, err := s.System().ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digestA, "imported-a-again"), testImport(digestB, "imported-b-again")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,27 +342,27 @@ func TestImportedDeploymentNotificationsIncludeDeletedDestinations(t *testing.T)
 	ctx := context.Background()
 	s := openTestStore(t)
 	digest, other := testURLDigest("deleted"), testURLDigest("never-imported")
-	if _, err := s.ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digest, "deleted-destination")}); err != nil {
+	if _, err := s.System().ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digest, "deleted-destination")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteManagedNotification(ctx, "deleted-destination", 1); err != nil {
+	if err := defaultTenant(s).DeleteManagedNotification(ctx, "deleted-destination", 1); err != nil {
 		t.Fatal(err)
 	}
-	imported, err := s.ImportedDeploymentNotifications(ctx, []string{digest, other})
+	imported, err := s.System().ImportedDeploymentNotifications(ctx, []string{digest, other})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !imported[digest] || imported[other] || len(imported) != 1 {
 		t.Fatalf("imported digests = %v, want only the deleted destination's URL", imported)
 	}
-	result, err := s.ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digest, "recreated")})
+	result, err := s.System().ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digest, "recreated")})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Imported) != 0 || result.Skipped != 1 {
 		t.Fatalf("import after delete = %#v, want the URL skipped", result)
 	}
-	if _, err := s.GetManagedNotification(ctx, "recreated"); !errors.Is(err, ErrNotFound) {
+	if _, err := defaultTenant(s).GetManagedNotification(ctx, "recreated"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted destination was recreated: %v", err)
 	}
 }
@@ -373,11 +373,11 @@ func TestImportDeploymentNotificationsChoosesUniqueNames(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	for _, name := range []string{"Deployment destination", "Deployment destination 2"} {
-		if _, err := s.CreateManagedNotification(ctx, "", name, "generic", []byte{1}, []byte{2}, true); err != nil {
+		if _, err := defaultTenant(s).CreateManagedNotification(ctx, "", name, "generic", []byte{1}, []byte{2}, true); err != nil {
 			t.Fatal(err)
 		}
 	}
-	result, err := s.ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(testURLDigest("x"), "x"), testImport(testURLDigest("y"), "y")})
+	result, err := s.System().ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(testURLDigest("x"), "x"), testImport(testURLDigest("y"), "y")})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,27 +403,27 @@ func TestImportDeploymentNotificationsRollsBackCompletely(t *testing.T) {
 			ctx := context.Background()
 			s := openTestStore(t)
 			digest := testURLDigest("rollback")
-			ids, err := s.EnsureDeploymentNotificationIDs(ctx, []string{digest})
+			ids, err := s.System().EnsureDeploymentNotificationIDs(ctx, []string{digest})
 			if err != nil {
 				t.Fatal(err)
 			}
 			opaque := ids[digest]
 			job := testJob("rollback-import")
 			job.NotificationDestinations = []string{"file:" + opaque}
-			record, err := s.CreateJob(ctx, job)
+			record, err := defaultTenant(s).CreateJob(ctx, job)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := s.SetApplicationUpdateDestinations(ctx, []string{"file:" + opaque}, AuditEntry{}); err != nil {
+			if err := defaultTenant(s).SetApplicationUpdateDestinations(ctx, []string{"file:" + opaque}, AuditEntry{}); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.QueueEvent(ctx, opaque, testImportEvent("rollback")); err != nil {
+			if err := s.System().QueueEvent(ctx, opaque, testImportEvent("rollback")); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.DB.ExecContext(ctx, test.fault); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digest, "rolled-back"), testImport(testURLDigest("second"), "second")}); err == nil {
+			if _, err := s.System().ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digest, "rolled-back"), testImport(testURLDigest("second"), "second")}); err == nil {
 				t.Fatal("import succeeded despite the fault")
 			}
 			var destinations, imported, mappings int
@@ -436,7 +436,7 @@ func TestImportDeploymentNotificationsRollsBackCompletely(t *testing.T) {
 			if destinations != 0 || imported != 0 || mappings != 1 {
 				t.Fatalf("after a failed import: %d destinations, %d of %d mappings imported", destinations, imported, mappings)
 			}
-			stored, err := s.GetJob(ctx, record.ID)
+			stored, err := defaultTenant(s).GetJob(ctx, record.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -464,11 +464,11 @@ func TestImportDeploymentNotificationsRejectsIncompleteItems(t *testing.T) {
 	} {
 		item := valid
 		mutate(&item)
-		if _, err := s.ImportDeploymentNotifications(context.Background(), []DeploymentNotificationImport{item}); err == nil {
+		if _, err := s.System().ImportDeploymentNotifications(context.Background(), []DeploymentNotificationImport{item}); err == nil {
 			t.Fatalf("import without %s succeeded", name)
 		}
 	}
-	if result, err := s.ImportDeploymentNotifications(context.Background(), nil); err != nil || len(result.Imported) != 0 {
+	if result, err := s.System().ImportDeploymentNotifications(context.Background(), nil); err != nil || len(result.Imported) != 0 {
 		t.Fatalf("empty import = %#v, %v", result, err)
 	}
 }
@@ -483,7 +483,7 @@ func TestMigration50AddsNotificationImportState(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := testURLDigest("schema49")
-	ids, err := s.EnsureDeploymentNotificationIDs(ctx, []string{digest})
+	ids, err := s.System().EnsureDeploymentNotificationIDs(ctx, []string{digest})
 	if err != nil {
 		s.Close()
 		t.Fatal(err)
@@ -516,11 +516,11 @@ func TestMigration50AddsNotificationImportState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	imported, err := existing.ImportedDeploymentNotifications(ctx, []string{digest})
+	imported, err := existing.System().ImportedDeploymentNotifications(ctx, []string{digest})
 	if err != nil || len(imported) != 0 {
 		t.Fatalf("imported digests before migration = %v, %v", imported, err)
 	}
-	if state, err := existing.NotificationConfigImportState(ctx); err != nil || state.Status != NotificationConfigImportNone {
+	if state, err := existing.System().NotificationConfigImportState(ctx); err != nil || state.Status != NotificationConfigImportNone {
 		t.Fatalf("import state before migration = %#v, %v", state, err)
 	}
 	if err := existing.Close(); err != nil {
@@ -543,10 +543,10 @@ func TestMigration50AddsNotificationImportState(t *testing.T) {
 	if opaque != ids[digest] || managedID != "" || importedAt != "" {
 		t.Fatalf("migrated mapping = %q/%q/%q, want the same opaque ID and no import", opaque, managedID, importedAt)
 	}
-	if state, err := upgraded.NotificationConfigImportState(ctx); err != nil || state.Status != NotificationConfigImportNone {
+	if state, err := upgraded.System().NotificationConfigImportState(ctx); err != nil || state.Status != NotificationConfigImportNone {
 		t.Fatalf("import state after migration = %#v, %v", state, err)
 	}
-	if _, err := upgraded.ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digest, "after-upgrade")}); err != nil {
+	if _, err := upgraded.System().ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(digest, "after-upgrade")}); err != nil {
 		t.Fatalf("import after upgrade: %v", err)
 	}
 }
@@ -556,7 +556,7 @@ func TestMigration50AddsNotificationImportState(t *testing.T) {
 func TestHealthStatusReportsNotificationImportWarnings(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.AcquireDaemonLease(ctx, "daemon"); err != nil {
+	if _, err := s.System().AcquireDaemonLease(ctx, "daemon"); err != nil {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
@@ -570,17 +570,17 @@ func TestHealthStatusReportsNotificationImportWarnings(t *testing.T) {
 		{"failed after an earlier import", NotificationConfigImport{Status: NotificationConfigImportFailed, ConfiguredURLs: 2, ImportedURLs: 1}, []string{"notification URLs in config.yaml were imported; remove them from config.yaml", "notification URLs in config.yaml could not be imported (import_failed); they are still delivered from config.yaml"}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if err := s.RecordNotificationConfigImport(ctx, test.state); err != nil {
+			if err := s.System().RecordNotificationConfigImport(ctx, test.state); err != nil {
 				t.Fatal(err)
 			}
-			health, err := s.HealthStatus(ctx)
+			health, err := s.System().HealthStatus(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if health.Status != "ready" || !slices.Equal(health.Warnings, test.want) {
 				t.Fatalf("health = %#v, want ready with warnings %v", health, test.want)
 			}
-			recorded, err := s.NotificationConfigImportState(ctx)
+			recorded, err := s.System().NotificationConfigImportState(ctx)
 			if err != nil || recorded.Status != test.state.Status || recorded.ConfiguredURLs != test.state.ConfiguredURLs || recorded.ImportedURLs != test.state.ImportedURLs || recorded.UpdatedAt.IsZero() {
 				t.Fatalf("recorded state = %#v, %v", recorded, err)
 			}

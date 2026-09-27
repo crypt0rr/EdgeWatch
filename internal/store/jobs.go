@@ -60,24 +60,9 @@ func scanTime(raw string) time.Time {
 	return time.Time{}
 }
 
-// CreateJob creates an enabled job.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.CreateJob.
-func (s *Store) CreateJob(ctx context.Context, job config.Job) (JobRecord, error) {
-	return s.Tenant(DefaultTenantScope()).CreateJob(ctx, job)
-}
-
 // CreateJob creates an enabled job in the tenant.
 func (ts *TenantStore) CreateJob(ctx context.Context, job config.Job) (JobRecord, error) {
 	return ts.CreateJobWithEnabled(ctx, job, true)
-}
-
-// CreateJobWithEnabled creates a job with the given lifecycle state.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.CreateJobWithEnabled.
-func (s *Store) CreateJobWithEnabled(ctx context.Context, job config.Job, enabled bool) (JobRecord, error) {
-	return s.Tenant(DefaultTenantScope()).CreateJobWithEnabled(ctx, job, enabled)
 }
 
 // CreateJobWithEnabled creates the initial job definition and lifecycle state
@@ -88,14 +73,6 @@ func (ts *TenantStore) CreateJobWithEnabled(ctx context.Context, job config.Job,
 	return ts.createJobWithAudits(ctx, job, enabled, nil)
 }
 
-// CreateJobWithEnabledAndAudit creates a job and its audit rows.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.CreateJobWithEnabledAndAudit.
-func (s *Store) CreateJobWithEnabledAndAudit(ctx context.Context, job config.Job, enabled bool, audits ...AuditEntry) (JobRecord, error) {
-	return s.Tenant(DefaultTenantScope()).CreateJobWithEnabledAndAudit(ctx, job, enabled, audits...)
-}
-
 // CreateJobWithEnabledAndAudit commits a new job and its security audit row in
 // one transaction. The plain CreateJobWithEnabled API remains available to
 // internal callers that deliberately do not need an audit entry (for example,
@@ -104,8 +81,34 @@ func (ts *TenantStore) CreateJobWithEnabledAndAudit(ctx context.Context, job con
 	return ts.createJobWithAudits(ctx, job, enabled, audits)
 }
 
+// ErrScannerProfileNotFound refuses a job that pins a scanner profile the
+// tenant cannot use: neither a built-in profile nor one of the tenant's own
+// has the ID. It is the validation error that the console returns for an
+// unknown profile, so a job write refused here looks the same as one that
+// the console refused.
+var ErrScannerProfileNotFound = NewValidationError(errors.New("selected scanner profile was not found"))
+
+// checkPinnedScannerProfileTx refuses a job whose TCP scan pins a scanner
+// profile that is neither built in nor the tenant's own. The TCP profile is
+// the one a scan applies, and the one the console checks. It reads in the
+// job write's transaction, so the check and the write see the same profiles.
+func (ts *TenantStore) checkPinnedScannerProfileTx(ctx context.Context, tx *sql.Tx, job config.Job) error {
+	if job.TCP == nil || strings.TrimSpace(job.TCP.ProfileID) == "" {
+		return nil
+	}
+	var visible int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM scanner_profiles WHERE id=? AND (tenant_id IS NULL OR tenant_id=?)`, job.TCP.ProfileID, ts.scope.id).Scan(&visible); err != nil {
+		return err
+	}
+	if visible == 0 {
+		return ErrScannerProfileNotFound
+	}
+	return nil
+}
+
 // createJobWithAudits creates the job in the store's tenant. Job names are
-// unique per tenant, so another tenant may already use the name.
+// unique per tenant, so another tenant may already use the name. A pinned
+// scanner profile must be built in or the tenant's own.
 func (ts *TenantStore) createJobWithAudits(ctx context.Context, job config.Job, enabled bool, audits []AuditEntry) (JobRecord, error) {
 	if err := ts.ready(); err != nil {
 		return JobRecord{}, err
@@ -125,6 +128,9 @@ func (ts *TenantStore) createJobWithAudits(ctx context.Context, job config.Job, 
 		return JobRecord{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err = ts.checkPinnedScannerProfileTx(ctx, tx, job); err != nil {
+		return JobRecord{}, err
+	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES(?,?,?,?, ?,0,1,?,?)`, id, ts.scope.id, job.Name, raw, boolInt(enabled), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		return JobRecord{}, err
 	}
@@ -141,13 +147,6 @@ func (ts *TenantStore) createJobWithAudits(ctx context.Context, job config.Job, 
 		return JobRecord{}, err
 	}
 	return JobRecord{ID: id, TenantID: ts.scope.id, Job: job, Enabled: enabled, Revision: 1, CreatedAt: now, UpdatedAt: now}, nil
-}
-
-// GetJob returns the job with the given ID.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetJob.
-func (s *Store) GetJob(ctx context.Context, id string) (JobRecord, error) {
-	return s.Tenant(DefaultTenantScope()).GetJob(ctx, id)
 }
 
 // GetJob returns the tenant's job with the given ID. A job of another tenant
@@ -197,13 +196,6 @@ func getTenantJobTx(ctx context.Context, tx *sql.Tx, scope TenantScope, id strin
 	return scanJobRecord(tx.QueryRowContext(ctx, `SELECT `+jobRecordColumns+` FROM jobs WHERE id=? AND tenant_id=?`, id, scope.id), id)
 }
 
-// GetJobByName returns the job with the given name.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetJobByName.
-func (s *Store) GetJobByName(ctx context.Context, name string) (JobRecord, error) {
-	return s.Tenant(DefaultTenantScope()).GetJobByName(ctx, name)
-}
-
 // GetJobByName returns the tenant's job with the given name. Job names are
 // unique per tenant, so another tenant's job with the same name is never
 // returned.
@@ -220,14 +212,6 @@ func (ts *TenantStore) GetJobByName(ctx context.Context, name string) (JobRecord
 		return JobRecord{}, err
 	}
 	return ts.GetJob(ctx, id)
-}
-
-// ListJobs returns the jobs, without archived jobs unless includeArchived is
-// set.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListJobs.
-func (s *Store) ListJobs(ctx context.Context, includeArchived bool) ([]JobRecord, error) {
-	return s.Tenant(DefaultTenantScope()).ListJobs(ctx, includeArchived)
 }
 
 // ListJobs returns the tenant's jobs, without archived jobs unless
@@ -260,25 +244,11 @@ func (ts *TenantStore) ListJobs(ctx context.Context, includeArchived bool) ([]Jo
 	return out, rows.Err()
 }
 
-// UpdateJob updates a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.UpdateJob.
-func (s *Store) UpdateJob(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool) (JobRecord, bool, error) {
-	return s.Tenant(DefaultTenantScope()).UpdateJob(ctx, id, expectedRevision, job, enabled, archived, confirmRebaseline)
-}
-
 // UpdateJob uses optimistic concurrency. The returned bool reports whether
 // the security hash changed and therefore requires rebaseline confirmation.
 func (ts *TenantStore) UpdateJob(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool) (JobRecord, bool, error) {
 	record, changed, _, err := ts.UpdateJobWithEvents(ctx, id, expectedRevision, job, enabled, archived, confirmRebaseline)
 	return record, changed, err
-}
-
-// UpdateJobWithEvents updates a job and returns its persisted events.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.UpdateJobWithEvents.
-func (s *Store) UpdateJobWithEvents(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool) (JobRecord, bool, []model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).UpdateJobWithEvents(ctx, id, expectedRevision, job, enabled, archived, confirmRebaseline)
 }
 
 // UpdateJobWithEvents updates a managed job and, when its security scope
@@ -289,29 +259,12 @@ func (ts *TenantStore) UpdateJobWithEvents(ctx context.Context, id string, expec
 	return ts.UpdateJobWithEventsWithOutbox(ctx, id, expectedRevision, job, enabled, archived, confirmRebaseline, nil)
 }
 
-// UpdateJobWithEventsWithOutbox updates a job and queues its events.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.UpdateJobWithEventsWithOutbox.
-func (s *Store) UpdateJobWithEventsWithOutbox(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool, destinations []string) (JobRecord, bool, []model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).UpdateJobWithEventsWithOutbox(ctx, id, expectedRevision, job, enabled, archived, confirmRebaseline, destinations)
-}
-
 // UpdateJobWithEventsWithOutbox also persists notification intent for the
 // security-scope reset event. Destination revisions are validated while the
 // job transaction is open, so a concurrent credential edit cannot leave an
 // orphaned delivery.
 func (ts *TenantStore) UpdateJobWithEventsWithOutbox(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool, destinations []string) (JobRecord, bool, []model.Event, error) {
 	return ts.UpdateJobWithEventsWithOutboxAndAudit(ctx, id, expectedRevision, job, enabled, archived, confirmRebaseline, destinations)
-}
-
-// UpdateJobWithEventsWithOutboxAndAudit updates a job with its events,
-// notification intent, and audit rows.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.UpdateJobWithEventsWithOutboxAndAudit.
-func (s *Store) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context, id string, expectedRevision int64, job config.Job, enabled, archived, confirmRebaseline bool, destinations []string, audits ...AuditEntry) (JobRecord, bool, []model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).UpdateJobWithEventsWithOutboxAndAudit(ctx, id, expectedRevision, job, enabled, archived, confirmRebaseline, destinations, audits...)
 }
 
 // UpdateJobWithEventsWithOutboxAndAudit extends the job revision transaction
@@ -342,6 +295,11 @@ func (ts *TenantStore) UpdateJobWithEventsWithOutboxAndAudit(ctx context.Context
 	defer func() { _ = tx.Rollback() }()
 	current, err := getTenantJobTx(ctx, tx, ts.scope, id)
 	if err != nil {
+		return JobRecord{}, false, nil, err
+	}
+	// The console refuses an unknown profile before it looks at the
+	// revision, and so does the store.
+	if err := ts.checkPinnedScannerProfileTx(ctx, tx, job); err != nil {
 		return JobRecord{}, false, nil, err
 	}
 	if expectedRevision != current.Revision {
@@ -447,25 +405,10 @@ func boolInt(v bool) int {
 	return 0
 }
 
-// SetJobArchived archives or restores a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.SetJobArchived.
-func (s *Store) SetJobArchived(ctx context.Context, id string, archived bool) error {
-	return s.Tenant(DefaultTenantScope()).SetJobArchived(ctx, id, archived)
-}
-
 // SetJobArchived archives or restores the tenant's job, whatever its
 // revision. A job of another tenant is ErrNotFound.
 func (ts *TenantStore) SetJobArchived(ctx context.Context, id string, archived bool) error {
 	return ts.setJobArchived(ctx, id, archived, nil, nil)
-}
-
-// SetJobArchivedWithRevision archives or restores a job at a revision.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.SetJobArchivedWithRevision.
-func (s *Store) SetJobArchivedWithRevision(ctx context.Context, id string, archived bool, expectedRevision int64) error {
-	return s.Tenant(DefaultTenantScope()).SetJobArchivedWithRevision(ctx, id, archived, expectedRevision)
 }
 
 // SetJobArchivedWithRevision applies an archive or restore transition only
@@ -474,15 +417,6 @@ func (s *Store) SetJobArchivedWithRevision(ctx context.Context, id string, archi
 // overwrite a newer edit.
 func (ts *TenantStore) SetJobArchivedWithRevision(ctx context.Context, id string, archived bool, expectedRevision int64) error {
 	return ts.setJobArchived(ctx, id, archived, &expectedRevision, nil)
-}
-
-// SetJobArchivedWithRevisionAndAudit archives or restores a job at a
-// revision, with its audit row.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.SetJobArchivedWithRevisionAndAudit.
-func (s *Store) SetJobArchivedWithRevisionAndAudit(ctx context.Context, id string, archived bool, expectedRevision int64, audit AuditEntry) error {
-	return s.Tenant(DefaultTenantScope()).SetJobArchivedWithRevisionAndAudit(ctx, id, archived, expectedRevision, audit)
 }
 
 // SetJobArchivedWithRevisionAndAudit applies the lifecycle transition and its
@@ -556,40 +490,16 @@ func (ts *TenantStore) setJobArchived(ctx context.Context, id string, archived b
 	return tx.Commit()
 }
 
-// SetJobEnabled pauses or resumes a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.SetJobEnabled.
-func (s *Store) SetJobEnabled(ctx context.Context, id string, enabled bool) error {
-	return s.Tenant(DefaultTenantScope()).SetJobEnabled(ctx, id, enabled)
-}
-
 // SetJobEnabled pauses or resumes the tenant's job, whatever its revision. A
 // job of another tenant is ErrNotFound.
 func (ts *TenantStore) SetJobEnabled(ctx context.Context, id string, enabled bool) error {
 	return ts.setJobEnabled(ctx, id, enabled, nil, nil)
 }
 
-// SetJobEnabledWithRevision pauses or resumes a job at a revision.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.SetJobEnabledWithRevision.
-func (s *Store) SetJobEnabledWithRevision(ctx context.Context, id string, enabled bool, expectedRevision int64) error {
-	return s.Tenant(DefaultTenantScope()).SetJobEnabledWithRevision(ctx, id, enabled, expectedRevision)
-}
-
 // SetJobEnabledWithRevision applies a pause or resume transition only when
 // the caller still holds the current immutable job revision.
 func (ts *TenantStore) SetJobEnabledWithRevision(ctx context.Context, id string, enabled bool, expectedRevision int64) error {
 	return ts.setJobEnabled(ctx, id, enabled, &expectedRevision, nil)
-}
-
-// SetJobEnabledWithRevisionAndAudit pauses or resumes a job at a revision,
-// with its audit row.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.SetJobEnabledWithRevisionAndAudit.
-func (s *Store) SetJobEnabledWithRevisionAndAudit(ctx context.Context, id string, enabled bool, expectedRevision int64, audit AuditEntry) error {
-	return s.Tenant(DefaultTenantScope()).SetJobEnabledWithRevisionAndAudit(ctx, id, enabled, expectedRevision, audit)
 }
 
 // SetJobEnabledWithRevisionAndAudit applies a pause/resume transition and its
@@ -689,24 +599,10 @@ func appendJobRevisionTx(ctx context.Context, tx *sql.Tx, jobID string, revision
 	return err
 }
 
-// DeleteJob permanently removes an archived job.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.DeleteJob.
-func (s *Store) DeleteJob(ctx context.Context, id string) error {
-	return s.Tenant(DefaultTenantScope()).DeleteJob(ctx, id)
-}
-
 // DeleteJob permanently removes the tenant's archived job. A job of another
 // tenant is ErrNotFound.
 func (ts *TenantStore) DeleteJob(ctx context.Context, id string) error {
 	return ts.deleteJobWithAudits(ctx, id, nil)
-}
-
-// DeleteJobWithAudit permanently removes an archived job with its audit row.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.DeleteJobWithAudit.
-func (s *Store) DeleteJobWithAudit(ctx context.Context, id string, audit AuditEntry) error {
-	return s.Tenant(DefaultTenantScope()).DeleteJobWithAudit(ctx, id, audit)
 }
 
 // DeleteJobWithAudit permanently removes an archived job only when the audit
@@ -775,13 +671,6 @@ func (ts *TenantStore) deleteJobWithAudits(ctx context.Context, id string, audit
 	return tx.Commit()
 }
 
-// JobActive reports whether a job holds an unexpired scan lease.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.JobActive.
-func (s *Store) JobActive(ctx context.Context, id string) (bool, error) {
-	return s.Tenant(DefaultTenantScope()).JobActive(ctx, id)
-}
-
 // JobActive reports whether the tenant's job holds an unexpired scan lease.
 // A job of another tenant is ErrNotFound. A lease key without a jobs row is
 // the name of a config.yaml job, and those jobs belong to the default
@@ -790,13 +679,15 @@ func (ts *TenantStore) JobActive(ctx context.Context, id string) (bool, error) {
 	if err := ts.ready(); err != nil {
 		return false, err
 	}
-	var owned, active int
-	err := ts.store.reader().QueryRowContext(ctx, `SELECT COALESCE((SELECT tenant_id FROM jobs WHERE id=?),'`+DefaultTenantID+`')=?,EXISTS(SELECT 1 FROM job_leases WHERE job=? AND expires_at>?)`, id, ts.scope.id, id, time.Now().UTC().Format(time.RFC3339Nano)).Scan(&owned, &active)
+	// The statement returns no row unless the tenant owns the job, or the ID
+	// names no job and the tenant is the default one.
+	var active int
+	err := ts.store.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM job_leases WHERE job=? AND expires_at>?) WHERE EXISTS(SELECT 1 FROM jobs WHERE id=? AND tenant_id=?) OR ?='`+DefaultTenantID+`' AND NOT EXISTS(SELECT 1 FROM jobs WHERE id=?)`, id, time.Now().UTC().Format(time.RFC3339Nano), id, ts.scope.id, ts.scope.id, id).Scan(&active)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("%w: job %s", ErrNotFound, id)
+	}
 	if err != nil {
 		return false, err
-	}
-	if owned == 0 {
-		return false, fmt.Errorf("%w: job %s", ErrNotFound, id)
 	}
 	return active != 0, nil
 }

@@ -76,7 +76,7 @@ func TestEnsureSetupTokenReusesAndReplacesExpiredTokens(t *testing.T) {
 	if second, err := m.EnsureSetupToken(ctx); err != nil || second != "" {
 		t.Fatalf("existing token was reissued: %q, %v", second, err)
 	}
-	if err := db.PutSetupTokenAt(ctx, digest("expired"), now.Add(-time.Minute), now.Add(-time.Hour)); err != nil {
+	if err := db.Platform().PutSetupTokenAt(ctx, digest("expired"), now.Add(-time.Minute), now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	replacement, err := m.EnsureSetupToken(ctx)

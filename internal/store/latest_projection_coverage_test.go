@@ -17,7 +17,7 @@ func TestRebuildLatestScanHostsWrapperRecreatesProjection(t *testing.T) {
 		ID: "projection-wrapper", JobID: "job-wrapper", Job: "wrapper", StartedAt: time.Unix(100, 0).UTC(), FinishedAt: time.Unix(100, 0).UTC(), Status: "success",
 		Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.90", AddressFamily: "IPv4", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}}},
 	}
-	if err := s.SaveScan(ctx, scan); err != nil {
+	if err := s.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM latest_scan_hosts`); err != nil {

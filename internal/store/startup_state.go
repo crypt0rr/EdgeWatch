@@ -113,12 +113,6 @@ func parseStartupTime(raw string) (time.Time, error) {
 	return value.UTC(), nil
 }
 
-// HealthStatus reads the daemon's health through SystemStore.HealthStatus,
-// until its callers use Store.System themselves.
-func (s *Store) HealthStatus(ctx context.Context) (HealthStatus, error) {
-	return s.System().HealthStatus(ctx)
-}
-
 // HealthStatus reads migration progress first, then falls back to the daemon
 // lease once startup work has completed. The migration state is considered
 // healthy while its heartbeat is recent; stale or failed migration state is a

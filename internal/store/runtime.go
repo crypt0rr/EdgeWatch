@@ -15,13 +15,6 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
-// RuntimeState returns the runtime state of a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.RuntimeState.
-func (s *Store) RuntimeState(ctx context.Context, jobID string) (model.JobState, error) {
-	return s.Tenant(DefaultTenantScope()).RuntimeState(ctx, jobID)
-}
-
 // RuntimeState returns the runtime state of one of the tenant's jobs. A job
 // without runtime state, an unknown job, and a job of another tenant all
 // read as an empty state.
@@ -79,14 +72,6 @@ func (e BaselineExpectation) matches(state model.JobState) bool {
 		return false
 	}
 	return !e.ModifiedSet || e.Modified == state.BaselineModified
-}
-
-// RuntimeBaselineInfo reads the compact baseline metadata of a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.RuntimeBaselineInfo.
-func (s *Store) RuntimeBaselineInfo(ctx context.Context, jobID string) (RuntimeBaselineInfo, error) {
-	return s.Tenant(DefaultTenantScope()).RuntimeBaselineInfo(ctx, jobID)
 }
 
 // RuntimeBaselineInfo reads the compact baseline metadata of one of the
@@ -152,14 +137,6 @@ func (ts *TenantStore) RuntimeBaselineInfo(ctx context.Context, jobID string) (R
 	return info, nil
 }
 
-// RuntimeBaselineEpoch returns the baseline epoch of a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.RuntimeBaselineEpoch.
-func (s *Store) RuntimeBaselineEpoch(ctx context.Context, jobID string) (int64, error) {
-	return s.Tenant(DefaultTenantScope()).RuntimeBaselineEpoch(ctx, jobID)
-}
-
 // RuntimeBaselineEpoch returns the monotonic epoch used to fence resumable
 // cycles of one of the tenant's jobs from a reset or accepted baseline
 // mutation. Legacy rows start at zero, and so do an unknown job and a job of
@@ -194,14 +171,6 @@ type RuntimeStateSummary struct {
 	IncidentCount               int
 	PendingCount                int
 	BaselineHostCount           int
-}
-
-// RuntimeStateSummary returns the bounded state projection of a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.RuntimeStateSummary.
-func (s *Store) RuntimeStateSummary(ctx context.Context, jobID string) (RuntimeStateSummary, error) {
-	return s.Tenant(DefaultTenantScope()).RuntimeStateSummary(ctx, jobID)
 }
 
 // RuntimeStateSummary returns the bounded state projection of one of the
@@ -295,14 +264,6 @@ func (ts *TenantStore) RuntimeStateSummary(ctx context.Context, jobID string) (R
 		}
 	}
 	return summary, nil
-}
-
-// RuntimeStateSummaries returns the job-list baseline projections.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.RuntimeStateSummaries.
-func (s *Store) RuntimeStateSummaries(ctx context.Context, includeArchived bool) (map[string]RuntimeStateSummary, error) {
-	return s.Tenant(DefaultTenantScope()).RuntimeStateSummaries(ctx, includeArchived)
 }
 
 // RuntimeStateSummaries returns the job-list baseline projections of the
@@ -510,14 +471,6 @@ FROM job_runtime r JOIN jobs j ON j.id=r.job_id AND j.tenant_id=? WHERE r.job_id
 	return 0, true, nil
 }
 
-// RuntimeBaselineMeta returns the baseline identifiers of a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.RuntimeBaselineMeta.
-func (s *Store) RuntimeBaselineMeta(ctx context.Context, jobID string) (scanID, configHash string, err error) {
-	return s.Tenant(DefaultTenantScope()).RuntimeBaselineMeta(ctx, jobID)
-}
-
 // RuntimeBaselineMeta retains the small compatibility API used by callers
 // that need only baseline identifiers of one of the tenant's jobs. Current
 // rows are served from the compact metadata projection; legacy rows use the
@@ -528,15 +481,6 @@ func (ts *TenantStore) RuntimeBaselineMeta(ctx context.Context, jobID string) (s
 		return "", "", err
 	}
 	return info.BaselineScanID, info.BaselineConfigHash, nil
-}
-
-// RuntimeBaselineModified reports whether the baseline of a job was changed
-// independently of its source scan.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.RuntimeBaselineModified.
-func (s *Store) RuntimeBaselineModified(ctx context.Context, jobID string) (bool, error) {
-	return s.Tenant(DefaultTenantScope()).RuntimeBaselineModified(ctx, jobID)
 }
 
 // RuntimeBaselineModified reports whether the current comparison baseline of
@@ -552,21 +496,10 @@ func (ts *TenantStore) RuntimeBaselineModified(ctx context.Context, jobID string
 	return info.BaselineModified, nil
 }
 
-// UpdateRuntime applies a runtime transition to a job of any tenant.
-func (s *Store) UpdateRuntime(ctx context.Context, jobID string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	return s.System().UpdateRuntime(ctx, jobID, fn)
-}
-
 // UpdateRuntime applies a runtime transition and persists its events in one
 // transaction. It is the daemon's writer and reaches a job of any tenant.
 func (ss *SystemStore) UpdateRuntime(ctx context.Context, jobID string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	return ss.updateRuntime(ctx, jobID, "", nil, fn)
-}
-
-// UpdateRuntimeWithOutbox applies a runtime transition to a job of any
-// tenant and queues its events.
-func (s *Store) UpdateRuntimeWithOutbox(ctx context.Context, jobID string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	return s.System().UpdateRuntimeWithOutbox(ctx, jobID, destinations, fn)
 }
 
 // UpdateRuntimeWithOutbox applies a runtime transition and queues its events
@@ -612,12 +545,6 @@ func (ss *SystemStore) updateRuntime(ctx context.Context, jobID, securityHash st
 	return events, nil
 }
 
-// UpdateRuntimeForScan applies a scan's runtime transition to a job of any
-// tenant.
-func (s *Store) UpdateRuntimeForScan(ctx context.Context, jobID, securityHash string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	return s.System().UpdateRuntimeForScan(ctx, jobID, securityHash, fn)
-}
-
 // UpdateRuntimeForScan applies a runtime transition only when the scan was
 // produced for the job's current security scope. A scan can legitimately
 // finish after a schedule, pause, or archive revision changes because those
@@ -627,12 +554,6 @@ func (s *Store) UpdateRuntimeForScan(ctx context.Context, jobID, securityHash st
 // transaction so an edit cannot slip between validation and persistence.
 func (ss *SystemStore) UpdateRuntimeForScan(ctx context.Context, jobID, securityHash string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
 	return ss.updateRuntime(ctx, jobID, securityHash, nil, fn)
-}
-
-// UpdateRuntimeForScanWithOutbox applies a scan's runtime transition to a
-// job of any tenant and queues its events.
-func (s *Store) UpdateRuntimeForScanWithOutbox(ctx context.Context, jobID, securityHash string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	return s.System().UpdateRuntimeForScanWithOutbox(ctx, jobID, securityHash, destinations, fn)
 }
 
 // UpdateRuntimeForScanWithOutbox persists the state transition, event rows,
@@ -674,12 +595,6 @@ func migrateLegacyScopeHashTx(ctx context.Context, tx *sql.Tx, jobID, legacyHash
 	// checkpoints or baseline epoch.
 	_, err = tx.ExecContext(ctx, `UPDATE scan_cycles SET config_hash=? WHERE job_id=? AND config_hash=? AND status NOT IN ('completed','discarded','expired')`, canonicalHash, jobID, legacyHash)
 	return err
-}
-
-// FinalizeManagedScan persists a managed scan of a job of any tenant and its
-// runtime transition.
-func (s *Store) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID, securityHash string, destinations []string, fn func(*model.JobState, *model.Scan) ([]model.Event, error)) ([]model.Event, error) {
-	return s.System().FinalizeManagedScan(ctx, scan, jobID, securityHash, destinations, fn)
 }
 
 // FinalizeManagedScan persists a managed scan and its runtime transition on the
@@ -1208,26 +1123,10 @@ func persistRuntimeTxWithOutbox(ctx context.Context, tx *sql.Tx, jobID string, s
 	return events, nil
 }
 
-// ResetRuntime clears the comparison state of a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ResetRuntime.
-func (s *Store) ResetRuntime(ctx context.Context, jobID, name string) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).ResetRuntime(ctx, jobID, name)
-}
-
 // ResetRuntime clears the comparison state of one of the tenant's jobs
 // without queueing notifications.
 func (ts *TenantStore) ResetRuntime(ctx context.Context, jobID, name string) ([]model.Event, error) {
 	return ts.ResetRuntimeWithOutbox(ctx, jobID, name, nil)
-}
-
-// ResetRuntimeWithOutbox clears the comparison state of a job and queues the
-// reset event.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ResetRuntimeWithOutbox.
-func (s *Store) ResetRuntimeWithOutbox(ctx context.Context, jobID, name string, destinations []string) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).ResetRuntimeWithOutbox(ctx, jobID, name, destinations)
 }
 
 // ResetRuntimeWithOutbox persists the baseline reset event of one of the
@@ -1236,29 +1135,11 @@ func (ts *TenantStore) ResetRuntimeWithOutbox(ctx context.Context, jobID, name s
 	return ts.resetRuntimeWithAudits(ctx, jobID, name, destinations, nil, BaselineExpectation{})
 }
 
-// ResetRuntimeWithOutboxAndAudit clears the comparison state of a job, queues
-// the reset event, and records the action.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ResetRuntimeWithOutboxAndAudit.
-func (s *Store) ResetRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name string, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).ResetRuntimeWithOutboxAndAudit(ctx, jobID, name, destinations, audit)
-}
-
 // ResetRuntimeWithOutboxAndAudit clears the comparison state of one of the
 // tenant's jobs, persists any reset notification intent, and records the
 // administrator action atomically.
 func (ts *TenantStore) ResetRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name string, destinations []string, audit AuditEntry) ([]model.Event, error) {
 	return ts.resetRuntimeWithAudits(ctx, jobID, name, destinations, []AuditEntry{audit}, BaselineExpectation{})
-}
-
-// ResetRuntimeWithExpectationAndAudit clears the comparison state of a job
-// only if it still matches the expectation.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ResetRuntimeWithExpectationAndAudit.
-func (s *Store) ResetRuntimeWithExpectationAndAudit(ctx context.Context, jobID, name string, destinations []string, audit AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).ResetRuntimeWithExpectationAndAudit(ctx, jobID, name, destinations, audit, expected)
 }
 
 // ResetRuntimeWithExpectationAndAudit is the stale-view-safe baseline reset
@@ -1342,26 +1223,10 @@ func (ts *TenantStore) resetRuntimeWithAudits(ctx context.Context, jobID, name s
 	return events, nil
 }
 
-// ApproveRuntime makes a successful scan the baseline of a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ApproveRuntime.
-func (s *Store) ApproveRuntime(ctx context.Context, jobID, name string, scan model.Scan) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).ApproveRuntime(ctx, jobID, name, scan)
-}
-
 // ApproveRuntime makes a successful scan the baseline of one of the tenant's
 // jobs without queueing notifications.
 func (ts *TenantStore) ApproveRuntime(ctx context.Context, jobID, name string, scan model.Scan) ([]model.Event, error) {
 	return ts.ApproveRuntimeWithOutbox(ctx, jobID, name, scan, nil)
-}
-
-// ApproveRuntimeWithOutbox makes a successful scan the baseline of a job and
-// queues the approval event.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ApproveRuntimeWithOutbox.
-func (s *Store) ApproveRuntimeWithOutbox(ctx context.Context, jobID, name string, scan model.Scan, destinations []string) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).ApproveRuntimeWithOutbox(ctx, jobID, name, scan, destinations)
 }
 
 // ApproveRuntimeWithOutbox persists a manual baseline approval of one of the
@@ -1371,29 +1236,11 @@ func (ts *TenantStore) ApproveRuntimeWithOutbox(ctx context.Context, jobID, name
 	return ts.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, nil, BaselineExpectation{})
 }
 
-// ApproveRuntimeWithOutboxAndAudit makes a successful scan the baseline of a
-// job, queues the approval event, and records the action.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ApproveRuntimeWithOutboxAndAudit.
-func (s *Store) ApproveRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).ApproveRuntimeWithOutboxAndAudit(ctx, jobID, name, scan, destinations, audit)
-}
-
 // ApproveRuntimeWithOutboxAndAudit applies a manual baseline approval of one
 // of the tenant's jobs and its notification intent/audit row in one
 // transaction.
 func (ts *TenantStore) ApproveRuntimeWithOutboxAndAudit(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audit AuditEntry) ([]model.Event, error) {
 	return ts.approveRuntimeWithAudits(ctx, jobID, name, scan, destinations, []AuditEntry{audit}, BaselineExpectation{})
-}
-
-// ApproveRuntimeWithExpectationAndAudit makes a successful scan the baseline
-// of a job only if the baseline still matches the expectation.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ApproveRuntimeWithExpectationAndAudit.
-func (s *Store) ApproveRuntimeWithExpectationAndAudit(ctx context.Context, jobID, name string, scan model.Scan, destinations []string, audit AuditEntry, expected BaselineExpectation) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).ApproveRuntimeWithExpectationAndAudit(ctx, jobID, name, scan, destinations, audit, expected)
 }
 
 // ApproveRuntimeWithExpectationAndAudit applies a manual baseline approval of

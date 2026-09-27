@@ -24,13 +24,6 @@ type DeploymentTelemetry struct {
 	OutboxFailed     int64     `json:"outbox_failed"`
 }
 
-// DeploymentTelemetry reads the deployment's counters through
-// SystemStore.DeploymentTelemetry, until its callers move to the platform
-// view or to TenantStore.Telemetry.
-func (s *Store) DeploymentTelemetry(ctx context.Context) (DeploymentTelemetry, error) {
-	return s.System().DeploymentTelemetry(ctx)
-}
-
 // DeploymentTelemetry returns inexpensive aggregate counters for the current
 // deployment. Callers should cache this value because retained-history counts
 // can become expensive on very large installations. No JSON snapshot is read.

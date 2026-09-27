@@ -113,7 +113,7 @@ func newPublicTenantFixture(t *testing.T) publicTenantFixture {
 		indexed := model.Scan{ID: record.ID + "-indexed", JobID: record.ID, JobRevision: record.Revision, Job: "edge", StartedAt: finished.Add(-time.Minute), FinishedAt: finished, Status: "success",
 			Snapshot: model.Snapshot{Hosts: []model.HostObservation{host("198.51.100.10"), host("8.8.8.8")}}}
 		for _, scan := range []model.Scan{legacy, indexed} {
-			if err := db.SaveScan(ctx, scan); err != nil {
+			if err := db.System().SaveScan(ctx, scan); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -204,7 +204,7 @@ func TestPublicAPIServesTheDefaultTenantUnchanged(t *testing.T) {
 func TestPublicDashboardRouteUsesTheSessionTenant(t *testing.T) {
 	ctx := context.Background()
 	f := newPublicTenantFixture(t)
-	other, err := f.db.CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := defaultTenant(f.db).CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}

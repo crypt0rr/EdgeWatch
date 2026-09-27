@@ -26,7 +26,7 @@ func TestCreateUserRejectsUsernamesTheStoreRejectsAsFieldErrors(t *testing.T) {
 		server.usersRoute(recorder, request, admin, defaultTenantStore(server), "")
 		return recorder
 	}
-	before, err := db.ListUsers(ctx)
+	before, err := defaultTenant(db).ListUsers(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestCreateUserRejectsUsernamesTheStoreRejectsAsFieldErrors(t *testing.T) {
 			t.Fatalf("%s username = %d %#v, want 400 with details.username", name, recorder.Code, body.Error)
 		}
 	}
-	after, err := db.ListUsers(ctx)
+	after, err := defaultTenant(db).ListUsers(ctx)
 	if err != nil || len(after) != len(before) {
 		t.Fatalf("rejected usernames created accounts: before=%d after=%d (%v)", len(before), len(after), err)
 	}
@@ -63,7 +63,7 @@ func TestPasswordResetActivationClosesTheAccountsStreams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := db.CreateUser(ctx, store.User{Username: "streaming-operator", DisplayName: "Streaming operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	operator, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "streaming-operator", DisplayName: "Streaming operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestDisplayNameChangesAreAuditedForEveryAccount(t *testing.T) {
 	}
 
 	for _, role := range []string{store.RoleOperator, store.RoleViewer} {
-		user, err := db.CreateUser(ctx, store.User{Username: "rename-" + role, DisplayName: "Before", Role: role, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+		user, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "rename-" + role, DisplayName: "Before", Role: role, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -212,7 +212,7 @@ func TestDisplayNameChangesAreAuditedForEveryAccount(t *testing.T) {
 		if got := countAuditRows(t, db, "user.updated", admin.UserID); got != 1 {
 			t.Fatalf("no-op administrator PATCH of %s audit rows = %d, want 1", role, got)
 		}
-		stored, err := db.GetUser(ctx, user.ID)
+		stored, err := defaultTenant(db).GetUser(ctx, user.ID)
 		if err != nil || stored.DisplayName != "Renamed by admin" {
 			t.Fatalf("stored display name = %q (%v)", stored.DisplayName, err)
 		}

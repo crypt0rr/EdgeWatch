@@ -25,7 +25,7 @@ func TestMigrationBackfillsRefreshStartupHeartbeat(t *testing.T) {
 		}
 	}
 
-	job, err := s.CreateJob(ctx, testJob("migration-progress-cycle"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("migration-progress-cycle"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestMigrationBackfillsRefreshStartupHeartbeat(t *testing.T) {
 		TotalUnits:  1,
 		TotalProbes: 1,
 	}
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
 		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
 		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan,
 	})

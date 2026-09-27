@@ -11,7 +11,7 @@ import (
 func TestGetLatestSuccessfulJobScanSummaryFiltersAndTies(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	record, err := s.CreateJob(ctx, testJob("latest-summary"))
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("latest-summary"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,12 +23,12 @@ func TestGetLatestSuccessfulJobScanSummaryFiltersAndTies(t *testing.T) {
 		{ID: "newer-incomplete", JobID: record.ID, Job: record.Job.Name, StartedAt: stamp.Add(time.Minute), FinishedAt: stamp.Add(time.Minute), Status: "incomplete", Snapshot: model.Snapshot{}},
 		{ID: "newest-failed", JobID: record.ID, Job: record.Job.Name, StartedAt: stamp.Add(2 * time.Minute), FinishedAt: stamp.Add(2 * time.Minute), Status: "failed", Error: "scanner failed", Snapshot: model.Snapshot{}},
 	} {
-		if err := s.SaveScan(ctx, scan); err != nil {
+		if err := s.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	latest, err := s.GetLatestSuccessfulJobScanSummary(ctx, record.ID)
+	latest, err := defaultTenant(s).GetLatestSuccessfulJobScanSummary(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,11 +39,11 @@ func TestGetLatestSuccessfulJobScanSummaryFiltersAndTies(t *testing.T) {
 		t.Fatalf("latest summary metadata = %#v", latest)
 	}
 
-	noSuccess, err := s.CreateJob(ctx, testJob("no-success"))
+	noSuccess, err := defaultTenant(s).CreateJob(ctx, testJob("no-success"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := s.GetLatestSuccessfulJobScanSummary(ctx, noSuccess.ID); err != nil || got != nil {
+	if got, err := defaultTenant(s).GetLatestSuccessfulJobScanSummary(ctx, noSuccess.ID); err != nil || got != nil {
 		t.Fatalf("no-success result = %#v, err=%v; want nil, nil", got, err)
 	}
 }

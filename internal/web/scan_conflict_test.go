@@ -25,7 +25,7 @@ func TestWriteBaselineConflictReturnsSafeCurrentMarker(t *testing.T) {
 	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), `"baseline_conflict"`) {
 		t.Fatalf("baseline conflict response = %d %s", rec.Code, rec.Body.String())
 	}
-	job, err := db.CreateJob(context.Background(), config.NormalizeJob(config.Job{
+	job, err := defaultTenant(db).CreateJob(context.Background(), config.NormalizeJob(config.Job{
 		Name: "conflict-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.1"},
 		TCP: &config.Protocol{Ports: "22", Mode: "connect"},
 	}))

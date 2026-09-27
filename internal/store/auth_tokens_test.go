@@ -11,26 +11,26 @@ func TestCheapAuthenticationTokenChecks(t *testing.T) {
 	s := openTestStore(t)
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
 
-	if ok, err := s.SetupTokenUsable(ctx, "missing", now); err != nil || ok {
+	if ok, err := s.Platform().SetupTokenUsable(ctx, "missing", now); err != nil || ok {
 		t.Fatalf("missing setup token = %v, %v", ok, err)
 	}
-	if err := s.PutSetupTokenAt(ctx, "setup-active", now.Add(time.Hour), now); err != nil {
+	if err := s.Platform().PutSetupTokenAt(ctx, "setup-active", now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := s.SetupTokenUsable(ctx, "setup-active", now); err != nil || !ok {
+	if ok, err := s.Platform().SetupTokenUsable(ctx, "setup-active", now); err != nil || !ok {
 		t.Fatalf("active setup token = %v, %v", ok, err)
 	}
-	if ok, err := s.SetupTokenUsable(ctx, "setup-active", now.Add(2*time.Hour)); err != nil || ok {
+	if ok, err := s.Platform().SetupTokenUsable(ctx, "setup-active", now.Add(2*time.Hour)); err != nil || ok {
 		t.Fatalf("expired setup token = %v, %v", ok, err)
 	}
-	if err := s.ConsumeSetupToken(ctx, "setup-active", now.Add(time.Minute)); err != nil {
+	if err := s.Platform().ConsumeSetupToken(ctx, "setup-active", now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := s.SetupTokenUsable(ctx, "setup-active", now.Add(2*time.Minute)); err != nil || ok {
+	if ok, err := s.Platform().SetupTokenUsable(ctx, "setup-active", now.Add(2*time.Minute)); err != nil || ok {
 		t.Fatalf("consumed setup token = %v, %v", ok, err)
 	}
 
-	pending, err := s.CreateUserWithInvite(ctx, User{Username: "token-pending", DisplayName: "Pending", Role: RoleViewer, PasswordHash: "!pending", Enabled: false}, "invite-active", now, now.Add(time.Hour), AuditEntry{})
+	pending, err := defaultTenant(s).CreateUserWithInvite(ctx, User{Username: "token-pending", DisplayName: "Pending", Role: RoleViewer, PasswordHash: "!pending", Enabled: false}, "invite-active", now, now.Add(time.Hour), AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,7 +40,7 @@ func TestCheapAuthenticationTokenChecks(t *testing.T) {
 	if ok, err := s.ActivationTokenUsable(ctx, "invite-active", now.Add(2*time.Hour)); err != nil || ok {
 		t.Fatalf("expired activation token = %v, %v", ok, err)
 	}
-	if err := s.CreateUserInvite(ctx, "invite-expired", pending.ID, now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
+	if err := defaultTenant(s).CreateUserInvite(ctx, "invite-expired", pending.ID, now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if ok, err := s.ActivationTokenUsable(ctx, "invite-expired", now); err != nil || ok {
@@ -63,7 +63,7 @@ func TestCheapAuthenticationTokenChecksReturnDatabaseErrors(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := s.SetupTokenUsable(ctx, "missing", time.Now().UTC()); err == nil || ok {
+	if ok, err := s.Platform().SetupTokenUsable(ctx, "missing", time.Now().UTC()); err == nil || ok {
 		t.Fatalf("closed setup-token store = %v, %v", ok, err)
 	}
 	if ok, err := s.ActivationTokenUsable(ctx, "missing", time.Now().UTC()); err == nil || ok {

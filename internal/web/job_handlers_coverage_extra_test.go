@@ -25,7 +25,7 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 		Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"},
 		Timeout: config.Duration(time.Minute), Timing: "balanced",
 	})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 	if rec := callUpdate(current); rec.Code != http.StatusOK {
 		t.Fatalf("unchanged update = %d: %s", rec.Code, rec.Body.String())
 	}
-	record, err = db.GetJob(ctx, record.ID)
+	record, err = defaultTenant(db).GetJob(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 	if rec := callUpdate(scope); rec.Code != http.StatusOK {
 		t.Fatalf("confirmed scope update = %d: %s", rec.Code, rec.Body.String())
 	}
-	record, err = db.GetJob(ctx, record.ID)
+	record, err = defaultTenant(db).GetJob(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,18 +83,18 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 	activeScope := fromConfig(record.Job)
 	activeScope.Revision = record.Revision
 	activeScope.Targets = []string{"192.0.2.3"}
-	if err := db.AcquireJobLease(ctx, record.ID, "active-update", time.Now().UTC().Add(time.Minute)); err != nil {
+	if err := db.System().AcquireJobLease(ctx, record.ID, "active-update", time.Now().UTC().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if rec := callUpdate(activeScope); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "active") {
 		t.Fatalf("active scope update = %d: %s", rec.Code, rec.Body.String())
 	}
-	_ = db.ReleaseJobLease(ctx, record.ID, "active-update")
+	_ = db.System().ReleaseJobLease(ctx, record.ID, "active-update")
 
 	// Pausing through the general job update endpoint must use the same lease
 	// guard as the dedicated lifecycle route. Otherwise a running scan could
 	// finalize after the UI says the job is paused.
-	if err := db.AcquireJobLease(ctx, record.ID, "active-pause", time.Now().UTC().Add(time.Minute)); err != nil {
+	if err := db.System().AcquireJobLease(ctx, record.ID, "active-pause", time.Now().UTC().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	paused := fromConfig(record.Job)
@@ -104,7 +104,7 @@ func TestJobUpdateRebaselineAndLifecycleErrors(t *testing.T) {
 	if rec := callUpdate(paused); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "active") {
 		t.Fatalf("active pause update = %d: %s", rec.Code, rec.Body.String())
 	}
-	_ = db.ReleaseJobLease(ctx, record.ID, "active-pause")
+	_ = db.System().ReleaseJobLease(ctx, record.ID, "active-pause")
 
 	// Lifecycle endpoints reject missing revisions, stale revisions, and
 	// unknown jobs before changing any durable state.
@@ -157,7 +157,7 @@ func TestJobListAndAPIDispatchCoverage(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "dispatch", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
-	if _, err := db.CreateJob(ctx, job); err != nil {
+	if _, err := defaultTenant(db).CreateJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
 	list := httptest.NewRecorder()
@@ -263,7 +263,7 @@ func TestJobResponsesRedactActiveScanCycleStoreFailures(t *testing.T) {
 		Name: "cycle-error-redaction", Schedule: "0 * * * *", Timezone: "UTC",
 		Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "22", Mode: "connect"},
 	})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,14 +345,14 @@ func TestBaselineJSONReportsUpdatingForLegacyScopeHash(t *testing.T) {
 func TestJobListBatchesProfileAndActiveCycleSummaries(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
-	profile, err := db.CreateScannerProfile(ctx, "List revision", "", config.ScannerProfile{Engine: config.EngineNmap}, admin.Username)
+	profile, err := defaultTenant(db).CreateScannerProfile(ctx, "List revision", "", config.ScannerProfile{Engine: config.EngineNmap}, admin.Username)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.UpdateScannerProfile(ctx, profile.ID, profile.Revision, profile.Name, "new revision", config.ScannerProfile{Engine: config.EngineNmap, Description: "new revision"}, admin.Username); err != nil {
+	if _, err := defaultTenant(db).UpdateScannerProfile(ctx, profile.ID, profile.Revision, profile.Name, "new revision", config.ScannerProfile{Engine: config.EngineNmap, Description: "new revision"}, admin.Username); err != nil {
 		t.Fatal(err)
 	}
-	job, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{
+	job, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name: "batched-job-list", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.20"},
 		TCP: &config.Protocol{Ports: "22", Mode: "syn", ProfileID: profile.ID, ProfileRevision: profile.Revision},
 	}))
@@ -365,11 +365,11 @@ func TestJobListBatchesProfileAndActiveCycleSummaries(t *testing.T) {
 		Units:      []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Family: 4, Addresses: []string{"192.0.2.20"}, Ports: "22", PortCount: 1, Probes: 1}},
 		TotalUnits: 1, TotalProbes: 1,
 	}
-	cycle, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := db.System().CreateScanCycle(ctx, store.ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cycle, err = db.StartScanCycleAttempt(ctx, cycle.ID); err != nil || cycle.Status != "running" {
+	if cycle, err = db.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil || cycle.Status != "running" {
 		t.Fatalf("start scan cycle = %#v, %v", cycle, err)
 	}
 
@@ -410,7 +410,7 @@ func TestJobListKeepsReadableResponseWhenCycleAndProfileReadsFail(t *testing.T) 
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
 	server.Log = nil
-	if _, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{
+	if _, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name: "read-failure-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.21"},
 		TCP: &config.Protocol{Ports: "22", Mode: "syn"},
 	})); err != nil {

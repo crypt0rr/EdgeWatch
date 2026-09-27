@@ -47,7 +47,7 @@ func TestManagedDeliverySurvivesMetadataEditAndPause(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldKey := managedKey(created.ID, created.Revision)
-	if err := db.QueueEvent(ctx, oldKey, model.Event{Type: "rename", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := db.System().QueueEvent(ctx, oldKey, model.Event{Type: "rename", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	renamed, err := notifier.UpdateManaged(ctx, created.ID, created.Revision, "Operations renamed", nil, boolPtr(true))
@@ -64,7 +64,7 @@ func TestManagedDeliverySurvivesMetadataEditAndPause(t *testing.T) {
 		t.Fatalf("metadata-edited delivery calls = %d, want 1", calls.Load())
 	}
 
-	if err := db.QueueEvent(ctx, managedKey(renamed.ID, renamed.Revision), model.Event{Type: "pause", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := db.System().QueueEvent(ctx, managedKey(renamed.ID, renamed.Revision), model.Event{Type: "pause", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	paused, err := notifier.UpdateManaged(ctx, renamed.ID, renamed.Revision, renamed.Name, nil, boolPtr(false))
@@ -84,7 +84,7 @@ func TestManagedDeliverySurvivesMetadataEditAndPause(t *testing.T) {
 	if attempts != 0 || terminal != 0 {
 		t.Fatalf("paused outbox state = attempts %d terminal %d", attempts, terminal)
 	}
-	if health, err := db.ListDeliveryHealth(ctx); err != nil {
+	if health, err := db.Tenant(store.DefaultTenantScope()).ListDeliveryHealth(ctx); err != nil {
 		t.Fatal(err)
 	} else if health["managed:"+created.ID].Pending != 0 {
 		t.Fatalf("paused delivery counted as pending: %#v", health["managed:"+created.ID])
@@ -215,7 +215,7 @@ func TestDeleteManagedRejectsStaleRevisionWithoutChangingRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := config.NormalizeJob(config.Job{Name: "routed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced", NotificationDestinations: []string{created.ID}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := db.Tenant(store.DefaultTenantScope()).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +225,7 @@ func TestDeleteManagedRejectsStaleRevisionWithoutChangingRouting(t *testing.T) {
 	if changed, err := notifier.DeleteManagedWithAudit(ctx, created.ID, created.Revision+1, store.AuditEntry{Action: "notifications.deleted"}); !errors.Is(err, store.ErrConflict) || changed != nil {
 		t.Fatalf("stale audited delete = %#v, %v; want conflict", changed, err)
 	}
-	stored, err := db.GetJob(ctx, record.ID)
+	stored, err := db.Tenant(store.DefaultTenantScope()).GetJob(ctx, record.ID)
 	if err != nil || stored.Revision != record.Revision || strings.Join(stored.Job.NotificationDestinations, ",") != created.ID {
 		t.Fatalf("job routing after rejected deletes = %#v, %v", stored, err)
 	}

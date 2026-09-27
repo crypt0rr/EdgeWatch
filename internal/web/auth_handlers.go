@@ -223,7 +223,9 @@ func (s *Server) applicationUpdateStatus(ctx context.Context) map[string]any {
 	if currentVersion == "" || s.Store == nil {
 		return result
 	}
-	state, err := s.Store.GetApplicationUpdateState(ctx)
+	// The status shows only the release check, which is platform data; the
+	// update routing it would also carry is not read here.
+	state, err := s.Store.Platform().GetApplicationUpdateState(ctx)
 	if err != nil {
 		result["status"] = "check_failed"
 		return result

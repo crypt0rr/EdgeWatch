@@ -136,12 +136,12 @@ func TestHistoryReadsRemainAvailableWhileWriterTransactionIsHeld(t *testing.T) {
 	}
 	defer s.Close()
 	ctx := context.Background()
-	job, err := s.CreateJob(ctx, testJob("read-isolation"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("read-isolation"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	stamp := time.Now().UTC()
-	if err := s.SaveScan(ctx, model.Scan{ID: "read-isolation-scan", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: stamp, FinishedAt: stamp, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "read-isolation-scan", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: stamp, FinishedAt: stamp, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -157,13 +157,19 @@ func TestHistoryReadsRemainAvailableWhileWriterTransactionIsHeld(t *testing.T) {
 		name string
 		read func(context.Context) error
 	}{
-		{name: "job", read: func(ctx context.Context) error { _, err := s.GetJob(ctx, job.ID); return err }},
-		{name: "scan summary", read: func(ctx context.Context) error { _, err := s.GetScanSummary(ctx, "read-isolation-scan"); return err }},
-		{name: "events", read: func(ctx context.Context) error { _, err := s.ListEventsPage(ctx, job.Job.Name, 50, 0); return err }},
-		{name: "incidents", read: func(ctx context.Context) error { _, err := s.ListIncidentsPage(ctx, 50, 0); return err }},
-		{name: "public dashboard", read: func(ctx context.Context) error { _, err := s.GetPublicDashboard(ctx); return err }},
+		{name: "job", read: func(ctx context.Context) error { _, err := defaultTenant(s).GetJob(ctx, job.ID); return err }},
+		{name: "scan summary", read: func(ctx context.Context) error {
+			_, err := defaultTenant(s).GetScanSummary(ctx, "read-isolation-scan")
+			return err
+		}},
+		{name: "events", read: func(ctx context.Context) error {
+			_, err := defaultTenant(s).ListEventsPage(ctx, job.Job.Name, 50, 0)
+			return err
+		}},
+		{name: "incidents", read: func(ctx context.Context) error { _, err := defaultTenant(s).ListIncidentsPage(ctx, 50, 0); return err }},
+		{name: "public dashboard", read: func(ctx context.Context) error { _, err := defaultTenant(s).GetPublicDashboard(ctx); return err }},
 		{name: "host inventory", read: func(ctx context.Context) error {
-			_, err := s.ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
+			_, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
 			return err
 		}},
 	}

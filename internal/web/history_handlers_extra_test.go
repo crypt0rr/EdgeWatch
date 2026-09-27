@@ -32,17 +32,17 @@ func TestHistoryAndIncidentHandlersExposeScopedPages(t *testing.T) {
 	}
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	job := config.NormalizeJob(config.Job{Name: "history-handlers", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
 	when := time.Now().UTC()
 	change := model.Change{Key: "port|127.0.0.1|tcp|1", Kind: "port", Severity: "critical", Target: "127.0.0.1", Protocol: "tcp", Port: 1, Old: "closed", New: "open"}
 	scan := model.Scan{ID: "history-handler-scan", JobID: record.ID, JobRevision: record.Revision, Job: job.Name, StartedAt: when, FinishedAt: when, Status: "success", ConfigHash: job.SecurityHash(), BaselineScanID: "baseline-scan", BaselineConfigHash: job.SecurityHash(), Changes: []model.Change{change}, Snapshot: model.Snapshot{Units: []model.Unit{{Target: "127.0.0.1", Protocol: "tcp", Addresses: []string{"127.0.0.1"}, Ports: []model.PortState{{Port: 1, State: "open"}}}}}}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Incidents[change.Key] = model.Incident{Change: change, ScanID: scan.ID, OpenedAt: when, LastSeenAt: when}
 		return []model.Event{{Type: "history-event", Job: job.Name, JobID: record.ID, ScanID: scan.ID, CreatedAt: when}}, nil
 	}); err != nil {
@@ -59,7 +59,7 @@ func TestHistoryAndIncidentHandlersExposeScopedPages(t *testing.T) {
 	if recorder.Code != http.StatusOK || !containsJSONField(recorder.Body.Bytes(), scan.ID) {
 		t.Fatalf("latest successful scan = %d: %s", recorder.Code, recorder.Body.String())
 	}
-	noSuccess, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "no-success", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	noSuccess, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "no-success", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
 	if err != nil {
 		t.Fatal(err)
 	}

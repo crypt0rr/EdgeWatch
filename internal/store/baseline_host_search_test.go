@@ -136,7 +136,7 @@ func TestBaselineHostSearchQueriesUseRowidLookups(t *testing.T) {
 	insertBaselineSearchJob(t, s, "plan-job", "plan-job")
 	insertBaselineSearchJob(t, s, "plan-other", "plan-other")
 	for jobID, prefix := range map[string]int{"plan-job": 1, "plan-other": 2} {
-		if err := s.ReplaceBaselineHostProjection(ctx, jobID, baselineSearchSnapshot(prefix, 8)); err != nil {
+		if err := s.System().ReplaceBaselineHostProjection(ctx, jobID, baselineSearchSnapshot(prefix, 8)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -184,7 +184,7 @@ func TestBaselineHostSearchQueriesUseRowidLookups(t *testing.T) {
 				}
 			}
 		}
-		page, err := s.ListBaselineHostsPage(ctx, "plan-job", tc.query, tc.protocol, tc.hasOpen, 50, 0)
+		page, err := defaultTenant(s).ListBaselineHostsPage(ctx, "plan-job", tc.query, tc.protocol, tc.hasOpen, 50, 0)
 		if err != nil {
 			t.Fatalf("%s search: %v", tc.name, err)
 		}
@@ -203,7 +203,7 @@ func TestBaselineHostProjectionReplaceIsIndependentOfOtherJobs(t *testing.T) {
 	for _, s := range []*Store{alone, crowded} {
 		insertBaselineSearchJob(t, s, "small", "small")
 		insertBaselineSearchJob(t, s, "large", "large")
-		if err := s.ReplaceBaselineHostProjection(ctx, "small", snapshot); err != nil {
+		if err := s.System().ReplaceBaselineHostProjection(ctx, "small", snapshot); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -237,7 +237,7 @@ SELECT 'large','10.2.'||(i/250)||'.'||(i%250+1),'{}','10.2.'||(i/250)||'.'||(i%2
 	for round := 0; round < 3; round++ {
 		for _, s := range []*Store{alone, crowded} {
 			started := time.Now()
-			if err := s.ReplaceBaselineHostProjection(ctx, "small", snapshot); err != nil {
+			if err := s.System().ReplaceBaselineHostProjection(ctx, "small", snapshot); err != nil {
 				t.Fatal(err)
 			}
 			if elapsed := time.Since(started); best[s] == 0 || elapsed < best[s] {
@@ -249,7 +249,7 @@ SELECT 'large','10.2.'||(i/250)||'.'||(i%250+1),'{}','10.2.'||(i/250)||'.'||(i%2
 	if best[crowded] > 3*best[alone] {
 		t.Fatalf("replacing %d hosts took %s beside %d other baseline hosts and %s alone; maintenance depends on other jobs", ownHosts, best[crowded], otherHosts, best[alone])
 	}
-	page, err := crowded.ListBaselineHostsPage(ctx, "small", "nginx", "", nil, 10, 0)
+	page, err := defaultTenant(crowded).ListBaselineHostsPage(ctx, "small", "nginx", "", nil, 10, 0)
 	if err != nil || page.Total != ownHosts {
 		t.Fatalf("crowded baseline search = total %d, err %v; want %d", page.Total, err, ownHosts)
 	}

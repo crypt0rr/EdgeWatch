@@ -9,7 +9,7 @@ func TestEnsureDeploymentNotificationIDsIsStableAndSkipsBlankHashes(t *testing.T
 	ctx := context.Background()
 	s := openTestStore(t)
 
-	empty, err := s.EnsureDeploymentNotificationIDs(ctx, nil)
+	empty, err := s.System().EnsureDeploymentNotificationIDs(ctx, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -17,7 +17,7 @@ func TestEnsureDeploymentNotificationIDsIsStableAndSkipsBlankHashes(t *testing.T
 		t.Fatalf("empty input returned %v", empty)
 	}
 
-	first, err := s.EnsureDeploymentNotificationIDs(ctx, []string{"  legacy-a  ", "", "   ", "legacy-b", "legacy-a"})
+	first, err := s.System().EnsureDeploymentNotificationIDs(ctx, []string{"  legacy-a  ", "", "   ", "legacy-b", "legacy-a"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,7 +28,7 @@ func TestEnsureDeploymentNotificationIDsIsStableAndSkipsBlankHashes(t *testing.T
 		t.Fatal("different legacy hashes received the same opaque ID")
 	}
 
-	second, err := s.EnsureDeploymentNotificationIDs(ctx, []string{"legacy-a", "legacy-b"})
+	second, err := s.System().EnsureDeploymentNotificationIDs(ctx, []string{"legacy-a", "legacy-b"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,13 +48,13 @@ func TestEnsureDeploymentNotificationIDsReturnsProjectionErrors(t *testing.T) {
 	s := openTestStore(t)
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := s.EnsureDeploymentNotificationIDs(canceled, []string{"cancelled"}); err == nil {
+	if _, err := s.System().EnsureDeploymentNotificationIDs(canceled, []string{"cancelled"}); err == nil {
 		t.Fatal("canceled transaction unexpectedly succeeded")
 	}
 	if _, err := s.DB.Exec(`DROP TABLE deployment_notification_ids`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.EnsureDeploymentNotificationIDs(context.Background(), []string{"missing-table"}); err == nil {
+	if _, err := s.System().EnsureDeploymentNotificationIDs(context.Background(), []string{"missing-table"}); err == nil {
 		t.Fatal("missing projection unexpectedly succeeded")
 	}
 }

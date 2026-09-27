@@ -153,6 +153,46 @@ func assertTenantCreatesJobs(t *testing.T, f tenantFixture, create func(ts *Tena
 	if _, err := create(f.store.Tenant(f.b), testJob("edge")); err == nil || errors.Is(err, ErrNotFound) {
 		t.Errorf("tenant B created a second job named edge: %v", err)
 	}
+	pinned := 0
+	assertTenantPinsOnlyItsProfiles(t, f, func(ts *TenantStore, profileID string) (JobRecord, error) {
+		pinned++
+		return create(ts, pinnedJob(fmt.Sprintf("edge-pinned-%d", pinned), profileID))
+	})
+}
+
+// pinnedJob returns a job whose TCP scan pins the scanner profile.
+func pinnedJob(name, profileID string) config.Job {
+	job := testJob(name)
+	job.TCP.ProfileID = profileID
+	return config.NormalizeJob(job)
+}
+
+// assertTenantPinsOnlyItsProfiles writes a job of tenant B that pins a
+// scanner profile. Tenant A's custom profiles and an unknown ID are refused
+// with ErrScannerProfileNotFound, the console's error for an unknown
+// profile, and change neither tenant's rows. B's own profile and a built-in
+// profile are accepted.
+func assertTenantPinsOnlyItsProfiles(t *testing.T, f tenantFixture, write func(ts *TenantStore, profileID string) (JobRecord, error)) {
+	t.Helper()
+	p := tenantFixtureProfiles
+	beforeA, beforeB := tenantJobDigest(t, f.store, f.a), tenantJobDigest(t, f.store, f.b)
+	for _, profileID := range []string{p.a, p.archivedA, unknownScannerProfileID} {
+		if _, err := write(f.store.Tenant(f.b), profileID); !errors.Is(err, ErrScannerProfileNotFound) || !errors.Is(err, ErrValidation) || err.Error() != "selected scanner profile was not found" {
+			t.Errorf("tenant B pinned scanner profile %s: %v, want ErrScannerProfileNotFound", profileID, err)
+		}
+	}
+	if tenantJobDigest(t, f.store, f.a) != beforeA || tenantJobDigest(t, f.store, f.b) != beforeB {
+		t.Fatal("a refused scanner profile changed a tenant's jobs")
+	}
+	for _, profileID := range []string{p.b, BuiltinNaabuProfileID} {
+		record, err := write(f.store.Tenant(f.b), profileID)
+		if err != nil || record.TenantID != f.b.ID() || record.Job.TCP.ProfileID != profileID {
+			t.Errorf("tenant B's job pinning scanner profile %s = %+v, %v", profileID, record, err)
+		}
+	}
+	if tenantJobDigest(t, f.store, f.a) != beforeA {
+		t.Fatal("tenant B's scanner profile pins changed tenant A's jobs")
+	}
 }
 
 // scopeChangedJob is the fixture's "edge" job with another target, so an
@@ -166,10 +206,10 @@ func scopeChangedJob() config.Job {
 // assertTenantUpdatesOnlyItsJobs runs a rebaselining update through tenant
 // B. On A's jobs it is not found and resets nothing; on B's own job it
 // resets B's baseline and records the reset event in tenant B.
-func assertTenantUpdatesOnlyItsJobs(t *testing.T, f tenantFixture, update func(ts *TenantStore, id string, job config.Job) (JobRecord, error)) {
+func assertTenantUpdatesOnlyItsJobs(t *testing.T, f tenantFixture, update func(ts *TenantStore, id string, revision int64, job config.Job) (JobRecord, error)) {
 	t.Helper()
 	write := func(ts *TenantStore, id string) error {
-		record, err := update(ts, id, scopeChangedJob())
+		record, err := update(ts, id, 1, scopeChangedJob())
 		if err == nil && (record.TenantID != ts.scope.ID() || record.Revision != 2) {
 			return fmt.Errorf("updated %+v", record)
 		}
@@ -184,6 +224,13 @@ func assertTenantUpdatesOnlyItsJobs(t *testing.T, f tenantFixture, update func(t
 	if err := f.store.DB.QueryRow(`SELECT (SELECT COUNT(*) FROM job_runtime WHERE job_id=?1),(SELECT COUNT(*) FROM events WHERE job_id=?1 AND type='baseline-reset' AND tenant_id=?2)`, f.jobB, f.b.ID()).Scan(&runtimes, &resets); err != nil || runtimes != 1 || resets != 1 {
 		t.Errorf("tenant B's reset: %d runtime rows, %d reset events, %v", runtimes, resets, err)
 	}
+	assertTenantPinsOnlyItsProfiles(t, f, func(ts *TenantStore, profileID string) (JobRecord, error) {
+		current, err := ts.GetJob(context.Background(), f.jobB)
+		if err != nil {
+			return JobRecord{}, err
+		}
+		return update(ts, f.jobB, current.Revision, pinnedJob("edge", profileID))
+	})
 }
 
 // assertTenantArchivesOnlyItsJobs archives A's active job and restores A's
@@ -241,26 +288,26 @@ var jobLeakCases = map[string]tenantLeakCase{
 		}, true)
 	}},
 	"UpdateJob": {writes: true, run: func(t *testing.T, f tenantFixture) {
-		assertTenantUpdatesOnlyItsJobs(t, f, func(ts *TenantStore, id string, job config.Job) (JobRecord, error) {
-			record, _, err := ts.UpdateJob(context.Background(), id, 1, job, true, false, true)
+		assertTenantUpdatesOnlyItsJobs(t, f, func(ts *TenantStore, id string, revision int64, job config.Job) (JobRecord, error) {
+			record, _, err := ts.UpdateJob(context.Background(), id, revision, job, true, false, true)
 			return record, err
 		})
 	}},
 	"UpdateJobWithEvents": {writes: true, run: func(t *testing.T, f tenantFixture) {
-		assertTenantUpdatesOnlyItsJobs(t, f, func(ts *TenantStore, id string, job config.Job) (JobRecord, error) {
-			record, _, _, err := ts.UpdateJobWithEvents(context.Background(), id, 1, job, true, false, true)
+		assertTenantUpdatesOnlyItsJobs(t, f, func(ts *TenantStore, id string, revision int64, job config.Job) (JobRecord, error) {
+			record, _, _, err := ts.UpdateJobWithEvents(context.Background(), id, revision, job, true, false, true)
 			return record, err
 		})
 	}},
 	"UpdateJobWithEventsWithOutbox": {writes: true, run: func(t *testing.T, f tenantFixture) {
-		assertTenantUpdatesOnlyItsJobs(t, f, func(ts *TenantStore, id string, job config.Job) (JobRecord, error) {
-			record, _, _, err := ts.UpdateJobWithEventsWithOutbox(context.Background(), id, 1, job, true, false, true, nil)
+		assertTenantUpdatesOnlyItsJobs(t, f, func(ts *TenantStore, id string, revision int64, job config.Job) (JobRecord, error) {
+			record, _, _, err := ts.UpdateJobWithEventsWithOutbox(context.Background(), id, revision, job, true, false, true, nil)
 			return record, err
 		})
 	}},
 	"UpdateJobWithEventsWithOutboxAndAudit": {writes: true, run: func(t *testing.T, f tenantFixture) {
-		assertTenantUpdatesOnlyItsJobs(t, f, func(ts *TenantStore, id string, job config.Job) (JobRecord, error) {
-			record, _, _, err := ts.UpdateJobWithEventsWithOutboxAndAudit(context.Background(), id, 1, job, true, false, true, nil, jobAudit)
+		assertTenantUpdatesOnlyItsJobs(t, f, func(ts *TenantStore, id string, revision int64, job config.Job) (JobRecord, error) {
+			record, _, _, err := ts.UpdateJobWithEventsWithOutboxAndAudit(context.Background(), id, revision, job, true, false, true, nil, jobAudit)
 			return record, err
 		})
 	}},
@@ -311,7 +358,7 @@ var jobLeakCases = map[string]tenantLeakCase{
 		ctx := context.Background()
 		expires := time.Now().Add(time.Hour)
 		for _, job := range []string{f.jobA, f.jobB, "config-job"} {
-			if err := f.store.AcquireJobLease(ctx, job, "owner/"+job, expires); err != nil {
+			if err := f.store.System().AcquireJobLease(ctx, job, "owner/"+job, expires); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -338,66 +385,4 @@ var jobLeakCases = map[string]tenantLeakCase{
 			}
 		}
 	}},
-}
-
-// The deprecated Store wrappers of the job writes act on the default tenant
-// only: tenant B's jobs are not found through them, and a job they create
-// belongs to the default tenant.
-func TestDeprecatedJobWritesUseTheDefaultTenant(t *testing.T) {
-	ctx := context.Background()
-	f := newTenantFixture(t)
-	s := f.store
-	before := tenantJobDigest(t, s, f.b)
-	for name, write := range map[string]func() error{
-		"UpdateJob": func() error {
-			_, _, err := s.UpdateJob(ctx, f.jobB, 1, scopeChangedJob(), true, false, true)
-			return err
-		},
-		"UpdateJobWithEvents": func() error {
-			_, _, _, err := s.UpdateJobWithEvents(ctx, f.jobB, 1, scopeChangedJob(), true, false, true)
-			return err
-		},
-		"UpdateJobWithEventsWithOutbox": func() error {
-			_, _, _, err := s.UpdateJobWithEventsWithOutbox(ctx, f.jobB, 1, scopeChangedJob(), true, false, true, nil)
-			return err
-		},
-		"UpdateJobWithEventsWithOutboxAndAudit": func() error {
-			_, _, _, err := s.UpdateJobWithEventsWithOutboxAndAudit(ctx, f.jobB, 1, scopeChangedJob(), true, false, true, nil, jobAudit)
-			return err
-		},
-		"SetJobArchived":                     func() error { return s.SetJobArchived(ctx, f.jobB, true) },
-		"SetJobArchivedWithRevision":         func() error { return s.SetJobArchivedWithRevision(ctx, f.jobB, true, 1) },
-		"SetJobArchivedWithRevisionAndAudit": func() error { return s.SetJobArchivedWithRevisionAndAudit(ctx, f.jobB, true, 1, jobAudit) },
-		"SetJobEnabled":                      func() error { return s.SetJobEnabled(ctx, f.jobB, false) },
-		"SetJobEnabledWithRevision":          func() error { return s.SetJobEnabledWithRevision(ctx, f.jobB, false, 1) },
-		"SetJobEnabledWithRevisionAndAudit":  func() error { return s.SetJobEnabledWithRevisionAndAudit(ctx, f.jobB, false, 1, jobAudit) },
-		"DeleteJob":                          func() error { return s.DeleteJob(ctx, f.archivedB) },
-		"DeleteJobWithAudit":                 func() error { return s.DeleteJobWithAudit(ctx, f.archivedB, jobAudit) },
-		"JobActive": func() error {
-			_, err := s.JobActive(ctx, f.jobB)
-			return err
-		},
-	} {
-		if err := write(); !errors.Is(err, ErrNotFound) {
-			t.Errorf("%s reached tenant B's job: %v", name, err)
-		}
-	}
-	if after := tenantJobDigest(t, s, f.b); after != before {
-		t.Fatal("a deprecated Store write changed tenant B's rows")
-	}
-	for name, create := range map[string]func(config.Job) (JobRecord, error){
-		"CreateJob":            func(job config.Job) (JobRecord, error) { return s.CreateJob(ctx, job) },
-		"CreateJobWithEnabled": func(job config.Job) (JobRecord, error) { return s.CreateJobWithEnabled(ctx, job, true) },
-		"CreateJobWithEnabledAndAudit": func(job config.Job) (JobRecord, error) {
-			return s.CreateJobWithEnabledAndAudit(ctx, job, true, jobAudit)
-		},
-	} {
-		record, err := create(testJob("default-" + name))
-		if err != nil || record.TenantID != DefaultTenantID {
-			t.Fatalf("%s = %+v, %v", name, record, err)
-		}
-		if _, err := s.Tenant(f.a).GetJob(ctx, record.ID); err != nil {
-			t.Errorf("%s: the default tenant does not own the job: %v", name, err)
-		}
-	}
 }

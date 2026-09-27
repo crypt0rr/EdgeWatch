@@ -48,7 +48,7 @@ func TestDryRunRestorePredictsRestoreOutcome(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := owner.AcquireDaemonLease(context.Background(), "daemon-probe"); err != nil {
+				if _, err := owner.System().AcquireDaemonLease(context.Background(), "daemon-probe"); err != nil {
 					owner.Close()
 					t.Fatal(err)
 				}

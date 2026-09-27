@@ -177,7 +177,7 @@ func TestPasswordAndTOTPHandlersValidateCredentialsAndSessionCookie(t *testing.T
 	if _, err := db.GetSession(ctx, "password-session"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("password change left session active: %v", err)
 	}
-	updated, err := db.GetUser(ctx, admin.UserID)
+	updated, err := defaultTenant(db).GetUser(ctx, admin.UserID)
 	if err != nil || !auth.VerifyPassword(updated.PasswordHash, "new administrator password") {
 		t.Fatalf("password was not updated: %#v, %v", updated, err)
 	}
@@ -469,7 +469,7 @@ func TestTOTPEnableAllowsRetryAfterMistypedCode(t *testing.T) {
 	if details["remaining_attempts"] != float64(pendingTOTPMaxAttempts-1) {
 		t.Fatalf("remaining attempts = %#v, want %d", details["remaining_attempts"], pendingTOTPMaxAttempts-1)
 	}
-	user, err := db.GetUser(context.Background(), admin.UserID)
+	user, err := defaultTenant(db).GetUser(context.Background(), admin.UserID)
 	if err != nil || !user.TOTPEnabled {
 		t.Fatalf("TOTP was not enabled: %#v, %v", user, err)
 	}
@@ -490,7 +490,7 @@ func TestTOTPEnableDiscardsEnrolmentAfterTooManyWrongCodes(t *testing.T) {
 	// The last permitted failure discards the enrolment and says so.
 	assertTOTPEnableError(t, submitTOTPEnable(server, admin, "totp-limit-session", wrong), "totp_setup_expired")
 	assertTOTPEnableError(t, submitTOTPEnable(server, admin, "totp-limit-session", coverageTOTPCode(secret, time.Now().Unix()/30)), "totp_setup_expired")
-	if user, err := db.GetUser(context.Background(), admin.UserID); err != nil || user.TOTPEnabled {
+	if user, err := defaultTenant(db).GetUser(context.Background(), admin.UserID); err != nil || user.TOTPEnabled {
 		t.Fatalf("TOTP enabled after the attempt budget was spent: %#v, %v", user, err)
 	}
 }

@@ -120,7 +120,7 @@ func ImportConfiguredURLs(ctx context.Context, s *store.Store, urls []string, ke
 	for _, item := range configured {
 		digests = append(digests, item.digest)
 	}
-	imported, err := s.ImportedDeploymentNotifications(ctx, digests)
+	imported, err := s.System().ImportedDeploymentNotifications(ctx, digests)
 	if err != nil {
 		return result, configImportError(ConfigImportDatabaseError, err)
 	}
@@ -165,7 +165,7 @@ func ImportConfiguredURLs(ctx context.Context, s *store.Store, urls []string, ke
 		}
 		items = append(items, store.DeploymentNotificationImport{LegacyHash: item.digest, ID: id, Name: DeploymentDestinationName, Provider: providerForURL(rawURL), Ciphertext: ciphertext, Nonce: nonce})
 	}
-	committed, err := s.ImportDeploymentNotifications(ctx, items)
+	committed, err := s.System().ImportDeploymentNotifications(ctx, items)
 	if err != nil {
 		return result, configImportError(ConfigImportDatabaseError, err)
 	}

@@ -84,7 +84,7 @@ func TestJobWritesReportStorageFailuresAsInternalErrors(t *testing.T) {
 	server.Log = slog.New(slog.NewTextHandler(&logs, nil))
 	operator := admin
 	operator.Role = store.RoleOperator
-	record, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "storage-failure", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect", Engine: config.EngineNmap}}))
+	record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "storage-failure", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect", Engine: config.EngineNmap}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,11 +150,11 @@ func TestJobProfileRevisionLookupFailureIsAnInternalError(t *testing.T) {
 	server, db, admin := newUsersTestServer(t)
 	var logs bytes.Buffer
 	server.Log = slog.New(slog.NewTextHandler(&logs, nil))
-	profile, err := db.CreateScannerProfile(ctx, "Revisioned", "", config.BuiltinNmapProfile(), "admin")
+	profile, err := defaultTenant(db).CreateScannerProfile(ctx, "Revisioned", "", config.BuiltinNmapProfile(), "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.UpdateScannerProfile(ctx, profile.ID, profile.Revision, "Revisioned", "second", config.BuiltinNmapProfile(), "admin"); err != nil {
+	if _, err := defaultTenant(db).UpdateScannerProfile(ctx, profile.ID, profile.Revision, "Revisioned", "second", config.BuiltinNmapProfile(), "admin"); err != nil {
 		t.Fatal(err)
 	}
 	// An administrator may roll a job back to a historical profile revision.
@@ -174,15 +174,15 @@ func TestJobProfileSelectionErrorsRemainFieldValidation(t *testing.T) {
 	tunable := config.BuiltinNaabuProfile()
 	tunable.OperatorAdjustable = []string{"scan_type", "rate"}
 	tunable.OperatorBounds = map[string]config.NumericBound{"rate": {Min: 100, Max: 2000}}
-	profile, err := db.CreateScannerProfile(ctx, "Tunable", "", tunable, "admin")
+	profile, err := defaultTenant(db).CreateScannerProfile(ctx, "Tunable", "", tunable, "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	archived, err := db.CreateScannerProfile(ctx, "Retired", "", config.BuiltinNmapProfile(), "admin")
+	archived, err := defaultTenant(db).CreateScannerProfile(ctx, "Retired", "", config.BuiltinNmapProfile(), "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetScannerProfileArchived(ctx, archived.ID, true, archived.Revision, "admin"); err != nil {
+	if err := defaultTenant(db).SetScannerProfileArchived(ctx, archived.ID, true, archived.Revision, "admin"); err != nil {
 		t.Fatal(err)
 	}
 	create := func(tcp string) *httptest.ResponseRecorder {
@@ -205,7 +205,7 @@ func TestJobProfileSelectionErrorsRemainFieldValidation(t *testing.T) {
 	}
 
 	// Switching an existing job to an archived profile is rejected the same way.
-	record, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "existing-selection", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.41"}, TCP: &config.Protocol{Ports: "443", Mode: "connect", Engine: config.EngineNmap}}))
+	record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "existing-selection", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.41"}, TCP: &config.Protocol{Ports: "443", Mode: "connect", Engine: config.EngineNmap}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestScannerProfileWritesMapStorageFailuresAndMissingProfiles(t *testing.T) 
 		server.scannerProfilesRoute(recorder, request, session, defaultTenantStore(server), rest)
 		return recorder
 	}
-	profile, err := db.CreateScannerProfile(ctx, "Existing", "", config.BuiltinNmapProfile(), "admin")
+	profile, err := defaultTenant(db).CreateScannerProfile(ctx, "Existing", "", config.BuiltinNmapProfile(), "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +312,7 @@ func TestJobNamesAreBoundedAndRejectControlCharacters(t *testing.T) {
 			}
 		}
 	}
-	jobs, err := db.ListJobs(ctx, true)
+	jobs, err := defaultTenant(db).ListJobs(ctx, true)
 	if err != nil || len(jobs) != 0 {
 		t.Fatalf("rejected names created jobs: %d (%v)", len(jobs), err)
 	}
@@ -332,7 +332,7 @@ func TestJobNamesAreBoundedAndRejectControlCharacters(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	record, err := db.GetJob(ctx, created.ID)
+	record, err := defaultTenant(db).GetJob(ctx, created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -372,7 +372,7 @@ func TestMaximumLengthJobNameKeepsEventWritesWorking(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &created); err != nil {
 		t.Fatal(err)
 	}
-	record, err := db.GetJob(ctx, created.ID)
+	record, err := defaultTenant(db).GetJob(ctx, created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,7 +396,7 @@ func TestMaximumLengthJobNameKeepsEventWritesWorking(t *testing.T) {
 		t.Fatalf("finalize successful scan: %v", err)
 	}
 	for _, id := range []string{failed.ID, success.ID} {
-		if _, err := db.GetScan(ctx, id); err != nil {
+		if _, err := defaultTenant(db).GetScan(ctx, id); err != nil {
 			t.Fatalf("scan %s was not persisted: %v", id, err)
 		}
 	}

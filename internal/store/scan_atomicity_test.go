@@ -30,7 +30,7 @@ END`); err != nil {
 			{Address: "198.51.100.2", AddressFamily: "IPv4"},
 		}},
 	}
-	if err := s.SaveScan(ctx, scan); err == nil {
+	if err := s.System().SaveScan(ctx, scan); err == nil {
 		t.Fatal("SaveScan unexpectedly succeeded")
 	}
 

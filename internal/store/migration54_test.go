@@ -180,11 +180,11 @@ func buildSchema53Fixture(t *testing.T, path string) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	jobA, err := s.CreateJob(ctx, testJob("edge-a"))
+	jobA, err := defaultTenant(s).CreateJob(ctx, testJob("edge-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobB, err := s.CreateJob(ctx, testJob("edge-b"))
+	jobB, err := defaultTenant(s).CreateJob(ctx, testJob("edge-b"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +200,7 @@ func buildSchema53Fixture(t *testing.T, path string) {
 		fixtureScan("scan-second-tenant", secondTenantJob, "edge-a", now.Add(4*time.Minute), []model.HostObservation{fixtureHost(6000)}),
 		fixtureScan("scan-dangling", jobA.ID, "edge-a", now.Add(5*time.Minute), []model.HostObservation{fixtureHost(7000)}),
 	} {
-		if err := s.SaveScan(ctx, scan); err != nil {
+		if err := s.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -332,7 +332,7 @@ func assertLatestHostsRekeyed(t *testing.T, s *Store, before latestHostsBefore) 
 		if got := latestSearchAddresses(t, s.DB, term); !slices.Equal(got, want) {
 			t.Fatalf("search %q after the upgrade = %v, want %v", term, got, want)
 		}
-		page, err := s.ListLatestScanHostsPage(ctx, term, "", nil, 1000, 0)
+		page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, term, "", nil, 1000, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -418,7 +418,7 @@ func TestMigration54KeysLatestHostsByTenant(t *testing.T) {
 	host.Protocols[0].Ports[0].Service = &model.ServiceObservation{Name: "http", Product: "caddy"}
 	address := host.Address
 	rowID := countRows(t, s.DB, `SELECT rowid FROM latest_scan_hosts WHERE address=?`, address)
-	if err := s.SaveScan(ctx, fixtureScan("scan-a-newer", jobA, "edge-a", time.Now().UTC(), []model.HostObservation{host})); err != nil {
+	if err := s.System().SaveScan(ctx, fixtureScan("scan-a-newer", jobA, "edge-a", time.Now().UTC(), []model.HostObservation{host})); err != nil {
 		t.Fatal(err)
 	}
 	if got := queryStrings(t, s.DB, `SELECT rowid || ' ' || scan_id || ' ' || tenant_id FROM latest_scan_hosts WHERE address=?`, address); !slices.Equal(got, []string{fmt.Sprintf("%d scan-a-newer %s", rowID, DefaultTenantID)}) {
@@ -429,7 +429,7 @@ func TestMigration54KeysLatestHostsByTenant(t *testing.T) {
 	}
 	// Retention repairs the dangling row: its scan is gone and no other
 	// scan observed the address.
-	if _, err := s.PruneWithStats(ctx, time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
+	if _, err := s.System().PruneWithStats(ctx, time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatal(err)
 	}
 	if got := countRows(t, s.DB, `SELECT COUNT(*) FROM latest_scan_hosts WHERE address=?`, fixtureDanglingAddress); got != 0 {
@@ -485,7 +485,7 @@ func TestMigration54ResumesAfterCancellation(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		status, err := reader.HealthStatus(ctx)
+		status, err := reader.System().HealthStatus(ctx)
 		_ = reader.Close()
 		if err != nil {
 			t.Error(err)
@@ -517,7 +517,7 @@ func TestMigration54ResumesAfterCancellation(t *testing.T) {
 	// scan saved by a host command, instead of losing rows or search terms.
 	jobA := queryStrings(t, pending.DB, `SELECT id FROM jobs WHERE name='edge-a' AND tenant_id=?`, DefaultTenantID)[0]
 	const refused = "latest_scan_hosts is being keyed by tenant"
-	if err := pending.SaveScan(ctx, fixtureScan("scan-during-copy", jobA, "edge-a", time.Now().UTC(), []model.HostObservation{fixtureHost(9000)})); err == nil || !strings.Contains(err.Error(), refused) {
+	if err := pending.System().SaveScan(ctx, fixtureScan("scan-during-copy", jobA, "edge-a", time.Now().UTC(), []model.HostObservation{fixtureHost(9000)})); err == nil || !strings.Contains(err.Error(), refused) {
 		t.Fatalf("scan saved during the copy: %v", err)
 	}
 	for _, statement := range []string{
@@ -619,7 +619,7 @@ func TestSchema54KeepsTheLatestHostOfEachTenant(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertSecondTenant(t, s)
-	jobA, err := s.CreateJob(ctx, testJob("edge"))
+	jobA, err := defaultTenant(s).CreateJob(ctx, testJob("edge"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -634,7 +634,7 @@ func TestSchema54KeepsTheLatestHostOfEachTenant(t *testing.T) {
 	base := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
 	save := func(id, jobID string, minute int, product string) {
 		t.Helper()
-		if err := s.SaveScan(ctx, fixtureScan(id, jobID, "edge", base.Add(time.Duration(minute)*time.Minute), observed(product))); err != nil {
+		if err := s.System().SaveScan(ctx, fixtureScan(id, jobID, "edge", base.Add(time.Duration(minute)*time.Minute), observed(product))); err != nil {
 			t.Fatalf("save %s: %v", id, err)
 		}
 	}
@@ -665,11 +665,11 @@ func TestSchema54KeepsTheLatestHostOfEachTenant(t *testing.T) {
 	assertSearch("nginx", []string{DefaultTenantID})
 	assertSearch("openssh", []string{secondTenantID})
 	// The host inventory shows the default tenant only.
-	page, err := s.ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
+	page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
 	if err != nil || page.Total != 1 || page.Items[0].ScanID != "a1" {
 		t.Fatalf("host inventory = %#v, %v", page, err)
 	}
-	if page, err := s.ListLatestScanHostsPage(ctx, "openssh", "", nil, 50, 0); err != nil || page.Total != 0 {
+	if page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "openssh", "", nil, 50, 0); err != nil || page.Total != 0 {
 		t.Fatalf("host inventory search for the second tenant = %#v, %v", page, err)
 	}
 
@@ -880,16 +880,16 @@ func TestMigration54UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 				t.Fatalf("integrity_check = %q, %v", integrity, err)
 			}
 
-			job, err := s.CreateJob(ctx, testJob("recovered"))
+			job, err := defaultTenant(s).CreateJob(ctx, testJob("recovered"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			host := fixtureHost(8000)
 			host.Protocols[0].Ports[0].Service = &model.ServiceObservation{Name: "https", Product: "recovered-server"}
-			if err := s.SaveScan(ctx, fixtureScan("scan-recovered", job.ID, "recovered", time.Now().UTC(), []model.HostObservation{host})); err != nil {
+			if err := s.System().SaveScan(ctx, fixtureScan("scan-recovered", job.ID, "recovered", time.Now().UTC(), []model.HostObservation{host})); err != nil {
 				t.Fatal(err)
 			}
-			page, err := s.ListLatestScanHostsPage(ctx, "recovered-server", "", nil, 50, 0)
+			page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "recovered-server", "", nil, 50, 0)
 			if err != nil || page.Total != 1 || page.Items[0].Host.Address != host.Address {
 				t.Fatalf("search after the recovery upgrade = %#v, %v", page, err)
 			}

@@ -312,7 +312,7 @@ func TestNotifierDeliveryFailureAndCancellationBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueueEvent(ctx, "removed-destination", model.Event{Type: "test", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := db.System().QueueEvent(ctx, "removed-destination", model.Event{Type: "test", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := notifier.Drain(ctx); err == nil {

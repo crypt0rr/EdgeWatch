@@ -102,7 +102,7 @@ func TestUsersRouteLifecycleAndSecretFreeResponses(t *testing.T) {
 	if activated.Code != http.StatusOK {
 		t.Fatalf("activation status = %d: %s", activated.Code, activated.Body.String())
 	}
-	operator, err := db.GetUser(ctx, operatorID)
+	operator, err := defaultTenant(db).GetUser(ctx, operatorID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestUsersRouteValidationAndSessionRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := db.CreateUser(ctx, store.User{Username: "session-user", DisplayName: "Session user", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	operator, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "session-user", DisplayName: "Session user", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +274,7 @@ func TestUsersAPIEnforcesAuthenticationCSRFAndRolePermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := db.CreateUser(ctx, store.User{Username: "api-operator", DisplayName: "API operator", Role: store.RoleOperator, PasswordHash: operatorHash, Enabled: true}, store.AuditEntry{})
+	operator, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "api-operator", DisplayName: "API operator", Role: store.RoleOperator, PasswordHash: operatorHash, Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}

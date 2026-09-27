@@ -14,18 +14,18 @@ func TestUserStoreProfilesSecurityAndSessions(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	admin, err := s.CreateUser(ctx, User{Username: "admin", DisplayName: "", Role: RoleAdministrator, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	admin, err := defaultTenant(s).CreateUser(ctx, User{Username: "admin", DisplayName: "", Role: RoleAdministrator, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if admin.ID == "" {
 		t.Fatal("administrator ID was not generated")
 	}
-	operator, err := s.CreateUser(ctx, User{Username: "operator", DisplayName: "Operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	operator, err := defaultTenant(s).CreateUser(ctx, User{Username: "operator", DisplayName: "Operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	users, err := s.ListUsers(ctx)
+	users, err := defaultTenant(s).ListUsers(ctx)
 	if err != nil || len(users) != 2 {
 		t.Fatalf("users = %#v, %v", users, err)
 	}
@@ -39,7 +39,7 @@ func TestUserStoreProfilesSecurityAndSessions(t *testing.T) {
 	if loaded.Revision != 1 {
 		t.Fatalf("new user revision = %d, want 1", loaded.Revision)
 	}
-	if _, err := s.GetUser(ctx, "missing-user"); !errors.Is(err, ErrNotFound) {
+	if _, err := defaultTenant(s).GetUser(ctx, "missing-user"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing user error = %v", err)
 	}
 	if err := s.SetUserLastLogin(ctx, operator.ID, now); err != nil {
@@ -50,16 +50,16 @@ func TestUserStoreProfilesSecurityAndSessions(t *testing.T) {
 	}
 	operator.PasswordHash = "replacement-hash"
 	operator.UpdatedAt = now.Add(time.Minute)
-	if err := s.UpdateUser(ctx, operator, false, AuditEntry{Action: "user.updated"}); err != nil {
+	if err := defaultTenant(s).UpdateUser(ctx, operator, false, AuditEntry{Action: "user.updated"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetUserPassword(ctx, operator.ID, "second-hash", true, AuditEntry{Action: "user.password_changed"}); err != nil {
+	if err := defaultTenant(s).SetUserPassword(ctx, operator.ID, "second-hash", true, AuditEntry{Action: "user.password_changed"}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetSession(ctx, "operator-session"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("password change left session active: %v", err)
 	}
-	operator, err = s.GetUser(ctx, operator.ID)
+	operator, err = defaultTenant(s).GetUser(ctx, operator.ID)
 	if err != nil || operator.PasswordHash != "second-hash" || operator.LastLoginAt.IsZero() {
 		t.Fatalf("updated operator = %#v, %v", operator, err)
 	}
@@ -68,7 +68,7 @@ func TestUserStoreProfilesSecurityAndSessions(t *testing.T) {
 	}
 	operator.DisplayName = "Updated operator"
 	operator.UpdatedAt = now.Add(2 * time.Minute)
-	if err := s.SaveUserSecurity(ctx, operator, []string{"recovery-a", "recovery-b"}, true, true, AuditEntry{Action: "user.security_updated"}); err != nil {
+	if err := defaultTenant(s).SaveUserSecurity(ctx, operator, []string{"recovery-a", "recovery-b"}, true, true, AuditEntry{Action: "user.security_updated"}); err != nil {
 		t.Fatal(err)
 	}
 	if count, err := s.RecoveryCodeCount(ctx); err != nil || count != 2 {
@@ -77,27 +77,27 @@ func TestUserStoreProfilesSecurityAndSessions(t *testing.T) {
 	if _, err := s.GetSession(ctx, "operator-session-2"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("security update left session active: %v", err)
 	}
-	if count, err := s.CountEnabledAdministrators(ctx); err != nil || count != 1 {
+	if count, err := defaultTenant(s).CountEnabledAdministrators(ctx); err != nil || count != 1 {
 		t.Fatalf("enabled administrator count = %d, %v", count, err)
 	}
-	if err := s.DeleteUserSessionsWithAudit(ctx, operator.ID, AuditEntry{Action: "user.sessions_revoked"}); err != nil {
+	if err := defaultTenant(s).DeleteUserSessionsWithAudit(ctx, operator.ID, AuditEntry{Action: "user.sessions_revoked"}); err != nil {
 		t.Fatal(err)
 	}
-	operator, err = s.GetUser(ctx, operator.ID)
+	operator, err = defaultTenant(s).GetUser(ctx, operator.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveUserSecurity(ctx, operator, nil, true, false, AuditEntry{}); err != nil {
+	if err := defaultTenant(s).SaveUserSecurity(ctx, operator, nil, true, false, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	if count, err := s.RecoveryCodeCount(ctx); err != nil || count != 0 {
 		t.Fatalf("empty recovery replacement count = %d, %v", count, err)
 	}
-	pending, err := s.CreateUser(ctx, User{Username: "pending", DisplayName: "Pending", Role: RoleViewer, PasswordHash: "!pending", Enabled: false}, AuditEntry{})
+	pending, err := defaultTenant(s).CreateUser(ctx, User{Username: "pending", DisplayName: "Pending", Role: RoleViewer, PasswordHash: "!pending", Enabled: false}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateUserInvite(ctx, "consume-invite", pending.ID, now, now.Add(time.Hour)); err != nil {
+	if err := defaultTenant(s).CreateUserInvite(ctx, "consume-invite", pending.ID, now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	consumed, err := s.ConsumeUserInvite(ctx, "consume-invite", now.Add(time.Minute))
@@ -113,7 +113,7 @@ func TestSecuritySaveCanPreserveActingSessionWhileRevokingOthers(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	user, err := s.CreateUser(ctx, User{Username: "totp-user", DisplayName: "TOTP User", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "totp-user", DisplayName: "TOTP User", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestSecuritySaveCanPreserveActingSessionWhileRevokingOthers(t *testing.T) {
 	}
 	user.TOTPEnabled = false
 	user.UpdatedAt = now.Add(time.Minute)
-	if err := s.SaveUserSecurityPreservingSession(ctx, user, []string{"recovery"}, true, true, AuditEntry{}, "current-session"); err != nil {
+	if err := defaultTenant(s).SaveUserSecurityPreservingSession(ctx, user, []string{"recovery"}, true, true, AuditEntry{}, "current-session"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetSession(ctx, "current-session"); err != nil {
@@ -140,11 +140,11 @@ func TestSecuritySaveAppliesDisableTransitionsAtomically(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	user, err := s.CreateUser(ctx, User{Username: "disable-transition", DisplayName: "Disable transition", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "disable-transition", DisplayName: "Disable transition", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateUserInvite(ctx, "disable-invite", user.ID, now, now.Add(time.Hour)); err != nil {
+	if err := defaultTenant(s).CreateUserInvite(ctx, "disable-invite", user.ID, now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.CreateSessionForUserWithAudit(ctx, user.ID, "disable-session", "csrf", now, now.Add(time.Hour), "", ""); err != nil {
@@ -155,7 +155,7 @@ func TestSecuritySaveAppliesDisableTransitionsAtomically(t *testing.T) {
 	// The transition policy must not depend on callers remembering the
 	// revokeSessions hint. Security saves and profile updates share the same
 	// transactional behavior.
-	if err := s.SaveUserSecurity(ctx, user, nil, false, false, AuditEntry{}); err != nil {
+	if err := defaultTenant(s).SaveUserSecurity(ctx, user, nil, false, false, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetSession(ctx, "disable-session"); !errors.Is(err, ErrNotFound) {
@@ -170,7 +170,7 @@ func TestSecuritySaveRoleTransitionRevokesSessionsWithoutHint(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	user, err := s.CreateUser(ctx, User{Username: "role-transition", DisplayName: "Role transition", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "role-transition", DisplayName: "Role transition", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestSecuritySaveRoleTransitionRevokesSessionsWithoutHint(t *testing.T) {
 	}
 	user.Role = RoleOperator
 	user.UpdatedAt = now.Add(time.Minute)
-	if err := s.SaveUserSecurity(ctx, user, nil, false, false, AuditEntry{}); err != nil {
+	if err := defaultTenant(s).SaveUserSecurity(ctx, user, nil, false, false, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetSession(ctx, "role-session"); !errors.Is(err, ErrNotFound) {
@@ -191,14 +191,14 @@ func TestRevokeUserInvitesIgnoresExpiredLinks(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	user, err := s.CreateUser(ctx, User{Username: "expired-invite", DisplayName: "Expired invite", Role: RoleViewer, PasswordHash: "!pending", Enabled: false}, AuditEntry{})
+	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "expired-invite", DisplayName: "Expired invite", Role: RoleViewer, PasswordHash: "!pending", Enabled: false}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateUserInvite(ctx, "expired-invite-token", user.ID, now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
+	if err := defaultTenant(s).CreateUserInvite(ctx, "expired-invite-token", user.ID, now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	affected, err := s.RevokeUserInvitesWithAudit(ctx, user.ID, now, AuditEntry{Action: "user.activation_revoked"})
+	affected, err := defaultTenant(s).RevokeUserInvitesWithAudit(ctx, user.ID, now, AuditEntry{Action: "user.activation_revoked"})
 	if err != nil || affected != 0 {
 		t.Fatalf("expired invite revocation = %d, %v", affected, err)
 	}
@@ -263,7 +263,7 @@ func TestGetAdminReadsOnlyTheUsersRow(t *testing.T) {
 	if admin, err := s.GetAdmin(ctx); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("administrator with only an admins row = %#v, %v; want ErrNotFound", admin, err)
 	}
-	if configured, err := s.HasAdministrator(ctx); err != nil || configured {
+	if configured, err := s.Platform().HasAdministrator(ctx); err != nil || configured {
 		t.Fatalf("configured with only an admins row = %v, %v; want false", configured, err)
 	}
 }
@@ -297,7 +297,7 @@ func TestGetAdminWorksWithReadOnlyDatabase(t *testing.T) {
 	if err != nil || admin.Username != "admin" || admin.PasswordHash != "hash" || admin.TOTPSecret != "legacy-seed" {
 		t.Fatalf("read-only GetAdmin = %#v, %v", admin, err)
 	}
-	user, err := reader.GetUser(ctx, LegacyAdminUserID)
+	user, err := defaultTenant(reader).GetUser(ctx, LegacyAdminUserID)
 	if err != nil || user.TOTPSecret != "legacy-seed" {
 		t.Fatalf("read-only GetUser = %#v, %v", user, err)
 	}
@@ -383,7 +383,7 @@ func TestMigrateAdminCompatibilityLeavesLegacyAdminsRowAlone(t *testing.T) {
 	if username != "legacy-admin" || passwordHash != "legacy-hash" || secret != "JBSWY3DPEHPK3PXP" {
 		t.Fatalf("admins row changed: username=%q password=%q secret=%q", username, passwordHash, secret)
 	}
-	if _, err := s.GetUser(ctx, LegacyAdminUserID); !errors.Is(err, ErrNotFound) {
+	if _, err := defaultTenant(s).GetUser(ctx, LegacyAdminUserID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("users row restored from the admins row: %v", err)
 	}
 }
@@ -512,7 +512,7 @@ func TestPasswordUpgradeRaceReturnsTypedConflict(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	user, err := s.CreateUser(ctx, User{Username: "race-user", Role: RoleViewer, PasswordHash: "current-hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "race-user", Role: RoleViewer, PasswordHash: "current-hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,7 +529,7 @@ func TestConditionalSessionPrimitivesCoverCredentialGuardsWithoutLegacyFallback(
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	user, err := s.CreateUser(ctx, User{Username: "conditional", DisplayName: "Conditional", Role: RoleViewer, PasswordHash: "current-hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "conditional", DisplayName: "Conditional", Role: RoleViewer, PasswordHash: "current-hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -564,7 +564,7 @@ func TestConditionalSessionPrimitivesCoverCredentialGuardsWithoutLegacyFallback(
 	if _, err := s.DB.ExecContext(ctx, `CREATE TRIGGER fail_conditional_audit BEFORE INSERT ON security_audit WHEN NEW.action='auth.audit_failure' BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
-	auditUser, err := s.CreateUser(ctx, User{Username: "audit-conditional", Role: RoleViewer, PasswordHash: "audit-hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	auditUser, err := defaultTenant(s).CreateUser(ctx, User{Username: "audit-conditional", Role: RoleViewer, PasswordHash: "audit-hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -620,7 +620,7 @@ func TestConditionalPasswordUpgradeCoversRevisionWithoutLegacyFallback(t *testin
 	if err := s.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, "missing", "old", " ", 1, false, "blank-upgrade", "csrf", now, now.Add(time.Hour), AuditEntry{}); err == nil {
 		t.Fatal("blank upgraded hash was accepted")
 	}
-	user, err := s.CreateUser(ctx, User{Username: "upgrade", DisplayName: "Upgrade", Role: RoleViewer, PasswordHash: "old-hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "upgrade", DisplayName: "Upgrade", Role: RoleViewer, PasswordHash: "old-hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -628,7 +628,7 @@ func TestConditionalPasswordUpgradeCoversRevisionWithoutLegacyFallback(t *testin
 	if err := s.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, user.ID, "old-hash", "new-hash", user.Revision, false, "upgrade-session", "csrf", now, now.Add(time.Hour), audit); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := s.GetUser(ctx, user.ID)
+	updated, err := defaultTenant(s).GetUser(ctx, user.ID)
 	if err != nil || updated.PasswordHash != "new-hash" || updated.Revision != user.Revision+1 {
 		t.Fatalf("upgraded user = %#v, %v", updated, err)
 	}
@@ -642,7 +642,7 @@ func TestConditionalPasswordUpgradeCoversRevisionWithoutLegacyFallback(t *testin
 	if err := s.SaveAdmin(ctx, Admin{Username: "legacy-admin", DisplayName: "Legacy Admin", PasswordHash: "legacy-old", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := s.GetUser(ctx, LegacyAdminUserID)
+	legacy, err := defaultTenant(s).GetUser(ctx, LegacyAdminUserID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -672,7 +672,7 @@ func TestConditionalPasswordUpgradeFailurePaths(t *testing.T) {
 	now := time.Date(2026, 9, 17, 14, 0, 0, 0, time.UTC)
 
 	updateFailure := openTestStore(t)
-	user, err := updateFailure.CreateUser(ctx, User{Username: "upgrade-failure", Role: RoleViewer, PasswordHash: "old-hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	user, err := defaultTenant(updateFailure).CreateUser(ctx, User{Username: "upgrade-failure", Role: RoleViewer, PasswordHash: "old-hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +689,7 @@ func TestConditionalPasswordUpgradeFailurePaths(t *testing.T) {
 	if err := legacyUpgrade.SaveAdmin(ctx, Admin{Username: "legacy-admin", DisplayName: "Legacy Admin", PasswordHash: "legacy-old", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := legacyUpgrade.GetUser(ctx, LegacyAdminUserID)
+	legacy, err := defaultTenant(legacyUpgrade).GetUser(ctx, LegacyAdminUserID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -699,7 +699,7 @@ func TestConditionalPasswordUpgradeFailurePaths(t *testing.T) {
 	if err := legacyUpgrade.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, LegacyAdminUserID, "legacy-old", "legacy-new", legacy.Revision, false, "legacy-upgrade-session", "csrf", now, now.Add(time.Hour), AuditEntry{}); err != nil {
 		t.Fatalf("administrator upgrade = %v", err)
 	}
-	if upgraded, err := legacyUpgrade.GetUser(ctx, LegacyAdminUserID); err != nil || upgraded.PasswordHash != "legacy-new" {
+	if upgraded, err := defaultTenant(legacyUpgrade).GetUser(ctx, LegacyAdminUserID); err != nil || upgraded.PasswordHash != "legacy-new" {
 		t.Fatalf("upgraded administrator = %#v, %v", upgraded, err)
 	}
 

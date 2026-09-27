@@ -19,16 +19,6 @@ type IncidentExpectation struct {
 	Change model.Change
 }
 
-// AcceptIncidentWithExpectedOutboxAndAudit folds one active incident into the
-// current baseline and queues the resulting event for the supplied job
-// destinations in the same transaction as the state and audit mutation.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.AcceptIncidentWithExpectedOutboxAndAudit.
-func (s *Store) AcceptIncidentWithExpectedOutboxAndAudit(ctx context.Context, jobID, jobName, key string, expected *IncidentExpectation, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).AcceptIncidentWithExpectedOutboxAndAudit(ctx, jobID, jobName, key, expected, destinations, audit)
-}
-
 // AcceptIncidentWithExpectedOutboxAndAudit folds one active incident of the
 // tenant's job into the current baseline and queues the resulting event for
 // the supplied job destinations in the same transaction as the state and
@@ -110,30 +100,12 @@ func (ts *TenantStore) AcceptIncidentWithExpectedOutboxAndAudit(ctx context.Cont
 }
 
 // AcceptIncidentWithOutboxAndAudit folds one active incident into the current
-// baseline without checking a reviewed change.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.AcceptIncidentWithOutboxAndAudit.
-func (s *Store) AcceptIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).AcceptIncidentWithOutboxAndAudit(ctx, jobID, jobName, key, destinations, audit)
-}
-
-// AcceptIncidentWithOutboxAndAudit folds one active incident into the current
 // baseline and queues the resulting event for the supplied job destinations in
 // the same transaction as the state and audit mutation. It is retained for
 // internal callers that already operate inside a trusted, current-state flow;
 // HTTP handlers should use the expected-snapshot variant above.
 func (ts *TenantStore) AcceptIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
 	return ts.AcceptIncidentWithExpectedOutboxAndAudit(ctx, jobID, jobName, key, nil, destinations, audit)
-}
-
-// AcceptIncidentWithAudit folds one active incident into the current
-// baseline without queueing notifications.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.AcceptIncidentWithAudit.
-func (s *Store) AcceptIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).AcceptIncidentWithAudit(ctx, jobID, jobName, key, audit)
 }
 
 // AcceptIncidentWithAudit is retained for callers that only need the durable
@@ -229,16 +201,6 @@ func acceptedIncidentMessage(count int) string {
 	return "Incident accepted into baseline"
 }
 
-// SuppressIncidentWithExpectedOutboxAndAudit hides an active incident for
-// exactly one future successful scan and queues the action event for the
-// supplied job destinations transactionally.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.SuppressIncidentWithExpectedOutboxAndAudit.
-func (s *Store) SuppressIncidentWithExpectedOutboxAndAudit(ctx context.Context, jobID, jobName, key string, expected *IncidentExpectation, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).SuppressIncidentWithExpectedOutboxAndAudit(ctx, jobID, jobName, key, expected, destinations, audit)
-}
-
 // SuppressIncidentWithExpectedOutboxAndAudit hides an active incident of the
 // tenant's job for exactly one future successful scan and queues the action
 // event for the supplied job destinations transactionally. The expected
@@ -273,29 +235,11 @@ func (ts *TenantStore) SuppressIncidentWithExpectedOutboxAndAudit(ctx context.Co
 }
 
 // SuppressIncidentWithOutboxAndAudit hides an active incident for exactly one
-// future successful scan without checking a reviewed change.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.SuppressIncidentWithOutboxAndAudit.
-func (s *Store) SuppressIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).SuppressIncidentWithOutboxAndAudit(ctx, jobID, jobName, key, destinations, audit)
-}
-
-// SuppressIncidentWithOutboxAndAudit hides an active incident for exactly one
 // future successful scan and queues the action event for the supplied job
 // destinations transactionally. It is retained for trusted internal callers;
 // HTTP handlers should use the expected-snapshot variant above.
 func (ts *TenantStore) SuppressIncidentWithOutboxAndAudit(ctx context.Context, jobID, jobName, key string, destinations []string, audit AuditEntry) ([]model.Event, error) {
 	return ts.SuppressIncidentWithExpectedOutboxAndAudit(ctx, jobID, jobName, key, nil, destinations, audit)
-}
-
-// SuppressIncidentWithAudit hides an active incident for exactly one future
-// successful scan without queueing notifications.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.SuppressIncidentWithAudit.
-func (s *Store) SuppressIncidentWithAudit(ctx context.Context, jobID, jobName, key string, audit AuditEntry) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).SuppressIncidentWithAudit(ctx, jobID, jobName, key, audit)
 }
 
 // SuppressIncidentWithAudit is retained for source compatibility with callers

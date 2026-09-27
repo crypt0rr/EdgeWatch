@@ -148,18 +148,18 @@ func newSchema51Fixture(t *testing.T) schema51Fixture {
 	now := time.Date(2026, 9, 20, 12, 0, 0, 0, time.UTC)
 	stamp := now.Format(time.RFC3339Nano)
 
-	if err := s.PutSetupTokenAt(ctx, "setup-hash", now.Add(time.Hour), now); err != nil {
+	if err := s.Platform().PutSetupTokenAt(ctx, "setup-hash", now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteSetup(ctx, "setup-hash", Admin{Username: "admin", DisplayName: "Administrator", PasswordHash: "admin-hash", TOTPSecret: "JBSWY3DPEHPK3PXP", TOTPEnabled: true, CreatedAt: now, UpdatedAt: now}, now); err != nil {
+	if err := s.Platform().CompleteSetup(ctx, "setup-hash", Admin{Username: "admin", DisplayName: "Administrator", PasswordHash: "admin-hash", TOTPSecret: "JBSWY3DPEHPK3PXP", TOTPEnabled: true, CreatedAt: now, UpdatedAt: now}, now); err != nil {
 		t.Fatal(err)
 	}
-	operator, err := s.CreateUser(ctx, User{Username: "operator", Role: RoleOperator, PasswordHash: "operator-hash", Enabled: true, CreatedAt: now}, AuditEntry{})
+	operator, err := defaultTenant(s).CreateUser(ctx, User{Username: "operator", Role: RoleOperator, PasswordHash: "operator-hash", Enabled: true, CreatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	fixture.operatorID = operator.ID
-	if _, err := s.CreateUserWithInvite(ctx, User{Username: "viewer", Role: RoleViewer, PasswordHash: "!pending", CreatedAt: now}, "invite-hash", now, now.Add(time.Hour), AuditEntry{ActorUserID: LegacyAdminUserID}); err != nil {
+	if _, err := defaultTenant(s).CreateUserWithInvite(ctx, User{Username: "viewer", Role: RoleViewer, PasswordHash: "!pending", CreatedAt: now}, "invite-hash", now, now.Add(time.Hour), AuditEntry{ActorUserID: LegacyAdminUserID}); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{LegacyAdminUserID, operator.ID} {
@@ -175,7 +175,7 @@ func newSchema51Fixture(t *testing.T) schema51Fixture {
 	}
 
 	for i, name := range []string{"edge-a", "edge-b", "edge-c"} {
-		job, err := s.CreateJob(ctx, testJob(name))
+		job, err := defaultTenant(s).CreateJob(ctx, testJob(name))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -189,24 +189,24 @@ func newSchema51Fixture(t *testing.T) schema51Fixture {
 		exec(`INSERT INTO scan_cycles(id,job_id,job,job_revision,config_hash,execution_hash,plan_json,status,total_units,total_probes,started_at,updated_at,expires_at) VALUES(?,?,?,1,'config','execution','{}','paused',1,1,?,?,?)`, cycleID, job.ID, name, stamp, stamp, now.Add(time.Hour).Format(time.RFC3339Nano))
 		exec(`INSERT INTO scan_cycle_units(cycle_id,sequence,work_unit_json,identity) VALUES(?,0,'{}',?)`, cycleID, "unit-"+name)
 	}
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "Perimeter"}, []PublicDashboardHost{
+	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "Perimeter"}, []PublicDashboardHost{
 		{JobID: fixture.jobIDs[0], Address: "192.0.2.10"},
 		{JobID: fixture.jobIDs[1], Address: "192.0.2.11"},
 	}, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 
-	profile, err := s.CreateScannerProfile(ctx, "Edge TCP", "custom", config.ScannerProfile{Engine: config.EngineNmap}, "admin")
+	profile, err := defaultTenant(s).CreateScannerProfile(ctx, "Edge TCP", "custom", config.ScannerProfile{Engine: config.EngineNmap}, "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateScannerProfile(ctx, profile.ID, profile.Revision, "Edge TCP", "custom, revised", config.ScannerProfile{Engine: config.EngineNmap, Description: "revised"}, "admin"); err != nil {
+	if _, err := defaultTenant(s).UpdateScannerProfile(ctx, profile.ID, profile.Revision, "Edge TCP", "custom, revised", config.ScannerProfile{Engine: config.EngineNmap, Description: "revised"}, "admin"); err != nil {
 		t.Fatal(err)
 	}
 	fixture.profileID = profile.ID
 
 	for _, name := range []string{"Operations", "Security"} {
-		destination, err := s.CreateManagedNotification(ctx, "destination-"+strings.ToLower(name), name, "generic", []byte("sealed-"+name), []byte("nonce-"+name), true)
+		destination, err := defaultTenant(s).CreateManagedNotification(ctx, "destination-"+strings.ToLower(name), name, "generic", []byte("sealed-"+name), []byte("nonce-"+name), true)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -467,10 +467,10 @@ func TestMigration52GivesRootTablesTheDefaultTenant(t *testing.T) {
 	if err != nil || admin.Username != "admin" || admin.PasswordHash != "admin-hash" || !admin.TOTPEnabled || admin.TOTPSecret != "JBSWY3DPEHPK3PXP" {
 		t.Fatalf("administrator after the upgrade = %#v, %v", admin, err)
 	}
-	if record, err := s.GetJobByName(ctx, "edge-b"); err != nil || record.ID != fixture.jobIDs[1] {
+	if record, err := defaultTenant(s).GetJobByName(ctx, "edge-b"); err != nil || record.ID != fixture.jobIDs[1] {
 		t.Fatalf("job by name = %#v, %v", record, err)
 	}
-	dashboard, err := s.GetPublicDashboard(ctx)
+	dashboard, err := defaultTenant(s).GetPublicDashboard(ctx)
 	if err != nil || len(dashboard.Hosts) != 2 {
 		t.Fatalf("public dashboard = %#v, %v", dashboard, err)
 	}
@@ -619,19 +619,19 @@ func TestMigration52UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 				t.Fatalf("admins rows = %d, want the row retired", got)
 			}
 
-			job, err := s.CreateJob(ctx, testJob("recovered"))
+			job, err := defaultTenant(s).CreateJob(ctx, testJob("recovered"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			user, err := s.CreateUser(ctx, User{Username: "recovered", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+			user, err := defaultTenant(s).CreateUser(ctx, User{Username: "recovered", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 			if err != nil {
 				t.Fatal(err)
 			}
-			profile, err := s.CreateScannerProfile(ctx, "Recovered", "", config.ScannerProfile{Engine: config.EngineNmap}, "admin")
+			profile, err := defaultTenant(s).CreateScannerProfile(ctx, "Recovered", "", config.ScannerProfile{Engine: config.EngineNmap}, "admin")
 			if err != nil {
 				t.Fatal(err)
 			}
-			destination, err := s.CreateManagedNotification(ctx, "destination-recovered", "Recovered", "generic", []byte{1}, []byte{2}, true)
+			destination, err := defaultTenant(s).CreateManagedNotification(ctx, "destination-recovered", "Recovered", "generic", []byte{1}, []byte{2}, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -787,28 +787,28 @@ func TestRootTableWritersNameTheDefaultTenant(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	if err := s.PutSetupTokenAt(ctx, "setup-hash", now.Add(time.Hour), now); err != nil {
+	if err := s.Platform().PutSetupTokenAt(ctx, "setup-hash", now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteSetup(ctx, "setup-hash", Admin{Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}, now); err != nil {
+	if err := s.Platform().CompleteSetup(ctx, "setup-hash", Admin{Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateUser(ctx, User{Username: "operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{}); err != nil {
+	if _, err := defaultTenant(s).CreateUser(ctx, User{Username: "operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateUserWithInvite(ctx, User{Username: "invited", Role: RoleViewer, PasswordHash: "!pending"}, "invite-hash", now, now.Add(time.Hour), AuditEntry{}); err != nil {
+	if _, err := defaultTenant(s).CreateUserWithInvite(ctx, User{Username: "invited", Role: RoleViewer, PasswordHash: "!pending"}, "invite-hash", now, now.Add(time.Hour), AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateJob(ctx, testJob("edge")); err != nil {
+	if _, err := defaultTenant(s).CreateJob(ctx, testJob("edge")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateScannerProfile(ctx, "Edge TCP", "", config.ScannerProfile{Engine: config.EngineNmap}, "admin"); err != nil {
+	if _, err := defaultTenant(s).CreateScannerProfile(ctx, "Edge TCP", "", config.ScannerProfile{Engine: config.EngineNmap}, "admin"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateManagedNotification(ctx, "destination-web", "Web", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "destination-web", "Web", "generic", []byte{1}, []byte{2}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(testURLDigest("tenant"), "destination-imported")}); err != nil {
+	if _, err := s.System().ImportDeploymentNotifications(ctx, []DeploymentNotificationImport{testImport(testURLDigest("tenant"), "destination-imported")}); err != nil {
 		t.Fatal(err)
 	}
 	saved := openTestStore(t)
@@ -846,13 +846,13 @@ func TestCompleteSetupOnAFreshInstallCreatesOnlyTheUsersRow(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	if configured, err := s.HasAdministrator(ctx); err != nil || configured {
+	if configured, err := s.Platform().HasAdministrator(ctx); err != nil || configured {
 		t.Fatalf("fresh install configured = %v, %v", configured, err)
 	}
-	if err := s.PutSetupTokenAt(ctx, "setup-hash", now.Add(time.Hour), now); err != nil {
+	if err := s.Platform().PutSetupTokenAt(ctx, "setup-hash", now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteSetup(ctx, "setup-hash", Admin{Username: "admin", PasswordHash: "setup-hash-value", CreatedAt: now, UpdatedAt: now}, now.Add(time.Minute)); err != nil {
+	if err := s.Platform().CompleteSetup(ctx, "setup-hash", Admin{Username: "admin", PasswordHash: "setup-hash-value", CreatedAt: now, UpdatedAt: now}, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	var tenant, role, displayName string
@@ -866,7 +866,7 @@ func TestCompleteSetupOnAFreshInstallCreatesOnlyTheUsersRow(t *testing.T) {
 	if got := countRows(t, s.DB, `SELECT COUNT(*) FROM admins`); got != 0 {
 		t.Fatalf("setup wrote %d admins rows", got)
 	}
-	if configured, err := s.HasAdministrator(ctx); err != nil || !configured {
+	if configured, err := s.Platform().HasAdministrator(ctx); err != nil || !configured {
 		t.Fatalf("configured after setup = %v, %v", configured, err)
 	}
 	if admin, err := s.GetAdmin(ctx); err != nil || admin.PasswordHash != "setup-hash-value" {
@@ -876,13 +876,13 @@ func TestCompleteSetupOnAFreshInstallCreatesOnlyTheUsersRow(t *testing.T) {
 		t.Fatalf("setup audit rows = %d", got)
 	}
 	// Setup and a reissued token are refused once the administrator exists.
-	if err := s.PutSetupTokenAt(ctx, "second-hash", now.Add(time.Hour), now); err != nil {
+	if err := s.Platform().PutSetupTokenAt(ctx, "second-hash", now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteSetup(ctx, "second-hash", Admin{Username: "second", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}, now.Add(time.Minute)); err == nil || !strings.Contains(err.Error(), "already configured") {
+	if err := s.Platform().CompleteSetup(ctx, "second-hash", Admin{Username: "second", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}, now.Add(time.Minute)); err == nil || !strings.Contains(err.Error(), "already configured") {
 		t.Fatalf("second setup = %v", err)
 	}
-	if err := s.ReissueSetupToken(ctx, "reissued-hash", now.Add(time.Hour), now.Add(time.Hour)); err == nil || !strings.Contains(err.Error(), "already configured") {
+	if err := s.Platform().ReissueSetupToken(ctx, "reissued-hash", now.Add(time.Hour), now.Add(time.Hour)); err == nil || !strings.Contains(err.Error(), "already configured") {
 		t.Fatalf("reissue after setup = %v", err)
 	}
 }
@@ -893,19 +893,19 @@ func TestSetupTokenWritersRequireTheUsersTable(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	if err := s.PutSetupTokenAt(ctx, "setup-hash", now.Add(time.Hour), now); err != nil {
+	if err := s.Platform().PutSetupTokenAt(ctx, "setup-hash", now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`DROP TABLE users`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteSetup(ctx, "setup-hash", Admin{Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}, now); err == nil || !strings.Contains(err.Error(), "no such table") {
+	if err := s.Platform().CompleteSetup(ctx, "setup-hash", Admin{Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}, now); err == nil || !strings.Contains(err.Error(), "no such table") {
 		t.Fatalf("setup without a users table = %v", err)
 	}
-	if err := s.ReissueSetupToken(ctx, "reissued-hash", now.Add(time.Hour), now.Add(time.Hour)); err == nil || !strings.Contains(err.Error(), "no such table") {
+	if err := s.Platform().ReissueSetupToken(ctx, "reissued-hash", now.Add(time.Hour), now.Add(time.Hour)); err == nil || !strings.Contains(err.Error(), "no such table") {
 		t.Fatalf("reissue without a users table = %v", err)
 	}
-	if configured, err := s.HasAdministrator(ctx); err == nil || configured {
+	if configured, err := s.Platform().HasAdministrator(ctx); err == nil || configured {
 		t.Fatalf("HasAdministrator without a users table = %v, %v", configured, err)
 	}
 	if admin, err := s.GetAdmin(ctx); err == nil || errors.Is(err, ErrNotFound) {
@@ -918,17 +918,17 @@ func TestSetupTokenWritersRequireTheUsersTable(t *testing.T) {
 func TestCustomScannerProfileCannotUseABuiltinName(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.CreateScannerProfile(ctx, "  nmap STANDARD ", "", config.ScannerProfile{Engine: config.EngineNmap}, "admin"); !errors.Is(err, ErrScannerProfileNameInUse) {
+	if _, err := defaultTenant(s).CreateScannerProfile(ctx, "  nmap STANDARD ", "", config.ScannerProfile{Engine: config.EngineNmap}, "admin"); !errors.Is(err, ErrScannerProfileNameInUse) {
 		t.Fatalf("custom profile named like a built-in = %v, want ErrScannerProfileNameInUse", err)
 	}
-	profile, err := s.CreateScannerProfile(ctx, "Custom", "", config.ScannerProfile{Engine: config.EngineNmap}, "admin")
+	profile, err := defaultTenant(s).CreateScannerProfile(ctx, "Custom", "", config.ScannerProfile{Engine: config.EngineNmap}, "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateScannerProfile(ctx, profile.ID, profile.Revision, "NAABU FULL TCP → NMAP", "", config.ScannerProfile{Engine: config.EngineNmap}, "admin"); !errors.Is(err, ErrScannerProfileNameInUse) {
+	if _, err := defaultTenant(s).UpdateScannerProfile(ctx, profile.ID, profile.Revision, "NAABU FULL TCP → NMAP", "", config.ScannerProfile{Engine: config.EngineNmap}, "admin"); !errors.Is(err, ErrScannerProfileNameInUse) {
 		t.Fatalf("rename to a built-in name = %v, want ErrScannerProfileNameInUse", err)
 	}
-	current, err := s.GetScannerProfile(ctx, profile.ID)
+	current, err := defaultTenant(s).GetScannerProfile(ctx, profile.ID)
 	if err != nil || current.Name != "Custom" || current.Revision != profile.Revision {
 		t.Fatalf("profile after a refused rename = %#v, %v", current, err)
 	}

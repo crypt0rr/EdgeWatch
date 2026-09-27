@@ -57,7 +57,7 @@ func TestNewJobsDefaultToConfiguredDeploymentTimezone(t *testing.T) {
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("create %s = %d: %s", name, rec.Code, rec.Body.String())
 		}
-		record, err := db.GetJobByName(context.Background(), name)
+		record, err := defaultTenant(db).GetJobByName(context.Background(), name)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -78,7 +78,7 @@ func TestNewJobsDefaultToConfiguredDeploymentTimezone(t *testing.T) {
 func TestDeploymentTimezoneStaysOutOfUnauthenticatedResponses(t *testing.T) {
 	server, db, _ := newUsersTestServer(t)
 	server.App.Config.Timezone = "Asia/Kathmandu"
-	if err := db.SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "Public"}, nil, store.AuditEntry{}); err != nil {
+	if err := defaultTenant(db).SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "Public"}, nil, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	setup := httptest.NewRecorder()

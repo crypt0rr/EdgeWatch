@@ -12,7 +12,7 @@ func TestReserveSSEEventIDsSurvivesRestartAndFollowsDurableEvents(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	start, end, err := db.ReserveSSEEventIDs(ctx, 4)
+	start, end, err := db.System().ReserveSSEEventIDs(ctx, 4)
 	if err != nil {
 		db.Close()
 		t.Fatal(err)
@@ -34,7 +34,7 @@ func TestReserveSSEEventIDsSurvivesRestartAndFollowsDurableEvents(t *testing.T) 
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	nextStart, nextEnd, err := reopened.ReserveSSEEventIDs(ctx, 2)
+	nextStart, nextEnd, err := reopened.System().ReserveSSEEventIDs(ctx, 2)
 	if err != nil {
 		t.Fatal(err)
 	}

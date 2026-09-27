@@ -149,7 +149,7 @@ func TestPublicAPIDisabledEnabledAndRateLimited(t *testing.T) {
 	if rec := call(http.MethodPost, "/api/public/v1/dashboard", "198.51.100.20:1001"); rec.Code != http.StatusNotFound {
 		t.Fatalf("wrong-method public API = %d", rec.Code)
 	}
-	if err := db.SavePublicDashboard(ctx, store.PublicDashboard{Enabled: true, Title: "Public"}, nil, store.AuditEntry{}); err != nil {
+	if err := defaultTenant(db).SavePublicDashboard(ctx, store.PublicDashboard{Enabled: true, Title: "Public"}, nil, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	if rec := call(http.MethodGet, "/api/public/v1/dashboard/", "198.51.100.20:1002"); rec.Code != http.StatusOK || rec.Header().Get("Cache-Control") != "no-store" {
@@ -264,13 +264,13 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 		t.Fatalf("invalid public text status = %d: %s", badTextRecorder.Code, badTextRecorder.Body.String())
 	}
 	job := config.NormalizeJob(config.Job{Name: "public-route", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.10"}, TCP: &config.Protocol{Ports: "443", Mode: "syn"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	scan := model.Scan{ID: "public-route-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.10", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https"}}}}}}}}}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
 	unknownHost := httptest.NewRequest(http.MethodPut, "/api/v1/public-dashboard", strings.NewReader(`{"enabled":true,"title":"Status","hosts":[{"job_id":"`+record.ID+`","address":"198.51.100.11"}],"updated_at":"`+publicDashboardToken(t, server, admin)+`"}`))
@@ -294,7 +294,7 @@ func TestPublicDashboardAdminRouteValidatesSelectionsAndPublishesHosts(t *testin
 	if err != nil || len(publicResponse.Hosts) != 1 || len(publicResponse.Hosts[0].OpenPorts) != 1 {
 		t.Fatalf("public response = %#v, %v", publicResponse, err)
 	}
-	if err := db.SetJobArchived(ctx, record.ID, true); err != nil {
+	if err := defaultTenant(db).SetJobArchived(ctx, record.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	// Retained archived selections remain valid for the admin configuration
@@ -361,11 +361,11 @@ func TestLatestLegacyPublicHostsLimitsEachJobIndependently(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	jobA, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "busy-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.10"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
+	jobA, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "busy-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.10"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobB, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "quiet-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.11"}, TCP: &config.Protocol{Ports: "443", Mode: "syn"}}))
+	jobB, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "quiet-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.11"}, TCP: &config.Protocol{Ports: "443", Mode: "syn"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,12 +385,12 @@ func TestLatestLegacyPublicHostsLimitsEachJobIndependently(t *testing.T) {
 			Status:      "success",
 			Snapshot:    model.Snapshot{Units: []model.Unit{{Target: "198.51.100.10", Addresses: []string{"198.51.100.10"}, Protocol: "tcp", Ports: []model.PortState{{Port: 22, State: "open"}}}}},
 		}
-		if err := db.SaveScan(ctx, scan); err != nil {
+		if err := db.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
 	quietWhen := now.Add(-time.Hour)
-	if err := db.SaveScan(ctx, model.Scan{
+	if err := db.System().SaveScan(ctx, model.Scan{
 		ID:          "quiet-1",
 		JobID:       jobB.ID,
 		JobRevision: jobB.Revision,
@@ -524,7 +524,7 @@ func TestPublicCacheFastPathIgnoresEntriesFromAnOlderGeneration(t *testing.T) {
 
 func TestPublicAPIStopsRereadingAPublicationThatKeepsChanging(t *testing.T) {
 	server, db, _ := newUsersTestServer(t)
-	if err := db.SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "Status"}, nil, store.AuditEntry{}); err != nil {
+	if err := defaultTenant(db).SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "Status"}, nil, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	var builds int

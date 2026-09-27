@@ -14,81 +14,81 @@ import (
 
 func TestScanCycleDefaultsAndMalformedPayloads(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cycle.ID == "" || cycle.StartedAt.IsZero() || cycle.UpdatedAt.IsZero() || cycle.ExpiresAt.IsZero() || cycle.Status != "paused" || cycle.TotalUnits != 1 || cycle.TotalProbes != 1 {
 		t.Fatalf("cycle defaults = %#v", cycle)
 	}
-	if _, err := s.CreateScanCycle(ctx, ScanCycleRecord{ID: cycle.ID, JobID: job.ID, Job: job.Job.Name, Plan: plan}); err == nil {
+	if _, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{ID: cycle.ID, JobID: job.ID, Job: job.Job.Name, Plan: plan}); err == nil {
 		t.Fatal("duplicate cycle ID was accepted")
 	}
-	if _, err := s.GetScanCycle(ctx, "missing"); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := defaultTenant(s).GetScanCycle(ctx, "missing"); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing cycle error = %v", err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET plan_json=? WHERE id=?`, []byte("not-json"), cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GetScanCycle(ctx, cycle.ID); err == nil {
+	if _, err := defaultTenant(s).GetScanCycle(ctx, cycle.ID); err == nil {
 		t.Fatal("malformed cycle plan was accepted")
 	}
 }
 
 func TestScanCycleStateAndUnitErrorBranches(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, "missing"); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := s.System().StartScanCycleAttempt(ctx, "missing"); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing start error = %v", err)
 	}
-	if _, err := s.NextScanCycleUnit(ctx, cycle.ID); !errors.Is(err, ErrCycleNotResumable) {
+	if _, err := s.System().NextScanCycleUnit(ctx, cycle.ID); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("paused next unit error = %v", err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, 0); !errors.Is(err, ErrCycleNotResumable) {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, 0); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("paused claim error = %v", err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, 99); !errors.Is(err, ErrNoPendingUnit) {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, 99); !errors.Is(err, ErrNoPendingUnit) {
 		t.Fatalf("unknown sequence claim error = %v", err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, 0); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, 0); !errors.Is(err, ErrNoPendingUnit) {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, 0); !errors.Is(err, ErrNoPendingUnit) {
 		t.Fatalf("already-running claim error = %v", err)
 	}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err != nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err != nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err != nil {
 		t.Fatalf("idempotent completion failed: %v", err)
 	}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, 99, model.Snapshot{}); err == nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, 99, model.Snapshot{}); err == nil {
 		t.Fatal("missing unit completion succeeded")
 	}
-	if _, err := s.NextScanCycleUnit(ctx, cycle.ID); !errors.Is(err, ErrNoPendingUnit) {
+	if _, err := s.System().NextScanCycleUnit(ctx, cycle.ID); !errors.Is(err, ErrNoPendingUnit) {
 		t.Fatalf("completed-only next unit error = %v", err)
 	}
 }
 
 func TestScanCycleMalformedUnitAndTerminalBranches(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=? WHERE cycle_id=? AND sequence=0`, []byte("bad-unit"), cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.NextScanCycleUnit(ctx, cycle.ID); err == nil {
+	if _, err := s.System().NextScanCycleUnit(ctx, cycle.ID); err == nil {
 		t.Fatal("malformed work unit was accepted")
 	}
 	// Restore the work unit and claim it, then make the transaction-level decode
@@ -97,60 +97,60 @@ func TestScanCycleMalformedUnitAndTerminalBranches(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=? WHERE cycle_id=? AND sequence=0`, raw, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, 0); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, 0); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=? WHERE cycle_id=? AND sequence=0`, []byte("bad-unit"), cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err == nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err == nil {
 		t.Fatal("malformed completion unit was accepted")
 	}
 
-	otherJob, err := s.CreateJob(ctx, testJob("cycle-terminal"))
+	otherJob, err := defaultTenant(s).CreateJob(ctx, testJob("cycle-terminal"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: otherJob.ID, Job: otherJob.Job.Name, Plan: plan})
+	terminal, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: otherJob.ID, Job: otherJob.Job.Name, Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded' WHERE id=?`, terminal.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, terminal.ID); !errors.Is(err, ErrCycleNotResumable) {
+	if _, err := s.System().StartScanCycleAttempt(ctx, terminal.ID); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("terminal restart error = %v", err)
 	}
-	if err := s.DiscardScanCycle(ctx, terminal.ID); !errors.Is(err, ErrCycleNotResumable) {
+	if err := defaultTenant(s).DiscardScanCycle(ctx, terminal.ID); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("terminal discard error = %v", err)
 	}
-	if _, err := s.CompleteScanCycle(ctx, terminal.ID); !errors.Is(err, ErrCycleNotResumable) {
+	if _, err := s.System().CompleteScanCycle(ctx, terminal.ID); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("terminal complete error = %v", err)
 	}
 }
 
 func TestScanCyclePauseStallAndRetryStatuses(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.PauseScanCycle(ctx, cycle.ID, false, "idle"); err != nil {
+	if _, err := s.System().PauseScanCycle(ctx, cycle.ID, false, "idle"); err != nil {
 		t.Fatal(err)
 	}
-	if paused, err := s.PauseScanCycle(ctx, cycle.ID, true, "  "+strings.Repeat("x", 600)); err != nil || paused.NoProgressAttempts != 1 || len([]rune(paused.LastError)) != 501 {
+	if paused, err := s.System().PauseScanCycle(ctx, cycle.ID, true, "  "+strings.Repeat("x", 600)); err != nil || paused.NoProgressAttempts != 1 || len([]rune(paused.LastError)) != 501 {
 		t.Fatalf("pause state = %#v, %v", paused, err)
 	}
-	if stalled, err := s.MarkScanCycleStalled(ctx, cycle.ID, "stalled"); err != nil || stalled.Status != "stalled" {
+	if stalled, err := s.System().MarkScanCycleStalled(ctx, cycle.ID, "stalled"); err != nil || stalled.Status != "stalled" {
 		t.Fatalf("stalled state = %#v, %v", stalled, err)
 	}
-	if err := s.RetryScanCycleUnit(ctx, cycle.ID, 0, "retry"); !errors.Is(err, ErrCycleNotResumable) {
+	if err := s.System().RetryScanCycleUnit(ctx, cycle.ID, 0, "retry"); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("retry paused error = %v", err)
 	}
-	if err := s.SplitScanCycleUnit(ctx, cycle.ID, 0, scanner.WorkUnit{}, scanner.WorkUnit{}, "split"); !errors.Is(err, ErrCycleNotResumable) {
+	if err := s.System().SplitScanCycleUnit(ctx, cycle.ID, 0, scanner.WorkUnit{}, scanner.WorkUnit{}, "split"); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("split paused error = %v", err)
 	}
-	if _, err := s.ExpireScanCycles(ctx, time.Now().UTC().Add(-time.Hour)); err != nil {
+	if _, err := s.System().ExpireScanCycles(ctx, time.Now().UTC().Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -158,26 +158,26 @@ func TestScanCyclePauseStallAndRetryStatuses(t *testing.T) {
 func TestLeaseAndDeliveryHelpersCoverBoundaries(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, testJob("lease-boundary"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("lease-boundary"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireJobLeaseForRevision(ctx, "missing", "owner", 1, time.Now().Add(time.Minute)); !errors.Is(err, ErrNotFound) {
+	if err := s.System().AcquireJobLeaseForRevision(ctx, "missing", "owner", 1, time.Now().Add(time.Minute)); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing revision lease error = %v", err)
 	}
-	if err := s.AcquireJobLeaseForRevision(ctx, job.ID, "owner", job.Revision, time.Now().Add(time.Minute)); err != nil {
+	if err := s.System().AcquireJobLeaseForRevision(ctx, job.ID, "owner", job.Revision, time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireJobLeaseForRevision(ctx, job.ID, "other", job.Revision, time.Now().Add(time.Minute)); !errors.Is(err, ErrJobBusy) {
+	if err := s.System().AcquireJobLeaseForRevision(ctx, job.ID, "other", job.Revision, time.Now().Add(time.Minute)); !errors.Is(err, ErrJobBusy) {
 		t.Fatalf("busy revision lease error = %v", err)
 	}
-	if err := s.ReleaseJobLease(ctx, job.ID, "owner"); err != nil {
+	if err := s.System().ReleaseJobLease(ctx, job.ID, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireJobLeaseForRevision(ctx, job.ID, "other", job.Revision, time.Now().Add(time.Minute)); err != nil {
+	if err := s.System().AcquireJobLeaseForRevision(ctx, job.ID, "other", job.Revision, time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReleaseJobLease(ctx, job.ID, "other"); err != nil {
+	if err := s.System().ReleaseJobLease(ctx, job.ID, "other"); err != nil {
 		t.Fatal(err)
 	}
 	if min(1, 2) != 1 || min(2, 1) != 1 || truncate("short", 10) != "short" || truncate("012345", 3) != "012" {
@@ -188,27 +188,27 @@ func TestLeaseAndDeliveryHelpersCoverBoundaries(t *testing.T) {
 func TestRenewJobLeaseValidatesAndRefreshesOwnership(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, testJob("renew-lease"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("renew-lease"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RenewJobLease(ctx, "", "owner", time.Now().Add(time.Minute)); err == nil {
+	if err := s.System().RenewJobLease(ctx, "", "owner", time.Now().Add(time.Minute)); err == nil {
 		t.Fatal("empty job lease was accepted")
 	}
-	if err := s.RenewJobLease(ctx, job.ID, "", time.Now().Add(time.Minute)); err == nil {
+	if err := s.System().RenewJobLease(ctx, job.ID, "", time.Now().Add(time.Minute)); err == nil {
 		t.Fatal("empty lease owner was accepted")
 	}
-	if err := s.RenewJobLease(ctx, job.ID, "owner", time.Now().Add(-time.Minute)); err == nil {
+	if err := s.System().RenewJobLease(ctx, job.ID, "owner", time.Now().Add(-time.Minute)); err == nil {
 		t.Fatal("expired lease renewal was accepted")
 	}
-	if err := s.RenewJobLease(ctx, job.ID, "owner", time.Now().Add(time.Minute)); !errors.Is(err, ErrLeaseLost) {
+	if err := s.System().RenewJobLease(ctx, job.ID, "owner", time.Now().Add(time.Minute)); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("missing lease renewal = %v, want ErrLeaseLost", err)
 	}
-	if err := s.AcquireJobLease(ctx, job.ID, "owner", time.Now().Add(time.Minute)); err != nil {
+	if err := s.System().AcquireJobLease(ctx, job.ID, "owner", time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(2 * time.Minute)
-	if err := s.RenewJobLease(ctx, job.ID, "owner", expires); err != nil {
+	if err := s.System().RenewJobLease(ctx, job.ID, "owner", expires); err != nil {
 		t.Fatal(err)
 	}
 	var stored string
@@ -220,13 +220,13 @@ func TestRenewJobLeaseValidatesAndRefreshesOwnership(t *testing.T) {
 	}
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
-	if err := s.RenewJobLease(canceled, job.ID, "owner", time.Now().Add(time.Minute)); err == nil {
+	if err := s.System().RenewJobLease(canceled, job.ID, "owner", time.Now().Add(time.Minute)); err == nil {
 		t.Fatal("canceled lease renewal unexpectedly succeeded")
 	}
-	if err := s.ReleaseJobLease(ctx, job.ID, "owner"); err != nil {
+	if err := s.System().ReleaseJobLease(ctx, job.ID, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RenewJobLease(ctx, job.ID, "owner", time.Now().Add(time.Minute)); !errors.Is(err, ErrLeaseLost) {
+	if err := s.System().RenewJobLease(ctx, job.ID, "owner", time.Now().Add(time.Minute)); !errors.Is(err, ErrLeaseLost) {
 		t.Fatalf("released lease renewal = %v, want ErrLeaseLost", err)
 	}
 }

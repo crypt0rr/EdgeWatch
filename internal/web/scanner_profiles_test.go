@@ -16,11 +16,11 @@ import (
 func TestOperatorCannotSelectSupersededScannerProfileRevision(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
-	profile, err := db.CreateScannerProfile(ctx, "Revision guard", "", config.ScannerProfile{Engine: config.EngineNmap}, admin.Username)
+	profile, err := defaultTenant(db).CreateScannerProfile(ctx, "Revision guard", "", config.ScannerProfile{Engine: config.EngineNmap}, admin.Username)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.UpdateScannerProfile(ctx, profile.ID, profile.Revision, profile.Name, "current", config.ScannerProfile{Engine: config.EngineNmap, Description: "current"}, admin.Username); err != nil {
+	if _, err := defaultTenant(db).UpdateScannerProfile(ctx, profile.ID, profile.Revision, profile.Name, "current", config.ScannerProfile{Engine: config.EngineNmap, Description: "current"}, admin.Username); err != nil {
 		t.Fatal(err)
 	}
 
@@ -50,7 +50,7 @@ func TestOperatorCannotSelectSupersededScannerProfileRevision(t *testing.T) {
 func TestScannerProfileMutationsMapAuditUnavailableToServiceUnavailable(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
-	profile, err := db.CreateScannerProfile(ctx, "Audit guarded", "", config.ScannerProfile{Engine: config.EngineNmap}, admin.Username)
+	profile, err := defaultTenant(db).CreateScannerProfile(ctx, "Audit guarded", "", config.ScannerProfile{Engine: config.EngineNmap}, admin.Username)
 	if err != nil {
 		t.Fatal(err)
 	}

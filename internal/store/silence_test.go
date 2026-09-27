@@ -15,7 +15,7 @@ func TestRecordJobSilenceAlertPersistsEventAndOutboxAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	job, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{
+	job, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name:     "silent",
 		Schedule: "0 * * * *",
 		Timezone: "UTC",
@@ -30,7 +30,7 @@ func TestRecordJobSilenceAlertPersistsEventAndOutboxAtomically(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=? WHERE job_id=?`, created.Format(time.RFC3339Nano), job.ID); err != nil {
 		t.Fatal(err)
 	}
-	event, createdEvent, err := s.RecordJobSilenceAlert(ctx, job.ID, job.Job.Name, created, now, 2*time.Hour, []string{"destination"})
+	event, createdEvent, err := s.System().RecordJobSilenceAlert(ctx, job.ID, job.Job.Name, created, now, 2*time.Hour, []string{"destination"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestRecordJobSilenceAlertPersistsEventAndOutboxAtomically(t *testing.T) {
 	if eventCount != 1 || outboxCount != 1 {
 		t.Fatalf("persisted event/outbox = %d/%d, want 1/1", eventCount, outboxCount)
 	}
-	if _, again, err := s.RecordJobSilenceAlert(ctx, job.ID, job.Job.Name, created, now.Add(30*time.Minute), 2*time.Hour, []string{"destination"}); err != nil {
+	if _, again, err := s.System().RecordJobSilenceAlert(ctx, job.ID, job.Job.Name, created, now.Add(30*time.Minute), 2*time.Hour, []string{"destination"}); err != nil {
 		t.Fatal(err)
 	} else if again {
 		t.Fatal("silence alert repeated inside its deduplication window")
@@ -61,7 +61,7 @@ func TestRecordJobSilenceAlertSkipsRecentSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	job, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{
+	job, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name:     "recent",
 		Schedule: "0 * * * *",
 		Timezone: "UTC",
@@ -77,7 +77,7 @@ func TestRecordJobSilenceAlertSkipsRecentSuccess(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job_id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?,?)`, "recent-scan", job.ID, job.Job.Name, stamp, stamp, "success", "", "Nmap", job.Job.SecurityHash(), []byte(`{"units":[]}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, created, err := s.RecordJobSilenceAlert(ctx, job.ID, job.Job.Name, now.Add(-24*time.Hour), now, 2*time.Hour, nil); err != nil {
+	if _, created, err := s.System().RecordJobSilenceAlert(ctx, job.ID, job.Job.Name, now.Add(-24*time.Hour), now, 2*time.Hour, nil); err != nil {
 		t.Fatal(err)
 	} else if created {
 		t.Fatal("recent successful scan generated silence alert")
@@ -87,7 +87,7 @@ func TestRecordJobSilenceAlertSkipsRecentSuccess(t *testing.T) {
 func TestJobSilenceReferenceUsesNewestEligibleEvidence(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{
+	job, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name:     "reference",
 		Schedule: "0 * * * *",
 		Timezone: "UTC",
@@ -115,7 +115,7 @@ func TestJobSilenceReferenceUsesNewestEligibleEvidence(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE job_silence_state SET last_success_at=? WHERE job_id=?`, lastSuccess.Format(time.RFC3339Nano), job.ID); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.JobSilenceReference(ctx, job.ID, created, now)
+	got, err := s.System().JobSilenceReference(ctx, job.ID, created, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestJobSilenceReferenceUsesNewestEligibleEvidence(t *testing.T) {
 func TestJobSilenceReferenceHonorsFutureEligibility(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{
+	job, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name:     "future-eligibility",
 		Schedule: "0 * * * *",
 		Timezone: "UTC",
@@ -146,7 +146,7 @@ func TestJobSilenceReferenceHonorsFutureEligibility(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE job_silence_state SET eligible_at=?,last_success_at=? WHERE job_id=?`, eligible.Format(time.RFC3339Nano), created.Format(time.RFC3339Nano), job.ID); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.JobSilenceReference(ctx, job.ID, created, now)
+	got, err := s.System().JobSilenceReference(ctx, job.ID, created, now)
 	if err != nil {
 		t.Fatal(err)
 	}

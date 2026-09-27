@@ -13,95 +13,95 @@ import (
 func TestJobListingLifecycleIdempotenceAndPermanentDeletionGuards(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	alpha, err := s.CreateJobWithEnabledAndAudit(ctx, testJob("alpha"), true, AuditEntry{Action: "job.created", Detail: "alpha"})
+	alpha, err := defaultTenant(s).CreateJobWithEnabledAndAudit(ctx, testJob("alpha"), true, AuditEntry{Action: "job.created", Detail: "alpha"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	beta, err := s.CreateJobWithEnabled(ctx, testJob("beta"), false)
+	beta, err := defaultTenant(s).CreateJobWithEnabled(ctx, testJob("beta"), false)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	active, err := s.ListJobs(ctx, false)
+	active, err := defaultTenant(s).ListJobs(ctx, false)
 	if err != nil || len(active) != 2 || active[0].Job.Name != "alpha" || active[1].Job.Name != "beta" {
 		t.Fatalf("active jobs = %#v, %v", active, err)
 	}
-	if err := s.SetJobArchivedWithRevisionAndAudit(ctx, beta.ID, true, beta.Revision, AuditEntry{Action: "job.archived", Detail: beta.ID}); err != nil {
+	if err := defaultTenant(s).SetJobArchivedWithRevisionAndAudit(ctx, beta.ID, true, beta.Revision, AuditEntry{Action: "job.archived", Detail: beta.ID}); err != nil {
 		t.Fatal(err)
 	}
-	archived, err := s.GetJob(ctx, beta.ID)
+	archived, err := defaultTenant(s).GetJob(ctx, beta.ID)
 	if err != nil || !archived.Archived || archived.Enabled || archived.Revision != beta.Revision+1 {
 		t.Fatalf("archived job = %#v, %v", archived, err)
 	}
-	all, err := s.ListJobs(ctx, true)
+	all, err := defaultTenant(s).ListJobs(ctx, true)
 	if err != nil || len(all) != 2 || !all[1].Archived {
 		t.Fatalf("all jobs = %#v, %v", all, err)
 	}
-	active, err = s.ListJobs(ctx, false)
+	active, err = defaultTenant(s).ListJobs(ctx, false)
 	if err != nil || len(active) != 1 || active[0].ID != alpha.ID {
 		t.Fatalf("filtered jobs = %#v, %v", active, err)
 	}
 
 	// Repeating a lifecycle action is intentionally idempotent: it records the
 	// audit entry but does not create a phantom revision.
-	if err := s.SetJobArchivedWithRevisionAndAudit(ctx, beta.ID, true, archived.Revision, AuditEntry{Action: "job.archived.repeat", Detail: beta.ID}); err != nil {
+	if err := defaultTenant(s).SetJobArchivedWithRevisionAndAudit(ctx, beta.ID, true, archived.Revision, AuditEntry{Action: "job.archived.repeat", Detail: beta.ID}); err != nil {
 		t.Fatal(err)
 	}
-	repeated, err := s.GetJob(ctx, beta.ID)
+	repeated, err := defaultTenant(s).GetJob(ctx, beta.ID)
 	if err != nil || repeated.Revision != archived.Revision {
 		t.Fatalf("idempotent archive changed revision: %#v, %v", repeated, err)
 	}
-	if err := s.SetJobArchivedWithRevision(ctx, beta.ID, false, archived.Revision); err != nil {
+	if err := defaultTenant(s).SetJobArchivedWithRevision(ctx, beta.ID, false, archived.Revision); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := s.GetJob(ctx, beta.ID)
+	restored, err := defaultTenant(s).GetJob(ctx, beta.ID)
 	if err != nil || restored.Archived || restored.Enabled || restored.Revision != archived.Revision+1 {
 		t.Fatalf("restored job = %#v, %v", restored, err)
 	}
-	if err := s.SetJobEnabledWithRevisionAndAudit(ctx, beta.ID, true, restored.Revision, AuditEntry{Action: "job.resumed", Detail: beta.ID}); err != nil {
+	if err := defaultTenant(s).SetJobEnabledWithRevisionAndAudit(ctx, beta.ID, true, restored.Revision, AuditEntry{Action: "job.resumed", Detail: beta.ID}); err != nil {
 		t.Fatal(err)
 	}
-	resumed, err := s.GetJob(ctx, beta.ID)
+	resumed, err := defaultTenant(s).GetJob(ctx, beta.ID)
 	if err != nil || !resumed.Enabled || resumed.Revision != restored.Revision+1 {
 		t.Fatalf("resumed job = %#v, %v", resumed, err)
 	}
-	if err := s.SetJobEnabledWithRevisionAndAudit(ctx, beta.ID, true, resumed.Revision, AuditEntry{Action: "job.resumed.repeat", Detail: beta.ID}); err != nil {
+	if err := defaultTenant(s).SetJobEnabledWithRevisionAndAudit(ctx, beta.ID, true, resumed.Revision, AuditEntry{Action: "job.resumed.repeat", Detail: beta.ID}); err != nil {
 		t.Fatal(err)
 	}
-	unchanged, err := s.GetJob(ctx, beta.ID)
+	unchanged, err := defaultTenant(s).GetJob(ctx, beta.ID)
 	if err != nil || unchanged.Revision != resumed.Revision {
 		t.Fatalf("idempotent resume changed revision: %#v, %v", unchanged, err)
 	}
-	if err := s.SetJobEnabledWithRevision(ctx, beta.ID, false, resumed.Revision-1); !errors.Is(err, ErrConflict) {
+	if err := defaultTenant(s).SetJobEnabledWithRevision(ctx, beta.ID, false, resumed.Revision-1); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale pause error = %v", err)
 	}
 
-	if err := s.DeleteJob(ctx, alpha.ID); err == nil || !strings.Contains(err.Error(), "archived") {
+	if err := defaultTenant(s).DeleteJob(ctx, alpha.ID); err == nil || !strings.Contains(err.Error(), "archived") {
 		t.Fatalf("active job deletion error = %v", err)
 	}
-	if err := s.SetJobArchived(ctx, alpha.ID, true); err != nil {
+	if err := defaultTenant(s).SetJobArchived(ctx, alpha.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	when := time.Now().UTC()
-	if err := s.SaveScan(ctx, model.Scan{ID: "alpha-scan", JobID: alpha.ID, Job: alpha.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", Snapshot: model.Snapshot{}}); err != nil {
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "alpha-scan", JobID: alpha.ID, Job: alpha.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteJob(ctx, alpha.ID); err == nil || !strings.Contains(err.Error(), "retained scan history") {
+	if err := defaultTenant(s).DeleteJob(ctx, alpha.ID); err == nil || !strings.Contains(err.Error(), "retained scan history") {
 		t.Fatal("job with scan history was deleted")
 	}
-	if err := s.DeleteJob(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+	if err := defaultTenant(s).DeleteJob(ctx, "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing deletion error = %v", err)
 	}
 
 	// A job with no retained scans/events can be permanently removed after it
 	// has been archived, while its deletion audit remains append-only.
-	if err := s.SetJobArchived(ctx, beta.ID, true); err != nil {
+	if err := defaultTenant(s).SetJobArchived(ctx, beta.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteJobWithAudit(ctx, beta.ID, AuditEntry{Action: "job.deleted", Detail: beta.ID}); err != nil {
+	if err := defaultTenant(s).DeleteJobWithAudit(ctx, beta.ID, AuditEntry{Action: "job.deleted", Detail: beta.ID}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GetJob(ctx, beta.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := defaultTenant(s).GetJob(ctx, beta.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted job lookup = %v", err)
 	}
 	var audits int
@@ -117,30 +117,30 @@ func TestListJobsPlacesArchivedJobsAfterActiveJobs(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 
-	activeLate, err := s.CreateJob(ctx, testJob("zulu-active"))
+	activeLate, err := defaultTenant(s).CreateJob(ctx, testJob("zulu-active"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	archivedEarly, err := s.CreateJob(ctx, testJob("aardvark-archived"))
+	archivedEarly, err := defaultTenant(s).CreateJob(ctx, testJob("aardvark-archived"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	activeEarly, err := s.CreateJob(ctx, testJob("alpha-active"))
+	activeEarly, err := defaultTenant(s).CreateJob(ctx, testJob("alpha-active"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	archivedLate, err := s.CreateJob(ctx, testJob("zulu-archived"))
+	archivedLate, err := defaultTenant(s).CreateJob(ctx, testJob("zulu-archived"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetJobArchived(ctx, archivedEarly.ID, true); err != nil {
+	if err := defaultTenant(s).SetJobArchived(ctx, archivedEarly.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetJobArchived(ctx, archivedLate.ID, true); err != nil {
+	if err := defaultTenant(s).SetJobArchived(ctx, archivedLate.ID, true); err != nil {
 		t.Fatal(err)
 	}
 
-	jobs, err := s.ListJobs(ctx, true)
+	jobs, err := defaultTenant(s).ListJobs(ctx, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,50 +155,50 @@ func TestListJobsPlacesArchivedJobsAfterActiveJobs(t *testing.T) {
 func TestJobActiveAndLeaseExpiry(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	record, err := s.CreateJob(ctx, testJob("lease"))
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("lease"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	active, err := s.JobActive(ctx, record.ID)
+	active, err := defaultTenant(s).JobActive(ctx, record.ID)
 	if err != nil || active {
 		t.Fatalf("job initially active = %v, %v", active, err)
 	}
-	if err := s.AcquireJobLease(ctx, record.ID, "owner", time.Now().Add(time.Hour)); err != nil {
+	if err := s.System().AcquireJobLease(ctx, record.ID, "owner", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	active, err = s.JobActive(ctx, record.ID)
+	active, err = defaultTenant(s).JobActive(ctx, record.ID)
 	if err != nil || !active {
 		t.Fatalf("leased job active = %v, %v", active, err)
 	}
-	if err := s.DeleteJob(ctx, record.ID); err == nil || !strings.Contains(err.Error(), "archived") {
+	if err := defaultTenant(s).DeleteJob(ctx, record.ID); err == nil || !strings.Contains(err.Error(), "archived") {
 		t.Fatalf("unarchived job deletion error = %v", err)
 	}
-	if err := s.SetJobArchived(ctx, record.ID, true); err == nil || !errors.Is(err, ErrJobScanActive) {
+	if err := defaultTenant(s).SetJobArchived(ctx, record.ID, true); err == nil || !errors.Is(err, ErrJobScanActive) {
 		t.Fatalf("active archive error = %v", err)
 	}
-	if err := s.SetJobEnabled(ctx, record.ID, false); err == nil || !errors.Is(err, ErrJobScanActive) {
+	if err := defaultTenant(s).SetJobEnabled(ctx, record.ID, false); err == nil || !errors.Is(err, ErrJobScanActive) {
 		t.Fatalf("active pause error = %v", err)
 	}
-	unchanged, err := s.GetJob(ctx, record.ID)
+	unchanged, err := defaultTenant(s).GetJob(ctx, record.ID)
 	if err != nil || unchanged.Archived || !unchanged.Enabled {
 		t.Fatalf("active lifecycle action changed job state: %#v", unchanged)
 	}
-	if err := s.ReleaseJobLease(ctx, record.ID, "owner"); err != nil {
+	if err := s.System().ReleaseJobLease(ctx, record.ID, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetJobArchived(ctx, record.ID, true); err != nil {
+	if err := defaultTenant(s).SetJobArchived(ctx, record.ID, true); err != nil {
 		t.Fatalf("archive after lease release = %v", err)
 	}
-	if err := s.AcquireJobLease(ctx, record.ID, "owner", time.Now().Add(time.Hour)); err != nil {
+	if err := s.System().AcquireJobLease(ctx, record.ID, "owner", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteJob(ctx, record.ID); err == nil || !errors.Is(err, ErrJobScanActive) {
+	if err := defaultTenant(s).DeleteJob(ctx, record.ID); err == nil || !errors.Is(err, ErrJobScanActive) {
 		t.Fatalf("active archived job deletion error = %v", err)
 	}
-	if err := s.ReleaseJobLease(ctx, record.ID, "owner"); err != nil {
+	if err := s.System().ReleaseJobLease(ctx, record.ID, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineScanID = "lease-test"
 		return nil, nil
 	}); err != nil {

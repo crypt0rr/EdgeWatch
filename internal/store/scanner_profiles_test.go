@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -14,7 +15,7 @@ func TestBuiltinScannerProfilesForwardUpgrade(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
 
-	current, err := s.GetScannerProfile(ctx, BuiltinNaabuProfileID)
+	current, err := defaultTenant(s).GetScannerProfile(ctx, BuiltinNaabuProfileID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,14 +41,14 @@ func TestBuiltinScannerProfilesForwardUpgrade(t *testing.T) {
 	if err := ensureBuiltinScannerProfiles(s.DB); err != nil {
 		t.Fatal(err)
 	}
-	upgraded, err := s.GetScannerProfile(ctx, BuiltinNaabuProfileID)
+	upgraded, err := defaultTenant(s).GetScannerProfile(ctx, BuiltinNaabuProfileID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if upgraded.Revision != 2 || upgraded.Definition.Description != config.BuiltinNaabuProfile().Description {
 		t.Fatalf("upgraded built-in = %#v, want revision 2 with current definition", upgraded)
 	}
-	historical, err := s.GetScannerProfileRevision(ctx, BuiltinNaabuProfileID, 1)
+	historical, err := defaultTenant(s).GetScannerProfileRevision(ctx, BuiltinNaabuProfileID, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +59,7 @@ func TestBuiltinScannerProfilesForwardUpgrade(t *testing.T) {
 	if err := ensureBuiltinScannerProfiles(s.DB); err != nil {
 		t.Fatal(err)
 	}
-	unchanged, err := s.GetScannerProfile(ctx, BuiltinNaabuProfileID)
+	unchanged, err := defaultTenant(s).GetScannerProfile(ctx, BuiltinNaabuProfileID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,11 +68,60 @@ func TestBuiltinScannerProfilesForwardUpgrade(t *testing.T) {
 	}
 }
 
+// The built-in seeding reads and writes only the built-in rows, whose
+// tenant_id is NULL. It repairs a missing current revision of a built-in,
+// and it refuses to seed over a tenant's profile that holds a built-in ID
+// instead of taking that profile over.
+func TestBuiltinScannerProfileSeedingTouchesOnlyBuiltinRows(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM scanner_profile_revisions WHERE profile_id=?`, BuiltinNmapProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBuiltinScannerProfiles(s.DB); err != nil {
+		t.Fatal(err)
+	}
+	revisions, err := defaultTenant(s).ListScannerProfileRevisions(ctx, BuiltinNmapProfileID)
+	if err != nil || len(revisions) != 1 || revisions[0].Revision != 1 {
+		t.Fatalf("repaired built-in revisions = %+v, %v", revisions, err)
+	}
+
+	// A tenant's profile that holds the built-in ID stops the seeding, which
+	// leaves the profile as it was.
+	if _, err := s.DB.ExecContext(ctx, `DELETE FROM scanner_profiles WHERE id=?`, BuiltinNmapProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scanner_profiles(id,tenant_id,name,definition_json,built_in,created_at,updated_at) VALUES(?,?,'Tenant profile','{}',0,'2026-09-27T00:00:00Z','2026-09-27T00:00:00Z')`, BuiltinNmapProfileID, DefaultTenantID); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureBuiltinScannerProfiles(s.DB); err == nil || !strings.Contains(err.Error(), "conflicts with the built-in profile") {
+		t.Fatalf("seeding over a tenant's profile = %v", err)
+	}
+	var name, definition string
+	var builtIn, revisionRows int
+	if err := s.DB.QueryRowContext(ctx, `SELECT name,definition_json,built_in,(SELECT COUNT(*) FROM scanner_profile_revisions WHERE profile_id=?) FROM scanner_profiles WHERE id=?`, BuiltinNmapProfileID, BuiltinNmapProfileID).Scan(&name, &definition, &builtIn, &revisionRows); err != nil {
+		t.Fatal(err)
+	}
+	if name != "Tenant profile" || definition != "{}" || builtIn != 0 || revisionRows != 0 {
+		t.Fatalf("the tenant's profile changed: %q %q built-in %d, %d revisions", name, definition, builtIn, revisionRows)
+	}
+
+	// A revision is recorded only for a built-in row.
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := insertBuiltinProfileRevisionTx(ctx, tx, BuiltinNmapProfileID, 2, []byte("{}"), "2026-09-27T00:00:00Z"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revision of a tenant's profile = %v, want ErrNotFound", err)
+	}
+}
+
 func TestCurrentScannerProfileRevisionsReturnsCurrentRowsAndReportsFailures(t *testing.T) {
 	t.Run("current revisions", func(t *testing.T) {
 		s := openTestStore(t)
 		ctx := context.Background()
-		revisions, err := s.CurrentScannerProfileRevisions(ctx)
+		revisions, err := defaultTenant(s).CurrentScannerProfileRevisions(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -90,7 +140,7 @@ func TestCurrentScannerProfileRevisionsReturnsCurrentRowsAndReportsFailures(t *t
 		if _, err := s.DB.ExecContext(ctx, `DROP TABLE scanner_profiles`); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.CurrentScannerProfileRevisions(ctx); err == nil {
+		if _, err := defaultTenant(s).CurrentScannerProfileRevisions(ctx); err == nil {
 			t.Fatal("expected missing scanner profile table to fail")
 		}
 	})
@@ -100,7 +150,7 @@ func TestCurrentScannerProfileRevisionsReturnsCurrentRowsAndReportsFailures(t *t
 		if _, err := s.DB.ExecContext(ctx, `UPDATE scanner_profiles SET revision='not-a-number' WHERE id=?`, BuiltinNmapProfileID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.CurrentScannerProfileRevisions(ctx); err == nil {
+		if _, err := defaultTenant(s).CurrentScannerProfileRevisions(ctx); err == nil {
 			t.Fatal("expected malformed scanner profile revision to fail scanning")
 		}
 	})
@@ -109,19 +159,19 @@ func TestCurrentScannerProfileRevisionsReturnsCurrentRowsAndReportsFailures(t *t
 func TestScannerProfilesSeedAndRevisionLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	profiles, err := s.ListScannerProfiles(ctx, true)
+	profiles, err := defaultTenant(s).ListScannerProfiles(ctx, true)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(profiles) < 2 {
 		t.Fatalf("built-in scanner profiles were not seeded: %#v", profiles)
 	}
-	builtin, err := s.GetScannerProfile(ctx, BuiltinNaabuProfileID)
+	builtin, err := defaultTenant(s).GetScannerProfile(ctx, BuiltinNaabuProfileID)
 	if err != nil || !builtin.BuiltIn || builtin.Definition.Engine != config.EngineNaabuNmap || builtin.Definition.Naabu.Rate != 1000 {
 		t.Fatalf("Naabu built-in profile = %#v, %v", builtin, err)
 	}
 
-	created, err := s.CreateScannerProfile(ctx, "Test Nmap", "test", config.ScannerProfile{Engine: config.EngineNmap}, "admin")
+	created, err := defaultTenant(s).CreateScannerProfile(ctx, "Test Nmap", "test", config.ScannerProfile{Engine: config.EngineNmap}, "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,39 +179,39 @@ func TestScannerProfilesSeedAndRevisionLifecycle(t *testing.T) {
 		t.Fatalf("created profile metadata = %#v", created)
 	}
 	updatedDefinition := config.ScannerProfile{Engine: config.EngineNmap, Description: "updated"}
-	updated, err := s.UpdateScannerProfile(ctx, created.ID, 1, "Test Nmap", "updated", updatedDefinition, "admin")
+	updated, err := defaultTenant(s).UpdateScannerProfile(ctx, created.ID, 1, "Test Nmap", "updated", updatedDefinition, "admin")
 	if err != nil || updated.Revision != 2 || updated.Definition.Description != "updated" {
 		t.Fatalf("updated profile = %#v, %v", updated, err)
 	}
-	historical, err := s.GetScannerProfileRevision(ctx, created.ID, 1)
+	historical, err := defaultTenant(s).GetScannerProfileRevision(ctx, created.ID, 1)
 	if err != nil || historical.Revision != 1 || historical.Definition.Description != "" {
 		t.Fatalf("historical profile revision = %#v, %v", historical, err)
 	}
-	if _, err := s.GetScannerProfileRevision(ctx, created.ID, 99); !errors.Is(err, ErrNotFound) {
+	if _, err := defaultTenant(s).GetScannerProfileRevision(ctx, created.ID, 99); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing profile revision error = %v", err)
 	}
-	if _, err := s.UpdateScannerProfile(ctx, created.ID, 1, "Test Nmap", "stale", updatedDefinition, "admin"); !errors.Is(err, ErrConflict) {
+	if _, err := defaultTenant(s).UpdateScannerProfile(ctx, created.ID, 1, "Test Nmap", "stale", updatedDefinition, "admin"); !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale profile update error = %v", err)
 	}
-	if err := s.SetScannerProfileArchived(ctx, created.ID, true, 2, "admin"); err != nil {
+	if err := defaultTenant(s).SetScannerProfileArchived(ctx, created.ID, true, 2, "admin"); err != nil {
 		t.Fatal(err)
 	}
-	archived, err := s.GetScannerProfile(ctx, created.ID)
+	archived, err := defaultTenant(s).GetScannerProfile(ctx, created.ID)
 	if err != nil || !archived.Archived || archived.Revision != 3 {
 		t.Fatalf("archived profile = %#v, %v", archived, err)
 	}
-	if err := s.SetScannerProfileArchived(ctx, created.ID, false, 3, "admin"); err != nil {
+	if err := defaultTenant(s).SetScannerProfileArchived(ctx, created.ID, false, 3, "admin"); err != nil {
 		t.Fatal(err)
 	}
-	restored, err := s.GetScannerProfile(ctx, created.ID)
+	restored, err := defaultTenant(s).GetScannerProfile(ctx, created.ID)
 	if err != nil || restored.Archived || restored.Revision != 4 {
 		t.Fatalf("restored profile = %#v, %v", restored, err)
 	}
-	revisions, err := s.ListScannerProfileRevisions(ctx, created.ID)
+	revisions, err := defaultTenant(s).ListScannerProfileRevisions(ctx, created.ID)
 	if err != nil || len(revisions) != 4 || revisions[0].Revision != 4 {
 		t.Fatalf("profile revisions = %#v, %v", revisions, err)
 	}
-	if _, err := s.ListScannerProfileRevisions(ctx, "missing-profile"); !errors.Is(err, ErrNotFound) {
+	if _, err := defaultTenant(s).ListScannerProfileRevisions(ctx, "missing-profile"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown profile revision lookup error = %v", err)
 	}
 }
@@ -171,7 +221,7 @@ func TestListScannerProfilesReportIsolatesInvalidDefinitions(t *testing.T) {
 	s := openTestStore(t)
 	defer s.Close()
 
-	created, err := s.CreateScannerProfile(ctx, "Corruptible", "test", config.ScannerProfile{Engine: config.EngineNmap}, "admin")
+	created, err := defaultTenant(s).CreateScannerProfile(ctx, "Corruptible", "test", config.ScannerProfile{Engine: config.EngineNmap}, "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +229,7 @@ func TestListScannerProfilesReportIsolatesInvalidDefinitions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	result, err := s.ListScannerProfilesReport(ctx, true)
+	result, err := defaultTenant(s).ListScannerProfilesReport(ctx, true)
 	if err != nil {
 		t.Fatal(err)
 	}

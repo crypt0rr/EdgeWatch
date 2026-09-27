@@ -11,7 +11,7 @@ func TestConsumeTOTPStepRejectsReplayAndOlderStep(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	user, err := s.CreateUser(ctx, User{Username: "totp-replay", DisplayName: "TOTP replay", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
+	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "totp-replay", DisplayName: "TOTP replay", Role: RoleViewer, PasswordHash: "hash", Enabled: true, CreatedAt: now, UpdatedAt: now}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}

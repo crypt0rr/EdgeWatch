@@ -19,7 +19,7 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "lifecycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}, Baseline: config.Baseline{Samples: 1}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +31,7 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	}
 	now := time.Now().UTC()
 	scan := model.Scan{ID: "lifecycle-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 443, State: "open"}}}}}}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
 	approveBody := strings.NewReader(`{"scan_id":"` + scan.ID + `"}`)
@@ -51,7 +51,7 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	}
 
 	plan := scanner.WorkPlan{Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Family: 4, Addresses: []string{"192.0.2.1"}, Ports: "443", PortCount: 1, Probes: 1}}}
-	cycle, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{ID: "lifecycle-cycle", JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), Plan: plan})
+	cycle, err := db.System().CreateScanCycle(ctx, store.ScanCycleRecord{ID: "lifecycle-cycle", JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 		t.Fatalf("empty cycle response = %d: %s", noCycle.Code, noCycle.Body.String())
 	}
 
-	current, err := db.GetJob(ctx, record.ID)
+	current, err := defaultTenant(db).GetJob(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	if archive.Code != http.StatusNoContent {
 		t.Fatalf("archive = %d: %s", archive.Code, archive.Body.String())
 	}
-	archived, err := db.GetJob(ctx, record.ID)
+	archived, err := defaultTenant(db).GetJob(ctx, record.ID)
 	if err != nil || !archived.Archived || archived.Revision <= current.Revision {
 		t.Fatalf("archived job = %#v, %v", archived, err)
 	}
@@ -95,7 +95,7 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 		t.Fatalf("restore = %d: %s", restore.Code, restore.Body.String())
 	}
 
-	second, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "delete-me", Schedule: "0 * * * *", Targets: []string{"192.0.2.2"}, TCP: &config.Protocol{Ports: "22", Mode: "connect"}}))
+	second, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "delete-me", Schedule: "0 * * * *", Targets: []string{"192.0.2.2"}, TCP: &config.Protocol{Ports: "22", Mode: "connect"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,15 +133,15 @@ func TestLifecycleActionsRejectActiveScans(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "active-lifecycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AcquireJobLease(ctx, record.ID, "running-scan", time.Now().UTC().Add(time.Minute)); err != nil {
+	if err := db.System().AcquireJobLease(ctx, record.ID, "running-scan", time.Now().UTC().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	defer func() {
-		if err := db.ReleaseJobLease(ctx, record.ID, "running-scan"); err != nil {
+		if err := db.System().ReleaseJobLease(ctx, record.ID, "running-scan"); err != nil {
 			t.Errorf("release test lease: %v", err)
 		}
 	}()
@@ -161,7 +161,7 @@ func TestLifecycleActionsRejectActiveScans(t *testing.T) {
 	if pause.Code != http.StatusConflict || !strings.Contains(pause.Body.String(), "job_active") || !strings.Contains(pause.Body.String(), "wait") {
 		t.Fatalf("active pause response = %d: %s", pause.Code, pause.Body.String())
 	}
-	unchanged, err := db.GetJob(ctx, record.ID)
+	unchanged, err := defaultTenant(db).GetJob(ctx, record.ID)
 	if err != nil || unchanged.Archived || !unchanged.Enabled || unchanged.Revision != record.Revision {
 		t.Fatalf("active lifecycle actions changed job: %#v", unchanged)
 	}
@@ -212,8 +212,8 @@ func TestNotificationRoutesAndRateLimit(t *testing.T) {
 	if routingResponse.Code != http.StatusOK || !strings.Contains(routingResponse.Body.String(), createdView.ID) {
 		t.Fatalf("update notification routing = %d: %s", routingResponse.Code, routingResponse.Body.String())
 	}
-	routingState, err := server.Store.GetApplicationUpdateState(context.Background())
-	if err != nil || !routingState.UpdateNotificationDestinationsConfigured || len(routingState.UpdateNotificationDestinations) != 1 || routingState.UpdateNotificationDestinations[0] != createdView.ID {
+	routingState, err := defaultTenantStore(server).ApplicationUpdateRouting(context.Background())
+	if err != nil || !routingState.Configured || len(routingState.Destinations) != 1 || routingState.Destinations[0] != createdView.ID {
 		t.Fatalf("stored update routing = %#v, %v", routingState, err)
 	}
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/notifications/destinations/"+createdView.ID, strings.NewReader(`{"password":"administrator password","revision":2}`))
@@ -252,19 +252,19 @@ func TestBaselineMutationsRejectActiveJobs(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "active-baseline", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.20"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}, Baseline: config.Baseline{Samples: 1}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	scan := model.Scan{ID: "active-baseline-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{}}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AcquireJobLease(ctx, record.ID, "active-baseline-test", now.Add(time.Hour)); err != nil {
+	if err := db.System().AcquireJobLease(ctx, record.ID, "active-baseline-test", now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = db.ReleaseJobLease(ctx, record.ID, "active-baseline-test") }()
+	defer func() { _ = db.System().ReleaseJobLease(ctx, record.ID, "active-baseline-test") }()
 
 	reset := httptest.NewRecorder()
 	server.jobRoute(reset, httptest.NewRequest(http.MethodPost, "/api/v1/jobs/"+record.ID+"/baseline/reset", nil), admin, defaultTenantStore(server), record.ID+"/baseline/reset")

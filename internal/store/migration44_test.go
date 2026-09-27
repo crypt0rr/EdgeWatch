@@ -18,7 +18,7 @@ func TestMigration44PreservesPausedCycleBaselineEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	job, err := store.CreateJob(ctx, config.NormalizeJob(config.Job{
+	job, err := defaultTenant(store).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name:     "epoch-migration",
 		Schedule: "0 * * * *",
 		Timezone: "UTC",
@@ -44,7 +44,7 @@ func TestMigration44PreservesPausedCycleBaselineEpoch(t *testing.T) {
 		store.Close()
 		t.Fatalf("fixture runtime epoch = %d, want zero", beforeEpoch)
 	}
-	cycle, err := store.CreateScanCycle(ctx, ScanCycleRecord{
+	cycle, err := store.System().CreateScanCycle(ctx, ScanCycleRecord{
 		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
 		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(),
 		Plan:      scanner.WorkPlan{Job: job.Job, Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Family: 4, Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1}}, TotalUnits: 1, TotalProbes: 1},
@@ -89,17 +89,17 @@ func TestMigration44PreservesPausedCycleBaselineEpoch(t *testing.T) {
 	if runtimeEpoch != 1 {
 		t.Fatalf("migrated runtime epoch = %d, want one", runtimeEpoch)
 	}
-	got, err := upgraded.GetScanCycle(ctx, cycle.ID)
+	got, err := defaultTenant(upgraded).GetScanCycle(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.BaselineEpoch != 1 || got.Status != "paused" || got.CompletedUnits != 0 {
 		t.Fatalf("migrated cycle = %#v, want paused epoch one with progress retained", got)
 	}
-	if _, err := upgraded.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := upgraded.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatalf("migrated cycle could not resume: %v", err)
 	}
-	resumed, err := upgraded.GetScanCycle(ctx, cycle.ID)
+	resumed, err := defaultTenant(upgraded).GetScanCycle(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

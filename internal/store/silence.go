@@ -11,13 +11,6 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
-// RecordJobSilenceAlert records a silence alert through
-// SystemStore.RecordJobSilenceAlert, until the daemon uses Store.System
-// itself.
-func (s *Store) RecordJobSilenceAlert(ctx context.Context, jobID, job string, createdAt, now time.Time, threshold time.Duration, destinations []string) (model.Event, bool, error) {
-	return s.System().RecordJobSilenceAlert(ctx, jobID, job, createdAt, now, threshold, destinations)
-}
-
 // RecordJobSilenceAlert records a deduplicated warning when a managed job has
 // not produced a successful scan within threshold. The latest successful
 // result, active lease, deduplication check, event, and notification outbox
@@ -93,12 +86,6 @@ func (ss *SystemStore) RecordJobSilenceAlert(ctx context.Context, jobID, job str
 	return bounded, true, nil
 }
 
-// JobSilenceDue runs the silence preflight through SystemStore.JobSilenceDue,
-// until the daemon uses Store.System itself.
-func (s *Store) JobSilenceDue(ctx context.Context, jobID string, createdAt, now time.Time, threshold time.Duration) (bool, error) {
-	return s.System().JobSilenceDue(ctx, jobID, createdAt, now, threshold)
-}
-
 // JobSilenceDue is a cheap preflight used by the application before it reloads
 // notification destinations. Destination decryption/reload is therefore only
 // performed for jobs that are actually overdue; RecordJobSilenceAlert repeats
@@ -111,13 +98,6 @@ func (ss *SystemStore) JobSilenceDue(ctx context.Context, jobID string, createdA
 	}
 	decision, err := jobSilenceDecisionQuery(ctx, ss.store.reader(), jobID, createdAt, now, threshold)
 	return decision.due, err
-}
-
-// JobSilenceReference reads the silence reference through
-// SystemStore.JobSilenceReference, until the daemon uses Store.System
-// itself.
-func (s *Store) JobSilenceReference(ctx context.Context, jobID string, createdAt, now time.Time) (time.Time, error) {
-	return s.System().JobSilenceReference(ctx, jobID, createdAt, now)
 }
 
 // JobSilenceReference returns the timestamp from which the watchdog should

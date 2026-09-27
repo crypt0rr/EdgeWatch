@@ -28,7 +28,7 @@ func insertRawEvent(t *testing.T, db *sql.DB, jobID, createdAt string) int64 {
 func TestEventTimestampNormalizationPreservesOrderingRetentionAndSilence(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, testJob("event-timestamp-ordering"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("event-timestamp-ordering"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestEventTimestampNormalizationPreservesOrderingRetentionAndSilence(t *test
 
 	// The fallback silence deduplication path must use that same newest event.
 	threshold := 59*time.Minute + 59*time.Second + 750*time.Millisecond
-	due, err := s.JobSilenceDue(ctx, job.ID, now.Add(-2*time.Hour), now, threshold)
+	due, err := s.System().JobSilenceDue(ctx, job.ID, now.Add(-2*time.Hour), now, threshold)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +67,7 @@ func TestEventTimestampNormalizationPreservesOrderingRetentionAndSilence(t *test
 		t.Fatal("silence watchdog selected the older same-second event")
 	}
 
-	stats, err := s.PruneWithStats(ctx, older.Add(250*time.Millisecond))
+	stats, err := s.System().PruneWithStats(ctx, older.Add(250*time.Millisecond))
 	if err != nil {
 		t.Fatal(err)
 	}

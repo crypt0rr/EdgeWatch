@@ -25,131 +25,131 @@ func TestStoreHistoryRuntimeAndLeaseWrappers(t *testing.T) {
 	second.ID = "wrapper-scan-2"
 	second.Status = "timed_out"
 	second.FinishedAt = now.Add(-time.Minute)
-	if err := s.SaveScan(ctx, scan); err != nil {
+	if err := s.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveScan(ctx, second); err != nil {
+	if err := s.System().SaveScan(ctx, second); err != nil {
 		t.Fatal(err)
 	}
 
-	jobScans, err := s.ListJobScans(ctx, job.ID, 0)
+	jobScans, err := defaultTenant(s).ListJobScans(ctx, job.ID, 0)
 	if err != nil || len(jobScans) != 2 || jobScans[0].ID != scan.ID {
 		t.Fatalf("job scans = %#v, %v", jobScans, err)
 	}
-	jobSummaries, err := s.ListJobScanSummariesPage(ctx, job.ID, 1, 0)
+	jobSummaries, err := defaultTenant(s).ListJobScanSummariesPage(ctx, job.ID, 1, 0)
 	if err != nil || jobSummaries.Total != 2 || len(jobSummaries.Items) != 1 || jobSummaries.Items[0].ID != scan.ID {
 		t.Fatalf("job summaries = %#v, %v", jobSummaries, err)
 	}
-	allScans, err := s.ListScans(ctx, job.Job.Name, 1)
+	allScans, err := defaultTenant(s).ListScans(ctx, job.Job.Name, 1)
 	if err != nil || len(allScans) != 1 || allScans[0].ID != scan.ID {
 		t.Fatalf("legacy scans = %#v, %v", allScans, err)
 	}
-	allPage, err := s.ListScansPage(ctx, "", 1, -1)
+	allPage, err := defaultTenant(s).ListScansPage(ctx, "", 1, -1)
 	if err != nil || allPage.Total != 2 || len(allPage.Items) != 1 {
 		t.Fatalf("all scan page = %#v, %v", allPage, err)
 	}
-	legacySummaries, err := s.ListScanSummariesPage(ctx, job.Job.Name, 0, 0)
+	legacySummaries, err := defaultTenant(s).ListScanSummariesPage(ctx, job.Job.Name, 0, 0)
 	if err != nil || legacySummaries.Total != 2 || len(legacySummaries.Items) != 2 {
 		t.Fatalf("legacy summaries = %#v, %v", legacySummaries, err)
 	}
-	if indexed, err := s.SuccessfulScanHostIndexExists(ctx); err != nil || !indexed {
+	if indexed, err := defaultTenant(s).SuccessfulScanHostIndexExists(ctx); err != nil || !indexed {
 		t.Fatalf("successful host index = %v, %v", indexed, err)
 	}
 
-	legacyEvents, err := s.UpdateState(ctx, "legacy-name", func(state *model.JobState) ([]model.Event, error) {
+	legacyEvents, err := s.System().UpdateState(ctx, "legacy-name", func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineScanID = "legacy-baseline"
 		return []model.Event{{Type: "legacy-event", Job: "legacy-name", Message: "legacy transition", CreatedAt: now}}, nil
 	})
 	if err != nil || len(legacyEvents) != 1 {
 		t.Fatalf("legacy state update = %#v, %v", legacyEvents, err)
 	}
-	legacyState, err := s.State(ctx, "legacy-name")
+	legacyState, err := defaultTenant(s).State(ctx, "legacy-name")
 	if err != nil || legacyState.BaselineScanID != "legacy-baseline" {
 		t.Fatalf("legacy state = %#v, %v", legacyState, err)
 	}
-	if events, err := s.ListEvents(ctx, "legacy-name", 10); err != nil || len(events) != 1 {
+	if events, err := defaultTenant(s).ListEvents(ctx, "legacy-name", 10); err != nil || len(events) != 1 {
 		t.Fatalf("legacy events = %#v, %v", events, err)
 	}
-	if page, err := s.ListEventsPage(ctx, "legacy-name", 10, 0); err != nil || page.Total != 1 || len(page.Items) != 1 {
+	if page, err := defaultTenant(s).ListEventsPage(ctx, "legacy-name", 10, 0); err != nil || page.Total != 1 || len(page.Items) != 1 {
 		t.Fatalf("legacy event page = %#v, %v", page, err)
 	}
 
-	managedEvents, err := s.UpdateRuntimeForScan(ctx, job.ID, job.Job.SecurityHash(), func(state *model.JobState) ([]model.Event, error) {
+	managedEvents, err := s.System().UpdateRuntimeForScan(ctx, job.ID, job.Job.SecurityHash(), func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineScanID = "managed-baseline"
 		return []model.Event{{Type: "managed-event", Job: job.Job.Name, Message: "managed transition", CreatedAt: now}}, nil
 	})
 	if err != nil || len(managedEvents) != 1 {
 		t.Fatalf("managed state update = %#v, %v", managedEvents, err)
 	}
-	managedWithOutbox, err := s.UpdateRuntimeForScanWithOutbox(ctx, job.ID, job.Job.SecurityHash(), []string{"deployment"}, func(state *model.JobState) ([]model.Event, error) {
+	managedWithOutbox, err := s.System().UpdateRuntimeForScanWithOutbox(ctx, job.ID, job.Job.SecurityHash(), []string{"deployment"}, func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineConfigHash = "managed-hash"
 		return []model.Event{{Type: "managed-outbox-event", Job: job.Job.Name, Message: "queued transition", CreatedAt: now}}, nil
 	})
 	if err != nil || len(managedWithOutbox) != 1 {
 		t.Fatalf("managed outbox update = %#v, %v", managedWithOutbox, err)
 	}
-	if state, err := s.RuntimeState(ctx, job.ID); err != nil || state.BaselineConfigHash != "managed-hash" {
+	if state, err := defaultTenant(s).RuntimeState(ctx, job.ID); err != nil || state.BaselineConfigHash != "managed-hash" {
 		t.Fatalf("managed runtime state = %#v, %v", state, err)
 	}
-	if scanID, hash, err := s.RuntimeBaselineMeta(ctx, job.ID); err != nil || scanID != "managed-baseline" || hash != "managed-hash" {
+	if scanID, hash, err := defaultTenant(s).RuntimeBaselineMeta(ctx, job.ID); err != nil || scanID != "managed-baseline" || hash != "managed-hash" {
 		t.Fatalf("runtime baseline metadata = %q, %q, %v", scanID, hash, err)
 	}
-	if events, err := s.ListJobEvents(ctx, job.ID, 10); err != nil || len(events) != 2 {
+	if events, err := defaultTenant(s).ListJobEvents(ctx, job.ID, 10); err != nil || len(events) != 2 {
 		t.Fatalf("managed events = %#v, %v", events, err)
 	}
-	if _, err := s.ListJobEventsPage(ctx, job.ID, 1, 1); err != nil {
+	if _, err := defaultTenant(s).ListJobEventsPage(ctx, job.ID, 1, 1); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := s.ApproveRuntime(ctx, job.ID, job.Job.Name, scan); err != nil {
+	if _, err := defaultTenant(s).ApproveRuntime(ctx, job.ID, job.Job.Name, scan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ApproveRuntimeWithOutboxAndAudit(ctx, job.ID, job.Job.Name, scan, []string{"deployment"}, AuditEntry{Action: "baseline.approve", Detail: "wrapper test"}); err != nil {
+	if _, err := defaultTenant(s).ApproveRuntimeWithOutboxAndAudit(ctx, job.ID, job.Job.Name, scan, []string{"deployment"}, AuditEntry{Action: "baseline.approve", Detail: "wrapper test"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Approve(ctx, job.Job.Name, scan); err != nil {
+	if _, err := s.System().Approve(ctx, job.Job.Name, scan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ResetBaseline(ctx, job.Job.Name); err != nil {
+	if _, err := s.System().ResetBaseline(ctx, job.Job.Name); err != nil {
 		t.Fatal(err)
 	}
-	if state, err := s.State(ctx, job.Job.Name); err != nil || state.Baseline != nil || state.BaselineScanID != "" {
+	if state, err := defaultTenant(s).State(ctx, job.Job.Name); err != nil || state.Baseline != nil || state.BaselineScanID != "" {
 		t.Fatalf("reset legacy baseline = %#v, %v", state, err)
 	}
 
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,attempts,next_at) VALUES(?,?,?,?)`, "failed-destination", []byte(`{}`), deliveryMaxAttempts, now.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	if failed, err := s.FailedDeliveries(ctx); err != nil || failed != 1 {
+	if failed, err := defaultTenant(s).FailedDeliveries(ctx); err != nil || failed != 1 {
 		t.Fatalf("failed deliveries = %d, %v", failed, err)
 	}
 }
 
 func TestStoreDaemonLeaseHealthTransitions(t *testing.T) {
 	ctx, s, _, _ := cycleFixture(t)
-	if err := s.AcquireLease(ctx, "owner"); err != nil {
+	if err := s.System().AcquireLease(ctx, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Heartbeat(ctx, "owner"); err != nil {
+	if err := s.System().Heartbeat(ctx, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Healthy(ctx); err != nil {
+	if err := s.System().Healthy(ctx); err != nil {
 		t.Fatalf("fresh lease health = %v", err)
 	}
-	if err := s.Heartbeat(ctx, "other"); err == nil {
+	if err := s.System().Heartbeat(ctx, "other"); err == nil {
 		t.Fatal("heartbeat from another owner succeeded")
 	}
 	old := time.Now().UTC().Add(-3 * time.Minute).Format(time.RFC3339Nano)
 	if _, err := s.DB.ExecContext(ctx, `UPDATE daemon_lease SET heartbeat=? WHERE id=1`, old); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Healthy(ctx); err == nil {
+	if err := s.System().Healthy(ctx); err == nil {
 		t.Fatal("stale lease was reported healthy")
 	}
-	if err := s.ReleaseLease(ctx, "owner"); err != nil {
+	if err := s.System().ReleaseLease(ctx, "owner"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Healthy(ctx); !errors.Is(err, sql.ErrNoRows) {
+	if err := s.System().Healthy(ctx); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("released lease health error = %v", err)
 	}
 }
@@ -167,25 +167,25 @@ func TestDeliveryRetryPolicyIsDurableAndBounded(t *testing.T) {
 
 	ctx := context.Background()
 	s := openTestStore(t)
-	if err := s.QueueEvent(ctx, "retry-policy", model.Event{Type: "retry-policy", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, "retry-policy", model.Event{Type: "retry-policy", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	for attempt := 0; attempt < deliveryMaxAttempts; attempt++ {
 		if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE destination=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), "retry-policy"); err != nil {
 			t.Fatal(err)
 		}
-		due, err := s.ClaimDueDeliveries(ctx, 1, fmt.Sprintf("retry-owner-%d", attempt))
+		due, err := s.System().ClaimDueDeliveries(ctx, 1, fmt.Sprintf("retry-owner-%d", attempt))
 		if err != nil || len(due) != 1 {
 			t.Fatalf("retry claim %d = %#v, %v", attempt+1, due, err)
 		}
-		if err := s.DeliveryResult(ctx, due[0].ID, errors.New("temporary provider failure")); err != nil {
+		if err := s.System().DeliveryResult(ctx, due[0].ID, errors.New("temporary provider failure")); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if failed, err := s.FailedDeliveries(ctx); err != nil || failed != 1 {
+	if failed, err := defaultTenant(s).FailedDeliveries(ctx); err != nil || failed != 1 {
 		t.Fatalf("terminal delivery count = %d, %v", failed, err)
 	}
-	if due, err := s.ClaimDueDeliveries(ctx, 1, "after-terminal"); err != nil || len(due) != 0 {
+	if due, err := s.System().ClaimDueDeliveries(ctx, 1, "after-terminal"); err != nil || len(due) != 0 {
 		t.Fatalf("terminal delivery was claimable again: %#v, %v", due, err)
 	}
 }
@@ -193,14 +193,14 @@ func TestDeliveryRetryPolicyIsDurableAndBounded(t *testing.T) {
 func TestIndeterminateDeliveryConsumesDeferralNotAttempt(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if err := s.QueueEvent(ctx, "indeterminate", model.Event{Type: "indeterminate", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, "indeterminate", model.Event{Type: "indeterminate", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	due, err := s.ClaimDueDeliveries(ctx, 1, "indeterminate-owner")
+	due, err := s.System().ClaimDueDeliveries(ctx, 1, "indeterminate-owner")
 	if err != nil || len(due) != 1 {
 		t.Fatalf("indeterminate claim = %#v, %v", due, err)
 	}
-	if err := s.DeliveryResultClaim(ctx, due[0].ID, due[0].ClaimToken, ErrDeliveryIndeterminate); err != nil {
+	if err := s.System().DeliveryResultClaim(ctx, due[0].ID, due[0].ClaimToken, ErrDeliveryIndeterminate); err != nil {
 		t.Fatal(err)
 	}
 	var attempts, deferrals int
@@ -214,7 +214,7 @@ func TestIndeterminateDeliveryConsumesDeferralNotAttempt(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), due[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	next, err := s.ClaimDueDeliveries(ctx, 1, "indeterminate-retry")
+	next, err := s.System().ClaimDueDeliveries(ctx, 1, "indeterminate-retry")
 	if err != nil || len(next) != 1 || next[0].Attempts != 0 || next[0].Deferrals != 1 {
 		t.Fatalf("indeterminate retry = %#v, %v", next, err)
 	}
@@ -224,10 +224,10 @@ func TestDeliveryHealthTracksRedactedOutcomesAndTerminalEvent(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	secret := "provider password=super-secret"
-	if err := s.QueueEvent(ctx, "destination", model.Event{Type: "health", Job: "job", Message: "first", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, "destination", model.Event{Type: "health", Job: "job", Message: "first", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	health, err := s.ListDeliveryHealth(ctx)
+	health, err := defaultTenant(s).ListDeliveryHealth(ctx)
 	if err != nil || health["destination"].Pending != 1 {
 		t.Fatalf("pending health = %#v, %v", health, err)
 	}
@@ -236,16 +236,16 @@ func TestDeliveryHealthTracksRedactedOutcomesAndTerminalEvent(t *testing.T) {
 		if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE destination=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), "destination"); err != nil {
 			t.Fatal(err)
 		}
-		due, err := s.ClaimDueDeliveries(ctx, 1, fmt.Sprintf("health-owner-%d", attempt))
+		due, err := s.System().ClaimDueDeliveries(ctx, 1, fmt.Sprintf("health-owner-%d", attempt))
 		if err != nil || len(due) != 1 {
 			t.Fatalf("claim %d = %#v, %v", attempt, due, err)
 		}
-		if err := s.DeliveryResult(ctx, due[0].ID, errors.New(secret)); err != nil {
+		if err := s.System().DeliveryResult(ctx, due[0].ID, errors.New(secret)); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	health, err = s.ListDeliveryHealth(ctx)
+	health, err = defaultTenant(s).ListDeliveryHealth(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,17 +268,17 @@ func TestDeliveryHealthTracksRedactedOutcomesAndTerminalEvent(t *testing.T) {
 		t.Fatalf("terminal event was not redacted: %s", payload)
 	}
 
-	if err := s.QueueEvent(ctx, "destination", model.Event{Type: "health", Job: "job", Message: "second", CreatedAt: time.Now().UTC().Add(time.Second)}); err != nil {
+	if err := s.System().QueueEvent(ctx, "destination", model.Event{Type: "health", Job: "job", Message: "second", CreatedAt: time.Now().UTC().Add(time.Second)}); err != nil {
 		t.Fatal(err)
 	}
-	due, err := s.ClaimDueDeliveries(ctx, 1, "health-success")
+	due, err := s.System().ClaimDueDeliveries(ctx, 1, "health-success")
 	if err != nil || len(due) != 1 {
 		t.Fatalf("success claim = %#v, %v", due, err)
 	}
-	if err := s.DeliveryResult(ctx, due[0].ID, nil); err != nil {
+	if err := s.System().DeliveryResult(ctx, due[0].ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	health, err = s.ListDeliveryHealth(ctx)
+	health, err = defaultTenant(s).ListDeliveryHealth(ctx)
 	if err != nil || health["destination"].LastSuccessAt.IsZero() {
 		t.Fatalf("success health = %#v, %v", health, err)
 	}
@@ -287,18 +287,18 @@ func TestDeliveryHealthTracksRedactedOutcomesAndTerminalEvent(t *testing.T) {
 func TestDeliveryDeferralsAreBoundedAndVisible(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if err := s.QueueEvent(ctx, "deferred", model.Event{Type: "deferred", Message: "locked", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, "deferred", model.Event{Type: "deferred", Message: "locked", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	for deferral := 0; deferral < deliveryMaxDeferrals; deferral++ {
 		if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE destination=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), "deferred"); err != nil {
 			t.Fatal(err)
 		}
-		due, err := s.ClaimDueDeliveries(ctx, 1, fmt.Sprintf("defer-owner-%d", deferral))
+		due, err := s.System().ClaimDueDeliveries(ctx, 1, fmt.Sprintf("defer-owner-%d", deferral))
 		if err != nil || len(due) != 1 {
 			t.Fatalf("deferral claim %d = %#v, %v", deferral+1, due, err)
 		}
-		if err := s.DeferDeliveryWithError(ctx, due[0].ID, due[0].ClaimToken, ErrDeliveryDestinationLocked, time.Minute); err != nil {
+		if err := s.System().DeferDeliveryWithError(ctx, due[0].ID, due[0].ClaimToken, ErrDeliveryDestinationLocked, time.Minute); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -310,14 +310,14 @@ func TestDeliveryDeferralsAreBoundedAndVisible(t *testing.T) {
 	if attempts != 0 || deferrals != deliveryMaxDeferrals || terminalAt == "" || lastError != "destination_locked" {
 		t.Fatalf("bounded deferral state = attempts %d, deferrals %d, terminal %q, error %q", attempts, deferrals, terminalAt, lastError)
 	}
-	if due, err := s.ClaimDueDeliveries(ctx, 1, "after-deferral-limit"); err != nil || len(due) != 0 {
+	if due, err := s.System().ClaimDueDeliveries(ctx, 1, "after-deferral-limit"); err != nil || len(due) != 0 {
 		t.Fatalf("terminally deferred delivery was claimable: %#v, %v", due, err)
 	}
-	health, err := s.ListDeliveryHealth(ctx)
+	health, err := defaultTenant(s).ListDeliveryHealth(ctx)
 	if err != nil || health["deferred"].TerminalFailures != 1 || health["deferred"].Pending != 0 {
 		t.Fatalf("bounded deferral health = %#v, %v", health["deferred"], err)
 	}
-	failed, err := s.FailedDeliveries(ctx)
+	failed, err := defaultTenant(s).FailedDeliveries(ctx)
 	if err != nil || failed != 1 {
 		t.Fatalf("bounded deferral failures = %d, %v", failed, err)
 	}
@@ -335,10 +335,10 @@ func TestLockedDeliveryAgingIsBoundedAndWakesOnRecovery(t *testing.T) {
 	s := openTestStore(t)
 	locked := "locked-recovery"
 	other := "other"
-	if err := s.QueueEvent(ctx, locked, model.Event{Type: "locked", Message: "held", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, locked, model.Event{Type: "locked", Message: "held", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.QueueEvent(ctx, other, model.Event{Type: "other", Message: "untouched", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, other, model.Event{Type: "other", Message: "untouched", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Add(-time.Minute)
@@ -346,7 +346,7 @@ func TestLockedDeliveryAgingIsBoundedAndWakesOnRecovery(t *testing.T) {
 		if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE destination IN (?,?)`, now.Format(time.RFC3339Nano), locked, other); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.AgeLockedDeliveries(ctx, []string{locked, locked, ""}); err != nil {
+		if err := s.System().AgeLockedDeliveries(ctx, []string{locked, locked, ""}); err != nil {
 			t.Fatal(err)
 		}
 		var attempts, gotDeferrals int
@@ -368,22 +368,22 @@ func TestLockedDeliveryAgingIsBoundedAndWakesOnRecovery(t *testing.T) {
 			t.Fatalf("unlisted destination was aged: %d", otherDeferrals)
 		}
 		if deferral == 0 {
-			if err := s.WakeLockedDeliveries(ctx, []string{locked}); err != nil {
+			if err := s.System().WakeLockedDeliveries(ctx, []string{locked}); err != nil {
 				t.Fatal(err)
 			}
-			due, err := s.ClaimDueDeliveries(ctx, 1, "locked-recovery")
+			due, err := s.System().ClaimDueDeliveries(ctx, 1, "locked-recovery")
 			if err != nil || len(due) != 1 || due[0].Deferrals != 1 || due[0].Attempts != 0 {
 				t.Fatalf("recovered delivery claim = %#v, %v", due, err)
 			}
-			if err := s.ReleaseDeliveryClaim(ctx, due[0].ID, due[0].ClaimToken, 0); err != nil {
+			if err := s.System().ReleaseDeliveryClaim(ctx, due[0].ID, due[0].ClaimToken, 0); err != nil {
 				t.Fatal(err)
 			}
 		}
 	}
-	if due, err := s.ClaimDueDeliveriesExcluding(ctx, 1, "after-locked-terminal", []string{other}); err != nil || len(due) != 0 {
+	if due, err := s.System().ClaimDueDeliveriesExcluding(ctx, 1, "after-locked-terminal", []string{other}); err != nil || len(due) != 0 {
 		t.Fatalf("terminal locked delivery was claimable: %#v, %v", due, err)
 	}
-	health, err := s.ListDeliveryHealth(ctx)
+	health, err := defaultTenant(s).ListDeliveryHealth(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

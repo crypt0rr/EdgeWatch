@@ -37,7 +37,7 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 		TCP: &config.Protocol{Ports: "22,443", Mode: "syn", ServiceDetection: true},
 		UDP: &config.Protocol{Ports: "53", ServiceDetection: true},
 	})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,10 +50,10 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 		},
 	}
 	scan := model.Scan{ID: "host-history-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", NmapVersion: "Nmap 7.99", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{detailedHost}}}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ApproveRuntime(ctx, record.ID, record.Job.Name, scan); err != nil {
+	if _, err := defaultTenant(db).ApproveRuntime(ctx, record.ID, record.Job.Name, scan); err != nil {
 		t.Fatal(err)
 	}
 
@@ -142,7 +142,7 @@ func TestHistoricalHostRoutesAndLegacyFallback(t *testing.T) {
 		Scopes: []model.Scope{{Target: "legacy.example", Protocol: "tcp", Ports: "80-81", ServiceDetection: false}},
 		Units:  []model.Unit{{Target: "legacy.example", Protocol: "tcp", Addresses: []string{"2001:db8::20"}, Ports: []model.PortState{{Port: 80, State: "open", Service: "http"}}}},
 	}}
-	if err := db.SaveScan(ctx, legacy); err != nil {
+	if err := db.System().SaveScan(ctx, legacy); err != nil {
 		t.Fatal(err)
 	}
 	legacyCalls := []struct {
@@ -209,7 +209,7 @@ func TestLatestScannedHostsWalksAllLegacyPagesAndSkipsMalformedRows(t *testing.T
 				Ports: []model.PortState{{Port: 443, State: "open"}},
 			}}},
 		}
-		if err := db.SaveScan(ctx, scan); err != nil {
+		if err := db.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}

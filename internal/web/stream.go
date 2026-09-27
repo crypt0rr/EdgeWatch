@@ -451,11 +451,11 @@ func (s *Server) streamNow() time.Time {
 
 // seedSSEFallbackCursor keeps live updates useful while the durable cursor is
 // temporarily unavailable. It is only a fallback: every later reservation is
-// made with ReserveSSEEventIDsAfter(minimum=current) so durable IDs cannot
+// made with SSECursor.ReserveAfter(minimum=current) so durable IDs cannot
 // overlap IDs emitted during the outage.
 func (s *Server) seedSSEFallbackCursor(ctx context.Context) {
 	if s.Store != nil {
-		if id, err := s.Store.MaxEventID(ctx); err == nil && id > s.nextEventID {
+		if id, err := s.Store.SSECursor().MaxEventID(ctx); err == nil && id > s.nextEventID {
 			s.nextEventID = id
 		}
 	}
@@ -499,7 +499,7 @@ func (s *Server) retrySSEReservationContext(parent context.Context) {
 		return
 	}
 	reserveCtx, cancel := context.WithTimeout(parent, 2*time.Second)
-	start, end, err := s.Store.ReserveSSEEventIDsAfter(reserveCtx, sseEventIDBlockSize, minimum)
+	start, end, err := s.Store.SSECursor().ReserveAfter(reserveCtx, sseEventIDBlockSize, minimum)
 	cancel()
 	if err != nil {
 		s.mu.Lock()

@@ -43,7 +43,7 @@ func TestLegacyHostBackfillBuildsIndexedHostsOnce(t *testing.T) {
 			}},
 		},
 	}
-	if err := initial.SaveScan(ctx, scan); err != nil {
+	if err := initial.System().SaveScan(ctx, scan); err != nil {
 		initial.Close()
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestLegacyHostBackfillBuildsIndexedHostsOnce(t *testing.T) {
 	if sourceCount != 2 || latestCount != 2 || checkpointCount != 1 || legacyCount != 2 {
 		t.Fatalf("legacy host projection counts source=%d latest=%d checkpoint=%d quality=%d", sourceCount, latestCount, checkpointCount, legacyCount)
 	}
-	legacyExists, err := upgraded.LegacySuccessfulScanExists(ctx)
+	legacyExists, err := defaultTenant(upgraded).LegacySuccessfulScanExists(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +302,7 @@ func TestLegacyHostBackfillStorageFailureIsFatal(t *testing.T) {
 	defer store.Close()
 	when := time.Now().UTC().Add(-time.Hour)
 	scan := model.Scan{ID: "legacy-storage-error", Job: "legacy-job", StartedAt: when, FinishedAt: when, Status: "success"}
-	if err := store.SaveScan(ctx, scan); err != nil {
+	if err := store.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := json.Marshal(model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.10", Status: "up"}}})
@@ -378,7 +378,7 @@ func TestLegacyHostBackfillDeduplicatesCanonicalAddresses(t *testing.T) {
 	}
 	when := time.Now().UTC().Add(-time.Hour)
 	scan := model.Scan{ID: "legacy-duplicate-host-scan", Job: "legacy-job", StartedAt: when, FinishedAt: when, Status: "success"}
-	if err := initial.SaveScan(ctx, scan); err != nil {
+	if err := initial.System().SaveScan(ctx, scan); err != nil {
 		initial.Close()
 		t.Fatal(err)
 	}
@@ -472,7 +472,7 @@ func TestLegacyHostBackfillSkipsMalformedScanAndContinues(t *testing.T) {
 	bad := model.Scan{ID: "bad-legacy-scan", Job: "legacy-job", StartedAt: base, FinishedAt: base, Status: "success"}
 	good := model.Scan{ID: "good-legacy-scan", Job: "legacy-job", StartedAt: base.Add(time.Minute), FinishedAt: base.Add(time.Minute), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.42", Status: "up"}}}}
 	for _, scan := range []model.Scan{bad, good} {
-		if err := initial.SaveScan(ctx, scan); err != nil {
+		if err := initial.System().SaveScan(ctx, scan); err != nil {
 			initial.Close()
 			t.Fatal(err)
 		}
@@ -523,7 +523,7 @@ func TestLegacyHostBackfillSkipsMalformedScanAndContinues(t *testing.T) {
 	if status != "quarantined" || reason != "snapshot JSON is malformed" {
 		t.Fatalf("malformed scan quarantine = %q/%q", status, reason)
 	}
-	legacyExists, err := upgraded.LegacySuccessfulScanExists(ctx)
+	legacyExists, err := defaultTenant(upgraded).LegacySuccessfulScanExists(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -703,7 +703,7 @@ func seedLegacyHostBackfillScans(ctx context.Context, t *testing.T, count int) (
 				Status:  "up",
 			}}},
 		}
-		if err := store.SaveScan(ctx, scan); err != nil {
+		if err := store.System().SaveScan(ctx, scan); err != nil {
 			store.Close()
 			t.Fatal(err)
 		}

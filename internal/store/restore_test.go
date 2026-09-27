@@ -382,7 +382,7 @@ func TestRestoreRefusesLiveDaemonLeaseUnlessExplicitlyOverridden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ownerStore.AcquireDaemonLease(context.Background(), "live-daemon"); err != nil {
+	if _, err := ownerStore.System().AcquireDaemonLease(context.Background(), "live-daemon"); err != nil {
 		ownerStore.Close()
 		t.Fatal(err)
 	}
@@ -432,12 +432,12 @@ func TestRestoreClearsLeasesCopiedFromLiveDaemonBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	expires := time.Now().UTC().Add(time.Hour)
-	if _, err := liveStore.AcquireDaemonLease(ctx, "old-daemon"); err != nil {
+	if _, err := liveStore.System().AcquireDaemonLease(ctx, "old-daemon"); err != nil {
 		liveStore.Close()
 		t.Fatal(err)
 	}
 	for job, owner := range map[string]string{"daemon-job": "daemon/old-daemon/scan-1", "cli-job": "cli-scan-2"} {
-		if err := liveStore.AcquireJobLease(ctx, job, owner, expires); err != nil {
+		if err := liveStore.System().AcquireJobLease(ctx, job, owner, expires); err != nil {
 			liveStore.Close()
 			t.Fatal(err)
 		}
@@ -475,16 +475,16 @@ func TestRestoreClearsLeasesCopiedFromLiveDaemonBackup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := restored.AcquireDaemonLease(ctx, "new-daemon"); err != nil {
+	if _, err := restored.System().AcquireDaemonLease(ctx, "new-daemon"); err != nil {
 		restored.Close()
 		t.Fatalf("new daemon lease after restore: %v", err)
 	}
 	for _, job := range []string{"daemon-job", "cli-job"} {
-		if active, err := restored.JobActive(ctx, job); err != nil || active {
+		if active, err := defaultTenant(restored).JobActive(ctx, job); err != nil || active {
 			restored.Close()
 			t.Fatalf("restored job %s active = %v, %v; want copied lease cleared", job, active, err)
 		}
-		if err := restored.AcquireJobLease(ctx, job, "daemon/new-daemon/"+job, expires); err != nil {
+		if err := restored.System().AcquireJobLease(ctx, job, "daemon/new-daemon/"+job, expires); err != nil {
 			restored.Close()
 			t.Fatalf("scan lease for %s after restore: %v", job, err)
 		}
@@ -512,7 +512,7 @@ func TestRestoreClearsLeasesCopiedFromLiveDaemonBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer source.Close()
-	status, err := source.DaemonLeaseStatus(ctx)
+	status, err := source.System().DaemonLeaseStatus(ctx)
 	if err != nil || status.Owner != "old-daemon" {
 		t.Fatalf("backup daemon lease = %#v, %v; want old-daemon kept in the backup", status, err)
 	}

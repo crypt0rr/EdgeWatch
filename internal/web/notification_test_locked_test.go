@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
 // The aggregate notification test must fail, not report {"sent":0}, while an
@@ -16,7 +18,7 @@ func TestNotificationTestReportsLockedManagedDestination(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	// The destination is locked before the test and is never contacted.
-	if _, err := server.App.Notifier.CreateManaged(ctx, "Ops", "generic://127.0.0.1:9/ops?disabletls=yes", true); err != nil {
+	if _, err := server.App.Notifier.Tenant(defaultTenantStore(server)).CreateManagedWithAudit(ctx, "Ops", "generic://127.0.0.1:9/ops?disabletls=yes", true, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Remove(filepath.Join(filepath.Dir(db.Path), "notification.key")); err != nil {

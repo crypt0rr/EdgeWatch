@@ -122,25 +122,25 @@ func newSchema50Fixture(t *testing.T, routing func(destinations []ManagedNotific
 		t.Fatal(err)
 	}
 	defer s.Close()
-	job, err := s.CreateJob(ctx, testJob("schema50-public"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("schema50-public"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	fixture.jobID = job.ID
 	var destinations []ManagedNotification
 	for _, name := range []string{"Operations", "Security"} {
-		destination, err := s.CreateManagedNotification(ctx, "destination-"+strings.ToLower(name), name, "generic", []byte{1}, []byte{2}, true)
+		destination, err := defaultTenant(s).CreateManagedNotification(ctx, "destination-"+strings.ToLower(name), name, "generic", []byte{1}, []byte{2}, true)
 		if err != nil {
 			t.Fatal(err)
 		}
 		destinations = append(destinations, destination)
 	}
 	if routing != nil {
-		if err := s.SetApplicationUpdateDestinations(ctx, routing(destinations), AuditEntry{Action: "notifications.update_routing", ActorUsername: "admin"}); err != nil {
+		if err := defaultTenant(s).SetApplicationUpdateDestinations(ctx, routing(destinations), AuditEntry{Action: "notifications.update_routing", ActorUsername: "admin"}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "Perimeter", Introduction: "Published hosts"}, []PublicDashboardHost{
+	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "Perimeter", Introduction: "Published hosts"}, []PublicDashboardHost{
 		{JobID: job.ID, Address: "192.0.2.10"},
 		{JobID: job.ID, Address: "192.0.2.11"},
 	}, AuditEntry{Action: "public_dashboard.updated", ActorUsername: "admin"}); err != nil {
@@ -154,7 +154,7 @@ func newSchema50Fixture(t *testing.T, routing func(destinations []ManagedNotific
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO security_audit(action,detail,created_at) VALUES('auth.legacy_recovery_codes_retired','retired=1',datetime('now'))`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.PutSetupToken(ctx, "setup-token-hash", time.Now().Add(time.Hour)); err != nil {
+	if err := s.Platform().PutSetupToken(ctx, "setup-token-hash", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -300,21 +300,21 @@ func TestMigration51MovesSingletonsToTheDefaultTenant(t *testing.T) {
 			if err := s.DB.QueryRow(`SELECT notification_destinations_json FROM application_update_state WHERE id=1`).Scan(&platformRouting); err != nil || platformRouting != "[]" {
 				t.Fatalf("platform update routing = %q, %v; want []", platformRouting, err)
 			}
-			updateState, err := s.GetApplicationUpdateState(ctx)
+			updateRouting, err := defaultTenant(s).ApplicationUpdateRouting(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if tc.routing == nil {
-				if fixture.routingJSON != "" || updateState.UpdateNotificationDestinationsConfigured || updateState.UpdateNotificationDestinations != nil {
-					t.Fatalf("unconfigured routing became %#v (fixture %q)", updateState, fixture.routingJSON)
+				if fixture.routingJSON != "" || updateRouting.Configured || updateRouting.Destinations != nil {
+					t.Fatalf("unconfigured routing became %#v (fixture %q)", updateRouting, fixture.routingJSON)
 				}
 			} else {
 				var want []string
 				if err := json.Unmarshal([]byte(fixture.routingJSON), &want); err != nil {
 					t.Fatal(err)
 				}
-				if !updateState.UpdateNotificationDestinationsConfigured || !slices.Equal(updateState.UpdateNotificationDestinations, want) {
-					t.Fatalf("configured routing = %#v, want %v", updateState, want)
+				if !updateRouting.Configured || !slices.Equal(updateRouting.Destinations, want) {
+					t.Fatalf("configured routing = %#v, want %v", updateRouting, want)
 				}
 			}
 
@@ -329,7 +329,7 @@ func TestMigration51MovesSingletonsToTheDefaultTenant(t *testing.T) {
 			if err := s.DB.QueryRow(`SELECT id,tenant_id FROM public_dashboards`).Scan(&dashboardID, &dashboardTenant); err != nil || dashboardID != 1 || dashboardTenant != DefaultTenantID {
 				t.Fatalf("public dashboard = %d/%q, %v", dashboardID, dashboardTenant, err)
 			}
-			dashboard, err := s.GetPublicDashboard(ctx)
+			dashboard, err := defaultTenant(s).GetPublicDashboard(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -386,10 +386,10 @@ func TestMigration51MovesSingletonsToTheDefaultTenant(t *testing.T) {
 			assertForeignKeysClean(t, s.DB)
 
 			// The copied revision token still lets the loaded editor save.
-			if err := s.SavePublicDashboardIfCurrent(ctx, dashboard.UpdatedAt, PublicDashboard{Enabled: false, Title: "After upgrade"}, dashboard.Hosts[:1], AuditEntry{Action: "public_dashboard.updated"}); err != nil {
+			if err := defaultTenant(s).SavePublicDashboardIfCurrent(ctx, dashboard.UpdatedAt, PublicDashboard{Enabled: false, Title: "After upgrade"}, dashboard.Hosts[:1], AuditEntry{Action: "public_dashboard.updated"}); err != nil {
 				t.Fatalf("save with the pre-upgrade revision token: %v", err)
 			}
-			saved, err := s.GetPublicDashboard(ctx)
+			saved, err := defaultTenant(s).GetPublicDashboard(ctx)
 			if err != nil || saved.Title != "After upgrade" || saved.Enabled || len(saved.Hosts) != 1 {
 				t.Fatalf("saved public dashboard = %#v, %v", saved, err)
 			}
@@ -434,10 +434,10 @@ func TestMigration51IsANoOpWhenRepeated(t *testing.T) {
 	}
 	// Write after the upgrade so the repeat cannot pass by copying the
 	// schema-50 values again.
-	if err := s.SetApplicationUpdateDestinations(ctx, []string{"file:after-upgrade"}, AuditEntry{Action: "notifications.update_routing"}); err != nil {
+	if err := defaultTenant(s).SetApplicationUpdateDestinations(ctx, []string{"file:after-upgrade"}, AuditEntry{Action: "notifications.update_routing"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "After upgrade"}, nil, AuditEntry{}); err != nil {
+	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "After upgrade"}, nil, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	before := schema51Snapshot(t, s.DB)
@@ -501,29 +501,29 @@ func TestMigration51UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 			if err := s.DB.QueryRow(`SELECT update_destinations_json FROM tenants WHERE id=? AND is_default=1`, DefaultTenantID).Scan(&routing); err != nil {
 				t.Fatalf("default tenant: %v", err)
 			}
-			state, err := s.GetApplicationUpdateState(ctx)
+			updateRouting, err := defaultTenant(s).ApplicationUpdateRouting(ctx)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if state.UpdateNotificationDestinationsConfigured {
-				t.Fatalf("update routing = %#v, want unconfigured", state)
+			if updateRouting.Configured {
+				t.Fatalf("update routing = %#v, want unconfigured", updateRouting)
 			}
-			if err := s.SetApplicationUpdateDestinations(ctx, []string{"file:ops"}, AuditEntry{Action: "notifications.update_routing"}); err != nil {
+			if err := defaultTenant(s).SetApplicationUpdateDestinations(ctx, []string{"file:ops"}, AuditEntry{Action: "notifications.update_routing"}); err != nil {
 				t.Fatal(err)
 			}
 			if slices.Contains(tc.missing, "public_dashboard") {
-				if _, err := s.GetPublicDashboard(ctx); !errors.Is(err, ErrNotFound) {
+				if _, err := defaultTenant(s).GetPublicDashboard(ctx); !errors.Is(err, ErrNotFound) {
 					t.Fatalf("public dashboard of a recovery database = %v, want not found", err)
 				}
 			}
-			if err := s.SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "Recovered"}, []PublicDashboardHost{{JobID: fixture.jobID, Address: "192.0.2.20"}}, AuditEntry{Action: "public_dashboard.updated"}); err != nil {
+			if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "Recovered"}, []PublicDashboardHost{{JobID: fixture.jobID, Address: "192.0.2.20"}}, AuditEntry{Action: "public_dashboard.updated"}); err != nil {
 				t.Fatal(err)
 			}
-			dashboard, err := s.GetPublicDashboard(ctx)
+			dashboard, err := defaultTenant(s).GetPublicDashboard(ctx)
 			if err != nil || dashboard.Title != "Recovered" || len(dashboard.Hosts) != 1 {
 				t.Fatalf("recovered public dashboard = %#v, %v", dashboard, err)
 			}
-			if err := s.PutSetupToken(ctx, "recovered-token", time.Now().Add(time.Hour)); err != nil {
+			if err := s.Platform().PutSetupToken(ctx, "recovered-token", time.Now().Add(time.Hour)); err != nil {
 				t.Fatal(err)
 			}
 			var purpose, category, tenant string
@@ -544,25 +544,25 @@ func TestMigration51UpgradesRecoveryDatabasesWithMissingTables(t *testing.T) {
 func TestUpdateRoutingWritesRequireTheDefaultTenant(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	destination, err := s.CreateManagedNotification(ctx, "destination-routing", "Routing", "generic", []byte{1}, []byte{2}, true)
+	destination, err := defaultTenant(s).CreateManagedNotification(ctx, "destination-routing", "Routing", "generic", []byte{1}, []byte{2}, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetApplicationUpdateDestinations(ctx, []string{destination.ID}, AuditEntry{}); err != nil {
+	if err := defaultTenant(s).SetApplicationUpdateDestinations(ctx, []string{destination.ID}, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	// Since schema 52 the destination references the tenant.
 	if _, err := s.DB.ExecContext(ctx, `PRAGMA foreign_keys=OFF; DELETE FROM public_dashboards; DELETE FROM tenants; PRAGMA foreign_keys=ON`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetApplicationUpdateDestinations(ctx, []string{"file:other"}, AuditEntry{Action: "notifications.update_routing"}); !errors.Is(err, ErrNotFound) {
+	if err := defaultTenant(s).SetApplicationUpdateDestinations(ctx, []string{"file:other"}, AuditEntry{Action: "notifications.update_routing"}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("routing write without the default tenant = %v, want ErrNotFound", err)
 	}
 	var audits int
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM security_audit WHERE action='notifications.update_routing'`).Scan(&audits); err != nil || audits != 0 {
 		t.Fatalf("failed routing write left %d audit rows: %v", audits, err)
 	}
-	if changed, err := s.DeleteManagedNotificationWithAudit(ctx, destination.ID, destination.Revision, AuditEntry{Action: "notifications.deleted"}); err != nil || len(changed) != 0 {
+	if changed, err := defaultTenant(s).DeleteManagedNotificationWithAudit(ctx, destination.ID, destination.Revision, AuditEntry{Action: "notifications.deleted"}); err != nil || len(changed) != 0 {
 		t.Fatalf("delete without the default tenant = %v, %v", changed, err)
 	}
 }

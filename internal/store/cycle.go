@@ -116,12 +116,6 @@ type ScanCycleUnitSummary struct {
 	LastError  string    `json:"last_error,omitempty"`
 }
 
-// CreateScanCycle stores a new cycle through SystemStore.CreateScanCycle,
-// until the daemon uses Store.System itself.
-func (s *Store) CreateScanCycle(ctx context.Context, cycle ScanCycleRecord) (ScanCycleRecord, error) {
-	return s.System().CreateScanCycle(ctx, cycle)
-}
-
 // CreateScanCycle stores a new paused cycle with its planned units. It is
 // the daemon's writer: the cycle belongs to its job's tenant, which the
 // scan_cycles foreign key requires to exist.
@@ -186,13 +180,6 @@ func (ss *SystemStore) CreateScanCycle(ctx context.Context, cycle ScanCycleRecor
 		return ScanCycleRecord{}, err
 	}
 	return cycle, nil
-}
-
-// ReconcileScanCycleEnrichment expands a cycle through
-// SystemStore.ReconcileScanCycleEnrichment, until the daemon uses
-// Store.System itself.
-func (s *Store) ReconcileScanCycleEnrichment(ctx context.Context, cycleID string) error {
-	return s.System().ReconcileScanCycleEnrichment(ctx, cycleID)
 }
 
 // ReconcileScanCycleEnrichment expands a phase-aware Naabu cycle from durable
@@ -812,13 +799,6 @@ func scanScanCycle(row *sql.Row, id string) (ScanCycleRecord, error) {
 	return cycle, nil
 }
 
-// GetScanCycle returns a cycle with its pinned plan.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetScanCycle.
-func (s *Store) GetScanCycle(ctx context.Context, id string) (ScanCycleRecord, error) {
-	return s.Tenant(DefaultTenantScope()).GetScanCycle(ctx, id)
-}
-
 // GetScanCycle returns one of the tenant's cycles with its pinned plan. A
 // cycle belongs to the tenant of its job; a cycle of another tenant is
 // ErrNoScanCycle, like an unknown ID.
@@ -833,14 +813,6 @@ func (ts *TenantStore) GetScanCycle(ctx context.Context, id string) (ScanCycleRe
 // use it to return the cycle they changed.
 func (ss *SystemStore) scanCycle(ctx context.Context, id string) (ScanCycleRecord, error) {
 	return scanScanCycle(ss.store.reader().QueryRowContext(ctx, `SELECT `+scanCycleColumns+` FROM scan_cycles c WHERE c.id=?`, id), id)
-}
-
-// ScanCycleProbeTotals reports the probes of a cycle by execution category.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ScanCycleProbeTotals.
-func (s *Store) ScanCycleProbeTotals(ctx context.Context, cycleID string) (discovery, nmap int64, err error) {
-	return s.Tenant(DefaultTenantScope()).ScanCycleProbeTotals(ctx, cycleID)
 }
 
 // ScanCycleProbeTotals reports the durable execution categories for one of
@@ -861,14 +833,6 @@ func (ts *TenantStore) ScanCycleProbeTotals(ctx context.Context, cycleID string)
 	return discovery, nmap, err
 }
 
-// GetActiveScanCycle returns the running, paused, or stalled cycle of a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.GetActiveScanCycle.
-func (s *Store) GetActiveScanCycle(ctx context.Context, jobID string) (ScanCycleRecord, error) {
-	return s.Tenant(DefaultTenantScope()).GetActiveScanCycle(ctx, jobID)
-}
-
 // GetActiveScanCycle returns the running, paused, or stalled cycle of one of
 // the tenant's jobs. A job of another tenant has none: ErrNoScanCycle.
 func (ts *TenantStore) GetActiveScanCycle(ctx context.Context, jobID string) (ScanCycleRecord, error) {
@@ -884,14 +848,6 @@ func (ts *TenantStore) GetActiveScanCycle(ctx context.Context, jobID string) (Sc
 		return ScanCycleRecord{}, err
 	}
 	return ts.GetScanCycle(ctx, id)
-}
-
-// ListActiveScanCycleSummaries returns the active cycle of each visible job.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ListActiveScanCycleSummaries.
-func (s *Store) ListActiveScanCycleSummaries(ctx context.Context, includeArchived bool) (map[string]ScanCycleSummary, error) {
-	return s.Tenant(DefaultTenantScope()).ListActiveScanCycleSummaries(ctx, includeArchived)
 }
 
 // ListActiveScanCycleSummaries returns the current active cycle for each of
@@ -925,14 +881,6 @@ func (ts *TenantStore) ListActiveScanCycleSummaries(ctx context.Context, include
 	return out, nil
 }
 
-// GetLatestScanCycle returns the newest cycle of a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.GetLatestScanCycle.
-func (s *Store) GetLatestScanCycle(ctx context.Context, jobID string) (ScanCycleRecord, error) {
-	return s.Tenant(DefaultTenantScope()).GetLatestScanCycle(ctx, jobID)
-}
-
 // GetLatestScanCycle returns the newest cycle for one of the tenant's jobs
 // regardless of its terminal state; a job of another tenant has none. It is
 // intentionally separate from GetActiveScanCycle: a completed, discarded, or
@@ -951,14 +899,6 @@ func (ts *TenantStore) GetLatestScanCycle(ctx context.Context, jobID string) (Sc
 		return ScanCycleRecord{}, err
 	}
 	return ts.GetScanCycle(ctx, id)
-}
-
-// GetRecoverableScanCycle returns the cycle of a job that a trigger resumes.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.GetRecoverableScanCycle.
-func (s *Store) GetRecoverableScanCycle(ctx context.Context, jobID string) (ScanCycleRecord, error) {
-	return s.Tenant(DefaultTenantScope()).GetRecoverableScanCycle(ctx, jobID)
 }
 
 // GetRecoverableScanCycle returns an active cycle or a completed cycle whose
@@ -993,15 +933,6 @@ func (ts *TenantStore) GetRecoverableScanCycle(ctx context.Context, jobID string
 	return cycle, nil
 }
 
-// ScanCycleExpiryNotified reports whether an expired cycle already produced
-// its terminal scan record.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ScanCycleExpiryNotified.
-func (s *Store) ScanCycleExpiryNotified(ctx context.Context, cycleID string) (bool, error) {
-	return s.Tenant(DefaultTenantScope()).ScanCycleExpiryNotified(ctx, cycleID)
-}
-
 // ScanCycleExpiryNotified reports whether one of the tenant's expired cycles
 // already produced its terminal scan record; only the tenant's scans count.
 // Housekeeping can expire a cycle between schedule ticks; keeping this check
@@ -1025,14 +956,6 @@ func (ts *TenantStore) ScanCycleExpiryNotified(ctx context.Context, cycleID stri
 // count.
 const scanCycleHasScanQuery = `SELECT COUNT(*) FROM scans WHERE cycle_id=? AND tenant_id=? AND cycle_status='completed' AND status IN ('success','incomplete')`
 
-// ScanCycleHasScan reports whether a terminal cycle has been promoted into
-// scan history.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ScanCycleHasScan.
-func (s *Store) ScanCycleHasScan(ctx context.Context, cycleID string) (bool, error) {
-	return s.Tenant(DefaultTenantScope()).ScanCycleHasScan(ctx, cycleID)
-}
-
 // ScanCycleHasScan reports whether one of the tenant's terminal cycles has
 // already been promoted into scan history; a cycle of another tenant has
 // not. The cycle is marked completed before the engine's final transaction,
@@ -1047,14 +970,6 @@ func (ts *TenantStore) ScanCycleHasScan(ctx context.Context, cycleID string) (bo
 		return false, err
 	}
 	return count > 0, nil
-}
-
-// ListScanCycleUnitSummaries returns the progress of every unit of a cycle.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ListScanCycleUnitSummaries.
-func (s *Store) ListScanCycleUnitSummaries(ctx context.Context, cycleID string) ([]ScanCycleUnitSummary, error) {
-	return s.Tenant(DefaultTenantScope()).ListScanCycleUnitSummaries(ctx, cycleID)
 }
 
 // ListScanCycleUnitSummaries returns the progress of every unit of one of
@@ -1087,15 +1002,6 @@ func (ts *TenantStore) ListScanCycleUnitSummaries(ctx context.Context, cycleID s
 		out = append(out, item)
 	}
 	return out, rows.Err()
-}
-
-// ListScanCycleUnitSummariesPage returns a bounded progress page of a
-// cycle's units.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ListScanCycleUnitSummariesPage.
-func (s *Store) ListScanCycleUnitSummariesPage(ctx context.Context, cycleID string, limit, offset int) (Page[ScanCycleUnitSummary], error) {
-	return s.Tenant(DefaultTenantScope()).ListScanCycleUnitSummariesPage(ctx, cycleID, limit, offset)
 }
 
 // ListScanCycleUnitSummariesPage returns a bounded progress page of one of
@@ -1137,13 +1043,6 @@ func (ts *TenantStore) ListScanCycleUnitSummariesPage(ctx context.Context, cycle
 		page.Items = append(page.Items, item)
 	}
 	return page, rows.Err()
-}
-
-// StartScanCycleAttempt starts an attempt through
-// SystemStore.StartScanCycleAttempt, until the daemon uses Store.System
-// itself.
-func (s *Store) StartScanCycleAttempt(ctx context.Context, id string) (ScanCycleRecord, error) {
-	return s.System().StartScanCycleAttempt(ctx, id)
 }
 
 // StartScanCycleAttempt resets a unit left running by a process crash and
@@ -1203,12 +1102,6 @@ func (ss *SystemStore) StartScanCycleAttempt(ctx context.Context, id string) (Sc
 	return ss.scanCycle(ctx, id)
 }
 
-// NextScanCycleUnit returns the next pending unit through
-// SystemStore.NextScanCycleUnit, until the daemon uses Store.System itself.
-func (s *Store) NextScanCycleUnit(ctx context.Context, cycleID string) (ScanCycleUnit, error) {
-	return s.System().NextScanCycleUnit(ctx, cycleID)
-}
-
 // NextScanCycleUnit returns the first pending unit of a running cycle.
 func (ss *SystemStore) NextScanCycleUnit(ctx context.Context, cycleID string) (ScanCycleUnit, error) {
 	var unit ScanCycleUnit
@@ -1243,12 +1136,6 @@ func (ss *SystemStore) NextScanCycleUnit(ctx context.Context, cycleID string) (S
 	unit.StartedAt, _ = time.Parse(time.RFC3339Nano, started)
 	unit.FinishedAt, _ = time.Parse(time.RFC3339Nano, finished)
 	return unit, nil
-}
-
-// ClaimScanCycleUnit claims a unit through SystemStore.ClaimScanCycleUnit,
-// until the daemon uses Store.System itself.
-func (s *Store) ClaimScanCycleUnit(ctx context.Context, cycleID string, sequence int) (ScanCycleUnit, error) {
-	return s.System().ClaimScanCycleUnit(ctx, cycleID, sequence)
 }
 
 // ClaimScanCycleUnit marks a pending unit of a running cycle as running
@@ -1310,13 +1197,6 @@ func (ss *SystemStore) getScanCycleUnit(ctx context.Context, cycleID string, seq
 	return unit, nil
 }
 
-// CompleteScanCycleUnit records a unit's result through
-// SystemStore.CompleteScanCycleUnit, until the daemon uses Store.System
-// itself.
-func (s *Store) CompleteScanCycleUnit(ctx context.Context, cycleID string, sequence int, snapshot model.Snapshot) error {
-	return s.System().CompleteScanCycleUnit(ctx, cycleID, sequence, snapshot)
-}
-
 // CompleteScanCycleUnit stores the checkpoint of a running unit and counts
 // its progress on the running cycle.
 func (ss *SystemStore) CompleteScanCycleUnit(ctx context.Context, cycleID string, sequence int, snapshot model.Snapshot) error {
@@ -1368,23 +1248,10 @@ func (ss *SystemStore) CompleteScanCycleUnit(ctx context.Context, cycleID string
 	return tx.Commit()
 }
 
-// RetryScanCycleUnit returns a unit to pending through
-// SystemStore.RetryScanCycleUnit, until the daemon uses Store.System itself.
-func (s *Store) RetryScanCycleUnit(ctx context.Context, cycleID string, sequence int, lastError string) error {
-	return s.System().RetryScanCycleUnit(ctx, cycleID, sequence, lastError)
-}
-
 // RetryScanCycleUnit returns a claimed unit of a running cycle to pending
 // without counting a scanner failure.
 func (ss *SystemStore) RetryScanCycleUnit(ctx context.Context, cycleID string, sequence int, lastError string) error {
 	return ss.retryScanCycleUnit(ctx, cycleID, sequence, lastError, false)
-}
-
-// RetryScanCycleUnitAfterFailure returns a unit to pending through
-// SystemStore.RetryScanCycleUnitAfterFailure, until the daemon uses
-// Store.System itself.
-func (s *Store) RetryScanCycleUnitAfterFailure(ctx context.Context, cycleID string, sequence int, lastError string) error {
-	return s.System().RetryScanCycleUnitAfterFailure(ctx, cycleID, sequence, lastError)
 }
 
 // RetryScanCycleUnitAfterFailure returns a claimed unit to pending and records
@@ -1415,12 +1282,6 @@ func (ss *SystemStore) retryScanCycleUnit(ctx context.Context, cycleID string, s
 		return ErrCycleNotResumable
 	}
 	return ErrNoPendingUnit
-}
-
-// SplitScanCycleUnit splits a unit through SystemStore.SplitScanCycleUnit,
-// until the daemon uses Store.System itself.
-func (s *Store) SplitScanCycleUnit(ctx context.Context, cycleID string, sequence int, first, second scanner.WorkUnit, lastError string) error {
-	return s.System().SplitScanCycleUnit(ctx, cycleID, sequence, first, second, lastError)
 }
 
 // SplitScanCycleUnit replaces a running unit of a running cycle with two
@@ -1491,12 +1352,6 @@ func (ss *SystemStore) SplitScanCycleUnit(ctx context.Context, cycleID string, s
 	return tx.Commit()
 }
 
-// PauseScanCycle pauses a cycle through SystemStore.PauseScanCycle, until
-// the daemon uses Store.System itself.
-func (s *Store) PauseScanCycle(ctx context.Context, cycleID string, noProgress bool, lastError string) (ScanCycleRecord, error) {
-	return s.System().PauseScanCycle(ctx, cycleID, noProgress, lastError)
-}
-
 // PauseScanCycle pauses an active cycle at the end of an attempt and counts
 // an attempt without progress, then returns the cycle.
 func (ss *SystemStore) PauseScanCycle(ctx context.Context, cycleID string, noProgress bool, lastError string) (ScanCycleRecord, error) {
@@ -1508,13 +1363,6 @@ func (ss *SystemStore) PauseScanCycle(ctx context.Context, cycleID string, noPro
 	return ss.scanCycle(ctx, cycleID)
 }
 
-// MarkScanCycleStalled stalls a cycle through
-// SystemStore.MarkScanCycleStalled, until the daemon uses Store.System
-// itself.
-func (s *Store) MarkScanCycleStalled(ctx context.Context, cycleID, lastError string) (ScanCycleRecord, error) {
-	return s.System().MarkScanCycleStalled(ctx, cycleID, lastError)
-}
-
 // MarkScanCycleStalled marks an active cycle stalled with the error that
 // stopped it, then returns the cycle.
 func (ss *SystemStore) MarkScanCycleStalled(ctx context.Context, cycleID, lastError string) (ScanCycleRecord, error) {
@@ -1522,12 +1370,6 @@ func (ss *SystemStore) MarkScanCycleStalled(ctx context.Context, cycleID, lastEr
 		return ScanCycleRecord{}, err
 	}
 	return ss.scanCycle(ctx, cycleID)
-}
-
-// CompleteScanCycle completes a cycle through SystemStore.CompleteScanCycle,
-// until the daemon uses Store.System itself.
-func (s *Store) CompleteScanCycle(ctx context.Context, cycleID string) (ScanCycleRecord, error) {
-	return s.System().CompleteScanCycle(ctx, cycleID)
 }
 
 // CompleteScanCycle marks a running cycle whose units are all completed as
@@ -1569,13 +1411,6 @@ func (ss *SystemStore) CompleteScanCycle(ctx context.Context, cycleID string) (S
 		return ScanCycleRecord{}, err
 	}
 	return ss.scanCycle(ctx, cycleID)
-}
-
-// DiscardScanCycle discards a cycle.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.DiscardScanCycle.
-func (s *Store) DiscardScanCycle(ctx context.Context, cycleID string) error {
-	return s.Tenant(DefaultTenantScope()).DiscardScanCycle(ctx, cycleID)
 }
 
 // tenantScanCycleSQL selects the ID of one cycle if it belongs to a tenant.
@@ -1641,12 +1476,6 @@ func (ts *TenantStore) DiscardScanCycle(ctx context.Context, cycleID string) err
 	return tx.Commit()
 }
 
-// ExpireScanCycles expires cycles through SystemStore.ExpireScanCycles,
-// until the daemon uses Store.System itself.
-func (s *Store) ExpireScanCycles(ctx context.Context, now time.Time) (int64, error) {
-	return s.System().ExpireScanCycles(ctx, now)
-}
-
 // ExpireScanCycles ends every tenant's active cycles whose resume window has
 // elapsed at now, in bounded batches, except those whose job holds a live
 // lease, and returns how many it ended.
@@ -1696,12 +1525,6 @@ func (ss *SystemStore) ExpireScanCycles(ctx context.Context, now time.Time) (int
 			return total, err
 		}
 	}
-}
-
-// ExpireScanCycle expires one cycle through SystemStore.ExpireScanCycle,
-// until the daemon uses Store.System itself.
-func (s *Store) ExpireScanCycle(ctx context.Context, cycleID string, now time.Time) (ScanCycleRecord, error) {
-	return s.System().ExpireScanCycle(ctx, cycleID, now)
 }
 
 // ExpireScanCycle ends one active cycle whose resume window has elapsed at
@@ -1772,13 +1595,6 @@ func (ss *SystemStore) clearExpiredCyclePayloads(ctx context.Context, ids []stri
 			return nil
 		}
 	}
-}
-
-// LoadScanCycleFragments loads a cycle's checkpoints through
-// SystemStore.LoadScanCycleFragments, until the daemon uses Store.System
-// itself.
-func (s *Store) LoadScanCycleFragments(ctx context.Context, cycleID string) (scanner.WorkPlan, []model.Snapshot, error) {
-	return s.System().LoadScanCycleFragments(ctx, cycleID)
 }
 
 // LoadScanCycleFragments returns a cycle's pinned plan and the checkpoint of

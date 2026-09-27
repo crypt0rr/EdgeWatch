@@ -220,7 +220,7 @@ func openSidecarProbe(t *testing.T, path string) *Store {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := probe.DaemonLeaseStatus(context.Background()); err != nil {
+	if _, err := probe.System().DaemonLeaseStatus(context.Background()); err != nil {
 		probe.Close()
 		t.Fatal(err)
 	}

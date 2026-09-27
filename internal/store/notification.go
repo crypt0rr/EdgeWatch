@@ -56,14 +56,6 @@ func scanManagedNotification(scanner interface{ Scan(...any) error }, tail ...an
 	return destination, nil
 }
 
-// ListManagedNotifications returns the destinations, ordered by name.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ListManagedNotifications.
-func (s *Store) ListManagedNotifications(ctx context.Context) ([]ManagedNotification, error) {
-	return s.Tenant(DefaultTenantScope()).ListManagedNotifications(ctx)
-}
-
 // ListManagedNotifications returns the tenant's destinations, ordered by
 // name. Another tenant's destinations and the platform's are never listed.
 func (ts *TenantStore) ListManagedNotifications(ctx context.Context) ([]ManagedNotification, error) {
@@ -117,14 +109,6 @@ func (ss *SystemStore) ListManagedNotifications(ctx context.Context) ([]ManagedN
 	return out, nil
 }
 
-// GetManagedNotification returns one destination.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.GetManagedNotification.
-func (s *Store) GetManagedNotification(ctx context.Context, id string) (ManagedNotification, error) {
-	return s.Tenant(DefaultTenantScope()).GetManagedNotification(ctx, id)
-}
-
 // GetManagedNotification returns one of the tenant's destinations. A
 // destination of another tenant or of the platform is ErrNotFound, exactly as
 // an unknown ID.
@@ -156,27 +140,10 @@ func (ts *TenantStore) OwnsDeploymentNotifications(_ context.Context) (bool, err
 	return ts.scope.id == DefaultTenantID, nil
 }
 
-// CreateManagedNotification creates a destination.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.CreateManagedNotification.
-func (s *Store) CreateManagedNotification(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool) (ManagedNotification, error) {
-	return s.Tenant(DefaultTenantScope()).CreateManagedNotification(ctx, id, name, provider, ciphertext, nonce, enabled)
-}
-
 // CreateManagedNotification creates a destination in the tenant. Names are
 // unique within a tenant, so another tenant may use the same name.
 func (ts *TenantStore) CreateManagedNotification(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool) (ManagedNotification, error) {
 	return ts.createManagedNotificationWithAuditsAndSelection(ctx, id, name, provider, ciphertext, nonce, enabled, nil, nil)
-}
-
-// CreateManagedNotificationWithAudit commits a new encrypted destination and
-// its audit record together.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.CreateManagedNotificationWithAudit.
-func (s *Store) CreateManagedNotificationWithAudit(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool, audit AuditEntry) (ManagedNotification, error) {
-	return s.Tenant(DefaultTenantScope()).CreateManagedNotificationWithAudit(ctx, id, name, provider, ciphertext, nonce, enabled, audit)
 }
 
 // CreateManagedNotificationWithAudit commits a new encrypted destination of
@@ -187,15 +154,6 @@ func (ts *TenantStore) CreateManagedNotificationWithAudit(ctx context.Context, i
 	return ts.createManagedNotificationWithAuditsAndSelection(ctx, id, name, provider, ciphertext, nonce, enabled, nil, []AuditEntry{audit})
 }
 
-// CreateManagedNotificationWithLegacySelection creates a destination and
-// freezes the jobs that still use the pre-routing global fallback.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.CreateManagedNotificationWithLegacySelection.
-func (s *Store) CreateManagedNotificationWithLegacySelection(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool, selection []string) (ManagedNotification, error) {
-	return s.Tenant(DefaultTenantScope()).CreateManagedNotificationWithLegacySelection(ctx, id, name, provider, ciphertext, nonce, enabled, selection)
-}
-
 // CreateManagedNotificationWithLegacySelection creates a destination in the
 // tenant and freezes the tenant's jobs that still use the pre-routing global
 // fallback in the same transaction. The selection must describe the
@@ -204,15 +162,6 @@ func (s *Store) CreateManagedNotificationWithLegacySelection(ctx context.Context
 // changed.
 func (ts *TenantStore) CreateManagedNotificationWithLegacySelection(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool, selection []string) (ManagedNotification, error) {
 	return ts.createManagedNotificationWithAuditsAndSelection(ctx, id, name, provider, ciphertext, nonce, enabled, cloneNotificationSelection(selection), nil)
-}
-
-// CreateManagedNotificationWithLegacySelectionAndAudit is the audited variant
-// of CreateManagedNotificationWithLegacySelection.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.CreateManagedNotificationWithLegacySelectionAndAudit.
-func (s *Store) CreateManagedNotificationWithLegacySelectionAndAudit(ctx context.Context, id, name, provider string, ciphertext, nonce []byte, enabled bool, selection []string, audit AuditEntry) (ManagedNotification, error) {
-	return s.Tenant(DefaultTenantScope()).CreateManagedNotificationWithLegacySelectionAndAudit(ctx, id, name, provider, ciphertext, nonce, enabled, selection, audit)
 }
 
 // CreateManagedNotificationWithLegacySelectionAndAudit is the audited variant
@@ -255,15 +204,6 @@ func (ts *TenantStore) createManagedNotificationWithAuditsAndSelection(ctx conte
 		return ManagedNotification{}, err
 	}
 	return ManagedNotification{ID: id, TenantID: ts.scope.id, Name: name, Provider: provider, Ciphertext: append([]byte(nil), ciphertext...), Nonce: append([]byte(nil), nonce...), Enabled: enabled, Revision: 1, CreatedAt: now, UpdatedAt: now}, nil
-}
-
-// MaterializeLegacyNotificationSelections freezes every job whose routing is
-// still nil to the supplied destination set.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.MaterializeLegacyNotificationSelections.
-func (s *Store) MaterializeLegacyNotificationSelections(ctx context.Context, selection []string) (int, error) {
-	return s.Tenant(DefaultTenantScope()).MaterializeLegacyNotificationSelections(ctx, selection)
 }
 
 // MaterializeLegacyNotificationSelections freezes every job of the tenant
@@ -390,14 +330,6 @@ func pendingManagedDeliveryDiscardAudit(audits []AuditEntry, id string, count in
 	return entry
 }
 
-// UpdateManagedNotification atomically updates metadata and ciphertext.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.UpdateManagedNotification.
-func (s *Store) UpdateManagedNotification(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool) (ManagedNotification, error) {
-	return s.Tenant(DefaultTenantScope()).UpdateManagedNotification(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled)
-}
-
 // UpdateManagedNotification atomically updates the metadata and ciphertext
 // of one of the tenant's destinations. Metadata only changes keep pending
 // delivery intents by moving the current revision selector to the new
@@ -407,15 +339,6 @@ func (s *Store) UpdateManagedNotification(ctx context.Context, id string, expect
 // tenant or of the platform is ErrNotFound, and nothing changes.
 func (ts *TenantStore) UpdateManagedNotification(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool) (ManagedNotification, error) {
 	return ts.updateManagedNotificationWithAudits(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, nil)
-}
-
-// UpdateManagedNotificationWithAudit atomically updates an encrypted
-// destination, invalidates old pending deliveries, and records the action.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.UpdateManagedNotificationWithAudit.
-func (s *Store) UpdateManagedNotificationWithAudit(ctx context.Context, id string, expectedRevision int64, name, provider string, ciphertext, nonce []byte, enabled bool, audit AuditEntry) (ManagedNotification, error) {
-	return s.Tenant(DefaultTenantScope()).UpdateManagedNotificationWithAudit(ctx, id, expectedRevision, name, provider, ciphertext, nonce, enabled, audit)
 }
 
 // UpdateManagedNotificationWithAudit atomically updates one of the tenant's
@@ -493,28 +416,11 @@ func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, 
 	return ManagedNotification{ID: id, TenantID: ts.scope.id, Name: name, Provider: provider, Ciphertext: append([]byte(nil), ciphertext...), Nonce: append([]byte(nil), nonce...), Enabled: enabled, Revision: next, CreatedAt: current.CreatedAt, UpdatedAt: now}, nil
 }
 
-// DeleteManagedNotification removes a destination.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.DeleteManagedNotification.
-func (s *Store) DeleteManagedNotification(ctx context.Context, id string, expectedRevision int64) error {
-	return s.Tenant(DefaultTenantScope()).DeleteManagedNotification(ctx, id, expectedRevision)
-}
-
 // DeleteManagedNotification removes one of the tenant's destinations, as
 // DeleteManagedNotificationWithAudit does, without an audit record.
 func (ts *TenantStore) DeleteManagedNotification(ctx context.Context, id string, expectedRevision int64) error {
 	_, err := ts.deleteManagedNotificationWithAudits(ctx, id, expectedRevision, nil)
 	return err
-}
-
-// DeleteManagedNotificationWithAudit removes a destination with its audit
-// row.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.DeleteManagedNotificationWithAudit.
-func (s *Store) DeleteManagedNotificationWithAudit(ctx context.Context, id string, expectedRevision int64, audit AuditEntry) ([]string, error) {
-	return s.Tenant(DefaultTenantScope()).DeleteManagedNotificationWithAudit(ctx, id, expectedRevision, audit)
 }
 
 // DeleteManagedNotificationWithAudit removes one of the tenant's

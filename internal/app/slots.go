@@ -5,25 +5,17 @@ import (
 	"context"
 	"errors"
 	"sync"
-
-	"github.com/crypt0rr/edgewatch/internal/store"
 )
-
-// defaultSlotKey is the scan-slot key every job uses. It is the default
-// tenant, which owns every job for now, so a single key keeps the
-// deployment's scheduling identical to one FIFO semaphore.
-//
-// TODO(#839): use the job's tenant ID once job records carry it.
-const defaultSlotKey = store.DefaultTenantID
 
 // errSlotWaitFailed is returned to waiters that FailWaiters removed without
 // giving a reason.
 var errSlotWaitFailed = errors.New("scan slot wait failed")
 
 // slotPool hands out the deployment's scan slots. Capacity is the global
-// number of slots, max_concurrent_scans. A key identifies a tenant; capFor
-// may limit a key to fewer slots than the global capacity, and 0 means no
-// limit below it.
+// number of slots, max_concurrent_scans. A key identifies a tenant: a run
+// takes a slot under the ID of its job's tenant, and a config.yaml job under
+// the default tenant's. capFor may limit a key to fewer slots than the global
+// capacity, and 0 means no limit below it.
 //
 // Each key has a FIFO queue of waiters. When a slot is free, it goes to the
 // head waiter of the eligible key that was granted a slot least recently, so

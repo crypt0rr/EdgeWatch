@@ -679,7 +679,7 @@ func (n *Notifier) Queue(ctx context.Context, events []model.Event) error {
 	destinations := n.defaultSet().keys()
 	for _, event := range events {
 		for destination := range destinations {
-			if err := n.Store.QueueEvent(ctx, destination, event); err != nil {
+			if err := n.Store.System().QueueEvent(ctx, destination, event); err != nil {
 				return err
 			}
 		}
@@ -725,10 +725,10 @@ func (n *Notifier) drain(sendCtx, dispatchCtx context.Context) error {
 	pausedDestinations := n.pausedDestinationKeys()
 	excludedDestinations := append(append([]string{}, lockedDestinations...), pausedDestinations...)
 	if n.Store != nil {
-		if err := n.Store.WakeLockedDeliveries(dispatchCtx, destinationSnapshotKeys(destinations)); err != nil {
+		if err := n.Store.System().WakeLockedDeliveries(dispatchCtx, destinationSnapshotKeys(destinations)); err != nil {
 			return err
 		}
-		if err := n.Store.AgeLockedDeliveries(dispatchCtx, lockedDestinations); err != nil {
+		if err := n.Store.System().AgeLockedDeliveries(dispatchCtx, lockedDestinations); err != nil {
 			return err
 		}
 	}
@@ -740,7 +740,7 @@ func (n *Notifier) drain(sendCtx, dispatchCtx context.Context) error {
 		// A bounded pass drains several batches so a burst of events does not
 		// wait for multiple 30-second worker ticks. The batch and pass limits
 		// keep provider latency from starving scans and schedule reconciliation.
-		deliveries, err := n.Store.ClaimDueDeliveriesExcluding(dispatchCtx, notificationBatchSize, uuid.NewString(), excludedDestinations)
+		deliveries, err := n.Store.System().ClaimDueDeliveriesExcluding(dispatchCtx, notificationBatchSize, uuid.NewString(), excludedDestinations)
 		if err != nil {
 			return errors.Join(append(all, err)...)
 		}
@@ -827,7 +827,7 @@ func (n *Notifier) deliverOneSafe(ctx context.Context, delivery store.Delivery, 
 			panicErr := store.ErrDeliveryWorkerPanic
 			resultCtx, cancel := deliveryResultContext(ctx)
 			defer cancel()
-			resultErr := n.Store.DeliveryResultClaim(resultCtx, delivery.ID, delivery.ClaimToken, panicErr)
+			resultErr := n.Store.System().DeliveryResultClaim(resultCtx, delivery.ID, delivery.ClaimToken, panicErr)
 			err = errors.Join(panicErr, resultErr)
 		}
 	}()
@@ -893,22 +893,22 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 		deferErr := n.releaseClaim(ctx, delivery, store.ErrDeliveryIndeterminate, notificationIndeterminateDelay)
 		return errors.Join(sendErr, deferErr)
 	}
-	resultCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	resultCtx, cancel := deliveryResultContext(ctx)
 	defer cancel()
-	resultErr := n.Store.DeliveryResultClaim(resultCtx, delivery.ID, delivery.ClaimToken, sendErr)
+	resultErr := n.Store.System().DeliveryResultClaim(resultCtx, delivery.ID, delivery.ClaimToken, sendErr)
 	return errors.Join(sendErr, resultErr)
 }
 
 func (n *Notifier) releaseClaim(ctx context.Context, delivery store.Delivery, reason error, delay time.Duration) error {
 	releaseCtx, cancel := deliveryResultContext(ctx)
 	defer cancel()
-	return n.Store.DeferDeliveryWithError(releaseCtx, delivery.ID, delivery.ClaimToken, reason, delay)
+	return n.Store.System().DeferDeliveryWithError(releaseCtx, delivery.ID, delivery.ClaimToken, reason, delay)
 }
 
 func (n *Notifier) releaseClaimWithoutBudget(ctx context.Context, delivery store.Delivery, delay time.Duration) error {
 	releaseCtx, cancel := deliveryResultContext(ctx)
 	defer cancel()
-	return n.Store.ReleaseDeliveryClaim(releaseCtx, delivery.ID, delivery.ClaimToken, delay)
+	return n.Store.System().ReleaseDeliveryClaim(releaseCtx, delivery.ID, delivery.ClaimToken, delay)
 }
 
 // deliveryResultContext keeps claim cleanup independent of a canceled parent

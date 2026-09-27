@@ -765,7 +765,9 @@ func (s *Store) AcquireJobLeaseForRevision(ctx context.Context, job, owner strin
 // edit and a scan start therefore cannot cross between the revision check and
 // the lease write: either the edit observes the lease, or the scan observes
 // the newer revision and is rejected before it can touch runtime state. The
-// job may belong to any tenant: the daemon runs every tenant's jobs.
+// job may belong to any tenant: the daemon runs every tenant's jobs. A job of
+// a tenant that is not active is refused with ErrTenantNotActive, so a paused
+// tenant starts no scan, scheduled or manual.
 func (ss *SystemStore) AcquireJobLeaseForRevision(ctx context.Context, job, owner string, revision int64, expires time.Time) error {
 	if strings.TrimSpace(job) == "" {
 		return errors.New("job lease job is required")
@@ -783,12 +785,16 @@ func (ss *SystemStore) AcquireJobLeaseForRevision(ctx context.Context, job, owne
 	defer func() { _ = tx.Rollback() }()
 	var current int64
 	var archived int
-	err = tx.QueryRowContext(ctx, `SELECT revision,archived FROM jobs WHERE id=?`, job).Scan(&current, &archived)
+	var tenantState string
+	err = tx.QueryRowContext(ctx, `SELECT j.revision,j.archived,t.state FROM jobs AS j JOIN tenants AS t ON t.id=j.tenant_id WHERE j.id=?`, job).Scan(&current, &archived, &tenantState)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: job %s", ErrNotFound, job)
 	}
 	if err != nil {
 		return err
+	}
+	if tenantState != TenantStateActive {
+		return fmt.Errorf("%w: job %s", ErrTenantNotActive, job)
 	}
 	if archived != 0 {
 		return errors.New("archived jobs cannot run")

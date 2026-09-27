@@ -535,10 +535,11 @@ func (s *Store) CreateSessionForUserWithAudit(ctx context.Context, userID, idHas
 	return s.CreateSessionForUserWithAuditEntry(ctx, userID, idHash, csrf, created, expires, AuditEntry{Action: action, Detail: detail, ActorUserID: userID})
 }
 
-// ErrTenantNotActive reports that an account belongs to a tenant that is
-// not active. A tenant that is disabled or being deleted stops sign-in and
-// the redemption of its activation links.
-var ErrTenantNotActive = errors.New("the account's tenant is not active")
+// ErrTenantNotActive reports that an account or a job belongs to a tenant
+// that is not active. A tenant that is disabled or being deleted stops
+// sign-in, the redemption of its activation links, and the start of its
+// scans.
+var ErrTenantNotActive = errors.New("the tenant is not active")
 
 // requireActiveAccountTenantTx fails with ErrTenantNotActive when the
 // account belongs to a tenant that is not active. It reads the tenant from

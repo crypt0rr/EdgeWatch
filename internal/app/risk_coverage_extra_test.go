@@ -97,23 +97,23 @@ func TestAppStartTrackedAndManagedSchedulerSkips(t *testing.T) {
 	if !owner {
 		t.Fatal("failed to bind scheduler context")
 	}
-	a.startManagedScheduled(bound, "missing")
+	a.startManagedScheduled(bound, store.DefaultTenantScope(), "missing")
 	disabled := config.NormalizeJob(config.Job{Name: "disabled", Schedule: "0 * * * *", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
-	disabledRecord, err := db.CreateJobWithEnabled(ctx, disabled, false)
+	disabledRecord, err := defaultTenant(db).CreateJobWithEnabled(ctx, disabled, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.startManagedScheduled(bound, disabledRecord.ID)
+	a.startManagedScheduled(bound, store.DefaultTenantScope(), disabledRecord.ID)
 	archived := disabled
 	archived.Name = "archived"
-	archivedRecord, err := db.CreateJob(ctx, archived)
+	archivedRecord, err := defaultTenant(db).CreateJob(ctx, archived)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetJobArchived(ctx, archivedRecord.ID, true); err != nil {
+	if err := defaultTenant(db).SetJobArchived(ctx, archivedRecord.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	a.startManagedScheduled(bound, archivedRecord.ID)
+	a.startManagedScheduled(bound, store.DefaultTenantScope(), archivedRecord.ID)
 	a.StopRun()
 
 	job := config.NormalizeJob(config.Job{Name: "wrapper", Schedule: "0 * * * *", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Second)})

@@ -78,7 +78,7 @@ func TestAppUtilityMethodsAndLifecycleBinding(t *testing.T) {
 		t.Fatal("second BeginRun replaced an active lifecycle binding")
 	}
 	a.StopRun()
-	if err := a.StartManagedRun("missing", nil); !errors.Is(err, ErrShuttingDown) {
+	if err := a.StartManagedRun(defaultTenant(a.Store), "missing", nil); !errors.Is(err, ErrShuttingDown) {
 		t.Fatalf("managed run after shutdown error = %v", err)
 	}
 }
@@ -111,18 +111,18 @@ func TestAppRunJobAndScheduledWrappers(t *testing.T) {
 	if scan, _, err := a.RunJob(ctx, job); err != nil || scan.Status != "success" {
 		t.Fatalf("unmanaged RunJob = %#v, %v", scan, err)
 	}
-	if _, err := s.CreateJob(ctx, job); err != nil {
+	if _, err := defaultTenant(s).CreateJob(ctx, job); err != nil {
 		t.Fatal(err)
 	}
 	bound, owner := a.BeginRun(ctx)
 	if !owner {
 		t.Fatal("managed scheduled wrapper did not own the lifecycle")
 	}
-	jobs, err := s.ListJobs(ctx, false)
+	jobs, err := defaultTenant(s).ListJobs(ctx, false)
 	if err != nil || len(jobs) != 1 {
 		t.Fatalf("scheduled wrapper jobs = %#v, %v", jobs, err)
 	}
-	a.startManagedScheduled(bound, jobs[0].ID)
+	a.startManagedScheduled(bound, store.DefaultTenantScope(), jobs[0].ID)
 	a.StopRun()
 	if a.startTracked(func() {}) {
 		t.Fatal("startTracked accepted work after StopRun")
@@ -149,25 +149,25 @@ func TestResumableProgressAndFailureMetadataHelpers(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	jobRecord, err := db.CreateJob(context.Background(), config.NormalizeJob(config.Job{Name: "cycle-job", Schedule: "0 * * * *", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}}))
+	jobRecord, err := defaultTenant(db).CreateJob(context.Background(), config.NormalizeJob(config.Job{Name: "cycle-job", Schedule: "0 * * * *", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	plan := scanner.WorkPlan{Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1}}}
-	created, err := db.CreateScanCycle(context.Background(), store.ScanCycleRecord{ID: "expired", JobID: jobRecord.ID, Job: jobRecord.Job.Name, Plan: plan, ExpiresAt: time.Now().UTC().Add(-time.Minute)})
+	created, err := db.System().CreateScanCycle(context.Background(), store.ScanCycleRecord{ID: "expired", JobID: jobRecord.ID, Job: jobRecord.Job.Name, Plan: plan, ExpiresAt: time.Now().UTC().Add(-time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ExpireScanCycles(context.Background(), time.Now().UTC()); err != nil {
+	if _, err := db.System().ExpireScanCycles(context.Background(), time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
 	scan := model.Scan{}
-	applyCycleFailureState(context.Background(), db, &scan, created.ID, "fallback")
+	applyCycleFailureState(context.Background(), defaultTenant(db), &scan, created.ID, "fallback")
 	if scan.Status != "timed_out" || scan.CycleStatus != "expired" {
 		t.Fatalf("expired cycle metadata = %#v", scan)
 	}
 	missing := model.Scan{}
-	applyCycleFailureState(context.Background(), db, &missing, "missing", "fallback")
+	applyCycleFailureState(context.Background(), defaultTenant(db), &missing, "missing", "fallback")
 	if missing.Status != "failed" || missing.Error != "fallback" {
 		t.Fatalf("missing cycle metadata = %#v", missing)
 	}

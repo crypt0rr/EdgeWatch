@@ -91,7 +91,7 @@ func TestResumableScanRetriesTransientUnitFailure(t *testing.T) {
 	probe := &transientResumableScanner{}
 	a.Scanner = probe
 	job := config.NormalizeJob(config.Job{Name: "transient", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour)})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,28 +100,28 @@ func TestResumableScanRetriesTransientUnitFailure(t *testing.T) {
 	if firstErr == nil || first.Status != "failed" || !first.Resumable || first.CycleStatus != "paused" {
 		t.Fatalf("transient failure attempt = %#v, err=%v", first, firstErr)
 	}
-	cycle, err := db.GetActiveScanCycle(ctx, record.ID)
+	cycle, err := defaultTenant(db).GetActiveScanCycle(ctx, record.ID)
 	if err != nil || cycle.Status != "paused" || cycle.CompletedUnits != 1 {
 		t.Fatalf("paused transient cycle = %#v, %v", cycle, err)
 	}
-	summaries, err := db.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	summaries, err := defaultTenant(db).ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil || len(summaries) != 2 || summaries[1].Sequence != 1 || summaries[1].Status != "pending" || summaries[1].Attempts != 1 || summaries[1].Failures != 1 {
 		t.Fatalf("retried unit summaries = %#v, %v", summaries, err)
 	}
-	if _, err := db.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := db.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.DiscardScanCycle(ctx, cycle.ID); err != nil {
+	if err := defaultTenant(db).DiscardScanCycle(ctx, cycle.ID); err != nil {
 		t.Fatalf("discard running transient cycle: %v", err)
 	}
-	discarded, err := db.GetScanCycle(ctx, cycle.ID)
+	discarded, err := defaultTenant(db).GetScanCycle(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if discarded.Status != "discarded" || discarded.CompletedUnits != 0 || discarded.TotalUnits != 0 || discarded.CompletedProbes != 0 || discarded.TotalProbes != 0 {
 		t.Fatalf("discarded transient cycle retained state: %#v", discarded)
 	}
-	if summaries, err := db.ListScanCycleUnitSummaries(ctx, cycle.ID); err != nil || len(summaries) != 0 {
+	if summaries, err := defaultTenant(db).ListScanCycleUnitSummaries(ctx, cycle.ID); err != nil || len(summaries) != 0 {
 		t.Fatalf("discarded transient cycle retained work: %#v, %v", summaries, err)
 	}
 
@@ -148,7 +148,7 @@ func TestResumableScanStallsAfterRetryBudget(t *testing.T) {
 	}
 	a.Scanner = &transientResumableScanner{alwaysFail: true}
 	job := config.NormalizeJob(config.Job{Name: "retry-budget", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour)})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestResumableScanStallsAfterRetryBudget(t *testing.T) {
 		if runErr == nil || scan.Status != "failed" || !scan.Resumable {
 			t.Fatalf("retry attempt %d = %#v, err=%v", attempt, scan, runErr)
 		}
-		cycle, cycleErr := db.GetActiveScanCycle(ctx, record.ID)
+		cycle, cycleErr := defaultTenant(db).GetActiveScanCycle(ctx, record.ID)
 		if cycleErr != nil {
 			t.Fatal(cycleErr)
 		}
@@ -169,7 +169,7 @@ func TestResumableScanStallsAfterRetryBudget(t *testing.T) {
 		if cycle.Status != wantStatus {
 			t.Fatalf("retry attempt %d cycle status = %q, want %q", attempt, cycle.Status, wantStatus)
 		}
-		summaries, summaryErr := db.ListScanCycleUnitSummaries(ctx, cycle.ID)
+		summaries, summaryErr := defaultTenant(db).ListScanCycleUnitSummaries(ctx, cycle.ID)
 		if summaryErr != nil || len(summaries) != 2 || summaries[1].Failures != attempt {
 			t.Fatalf("retry attempt %d failure count = %#v, %v", attempt, summaries, summaryErr)
 		}
@@ -217,13 +217,13 @@ func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := config.NormalizeJob(config.Job{Name: "resumable-coverage", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour)})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	var scan model.Scan
-	if handled, _, runErr := a.runResumableAttempt(ctx, ctx, job, "", &scan, nil, coverageResumableScanner{}, false); handled || runErr != nil {
+	if handled, _, runErr := a.runResumableAttempt(ctx, ctx, defaultTenant(a.Store), job, "", &scan, nil, coverageResumableScanner{}, false); handled || runErr != nil {
 		t.Fatalf("empty job id result = handled %v err %v", handled, runErr)
 	}
 
@@ -240,7 +240,7 @@ func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var local model.Scan
-			_, _, gotErr := a.runResumableAttempt(ctx, test.scanCtx, job, record.ID+test.name, &local, nil, coverageResumableScanner{planErr: errors.New(test.planErr)}, false)
+			_, _, gotErr := a.runResumableAttempt(ctx, test.scanCtx, defaultTenant(a.Store), job, record.ID+test.name, &local, nil, coverageResumableScanner{planErr: errors.New(test.planErr)}, false)
 			if gotErr == nil || local.Status != test.wantState || !strings.Contains(local.Error, test.wantError) {
 				t.Fatalf("planning result = scan %#v err %v", local, gotErr)
 			}
@@ -249,7 +249,7 @@ func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 
 	oneUnit := scanner.WorkPlan{Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1}}}
 	var single model.Scan
-	if handled, _, err := a.runResumableAttempt(ctx, ctx, job, record.ID+"single", &single, nil, coverageResumableScanner{plan: oneUnit}, false); handled || err != nil {
+	if handled, _, err := a.runResumableAttempt(ctx, ctx, defaultTenant(a.Store), job, record.ID+"single", &single, nil, coverageResumableScanner{plan: oneUnit}, false); handled || err != nil {
 		t.Fatalf("single-unit plan = handled %v err %v", handled, err)
 	}
 
@@ -257,7 +257,7 @@ func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 		{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1},
 		{Sequence: 1, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "2", PortCount: 1, Probes: 1},
 	}}
-	cycle, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: job.Name, JobRevision: record.Revision, ConfigHash: job.SecurityHash(), Plan: cyclePlan})
+	cycle, err := db.System().CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: job.Name, JobRevision: record.Revision, ConfigHash: job.SecurityHash(), Plan: cyclePlan})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -265,11 +265,11 @@ func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stalled model.Scan
-	if handled, _, err := a.runResumableAttempt(ctx, ctx, job, record.ID, &stalled, nil, coverageResumableScanner{plan: cyclePlan}, false); !handled || !errors.Is(err, ErrScanCycleStalled) {
+	if handled, _, err := a.runResumableAttempt(ctx, ctx, defaultTenant(a.Store), job, record.ID, &stalled, nil, coverageResumableScanner{plan: cyclePlan}, false); !handled || !errors.Is(err, ErrScanCycleStalled) {
 		t.Fatalf("scheduled stalled cycle = handled %v err %v scan %#v", handled, err, stalled)
 	}
 	var manual model.Scan
-	if handled, _, err := a.runResumableAttempt(ctx, ctx, job, record.ID, &manual, nil, coverageResumableScanner{plan: cyclePlan}, true); handled && err == nil {
+	if handled, _, err := a.runResumableAttempt(ctx, ctx, defaultTenant(a.Store), job, record.ID, &manual, nil, coverageResumableScanner{plan: cyclePlan}, true); handled && err == nil {
 		// The manual path is allowed to retry; it may fail later in this minimal
 		// fixture, but it must not be rejected by ErrScanCycleStalled.
 		t.Logf("manual stalled-cycle retry reached scan state %#v", manual)
@@ -279,19 +279,19 @@ func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 	// instead of being resumed with a changed scope.
 	mismatchJob := job
 	mismatchJob.Name = "resumable-mismatch"
-	mismatchRecord, err := db.CreateJob(ctx, mismatchJob)
+	mismatchRecord, err := defaultTenant(db).CreateJob(ctx, mismatchJob)
 	if err != nil {
 		t.Fatal(err)
 	}
-	mismatch, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: mismatchRecord.ID, Job: mismatchJob.Name, JobRevision: mismatchRecord.Revision, ConfigHash: "old-hash", Plan: cyclePlan})
+	mismatch, err := db.System().CreateScanCycle(ctx, store.ScanCycleRecord{JobID: mismatchRecord.ID, Job: mismatchJob.Name, JobRevision: mismatchRecord.Revision, ConfigHash: "old-hash", Plan: cyclePlan})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var mismatchScan model.Scan
-	if handled, _, err := a.runResumableAttempt(ctx, ctx, mismatchJob, mismatchRecord.ID, &mismatchScan, nil, coverageResumableScanner{plan: cyclePlan}, false); !handled || err == nil || mismatchScan.Status != "failed" || mismatchScan.CycleStatus != "stalled" {
+	if handled, _, err := a.runResumableAttempt(ctx, ctx, defaultTenant(a.Store), mismatchJob, mismatchRecord.ID, &mismatchScan, nil, coverageResumableScanner{plan: cyclePlan}, false); !handled || err == nil || mismatchScan.Status != "failed" || mismatchScan.CycleStatus != "stalled" {
 		t.Fatalf("mismatched cycle = handled %v scan %#v err %v", handled, mismatchScan, err)
 	}
-	if got, err := db.GetScanCycle(ctx, mismatch.ID); err != nil || got.Status != "stalled" {
+	if got, err := defaultTenant(db).GetScanCycle(ctx, mismatch.ID); err != nil || got.Status != "stalled" {
 		t.Fatalf("mismatched cycle state = %#v %v", got, err)
 	}
 
@@ -299,65 +299,65 @@ func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 	// resumed into the new comparison scope.
 	epochJob := job
 	epochJob.Name = "resumable-epoch"
-	epochRecord, err := db.CreateJob(ctx, epochJob)
+	epochRecord, err := defaultTenant(db).CreateJob(ctx, epochJob)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.UpdateRuntime(ctx, epochRecord.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := db.System().UpdateRuntime(ctx, epochRecord.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = &model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp"}}}
 		return nil, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	oldEpoch, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: epochRecord.ID, Job: epochJob.Name, JobRevision: epochRecord.Revision, BaselineEpoch: 0, ConfigHash: epochJob.SecurityHash(), Plan: cyclePlan})
+	oldEpoch, err := db.System().CreateScanCycle(ctx, store.ScanCycleRecord{JobID: epochRecord.ID, Job: epochJob.Name, JobRevision: epochRecord.Revision, BaselineEpoch: 0, ConfigHash: epochJob.SecurityHash(), Plan: cyclePlan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.StartScanCycleAttempt(ctx, oldEpoch.ID); err != nil {
+	if _, err := db.System().StartScanCycleAttempt(ctx, oldEpoch.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ClaimScanCycleUnit(ctx, oldEpoch.ID, 0); err != nil {
+	if _, err := db.System().ClaimScanCycleUnit(ctx, oldEpoch.ID, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.CompleteScanCycleUnit(ctx, oldEpoch.ID, 0, model.Snapshot{}); err != nil {
+	if err := db.System().CompleteScanCycleUnit(ctx, oldEpoch.ID, 0, model.Snapshot{}); err != nil {
 		t.Fatal(err)
 	}
 	var epochScan model.Scan
-	if handled, _, err := a.runResumableAttempt(ctx, ctx, epochJob, epochRecord.ID, &epochScan, nil, coverageResumableScanner{plan: cyclePlan}, false); !handled || err == nil || epochScan.CycleID != oldEpoch.ID || epochScan.CycleStatus != "discarded" {
+	if handled, _, err := a.runResumableAttempt(ctx, ctx, defaultTenant(a.Store), epochJob, epochRecord.ID, &epochScan, nil, coverageResumableScanner{plan: cyclePlan}, false); !handled || err == nil || epochScan.CycleID != oldEpoch.ID || epochScan.CycleStatus != "discarded" {
 		t.Fatalf("stale epoch cycle = handled %v scan %#v err %v", handled, epochScan, err)
 	}
-	discardedEpoch, err := db.GetScanCycle(ctx, oldEpoch.ID)
+	discardedEpoch, err := defaultTenant(db).GetScanCycle(ctx, oldEpoch.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if discardedEpoch.Status != "discarded" || discardedEpoch.FinishedAt.IsZero() || discardedEpoch.CompletedUnits != 0 || discardedEpoch.TotalUnits != 0 || discardedEpoch.CompletedProbes != 0 || discardedEpoch.TotalProbes != 0 {
 		t.Fatalf("stale epoch cycle retained state: %#v", discardedEpoch)
 	}
-	if summaries, err := db.ListScanCycleUnitSummaries(ctx, oldEpoch.ID); err != nil || len(summaries) != 0 {
+	if summaries, err := defaultTenant(db).ListScanCycleUnitSummaries(ctx, oldEpoch.ID); err != nil || len(summaries) != 0 {
 		t.Fatalf("stale epoch cycle retained work: %#v, %v", summaries, err)
 	}
 	if _, err := db.DB.ExecContext(ctx, `CREATE TRIGGER reject_scan_cycle_discard BEFORE UPDATE OF status ON scan_cycles WHEN NEW.status='discarded' BEGIN SELECT RAISE(ABORT, 'discard unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
-	blockedEpoch, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: epochRecord.ID, Job: epochJob.Name, JobRevision: epochRecord.Revision, BaselineEpoch: 0, ConfigHash: epochJob.SecurityHash(), Plan: cyclePlan})
+	blockedEpoch, err := db.System().CreateScanCycle(ctx, store.ScanCycleRecord{JobID: epochRecord.ID, Job: epochJob.Name, JobRevision: epochRecord.Revision, BaselineEpoch: 0, ConfigHash: epochJob.SecurityHash(), Plan: cyclePlan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.StartScanCycleAttempt(ctx, blockedEpoch.ID); err != nil {
+	if _, err := db.System().StartScanCycleAttempt(ctx, blockedEpoch.ID); err != nil {
 		t.Fatal(err)
 	}
 	var blockedScan model.Scan
-	if handled, _, err := a.runResumableAttempt(ctx, ctx, epochJob, epochRecord.ID, &blockedScan, nil, coverageResumableScanner{plan: cyclePlan}, false); !handled || err == nil || blockedScan.Status != "failed" || blockedScan.CycleStatus != "running" || !strings.Contains(blockedScan.Error, "discard stale scan cycle") {
+	if handled, _, err := a.runResumableAttempt(ctx, ctx, defaultTenant(a.Store), epochJob, epochRecord.ID, &blockedScan, nil, coverageResumableScanner{plan: cyclePlan}, false); !handled || err == nil || blockedScan.Status != "failed" || blockedScan.CycleStatus != "running" || !strings.Contains(blockedScan.Error, "discard stale scan cycle") {
 		t.Fatalf("failed stale-cycle discard = handled %v scan %#v err %v", handled, blockedScan, err)
 	}
-	persistedEpoch, err := db.GetScanCycle(ctx, blockedEpoch.ID)
+	persistedEpoch, err := defaultTenant(db).GetScanCycle(ctx, blockedEpoch.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if persistedEpoch.Status != "running" {
 		t.Fatalf("failed discard changed persisted cycle state to %q", persistedEpoch.Status)
 	}
-	if summaries, err := db.ListScanCycleUnitSummaries(ctx, blockedEpoch.ID); err != nil || len(summaries) != 2 {
+	if summaries, err := defaultTenant(db).ListScanCycleUnitSummaries(ctx, blockedEpoch.ID); err != nil || len(summaries) != 2 {
 		t.Fatalf("failed discard removed cycle work: %#v, %v", summaries, err)
 	}
 }
@@ -381,7 +381,7 @@ func TestResumableRecoveryAndFinishPersistenceFailures(t *testing.T) {
 			return a.recoverCompletedCycle(ctx, scan, nil, cycle)
 		},
 		func(scan *model.Scan) (bool, model.Snapshot, error) {
-			return a.finishResumableCycle(ctx, scan, nil, cycle)
+			return a.finishResumableCycle(ctx, defaultTenant(a.Store), scan, nil, cycle)
 		},
 	} {
 		var scan model.Scan
@@ -414,7 +414,7 @@ func TestFinishResumableCycleStallsWhenCheckpointRowsAreMissing(t *testing.T) {
 				t.Fatal(err)
 			}
 			job := config.NormalizeJob(config.Job{Name: "missing-checkpoint", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour)})
-			record, err := db.CreateJob(ctx, job)
+			record, err := defaultTenant(db).CreateJob(ctx, job)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -422,22 +422,22 @@ func TestFinishResumableCycleStallsWhenCheckpointRowsAreMissing(t *testing.T) {
 				{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1},
 				{Sequence: 1, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "2", PortCount: 1, Probes: 1},
 			}, TotalUnits: 2, TotalProbes: 2}
-			cycle, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: job.Name, JobRevision: record.Revision, ConfigHash: job.SecurityHash(), ExecutionHash: job.ExecutionHash(), Plan: plan})
+			cycle, err := db.System().CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: job.Name, JobRevision: record.Revision, ConfigHash: job.SecurityHash(), ExecutionHash: job.ExecutionHash(), Plan: plan})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+			if _, err := db.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 				t.Fatal(err)
 			}
 			for sequence := 0; sequence < 2; sequence++ {
-				if _, err := db.ClaimScanCycleUnit(ctx, cycle.ID, sequence); err != nil {
+				if _, err := db.System().ClaimScanCycleUnit(ctx, cycle.ID, sequence); err != nil {
 					t.Fatal(err)
 				}
-				if err := db.CompleteScanCycleUnit(ctx, cycle.ID, sequence, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: sequence + 1, State: "open"}}}}}); err != nil {
+				if err := db.System().CompleteScanCycleUnit(ctx, cycle.ID, sequence, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: sequence + 1, State: "open"}}}}}); err != nil {
 					t.Fatal(err)
 				}
 			}
-			cycle, err = db.GetScanCycle(ctx, cycle.ID)
+			cycle, err = defaultTenant(db).GetScanCycle(ctx, cycle.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -446,7 +446,7 @@ func TestFinishResumableCycleStallsWhenCheckpointRowsAreMissing(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			_, fragments, err := db.LoadScanCycleFragments(ctx, cycle.ID)
+			_, fragments, err := db.System().LoadScanCycleFragments(ctx, cycle.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -460,18 +460,18 @@ func TestFinishResumableCycleStallsWhenCheckpointRowsAreMissing(t *testing.T) {
 			}
 
 			var scan model.Scan
-			handled, snapshot, finishErr := a.finishResumableCycle(ctx, &scan, nil, cycle)
+			handled, snapshot, finishErr := a.finishResumableCycle(ctx, defaultTenant(a.Store), &scan, nil, cycle)
 			if !handled || finishErr == nil || snapshot.Units != nil || scan.Status != "failed" || scan.CycleStatus != "stalled" || !strings.Contains(scan.Error, "missing one or more checkpoints") {
 				t.Fatalf("missing checkpoint finish = handled %v snapshot %#v scan %#v err %v", handled, snapshot, scan, finishErr)
 			}
-			stalled, err := db.GetScanCycle(ctx, cycle.ID)
+			stalled, err := defaultTenant(db).GetScanCycle(ctx, cycle.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
 			if stalled.Status != "stalled" {
 				t.Fatalf("cycle status = %q, want stalled", stalled.Status)
 			}
-			scans, err := db.ListJobScans(ctx, record.ID, 10)
+			scans, err := defaultTenant(db).ListJobScans(ctx, record.ID, 10)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -497,7 +497,7 @@ func TestResumableAttemptHandlesUnitFailuresAndNoProgressStalls(t *testing.T) {
 			t.Fatal(err)
 		}
 		job := config.NormalizeJob(config.Job{Name: name, Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour)})
-		record, err := db.CreateJob(ctx, job)
+		record, err := defaultTenant(db).CreateJob(ctx, job)
 		if err != nil {
 			db.Close()
 			t.Fatal(err)
@@ -512,13 +512,13 @@ func TestResumableAttemptHandlesUnitFailuresAndNoProgressStalls(t *testing.T) {
 	a, db, job, record := newApp(t, "unit-error")
 	defer db.Close()
 	var failed model.Scan
-	if handled, _, err := a.runResumableAttempt(ctx, ctx, job, record.ID, &failed, nil, coverageResumableScanner{plan: twoUnits, scanErr: scanner.ConfigurationError(errors.New("scanner profile arguments: invalid template"))}, false); !handled || err == nil || failed.Status != "failed" || failed.CycleStatus != "stalled" {
+	if handled, _, err := a.runResumableAttempt(ctx, ctx, defaultTenant(a.Store), job, record.ID, &failed, nil, coverageResumableScanner{plan: twoUnits, scanErr: scanner.ConfigurationError(errors.New("scanner profile arguments: invalid template"))}, false); !handled || err == nil || failed.Status != "failed" || failed.CycleStatus != "stalled" {
 		t.Fatalf("unit failure = handled %v scan %#v err %v", handled, failed, err)
 	}
 
 	a, db, job, record = newApp(t, "timeout-stall")
 	defer db.Close()
-	cycle, err := db.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: job.Name, JobRevision: record.Revision, ConfigHash: job.SecurityHash(), Plan: scanner.WorkPlan{Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1}}}})
+	cycle, err := db.System().CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: job.Name, JobRevision: record.Revision, ConfigHash: job.SecurityHash(), Plan: scanner.WorkPlan{Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1}}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -526,13 +526,13 @@ func TestResumableAttemptHandlesUnitFailuresAndNoProgressStalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	var stalled model.Scan
-	if handled, _, err := a.runResumableAttempt(ctx, ctx, job, record.ID, &stalled, nil, coverageResumableScanner{scanErr: context.DeadlineExceeded}, false); !handled || err == nil || stalled.Status != "failed" || stalled.CycleStatus != "stalled" {
+	if handled, _, err := a.runResumableAttempt(ctx, ctx, defaultTenant(a.Store), job, record.ID, &stalled, nil, coverageResumableScanner{scanErr: context.DeadlineExceeded}, false); !handled || err == nil || stalled.Status != "failed" || stalled.CycleStatus != "stalled" {
 		t.Fatalf("no-progress timeout = handled %v scan %#v err %v", handled, stalled, err)
 	}
 
 	a, db, job, record = newApp(t, "complete-error")
 	var completeError model.Scan
-	if handled, _, err := a.runResumableAttempt(ctx, ctx, job, record.ID, &completeError, nil, coverageResumableScanner{plan: twoUnits, closeDB: db}, false); !handled || err == nil || completeError.Status != "failed" {
+	if handled, _, err := a.runResumableAttempt(ctx, ctx, defaultTenant(a.Store), job, record.ID, &completeError, nil, coverageResumableScanner{plan: twoUnits, closeDB: db}, false); !handled || err == nil || completeError.Status != "failed" {
 		t.Fatalf("checkpoint persistence failure = handled %v scan %#v err %v", handled, completeError, err)
 	}
 }
@@ -550,7 +550,7 @@ func TestManagedFinalizationContinuesWhenLeaseRenewalIsLost(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := config.NormalizeJob(config.Job{Name: "lease-warning", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.40"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour)})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -656,12 +656,12 @@ func TestNaabuMissDoesNotRecoverIncidentWithoutNmapConfirmation(t *testing.T) {
 				TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Mode: "connect", Naabu: &config.NaabuOptions{ScanType: "connect"}},
 				Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour),
 			})
-			record, err := db.CreateJob(ctx, job)
+			record, err := defaultTenant(db).CreateJob(ctx, job)
 			if err != nil {
 				t.Fatal(err)
 			}
 			incident := model.Change{Key: "port|192.0.2.1|tcp|8080", Kind: "port", Severity: "critical", Target: "192.0.2.1", Protocol: "tcp", Port: 8080, Old: "not-open", New: "open"}
-			if _, err := db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+			if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 				state.Baseline = &model.Snapshot{
 					Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}},
 					Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 443, State: "open", Evidence: []string{"192.0.2.1"}}}}},
@@ -684,7 +684,7 @@ func TestNaabuMissDoesNotRecoverIncidentWithoutNmapConfirmation(t *testing.T) {
 					recoveredEvent = true
 				}
 			}
-			state, err := db.RuntimeState(ctx, record.ID)
+			state, err := defaultTenant(db).RuntimeState(ctx, record.ID)
 			if err != nil {
 				t.Fatal(err)
 			}

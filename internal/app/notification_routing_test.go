@@ -42,17 +42,17 @@ func TestNewReportsJobsRoutedToRotatedDeploymentDestination(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	rotated, err := s.CreateJob(ctx, routingTestJob("rotated-routing"))
+	rotated, err := defaultTenant(s).CreateJob(ctx, routingTestJob("rotated-routing"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	archived, err := s.CreateJob(ctx, routingTestJob("archived-rotated-routing"))
+	archived, err := defaultTenant(s).CreateJob(ctx, routingTestJob("archived-rotated-routing"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	silentJob := routingTestJob("silent-routing")
 	silentJob.NotificationDestinations = []string{}
-	silent, err := s.CreateJob(ctx, silentJob)
+	silent, err := defaultTenant(s).CreateJob(ctx, silentJob)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestNewReportsJobsRoutedToRotatedDeploymentDestination(t *testing.T) {
 	if strings.Contains(firstLogs.String(), "no longer exist") {
 		t.Fatalf("startup reported missing destinations before the URL changed: %s", firstLogs.String())
 	}
-	frozen, err := s.GetJob(ctx, rotated.ID)
+	frozen, err := defaultTenant(s).GetJob(ctx, rotated.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestNewReportsJobsRoutedToRotatedDeploymentDestination(t *testing.T) {
 		t.Fatalf("startup did not freeze the deployment selector: %#v", frozen.Job.NotificationDestinations)
 	}
 	oldSelector := frozen.Job.NotificationDestinations[0]
-	if err := s.SetJobArchived(ctx, archived.ID, true); err != nil {
+	if err := defaultTenant(s).SetJobArchived(ctx, archived.ID, true); err != nil {
 		t.Fatal(err)
 	}
 
@@ -130,7 +130,7 @@ func TestNewDoesNotReportCurrentNotificationRouting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := s.CreateJob(context.Background(), routingTestJob("current-routing")); err != nil {
+	if _, err := defaultTenant(s).CreateJob(context.Background(), routingTestJob("current-routing")); err != nil {
 		t.Fatal(err)
 	}
 	url := "generic://localhost/hook?token=current&disabletls=yes&template=json"

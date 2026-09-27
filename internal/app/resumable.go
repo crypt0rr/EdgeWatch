@@ -38,10 +38,13 @@ func retryableResumableError(err error) bool {
 // returns handled=false when the scanner's plan fits in one invocation and the
 // caller should use the ordinary Scanner path. Every other outcome is handled
 // here, including persistence of an intermediate timeout/cancellation record.
-func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, jobID string, scan *model.Scan, run *activeRun, rs scanner.ResumableScanner, manual bool) (handled bool, snapshot model.Snapshot, runErr error) {
+// ts is the store of the job's tenant: the job's cycles and runtime state are
+// read through it, and cycle changes are written through the system store.
+func (a *App) runResumableAttempt(ctx, scanCtx context.Context, ts *store.TenantStore, job config.Job, jobID string, scan *model.Scan, run *activeRun, rs scanner.ResumableScanner, manual bool) (handled bool, snapshot model.Snapshot, runErr error) {
 	if jobID == "" {
 		return false, model.Snapshot{}, nil
 	}
+	system := a.Store.System()
 	// Persistence must outlive scanCtx: a timed-out/canceled Nmap process still
 	// needs to checkpoint its result and cycle state. SQLite's busy timeout
 	// bounds each operation, while the caller's daemon context remains free to
@@ -52,26 +55,26 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 	// terminal failed scan so the operator receives the promised failure
 	// notification. The following trigger will see no active cycle and start a
 	// fresh plan.
-	previousCycle, previousCycleErr := a.Store.GetActiveScanCycle(stateCtx, jobID)
+	previousCycle, previousCycleErr := ts.GetActiveScanCycle(stateCtx, jobID)
 	if previousCycleErr != nil && !errors.Is(previousCycleErr, store.ErrNoScanCycle) {
 		scan.Status = "failed"
 		scan.Error = previousCycleErr.Error()
 		return true, model.Snapshot{}, previousCycleErr
 	}
 	now := time.Now().UTC()
-	baselineEpoch, epochErr := a.Store.RuntimeBaselineEpoch(stateCtx, jobID)
+	baselineEpoch, epochErr := ts.RuntimeBaselineEpoch(stateCtx, jobID)
 	if epochErr != nil {
 		scan.Status = "failed"
 		scan.Error = epochErr.Error()
 		return true, model.Snapshot{}, epochErr
 	}
-	if _, expiryErr := a.Store.ExpireScanCycles(stateCtx, now); expiryErr != nil {
+	if _, expiryErr := system.ExpireScanCycles(stateCtx, now); expiryErr != nil {
 		scan.Status = "failed"
 		scan.Error = expiryErr.Error()
 		return true, model.Snapshot{}, expiryErr
 	}
 	if previousCycleErr == nil {
-		if expiredCycle, cycleErr := a.Store.GetScanCycle(stateCtx, previousCycle.ID); cycleErr == nil && expiredCycle.Status == "expired" {
+		if expiredCycle, cycleErr := ts.GetScanCycle(stateCtx, previousCycle.ID); cycleErr == nil && expiredCycle.Status == "expired" {
 			return expiredCycleAttempt(scan, expiredCycle)
 		}
 	}
@@ -79,8 +82,8 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 	// the cycle before this trigger arrived, surface the expiry once now rather
 	// than silently starting a new cycle; the following trigger can then begin
 	// fresh after the terminal record is persisted.
-	if latestCycle, latestErr := a.Store.GetLatestScanCycle(stateCtx, jobID); latestErr == nil && latestCycle.Status == "expired" {
-		notified, notifyErr := a.Store.ScanCycleExpiryNotified(stateCtx, latestCycle.ID)
+	if latestCycle, latestErr := ts.GetLatestScanCycle(stateCtx, jobID); latestErr == nil && latestCycle.Status == "expired" {
+		notified, notifyErr := ts.ScanCycleExpiryNotified(stateCtx, latestCycle.ID)
 		if notifyErr != nil {
 			scan.Status = "failed"
 			scan.Error = notifyErr.Error()
@@ -95,7 +98,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		return true, model.Snapshot{}, latestErr
 	}
 
-	cycle, err := a.Store.GetActiveScanCycle(stateCtx, jobID)
+	cycle, err := ts.GetActiveScanCycle(stateCtx, jobID)
 	if err != nil && !errors.Is(err, store.ErrNoScanCycle) {
 		scan.Status = "failed"
 		scan.Error = err.Error()
@@ -107,9 +110,9 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		// that already-complete cycle before planning a new one; otherwise a full
 		// range could be scanned twice while its first result never reaches the
 		// baseline engine.
-		if latest, latestErr := a.Store.GetLatestScanCycle(stateCtx, jobID); latestErr == nil && latest.Status == "completed" {
+		if latest, latestErr := ts.GetLatestScanCycle(stateCtx, jobID); latestErr == nil && latest.Status == "completed" {
 			if latest.BaselineEpoch == baselineEpoch {
-				hasScan, scanErr := a.Store.ScanCycleHasScan(stateCtx, latest.ID)
+				hasScan, scanErr := ts.ScanCycleHasScan(stateCtx, latest.ID)
 				if scanErr != nil {
 					scan.Status = "failed"
 					scan.Error = scanErr.Error()
@@ -121,7 +124,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 			} else {
 				// A completed but unpromoted cycle from an older baseline is
 				// historical debris, never a source for the current baseline.
-				_ = a.Store.DiscardScanCycle(stateCtx, latest.ID)
+				_ = ts.DiscardScanCycle(stateCtx, latest.ID)
 			}
 		} else if latestErr != nil && !errors.Is(latestErr, store.ErrNoScanCycle) {
 			scan.Status = "failed"
@@ -165,7 +168,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		// immutable configuration even for alternate scanner implementations.
 		plan.Job = job
 		now := time.Now().UTC()
-		cycle, err = a.Store.CreateScanCycle(stateCtx, store.ScanCycleRecord{
+		cycle, err = system.CreateScanCycle(stateCtx, store.ScanCycleRecord{
 			JobID:         jobID,
 			Job:           job.Name,
 			JobRevision:   scan.JobRevision,
@@ -188,7 +191,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		// this scan holds that lease. Record the expiry here, before the stalled
 		// guard, so a stalled cycle stops blocking scheduled triggers when its
 		// resume window ends rather than at the next daily housekeeping pass.
-		expired, expireErr := a.Store.ExpireScanCycle(stateCtx, cycle.ID, now)
+		expired, expireErr := system.ExpireScanCycle(stateCtx, cycle.ID, now)
 		if expireErr != nil {
 			scan.Status = "failed"
 			scan.Error = expireErr.Error()
@@ -205,7 +208,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		return true, model.Snapshot{}, ErrScanCycleStalled
 	}
 	if cycle.BaselineEpoch != baselineEpoch {
-		if discardErr := a.Store.DiscardScanCycle(stateCtx, cycle.ID); discardErr != nil {
+		if discardErr := ts.DiscardScanCycle(stateCtx, cycle.ID); discardErr != nil {
 			scan.Resumable = true
 			scan.CycleID = cycle.ID
 			scan.CycleStatus = cycle.Status
@@ -223,7 +226,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 
 	if cycle.ConfigHash != job.SecurityHash() && cycle.ConfigHash != job.LegacySecurityHash() {
 		message := "scan cycle settings changed; discard the paused cycle before retrying"
-		_, _ = a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, message)
+		_, _ = system.MarkScanCycleStalled(stateCtx, cycle.ID, message)
 		scan.Resumable = true
 		scan.CycleID = cycle.ID
 		scan.CycleStatus = "stalled"
@@ -235,27 +238,27 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 	// before the dynamic enrichment transaction. Reconcile before every retry
 	// (including the first attempt after restart) so that gap is repaired
 	// atomically and completed discovery work is never replayed.
-	if err := a.Store.ReconcileScanCycleEnrichment(stateCtx, cycle.ID); err != nil && !errors.Is(err, store.ErrNoScanCycle) {
+	if err := system.ReconcileScanCycleEnrichment(stateCtx, cycle.ID); err != nil && !errors.Is(err, store.ErrNoScanCycle) {
 		scan.Status = "failed"
 		scan.Error = err.Error()
 		return true, model.Snapshot{}, err
 	}
-	cycle, err = a.Store.GetScanCycle(stateCtx, cycle.ID)
+	cycle, err = ts.GetScanCycle(stateCtx, cycle.ID)
 	if err != nil {
 		scan.Status = "failed"
 		scan.Error = err.Error()
 		return true, model.Snapshot{}, err
 	}
-	if budgetErr := a.CheckScanCycleProbeBudget(stateCtx, cycle, job); budgetErr != nil {
+	if budgetErr := a.CheckScanCycleProbeBudget(stateCtx, ts, cycle, job); budgetErr != nil {
 		scan.Status = "failed"
 		scan.Error = budgetErr.Error()
-		if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, budgetErr.Error()); stallErr == nil {
+		if stalled, stallErr := system.MarkScanCycleStalled(stateCtx, cycle.ID, budgetErr.Error()); stallErr == nil {
 			setScanCycleMetadata(scan, stalled)
 		}
 		return true, model.Snapshot{}, budgetErr
 	}
 
-	startedCycle, err := a.Store.StartScanCycleAttempt(stateCtx, cycle.ID)
+	startedCycle, err := system.StartScanCycleAttempt(stateCtx, cycle.ID)
 	if err != nil {
 		if errors.Is(err, store.ErrCycleNotResumable) {
 			scan.Resumable = true
@@ -276,25 +279,25 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 
 	completedThisAttempt := 0
 	for {
-		unit, nextErr := a.Store.NextScanCycleUnit(stateCtx, cycle.ID)
+		unit, nextErr := system.NextScanCycleUnit(stateCtx, cycle.ID)
 		if errors.Is(nextErr, store.ErrNoPendingUnit) {
-			return a.finishResumableCycle(stateCtx, scan, run, cycle)
+			return a.finishResumableCycle(stateCtx, ts, scan, run, cycle)
 		}
 		if nextErr != nil {
 			if errors.Is(nextErr, store.ErrCycleNotResumable) {
-				applyCycleFailureState(stateCtx, a.Store, scan, cycle.ID, nextErr.Error())
+				applyCycleFailureState(stateCtx, ts, scan, cycle.ID, nextErr.Error())
 				return true, model.Snapshot{}, nextErr
 			}
 			scan.Status = "failed"
 			scan.Error = nextErr.Error()
-			if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, nextErr.Error()); stallErr == nil {
+			if stalled, stallErr := system.MarkScanCycleStalled(stateCtx, cycle.ID, nextErr.Error()); stallErr == nil {
 				setScanCycleMetadata(scan, stalled)
 			} else {
 				scan.CycleStatus = "stalled"
 			}
 			return true, model.Snapshot{}, nextErr
 		}
-		claimed, claimErr := a.Store.ClaimScanCycleUnit(stateCtx, cycle.ID, unit.Sequence)
+		claimed, claimErr := system.ClaimScanCycleUnit(stateCtx, cycle.ID, unit.Sequence)
 		if claimErr != nil {
 			if errors.Is(claimErr, store.ErrNoPendingUnit) {
 				continue
@@ -302,8 +305,8 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 			scan.Status = "failed"
 			scan.Error = claimErr.Error()
 			if errors.Is(claimErr, store.ErrCycleNotResumable) {
-				applyCycleFailureState(stateCtx, a.Store, scan, cycle.ID, claimErr.Error())
-			} else if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, claimErr.Error()); stallErr == nil {
+				applyCycleFailureState(stateCtx, ts, scan, cycle.ID, claimErr.Error())
+			} else if stalled, stallErr := system.MarkScanCycleStalled(stateCtx, cycle.ID, claimErr.Error()); stallErr == nil {
 				setScanCycleMetadata(scan, stalled)
 			} else {
 				scan.CycleStatus = "stalled"
@@ -331,13 +334,13 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 			scanErr = scanCtx.Err()
 		}
 		if scanErr == nil {
-			if completeErr := a.Store.CompleteScanCycleUnit(stateCtx, cycle.ID, claimed.Sequence, fragment); completeErr != nil {
+			if completeErr := system.CompleteScanCycleUnit(stateCtx, cycle.ID, claimed.Sequence, fragment); completeErr != nil {
 				if errors.Is(completeErr, store.ErrCycleNotResumable) {
-					applyCycleFailureState(stateCtx, a.Store, scan, cycle.ID, completeErr.Error())
+					applyCycleFailureState(stateCtx, ts, scan, cycle.ID, completeErr.Error())
 				} else {
 					scan.Status = "failed"
 					scan.Error = completeErr.Error()
-					if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, completeErr.Error()); stallErr == nil {
+					if stalled, stallErr := system.MarkScanCycleStalled(stateCtx, cycle.ID, completeErr.Error()); stallErr == nil {
 						setScanCycleMetadata(scan, stalled)
 					} else {
 						scan.CycleStatus = "stalled"
@@ -346,26 +349,26 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 				return true, model.Snapshot{}, completeErr
 			}
 			if claimed.Unit.Phase == "discovery" {
-				if expandErr := a.Store.ReconcileScanCycleEnrichment(stateCtx, cycle.ID); expandErr != nil {
+				if expandErr := system.ReconcileScanCycleEnrichment(stateCtx, cycle.ID); expandErr != nil {
 					scan.Status = "failed"
 					scan.Error = expandErr.Error()
-					if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, expandErr.Error()); stallErr == nil {
+					if stalled, stallErr := system.MarkScanCycleStalled(stateCtx, cycle.ID, expandErr.Error()); stallErr == nil {
 						setScanCycleMetadata(scan, stalled)
 					}
 					return true, model.Snapshot{}, expandErr
 				}
 			}
 			completedThisAttempt++
-			cycle, err = a.Store.GetScanCycle(stateCtx, cycle.ID)
+			cycle, err = ts.GetScanCycle(stateCtx, cycle.ID)
 			if err != nil {
 				scan.Status = "failed"
 				scan.Error = err.Error()
 				return true, model.Snapshot{}, err
 			}
-			if budgetErr := a.CheckScanCycleProbeBudget(stateCtx, cycle, job); budgetErr != nil {
+			if budgetErr := a.CheckScanCycleProbeBudget(stateCtx, ts, cycle, job); budgetErr != nil {
 				scan.Status = "failed"
 				scan.Error = budgetErr.Error()
-				if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, budgetErr.Error()); stallErr == nil {
+				if stalled, stallErr := system.MarkScanCycleStalled(stateCtx, cycle.ID, budgetErr.Error()); stallErr == nil {
 					setScanCycleMetadata(scan, stalled)
 				}
 				return true, model.Snapshot{}, budgetErr
@@ -386,13 +389,13 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 				lastError = scanErr.Error()
 			}
 			if first, second, split := scanner.SplitWorkUnit(claimed.Unit); timedOut && split {
-				if splitErr := a.Store.SplitScanCycleUnit(stateCtx, cycle.ID, claimed.Sequence, first, second, lastError); splitErr != nil {
+				if splitErr := system.SplitScanCycleUnit(stateCtx, cycle.ID, claimed.Sequence, first, second, lastError); splitErr != nil {
 					if errors.Is(splitErr, store.ErrCycleNotResumable) {
-						applyCycleFailureState(stateCtx, a.Store, scan, cycle.ID, splitErr.Error())
+						applyCycleFailureState(stateCtx, ts, scan, cycle.ID, splitErr.Error())
 					} else {
 						scan.Status = "failed"
 						scan.Error = splitErr.Error()
-						if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, splitErr.Error()); stallErr == nil {
+						if stalled, stallErr := system.MarkScanCycleStalled(stateCtx, cycle.ID, splitErr.Error()); stallErr == nil {
 							setScanCycleMetadata(scan, stalled)
 						} else {
 							scan.CycleStatus = "stalled"
@@ -400,13 +403,13 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 					}
 					return true, fragment, splitErr
 				}
-			} else if retryErr := a.Store.RetryScanCycleUnit(stateCtx, cycle.ID, claimed.Sequence, lastError); retryErr != nil {
+			} else if retryErr := system.RetryScanCycleUnit(stateCtx, cycle.ID, claimed.Sequence, lastError); retryErr != nil {
 				if errors.Is(retryErr, store.ErrCycleNotResumable) {
-					applyCycleFailureState(stateCtx, a.Store, scan, cycle.ID, retryErr.Error())
+					applyCycleFailureState(stateCtx, ts, scan, cycle.ID, retryErr.Error())
 				} else {
 					scan.Status = "failed"
 					scan.Error = retryErr.Error()
-					if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, retryErr.Error()); stallErr == nil {
+					if stalled, stallErr := system.MarkScanCycleStalled(stateCtx, cycle.ID, retryErr.Error()); stallErr == nil {
 						setScanCycleMetadata(scan, stalled)
 					} else {
 						scan.CycleStatus = "stalled"
@@ -414,7 +417,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 				}
 				return true, fragment, retryErr
 			}
-			paused, pauseErr := a.Store.PauseScanCycle(stateCtx, cycle.ID, timedOut && completedThisAttempt == 0, lastError)
+			paused, pauseErr := system.PauseScanCycle(stateCtx, cycle.ID, timedOut && completedThisAttempt == 0, lastError)
 			if pauseErr != nil {
 				// A persistence failure must not be reported as resumable progress.
 				scan.Status = "failed"
@@ -423,7 +426,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 			}
 			cycle = paused
 			if cycle.Status == "paused" && cycle.NoProgressAttempts >= 3 {
-				stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, "scan made no progress in three consecutive attempts")
+				stalled, stallErr := system.MarkScanCycleStalled(stateCtx, cycle.ID, "scan made no progress in three consecutive attempts")
 				if stallErr != nil {
 					scan.Status = "failed"
 					scan.Error = stallErr.Error()
@@ -451,7 +454,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		// transient failures pending for a bounded number of future attempts.
 		retryable := retryableResumableError(scanErr)
 		if !retryable {
-			stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, scanErr.Error())
+			stalled, stallErr := system.MarkScanCycleStalled(stateCtx, cycle.ID, scanErr.Error())
 			if stallErr == nil {
 				cycle = stalled
 			} else {
@@ -467,13 +470,13 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 		}
 
 		nextFailure := claimed.Failures + 1
-		if retryErr := a.Store.RetryScanCycleUnitAfterFailure(stateCtx, cycle.ID, claimed.Sequence, scanErr.Error()); retryErr != nil {
+		if retryErr := system.RetryScanCycleUnitAfterFailure(stateCtx, cycle.ID, claimed.Sequence, scanErr.Error()); retryErr != nil {
 			if errors.Is(retryErr, store.ErrCycleNotResumable) {
-				applyCycleFailureState(stateCtx, a.Store, scan, cycle.ID, retryErr.Error())
+				applyCycleFailureState(stateCtx, ts, scan, cycle.ID, retryErr.Error())
 			} else {
 				scan.Status = "failed"
 				scan.Error = retryErr.Error()
-				if stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, retryErr.Error()); stallErr == nil {
+				if stalled, stallErr := system.MarkScanCycleStalled(stateCtx, cycle.ID, retryErr.Error()); stallErr == nil {
 					setScanCycleMetadata(scan, stalled)
 				} else {
 					scan.CycleStatus = "stalled"
@@ -482,7 +485,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 			return true, fragment, retryErr
 		}
 		if nextFailure >= scanCycleMaxUnitAttempts {
-			stalled, stallErr := a.Store.MarkScanCycleStalled(stateCtx, cycle.ID, scanErr.Error())
+			stalled, stallErr := system.MarkScanCycleStalled(stateCtx, cycle.ID, scanErr.Error())
 			if stallErr != nil {
 				scan.Status = "failed"
 				scan.Error = stallErr.Error()
@@ -495,7 +498,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 			return true, fragment, scanErr
 		}
 		retryMessage := fmt.Sprintf("retryable scanner failure (failure %d of %d): %s", nextFailure, scanCycleMaxUnitAttempts, scanErr)
-		paused, pauseErr := a.Store.PauseScanCycle(stateCtx, cycle.ID, false, retryMessage)
+		paused, pauseErr := system.PauseScanCycle(stateCtx, cycle.ID, false, retryMessage)
 		if pauseErr != nil {
 			// A persistence failure must not be reported as resumable progress.
 			scan.Status = "failed"
@@ -514,7 +517,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, job config.Job, 
 // after CompleteScanCycle committed but before FinalizeManagedScan persisted
 // the immutable scan and baseline transition.
 func (a *App) recoverCompletedCycle(ctx context.Context, scan *model.Scan, run *activeRun, cycle store.ScanCycleRecord) (bool, model.Snapshot, error) {
-	plan, fragments, err := a.Store.LoadScanCycleFragments(ctx, cycle.ID)
+	plan, fragments, err := a.Store.System().LoadScanCycleFragments(ctx, cycle.ID)
 	if err != nil {
 		scan.Status = "failed"
 		scan.Error = err.Error()
@@ -587,12 +590,15 @@ func expiredCycleAttempt(scan *model.Scan, cycle store.ScanCycleRecord) (bool, m
 	return true, model.Snapshot{}, errors.New(scan.Error)
 }
 
-func (a *App) finishResumableCycle(ctx context.Context, scan *model.Scan, run *activeRun, cycle store.ScanCycleRecord) (bool, model.Snapshot, error) {
-	plan, fragments, err := a.Store.LoadScanCycleFragments(ctx, cycle.ID)
+// finishResumableCycle merges the checkpoints of a cycle whose units are all
+// done and completes the cycle. ts is the store of the job's tenant.
+func (a *App) finishResumableCycle(ctx context.Context, ts *store.TenantStore, scan *model.Scan, run *activeRun, cycle store.ScanCycleRecord) (bool, model.Snapshot, error) {
+	system := a.Store.System()
+	plan, fragments, err := system.LoadScanCycleFragments(ctx, cycle.ID)
 	if err != nil {
 		scan.Status = "failed"
 		scan.Error = err.Error()
-		if stalled, stallErr := a.Store.MarkScanCycleStalled(ctx, cycle.ID, err.Error()); stallErr == nil {
+		if stalled, stallErr := system.MarkScanCycleStalled(ctx, cycle.ID, err.Error()); stallErr == nil {
 			setScanCycleMetadata(scan, stalled)
 		} else {
 			scan.CycleStatus = "stalled"
@@ -602,7 +608,7 @@ func (a *App) finishResumableCycle(ctx context.Context, scan *model.Scan, run *a
 	if err := missingScanCycleCheckpointError(cycle, len(fragments)); err != nil {
 		scan.Status = "failed"
 		scan.Error = err.Error()
-		if stalled, stallErr := a.Store.MarkScanCycleStalled(ctx, cycle.ID, err.Error()); stallErr == nil {
+		if stalled, stallErr := system.MarkScanCycleStalled(ctx, cycle.ID, err.Error()); stallErr == nil {
 			setScanCycleMetadata(scan, stalled)
 		} else {
 			scan.CycleStatus = "stalled"
@@ -611,10 +617,10 @@ func (a *App) finishResumableCycle(ctx context.Context, scan *model.Scan, run *a
 	}
 	snapshot := scanner.MergeWorkSnapshots(plan, fragments)
 	cycleID := cycle.ID
-	cycle, err = a.Store.CompleteScanCycle(ctx, cycleID)
+	cycle, err = system.CompleteScanCycle(ctx, cycleID)
 	if err != nil {
 		if errors.Is(err, store.ErrCycleNotResumable) {
-			applyCycleFailureState(ctx, a.Store, scan, cycleID, err.Error())
+			applyCycleFailureState(ctx, ts, scan, cycleID, err.Error())
 		} else {
 			scan.Status = "failed"
 			scan.Error = err.Error()
@@ -653,8 +659,8 @@ func setScanCycleMetadata(scan *model.Scan, cycle store.ScanCycleRecord) {
 // commonly expiry housekeeping racing a returning Nmap process). In that case
 // preserve the terminal state instead of relabelling an expired cycle as
 // stalled; the engine will emit the normal failure event and never compare its
-// partial snapshot.
-func applyCycleFailureState(ctx context.Context, cycles *store.Store, scan *model.Scan, cycleID, fallback string) {
+// partial snapshot. cycles is the store of the tenant that owns the cycle.
+func applyCycleFailureState(ctx context.Context, cycles *store.TenantStore, scan *model.Scan, cycleID, fallback string) {
 	if cycle, err := cycles.GetScanCycle(ctx, cycleID); err == nil {
 		setScanCycleMetadata(scan, cycle)
 		if cycle.Status == "expired" {

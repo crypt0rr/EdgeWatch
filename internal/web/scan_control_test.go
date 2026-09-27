@@ -52,7 +52,7 @@ func TestActiveScanEndpointAndCancellationLifecycle(t *testing.T) {
 	}
 	a.BeginRun(ctx)
 	finished := make(chan error, 1)
-	if err := a.StartManagedRun(record.ID, func(_ model.Scan, _ []model.Event, runErr error) { finished <- runErr }); err != nil {
+	if err := a.StartManagedRun(db.Tenant(store.DefaultTenantScope()), record.ID, func(_ model.Scan, _ []model.Event, runErr error) { finished <- runErr }); err != nil {
 		t.Fatal(err)
 	}
 	select {

@@ -261,9 +261,10 @@ func (a *App) CheckScanWorkBudget(job config.Job) (config.WorkEstimate, error) {
 // CheckScanCycleProbeBudget applies the same safety rails to durable work
 // totals before the next process starts. For Naabu cycles this covers the
 // data-dependent Nmap enrichment phase; for ordinary Nmap/UDP cycles it also
-// keeps resolved DNS/CIDR work within the same deployment budgets.
-func (a *App) CheckScanCycleProbeBudget(ctx context.Context, cycle store.ScanCycleRecord, job config.Job) error {
-	discovery, nmapProbes, err := a.Store.ScanCycleProbeTotals(ctx, cycle.ID)
+// keeps resolved DNS/CIDR work within the same deployment budgets. ts is the
+// store of the tenant that owns the cycle's job.
+func (a *App) CheckScanCycleProbeBudget(ctx context.Context, ts *store.TenantStore, cycle store.ScanCycleRecord, job config.Job) error {
+	discovery, nmapProbes, err := ts.ScanCycleProbeTotals(ctx, cycle.ID)
 	if err != nil {
 		return err
 	}
@@ -367,8 +368,11 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 	// and historically followed every globally enabled destination. Materialize
 	// that snapshot at startup so a destination added later cannot silently
 	// become enabled for those jobs. Explicit selections, including an empty
-	// silent selection, are left untouched.
-	materialized, err := s.MaterializeLegacyNotificationSelections(context.Background(), n.LegacySelection())
+	// silent selection, are left untouched. Those jobs predate tenants, so
+	// they belong to the default tenant, and only its jobs are frozen here.
+	// Adding a destination to any tenant freezes that tenant's nil
+	// selections first, so another tenant's jobs are left as they are.
+	materialized, err := materializeLegacyNotificationSelections(context.Background(), s, n)
 	if err != nil {
 		return nil, fmt.Errorf("freeze legacy notification selections: %w", err)
 	}
@@ -423,29 +427,56 @@ func importConfiguredNotifications(ctx context.Context, cfg *config.Config, s *s
 	if result.ImportedURLs() > 0 {
 		logger.Warn("notification URLs in config.yaml were imported as web-managed destinations and are no longer used; remove notifications.urls and notifications.urls_file from config.yaml, a later release refuses to start while they are set", "configured_urls", result.Configured, "imported_urls", result.ImportedURLs())
 	}
-	if recordErr := s.RecordNotificationConfigImport(ctx, state); recordErr != nil {
+	if recordErr := s.System().RecordNotificationConfigImport(ctx, state); recordErr != nil {
 		logger.Warn("notification import state could not be recorded for the health command", "error", recordErr)
 	}
 	return nil
 }
 
+// materializeLegacyNotificationSelections freezes the nil notification
+// selection of the default tenant's jobs to the destinations that selection
+// follows in that tenant, and returns how many jobs it changed.
+func materializeLegacyNotificationSelections(ctx context.Context, s *store.Store, n *notify.Notifier) (int, error) {
+	ts := s.Tenant(store.DefaultTenantScope())
+	selection, err := n.Tenant(ts).LegacySelection(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return ts.MaterializeLegacyNotificationSelections(ctx, selection)
+}
+
 // reportMissingNotificationDestinations warns about saved routing that no
 // longer resolves. A deployment destination's ID follows its exact URL, so
 // changing a URL in config.yaml creates a new destination. Jobs that selected
-// the old one keep a selector that no longer delivers anywhere. The warning
+// the old one keep a selector that no longer delivers anywhere. Each job's
+// selection is checked against its own tenant's destinations. The warning
 // names jobs only: selectors can be legacy URL digests and are not logged. A
 // failed check is logged and never blocks startup.
 func reportMissingNotificationDestinations(ctx context.Context, s *store.Store, n *notify.Notifier, logger *slog.Logger) {
-	jobs, err := s.ListJobs(ctx, false)
+	scopes, err := s.System().TenantScopes(ctx)
 	if err != nil {
 		logger.Warn("notification routing check failed", "error", err)
 		return
 	}
 	var names, ids []string
-	for _, record := range jobs {
-		if _, missing := n.CanonicalSelection(record.Job.NotificationDestinations); len(missing) > 0 {
-			names = append(names, record.Job.Name)
-			ids = append(ids, record.ID)
+	for _, scope := range scopes {
+		ts := s.Tenant(scope)
+		jobs, err := ts.ListJobs(ctx, false)
+		if err != nil {
+			logger.Warn("notification routing check failed", "error", err)
+			return
+		}
+		notifier := n.Tenant(ts)
+		for _, record := range jobs {
+			_, missing, err := notifier.CanonicalSelection(ctx, record.Job.NotificationDestinations)
+			if err != nil {
+				logger.Warn("notification routing check failed", "error", err)
+				return
+			}
+			if len(missing) > 0 {
+				names = append(names, record.Job.Name)
+				ids = append(ids, record.ID)
+			}
 		}
 	}
 	if len(names) > 0 {
@@ -462,8 +493,10 @@ func (a *App) Job(name string) (config.Job, error) {
 	return config.Job{}, fmt.Errorf("unknown job %q", name)
 }
 
+// RunJob executes a config.yaml job. Those jobs belong to the default
+// tenant.
 func (a *App) RunJob(ctx context.Context, job config.Job) (model.Scan, []model.Event, error) {
-	return a.runJob(ctx, job, "", 0, false, false)
+	return a.runJob(ctx, store.DefaultTenantScope(), job, "", 0, false, false)
 }
 
 // RunJobRecord executes a web-managed job revision. The record is passed by
@@ -477,12 +510,17 @@ func (a *App) RunJobRecord(ctx context.Context, record store.JobRecord) (model.S
 // runJobRecord executes a web-managed job with an explicit trigger mode. A
 // manual trigger may retry a stalled resumable cycle; scheduled triggers stop
 // at the stalled state until an operator either runs it manually or discards
-// the saved progress.
+// the saved progress. The run takes its tenant from the record once and
+// reads the job's data, cycles and destinations in that tenant only.
 func (a *App) runJobRecord(ctx context.Context, record store.JobRecord, manual bool) (model.Scan, []model.Event, error) {
 	if record.Archived {
 		return model.Scan{}, nil, errors.New("archived jobs cannot run")
 	}
-	return a.runJob(ctx, record.Job, record.ID, record.Revision, true, manual)
+	scope, err := a.Store.TenantScopeByID(ctx, record.TenantID)
+	if err != nil {
+		return model.Scan{}, nil, err
+	}
+	return a.runJob(ctx, scope, record.Job, record.ID, record.Revision, true, manual)
 }
 
 // queuedManagedJob returns the job definition a managed run starts with once
@@ -491,9 +529,10 @@ func (a *App) runJobRecord(ctx context.Context, record store.JobRecord, manual b
 // rather than failing the lease's revision check and disappearing. A job that
 // was archived, or paused for a scheduled run, is skipped with
 // ErrQueuedRunSkipped. The lease still checks the returned revision, so a
-// definition that changes again before the scan starts never runs.
-func (a *App) queuedManagedJob(ctx context.Context, job config.Job, jobID string, revision int64, manual bool) (config.Job, int64, error) {
-	current, err := a.Store.GetJob(ctx, jobID)
+// definition that changes again before the scan starts never runs. ts is the
+// store of the job's tenant.
+func (a *App) queuedManagedJob(ctx context.Context, ts *store.TenantStore, job config.Job, jobID string, revision int64, manual bool) (config.Job, int64, error) {
+	current, err := ts.GetJob(ctx, jobID)
 	if err != nil {
 		return job, revision, err
 	}
@@ -590,8 +629,9 @@ func (a *App) recoverBackgroundPanic(name string) {
 // StartManagedRun accepts a web-triggered managed scan and tracks it in the
 // same wait group as scheduled work. The callback runs after the scan has
 // reached a terminal state (or could not be started) and the job's run
-// reservation is released, so the callback may start the next run.
-func (a *App) StartManagedRun(id string, done func(model.Scan, []model.Event, error)) error {
+// reservation is released, so the callback may start the next run. ts is the
+// store of the requesting tenant: a job of another tenant is not found.
+func (a *App) StartManagedRun(ts *store.TenantStore, id string, done func(model.Scan, []model.Event, error)) error {
 	reservation := scanner.NewID(time.Now().UTC())
 	if _, loaded := a.managedReservations.LoadOrStore(id, reservation); loaded {
 		return scanner.ErrBusy
@@ -633,7 +673,7 @@ func (a *App) StartManagedRun(id string, done func(model.Scan, []model.Event, er
 				done(scan, events, err)
 			}
 		}
-		latest, err := a.Store.GetJob(ctx, id)
+		latest, err := ts.GetJob(ctx, id)
 		if err != nil {
 			finish(model.Scan{}, nil, err)
 			return
@@ -647,7 +687,11 @@ func (a *App) StartManagedRun(id string, done func(model.Scan, []model.Event, er
 	return nil
 }
 
-func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision int64, managed, manual bool) (model.Scan, []model.Event, error) {
+// runJob runs one scan of a job of the tenant of scope. It reads the job,
+// its cycles and its notification destinations through that tenant's store,
+// and writes leases, cycles and results through the system store. The
+// tenant's ID keys its scan slot.
+func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Job, jobID string, revision int64, managed, manual bool) (model.Scan, []model.Event, error) {
 	key := job.Name
 	if managed {
 		key = jobID
@@ -661,14 +705,15 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		return model.Scan{}, nil, scanner.ErrBusy
 	}
 	defer a.active.Delete(key)
-	releaseSlot, slotErr := a.slots.Acquire(ctx, defaultSlotKey)
+	releaseSlot, slotErr := a.slots.Acquire(ctx, scope.ID())
 	if slotErr != nil {
 		return model.Scan{}, nil, slotErr
 	}
 	defer releaseSlot()
+	ts, system := a.Store.Tenant(scope), a.Store.System()
 	if managed {
 		var queuedErr error
-		if job, revision, queuedErr = a.queuedManagedJob(ctx, job, jobID, revision, manual); queuedErr != nil {
+		if job, revision, queuedErr = a.queuedManagedJob(ctx, ts, job, jobID, revision, manual); queuedErr != nil {
 			return model.Scan{}, nil, queuedErr
 		}
 	}
@@ -677,7 +722,7 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		return model.Scan{}, nil, err
 	}
 	if managed && !manual {
-		if cycle, cycleErr := a.Store.GetActiveScanCycle(ctx, jobID); cycleErr == nil && cycle.Status == "stalled" && !cycleResumeWindowElapsed(cycle, time.Now().UTC()) {
+		if cycle, cycleErr := ts.GetActiveScanCycle(ctx, jobID); cycleErr == nil && cycle.Status == "stalled" && !cycleResumeWindowElapsed(cycle, time.Now().UTC()) {
 			return model.Scan{}, nil, ErrScanCycleStalled
 		}
 	}
@@ -706,9 +751,11 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	}
 	var leaseErr error
 	if managed {
-		leaseErr = a.Store.AcquireJobLeaseForRevision(ctx, leaseKey, leaseOwner, revision, started.Add(job.Timeout.Value()+time.Minute))
+		// The lease also refuses a job whose tenant is not active, so a paused
+		// tenant starts no scan, whether scheduled or manual.
+		leaseErr = system.AcquireJobLeaseForRevision(ctx, leaseKey, leaseOwner, revision, started.Add(job.Timeout.Value()+time.Minute))
 	} else {
-		leaseErr = a.Store.AcquireJobLease(ctx, leaseKey, leaseOwner, started.Add(job.Timeout.Value()+time.Minute))
+		leaseErr = system.AcquireJobLease(ctx, leaseKey, leaseOwner, started.Add(job.Timeout.Value()+time.Minute))
 	}
 	if err := leaseErr; err != nil {
 		if errors.Is(err, store.ErrJobBusy) {
@@ -728,14 +775,15 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	// older scan is running: that scan must not deliver its completion events to
 	// an endpoint that did not exist when the scan began. Stable selectors are
 	// resolved again at finalization so managed credential rotations still use
-	// the current revision.
+	// the current revision. Both follow the destinations of the job's tenant,
+	// so a nil selection never reaches another tenant's destinations.
 	var legacyNotificationSelection []string
 	legacySelectionCaptured := false
 	if managed && job.NotificationDestinations == nil {
-		if reloadErr := a.Notifier.Reload(ctx); reloadErr != nil {
-			a.Logger.Warn("legacy notification selection snapshot failed", "job", job.Name, "error", reloadErr)
+		if selection, selectionErr := a.Notifier.Tenant(ts).LegacySelection(ctx); selectionErr != nil {
+			a.Logger.Warn("legacy notification selection snapshot failed", "job", job.Name, "error", selectionErr)
 		} else {
-			legacyNotificationSelection = a.Notifier.LegacySelection()
+			legacyNotificationSelection = selection
 			legacySelectionCaptured = true
 		}
 	}
@@ -746,7 +794,7 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	defer func() {
 		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer releaseCancel()
-		_ = a.Store.ReleaseJobLease(releaseCtx, leaseKey, leaseOwner)
+		_ = system.ReleaseJobLease(releaseCtx, leaseKey, leaseOwner)
 	}()
 	var snapshot model.Snapshot
 	var scanErr error
@@ -759,7 +807,7 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	if useResumable {
 		if resumableScanner, ok := a.Scanner.(scanner.ResumableScanner); ok {
 			var handled bool
-			handled, snapshot, scanErr = a.runResumableAttempt(ctx, scanCtx, job, jobID, &scan, run, resumableScanner, manual)
+			handled, snapshot, scanErr = a.runResumableAttempt(ctx, scanCtx, ts, job, jobID, &scan, run, resumableScanner, manual)
 			resumableRun = handled
 			if errors.Is(scanErr, ErrScanCycleStalled) {
 				// A scheduled trigger that races with a newly stalled cycle must
@@ -843,22 +891,25 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	if a.Logger != nil {
 		a.Logger.Debug("persisting scan result", "scan_id", scan.ID, "hosts", len(scan.Snapshot.Hosts), "timeout", persistTimeout)
 	}
-	persistCtx, persistCancel := context.WithTimeout(context.Background(), persistTimeout)
+	// The result is persisted even when the run was canceled, so the
+	// persistence context keeps ctx's values but not its cancellation.
+	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 	defer persistCancel()
 	completionEvent := model.Event{Type: "scan.completed", JobID: jobID, Job: job.Name, ScanID: scan.ID, Message: "Scan " + scan.Status, CreatedAt: scan.FinishedAt}
 	var destinations []string
 	if managed {
 		var destinationErr error
+		notifier := a.Notifier.Tenant(ts)
 		if legacySelectionCaptured {
-			destinations, destinationErr = a.Notifier.QueueDestinationsForSelection(persistCtx, legacyNotificationSelection)
+			destinations, destinationErr = notifier.QueueDestinationsForSelection(persistCtx, legacyNotificationSelection)
 		} else {
-			destinations, destinationErr = a.Notifier.QueueDestinationsForJob(persistCtx, job)
+			destinations, destinationErr = notifier.QueueDestinationsForJob(persistCtx, job)
 		}
 		if destinationErr != nil {
 			// Preserve the completed scan even when notification configuration
 			// cannot be read. Runtime state is deliberately left unchanged,
 			// matching the pre-transaction behavior.
-			if saveErr := a.Store.SaveScan(persistCtx, scan); saveErr != nil {
+			if saveErr := system.SaveScan(persistCtx, scan); saveErr != nil {
 				return scan, nil, saveErr
 			}
 			return scan, nil, destinationErr
@@ -871,7 +922,7 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 		leaseUntil := time.Now().UTC().Add(persistTimeout + time.Minute)
 		leaseCtx, leaseCancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 		defer leaseCancel()
-		if err := a.Store.RenewJobLease(leaseCtx, leaseKey, leaseOwner, leaseUntil); err != nil && a.Logger != nil {
+		if err := system.RenewJobLease(leaseCtx, leaseKey, leaseOwner, leaseUntil); err != nil && a.Logger != nil {
 			a.Logger.Warn("scan lease renewal before finalization failed", "job", job.Name, "scan_id", scan.ID, "error", err)
 		}
 	}
@@ -880,7 +931,7 @@ func (a *App) runJob(ctx context.Context, job config.Job, jobID string, revision
 	if managed {
 		events, finalizeErr = a.Engine.FinalizeManagedScan(persistCtx, jobID, job, &scan, destinations)
 	} else {
-		if err := a.Store.SaveScan(persistCtx, scan); err != nil {
+		if err := system.SaveScan(persistCtx, scan); err != nil {
 			return scan, nil, err
 		}
 		if scan.Status != "success" && scan.Status != "incomplete" {
@@ -1107,6 +1158,7 @@ func (a *App) Daemon(ctx context.Context) error {
 	ctx = daemonCtx
 	defer daemonCancel()
 	owner := daemonProcessOwner()
+	system := a.Store.System()
 	if owned {
 		defer func() {
 			a.StopRun()
@@ -1116,7 +1168,7 @@ func (a *App) Daemon(ctx context.Context) error {
 	if len(a.Config.Jobs) > 0 {
 		a.Logger.Warn("legacy YAML jobs detected; they are inactive in web-managed mode and must be recreated in the console", "jobs", len(a.Config.Jobs))
 	}
-	reclaimed, err := a.Store.AcquireDaemonLease(ctx, owner)
+	reclaimed, err := system.AcquireDaemonLease(ctx, owner)
 	if err != nil {
 		return err
 	}
@@ -1124,12 +1176,12 @@ func (a *App) Daemon(ctx context.Context) error {
 	if reclaimed > 0 {
 		a.Logger.Info("reclaimed job leases from previous daemon", "leases", reclaimed)
 	}
-	if released, err := a.Store.ReleaseDeliveryClaims(ctx); err != nil {
+	if released, err := system.ReleaseDeliveryClaims(ctx); err != nil {
 		a.Logger.Error("startup notification claim cleanup failed", "error", err)
 	} else if released > 0 {
 		a.Logger.Info("startup notification claims released", "claims", released)
 	}
-	if released, err := a.Store.ReclaimExpiredJobLeases(ctx, time.Now().UTC()); err != nil {
+	if released, err := system.ReclaimExpiredJobLeases(ctx, time.Now().UTC()); err != nil {
 		a.Logger.Error("startup job lease cleanup failed", "error", err)
 	} else if released > 0 {
 		a.Logger.Info("startup expired job leases reclaimed", "leases", released)
@@ -1146,7 +1198,7 @@ func (a *App) Daemon(ctx context.Context) error {
 		a.StopRun()
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = a.Store.ReleaseLease(releaseCtx, owner)
+		_ = system.ReleaseLease(releaseCtx, owner)
 	}()
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	cronLogger := cronSlogLogger{logger: a.Logger}
@@ -1194,7 +1246,7 @@ func (a *App) Daemon(ctx context.Context) error {
 		<-deliveryDone
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if released, err := a.Store.ReleaseDeliveryClaims(releaseCtx); err != nil {
+		if released, err := system.ReleaseDeliveryClaims(releaseCtx); err != nil {
 			a.Logger.Error("shutdown notification claim cleanup failed", "error", err)
 		} else if released > 0 {
 			a.Logger.Info("shutdown notification claims released", "claims", released)
@@ -1206,12 +1258,12 @@ func (a *App) Daemon(ctx context.Context) error {
 	} else if removed > 0 {
 		a.Logger.Info("startup expired sessions pruned", "sessions", removed)
 	}
-	if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
+	if stats, err := system.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
 		a.Logger.Error("startup history pruning failed", "error", err)
 	} else if stats.Total() > 0 || stats.FTSOptimized {
 		a.Logger.Info("startup history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions, "cycles", stats.Cycles, "fts_optimized", stats.FTSOptimized, "reclaimed_pages", stats.ReclaimedPages)
 	}
-	if expired, err := a.Store.ExpireScanCycles(ctx, time.Now().UTC()); err != nil {
+	if expired, err := system.ExpireScanCycles(ctx, time.Now().UTC()); err != nil {
 		a.Logger.Error("startup scan-cycle expiry failed", "error", err)
 	} else if expired > 0 {
 		a.Logger.Info("expired scan cycles", "cycles", expired)
@@ -1230,7 +1282,7 @@ func (a *App) Daemon(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-heartbeat.C:
-			if err := a.Store.Heartbeat(ctx, owner); err != nil {
+			if err := system.Heartbeat(ctx, owner); err != nil {
 				if errors.Is(err, store.ErrLeaseLost) {
 					return err
 				}
@@ -1249,12 +1301,12 @@ func (a *App) Daemon(ctx context.Context) error {
 			} else if removed > 0 {
 				a.Logger.Info("expired sessions pruned", "sessions", removed)
 			}
-			if stats, err := a.Store.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
+			if stats, err := system.PruneWithStats(ctx, time.Now().Add(-a.Config.Retention.Value())); err != nil {
 				a.Logger.Error("history pruning failed", "error", err)
 			} else {
 				a.Logger.Info("history pruned", "rows", stats.Total(), "scans", stats.Scans, "events", stats.Events, "sent_outbox", stats.SentOutbox, "failed_outbox", stats.FailedOutbox, "revisions", stats.Revisions, "cycles", stats.Cycles, "fts_optimized", stats.FTSOptimized, "reclaimed_pages", stats.ReclaimedPages)
 			}
-			if expired, err := a.Store.ExpireScanCycles(ctx, time.Now().UTC()); err != nil {
+			if expired, err := system.ExpireScanCycles(ctx, time.Now().UTC()); err != nil {
 				a.Logger.Error("scan-cycle expiry failed", "error", err)
 			} else if expired > 0 {
 				a.Logger.Info("expired scan cycles", "cycles", expired)
@@ -1273,11 +1325,17 @@ func (a *App) Daemon(ctx context.Context) error {
 	}
 }
 
+// updateDestinations resolves the destinations of an update alert. The update
+// check is platform-wide and its alerts follow the default tenant's update
+// routing to that tenant's destinations, as they did before tenants existed.
+// Routing the alerts of every tenant to its own destinations comes with the
+// per-tenant update fan-out.
 func (a *App) updateDestinations(ctx context.Context) []string {
 	if a.Notifier == nil {
 		return nil
 	}
-	state, err := a.Store.GetApplicationUpdateState(ctx)
+	ts := a.Store.Tenant(store.DefaultTenantScope())
+	routing, err := ts.ApplicationUpdateRouting(ctx)
 	if err != nil {
 		logger := a.Logger
 		if logger == nil {
@@ -1286,15 +1344,11 @@ func (a *App) updateDestinations(ctx context.Context) []string {
 		logger.Warn("application update notification routing unavailable", "error", err)
 		return nil
 	}
-	var destinations []string
-	if state.UpdateNotificationDestinationsConfigured {
-		destinations, err = a.Notifier.QueueDestinationsForSelection(ctx, state.UpdateNotificationDestinations)
-	} else {
-		// Existing installations have no explicit routing row yet. Preserve the
-		// original behavior of sending update events to every globally enabled
-		// destination until an administrator saves a selection.
-		destinations, err = a.Notifier.QueueDestinations(ctx)
-	}
+	// Routing that was never configured has nil destinations, which keeps the
+	// original behavior of sending update events to every enabled destination
+	// until an administrator saves a selection. A saved empty selection
+	// silences them.
+	destinations, err := a.Notifier.Tenant(ts).QueueDestinationsForSelection(ctx, routing.Destinations)
 	if err != nil {
 		logger := a.Logger
 		if logger == nil {
@@ -1323,7 +1377,7 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 	}
 	current := updatecheck.NormalizeVersion(a.Version)
 	if current != "" {
-		state, err := a.Store.GetApplicationUpdateState(ctx)
+		state, err := a.Store.Platform().GetApplicationUpdateState(ctx)
 		if err != nil {
 			logger.Warn("application version state unavailable", "error", err)
 		} else {
@@ -1343,7 +1397,7 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 			if notifyUpgrade {
 				destinations = a.updateDestinations(ctx)
 			}
-			events, recordErr := a.Store.RecordInstalledVersion(ctx, current, releaseURL, notifyUpgrade, destinations)
+			events, recordErr := a.Store.Platform().RecordInstalledVersion(ctx, current, releaseURL, notifyUpgrade, destinations)
 			if recordErr != nil {
 				logger.Warn("application version state update failed", "error", recordErr)
 			} else if len(events) > 0 {
@@ -1359,14 +1413,14 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 	if checker == nil {
 		return
 	}
-	state, err := a.Store.GetApplicationUpdateState(ctx)
+	state, err := a.Store.Platform().GetApplicationUpdateState(ctx)
 	if err != nil {
 		logger.Warn("application release state unavailable", "error", err)
 		return
 	}
 	result, checkErr := checker.Check(ctx, state.ETag)
 	if checkErr != nil {
-		if err := a.Store.RecordReleaseCheckFailure(ctx, checkErr.Error()); err != nil {
+		if err := a.Store.Platform().RecordReleaseCheckFailure(ctx, checkErr.Error()); err != nil {
 			logger.Warn("application release failure state could not be saved", "error", err)
 		}
 		logger.Warn("application release check failed", "error", checkErr)
@@ -1374,7 +1428,7 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 		return
 	}
 	if result.NotModified {
-		if err := a.Store.RecordReleaseNotModified(ctx, result.ETag); err != nil {
+		if err := a.Store.Platform().RecordReleaseNotModified(ctx, result.ETag); err != nil {
 			logger.Warn("application release check timestamp could not be saved", "error", err)
 		}
 		a.emitUpdateStatus()
@@ -1389,7 +1443,7 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 	if newer {
 		destinations = a.updateDestinations(ctx)
 	}
-	events, recordErr := a.Store.RecordReleaseCheck(ctx, current, release.Version, release.URL, release.Name, release.PublishedAt, result.ETag, newer, destinations)
+	events, recordErr := a.Store.Platform().RecordReleaseCheck(ctx, current, release.Version, release.URL, release.Name, release.PublishedAt, result.ETag, newer, destinations)
 	if recordErr != nil {
 		logger.Warn("application release state update failed", "error", recordErr)
 		return
@@ -1401,9 +1455,11 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 	a.emitUpdateStatus()
 }
 
-func (a *App) startManagedScheduled(ctx context.Context, id string) {
+// startManagedScheduled starts a scheduled run of the job with the given ID
+// in the tenant of scope.
+func (a *App) startManagedScheduled(ctx context.Context, scope store.TenantScope, id string) {
 	a.startTracked(func() {
-		record, err := a.Store.GetJob(ctx, id)
+		record, err := a.Store.Tenant(scope).GetJob(ctx, id)
 		if err != nil {
 			if errors.Is(err, store.ErrNotFound) {
 				a.Logger.Warn("scheduled job no longer exists", "job_id", id)
@@ -1426,6 +1482,12 @@ func (a *App) startManagedScheduled(ctx context.Context, id string) {
 		}
 		if errors.Is(runErr, ErrQueuedRunSkipped) {
 			a.Logger.Info("scheduled run skipped", "job", record.Job.Name, "reason", runErr)
+			return
+		}
+		if errors.Is(runErr, store.ErrTenantNotActive) {
+			// The tenant was paused after the schedule was reconciled. The next
+			// reconciliation removes its jobs until the tenant is active again.
+			a.Logger.Info("scheduled run skipped because the job's tenant is not active", "job", record.Job.Name)
 			return
 		}
 		if runErr != nil {
@@ -1489,14 +1551,25 @@ func (a *App) reconcileSchedules(ctx context.Context, runOnStart bool) error {
 	if c == nil {
 		return nil
 	}
-	jobs, err := a.Store.ListJobs(ctx, true)
+	// Every active tenant's jobs are scheduled. A paused tenant's jobs are
+	// left out, so their entries are removed below and return when the
+	// tenant is active again. Job IDs are unique across tenants.
+	scopes, err := a.Store.System().ActiveTenantScopes(ctx)
 	if err != nil {
 		return err
 	}
 	desired := map[string]store.JobRecord{}
-	for _, record := range jobs {
-		if !record.Archived && record.Enabled {
-			desired[record.ID] = record
+	desiredScopes := map[string]store.TenantScope{}
+	for _, scope := range scopes {
+		jobs, err := a.Store.Tenant(scope).ListJobs(ctx, true)
+		if err != nil {
+			return err
+		}
+		for _, record := range jobs {
+			if !record.Archived && record.Enabled {
+				desired[record.ID] = record
+				desiredScopes[record.ID] = scope
+			}
 		}
 	}
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
@@ -1537,8 +1610,8 @@ func (a *App) reconcileSchedules(ctx context.Context, runOnStart bool) error {
 		if exists && a.scheduleSpecs[id] == spec {
 			continue
 		}
-		jobID := id
-		entry, err := c.AddFunc(spec, func() { a.startManagedScheduled(ctx, jobID) })
+		jobID, scope := id, desiredScopes[id]
+		entry, err := c.AddFunc(spec, func() { a.startManagedScheduled(ctx, scope, jobID) })
 		if err != nil {
 			for _, added := range pending {
 				c.Remove(added.entry)
@@ -1580,7 +1653,7 @@ func (a *App) reconcileSchedules(ctx context.Context, runOnStart bool) error {
 	}
 	a.scheduleMu.Unlock()
 	for _, id := range startOnCreate {
-		a.startManagedScheduled(ctx, id)
+		a.startManagedScheduled(ctx, desiredScopes[id], id)
 	}
 	if len(invalid) > 0 {
 		errList := make([]error, 0, len(invalid))

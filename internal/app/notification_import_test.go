@@ -72,6 +72,17 @@ func importLogger() (*slog.Logger, *bytes.Buffer) {
 	return slog.New(slog.NewJSONHandler(&logs, nil)), &logs
 }
 
+// notificationStatus returns the default tenant's notification status, as
+// the console shows it.
+func notificationStatus(t *testing.T, a *App) map[string]any {
+	t.Helper()
+	status, err := a.Notifier.Tenant(defaultTenant(a.Store)).Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return status
+}
+
 func countRows(t *testing.T, s *store.Store, query string, args ...any) int {
 	t.Helper()
 	var count int
@@ -177,11 +188,11 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	ops, err := previous.CreateManaged(ctx, "Ops", opsURL, true)
+	ops, err := previous.Tenant(defaultTenant(fixture)).CreateManagedWithAudit(ctx, "Ops", opsURL, true, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ids, err := fixture.EnsureDeploymentNotificationIDs(ctx, []string{digestInline, digestFile})
+	ids, err := fixture.System().EnsureDeploymentNotificationIDs(ctx, []string{digestInline, digestFile})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +201,7 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 		t.Helper()
 		job := routingTestJob(name)
 		job.NotificationDestinations = selection
-		record, createErr := fixture.CreateJob(ctx, job)
+		record, createErr := defaultTenant(fixture).CreateJob(ctx, job)
 		if createErr != nil {
 			t.Fatal(createErr)
 		}
@@ -200,7 +211,7 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 	legacyDigest := create("fixture-legacy-digest", []string{"file:" + digestFile})
 	allDestinations := create("fixture-all", nil)
 	silent := create("fixture-silent", []string{})
-	if err := fixture.SetApplicationUpdateDestinations(ctx, []string{"file:" + opaqueInline, "file:" + digestFile}, store.AuditEntry{}); err != nil {
+	if err := defaultTenant(fixture).SetApplicationUpdateDestinations(ctx, []string{"file:" + opaqueInline, "file:" + digestFile}, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	event := func(label string) model.Event {
@@ -212,7 +223,7 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 		{digestFile, "legacy-file"},
 		{opaqueFile, "file"},
 	} {
-		if err := fixture.QueueEvent(ctx, queued.destination, event(queued.label)); err != nil {
+		if err := fixture.System().QueueEvent(ctx, queued.destination, event(queued.label)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -246,7 +257,7 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 	if importedInline == importedFile || importedInline == "" {
 		t.Fatalf("imported destination IDs = %q and %q, want one per URL", importedInline, importedFile)
 	}
-	records, err := upgraded.ListManagedNotifications(ctx)
+	records, err := defaultTenant(upgraded).ListManagedNotifications(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +267,10 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 	for _, record := range records {
 		assertNoSecrets(t, "stored ciphertext", string(record.Ciphertext), "secret-token", "127.0.0.1")
 	}
-	views := application.Notifier.DestinationsContext(ctx)
+	views, err := application.Notifier.Tenant(defaultTenant(upgraded)).Destinations(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
 	names := map[string]string{}
 	for _, view := range views {
 		if view.Source != "web" || view.Locked || view.ReadOnly || !view.Enabled {
@@ -278,7 +292,7 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 		{legacyDigest, []string{importedFile}, 1},
 		{silent, []string{}, 0},
 	} {
-		stored, err := upgraded.GetJob(ctx, check.before.ID)
+		stored, err := defaultTenant(upgraded).GetJob(ctx, check.before.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -289,7 +303,7 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 	// The import leaves the nil "all enabled destinations" selection alone;
 	// the existing startup freeze then pins it to the destinations that now
 	// exist, which are the imported ones instead of the deployment ones.
-	stored, err := upgraded.GetJob(ctx, allDestinations.ID)
+	stored, err := defaultTenant(upgraded).GetJob(ctx, allDestinations.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,18 +313,18 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 	if n := countRows(t, upgraded, `SELECT COUNT(*) FROM security_audit WHERE action='job.notification_destination_replaced' AND detail LIKE ?`, "%"+allDestinations.ID+"%"); n != 0 {
 		t.Fatalf("the import rewrote the nil selection (%d audit rows)", n)
 	}
-	state, err := upgraded.GetApplicationUpdateState(ctx)
+	routing, err := defaultTenant(upgraded).ApplicationUpdateRouting(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := sortedIDs(importedInline, importedFile); !slices.Equal(state.UpdateNotificationDestinations, want) {
-		t.Fatalf("update routing = %v, want %v", state.UpdateNotificationDestinations, want)
+	if want := sortedIDs(importedInline, importedFile); !slices.Equal(routing.Destinations, want) {
+		t.Fatalf("update routing = %v, want %v", routing.Destinations, want)
 	}
 	pending := pendingOutbox(t, upgraded)
 	if pending["managed:"+importedInline+":1"] != 1 || pending["managed:"+importedFile+":1"] != 2 || len(pending) != 2 {
 		t.Fatalf("pending deliveries = %v, want the legacy-digest duplicate merged and every row re-addressed", pending)
 	}
-	health, err := upgraded.ListDeliveryHealth(ctx)
+	health, err := defaultTenant(upgraded).ListDeliveryHealth(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,17 +348,17 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 	}
 
 	// The health command reports the leftover configuration.
-	if _, err := upgraded.AcquireDaemonLease(ctx, "import-test"); err != nil {
+	if _, err := upgraded.System().AcquireDaemonLease(ctx, "import-test"); err != nil {
 		t.Fatal(err)
 	}
-	status, err := upgraded.HealthStatus(ctx)
+	status, err := upgraded.System().HealthStatus(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !slices.Equal(status.Warnings, []string{"notification URLs in config.yaml were imported; remove them from config.yaml"}) {
 		t.Fatalf("health warnings = %v", status.Warnings)
 	}
-	if got := application.Notifier.StatusContext(ctx)["config_import"]; got != "imported" {
+	if got := notificationStatus(t, application)["config_import"]; got != "imported" {
 		t.Fatalf("console notification status config_import = %v, want imported", got)
 	}
 
@@ -373,7 +387,7 @@ func TestMigration50ImportsConfiguredNotificationURLsFromSchema49Fixture(t *test
 	if strings.Contains(secondLogs.String(), "imported notification URLs from config.yaml") || !strings.Contains(secondLogs.String(), "remove notifications.urls and notifications.urls_file from config.yaml") {
 		t.Fatalf("second start log = %s", secondLogs.String())
 	}
-	if deployment := restarted.Notifier.StatusContext(ctx)["deployment"]; deployment != 0 {
+	if deployment := notificationStatus(t, restarted)["deployment"]; deployment != 0 {
 		t.Fatalf("a second start registered %v deployment destinations", deployment)
 	}
 }
@@ -401,7 +415,7 @@ func TestDaemonImportFailureKeepsDeliveringFromConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := existing.CreateManaged(ctx, "Locked", "generic://127.0.0.1:9/locked?disabletls=yes", true); err != nil {
+	if _, err := existing.Tenant(defaultTenant(s)).CreateManagedWithAudit(ctx, "Locked", "generic://127.0.0.1:9/locked?disabletls=yes", true, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	// The default key is lost while an encrypted destination exists, so the
@@ -425,19 +439,19 @@ func TestDaemonImportFailureKeepsDeliveringFromConfig(t *testing.T) {
 		t.Fatalf("failed import log = %s", logs.String())
 	}
 	assertNoSecrets(t, "daemon log", logs.String(), "config-secret-token", "127.0.0.1", urlDigest(configured), "generic://")
-	if _, err := s.AcquireDaemonLease(ctx, "import-failure-test"); err != nil {
+	if _, err := s.System().AcquireDaemonLease(ctx, "import-failure-test"); err != nil {
 		t.Fatal(err)
 	}
-	status, err := s.HealthStatus(ctx)
+	status, err := s.System().HealthStatus(ctx)
 	if err != nil {
 		t.Fatalf("a failed import made the daemon unhealthy: %v", err)
 	}
 	if !slices.Equal(status.Warnings, []string{"notification URLs in config.yaml could not be imported (key_unavailable); they are still delivered from config.yaml"}) {
 		t.Fatalf("health warnings = %v", status.Warnings)
 	}
-	notificationStatus := application.Notifier.StatusContext(ctx)
-	if notificationStatus["config_import"] != "failed" || notificationStatus["deployment"] != 1 {
-		t.Fatalf("notification status after a failed import = %#v", notificationStatus)
+	consoleStatus := notificationStatus(t, application)
+	if consoleStatus["config_import"] != "failed" || consoleStatus["deployment"] != 1 {
+		t.Fatalf("notification status after a failed import = %#v", consoleStatus)
 	}
 	if err := application.Notifier.Queue(ctx, []model.Event{{Type: "scan_failed", Job: "after-failed-import", CreatedAt: time.Now().UTC()}}); err != nil {
 		t.Fatal(err)
@@ -469,13 +483,13 @@ func TestHostCommandsDoNotImportNotificationURLs(t *testing.T) {
 	if n := countRows(t, s, `SELECT COUNT(*) FROM managed_notifications`); n != 0 {
 		t.Fatalf("a host command imported %d destinations", n)
 	}
-	if deployment := application.Notifier.StatusContext(ctx)["deployment"]; deployment != 1 {
+	if deployment := notificationStatus(t, application)["deployment"]; deployment != 1 {
 		t.Fatalf("deployment destinations for a host command = %v, want 1", deployment)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "data", "notification.key")); !os.IsNotExist(err) {
 		t.Fatalf("a host command created the notification key: %v", err)
 	}
-	if state, err := s.NotificationConfigImportState(ctx); err != nil || state.Status != store.NotificationConfigImportNone {
+	if state, err := s.System().NotificationConfigImportState(ctx); err != nil || state.Status != store.NotificationConfigImportNone {
 		t.Fatalf("a host command recorded import state %#v, %v", state, err)
 	}
 }
@@ -519,7 +533,7 @@ func TestDaemonImportWithoutConfiguredURLs(t *testing.T) {
 	if _, err := NewWithOptions(routingTestConfig(database), s, "missing-nmap", logger, Options{ImportNotificationURLs: true}); err != nil {
 		t.Fatal(err)
 	}
-	state, err := s.NotificationConfigImportState(ctx)
+	state, err := s.System().NotificationConfigImportState(ctx)
 	if err != nil || state.Status != store.NotificationConfigImportNone || state.UpdatedAt.IsZero() {
 		t.Fatalf("import state without URLs = %#v, %v", state, err)
 	}

@@ -95,6 +95,14 @@ Report the checks you ran and any failures or checks you could not run.
 - Preserve job profile revisions so profile edits do not silently change scheduled jobs.
 - Preserve baseline state for failed or incomplete observations and retain scan history when users accept changes.
 - Enforce permissions in backend handlers and test each affected role.
+- Keep business unit data isolated in the application.
+  Classify each new table in `tenancyTables` in `internal/store/tenancy_tables.go` and give a table with unit data its step in `tenantPurgeSteps`.
+  Unit data carries `tenant_id` or inherits it from a parent row.
+  A unit's requests reach it only through `TenantStore` and anonymous requests only through `PublicStore`, whose queries put the tenant predicate inline in their `WHERE` or `ON` clauses, which `TestTenantSQLLint` enforces; the daemon's work across units belongs to `SystemStore`.
+  Give each exported `TenantStore` or `PublicStore` method a case in `tenantStoreLeakCases` or `publicStoreCases`.
+  `PlatformStore` returns a unit only as its identity, counts, capacity, and account summaries, never its data; give each new audit action its category in `auditActionCategories`, which decides whether the platform audit shows it.
+  Add each new route to `apiRoutes` in `internal/web/permissions.go` and send each live update through `broadcastTo` with an explicit audience.
+  `TestIsolationMatrix` sends every route in `apiRoutes` as each role, including `platform_admin`, and requires another unit's ID to get the same response as an unknown ID; teach it any new path placeholder.
 - Keep public status limited to explicitly published data and exclude private fingerprints and raw scan evidence.
 - Preserve secret redaction in logs and API responses, including the write-only contract for notification URLs.
 - Never commit notification URLs, authentication tokens, passwords, or encryption keys.

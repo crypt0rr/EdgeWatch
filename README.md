@@ -137,16 +137,9 @@ docker compose exec edgewatch edgewatch admin setup-token \
 
 This recovery action is refused after an administrator has been created.
 
-With the experimental business units on, the first platform administrator is
-created the same way, once the first administrator exists. Print a one-time
-platform setup token on the host, then open the console: while the token is
-valid, the sign-in page links to the setup page, where the token, a username,
-and a password create the account. The token expires after 15 minutes.
-
-```console
-docker compose exec edgewatch edgewatch admin platform-setup-token \
-  --config /etc/edgewatch/config.yaml
-```
+With the experimental business units on, a platform administrator is created
+the same way once the first administrator exists; see
+[Business units](#business-units-experimental).
 
 ### Tailscale Serve and reverse proxies
 
@@ -262,6 +255,7 @@ validated schema.
 | updates.enabled | YAML | Enable or disable the three-hour stable-release check. |
 | notifications.encryption_key_file | YAML/secrets | Optional separate key for the encrypted notification destinations. |
 | notifications.urls, urls_file | YAML/secrets | Deprecated. Imported once as web-managed destinations; see [Notifications](#notifications). |
+| experimental.business_units | YAML | Off by default. Several business units in one deployment; see [Business units](#business-units-experimental). |
 | Jobs, users, profiles, notification destinations | Web console | Runtime administration stored in SQLite. |
 
 The YAML jobs section from older deployments is not imported into the scheduler.
@@ -515,18 +509,175 @@ names, latest successful scan time, positive ports, service names, and cached
 normalized network-registration data. It does not expose raw Nmap evidence,
 product fingerprints, credentials, or an arbitrary RDAP proxy.
 
-With the experimental business units switched on, each unit publishes its own
-page at /public/<slug>, where slug is the unit's slug; /public keeps serving the
-default unit's page. A slug without a published page answers exactly like a
-page that is not enabled, whether the slug is unknown, the unit's page is off,
-or the unit is paused or deleted. Each page has its own anonymous rate limit
-and cache.
+With the experimental business units on, each unit publishes its own page;
+see [Business units](#business-units-experimental).
 
 A public-status save applies only to the configuration the editor loaded. If
 another administrator saved in the meantime, EdgeWatch rejects the save with a
 conflict and the editor reloads the current settings, so an outdated editor
 cannot re-publish a withdrawn page. API clients send the `updated_at` value from
 `GET /api/v1/public-dashboard` with each `PUT`.
+
+## Business units (experimental)
+
+Business units let several internal teams share one deployment and its
+database. Each unit has its own accounts, jobs, scans, baselines, incidents,
+notification destinations, custom scanner profiles, and public status page.
+EdgeWatch enforces the separation in the application, not in the host or the
+database; see [Limits](#limits).
+
+The feature is under development and off by default. Turn it on in
+config.yaml, then recreate the container:
+
+```yaml
+experimental:
+  business_units: true
+```
+
+No migration is needed: the upgrade to schema 54 already moved everything
+that existed into the default unit, named `Default` with the slug `default`,
+and every account keeps its role there, so existing administrators administer
+the default unit. While it is the only unit, turning the flag on changes
+little. Administrators get a read-only **Audit** page, the host can issue a
+platform setup token, host commands accept `--tenant` (see
+[Useful commands](#useful-commands)), and the default unit's public page is
+also served at /public/default. Jobs, schedules, notifications, public
+status, and optional TOTP work as before.
+
+### The platform administrator
+
+A platform administrator is a separate account that belongs to no unit. It
+creates, renames, disables, and deletes units, sets their capacity, invites
+and resets their administrators, can sign out any of their accounts, manages
+the other platform administrators and the platform's own notification
+destinations, and reads the platform audit and status. It never sees a
+unit's jobs, scans, hosts, baselines, incidents, destinations, or public
+status settings: the platform console shows each unit with its name, slug,
+state, and counts of accounts, administrators, jobs, and scan slots in use,
+and lists the unit's accounts without credentials.
+
+The host creates the first platform administrator, after the first
+administrator exists. Print a one-time platform setup token:
+
+```console
+docker compose exec edgewatch edgewatch admin platform-setup-token \
+  --config /etc/edgewatch/config.yaml
+```
+
+The token is valid for 15 minutes. While it is valid, the sign-in page links
+to the setup page, where the token, a username, and a password create the
+account. The command is refused while the flag is off or an enabled platform
+administrator exists, and it replaces an unused token only with `--force`. An
+existing platform administrator invites the others from **Platform admins**.
+
+### Units and their accounts
+
+Create a unit on the **Units** page of the platform console. Its name has at
+most 80 characters and is unique without regard to case. Its slug, derived
+from the name when left empty, has 2 to 40 lowercase letters, digits, or
+hyphens and cannot be a reserved word such as `api`, `platform`, or `public`.
+Then invite the unit's first administrator from the unit's **Accounts** tab.
+
+The platform administrator invites and resets only unit administrators, and
+receives each one-time link to pass on. The unit's administrators invite and
+manage its operators and viewers on **Users**, and cannot reach another
+unit's accounts or a platform administrator. Each unit keeps at least one
+enabled administrator. Usernames are unique across every unit and the
+platform.
+
+Once more than one unit exists, counting disabled units and units being
+deleted, every unit administrator and platform administrator must use TOTP.
+Operators and viewers are not affected. An administrator without TOTP gets a
+forced enrolment screen after signing in, which offers only the authenticator
+setup, a password change, and sign-out; until TOTP is on, the session can
+manage only its own account. After enabling TOTP and saving the recovery
+codes, sign out and sign in again. Enrol the existing administrators before
+you create the second unit. The host command `admin disable-totp` stays the
+recovery path, and the account then enrols again.
+
+### What belongs to each unit
+
+- **Notifications:** each unit adds and routes its own destinations; jobs can
+  select only their unit's destinations. URLs from `notifications.urls` and
+  `urls_file` in config.yaml are imported into the default unit only. The
+  platform has its own destinations on the platform console's
+  **Notifications** page.
+- **Update alerts:** each active unit gets its own copy of an update alert,
+  routed by its own **Update alerts** selection. A unit that never saved a
+  selection sends it to all of its enabled destinations, and an empty
+  selection silences it. The platform's copy goes only to the platform
+  destinations selected there; none are selected until a platform
+  administrator chooses them.
+- **Scanner profiles:** the built-in profiles are shared and read-only. Custom
+  profiles belong to the unit that created them.
+- **Public status:** each unit's administrators publish its page at
+  /public/<slug>; /public keeps serving the default unit's page. An unknown
+  slug, a page that is not enabled, a unit that is disabled or being deleted,
+  and every slug while the flag is off get the same answer as a page that is
+  not enabled. Each page has its own anonymous rate limit and cache. Changing
+  a unit's slug changes its public address.
+- **Capacity:** the `scheduler` settings in config.yaml stay the deployment's
+  limits. On a unit's **Capacity** tab, a platform administrator can cap the
+  unit's scan slots and its Nmap and Naabu probe budgets below those limits,
+  or keep the deployment's setting. A slot cap is a limit, not a reservation:
+  free slots go in turn to the units that have queued scans, up to each
+  unit's cap. The high-cost ceiling is the most probes that a job approved
+  for high-cost work may send. A new unit's ceiling starts at the lower of
+  the deployment's two probe budgets, so such an approval raises nothing
+  until a platform administrator raises the ceiling. The default unit keeps
+  the high-cost behavior from before business units.
+- **Audit:** a unit's administrators read its security audit on **Audit**,
+  including a platform administrator's actions on the unit's accounts and
+  capacity, without the platform administrator's source address. The platform
+  audit shows the records that belong to no unit, such as each unit's
+  creation, rename, disabling, enabling, and deletion, and every unit's
+  account records, never its data records. Both views are read-only.
+
+### Disabling and deleting a unit
+
+Disabling a unit, from its **Danger zone** tab with the platform
+administrator's password, pauses it and keeps its data:
+
+- its sessions end, its open invitations are revoked, and sign-in fails as it
+  does with a wrong password;
+- its running scans are cancelled without changing baselines, its queued runs
+  fail, and its jobs leave the schedule;
+- its undelivered alerts are held, and it gets no copy of new update alerts;
+- its public page answers as a page that is not enabled;
+- retention keeps removing its expired history.
+
+Enabling it again restores sign-in and the schedule and delivers the held
+alerts; revoked invitations stay revoked. The default unit can be disabled
+but never deleted.
+
+Deleting a unit needs a disabled unit, its exact name typed, and the platform
+administrator's password. Its jobs are archived at once, and the daemon then
+erases its data in small batches. The deletion continues in the background,
+resumes after a restart, and waits for a running scan to finish; the unit's
+page shows its progress. The records of platform administrators' actions and
+of the deletion stay in the platform audit; the unit's other audit records
+are erased. Afterwards the unit's name and slug can be used again. Backups
+taken before the deletion still contain the unit.
+
+Turning the flag off again removes nothing. The units, their accounts, and
+their jobs keep working, stored capacity caps keep applying, a deletion in
+progress completes, and administrators still need TOTP while more than one
+unit exists. The platform console, the platform setup, the unit audit,
+`--tenant`, and the /public/<slug> pages are unavailable until the flag is
+on again.
+
+### Limits
+
+The separation of units is enforced by the console, the API, live updates,
+and the public pages. Units share the process, the database, and the
+`notification.key` and `auth.key`, so anyone with access to the Docker host,
+the container, the host commands, the database, or a backup can read and
+change every unit's data. A backup and a restore always cover every unit
+together. Use business units for teams that trust the deployment's operators,
+and separate deployments for parties that must not share them.
+[SECURITY.md](SECURITY.md) describes the trust boundary, the platform
+administrator's reach, and the signals that units can still observe about
+each other.
 
 ## Data, backup, and recovery
 
@@ -762,7 +913,8 @@ passwords, setup tokens, database files, or encryption keys.
 More security detail, including the live-update session-revocation and
 isolation bounds, is in [SECURITY.md](SECURITY.md); container capability
 guidance is in [docs/container-hardening.md](docs/container-hardening.md).
-The historical scan API's metadata and full-result endpoints are documented in
+The historical scan API's metadata and full-result endpoints, and the API of
+the experimental business units, are documented in
 [docs/api-compatibility.md](docs/api-compatibility.md).
 
 ## License

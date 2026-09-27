@@ -9,8 +9,11 @@ import (
 
 func TestPermissionsForRoleIsDeterministicAndComplete(t *testing.T) {
 	admin := PermissionsForRole(store.RoleAdministrator)
-	if len(admin) != 19 || !sortStrings(admin) {
+	if len(admin) != 20 || !sortStrings(admin) {
 		t.Fatalf("administrator permissions = %#v", admin)
+	}
+	if !HasPermission(store.Session{Role: store.RoleAdministrator}, PermissionAuditRead) {
+		t.Fatal("administrator cannot read the unit audit")
 	}
 	operator := PermissionsForRole(store.RoleOperator)
 	if len(operator) != 14 || !sortStrings(operator) {
@@ -24,7 +27,7 @@ func TestPermissionsForRoleIsDeterministicAndComplete(t *testing.T) {
 	if got := PermissionsForRole("unknown"); len(got) != 0 {
 		t.Fatalf("unknown role permissions = %#v", got)
 	}
-	for _, permission := range []string{PermissionNotificationsRead, PermissionAuditRead} {
+	for _, permission := range []string{PermissionNotificationsRead} {
 		if HasPermission(store.Session{Role: store.RoleAdministrator}, permission) {
 			t.Fatalf("administrator unexpectedly has unenforced capability %s", permission)
 		}
@@ -97,4 +100,28 @@ func sortStrings(values []string) bool {
 		}
 	}
 	return true
+}
+
+// The unit audit is the only permission of a unit's role that the routes of
+// the experimental business units alone grant; the filter drops it and keeps
+// every other permission in order.
+func TestWithoutBusinessUnitPermissions(t *testing.T) {
+	admin := PermissionsForRole(store.RoleAdministrator)
+	filtered := WithoutBusinessUnitPermissions(admin)
+	if len(filtered) != len(admin)-1 || !sortStrings(filtered) {
+		t.Fatalf("filtered administrator permissions = %#v", filtered)
+	}
+	for _, permission := range filtered {
+		if permission == PermissionAuditRead {
+			t.Fatal("the filter kept the unit audit permission")
+		}
+	}
+	for _, role := range []string{store.RoleOperator, store.RoleViewer, store.RolePlatformAdmin} {
+		if got, want := WithoutBusinessUnitPermissions(PermissionsForRole(role)), PermissionsForRole(role); !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s permissions filtered = %#v, want %#v", role, got, want)
+		}
+	}
+	if got := WithoutBusinessUnitPermissions(nil); got == nil || len(got) != 0 {
+		t.Fatalf("filtered nil = %#v, want an empty list", got)
+	}
 }

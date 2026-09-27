@@ -446,6 +446,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	permission := requestPermission(path, r)
+	if businessUnitsRoute(path) && !s.businessUnitsEnabled() {
+		// The platform routes and the unit audit exist only while
+		// experimental.business_units is on. Otherwise they fail closed
+		// exactly like a path that no route knows.
+		permission = auth.PermissionDenied
+	}
 	if permission == "" || permission == auth.PermissionDenied || !auth.HasPermission(session, permission) {
 		details := map[string]string{"permission": permission}
 		if permission == auth.PermissionDenied || permission == "" {
@@ -472,6 +478,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/auth/activity" || path == "/auth/logout":
 	case session.Role == store.RolePlatformAdmin && permission == auth.PermissionAccountSelf:
 		account = s.Store.Platform().Account(session.UserID)
+	case session.Role == store.RolePlatformAdmin && isPlatformPermission(permission):
+		// The platform routes read and change the platform's own data and
+		// the business units by ID, through the platform's store. They
+		// never take a tenant's store.
 	default:
 		if ts, ok = s.requestTenant(w, r, session); !ok {
 			return
@@ -580,6 +590,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.listIncidents(w, r, ts)
 	case path == "/events" && r.Method == http.MethodGet:
 		s.listEvents(w, r, ts, r.URL.Query().Get("job"))
+	case path == "/audit" && r.Method == http.MethodGet:
+		s.unitAudit(w, r, ts)
+	case strings.HasPrefix(path, "/platform/"):
+		s.platformRoute(w, r, session, strings.TrimPrefix(path, "/platform/"))
 	case strings.HasPrefix(path, "/jobs/"):
 		s.jobRoute(w, r, session, ts, strings.TrimPrefix(path, "/jobs/"))
 	default:

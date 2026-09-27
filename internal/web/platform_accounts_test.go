@@ -88,7 +88,10 @@ func readSession(t *testing.T, server *Server, account routeMatrixSession) sessi
 // assertOnlySelfService checks through the API router that the session is
 // refused every route of the inventory except its own account's
 // self-service, before any handler runs. Mutations carry a CSRF token, so the
-// refusal comes from the permission gate.
+// refusal comes from the permission gate. A platform administrator with a
+// full session also reaches the platform console's routes while business
+// units are on; the platform tests cover those. With business units off,
+// their routes are refused to everyone as unknown routes.
 func assertOnlySelfService(t *testing.T, server *Server, account *routeMatrixSession) {
 	t.Helper()
 	for _, route := range apiRoutes {
@@ -101,29 +104,45 @@ func assertOnlySelfService(t *testing.T, server *Server, account *routeMatrixSes
 			}
 			continue
 		}
-		if auth.HasPermission(account.session, route.Permission) {
+		want := route.Permission
+		switch {
+		case route.BusinessUnits && !server.businessUnitsEnabled():
+			want = "route"
+		case isPlatformPermission(route.Permission) && account.role == store.RolePlatformAdmin && !account.session.TOTPEnrollmentRequired:
+			if !auth.HasPermission(account.session, route.Permission) {
+				t.Errorf("%s: %s is refused its console's %s", routeInventoryName(route), account.role, route.Permission)
+			}
+			continue
+		case auth.HasPermission(account.session, route.Permission):
 			t.Errorf("%s: %s holds %s", routeInventoryName(route), account.role, route.Permission)
 		}
 		response := serveRouteMatrixRequest(t, server.api, route.Method, routeMatrixTarget(route), account, true, "")
-		if response.status != http.StatusForbidden || response.code != "forbidden" || response.details["permission"] != route.Permission {
-			t.Errorf("%s as %s = %d %s, want 403 forbidden for %s", routeInventoryName(route), account.role, response.status, response.body, route.Permission)
+		if response.status != http.StatusForbidden || response.code != "forbidden" || response.details["permission"] != want {
+			t.Errorf("%s as %s = %d %s, want 403 forbidden for %s", routeInventoryName(route), account.role, response.status, response.body, want)
 		}
 	}
 }
 
 // Every route of a unit's console that reads or changes the unit's data is
-// refused to a platform administrator, which holds no unit permission; only
-// its own account's self-service routes are open to it.
+// refused to a platform administrator, which holds no unit permission, with
+// business units off and on; only its own account's self-service routes,
+// and with business units on its platform console's routes, are open to
+// it.
 func TestRouteInventoryDeniesPlatformAdministratorsUnitData(t *testing.T) {
-	server, accounts := newRouteMatrixSessions(t)
-	platform := &accounts[len(accounts)-1]
-	if platform.role != store.RolePlatformAdmin || platform.session.TenantID != "" {
-		t.Fatalf("matrix account = %s in tenant %q, want a platform administrator", platform.role, platform.session.TenantID)
-	}
-	assertOnlySelfService(t, server, platform)
-	payload := readSession(t, server, *platform)
-	if payload.Role != store.RolePlatformAdmin || !reflect.DeepEqual(payload.Permissions, auth.PermissionsForRole(store.RolePlatformAdmin)) || payload.Enrollment != nil {
-		t.Fatalf("platform administrator session = %+v", payload)
+	for _, businessUnits := range []bool{false, true} {
+		server, accounts := newRouteMatrixSessions(t)
+		if businessUnits {
+			enableBusinessUnits(server)
+		}
+		platform := &accounts[len(accounts)-1]
+		if platform.role != store.RolePlatformAdmin || platform.session.TenantID != "" {
+			t.Fatalf("matrix account = %s in tenant %q, want a platform administrator", platform.role, platform.session.TenantID)
+		}
+		assertOnlySelfService(t, server, platform)
+		payload := readSession(t, server, *platform)
+		if payload.Role != store.RolePlatformAdmin || !reflect.DeepEqual(payload.Permissions, auth.PermissionsForRole(store.RolePlatformAdmin)) || payload.Enrollment != nil {
+			t.Fatalf("platform administrator session with business units %t = %+v", businessUnits, payload)
+		}
 	}
 }
 
@@ -217,7 +236,9 @@ func TestTOTPEnrollmentRestrictsAdministratorSessions(t *testing.T) {
 		}
 		return payload
 	}
-	full := auth.PermissionsForRole(store.RoleAdministrator)
+	// Business units are off, so the unit audit, which only they offer, is
+	// not listed.
+	full := auth.WithoutBusinessUnitPermissions(auth.PermissionsForRole(store.RoleAdministrator))
 
 	if payload := login(); payload["totp_enrollment_required"] != nil {
 		t.Fatalf("single-unit login payload = %v", payload)

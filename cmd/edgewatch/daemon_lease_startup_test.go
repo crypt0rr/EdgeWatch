@@ -47,7 +47,7 @@ func seedDaemonLeaseDatabase(t *testing.T, database string, heartbeatAge time.Du
 		seed.Close()
 		t.Fatal(err)
 	}
-	if _, err := seed.AcquireDaemonLease(ctx, "running-daemon"); err != nil {
+	if _, err := seed.System().AcquireDaemonLease(ctx, "running-daemon"); err != nil {
 		seed.Close()
 		t.Fatal(err)
 	}

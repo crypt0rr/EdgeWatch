@@ -566,7 +566,9 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/suppress", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/suppress"},
 	{Method: http.MethodGet, Template: "/jobs/{id}/events", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/events"},
 
-	// Unauthenticated public status projection, relative to publicAPIBase.
+	// Unauthenticated public status projection, relative to publicAPIBase:
+	// the default business unit's page, and a unit's page by its slug.
 	// Server.publicAPI also accepts one trailing slash.
 	{Method: http.MethodGet, Template: "/dashboard", Example: "/dashboard", Access: routePublic},
+	{Method: http.MethodGet, Template: "/dashboard/{slug}", Example: "/dashboard/default", Access: routePublic},
 }

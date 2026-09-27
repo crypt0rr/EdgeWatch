@@ -504,6 +504,13 @@ names, latest successful scan time, positive ports, service names, and cached
 normalized network-registration data. It does not expose raw Nmap evidence,
 product fingerprints, credentials, or an arbitrary RDAP proxy.
 
+With the experimental business units switched on, each unit publishes its own
+page at /public/<slug>, where slug is the unit's slug; /public keeps serving the
+default unit's page. A slug without a published page answers exactly like a
+page that is not enabled, whether the slug is unknown, the unit's page is off,
+or the unit is paused or deleted. Each page has its own anonymous rate limit
+and cache.
+
 A public-status save applies only to the configuration the editor loaded. If
 another administrator saved in the meantime, EdgeWatch rejects the save with a
 conflict and the editor reloads the current settings, so an outdated editor
@@ -667,7 +674,23 @@ docker compose exec edgewatch edgewatch history \
 # Test configured notification delivery
 docker compose exec edgewatch edgewatch notify test \
   --config /etc/edgewatch/config.yaml
+
+# With the experimental business units on, act on one unit by its slug
+docker compose exec edgewatch edgewatch status \
+  --config /etc/edgewatch/config.yaml --tenant UNIT_SLUG --output json
 ```
+
+`scan`, `status`, `history`, `baseline approve|reset|export`, and `notify test`
+act on the default business unit. With `experimental.business_units` on,
+`--tenant UNIT_SLUG` makes them act on that unit's jobs, scans, baselines, and
+destinations instead, and record their audit entries in that unit. A disabled
+unit can still be read with `status`, `history`, and `baseline export`; the
+other commands refuse it until it is enabled, and every command refuses a unit
+that is being deleted. `admin reset-password` and `admin disable-totp` find the
+account by `--username` in any unit; with business units on they print the
+account's unit and role before they act, and `--tenant UNIT_SLUG` makes them
+stop without a change unless the account belongs to that unit. Every other
+command, and every command while business units are off, refuses `--tenant`.
 
 `health` exits non-zero when migrations or the daemon heartbeat are unhealthy.
 Its `warnings` list actions that do not stop EdgeWatch, such as removing

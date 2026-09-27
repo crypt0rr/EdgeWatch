@@ -83,6 +83,15 @@ out; everything else is refused.
 If the units cannot be counted, the restriction applies. With a single unit
 nothing changes.
 
+Each unit's public status page is served at `/public/<slug>` and
+`/api/public/v1/dashboard/<slug>`, from that unit's published hosts only;
+`/public` keeps serving the default unit's page. An unknown slug, a unit's
+page that is not enabled, a paused unit, a unit being deleted, and every slug
+while the flag is off get the same 404 `public_disabled` answer as a disabled
+page, so the address does not reveal whether a unit has that slug. Each page
+has its own per-client rate limit and its own cache: a busy page does not
+throttle another, and saving one page does not drop another page's cache.
+
 A platform administrator's action on a unit's account is recorded in that
 unit's security audit with the `platform` actor kind, so the unit's
 administrators see it. The platform administrator's own actions, sign-in

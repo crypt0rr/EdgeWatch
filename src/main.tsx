@@ -355,7 +355,11 @@ export function App() { return <BrowserRouter><AppContent /></BrowserRouter> }
 export function AppContent() {
   const location = useLocation()
   const client = useQueryClient()
-  const isPublic = location.pathname === '/public' || location.pathname === '/public/'
+  // /public serves the default business unit's page, and /public/<slug> the
+  // page of the business unit with that slug.
+  const publicMatch = /^\/public(?:\/([^/]+))?\/?$/.exec(location.pathname)
+  const isPublic = publicMatch !== null
+  const publicSlug = publicMatch?.[1] ? decodePathSegment(publicMatch[1]) : undefined
   const [signedOut, setSignedOut] = useState(false)
   // The public highlights page is deliberately independent of setup/session
   // state. This avoids an unnecessary authenticated request and keeps the
@@ -381,13 +385,19 @@ export function AppContent() {
     try { await apiLogout() } catch { /* The server clears the cookie before reporting audit errors. */ }
     finally { setCSRF(''); client.clear(); client.setQueryData(['session'], null); setSignedOut(true) }
   }
-  if (isPublic) return <PublicDashboard />
+  if (isPublic) return <PublicDashboard slug={publicSlug} />
   if (status.isLoading || session.isLoading) return <Loading />
   if (status.error) return <ErrorCard message="Unable to contact EdgeWatch. Retry when the service is available." />
   return status.data?.configured && authenticated ? <ProtectedApp onLogout={handleLogout} /> : <AuthGate statusConfigured={!!status.data?.configured} />
 }
 
 function AuthGate({ statusConfigured }: { statusConfigured: boolean }) { return <AuthRoutes configured={statusConfigured} /> }
+
+// A malformed escape is passed on as typed; the server answers it as a page
+// that is not published.
+function decodePathSegment(value: string) {
+  try { return decodeURIComponent(value) } catch { return value }
+}
 
 function Loading() { return <div className="loading"><span className="spinner" />Loading EdgeWatch…</div> }
 function ErrorCard({ message }: { message: string }) { return <div className="error-card">{message}</div> }

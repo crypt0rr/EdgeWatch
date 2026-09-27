@@ -25,6 +25,14 @@ func (s *Server) cachedPublicDashboardPayload(ctx context.Context, generation ui
 	return s.cachedPublicPagePayload(ctx, store.DefaultPublicScope(), generation, dashboard)
 }
 
+func (s *Server) publicDashboardGeneration() uint64 {
+	return s.publicPageGeneration(store.DefaultPublicScope())
+}
+
+func (s *Server) invalidatePublicDashboardCache() {
+	s.invalidatePublicPage(store.DefaultPublicScope())
+}
+
 func (s *Server) publicDashboardResponse(ctx context.Context, dashboard store.PublicDashboard) (publicDashboardResponse, error) {
 	return s.publicPageResponse(ctx, s.Store.Public(store.DefaultPublicScope()), dashboard)
 }
@@ -134,7 +142,9 @@ func newPublicTenantFixture(t *testing.T) publicTenantFixture {
 	return f
 }
 
-// getPublicPage requests the page of the scope as an anonymous client.
+// getPublicPage requests the page of the scope as an anonymous client: the
+// default tenant's through the legacy URL, and another tenant's through the
+// scope itself, as if it had been resolved before the request.
 func (f publicTenantFixture) getPublicPage(scope store.PublicScope, remote string) *httptest.ResponseRecorder {
 	request := httptest.NewRequest(http.MethodGet, "/api/public/v1/dashboard", nil)
 	request.RemoteAddr = remote
@@ -142,7 +152,7 @@ func (f publicTenantFixture) getPublicPage(scope store.PublicScope, remote strin
 	if scope == store.DefaultPublicScope() {
 		f.server.publicAPI(recorder, request)
 	} else {
-		f.server.servePublicPage(recorder, request, scope)
+		f.server.servePublicPage(recorder, request, "public-dashboard/test", func(context.Context) (store.PublicScope, error) { return scope, nil })
 	}
 	return recorder
 }
@@ -187,7 +197,7 @@ func TestPublicAPIServesTheDefaultTenantUnchanged(t *testing.T) {
 	if _, err := f.db.DB.ExecContext(ctx, `UPDATE tenants SET state='disabled' WHERE id=?`, publicTenantB); err != nil {
 		t.Fatal(err)
 	}
-	f.server.invalidatePublicDashboardCache()
+	f.server.invalidatePublicPage(scopeB)
 	if rec := f.getPublicPage(scopeB, "198.51.100.71:1001"); rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "public_disabled") {
 		t.Fatalf("paused tenant's page = %d: %s", rec.Code, rec.Body.String())
 	}
@@ -272,8 +282,9 @@ func TestPublicDashboardRouteUsesTheSessionTenant(t *testing.T) {
 }
 
 // Each public scope has its own cache: a page cached for one tenant is never
-// served for another, and a save of any page drops the cache of every page.
-// With one tenant, the default page keeps the server's single cache.
+// served for another, and invalidating one page leaves every other page's
+// cache in place. With one tenant, the default page keeps the server's single
+// cache.
 func TestPublicPageCacheIsKeyedPerScope(t *testing.T) {
 	ctx := context.Background()
 	f := newPublicTenantFixture(t)
@@ -303,10 +314,26 @@ func TestPublicPageCacheIsKeyedPerScope(t *testing.T) {
 	if defaultEntry == nil || pages != 1 {
 		t.Fatalf("default page cache = %v, other pages = %d", defaultEntry, pages)
 	}
-	f.server.invalidatePublicDashboardCache()
-	for _, scope := range []store.PublicScope{store.DefaultPublicScope(), scopeB} {
-		if payload, ok := f.server.cachedPublicPageResponse(scope); ok {
-			t.Errorf("tenant %s: page served after a save: %s", scope.TenantID(), payload)
+	for _, step := range []struct {
+		invalidated, kept store.PublicScope
+		keptPage          string
+	}{{scopeB, store.DefaultPublicScope(), pageA}, {store.DefaultPublicScope(), scopeB, pageB}} {
+		// Both pages are cached before the save.
+		for _, scope := range []store.PublicScope{store.DefaultPublicScope(), scopeB} {
+			if rec := f.getPublicPage(scope, "198.51.100.73:1002"); rec.Code != http.StatusOK {
+				t.Fatalf("tenant %s: page = %d: %s", scope.TenantID(), rec.Code, rec.Body.String())
+			}
+		}
+		before := f.server.publicPageGeneration(step.kept)
+		f.server.invalidatePublicPage(step.invalidated)
+		if payload, ok := f.server.cachedPublicPageResponse(step.invalidated); ok {
+			t.Errorf("tenant %s: page served after its save: %s", step.invalidated.TenantID(), payload)
+		}
+		if payload, ok := f.server.cachedPublicPageResponse(step.kept); !ok || string(payload)+"\n" != step.keptPage {
+			t.Errorf("tenant %s: cache after another page's save = %s, %v; want %s", step.kept.TenantID(), payload, ok, step.keptPage)
+		}
+		if after := f.server.publicPageGeneration(step.kept); after != before {
+			t.Errorf("tenant %s: generation moved from %d to %d on another page's save", step.kept.TenantID(), before, after)
 		}
 	}
 }

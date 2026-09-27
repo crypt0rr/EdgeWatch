@@ -309,6 +309,44 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByText(/Public status/i)).toBeInTheDocument())
     expect(setupStatus).toHaveBeenCalled()
     expect(getSession).not.toHaveBeenCalled()
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/public/v1/dashboard')
+  })
+
+  it('serves a business unit public page by its slug without setup or session requests', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ title: 'Unit status', introduction: '', updated_at: '2026-09-20T12:00:00Z', hosts: [] }) })
+    vi.stubGlobal('fetch', fetchMock)
+    for (const [route, requested] of [
+      ['/public/other', '/api/public/v1/dashboard/other'],
+      ['/public/other/', '/api/public/v1/dashboard/other'],
+      ['/public/a%20b', '/api/public/v1/dashboard/a%20b'],
+      ['/public/%E0%A4%A', '/api/public/v1/dashboard/%25E0%25A4%25A'],
+      ['/public/', '/api/public/v1/dashboard'],
+    ]) {
+      cleanup()
+      fetchMock.mockClear()
+      renderWithProviders(<AppContent />, { route: [route] })
+      await waitFor(() => expect(screen.getByRole('heading', { name: 'Unit status' })).toBeInTheDocument())
+      expect(fetchMock).toHaveBeenCalledTimes(1)
+      expect(String(fetchMock.mock.calls[0][0])).toBe(requested)
+      expect(fetchMock.mock.calls[0][1]).toMatchObject({ credentials: 'omit' })
+    }
+    expect(setupStatus).not.toHaveBeenCalled()
+    expect(getSession).not.toHaveBeenCalled()
+
+    // A deeper path is not a public page; it goes through sign-in.
+    cleanup()
+    vi.mocked(getSession).mockRejectedValueOnce(new Error('unauthenticated'))
+    renderWithProviders(<AppContent />, { route: ['/public/other/extra'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Sign in to EdgeWatch/ })).toBeInTheDocument())
+  })
+
+  it('explains that a slug page is not available without telling why', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 404, json: async () => ({ error: { code: 'public_disabled', message: 'public status is not enabled' } }) })
+    vi.stubGlobal('fetch', fetchMock)
+    renderWithProviders(<AppContent />, { route: ['/public/nobody'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Public status unavailable' })).toBeInTheDocument())
+    expect(screen.getByText('This status page is not enabled by the administrator.')).toBeInTheDocument()
+    expect(String(fetchMock.mock.calls[0][0])).toBe('/api/public/v1/dashboard/nobody')
   })
 
   it('renders the application unavailable and login fallbacks', async () => {

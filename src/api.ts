@@ -243,8 +243,10 @@ export const getPublicDashboardConfig = () => api<PublicDashboardConfig>('/publi
 // updated_at is the concurrency token from the loaded configuration; the
 // server rejects a save based on an older value with a 409 conflict.
 export const savePublicDashboardConfig = (value: { enabled: boolean; title: string; introduction: string; hosts: PublicDashboardHostSelection[]; updated_at: string }) => api<PublicDashboardConfig>('/public-dashboard', { method: 'PUT', body: JSON.stringify(value) })
-export async function getPublicDashboard(): Promise<PublicDashboard> {
-  const response = await fetch('/api/public/v1/dashboard', { credentials: 'omit' })
+// Without a slug the legacy public URL serves the default business unit's
+// page; with one, the page of the business unit with that slug.
+export async function getPublicDashboard(slug?: string): Promise<PublicDashboard> {
+  const response = await fetch(slug ? `/api/public/v1/dashboard/${encodeURIComponent(slug)}` : '/api/public/v1/dashboard', { credentials: 'omit' })
   const body = await response.json().catch(() => ({}))
   if (!response.ok) throw new APIError(body?.error?.message || 'Public status is not available', body?.error?.code)
   return body as PublicDashboard

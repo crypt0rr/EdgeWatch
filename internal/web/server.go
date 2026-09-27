@@ -63,13 +63,13 @@ type Server struct {
 	// publicPageCache caches the default tenant's page, which the legacy
 	// public URLs serve, and publicPages the page of any other tenant, by
 	// tenant ID. A request reads and fills only the cache of its public
-	// scope, so one tenant's page is never served for another's.
+	// scope, so one tenant's page is never served for another's, and a save
+	// invalidates only the cache of the page it saved.
 	publicPageCache
 	publicPages map[string]*publicPageCache
 	// publicDashboardBuildFunc is used by deterministic tests to control the
 	// cache-fill workload. Production requests use publicPageResponse.
 	publicDashboardBuildFunc func(context.Context, store.PublicDashboard) (publicDashboardResponse, error)
-	publicGen                uint64
 	telemetryMu              sync.Mutex
 	// telemetry caches each tenant's status telemetry by tenant ID.
 	telemetry map[string]*tenantTelemetryCache

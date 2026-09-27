@@ -34,8 +34,9 @@ const (
 var errPublicDashboardChanged = errors.New("public dashboard changed while it was loading")
 
 // publicDashboardCache holds one rendered payload. generation is the
-// publication generation it was built under; a save bumps the generation,
-// and an entry from an older generation is never served.
+// publication generation of its page that it was built under; a save of the
+// page bumps the generation, and an entry from an older generation is never
+// served.
 type publicDashboardCache struct {
 	key        string
 	generation uint64
@@ -44,11 +45,16 @@ type publicDashboardCache struct {
 }
 
 // publicPageCache is the cache of one tenant's public page: the rendered
-// payload, the shared build in flight, and a recent build failure.
+// payload, the shared build in flight, a recent build failure, and the
+// page's publication generation. A save of the page bumps publicGen, so
+// neither an entry nor a build from before the save is served. Each page has
+// its own generation: a save of one tenant's page leaves the cache and the
+// builds of every other page in place.
 type publicPageCache struct {
 	publicCache   *publicDashboardCache
 	publicBuild   *publicDashboardBuild
 	publicFailure *publicDashboardFailure
+	publicGen     uint64
 }
 
 // publicPage returns the cache of the scope's page. The default tenant's page
@@ -69,46 +75,127 @@ func (s *Server) publicPage(scope store.PublicScope) *publicPageCache {
 	return page
 }
 
+// publicDashboardRateLimit is the rate-limit namespace of the legacy public
+// URL. Each slug page has its own; see publicPageRateLimit.
+const publicDashboardRateLimit = "public-dashboard"
+
 // publicAPI is intentionally separate from /api/v1. It has no session
 // middleware and exposes one fixed, sanitized projection without resource
-// selectors that could be used to enumerate jobs or hosts. Its URLs serve
-// the default tenant's page.
+// selectors that could be used to enumerate jobs or hosts. The legacy URL
+// serves the default tenant's page, and /api/public/v1/dashboard/<slug> the
+// page of the business unit with that slug. Both accept one trailing slash.
 func (s *Server) publicAPI(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet || strings.TrimSuffix(r.URL.Path, "/") != "/api/public/v1/dashboard" {
-		writeError(w, http.StatusNotFound, "not_found", "endpoint not found", nil)
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	if r.Method == http.MethodGet && path == "/api/public/v1/dashboard" {
+		s.servePublicPage(w, r, publicDashboardRateLimit, func(context.Context) (store.PublicScope, error) {
+			return store.DefaultPublicScope(), nil
+		})
 		return
 	}
-	s.servePublicPage(w, r, store.DefaultPublicScope())
+	if r.Method == http.MethodGet && strings.HasPrefix(path, "/api/public/v1/dashboard/") {
+		if slug := strings.TrimPrefix(path, "/api/public/v1/dashboard/"); slug != "" {
+			s.servePublicPage(w, r, publicPageRateLimit(slug), func(ctx context.Context) (store.PublicScope, error) {
+				return s.publicScopeForSlug(ctx, slug)
+			})
+			return
+		}
+	}
+	writeError(w, http.StatusNotFound, "not_found", "endpoint not found", nil)
 }
 
-// servePublicPage answers an anonymous request for the published page of the
-// scope's tenant. Every read goes through the scope's PublicStore, and the
-// payload is cached for that scope only.
-func (s *Server) servePublicPage(w http.ResponseWriter, r *http.Request, scope store.PublicScope) {
-	if !s.allowAnonymousRequest(r, "public-dashboard") {
+// publicSlugWellFormed reports whether slug can name a business unit: it
+// has the form of a unit's slug and is not reserved.
+func publicSlugWellFormed(slug string) bool {
+	valid, err := store.ValidateTenantSlug(slug)
+	return err == nil && valid == slug
+}
+
+// publicPageRateLimit returns the rate-limit namespace of the page at
+// /api/public/v1/dashboard/<slug>. Each well-formed slug has its own,
+// whether or not a unit publishes a page under it, so a busy page does not
+// throttle another, and a slug without a page is limited exactly as a slug
+// whose page is withdrawn. Addresses that cannot name a unit share one
+// namespace, so they cannot add limiter keys without bound.
+func publicPageRateLimit(slug string) string {
+	if !publicSlugWellFormed(slug) {
+		return publicDashboardRateLimit + "/*"
+	}
+	return publicDashboardRateLimit + "/" + slug
+}
+
+// publicSlugPagesEnabled reports whether business units may publish pages
+// under their slugs. While experimental.business_units is off, every slug
+// page answers as a page that is not enabled.
+func (s *Server) publicSlugPagesEnabled() bool {
+	return s.App != nil && s.App.Config != nil && s.App.Config.BusinessUnitsEnabled()
+}
+
+// publicScopeForSlug returns the public scope of the page at
+// /api/public/v1/dashboard/<slug>. It returns the zero scope while business
+// units are off, and for a slug that cannot name a unit, an unknown slug, a
+// unit that is not active, and a page that is not enabled. servePublicPage
+// answers the zero scope exactly as the default tenant's page when that page
+// is not enabled, so the answer never tells whether a unit has the slug.
+func (s *Server) publicScopeForSlug(ctx context.Context, slug string) (store.PublicScope, error) {
+	if !s.publicSlugPagesEnabled() || !publicSlugWellFormed(slug) {
+		return store.PublicScope{}, nil
+	}
+	scope, err := s.Store.PublicScopeBySlug(ctx, slug)
+	if errors.Is(err, store.ErrNotFound) {
+		return store.PublicScope{}, nil
+	}
+	return scope, err
+}
+
+// writePublicDisabled answers a request for a page that is not published.
+func writePublicDisabled(w http.ResponseWriter) {
+	writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
+}
+
+// servePublicPage answers an anonymous request for a published page. It
+// counts the request in namespace, the page's rate-limit namespace, and then
+// resolves the scope of the page's tenant; the zero scope names no page.
+// Every read goes through the scope's PublicStore, and the payload is cached
+// for that scope only.
+func (s *Server) servePublicPage(w http.ResponseWriter, r *http.Request, namespace string, resolve func(context.Context) (store.PublicScope, error)) {
+	if !s.allowAnonymousRequest(r, namespace) {
 		w.Header().Set("Retry-After", "60")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "public status requests are temporarily rate limited", nil)
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Robots-Tag", "noindex, nofollow")
+	ctx, cancel := context.WithTimeout(r.Context(), publicDashboardBuildTimeout)
+	defer cancel()
+	scope, err := resolve(ctx)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			writeError(w, http.StatusGatewayTimeout, "public_dashboard_timeout", "public status took too long to load", nil)
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "public_dashboard", "public status could not be loaded", nil)
+		return
+	}
+	if scope.TenantID() == "" {
+		writePublicDisabled(w)
+		return
+	}
 	if payload, ok := s.cachedPublicPageResponse(scope); ok {
 		writeJSON(w, http.StatusOK, json.RawMessage(payload))
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), publicDashboardBuildTimeout)
-	defer cancel()
 	public := s.Store.Public(scope)
 	for attempt := 1; ; attempt++ {
-		// Capture the generation before the read. A save that commits after
-		// this point bumps it, so a payload from the dashboard read below can
-		// neither be cached nor returned once the save has invalidated it.
-		generation := s.publicDashboardGeneration()
+		// Capture the page's generation before the read. A save of the page
+		// that commits after this point bumps it, so a payload from the
+		// dashboard read below can neither be cached nor returned once the
+		// save has invalidated it.
+		generation := s.publicPageGeneration(scope)
 		// The read finds no page unless the tenant is active and its page
 		// is enabled.
 		dashboard, err := public.GetPublicDashboard(ctx)
 		if errors.Is(err, store.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
+			writePublicDisabled(w)
 			return
 		}
 		if err != nil {
@@ -120,7 +207,7 @@ func (s *Server) servePublicPage(w http.ResponseWriter, r *http.Request, scope s
 			return
 		}
 		if !dashboard.Enabled {
-			writeError(w, http.StatusNotFound, "public_disabled", "public status is not enabled", nil)
+			writePublicDisabled(w)
 			return
 		}
 		payload, err := s.cachedPublicPagePayload(ctx, scope, generation, dashboard)
@@ -145,10 +232,12 @@ func (s *Server) servePublicPage(w http.ResponseWriter, r *http.Request, scope s
 	}
 }
 
-func (s *Server) publicDashboardGeneration() uint64 {
+// publicPageGeneration returns the publication generation of the scope's
+// page.
+func (s *Server) publicPageGeneration(scope store.PublicScope) uint64 {
 	s.publicCacheMu.Lock()
 	defer s.publicCacheMu.Unlock()
-	return s.publicGen
+	return s.publicPage(scope).publicGen
 }
 
 func publicDashboardCacheKey(dashboard store.PublicDashboard) string {
@@ -161,19 +250,19 @@ func publicDashboardCacheKey(dashboard store.PublicDashboard) string {
 
 // cachedPublicPagePayload returns the rendered payload for dashboard, the
 // scope's page, which the caller read under generation. It returns
-// errPublicDashboardChanged as soon as a save has bumped the generation, so
-// the caller re-reads the publication instead of building, caching, or
-// returning content that the save withdrew.
+// errPublicDashboardChanged as soon as a save of the page has bumped its
+// generation, so the caller re-reads the publication instead of building,
+// caching, or returning content that the save withdrew.
 func (s *Server) cachedPublicPagePayload(ctx context.Context, scope store.PublicScope, generation uint64, dashboard store.PublicDashboard) ([]byte, error) {
 	key := publicDashboardCacheKey(dashboard)
 	for {
 		now := s.currentTime()
 		s.publicCacheMu.Lock()
-		if generation != s.publicGen {
+		page := s.publicPage(scope)
+		if generation != page.publicGen {
 			s.publicCacheMu.Unlock()
 			return nil, errPublicDashboardChanged
 		}
-		page := s.publicPage(scope)
 		if cached := page.publicCache; cached != nil && cached.generation == generation && cached.key == key && now.Before(cached.expiresAt) {
 			payload := append([]byte(nil), cached.payload...)
 			s.publicCacheMu.Unlock()
@@ -241,10 +330,10 @@ func (s *Server) buildPublicDashboardPayload(parent context.Context, scope store
 
 	s.publicCacheMu.Lock()
 	building.err = err
-	if err == nil && generation == s.publicGen {
+	if err == nil && generation == page.publicGen {
 		page.publicCache = &publicDashboardCache{key: key, generation: generation, expiresAt: now.Add(publicDashboardCacheTTL), payload: append([]byte(nil), payload...)}
 		page.publicFailure = nil
-	} else if err != nil && generation == s.publicGen {
+	} else if err != nil && generation == page.publicGen {
 		// Short negative caching prevents a broken legacy snapshot or slow store
 		// from being rebuilt for every anonymous request. It expires quickly so a
 		// transient failure does not hide a recovered dashboard.
@@ -257,30 +346,29 @@ func (s *Server) buildPublicDashboardPayload(parent context.Context, scope store
 	s.publicCacheMu.Unlock()
 }
 
-// invalidatePublicDashboardCache drops the cached page of every tenant. The
-// publication generation is shared, so a save of any page also keeps a build
-// already in flight from caching or returning its result.
-func (s *Server) invalidatePublicDashboardCache() {
+// invalidatePublicPage drops the cached page of the scope's tenant after a
+// save of that page. It bumps the page's generation, so a build of the page
+// already in flight neither caches nor returns its result. The other
+// tenants' pages keep their cache.
+func (s *Server) invalidatePublicPage(scope store.PublicScope) {
 	s.publicCacheMu.Lock()
-	s.publicGen++
-	s.publicCache = nil
-	s.publicFailure = nil
-	for _, page := range s.publicPages {
-		page.publicCache = nil
-		page.publicFailure = nil
-	}
+	page := s.publicPage(scope)
+	page.publicGen++
+	page.publicCache = nil
+	page.publicFailure = nil
 	s.publicCacheMu.Unlock()
 }
 
 // cachedPublicPageResponse is the anonymous fast path. It serves only an
-// unexpired entry of the scope's page built under the current publication
+// unexpired entry of the scope's page built under the page's current
 // generation.
 func (s *Server) cachedPublicPageResponse(scope store.PublicScope) ([]byte, bool) {
 	now := s.currentTime()
 	s.publicCacheMu.Lock()
 	defer s.publicCacheMu.Unlock()
-	cached := s.publicPage(scope).publicCache
-	if cached == nil || cached.generation != s.publicGen || !now.Before(cached.expiresAt) {
+	page := s.publicPage(scope)
+	cached := page.publicCache
+	if cached == nil || cached.generation != page.publicGen || !now.Before(cached.expiresAt) {
 		return nil, false
 	}
 	return append([]byte(nil), cached.payload...), true
@@ -481,7 +569,7 @@ func (s *Server) publicDashboardRoute(w http.ResponseWriter, r *http.Request, se
 		s.writeInternalError(w, r, "save_failed", err)
 		return
 	}
-	s.invalidatePublicDashboardCache()
+	s.invalidatePublicPage(scope)
 	result, err := ts.GetPublicDashboard(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "store", "public dashboard could not be loaded after saving", nil)

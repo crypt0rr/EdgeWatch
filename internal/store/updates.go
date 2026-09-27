@@ -88,6 +88,11 @@ const platformUpdateStateColumns = applicationReleaseColumns + `,notification_de
 // has no destinations.
 const insertApplicationUpdateStateRow = `INSERT OR IGNORE INTO application_update_state(id,check_status,notification_destinations_json) VALUES(1,'unknown','[]')`
 
+// noUpdateDestinations is a tenant's update routing that is configured and
+// selects nothing: what SetApplicationUpdateDestinations stores for an empty
+// selection. CreateTenant gives it to each new tenant.
+const noUpdateDestinations = `[]`
+
 // readTenantUpdateDestinationsTx returns a tenant's raw update routing. An
 // empty value means that the routing was never configured.
 func readTenantUpdateDestinationsTx(ctx context.Context, tx *sql.Tx, tenantID string) (string, error) {
@@ -156,8 +161,10 @@ func readApplicationUpdateState(ctx context.Context, s *Store, columns string) (
 // alerts. Destinations holds stable destination selectors, never URLs.
 type ApplicationUpdateRouting struct {
 	// Destinations is nil when the routing was never configured, which keeps
-	// the legacy "every enabled destination" behavior. A configured empty
-	// slice silences the update alerts.
+	// the legacy "every enabled destination" behavior that the default
+	// tenant has from before business units. A configured empty slice
+	// silences the update alerts; a tenant that CreateTenant creates starts
+	// with one.
 	Destinations []string
 	Configured   bool
 }

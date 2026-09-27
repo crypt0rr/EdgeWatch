@@ -606,11 +606,14 @@ account then enrols again.
   platform has its own destinations on the platform console's
   **Notifications** page.
 - **Update alerts:** each active unit gets its own copy of an update alert,
-  routed by its own **Update alerts** selection. A unit that never saved a
-  selection sends it to all of its enabled destinations, and an empty
-  selection silences it. The platform's copy goes only to the platform
-  destinations selected there; none are selected until a platform
-  administrator chooses them.
+  routed by its own **Update alerts** selection, and an empty selection
+  silences it. A new unit starts with update alerts off: its copy goes to
+  none of its destinations until its administrators select some on
+  **Notifications**. The default unit keeps its behavior from before
+  business units: until its administrators save a selection, it sends update
+  alerts to all of its enabled destinations. The platform's copy goes only to
+  the platform destinations selected there; none are selected until a
+  platform administrator chooses them.
 - **Scanner profiles:** the built-in profiles are shared and read-only. Custom
   profiles belong to the unit that created them.
 - **Public status:** each unit's administrators publish its page at

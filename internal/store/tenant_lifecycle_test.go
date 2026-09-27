@@ -228,6 +228,57 @@ func TestCreateRenameAndListTenants(t *testing.T) {
 	}
 }
 
+// A new tenant starts with update alerts off: its update routing is
+// configured and selects nothing, stored exactly as an administrator's
+// cleared selection is. The routing of the tenants that already exist is
+// left alone: the default tenant's routing that was never configured still
+// sends update alerts to every enabled destination, as before business
+// units.
+func TestCreateTenantStartsWithUpdateAlertsOff(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	storedRouting := func(id string) string {
+		t.Helper()
+		var routing string
+		if err := f.store.DB.QueryRowContext(ctx, `SELECT update_destinations_json FROM tenants WHERE id=?`, id).Scan(&routing); err != nil {
+			t.Fatal(err)
+		}
+		return routing
+	}
+	if _, err := f.store.DB.ExecContext(ctx, `UPDATE tenants SET update_destinations_json='' WHERE id=?`, DefaultTenantID); err != nil {
+		t.Fatal(err)
+	}
+	before := map[string]string{DefaultTenantID: storedRouting(DefaultTenantID), secondTenantID: storedRouting(secondTenantID)}
+	third, err := f.store.Platform().CreateTenant(ctx, "Third", "third", testCapacityLimits, AuditEntry{ActorKind: AuditActorHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := f.store.TenantScopeByID(ctx, third.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := f.store.Tenant(scope)
+	routing, err := ts.ApplicationUpdateRouting(ctx)
+	if err != nil || !reflect.DeepEqual(routing, ApplicationUpdateRouting{Configured: true, Destinations: []string{}}) {
+		t.Fatalf("a new tenant's update routing = %#v, %v; want configured and empty", routing, err)
+	}
+	created := storedRouting(third.ID)
+	if err := ts.SetApplicationUpdateDestinations(ctx, nil, AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if cleared := storedRouting(third.ID); cleared != created {
+		t.Fatalf("a new tenant's stored update routing = %q, want %q as a cleared selection is stored", created, cleared)
+	}
+	for id, routing := range before {
+		if after := storedRouting(id); after != routing {
+			t.Errorf("tenant %s's stored update routing changed from %q to %q when another tenant was created", id, routing, after)
+		}
+	}
+	if routing, err := defaultTenant(f.store).ApplicationUpdateRouting(ctx); err != nil || routing.Configured || routing.Destinations != nil {
+		t.Fatalf("the default tenant's update routing = %#v, %v; want it never configured", routing, err)
+	}
+}
+
 // Every lifecycle method reports a database that fails, and changes
 // nothing.
 func TestTenantLifecycleReportsDatabaseErrors(t *testing.T) {

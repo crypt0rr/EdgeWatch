@@ -623,6 +623,34 @@ func TestUpdateRoutingStoreRefusalAnswersAsTheNotifierCheck(t *testing.T) {
 	expectError(t, recorder, http.StatusForbidden, "not_permitted", "platform routing written by a unit's administrator")
 }
 
+// A unit that the platform creates starts with update alerts off: its
+// administrator sees its update routing configured and selecting none of
+// its destinations, so the console shows every Update alerts toggle off,
+// until the administrator selects one. The default unit's routing that was
+// never saved is still reported as not configured, which the console shows
+// as each enabled destination selected, as before business units.
+func TestNewUnitStartsWithUpdateAlertsOff(t *testing.T) {
+	f := newPlatformFixture(t)
+	var unit destinationsPayload
+	expectResponse(t, f.call(t, actorAdminB, http.MethodGet, "/notifications/destinations", ""), http.StatusOK, "the new unit's destinations", &unit)
+	if len(unit.Destinations) != 1 || unit.Destinations[0].ID != f.destinationB || !unit.UpdateRouting.Configured || unit.UpdateRouting.Destinations == nil || len(unit.UpdateRouting.Destinations) != 0 {
+		t.Fatalf("the new unit's destinations = %+v, want its destination with configured, empty update routing", unit)
+	}
+	var defaultUnit destinationsPayload
+	expectResponse(t, f.call(t, actorAdminA, http.MethodGet, "/notifications/destinations", ""), http.StatusOK, "the default unit's destinations", &defaultUnit)
+	if defaultUnit.UpdateRouting.Configured || len(defaultUnit.UpdateRouting.Destinations) != 0 {
+		t.Fatalf("the default unit's update routing = %+v, want it never configured", defaultUnit.UpdateRouting)
+	}
+	var saved struct {
+		Configured   bool     `json:"configured"`
+		Destinations []string `json:"destinations"`
+	}
+	expectResponse(t, f.call(t, actorAdminB, http.MethodPut, "/notifications/update-routing", confirmBody(`"destinations":["`+f.destinationB+`"]`)), http.StatusOK, "select the new unit's destination", &saved)
+	if !saved.Configured || len(saved.Destinations) != 1 || saved.Destinations[0] != f.destinationB {
+		t.Fatalf("the new unit's saved update routing = %+v, want its destination", saved)
+	}
+}
+
 // The platform status reports the deployment as numbers only.
 func TestPlatformStatus(t *testing.T) {
 	f := newPlatformFixture(t)

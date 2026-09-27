@@ -192,8 +192,10 @@ func getTenantRecord(ctx context.Context, queryer rowQueryer, id string) (Tenant
 // CreateTenant creates an active tenant with the name and slug, and with
 // InitialTenantCapacity of the deployment's limits: it inherits the
 // deployment's slots and probe budgets, and high-cost work stays off until
-// a platform administrator raises its ceiling. The name and the slug must
-// be unique among the tenants that are not deleted.
+// a platform administrator raises its ceiling. Its update routing, stored
+// in the same row, is configured and selects nothing, so it gets no update
+// alerts until its administrators select destinations. The name and the
+// slug must be unique among the tenants that are not deleted.
 func (ps *PlatformStore) CreateTenant(ctx context.Context, name, slug string, limits CapacityLimits, audit AuditEntry) (TenantRecord, error) {
 	name, err := ValidateTenantName(name)
 	if err != nil {
@@ -214,7 +216,7 @@ func (ps *PlatformStore) CreateTenant(ctx context.Context, name, slug string, li
 	stamp := sqliteTimestamp(now)
 	id := uuid.NewString()
 	capacity := InitialTenantCapacity(limits)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,state,is_default,revision,created_at,updated_at,state_changed_at,state_changed_by,`+tenantCapacityColumns+`) VALUES(?,?,?,?,0,1,?,?,?,?,?,?,?,?)`, id, name, slug, TenantStateActive, stamp, stamp, stamp, tenantStateActor(audit),
+	if _, err := tx.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,state,is_default,update_destinations_json,revision,created_at,updated_at,state_changed_at,state_changed_by,`+tenantCapacityColumns+`) VALUES(?,?,?,?,0,?,1,?,?,?,?,?,?,?,?)`, id, name, slug, TenantStateActive, noUpdateDestinations, stamp, stamp, stamp, tenantStateActor(audit),
 		nullableInt(capacity.MaxConcurrentScans), nullableInt64(capacity.MaxProbeCount), nullableInt64(capacity.MaxNaabuProbeCount), nullableInt64(capacity.HighCostCeiling)); err != nil {
 		return TenantRecord{}, tenantUniqueError(err)
 	}

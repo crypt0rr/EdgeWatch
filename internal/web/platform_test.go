@@ -521,6 +521,52 @@ func TestPlatformNotifications(t *testing.T) {
 	expectNoMarkers(t, strings.Join(records, "\n"), "platform audit", "platform-secret-hook")
 }
 
+// The store checks an update routing selection again when it writes it, for
+// a caller that skipped the notifier's check or a destination deleted since
+// that check. Its refusal gets the answer of the notifier's check byte for
+// byte, for a unit's routing and for the platform's, so the API tells
+// neither which check refused a selection nor another owner's destination
+// from an unknown one.
+func TestUpdateRoutingStoreRefusalAnswersAsTheNotifierCheck(t *testing.T) {
+	ctx := context.Background()
+	f := newPlatformFixture(t)
+	platformActor := store.AuditEntry{ActorUserID: f.users[actorPlatform].ID, ActorUsername: f.users[actorPlatform].Username}
+	for _, owner := range []struct {
+		actor, path string
+		foreign     []string
+		write       func(selection []string) error
+	}{
+		{actorAdminB, "/notifications/update-routing", []string{f.destinationA}, func(selection []string) error {
+			return f.b.SetApplicationUpdateDestinations(ctx, selection, store.AuditEntry{})
+		}},
+		{actorPlatform, "/platform/notifications/update-routing", []string{f.destinationA, f.destinationB}, func(selection []string) error {
+			return f.db.Platform().SetPlatformUpdateDestinations(ctx, selection, platformActor)
+		}},
+	} {
+		for _, selector := range append(owner.foreign, "file:deployment", "00000000-0000-0000-0000-00000000dead") {
+			checked := f.call(t, owner.actor, http.MethodPut, owner.path, confirmBody(`"destinations":["`+selector+`"]`))
+			refused := httptest.NewRecorder()
+			if err := owner.write([]string{selector}); !writeDestinationSelectionError(refused, err) {
+				t.Fatalf("%s: the store's refusal of %s = %v, not a selection error", owner.actor, selector, err)
+			}
+			if checked.Code != http.StatusBadRequest || refused.Code != checked.Code || refused.Body.String() != checked.Body.String() {
+				t.Errorf("%s: routing to %s = %d %s from the store, %d %s from the notifier", owner.actor, selector, refused.Code, refused.Body.String(), checked.Code, checked.Body.String())
+			}
+		}
+	}
+	if writeDestinationSelectionError(httptest.NewRecorder(), store.ErrNotFound) {
+		t.Fatal("another store error was answered as a selection error")
+	}
+	// Another refusal of the platform routing write keeps its own answer: an
+	// account that is not a platform administrator by the time of the write
+	// is refused by the store, not as a selection.
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPut, consoleAPIBase+"/platform/notifications/update-routing", strings.NewReader(confirmBody(`"destinations":[]`)))
+	request.Header.Set("Content-Type", "application/json")
+	f.server.updatePlatformNotificationRouting(recorder, request, f.sessions[actorAdminB].session)
+	expectError(t, recorder, http.StatusForbidden, "not_permitted", "platform routing written by a unit's administrator")
+}
+
 // The platform status reports the deployment as numbers only.
 func TestPlatformStatus(t *testing.T) {
 	f := newPlatformFixture(t)

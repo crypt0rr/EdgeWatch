@@ -13,7 +13,6 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/app"
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
-	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -933,17 +932,18 @@ func (s *Server) updatePlatformNotificationRouting(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, "validation_failed", "destinations must be an array", map[string]string{"destinations": "select zero or more platform destinations"})
 		return
 	}
+	// The store checks the selection again when it writes it.
 	platform := s.Store.Platform()
 	if err := s.App.Notifier.Platform(platform).ValidateDestinationSelection(r.Context(), input.Destinations); err != nil {
-		if errors.Is(err, notify.ErrInvalidDestinationSelection) {
-			writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]string{"destinations": err.Error()})
-		} else {
+		if !writeDestinationSelectionError(w, err) {
 			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
 		}
 		return
 	}
 	if err := platform.SetPlatformUpdateDestinations(r.Context(), input.Destinations, platformActorAudit(session, "", "platform update notification routing changed")); err != nil {
-		s.writePlatformError(w, r, err, "platform_notifications.update_routing", "notification destination not found")
+		if !writeDestinationSelectionError(w, err) {
+			s.writePlatformError(w, r, err, "platform_notifications.update_routing", "notification destination not found")
+		}
 		return
 	}
 	destinations := []string{}

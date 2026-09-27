@@ -186,11 +186,77 @@ func (ts *TenantStore) ApplicationUpdateRouting(ctx context.Context) (Applicatio
 	return ApplicationUpdateRouting{Destinations: normalizeUpdateDestinations(destinations), Configured: true}, nil
 }
 
+// ErrInvalidDestinationSelection reports a routing selection that names a
+// destination its owner does not have. The notifier's selection check
+// refuses with the same error, so a caller handles both alike.
+var ErrInvalidDestinationSelection = errors.New("invalid notification destination selection")
+
+// unknownDestinationSelection is the ValidationError for a selector that
+// names no destination of the routing's owner. It names only the selector,
+// with the notifier's text, so another owner's destination and a deleted one
+// read exactly as an unknown ID.
+func unknownDestinationSelection(selector string) error {
+	return NewValidationError(fmt.Errorf("%w: notification destination %q was not found", ErrInvalidDestinationSelection, selector))
+}
+
+// requireTenantUpdateDestinationsTx refuses a tenant's normalized update
+// routing unless each selector names a destination of the tenant: a
+// web-managed destination of the tenant, paused or not, or, for the default
+// tenant, which owns them, a deployment destination from config.yaml.
+// Deployment destinations are not stored, so a file: selector is checked
+// for its owner only; the notifier checks that config.yaml lists it.
+func requireTenantUpdateDestinationsTx(ctx context.Context, tx *sql.Tx, tenantID string, destinations []string) error {
+	for _, selector := range destinations {
+		if id, deployment := strings.CutPrefix(selector, "file:"); deployment {
+			if tenantID != DefaultTenantID || id == "" {
+				return unknownDestinationSelection(selector)
+			}
+			continue
+		}
+		var found int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM managed_notifications WHERE id=? AND tenant_id=?`, selector, tenantID).Scan(&found)
+		if errors.Is(err, sql.ErrNoRows) {
+			return unknownDestinationSelection(selector)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// requirePlatformUpdateDestinationsTx refuses the platform's normalized
+// update routing unless each selector names a platform destination, a
+// web-managed destination without a tenant, paused or not. The deployment
+// destinations from config.yaml are the default tenant's, so a file:
+// selector is refused too.
+func requirePlatformUpdateDestinationsTx(ctx context.Context, tx *sql.Tx, destinations []string) error {
+	for _, selector := range destinations {
+		if strings.HasPrefix(selector, "file:") {
+			return unknownDestinationSelection(selector)
+		}
+		var found int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM managed_notifications WHERE id=? AND tenant_id IS NULL`, selector).Scan(&found)
+		if errors.Is(err, sql.ErrNoRows) {
+			return unknownDestinationSelection(selector)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SetApplicationUpdateDestinations stores the tenant administrator's explicit
 // update notification routing. The destination identifiers are stable opaque
-// selectors; URLs and credentials never enter this record. The caller checks
-// the selection against the tenant's destinations first. Another tenant's
-// routing is never changed.
+// selectors; URLs and credentials never enter this record. Callers check the
+// selection with the notifier first, for its message; the store checks it
+// again in the transaction of the write, so the routing selects only the
+// tenant's own destinations, as requireTenantUpdateDestinationsTx describes,
+// even when a caller skipped its check or a destination was deleted since.
+// Another tenant's destination, a platform destination, and an unknown ID
+// are refused alike with an ErrInvalidDestinationSelection ValidationError,
+// and nothing changes. Another tenant's routing is never changed.
 func (ts *TenantStore) SetApplicationUpdateDestinations(ctx context.Context, destinations []string, audit AuditEntry) error {
 	if err := ts.ready(); err != nil {
 		return err
@@ -205,6 +271,9 @@ func (ts *TenantStore) SetApplicationUpdateDestinations(ctx context.Context, des
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := requireTenantUpdateDestinationsTx(ctx, tx, ts.scope.id, destinations); err != nil {
+		return err
+	}
 	if err := writeTenantUpdateDestinationsTx(ctx, tx, ts.scope.id, string(raw)); err != nil {
 		return err
 	}

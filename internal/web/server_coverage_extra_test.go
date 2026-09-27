@@ -177,7 +177,7 @@ func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	destination, err := server.App.Notifier.CreateManaged(context.Background(), "Route test", "generic://"+parsed.Host+"/edgewatch?disabletls=yes&template=json", true)
+	destination, err := server.App.Notifier.Tenant(defaultTenantStore(server)).CreateManagedWithAudit(context.Background(), "Route test", "generic://"+parsed.Host+"/edgewatch?disabletls=yes&template=json", true, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestNotificationDestinationRouteGuardsAndTestDelivery(t *testing.T) {
 
 func TestNotificationDestinationDeliveryFailureUsesGatewayStatus(t *testing.T) {
 	server, _, admin := newUsersTestServer(t)
-	destination, err := server.App.Notifier.CreateManaged(context.Background(), "Unreachable", "generic://127.0.0.1:1/edgewatch?disabletls=yes&template=json", true)
+	destination, err := server.App.Notifier.Tenant(defaultTenantStore(server)).CreateManagedWithAudit(context.Background(), "Unreachable", "generic://127.0.0.1:1/edgewatch?disabletls=yes&template=json", true, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestServerSetupStatusAndRouteGuards(t *testing.T) {
 	if active.Code != http.StatusOK || !strings.Contains(active.Body.String(), `"scans":[]`) {
 		t.Fatalf("empty active scans = %d %s", active.Code, active.Body.String())
 	}
-	if _, err := db.GetUser(ctx, admin.UserID); err != nil {
+	if _, err := defaultTenant(db).GetUser(ctx, admin.UserID); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -319,11 +319,11 @@ func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
 		t.Fatalf("missing run status = %d", missing.Code)
 	}
 	job := config.NormalizeJob(config.Job{Name: "run-guards", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetJobArchived(ctx, record.ID, true); err != nil {
+	if err := defaultTenant(db).SetJobArchived(ctx, record.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	archived := httptest.NewRecorder()
@@ -331,10 +331,10 @@ func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
 	if archived.Code != http.StatusConflict {
 		t.Fatalf("archived run status = %d", archived.Code)
 	}
-	if err := db.SetJobArchived(ctx, record.ID, false); err != nil {
+	if err := defaultTenant(db).SetJobArchived(ctx, record.ID, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AcquireJobLease(ctx, record.ID, "active-owner", time.Now().Add(time.Minute)); err != nil {
+	if err := db.System().AcquireJobLease(ctx, record.ID, "active-owner", time.Now().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	active := httptest.NewRecorder()
@@ -342,7 +342,7 @@ func TestRunJobGuardsMissingArchivedAndActive(t *testing.T) {
 	if active.Code != http.StatusConflict {
 		t.Fatalf("active run status = %d", active.Code)
 	}
-	_ = db.ReleaseJobLease(ctx, record.ID, "active-owner")
+	_ = db.System().ReleaseJobLease(ctx, record.ID, "active-owner")
 }
 
 func TestServerPaginationAndSSEBoundaryHelpers(t *testing.T) {

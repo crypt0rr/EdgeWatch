@@ -17,13 +17,13 @@ func TestPublicDashboardRoundTripNormalizesAndDeduplicatesHosts(t *testing.T) {
 	jobIDs := map[string]string{}
 	for _, name := range []string{"job-a", "job-b"} {
 		job := config.NormalizeJob(config.Job{Name: name, Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}})
-		record, err := s.CreateJob(ctx, job)
+		record, err := defaultTenant(s).CreateJob(ctx, job)
 		if err != nil {
 			t.Fatal(err)
 		}
 		jobIDs[name] = record.ID
 	}
-	err := s.SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "  Network status  ", Introduction: "  selected hosts  "}, []PublicDashboardHost{
+	err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Enabled: true, Title: "  Network status  ", Introduction: "  selected hosts  "}, []PublicDashboardHost{
 		{JobID: jobIDs["job-b"], Address: " 2001:0db8::1 "},
 		{JobID: jobIDs["job-a"], Address: "192.0.2.1"},
 		{JobID: jobIDs["job-a"], Address: " 192.0.2.1 "},
@@ -31,7 +31,7 @@ func TestPublicDashboardRoundTripNormalizesAndDeduplicatesHosts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dashboard, err := s.GetPublicDashboard(ctx)
+	dashboard, err := defaultTenant(s).GetPublicDashboard(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,26 +57,26 @@ func TestPublicDashboardRoundTripNormalizesAndDeduplicatesHosts(t *testing.T) {
 	}
 
 	// Invalid input must roll back both the dashboard text and the host set.
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{Enabled: false, Title: "replacement"}, []PublicDashboardHost{{JobID: jobIDs["job-a"], Address: "not-an-ip"}}, AuditEntry{}); err == nil {
+	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Enabled: false, Title: "replacement"}, []PublicDashboardHost{{JobID: jobIDs["job-a"], Address: "not-an-ip"}}, AuditEntry{}); err == nil {
 		t.Fatal("invalid host was accepted")
 	}
-	after, err := s.GetPublicDashboard(ctx)
+	after, err := defaultTenant(s).GetPublicDashboard(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if after.Title != dashboard.Title || len(after.Hosts) != len(dashboard.Hosts) {
 		t.Fatalf("invalid save was not rolled back: %#v", after)
 	}
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{Title: "x", Introduction: strings.Repeat("i", 501)}, nil, AuditEntry{}); err == nil {
+	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Title: "x", Introduction: strings.Repeat("i", 501)}, nil, AuditEntry{}); err == nil {
 		t.Fatal("overlong introduction was accepted")
 	}
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{Title: strings.Repeat("🙂", 120), Introduction: strings.Repeat("é", 500)}, nil, AuditEntry{}); err != nil {
+	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Title: strings.Repeat("🙂", 120), Introduction: strings.Repeat("é", 500)}, nil, AuditEntry{}); err != nil {
 		t.Fatalf("unicode text at the character limit was rejected: %v", err)
 	}
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{Title: strings.Repeat("🙂", 121)}, nil, AuditEntry{}); err == nil {
+	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Title: strings.Repeat("🙂", 121)}, nil, AuditEntry{}); err == nil {
 		t.Fatal("unicode title beyond the character limit was accepted")
 	}
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{Title: "x"}, []PublicDashboardHost{{Address: "192.0.2.1"}}, AuditEntry{}); err == nil {
+	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Title: "x"}, []PublicDashboardHost{{Address: "192.0.2.1"}}, AuditEntry{}); err == nil {
 		t.Fatal("host without job was accepted")
 	}
 
@@ -88,12 +88,12 @@ func TestPublicDashboardNotFoundAndLatestSuccessfulHostScope(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM public_dashboards WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GetPublicDashboard(ctx); !errors.Is(err, ErrNotFound) {
+	if _, err := defaultTenant(s).GetPublicDashboard(ctx); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing dashboard error = %v", err)
 	}
 
 	jobConfig := config.NormalizeJob(config.Job{Name: "host-scope", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.0/30"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}})
-	job, err := s.CreateJob(ctx, jobConfig)
+	job, err := defaultTenant(s).CreateJob(ctx, jobConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,24 +102,24 @@ func TestPublicDashboardNotFoundAndLatestSuccessfulHostScope(t *testing.T) {
 	latest := model.Scan{ID: "scope-latest", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", NmapVersion: "7.99", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.7", Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22,443", ScannedPortCount: 2, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}}}}
 	failed := model.Scan{ID: "scope-failed", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now.Add(time.Minute), FinishedAt: now.Add(time.Minute), Status: "failed", Snapshot: latest.Snapshot}
 	for _, scan := range []model.Scan{old, latest, failed} {
-		if err := s.SaveScan(ctx, scan); err != nil {
+		if err := s.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
-	host, summary, err := s.GetLatestSuccessfulJobHost(ctx, job.ID, "198.51.100.7")
+	host, summary, err := s.Public(DefaultPublicScope()).GetLatestSuccessfulJobHost(ctx, job.ID, "198.51.100.7")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if host.ScanID != latest.ID || host.DataQuality != "detailed" || host.Host.Protocols[0].Ports[0].Port != 443 || summary.ID != latest.ID {
 		t.Fatalf("latest scoped host = %#v, summary = %#v", host, summary)
 	}
-	if _, _, err := s.GetLatestSuccessfulJobHost(ctx, "another-job", "198.51.100.7"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := s.Public(DefaultPublicScope()).GetLatestSuccessfulJobHost(ctx, "another-job", "198.51.100.7"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-job lookup error = %v", err)
 	}
-	if _, _, err := s.GetLatestSuccessfulJobHost(ctx, job.ID, "198.51.100.8"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := s.Public(DefaultPublicScope()).GetLatestSuccessfulJobHost(ctx, job.ID, "198.51.100.8"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing-address lookup error = %v", err)
 	}
-	if _, _, err := s.GetLatestSuccessfulJobHost(ctx, job.ID, "not-an-ip"); !errors.Is(err, ErrNotFound) {
+	if _, _, err := s.Public(DefaultPublicScope()).GetLatestSuccessfulJobHost(ctx, job.ID, "not-an-ip"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("invalid-address lookup error = %v", err)
 	}
 }
@@ -127,11 +127,11 @@ func TestPublicDashboardNotFoundAndLatestSuccessfulHostScope(t *testing.T) {
 func TestLatestSuccessfulJobHostsResolvesSelectionsInOneSet(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	jobA, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "batch-a", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.1"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
+	jobA, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "batch-a", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.1"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobB, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "batch-b", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"2001:db8::1"}, TCP: &config.Protocol{Ports: "443", Mode: "syn"}}))
+	jobB, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "batch-b", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"2001:db8::1"}, TCP: &config.Protocol{Ports: "443", Mode: "syn"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,11 +140,11 @@ func TestLatestSuccessfulJobHostsResolvesSelectionsInOneSet(t *testing.T) {
 		{ID: "batch-a-scan", JobID: jobA.ID, JobRevision: jobA.Revision, Job: jobA.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 22, State: "open"}}}}}}}},
 		{ID: "batch-b-scan", JobID: jobB.ID, JobRevision: jobB.Revision, Job: jobB.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "2001:db8::1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}}}},
 	} {
-		if err := s.SaveScan(ctx, scan); err != nil {
+		if err := s.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
-	results, err := s.GetLatestSuccessfulJobHosts(ctx, []PublicDashboardHost{{JobID: jobA.ID, Address: "198.51.100.1"}, {JobID: jobB.ID, Address: "2001:0db8::1"}, {JobID: "missing", Address: "198.51.100.1"}})
+	results, err := s.Public(DefaultPublicScope()).GetLatestSuccessfulJobHosts(ctx, []PublicDashboardHost{{JobID: jobA.ID, Address: "198.51.100.1"}, {JobID: jobB.ID, Address: "2001:0db8::1"}, {JobID: "missing", Address: "198.51.100.1"}})
 	if err != nil || len(results) != 2 {
 		t.Fatalf("batch latest hosts = %#v, %v", results, err)
 	}
@@ -156,11 +156,11 @@ func TestLatestSuccessfulJobHostsResolvesSelectionsInOneSet(t *testing.T) {
 func TestLatestSuccessfulJobHostsUsesProjectionBeforeHistoryFallback(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	jobA, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "same-address-a", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.44"}, TCP: &config.Protocol{Ports: "22", Mode: "connect"}}))
+	jobA, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "same-address-a", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.44"}, TCP: &config.Protocol{Ports: "22", Mode: "connect"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobB, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "same-address-b", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.44"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}}))
+	jobB, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "same-address-b", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.44"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -169,7 +169,7 @@ func TestLatestSuccessfulJobHostsUsesProjectionBeforeHistoryFallback(t *testing.
 		{ID: "same-address-a-scan", JobID: jobA.ID, JobRevision: jobA.Revision, Job: jobA.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.44", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 22, State: "open"}}}}}}}},
 		{ID: "same-address-b-scan", JobID: jobB.ID, JobRevision: jobB.Revision, Job: jobB.Job.Name, StartedAt: now.Add(time.Second), FinishedAt: now.Add(time.Second), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.44", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}}}},
 	} {
-		if err := s.SaveScan(ctx, scan); err != nil {
+		if err := s.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -177,7 +177,7 @@ func TestLatestSuccessfulJobHostsUsesProjectionBeforeHistoryFallback(t *testing.
 	// The address-keyed projection now points at job B. Job A must still be
 	// resolved exactly through the bounded history fallback rather than being
 	// given job B's observation.
-	results, err := s.GetLatestSuccessfulJobHosts(ctx, []PublicDashboardHost{{JobID: jobA.ID, Address: "198.51.100.44"}, {JobID: jobB.ID, Address: "198.51.100.44"}})
+	results, err := s.Public(DefaultPublicScope()).GetLatestSuccessfulJobHosts(ctx, []PublicDashboardHost{{JobID: jobA.ID, Address: "198.51.100.44"}, {JobID: jobB.ID, Address: "198.51.100.44"}})
 	if err != nil || len(results) != 2 {
 		t.Fatalf("same-address lookup = %#v, %v", results, err)
 	}
@@ -196,7 +196,7 @@ func TestLatestSuccessfulJobHostsUsesProjectionBeforeHistoryFallback(t *testing.
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM scan_hosts WHERE scan_id=?`, "same-address-b-scan"); err != nil {
 		t.Fatal(err)
 	}
-	results, err = s.GetLatestSuccessfulJobHosts(ctx, []PublicDashboardHost{{JobID: jobB.ID, Address: "198.51.100.44"}})
+	results, err = s.Public(DefaultPublicScope()).GetLatestSuccessfulJobHosts(ctx, []PublicDashboardHost{{JobID: jobB.ID, Address: "198.51.100.44"}})
 	if err != nil || len(results) != 1 || results[0].Summary.ID != "same-address-b-scan" {
 		t.Fatalf("projection-only lookup = %#v, %v", results, err)
 	}
@@ -234,10 +234,10 @@ func TestLatestSuccessfulJobHostsHistoryQueryScopesSelectionBeforeLookup(t *test
 func TestPublicDashboardDefaultsBlankTitle(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if err := s.SavePublicDashboard(ctx, PublicDashboard{Title: "   "}, nil, AuditEntry{}); err != nil {
+	if err := defaultTenant(s).SavePublicDashboard(ctx, PublicDashboard{Title: "   "}, nil, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	dashboard, err := s.GetPublicDashboard(ctx)
+	dashboard, err := defaultTenant(s).GetPublicDashboard(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,25 +249,25 @@ func TestPublicDashboardDefaultsBlankTitle(t *testing.T) {
 func TestSavePublicDashboardIfCurrentRejectsAStaleToken(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	loaded, err := s.GetPublicDashboard(ctx)
+	loaded, err := defaultTenant(s).GetPublicDashboard(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SavePublicDashboardIfCurrent(ctx, loaded.UpdatedAt, PublicDashboard{Enabled: true, Title: "Status", Introduction: "v1"}, nil, AuditEntry{Action: "public_dashboard.updated"}); err != nil {
+	if err := defaultTenant(s).SavePublicDashboardIfCurrent(ctx, loaded.UpdatedAt, PublicDashboard{Enabled: true, Title: "Status", Introduction: "v1"}, nil, AuditEntry{Action: "public_dashboard.updated"}); err != nil {
 		t.Fatal(err)
 	}
-	published, err := s.GetPublicDashboard(ctx)
+	published, err := defaultTenant(s).GetPublicDashboard(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !published.UpdatedAt.After(loaded.UpdatedAt) {
 		t.Fatalf("save did not advance updated_at: %s -> %s", loaded.UpdatedAt, published.UpdatedAt)
 	}
-	err = s.SavePublicDashboardIfCurrent(ctx, loaded.UpdatedAt, PublicDashboard{Enabled: false, Title: "Stale"}, nil, AuditEntry{Action: "public_dashboard.updated"})
+	err = defaultTenant(s).SavePublicDashboardIfCurrent(ctx, loaded.UpdatedAt, PublicDashboard{Enabled: false, Title: "Stale"}, nil, AuditEntry{Action: "public_dashboard.updated"})
 	if !errors.Is(err, ErrConflict) {
 		t.Fatalf("stale save error = %v, want ErrConflict", err)
 	}
-	current, err := s.GetPublicDashboard(ctx)
+	current, err := defaultTenant(s).GetPublicDashboard(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,17 +285,17 @@ func TestSavePublicDashboardIfCurrentRejectsAStaleToken(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE public_dashboards SET updated_at=? WHERE id=1`, future.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SavePublicDashboardIfCurrent(ctx, future, PublicDashboard{Enabled: true, Title: "After clock step"}, nil, AuditEntry{}); err != nil {
+	if err := defaultTenant(s).SavePublicDashboardIfCurrent(ctx, future, PublicDashboard{Enabled: true, Title: "After clock step"}, nil, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	stepped, err := s.GetPublicDashboard(ctx)
+	stepped, err := defaultTenant(s).GetPublicDashboard(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !stepped.UpdatedAt.After(future) {
 		t.Fatalf("updated_at after a clock step = %s, want later than %s", stepped.UpdatedAt, future)
 	}
-	if err := s.SavePublicDashboardIfCurrent(ctx, future, PublicDashboard{Title: "Stale again"}, nil, AuditEntry{}); !errors.Is(err, ErrConflict) {
+	if err := defaultTenant(s).SavePublicDashboardIfCurrent(ctx, future, PublicDashboard{Title: "Stale again"}, nil, AuditEntry{}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("save with the pre-step token = %v, want ErrConflict", err)
 	}
 }
@@ -303,7 +303,7 @@ func TestSavePublicDashboardIfCurrentRejectsAStaleToken(t *testing.T) {
 func TestListLegacyPublicScansExcludesIndexedSnapshots(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{
+	job, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name: "legacy-public", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.1"}, TCP: &config.Protocol{Ports: "80", Mode: "connect"},
 	}))
 	if err != nil {
@@ -320,13 +320,13 @@ func TestListLegacyPublicScansExcludesIndexedSnapshots(t *testing.T) {
 		StartedAt: now, FinishedAt: now, Status: "success",
 		Snapshot: model.Snapshot{Units: []model.Unit{{Target: "198.51.100.1", Protocol: "tcp", Addresses: []string{"198.51.100.1"}, Ports: []model.PortState{{Port: 80, State: "open"}}}}},
 	}
-	if err := s.SaveScan(ctx, indexed); err != nil {
+	if err := s.System().SaveScan(ctx, indexed); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveScan(ctx, legacy); err != nil {
+	if err := s.System().SaveScan(ctx, legacy); err != nil {
 		t.Fatal(err)
 	}
-	rows, err := s.ListLegacyPublicScans(ctx, job.ID, 100)
+	rows, err := s.Public(DefaultPublicScope()).ListLegacyPublicScans(ctx, job.ID, 100)
 	if err != nil {
 		t.Fatal(err)
 	}

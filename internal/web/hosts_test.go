@@ -33,16 +33,16 @@ func TestBaselineHostExplorerReturnsDetailedAndFilteredHosts(t *testing.T) {
 	}
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	job := config.NormalizeJob(config.Job{Name: "host-test", Schedule: "0 * * * *", Targets: []string{"198.51.100.0/30"}, TCP: &config.Protocol{Ports: "22,443", Mode: "syn"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	scan := model.Scan{ID: "host-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1", AddressFamily: "IPv4", SourceTargets: []string{"198.51.100.0/30"}, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22,443", ScannedPortCount: 2, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}, {Address: "2001:db8::1", AddressFamily: "IPv6", SourceTargets: []string{"router.example"}, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "udp", ScannedPorts: "53", ScannedPortCount: 1}}}}}}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ApproveRuntime(ctx, record.ID, record.Job.Name, scan); err != nil {
+	if _, err := defaultTenant(db).ApproveRuntime(ctx, record.ID, record.Job.Name, scan); err != nil {
 		t.Fatal(err)
 	}
 	recordRequest := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts?protocol=tcp&has_open_ports=true", nil)
@@ -74,7 +74,7 @@ func TestBaselineHostExplorerReturnsDetailedAndFilteredHosts(t *testing.T) {
 	// being rewritten from the current job revision.
 	changed := record.Job
 	changed.TCP = &config.Protocol{Ports: "1-65535", Mode: record.Job.TCP.Mode, ServiceDetection: record.Job.TCP.ServiceDetection}
-	if _, _, err := db.UpdateJob(ctx, record.ID, record.Revision, changed, true, false, true); err != nil {
+	if _, _, err := defaultTenant(db).UpdateJob(ctx, record.ID, record.Revision, changed, true, false, true); err != nil {
 		t.Fatal(err)
 	}
 	historicalRecorder := httptest.NewRecorder()
@@ -107,7 +107,7 @@ func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testi
 	}
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	job := config.NormalizeJob(config.Job{Name: "accepted-host", Schedule: "0 * * * *", Targets: []string{"198.51.100.1"}, TCP: &config.Protocol{Ports: "22,443", Mode: "syn"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,20 +121,20 @@ func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testi
 			Hosts:  []model.HostObservation{{Address: "198.51.100.1", SourceTargets: []string{"198.51.100.1"}, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22,443", ScannedPortCount: 2, Ports: []model.PortObservation{{Port: 22, State: "open"}}}}}},
 		},
 	}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ApproveRuntime(ctx, record.ID, record.Job.Name, scan); err != nil {
+	if _, err := defaultTenant(db).ApproveRuntime(ctx, record.ID, record.Job.Name, scan); err != nil {
 		t.Fatal(err)
 	}
 	key := "port|198.51.100.1|tcp|443"
-	if _, err := db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Incidents[key] = model.Incident{Change: model.Change{Key: key, Kind: "port", Target: "198.51.100.1", Protocol: "tcp", Port: 443, Old: "not-open", New: "open", Severity: "critical"}}
 		return nil, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, key, store.AuditEntry{}); err != nil {
+	if _, err := defaultTenant(db).AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, key, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -220,7 +220,7 @@ func TestHistoricalHostUsesAcceptedPortAndServiceRemovals(t *testing.T) {
 	}
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	job := config.NormalizeJob(config.Job{Name: "accepted-removal-host", Schedule: "0 * * * *", Targets: []string{"198.51.100.20"}, TCP: &config.Protocol{Ports: "25,80", Mode: "connect", ServiceDetection: true}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,15 +243,15 @@ func TestHistoricalHostUsesAcceptedPortAndServiceRemovals(t *testing.T) {
 			}},
 		},
 	}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ApproveRuntime(ctx, record.ID, record.Job.Name, scan); err != nil {
+	if _, err := defaultTenant(db).ApproveRuntime(ctx, record.ID, record.Job.Name, scan); err != nil {
 		t.Fatal(err)
 	}
 	portKey := "port|198.51.100.20|tcp|25"
 	serviceKey := "service|198.51.100.20|tcp|25"
-	_, err = db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+	_, err = db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Incidents[portKey] = model.Incident{Change: model.Change{Key: portKey, Kind: "port", Target: "198.51.100.20", Protocol: "tcp", Port: 25, Old: "open", New: "not-open", Severity: "info"}, ScanID: scan.ID}
 		state.Incidents[serviceKey] = model.Incident{Change: model.Change{Key: serviceKey, Kind: "service", Target: "198.51.100.20", Protocol: "tcp", Port: 25, Old: "smtp", New: "not-open", Severity: "info"}, ScanID: scan.ID}
 		return nil, nil
@@ -262,14 +262,14 @@ func TestHistoricalHostUsesAcceptedPortAndServiceRemovals(t *testing.T) {
 	// A service/port pair from the same scan is one operator decision. The
 	// selected service row removes both related changes atomically, so the
 	// historical expected view cannot retain the old positive port.
-	events, err := db.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, serviceKey, store.AuditEntry{})
+	events, err := defaultTenant(db).AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, serviceKey, store.AuditEntry{})
 	if err != nil {
 		t.Fatalf("accept service removal = %v", err)
 	}
 	if len(events) != 1 || len(events[0].Changes) != 2 {
 		t.Fatalf("grouped removal events = %#v", events)
 	}
-	if _, err := db.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, portKey, store.AuditEntry{}); !errors.Is(err, store.ErrIncidentNotFound) {
+	if _, err := defaultTenant(db).AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, portKey, store.AuditEntry{}); !errors.Is(err, store.ErrIncidentNotFound) {
 		t.Fatalf("stale port removal error = %v", err)
 	}
 
@@ -303,7 +303,7 @@ func TestAllHostsReturnsLatestSuccessfulResultPerAddress(t *testing.T) {
 	}
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	job := config.NormalizeJob(config.Job{Name: "global-hosts", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.0/30"}, TCP: &config.Protocol{Ports: "22,443", Mode: "syn"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +311,7 @@ func TestAllHostsReturnsLatestSuccessfulResultPerAddress(t *testing.T) {
 	old := model.Scan{ID: "old-host-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now.Add(-time.Minute), FinishedAt: now.Add(-time.Minute), Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 22, State: "open"}}}}}}}}
 	latest := model.Scan{ID: "latest-host-scan", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.1", SourceTargets: []string{"router.example"}, Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}, {Address: "198.51.100.222", SourceTargets: []string{"switch-222.example"}, Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1}}}, {Address: "2001:db8::1", Protocols: []model.ProtocolObservation{{Protocol: "udp", ScannedPorts: "53", ScannedPortCount: 1}}}}}}
 	for _, scan := range []model.Scan{old, latest} {
-		if err := db.SaveScan(ctx, scan); err != nil {
+		if err := db.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -360,11 +360,11 @@ func TestAllHostsSeparatesArchivedJobsAfterActiveHosts(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	archivedJob, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "archived-host", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.40"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
+	archivedJob, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "archived-host", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.40"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	activeJob, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "active-host", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.41"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
+	activeJob, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "active-host", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.41"}, TCP: &config.Protocol{Ports: "22", Mode: "syn"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,11 +378,11 @@ func TestAllHostsSeparatesArchivedJobsAfterActiveHosts(t *testing.T) {
 		{job: activeJob, id: "active-host-scan", ip: "198.51.100.41"},
 	} {
 		scan := model.Scan{ID: item.id, JobID: item.job.ID, JobRevision: item.job.Revision, Job: item.job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: item.ip, Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22", ScannedPortCount: 1}}}}}}
-		if err := db.SaveScan(ctx, scan); err != nil {
+		if err := db.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := db.SetJobArchived(ctx, archivedJob.ID, true); err != nil {
+	if err := defaultTenant(db).SetJobArchived(ctx, archivedJob.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	recorder := httptest.NewRecorder()
@@ -414,17 +414,17 @@ func TestAllHostsMergesIndexedAndLegacySuccessfulScans(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	job, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "indexed-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.10"}, TCP: &config.Protocol{Ports: "22", Mode: "connect"}}))
+	job, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "indexed-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.10"}, TCP: &config.Protocol{Ports: "22", Mode: "connect"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
 	when := time.Unix(500, 0).UTC()
 	indexed := model.Scan{ID: "indexed-mixed", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.10", SourceTargets: []string{"198.51.100.10"}, Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 22, State: "open"}}}}}}}}
-	if err := db.SaveScan(ctx, indexed); err != nil {
+	if err := db.System().SaveScan(ctx, indexed); err != nil {
 		t.Fatal(err)
 	}
 	legacy := model.Scan{ID: "legacy-mixed", Job: "legacy-job", StartedAt: when.Add(-time.Minute), FinishedAt: when.Add(-time.Minute), Status: "success", Snapshot: model.Snapshot{Scopes: []model.Scope{{Target: "legacy.example", Protocol: "tcp", Ports: "80"}}, Units: []model.Unit{{Target: "legacy.example", Protocol: "tcp", Addresses: []string{"198.51.100.11"}, Ports: []model.PortState{{Port: 80, State: "open", Service: "legacy-http"}}}}}}
-	if err := db.SaveScan(ctx, legacy); err != nil {
+	if err := db.System().SaveScan(ctx, legacy); err != nil {
 		t.Fatal(err)
 	}
 

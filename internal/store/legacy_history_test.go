@@ -47,12 +47,12 @@ func TestListLegacySuccessfulScanSnapshotsPageFiltersIndexedRows(t *testing.T) {
 	failed.Status = "failed"
 	failed.FinishedAt = now.Add(time.Minute)
 	for _, scan := range []model.Scan{indexed, legacy, failed} {
-		if err := s.SaveScan(ctx, scan); err != nil {
+		if err := s.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	page, err := s.ListLegacySuccessfulScanSnapshotsPage(ctx, 1, 0)
+	page, err := defaultTenant(s).ListLegacySuccessfulScanSnapshotsPage(ctx, 1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestListLegacySuccessfulScanSnapshotsPageFiltersIndexedRows(t *testing.T) {
 		t.Fatal("legacy raw snapshot was not returned")
 	}
 
-	second, err := s.ListLegacySuccessfulScanSnapshotsPage(ctx, 50, 1)
+	second, err := defaultTenant(s).ListLegacySuccessfulScanSnapshotsPage(ctx, 50, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

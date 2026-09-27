@@ -28,7 +28,7 @@ func TestScheduleSuggestionUsesNearestActiveJobAndSafeMinuteShift(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "nightly", Schedule: "0 */6 * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"})); err != nil {
+	if _, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "nightly", Schedule: "0 */6 * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"})); err != nil {
 		t.Fatal(err)
 	}
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))

@@ -61,7 +61,7 @@ func TestStoreBackedNotificationTestSendsOncePerDeploymentDestination(t *testing
 
 	// The legacy digest alias must keep routing outbox rows created before
 	// opaque deployment IDs, even though it no longer adds a test send.
-	if err := db.QueueEvent(ctx, hashURL(raw), model.Event{Type: "legacy", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := db.System().QueueEvent(ctx, hashURL(raw), model.Event{Type: "legacy", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	if err := notifier.Drain(ctx); err != nil {

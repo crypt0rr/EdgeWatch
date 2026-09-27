@@ -91,7 +91,7 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := db.CreateUser(context.Background(), store.User{Username: "handler-operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	operator, err := defaultTenant(db).CreateUser(context.Background(), store.User{Username: "handler-operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 		t.Fatalf("invalid activation token was echoed: %s", badToken.Body.String())
 	}
 
-	disabled, err := db.CreateUser(context.Background(), store.User{Username: "disabled-user", DisplayName: "Disabled", Role: store.RoleViewer, PasswordHash: hash, Enabled: false}, store.AuditEntry{})
+	disabled, err := defaultTenant(db).CreateUser(context.Background(), store.User{Username: "disabled-user", DisplayName: "Disabled", Role: store.RoleViewer, PasswordHash: hash, Enabled: false}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestUserHandlersCoverValidationAndStoreFailures(t *testing.T) {
 		}
 	}
 
-	locked, err := db.CreateUser(context.Background(), store.User{Username: "locked-totp", DisplayName: "Locked TOTP", Role: store.RoleViewer, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	locked, err := defaultTenant(db).CreateUser(context.Background(), store.User{Username: "locked-totp", DisplayName: "Locked TOTP", Role: store.RoleViewer, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +190,7 @@ func TestUserSecurityHandlersCoverOperatorAndTOTPSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := db.CreateUser(ctx, store.User{Username: "security-operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	operator, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "security-operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestUserSecurityHandlersCoverOperatorAndTOTPSuccess(t *testing.T) {
 	if secondEnable.Code != http.StatusBadRequest {
 		t.Fatalf("reused pending TOTP setup = %d: %s", secondEnable.Code, secondEnable.Body.String())
 	}
-	configured, err := db.GetUser(ctx, operator.ID)
+	configured, err := defaultTenant(db).GetUser(ctx, operator.ID)
 	if err != nil || configured.TOTPSecret == "" {
 		t.Fatalf("configured TOTP secret = %q, %v", configured.TOTPSecret, err)
 	}

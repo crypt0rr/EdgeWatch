@@ -114,11 +114,11 @@ func prepareRuntimeWrites(t *testing.T, f tenantFixture) {
 		hash := record.Job.SecurityHash()
 		approve := fixtureScan(runtimeApproveScan(marker), owner.job, "edge-archived", at, runtimeBaselineHosts(marker))
 		approve.ConfigHash = hash
-		if err := f.store.SaveScan(ctx, approve); err != nil {
+		if err := f.store.System().SaveScan(ctx, approve); err != nil {
 			t.Fatal(err)
 		}
 		plan := scanner.WorkPlan{CreatedAt: at, Job: record.Job, Scopes: []model.Scope{{Target: runtimeAddress, Protocol: "tcp", Ports: "1"}}, Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Family: 4, Addresses: []string{runtimeAddress}, Ports: "1", PortCount: 1, Probes: 1}}, TotalUnits: 1, TotalProbes: 1}
-		if _, err := f.store.CreateScanCycle(ctx, ScanCycleRecord{ID: "cycle-" + marker, JobID: owner.job, Job: "edge-archived", JobRevision: record.Revision, ConfigHash: hash, Plan: plan}); err != nil {
+		if _, err := f.store.System().CreateScanCycle(ctx, ScanCycleRecord{ID: "cycle-" + marker, JobID: owner.job, Job: "edge-archived", JobRevision: record.Revision, ConfigHash: hash, Plan: plan}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -496,9 +496,6 @@ var runtimeTenantLeakCases = map[string]tenantLeakCase{
 				t.Errorf("tenant %s: own baseline host = %v, %v; want %v", scope.ID(), got, err, want)
 			}
 		}
-		if _, err := f.store.GetBaselineHost(ctx, f.archivedB, runtimeAddress); !errors.Is(err, ErrNotFound) {
-			t.Errorf("deprecated GetBaselineHost read tenant B's host: %v", err)
-		}
 	}},
 	"ListBaselineHostsPage": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
@@ -531,9 +528,6 @@ var runtimeTenantLeakCases = map[string]tenantLeakCase{
 			if got := baselineHostMarkers(scanHostObservations(page.Items)); !reflect.DeepEqual(got, check.want) || page.Total != len(check.want) {
 				t.Errorf("tenant %s, job %s, search %q: hosts %v (total %d), want %v", check.scope.ID(), check.jobID, check.query, got, page.Total, check.want)
 			}
-		}
-		if page, err := f.store.ListBaselineHostsPage(ctx, f.archivedB, "", "", nil, 10, 0); err != nil || page.Total != 0 {
-			t.Errorf("deprecated ListBaselineHostsPage read tenant B's hosts: %+v, %v", page, err)
 		}
 	}},
 	"ExportBaselines": {writes: true, run: func(t *testing.T, f tenantFixture) {
@@ -586,9 +580,6 @@ var runtimeTenantLeakCases = map[string]tenantLeakCase{
 		}
 		if export, err := f.store.Tenant(f.a).ExportBaselines(ctx, runtimeLegacyJob); err != nil || !reflect.DeepEqual(exportJobIDs(export), []string{"legacy:" + runtimeLegacyJob}) || export.Jobs[0].SourceScan == nil {
 			t.Errorf("tenant A's export of its config.yaml job = %+v, %v", export, err)
-		}
-		if export, err := f.store.ExportBaselines(ctx, f.archivedB); !errors.Is(err, ErrNotFound) {
-			t.Errorf("deprecated ExportBaselines exported tenant B's job: %v, %v", exportJobIDs(export), err)
 		}
 	}},
 	"ResetRuntime": {run: func(t *testing.T, f tenantFixture) {
@@ -658,43 +649,18 @@ var runtimeTenantLeakCases = map[string]tenantLeakCase{
 	}},
 }
 
-// The deprecated Store wrappers of the runtime reads and writes reach only
-// the default tenant's jobs, and the daemon's writers reach every tenant's
-// jobs.
+// The daemon's runtime writers reach every tenant's jobs through the system
+// store.
 func TestRuntimeWritersFollowTheirScope(t *testing.T) {
 	ctx := context.Background()
 	f := newTenantFixture(t)
-	if state, err := f.store.RuntimeState(ctx, f.archivedB); err != nil || state.Baseline != nil {
-		t.Fatalf("deprecated RuntimeState read tenant B's job: %+v, %v", state, err)
-	}
-	if summaries, err := f.store.RuntimeStateSummaries(ctx, true); err != nil || len(summaries) != 2 || summaries[f.archivedA].BaselineHostCount != 3 {
-		t.Fatalf("deprecated RuntimeStateSummaries = %+v, %v", summaries, err)
-	}
-	before := tenantJobDigest(t, f.store, f.b)
-	if _, err := f.store.ResetRuntimeWithOutboxAndAudit(ctx, f.archivedB, "edge-archived", nil, AuditEntry{Action: "baseline.reset"}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("deprecated reset of tenant B's job = %v", err)
-	}
-	if _, err := f.store.ApproveRuntimeWithOutboxAndAudit(ctx, f.jobB, "edge", model.Scan{ID: f.scanB}, nil, AuditEntry{Action: "baseline.approved"}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("deprecated approval of tenant B's job = %v", err)
-	}
-	if after := tenantJobDigest(t, f.store, f.b); after != before {
-		t.Fatalf("a deprecated write changed tenant B: digest %s, was %s", after, before)
-	}
-	if _, err := f.store.ResetRuntime(ctx, f.archivedA, "edge-archived"); err != nil {
-		t.Fatalf("deprecated reset of tenant A's job = %v", err)
-	}
-	if state, err := f.store.RuntimeState(ctx, f.archivedA); err != nil || state.Baseline != nil {
-		t.Fatalf("tenant A's state after the deprecated reset = %+v, %v", state, err)
-	}
-	// The daemon's writers reach tenant B's job through the system store and
-	// the plain Store forwarders alike.
-	if err := f.store.ReplaceBaselineHostProjection(ctx, f.archivedB, model.Snapshot{Hosts: fixtureHosts(0, 5)}); err != nil {
+	if err := f.store.System().ReplaceBaselineHostProjection(ctx, f.archivedB, model.Snapshot{Hosts: fixtureHosts(0, 5)}); err != nil {
 		t.Fatal(err)
 	}
 	if page, err := f.store.Tenant(f.b).ListBaselineHostsPage(ctx, f.archivedB, "", "", nil, 10, 0); err != nil || page.Total != 5 {
 		t.Fatalf("tenant B's baseline hosts after the system replace = %d, %v", page.Total, err)
 	}
-	if _, err := f.store.UpdateRuntime(ctx, f.archivedB, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := f.store.System().UpdateRuntime(ctx, f.archivedB, func(state *model.JobState) ([]model.Event, error) {
 		state.CandidateCount = 7
 		return nil, nil
 	}); err != nil {

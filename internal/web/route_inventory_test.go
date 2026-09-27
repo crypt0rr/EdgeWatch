@@ -135,7 +135,7 @@ func newRouteMatrixSessions(t *testing.T) (*Server, []routeMatrixSession) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := db.CreateUser(ctx, store.User{Username: username, DisplayName: username, Role: account.role, PasswordHash: hash, Enabled: true}, store.AuditEntry{}); err != nil {
+			if _, err := defaultTenant(db).CreateUser(ctx, store.User{Username: username, DisplayName: username, Role: account.role, PasswordHash: hash, Enabled: true}, store.AuditEntry{}); err != nil {
 				t.Fatal(err)
 			}
 		}

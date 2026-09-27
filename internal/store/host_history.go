@@ -221,25 +221,11 @@ func latestScanHostsPageQueries(tenantID, query, protocol string, hasOpen *bool,
 	}
 }
 
-// ListJobScans returns the newest complete scans of a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListJobScans.
-func (s *Store) ListJobScans(ctx context.Context, jobID string, limit int) ([]model.Scan, error) {
-	return s.Tenant(DefaultTenantScope()).ListJobScans(ctx, jobID, limit)
-}
-
 // ListJobScans returns the newest complete scans of one of the tenant's
 // jobs; a job of another tenant has none.
 func (ts *TenantStore) ListJobScans(ctx context.Context, jobID string, limit int) ([]model.Scan, error) {
 	page, err := ts.ListJobScansPage(ctx, jobID, limit, 0)
 	return page.Items, err
-}
-
-// ListJobScansPage returns one page of a job's complete scans.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListJobScansPage.
-func (s *Store) ListJobScansPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Scan], error) {
-	return s.Tenant(DefaultTenantScope()).ListJobScansPage(ctx, jobID, limit, offset)
 }
 
 // ListJobScansPage returns one page of the complete scans, newest first, of
@@ -290,14 +276,6 @@ func (ts *TenantStore) ListJobScansPage(ctx context.Context, jobID string, limit
 		page.Items = append(page.Items, v)
 	}
 	return page, rows.Err()
-}
-
-// ListJobScanSummariesPage returns one page of a job's scan metadata.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ListJobScanSummariesPage.
-func (s *Store) ListJobScanSummariesPage(ctx context.Context, jobID string, limit, offset int) (Page[model.ScanSummary], error) {
-	return s.Tenant(DefaultTenantScope()).ListJobScanSummariesPage(ctx, jobID, limit, offset)
 }
 
 // ListJobScanSummariesPage returns only the metadata needed by a paginated

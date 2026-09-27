@@ -8,7 +8,7 @@ import (
 func TestUpdateUserAuditsEveryPersistedChangeButNotNoOps(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	user, err := s.CreateUser(ctx, User{Username: "renamed-operator", DisplayName: "Before", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "renamed-operator", DisplayName: "Before", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -22,12 +22,12 @@ func TestUpdateUserAuditsEveryPersistedChangeButNotNoOps(t *testing.T) {
 	}
 	update := func(change func(*User)) {
 		t.Helper()
-		current, err := s.GetUser(ctx, user.ID)
+		current, err := defaultTenant(s).GetUser(ctx, user.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
 		change(&current)
-		if err := s.UpdateUser(ctx, current, false, AuditEntry{Action: "user.updated", Detail: "updated", ActorUserID: LegacyAdminUserID, ActorUsername: "admin"}); err != nil {
+		if err := defaultTenant(s).UpdateUser(ctx, current, false, AuditEntry{Action: "user.updated", Detail: "updated", ActorUserID: LegacyAdminUserID, ActorUsername: "admin"}); err != nil {
 			t.Fatal(err)
 		}
 	}

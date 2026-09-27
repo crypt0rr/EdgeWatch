@@ -70,12 +70,6 @@ func clearBaselineHostProjectionTx(ctx context.Context, tx *sql.Tx, jobID string
 	return err
 }
 
-// ReplaceBaselineHostProjection replaces the baseline host projection of a
-// job of any tenant.
-func (s *Store) ReplaceBaselineHostProjection(ctx context.Context, jobID string, snapshot model.Snapshot) error {
-	return s.System().ReplaceBaselineHostProjection(ctx, jobID, snapshot)
-}
-
 // ReplaceBaselineHostProjection is kept for maintenance callers that already
 // own a complete baseline snapshot but do not have a surrounding transaction.
 // It is a daemon writer and reaches a job of any tenant.
@@ -91,15 +85,6 @@ func (ss *SystemStore) ReplaceBaselineHostProjection(ctx context.Context, jobID 
 	return tx.Commit()
 }
 
-// BaselineHostProjectionExists reports whether a job has a baseline host
-// projection.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.BaselineHostProjectionExists.
-func (s *Store) BaselineHostProjectionExists(ctx context.Context, jobID string) (bool, error) {
-	return s.Tenant(DefaultTenantScope()).BaselineHostProjectionExists(ctx, jobID)
-}
-
 // BaselineHostProjectionExists reports whether one of the tenant's jobs has
 // a baseline host projection. A job of another tenant has none.
 func (ts *TenantStore) BaselineHostProjectionExists(ctx context.Context, jobID string) (bool, error) {
@@ -109,14 +94,6 @@ func (ts *TenantStore) BaselineHostProjectionExists(ctx context.Context, jobID s
 	var exists bool
 	err := ts.store.reader().QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM baseline_hosts b JOIN jobs j ON j.id=b.job_id AND j.tenant_id=? WHERE b.job_id=?)`, ts.scope.id, jobID).Scan(&exists)
 	return exists, err
-}
-
-// ListBaselineHostsPage returns one page of a job's baseline hosts.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ListBaselineHostsPage.
-func (s *Store) ListBaselineHostsPage(ctx context.Context, jobID, query, protocol string, hasOpen *bool, limit, offset int) (Page[ScanHost], error) {
-	return s.Tenant(DefaultTenantScope()).ListBaselineHostsPage(ctx, jobID, query, protocol, hasOpen, limit, offset)
 }
 
 // ListBaselineHostsPage filters and paginates the effective overlay of one
@@ -190,13 +167,6 @@ func baselineHostsPageQueries(tenantID, jobID, query, protocol string, hasOpen *
 		pageSQL:  `SELECT h.address,h.data_quality,h.host_json FROM baseline_hosts h JOIN jobs j ON j.id=h.job_id AND j.tenant_id=? WHERE ` + whereSQL + ` ORDER BY h.address LIMIT ? OFFSET ?`,
 		pageArg:  append(append([]any(nil), args...), limit, offset),
 	}
-}
-
-// GetBaselineHost returns one baseline host of a job.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetBaselineHost.
-func (s *Store) GetBaselineHost(ctx context.Context, jobID, address string) (ScanHost, error) {
-	return s.Tenant(DefaultTenantScope()).GetBaselineHost(ctx, jobID, address)
 }
 
 // GetBaselineHost returns one baseline host of one of the tenant's jobs. A

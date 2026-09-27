@@ -121,7 +121,7 @@ func TestDeliveryClaimsHoldADisabledTenant(t *testing.T) {
 	if got, want := claimed(system.ClaimDueDeliveriesExcluding(ctx, 10, "owner-1", []string{"claim-a"})), map[string]string{"claim-platform": ""}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("claims excluding tenant A's destination = %v, want %v", got, want)
 	}
-	if got, want := claimed(f.store.ClaimDueDeliveries(ctx, 10, "owner-2")), map[string]string{"claim-a": DefaultTenantID}; !reflect.DeepEqual(got, want) {
+	if got, want := claimed(f.store.System().ClaimDueDeliveries(ctx, 10, "owner-2")), map[string]string{"claim-a": DefaultTenantID}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("claims with tenant B disabled = %v, want %v", got, want)
 	}
 	// A locked destination does not use up the held delivery's deferrals.
@@ -195,7 +195,7 @@ func TestSilenceWatchdogSkipsADisabledTenant(t *testing.T) {
 	if !due(f.jobB) {
 		t.Fatal("tenant B's job is not due after the tenant was enabled")
 	}
-	event, recorded, err := f.store.RecordJobSilenceAlert(ctx, f.jobB, "edge", created, now, threshold, nil)
+	event, recorded, err := f.store.System().RecordJobSilenceAlert(ctx, f.jobB, "edge", created, now, threshold, nil)
 	if err != nil || !recorded || event.JobID != f.jobB {
 		t.Fatalf("silence alert after tenant B was enabled = %+v, %v, %v", event, recorded, err)
 	}

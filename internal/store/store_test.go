@@ -202,36 +202,36 @@ func TestScanHostIndexSupportsFilteringPaginationAndLatestRows(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO jobs(id,tenant_id,name,definition_json,enabled,archived,revision,created_at,updated_at) VALUES('job-1',?,'edge','{}',1,0,1,?,?)`, DefaultTenantID, time.Unix(1, 0).UTC().Format(time.RFC3339Nano), time.Unix(1, 0).UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveScan(ctx, job); err != nil {
+	if err := s.System().SaveScan(ctx, job); err != nil {
 		t.Fatal(err)
 	}
 	tcp := "tcp"
 	open := true
-	page, err := s.ListScanHostsPage(ctx, job.ID, "edge.example", tcp, &open, 1, 0)
+	page, err := defaultTenant(s).ListScanHostsPage(ctx, job.ID, "edge.example", tcp, &open, 1, 0)
 	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].Host.Address != "198.51.100.20" {
 		t.Fatalf("indexed TCP page = %#v, %v", page, err)
 	}
-	if _, err := s.GetScanHost(ctx, job.ID, "2001:0db8::20"); err != nil {
+	if _, err := defaultTenant(s).GetScanHost(ctx, job.ID, "2001:0db8::20"); err != nil {
 		t.Fatalf("normalized IPv6 lookup failed: %v", err)
 	}
 	udp := "udp"
-	page, err = s.ListScanHostsPage(ctx, job.ID, "", udp, &open, 50, 0)
+	page, err = defaultTenant(s).ListScanHostsPage(ctx, job.ID, "", udp, &open, 50, 0)
 	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].Host.Address != "2001:db8::20" {
 		t.Fatalf("indexed UDP page = %#v, %v", page, err)
 	}
-	latest, err := s.ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
+	latest, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
 	if err != nil || latest.Total != 2 || len(latest.Items) != 2 {
 		t.Fatalf("latest indexed page = %#v, %v", latest, err)
 	}
-	if _, _, err := s.RuntimeBaselineMeta(ctx, "job-1"); err != nil {
+	if _, _, err := defaultTenant(s).RuntimeBaselineMeta(ctx, "job-1"); err != nil {
 		t.Fatal(err)
 	}
-	indexed, err := s.ScanHostIndexExists(ctx, job.ID)
+	indexed, err := defaultTenant(s).ScanHostIndexExists(ctx, job.ID)
 	if err != nil || !indexed {
 		t.Fatalf("scan host index marker = %v, %v", indexed, err)
 	}
 	missing := "does-not-match"
-	empty, err := s.ListScanHostsPage(ctx, job.ID, missing, "", nil, 50, 0)
+	empty, err := defaultTenant(s).ListScanHostsPage(ctx, job.ID, missing, "", nil, 50, 0)
 	if err != nil || empty.Total != 0 || len(empty.Items) != 0 {
 		t.Fatalf("empty indexed filter = %#v, %v", empty, err)
 	}
@@ -246,11 +246,11 @@ func TestHostSearchShortQueriesEscapeLikeWildcards(t *testing.T) {
 		{ID: "literal-underscore-x", JobID: "job-underscore-x", Job: "edge_x", StartedAt: time.Unix(101, 0).UTC(), FinishedAt: time.Unix(101, 0).UTC(), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.2"}}}},
 		{ID: "wildcard-lookalike", JobID: "job-wildcard", Job: "axb", StartedAt: time.Unix(102, 0).UTC(), FinishedAt: time.Unix(102, 0).UTC(), Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.3"}}}},
 	} {
-		if err := s.SaveScan(ctx, scan); err != nil {
+		if err := s.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
-	page, err := s.ListLatestScanHostsPage(ctx, "_", "", nil, 50, 0)
+	page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "_", "", nil, 50, 0)
 	if err != nil || page.Total != 2 {
 		t.Fatalf("literal underscore search = %#v, %v", page, err)
 	}
@@ -259,11 +259,11 @@ func TestHostSearchShortQueriesEscapeLikeWildcards(t *testing.T) {
 			t.Fatalf("underscore wildcard matched unrelated job: %#v", page.Items)
 		}
 	}
-	page, err = s.ListLatestScanHostsPage(ctx, "_x", "", nil, 50, 0)
+	page, err = defaultTenant(s).ListLatestScanHostsPage(ctx, "_x", "", nil, 50, 0)
 	if err != nil || page.Total != 1 || page.Items[0].Job != "edge_x" {
 		t.Fatalf("literal underscore suffix search = %#v, %v", page, err)
 	}
-	page, err = s.ListLatestScanHostsPage(ctx, "%", "", nil, 50, 0)
+	page, err = defaultTenant(s).ListLatestScanHostsPage(ctx, "%", "", nil, 50, 0)
 	if err != nil || page.Total != 0 {
 		t.Fatalf("literal percent search = %#v, %v", page, err)
 	}
@@ -282,11 +282,11 @@ func TestLatestScanHostProjectionPreservesSuccessfulOrdering(t *testing.T) {
 		{ID: "projection-failed", JobID: "job", Job: "edge", StartedAt: time.Unix(300, 0).UTC(), FinishedAt: time.Unix(300, 0).UTC(), Status: "failed", Snapshot: model.Snapshot{Hosts: []model.HostObservation{host("198.51.100.7", "closed")}}},
 	}
 	for _, scan := range scans {
-		if err := s.SaveScan(ctx, scan); err != nil {
+		if err := s.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
-	page, err := s.ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
+	page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
 	if err != nil || page.Total != 1 || len(page.Items) != 1 {
 		t.Fatalf("projection page = %#v, %v", page, err)
 	}
@@ -305,10 +305,10 @@ func TestLatestScanHostProjectionRebuildsAfterSourceRemoval(t *testing.T) {
 	makeScan := func(id string, finished time.Time, state string) model.Scan {
 		return model.Scan{ID: id, JobID: "job", Job: "edge", StartedAt: finished, FinishedAt: finished, Status: "success", Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.8", AddressFamily: "IPv4", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: state}}}}}}}}
 	}
-	if err := s.SaveScan(ctx, makeScan("projection-retained", time.Unix(100, 0).UTC(), "closed")); err != nil {
+	if err := s.System().SaveScan(ctx, makeScan("projection-retained", time.Unix(100, 0).UTC(), "closed")); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SaveScan(ctx, makeScan("projection-removed", time.Unix(200, 0).UTC(), "open")); err != nil {
+	if err := s.System().SaveScan(ctx, makeScan("projection-removed", time.Unix(200, 0).UTC(), "open")); err != nil {
 		t.Fatal(err)
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -324,7 +324,7 @@ func TestLatestScanHostProjectionRebuildsAfterSourceRemoval(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	page, err := s.ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
+	page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "", "", nil, 50, 0)
 	if err != nil || page.Total != 1 || len(page.Items) != 1 {
 		t.Fatalf("rebuilt projection page = %#v, %v", page, err)
 	}
@@ -355,7 +355,7 @@ func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 			},
 		}},
 	}
-	if err := s.SaveScan(ctx, job); err != nil {
+	if err := s.System().SaveScan(ctx, job); err != nil {
 		t.Fatal(err)
 	}
 	var searchText, indexedContent string
@@ -372,7 +372,7 @@ func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 		t.Fatalf("FTS indexed unbounded host evidence: %q", indexedContent)
 	}
 	for _, query := range []string{"nginx", "edge-router", "production", "router.example", "198.51.100.4"} {
-		page, err := s.ListLatestScanHostsPage(ctx, query, "", nil, 50, 0)
+		page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, query, "", nil, 50, 0)
 		if err != nil {
 			t.Fatalf("search %q: %v", query, err)
 		}
@@ -417,14 +417,14 @@ func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE latest_scan_hosts SET job=? WHERE address=?`, "Database edge", "198.51.100.44"); err != nil {
 		t.Fatal(err)
 	}
-	page, err := s.ListLatestScanHostsPage(ctx, "database", "", nil, 50, 0)
+	page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "database", "", nil, 50, 0)
 	if err != nil || page.Total != 1 {
 		t.Fatalf("updated projection search = %#v, %v", page, err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `DELETE FROM latest_scan_hosts WHERE address=?`, "198.51.100.44"); err != nil {
 		t.Fatal(err)
 	}
-	page, err = s.ListLatestScanHostsPage(ctx, "database", "", nil, 50, 0)
+	page, err = defaultTenant(s).ListLatestScanHostsPage(ctx, "database", "", nil, 50, 0)
 	if err != nil || page.Total != 0 {
 		t.Fatalf("deleted projection search = %#v, %v", page, err)
 	}
@@ -522,21 +522,21 @@ func TestScanStateAndEventPersistence(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	scan := model.Scan{ID: "scan-1", Job: "job", StartedAt: time.Now(), FinishedAt: time.Now(), Status: "success", ConfigHash: "hash", Snapshot: model.Snapshot{}}
-	if err := s.SaveScan(ctx, scan); err != nil {
+	if err := s.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetScan(ctx, "scan-1")
+	got, err := defaultTenant(s).GetScan(ctx, "scan-1")
 	if err != nil || got.Job != "job" {
 		t.Fatalf("scan: %#v %v", got, err)
 	}
-	events, err := s.UpdateState(ctx, "job", func(state *model.JobState) ([]model.Event, error) {
+	events, err := s.System().UpdateState(ctx, "job", func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineScanID = "scan-1"
 		return []model.Event{{Type: "test", Job: "job", ScanID: "scan-1", CreatedAt: time.Now()}}, nil
 	})
 	if err != nil || len(events) != 1 {
 		t.Fatal(err)
 	}
-	history, err := s.ListEvents(ctx, "job", 10)
+	history, err := defaultTenant(s).ListEvents(ctx, "job", 10)
 	if err != nil || len(history) != 1 {
 		t.Fatalf("events: %#v %v", history, err)
 	}
@@ -548,10 +548,10 @@ func TestScanComparisonMetadataRoundTrips(t *testing.T) {
 	now := time.Now().UTC()
 	wantChange := model.Change{Key: "port|127.0.0.1|tcp|443", Kind: "port", Severity: "critical", Target: "127.0.0.1", Protocol: "tcp", Port: 443, Old: "closed", New: "open"}
 	want := model.Scan{ID: "comparison-scan", Job: "job", StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: "scope-hash", BaselineScanID: "baseline-scan", BaselineConfigHash: "baseline-hash", Changes: []model.Change{wantChange}, Snapshot: model.Snapshot{}}
-	if err := s.SaveScan(ctx, want); err != nil {
+	if err := s.System().SaveScan(ctx, want); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetScan(ctx, want.ID)
+	got, err := defaultTenant(s).GetScan(ctx, want.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -570,10 +570,10 @@ func TestScanComparisonQueryDoesNotLoadSnapshot(t *testing.T) {
 		large.Units[0].Ports[i] = model.PortState{Port: i + 1, State: "open", Evidence: []string{"127.0.0.1"}}
 	}
 	scan := model.Scan{ID: "metadata-only", JobID: "job", Job: "job", StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: "scope", BaselineScanID: "baseline", BaselineConfigHash: "scope", Changes: []model.Change{{Key: "port|127.0.0.1|tcp|1", Kind: "port", Severity: "critical", Target: "127.0.0.1", Protocol: "tcp", Port: 1, Old: "closed", New: "open"}}, Snapshot: large}
-	if err := s.SaveScan(ctx, scan); err != nil {
+	if err := s.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	summary, changes, err := s.GetScanComparison(ctx, scan.ID)
+	summary, changes, err := defaultTenant(s).GetScanComparison(ctx, scan.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,10 +593,10 @@ func TestScanChangesPagePaginatesWithoutLoadingSnapshot(t *testing.T) {
 		{Key: "port|127.0.0.1|tcp|3", Kind: "port", Severity: "critical", Target: "127.0.0.1", Protocol: "tcp", Port: 3, Old: "closed", New: "open"},
 	}
 	large := model.Snapshot{Units: []model.Unit{{Target: "127.0.0.1", Protocol: "tcp", Ports: make([]model.PortState, 8192)}}}
-	if err := s.SaveScan(ctx, model.Scan{ID: "paged-changes", JobID: "job", Job: "job", StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: "scope", BaselineScanID: "baseline", BaselineConfigHash: "scope", Changes: changes, Snapshot: large}); err != nil {
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "paged-changes", JobID: "job", Job: "job", StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: "scope", BaselineScanID: "baseline", BaselineConfigHash: "scope", Changes: changes, Snapshot: large}); err != nil {
 		t.Fatal(err)
 	}
-	page, err := s.ListScanChangesPage(ctx, "paged-changes", 1, 1)
+	page, err := defaultTenant(s).ListScanChangesPage(ctx, "paged-changes", 1, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -614,10 +614,10 @@ func TestScanResultsPagePaginatesSnapshotUnits(t *testing.T) {
 		{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}},
 		{Target: "192.0.2.2", Protocol: "tcp", Ports: []model.PortState{{Port: 2, State: "open"}}},
 	}
-	if err := s.SaveScan(ctx, model.Scan{ID: "paged-results", JobID: "job", Job: "job", StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: "scope", Snapshot: model.Snapshot{Units: units}}); err != nil {
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "paged-results", JobID: "job", Job: "job", StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: "scope", Snapshot: model.Snapshot{Units: units}}); err != nil {
 		t.Fatal(err)
 	}
-	page, err := s.ListScanResultsPage(ctx, "paged-results", 1, 1)
+	page, err := defaultTenant(s).ListScanResultsPage(ctx, "paged-results", 1, 1)
 	if err != nil || page.Total != len(units) || len(page.Items) != 1 || page.Items[0].Target != "192.0.2.2" {
 		t.Fatalf("unexpected paged results: %#v, err=%v", page, err)
 	}
@@ -637,7 +637,7 @@ func TestScanResultsPageTreatsNullOrMissingUnitsAsEmpty(t *testing.T) {
 		if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?)`, tc.id, "results", now, now, "failed", "scan did not complete", "Nmap", "hash", []byte(tc.snapshot)); err != nil {
 			t.Fatal(err)
 		}
-		page, err := s.ListScanResultsPage(ctx, tc.id, 50, 0)
+		page, err := defaultTenant(s).ListScanResultsPage(ctx, tc.id, 50, 0)
 		if err != nil {
 			t.Fatalf("%s: %v", tc.id, err)
 		}
@@ -650,15 +650,15 @@ func TestScanResultsPageTreatsNullOrMissingUnitsAsEmpty(t *testing.T) {
 func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	record, err := s.CreateJob(ctx, testJob("job"))
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("job"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateManagedNotification(ctx, "destination-b", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "destination-b", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
 		t.Fatal(err)
 	}
 	destinations := []string{"destination-a", "managed:destination-b:2"}
-	events, err := s.UpdateRuntimeWithOutbox(ctx, record.ID, destinations, func(state *model.JobState) ([]model.Event, error) {
+	events, err := s.System().UpdateRuntimeWithOutbox(ctx, record.ID, destinations, func(state *model.JobState) ([]model.Event, error) {
 		state.ConsecutiveFailures = 3
 		return []model.Event{{Type: "alert", Job: "job", ScanID: "scan", Message: "changed", CreatedAt: time.Now().UTC()}}, nil
 	})
@@ -672,7 +672,7 @@ func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("notification intent rows = %d, want one valid row", count)
 	}
-	state, err := s.RuntimeState(ctx, record.ID)
+	state, err := defaultTenant(s).RuntimeState(ctx, record.ID)
 	if err != nil || state.ConsecutiveFailures != 3 {
 		t.Fatalf("runtime state: %#v %v", state, err)
 	}
@@ -681,7 +681,7 @@ func TestRuntimeAndNotificationIntentCommitTogether(t *testing.T) {
 func TestEventPayloadsAreBoundedWithOverflowSummary(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	record, err := s.CreateJob(ctx, testJob("bounded-event"))
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("bounded-event"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -689,7 +689,7 @@ func TestEventPayloadsAreBoundedWithOverflowSummary(t *testing.T) {
 	for i := range changes {
 		changes[i] = model.Change{Key: "port|127.0.0.1|tcp|" + strconv.Itoa(i+1), Kind: "port", Severity: "critical", Target: "127.0.0.1", Protocol: "tcp", Port: i + 1, Old: "closed", New: "open"}
 	}
-	events, err := s.UpdateRuntimeWithOutbox(ctx, record.ID, []string{"destination"}, func(state *model.JobState) ([]model.Event, error) {
+	events, err := s.System().UpdateRuntimeWithOutbox(ctx, record.ID, []string{"destination"}, func(state *model.JobState) ([]model.Event, error) {
 		return []model.Event{{Type: "changes-detected", Job: record.Job.Name, Changes: changes, CreatedAt: time.Now().UTC()}}, nil
 	})
 	if err != nil {
@@ -742,17 +742,17 @@ func TestDeleteExpiredSessionsKeepsActiveSessions(t *testing.T) {
 func TestIncidentPagesUseSQLiteJSONPagination(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	first, err := s.CreateJob(ctx, testJob("incident-a"))
+	first, err := defaultTenant(s).CreateJob(ctx, testJob("incident-a"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := s.CreateJob(ctx, testJob("incident-b"))
+	second, err := defaultTenant(s).CreateJob(ctx, testJob("incident-b"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	makeState := func(jobID string, port int) error {
-		_, err := s.UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
+		_, err := s.System().UpdateRuntime(ctx, jobID, func(state *model.JobState) ([]model.Event, error) {
 			state.Incidents[fmt.Sprintf("port|127.0.0.1|tcp|%d", port)] = model.Incident{Change: model.Change{Key: fmt.Sprintf("port|127.0.0.1|tcp|%d", port), Target: "127.0.0.1", Protocol: "tcp", Port: port, Old: "closed", New: "open", Severity: "critical"}, OpenedAt: now, LastSeenAt: now}
 			return nil, nil
 		})
@@ -764,11 +764,11 @@ func TestIncidentPagesUseSQLiteJSONPagination(t *testing.T) {
 	if err := makeState(second.ID, 2); err != nil {
 		t.Fatal(err)
 	}
-	jobPage, err := s.ListJobIncidentsPage(ctx, first.ID, 1, 0)
+	jobPage, err := defaultTenant(s).ListJobIncidentsPage(ctx, first.ID, 1, 0)
 	if err != nil || jobPage.Total != 1 || len(jobPage.Items) != 1 || jobPage.Items[0].Change.Port != 1 {
 		t.Fatalf("job incident page = %#v, err=%v", jobPage, err)
 	}
-	globalPage, err := s.ListIncidentsPage(ctx, 1, 1)
+	globalPage, err := defaultTenant(s).ListIncidentsPage(ctx, 1, 1)
 	if err != nil || globalPage.Total != 2 || len(globalPage.Items) != 1 || globalPage.Items[0].Job != "incident-b" {
 		t.Fatalf("global incident page = %#v, err=%v", globalPage, err)
 	}
@@ -792,7 +792,7 @@ func TestSessionAuditFailureRollsBackAuthenticationMutation(t *testing.T) {
 func TestFinalizeManagedScanCommitsScanAndRuntimeTogether(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	record, err := s.CreateJob(ctx, testJob("finalize"))
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("finalize"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -802,24 +802,24 @@ func TestFinalizeManagedScanCommitsScanAndRuntimeTogether(t *testing.T) {
 		StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: record.Job.SecurityHash(),
 		Snapshot: model.Snapshot{},
 	}
-	events, err := s.FinalizeManagedScan(ctx, &scan, record.ID, scan.ConfigHash, nil, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
+	events, err := s.System().FinalizeManagedScan(ctx, &scan, record.ID, scan.ConfigHash, nil, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
 		state.BaselineScanID = current.ID
 		return []model.Event{{Type: "finalized", Job: current.Job, ScanID: current.ID, Message: "finalized", CreatedAt: now}}, nil
 	})
 	if err != nil || len(events) != 1 {
 		t.Fatalf("finalization: %#v %v", events, err)
 	}
-	if _, err := s.GetScan(ctx, scan.ID); err != nil {
+	if _, err := defaultTenant(s).GetScan(ctx, scan.ID); err != nil {
 		t.Fatalf("scan was not persisted: %v", err)
 	}
-	state, err := s.RuntimeState(ctx, record.ID)
+	state, err := defaultTenant(s).RuntimeState(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if state.BaselineScanID != scan.ID {
 		t.Fatalf("runtime state was not persisted with scan: %#v", state)
 	}
-	history, err := s.ListJobEvents(ctx, record.ID, 10)
+	history, err := defaultTenant(s).ListJobEvents(ctx, record.ID, 10)
 	if err != nil || len(history) != 1 || history[0].JobID != record.ID {
 		t.Fatalf("event was not persisted with scan: %#v %v", history, err)
 	}
@@ -828,14 +828,14 @@ func TestFinalizeManagedScanCommitsScanAndRuntimeTogether(t *testing.T) {
 func TestFinalizeManagedScanRetainsSupersededScan(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	record, err := s.CreateJob(ctx, testJob("superseded-finalize"))
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("superseded-finalize"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	oldHash := record.Job.SecurityHash()
 	changed := record.Job
 	changed.Targets = []string{"127.0.0.2"}
-	if _, _, err := s.UpdateJob(ctx, record.ID, record.Revision, changed, true, false, true); err != nil {
+	if _, _, err := defaultTenant(s).UpdateJob(ctx, record.ID, record.Revision, changed, true, false, true); err != nil {
 		t.Fatal(err)
 	}
 	scan := model.Scan{
@@ -843,17 +843,17 @@ func TestFinalizeManagedScanRetainsSupersededScan(t *testing.T) {
 		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "success",
 		ConfigHash: oldHash, Snapshot: model.Snapshot{},
 	}
-	_, err = s.FinalizeManagedScan(ctx, &scan, record.ID, oldHash, nil, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
+	_, err = s.System().FinalizeManagedScan(ctx, &scan, record.ID, oldHash, nil, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
 		t.Fatal("superseded scan mutated runtime")
 		return nil, nil
 	})
 	if !errors.Is(err, ErrJobRevisionChanged) {
 		t.Fatalf("expected superseded revision error, got %v", err)
 	}
-	if _, err := s.GetScan(ctx, scan.ID); err != nil {
+	if _, err := defaultTenant(s).GetScan(ctx, scan.ID); err != nil {
 		t.Fatalf("superseded scan was not retained: %v", err)
 	}
-	state, err := s.RuntimeState(ctx, record.ID)
+	state, err := defaultTenant(s).RuntimeState(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -865,7 +865,7 @@ func TestFinalizeManagedScanRetainsSupersededScan(t *testing.T) {
 func TestFinalizeManagedScanSerializesWithBaselineReset(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	record, err := s.CreateJob(ctx, testJob("finalize-reset"))
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("finalize-reset"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -878,7 +878,7 @@ func TestFinalizeManagedScanSerializesWithBaselineReset(t *testing.T) {
 	release := make(chan struct{})
 	finalizeDone := make(chan error, 1)
 	go func() {
-		_, finalizeErr := s.FinalizeManagedScan(ctx, &scan, record.ID, scan.ConfigHash, nil, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
+		_, finalizeErr := s.System().FinalizeManagedScan(ctx, &scan, record.ID, scan.ConfigHash, nil, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
 			close(entered)
 			<-release
 			state.BaselineScanID = current.ID
@@ -893,7 +893,7 @@ func TestFinalizeManagedScanSerializesWithBaselineReset(t *testing.T) {
 	}
 	resetDone := make(chan error, 1)
 	go func() {
-		_, resetErr := s.ResetRuntime(ctx, record.ID, record.Job.Name)
+		_, resetErr := defaultTenant(s).ResetRuntime(ctx, record.ID, record.Job.Name)
 		resetDone <- resetErr
 	}()
 	select {
@@ -908,14 +908,14 @@ func TestFinalizeManagedScanSerializesWithBaselineReset(t *testing.T) {
 	if err := <-resetDone; err != nil {
 		t.Fatal(err)
 	}
-	state, err := s.RuntimeState(ctx, record.ID)
+	state, err := defaultTenant(s).RuntimeState(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if state.BaselineScanID != "" {
 		t.Fatalf("reset did not apply after serialized finalization: %#v", state)
 	}
-	if _, err := s.GetScan(ctx, scan.ID); err != nil {
+	if _, err := defaultTenant(s).GetScan(ctx, scan.ID); err != nil {
 		t.Fatalf("scan was not persisted: %v", err)
 	}
 }
@@ -1029,17 +1029,17 @@ func TestSaveAdminSecurityRevokesSessionsOnSuccessfulTOTPChange(t *testing.T) {
 func TestStaleManagedDestinationIntentIsSkipped(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, testJob("stale-destination"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("stale-destination"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateManagedNotification(ctx, "destination-c", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "destination-c", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateManagedNotification(ctx, "destination-c", 1, "Test destination", "generic", []byte{3}, []byte{4}, true); err != nil {
+	if _, err := defaultTenant(s).UpdateManagedNotification(ctx, "destination-c", 1, "Test destination", "generic", []byte{3}, []byte{4}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateRuntimeWithOutbox(ctx, job.ID, []string{"managed:destination-c:1"}, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntimeWithOutbox(ctx, job.ID, []string{"managed:destination-c:1"}, func(state *model.JobState) ([]model.Event, error) {
 		return []model.Event{{Type: "alert", Job: job.Job.Name, CreatedAt: time.Now().UTC()}}, nil
 	}); err != nil {
 		t.Fatal(err)
@@ -1056,14 +1056,14 @@ func TestStaleManagedDestinationIntentIsSkipped(t *testing.T) {
 func TestBaselineActionsPersistNotificationIntent(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, testJob("baseline-actions"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("baseline-actions"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateManagedNotification(ctx, "baseline-destination", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "baseline-destination", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ResetRuntimeWithOutbox(ctx, job.ID, job.Job.Name, []string{"managed:baseline-destination:1"}); err != nil {
+	if _, err := defaultTenant(s).ResetRuntimeWithOutbox(ctx, job.ID, job.Job.Name, []string{"managed:baseline-destination:1"}); err != nil {
 		t.Fatal(err)
 	}
 	var count int
@@ -1074,10 +1074,10 @@ func TestBaselineActionsPersistNotificationIntent(t *testing.T) {
 		t.Fatalf("reset notification intent rows = %d, want 1", count)
 	}
 	scan := model.Scan{ID: "baseline-approval-scan", JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}
-	if err := s.SaveScan(ctx, scan); err != nil {
+	if err := s.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ApproveRuntimeWithOutbox(ctx, job.ID, job.Job.Name, scan, []string{"managed:baseline-destination:1"}); err != nil {
+	if _, err := defaultTenant(s).ApproveRuntimeWithOutbox(ctx, job.ID, job.Job.Name, scan, []string{"managed:baseline-destination:1"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE destination=?`, "managed:baseline-destination:1").Scan(&count); err != nil {
@@ -1091,16 +1091,16 @@ func TestBaselineActionsPersistNotificationIntent(t *testing.T) {
 func TestLeaseCanBeReleased(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if err := s.AcquireLease(ctx, "one"); err != nil {
+	if err := s.System().AcquireLease(ctx, "one"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireLease(ctx, "two"); err == nil {
+	if err := s.System().AcquireLease(ctx, "two"); err == nil {
 		t.Fatal("second lease acquired")
 	}
-	if err := s.ReleaseLease(ctx, "one"); err != nil {
+	if err := s.System().ReleaseLease(ctx, "one"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireLease(ctx, "two"); err != nil {
+	if err := s.System().AcquireLease(ctx, "two"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1109,16 +1109,16 @@ func TestReclaimExpiredJobLeasesRecoversStaleScanLease(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	if err := s.AcquireJobLease(ctx, "job", "stale-scan", now.Add(time.Hour)); err != nil {
+	if err := s.System().AcquireJobLease(ctx, "job", "stale-scan", now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE job_leases SET expires_at=? WHERE job=?`, now.Add(-time.Minute).Format(time.RFC3339Nano), "job"); err != nil {
 		t.Fatal(err)
 	}
-	if released, err := s.ReclaimExpiredJobLeases(ctx, now); err != nil || released != 1 {
+	if released, err := s.System().ReclaimExpiredJobLeases(ctx, now); err != nil || released != 1 {
 		t.Fatalf("released job leases = %d, error = %v", released, err)
 	}
-	if err := s.AcquireJobLease(ctx, "job", "new-scan", time.Now().UTC().Add(time.Hour)); err != nil {
+	if err := s.System().AcquireJobLease(ctx, "job", "new-scan", time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatalf("job lease was not recoverable after reconciliation: %v", err)
 	}
 }
@@ -1127,16 +1127,16 @@ func TestReclaimExpiredJobLeasesLeavesLiveOwner(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	if err := s.AcquireJobLease(ctx, "job", "cli-scan", now.Add(time.Hour)); err != nil {
+	if err := s.System().AcquireJobLease(ctx, "job", "cli-scan", now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if reclaimed, err := s.ReclaimExpiredJobLeases(ctx, now); err != nil || reclaimed != 0 {
+	if reclaimed, err := s.System().ReclaimExpiredJobLeases(ctx, now); err != nil || reclaimed != 0 {
 		t.Fatalf("reclaimed live job leases = %d, error = %v", reclaimed, err)
 	}
-	if err := s.AcquireJobLease(ctx, "job", "daemon-scan", now.Add(time.Hour)); !errors.Is(err, ErrJobBusy) {
+	if err := s.System().AcquireJobLease(ctx, "job", "daemon-scan", now.Add(time.Hour)); !errors.Is(err, ErrJobBusy) {
 		t.Fatalf("live CLI-shaped lease was not preserved, acquire error = %v", err)
 	}
-	if err := s.ReleaseJobLease(ctx, "job", "cli-scan"); err != nil {
+	if err := s.System().ReleaseJobLease(ctx, "job", "cli-scan"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -1152,7 +1152,7 @@ func TestAcquireDaemonLeaseReclaimsOnlyPreviousDaemonJobs(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_leases(job,owner,expires_at) VALUES(?,?,?),(?,?,?)`, "managed", "daemon/"+oldOwner+"/scan-1", now.Add(time.Hour).Format(time.RFC3339Nano), "cli", "cli-scan", now.Add(time.Hour).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	reclaimed, err := s.AcquireDaemonLease(ctx, "new-host-456")
+	reclaimed, err := s.System().AcquireDaemonLease(ctx, "new-host-456")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1191,7 +1191,7 @@ func TestAcquireDaemonLeaseDoesNotStealLiveDaemon(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_leases(job,owner,expires_at) VALUES(?,?,?)`, "managed", "daemon/live-daemon/scan-1", now.Add(time.Hour).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AcquireDaemonLease(ctx, "replacement"); !errors.Is(err, ErrDaemonLeaseBusy) {
+	if _, err := s.System().AcquireDaemonLease(ctx, "replacement"); !errors.Is(err, ErrDaemonLeaseBusy) {
 		t.Fatalf("live daemon takeover error = %v", err)
 	}
 	var count int
@@ -1274,16 +1274,16 @@ func TestCheckDaemonLeaseBeforeStartup(t *testing.T) {
 func TestJobLeasePreventsConcurrentRunsAndExpires(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if err := s.AcquireJobLease(ctx, "job", "one", time.Now().Add(time.Hour)); err != nil {
+	if err := s.System().AcquireJobLease(ctx, "job", "one", time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireJobLease(ctx, "job", "two", time.Now().Add(time.Hour)); !errors.Is(err, ErrJobBusy) {
+	if err := s.System().AcquireJobLease(ctx, "job", "two", time.Now().Add(time.Hour)); !errors.Is(err, ErrJobBusy) {
 		t.Fatalf("expected busy, got %v", err)
 	}
 	if _, err := s.DB.Exec(`UPDATE job_leases SET expires_at=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireJobLease(ctx, "job", "two", time.Now().Add(time.Hour)); err != nil {
+	if err := s.System().AcquireJobLease(ctx, "job", "two", time.Now().Add(time.Hour)); err != nil {
 		t.Fatalf("expired lease not replaced: %v", err)
 	}
 }
@@ -1292,27 +1292,27 @@ func TestOutboxRetriesAndCompletes(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	event := model.Event{Type: "test", Job: "job", CreatedAt: time.Now()}
-	if err := s.QueueEvent(ctx, "destination", event); err != nil {
+	if err := s.System().QueueEvent(ctx, "destination", event); err != nil {
 		t.Fatal(err)
 	}
-	due, err := s.DueDeliveries(ctx, 10)
+	due, err := s.System().DueDeliveries(ctx, 10)
 	if err != nil || len(due) != 1 {
 		t.Fatalf("due %#v %v", due, err)
 	}
-	if err := s.DeliveryResult(ctx, due[0].ID, errors.New("failed")); err != nil {
+	if err := s.System().DeliveryResult(ctx, due[0].ID, errors.New("failed")); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`UPDATE outbox SET next_at=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	due, err = s.DueDeliveries(ctx, 10)
+	due, err = s.System().DueDeliveries(ctx, 10)
 	if err != nil || len(due) != 1 || due[0].Attempts != 1 {
 		t.Fatalf("retry %#v %v", due, err)
 	}
-	if err := s.DeliveryResult(ctx, due[0].ID, nil); err != nil {
+	if err := s.System().DeliveryResult(ctx, due[0].ID, nil); err != nil {
 		t.Fatal(err)
 	}
-	due, _ = s.DueDeliveries(ctx, 10)
+	due, _ = s.System().DueDeliveries(ctx, 10)
 	if len(due) != 0 {
 		t.Fatal("sent delivery remained due")
 	}
@@ -1321,27 +1321,27 @@ func TestOutboxRetriesAndCompletes(t *testing.T) {
 func TestOutboxClaimsAreExclusiveAndRequireOwner(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if err := s.QueueEvent(ctx, "destination", model.Event{Type: "claim", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, "destination", model.Event{Type: "claim", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	first, err := s.ClaimDueDeliveries(ctx, 10, "owner-one")
+	first, err := s.System().ClaimDueDeliveries(ctx, 10, "owner-one")
 	if err != nil || len(first) != 1 || first[0].ClaimToken != "owner-one" {
 		t.Fatalf("first claim %#v %v", first, err)
 	}
-	second, err := s.ClaimDueDeliveries(ctx, 10, "owner-two")
+	second, err := s.System().ClaimDueDeliveries(ctx, 10, "owner-two")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(second) != 0 {
 		t.Fatalf("active claim was handed to another owner: %#v", second)
 	}
-	if err := s.DeliveryResultClaim(ctx, first[0].ID, "wrong-owner", nil); !errors.Is(err, ErrDeliveryClaimLost) {
+	if err := s.System().DeliveryResultClaim(ctx, first[0].ID, "wrong-owner", nil); !errors.Is(err, ErrDeliveryClaimLost) {
 		t.Fatalf("wrong owner result = %v, want claim lost", err)
 	}
-	if err := s.DeliveryResultClaim(ctx, first[0].ID, first[0].ClaimToken, nil); err != nil {
+	if err := s.System().DeliveryResultClaim(ctx, first[0].ID, first[0].ClaimToken, nil); err != nil {
 		t.Fatal(err)
 	}
-	third, err := s.ClaimDueDeliveries(ctx, 10, "owner-three")
+	third, err := s.System().ClaimDueDeliveries(ctx, 10, "owner-three")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1353,21 +1353,21 @@ func TestOutboxClaimsAreExclusiveAndRequireOwner(t *testing.T) {
 func TestReleaseDeliveryClaimsMakesRowsImmediatelyClaimable(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if err := s.QueueEvent(ctx, "destination", model.Event{Type: "claim-recovery", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, "destination", model.Event{Type: "claim-recovery", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := s.ClaimDueDeliveries(ctx, 1, "stale-owner")
+	claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "stale-owner")
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("initial claim %#v %v", claimed, err)
 	}
-	released, err := s.ReleaseDeliveryClaims(ctx)
+	released, err := s.System().ReleaseDeliveryClaims(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if released != 1 {
 		t.Fatalf("released claims = %d, want 1", released)
 	}
-	reclaimed, err := s.ClaimDueDeliveries(ctx, 1, "new-owner")
+	reclaimed, err := s.System().ClaimDueDeliveries(ctx, 1, "new-owner")
 	if err != nil || len(reclaimed) != 1 || reclaimed[0].ClaimToken != "new-owner" {
 		t.Fatalf("reclaimed %#v %v", reclaimed, err)
 	}
@@ -1376,17 +1376,17 @@ func TestReleaseDeliveryClaimsMakesRowsImmediatelyClaimable(t *testing.T) {
 func TestReleaseDeliveryClaimPreservesRetryBudgets(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if err := s.QueueEvent(ctx, "destination", model.Event{Type: "claim-release", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, "destination", model.Event{Type: "claim-release", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := s.ClaimDueDeliveries(ctx, 1, "owner")
+	claimed, err := s.System().ClaimDueDeliveries(ctx, 1, "owner")
 	if err != nil || len(claimed) != 1 {
 		t.Fatalf("initial claim %#v %v", claimed, err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempts=2,deferrals=3 WHERE id=?`, claimed[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReleaseDeliveryClaim(ctx, claimed[0].ID, claimed[0].ClaimToken, time.Hour); err != nil {
+	if err := s.System().ReleaseDeliveryClaim(ctx, claimed[0].ID, claimed[0].ClaimToken, time.Hour); err != nil {
 		t.Fatal(err)
 	}
 	var attempts, deferrals, claims int
@@ -1396,28 +1396,28 @@ func TestReleaseDeliveryClaimPreservesRetryBudgets(t *testing.T) {
 	if attempts != 2 || deferrals != 3 || claims != 0 {
 		t.Fatalf("released delivery state = attempts %d deferrals %d claims %d", attempts, deferrals, claims)
 	}
-	if due, err := s.ClaimDueDeliveries(ctx, 1, "early-retry"); err != nil || len(due) != 0 {
+	if due, err := s.System().ClaimDueDeliveries(ctx, 1, "early-retry"); err != nil || len(due) != 0 {
 		t.Fatalf("delayed release was immediately claimable: %#v %v", due, err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), claimed[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	reclaimed, err := s.ClaimDueDeliveries(ctx, 1, "retry-owner")
+	reclaimed, err := s.System().ClaimDueDeliveries(ctx, 1, "retry-owner")
 	if err != nil || len(reclaimed) != 1 {
 		t.Fatalf("released delivery was not retryable: %#v %v", reclaimed, err)
 	}
-	if err := s.ReleaseDeliveryClaim(ctx, reclaimed[0].ID, reclaimed[0].ClaimToken, 0); err != nil {
+	if err := s.System().ReleaseDeliveryClaim(ctx, reclaimed[0].ID, reclaimed[0].ClaimToken, 0); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 9; i++ {
 		if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), claimed[0].ID); err != nil {
 			t.Fatal(err)
 		}
-		next, err := s.ClaimDueDeliveries(ctx, 1, fmt.Sprintf("cancel-owner-%d", i))
+		next, err := s.System().ClaimDueDeliveries(ctx, 1, fmt.Sprintf("cancel-owner-%d", i))
 		if err != nil || len(next) != 1 {
 			t.Fatalf("cancellation retry %d claim = %#v, %v", i+1, next, err)
 		}
-		if err := s.ReleaseDeliveryClaim(ctx, next[0].ID, next[0].ClaimToken, 0); err != nil {
+		if err := s.System().ReleaseDeliveryClaim(ctx, next[0].ID, next[0].ClaimToken, 0); err != nil {
 			t.Fatalf("cancellation retry %d release: %v", i+1, err)
 		}
 	}
@@ -1433,17 +1433,17 @@ func TestReleaseDeliveryClaimPreservesRetryBudgets(t *testing.T) {
 func TestDeferredDeliveryDoesNotConsumeAttempts(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if _, err := s.CreateManagedNotification(ctx, "destination", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(s).CreateManagedNotification(ctx, "destination", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.QueueEvent(ctx, "managed:destination:1", model.Event{Type: "defer", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, "managed:destination:1", model.Event{Type: "defer", Job: "job", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	due, err := s.ClaimDueDeliveries(ctx, 1, "owner")
+	due, err := s.System().ClaimDueDeliveries(ctx, 1, "owner")
 	if err != nil || len(due) != 1 {
 		t.Fatalf("claim %#v %v", due, err)
 	}
-	if err := s.DeferDelivery(ctx, due[0].ID, due[0].ClaimToken, "key unavailable", time.Minute); err != nil {
+	if err := s.System().DeferDelivery(ctx, due[0].ID, due[0].ClaimToken, "key unavailable", time.Minute); err != nil {
 		t.Fatal(err)
 	}
 	var attempts int
@@ -1456,7 +1456,7 @@ func TestDeferredDeliveryDoesNotConsumeAttempts(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), due[0].ID); err != nil {
 		t.Fatal(err)
 	}
-	if retry, err := s.ClaimDueDeliveries(ctx, 1, "retry-owner"); err != nil || len(retry) != 1 {
+	if retry, err := s.System().ClaimDueDeliveries(ctx, 1, "retry-owner"); err != nil || len(retry) != 1 {
 		t.Fatalf("deferred row was not retryable: %#v %v", retry, err)
 	}
 }
@@ -1466,35 +1466,35 @@ func TestPrunePreservesLegacyAndManagedBaselines(t *testing.T) {
 	s := openTestStore(t)
 	old := time.Now().UTC().Add(-48 * time.Hour)
 	for _, id := range []string{"legacy-baseline", "managed-baseline", "discard"} {
-		if err := s.SaveScan(ctx, model.Scan{ID: id, Job: "legacy", StartedAt: old, FinishedAt: old, Status: "success", Snapshot: model.Snapshot{}}); err != nil {
+		if err := s.System().SaveScan(ctx, model.Scan{ID: id, Job: "legacy", StartedAt: old, FinishedAt: old, Status: "success", Snapshot: model.Snapshot{}}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.UpdateState(ctx, "legacy", func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateState(ctx, "legacy", func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineScanID = "legacy-baseline"
 		return nil, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	managed, err := s.CreateJob(ctx, testJob("managed"))
+	managed, err := defaultTenant(s).CreateJob(ctx, testJob("managed"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateRuntime(ctx, managed.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntime(ctx, managed.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineScanID = "managed-baseline"
 		return nil, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Prune(ctx, time.Now().UTC().Add(-24*time.Hour)); err != nil {
+	if _, err := s.System().Prune(ctx, time.Now().UTC().Add(-24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []string{"legacy-baseline", "managed-baseline"} {
-		if _, err := s.GetScan(ctx, id); err != nil {
+		if _, err := defaultTenant(s).GetScan(ctx, id); err != nil {
 			t.Fatalf("baseline scan %s was pruned: %v", id, err)
 		}
 	}
-	if _, err := s.GetScan(ctx, "discard"); err == nil {
+	if _, err := defaultTenant(s).GetScan(ctx, "discard"); err == nil {
 		t.Fatal("unreferenced old scan was not pruned")
 	}
 }
@@ -1518,19 +1518,19 @@ func TestPruneSkipsProtectedBatchEntriesAndContinuesToEligibleHistory(t *testing
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?)`, eligibleID, "retention-eligible", oldText, oldText, "success", "", "", "hash", []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := s.PruneWithStats(ctx, old.Add(24*time.Hour))
+	stats, err := s.System().PruneWithStats(ctx, old.Add(24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stats.Scans != 1 {
 		t.Fatalf("pruned scans = %d, want one eligible scan: %#v", stats.Scans, stats)
 	}
-	if _, err := s.GetScan(ctx, eligibleID); err == nil {
+	if _, err := defaultTenant(s).GetScan(ctx, eligibleID); err == nil {
 		t.Fatal("eligible scan after protected batch was not pruned")
 	}
 	for i := 0; i < protectedCount; i++ {
 		id := fmt.Sprintf("protected-%04d", i)
-		if _, err := s.GetScan(ctx, id); err != nil {
+		if _, err := defaultTenant(s).GetScan(ctx, id); err != nil {
 			t.Fatalf("protected scan %s was pruned: %v", id, err)
 		}
 	}
@@ -1539,15 +1539,15 @@ func TestPruneSkipsProtectedBatchEntriesAndContinuesToEligibleHistory(t *testing
 func TestPrunePreservesScansReferencedByOpenIncidents(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, testJob("incident-retention"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("incident-retention"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().UTC().Add(-48 * time.Hour)
-	if err := s.SaveScan(ctx, model.Scan{ID: "incident-retained", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: old, FinishedAt: old, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "incident-retained", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: old, FinishedAt: old, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Incidents["port|198.51.100.10|tcp|443"] = model.Incident{
 			Change:     model.Change{Key: "port|198.51.100.10|tcp|443", Kind: "port", Target: "198.51.100.10", Protocol: "tcp", Port: 443, New: "open"},
 			ScanID:     "incident-retained",
@@ -1558,26 +1558,26 @@ func TestPrunePreservesScansReferencedByOpenIncidents(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := s.PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
+	stats, err := s.System().PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stats.Scans != 0 {
 		t.Fatalf("open-incident scan was pruned: %#v", stats)
 	}
-	if _, err := s.GetScan(ctx, "incident-retained"); err != nil {
+	if _, err := defaultTenant(s).GetScan(ctx, "incident-retained"); err != nil {
 		t.Fatalf("scan referenced by open incident was removed: %v", err)
 	}
-	if _, err := s.UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
 		delete(state.Incidents, "port|198.51.100.10|tcp|443")
 		return nil, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour)); err != nil {
+	if _, err := s.System().PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GetScan(ctx, "incident-retained"); err == nil {
+	if _, err := defaultTenant(s).GetScan(ctx, "incident-retained"); err == nil {
 		t.Fatal("scan without an open incident reference was not pruned")
 	}
 }
@@ -1585,32 +1585,32 @@ func TestPrunePreservesScansReferencedByOpenIncidents(t *testing.T) {
 func TestPruneRepairsLatestHostProjectionForProtectedOlderScan(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, testJob("projection-repair"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("projection-repair"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().UTC().Add(-48 * time.Hour)
 	newer := old.Add(12 * time.Hour)
 	host := model.HostObservation{Address: "198.51.100.77", AddressFamily: "IPv4", Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}
-	if err := s.SaveScan(ctx, model.Scan{ID: "projection-baseline", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: old, FinishedAt: old, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{host}}}); err != nil {
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "projection-baseline", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: old, FinishedAt: old, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{host}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineScanID = "projection-baseline"
 		return nil, nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	host.Protocols[0].Ports[0].State = "closed"
-	if err := s.SaveScan(ctx, model.Scan{ID: "projection-newer", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: newer, FinishedAt: newer, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{host}}}); err != nil {
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "projection-newer", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: newer, FinishedAt: newer, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{host}}}); err != nil {
 		t.Fatal(err)
 	}
-	if stats, err := s.PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour)); err != nil {
+	if stats, err := s.System().PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour)); err != nil {
 		t.Fatal(err)
 	} else if stats.Scans != 1 {
 		t.Fatalf("pruned scans = %d, want newer projection source only", stats.Scans)
 	}
-	page, err := s.ListLatestScanHostsPage(ctx, "198.51.100.77", "", nil, 50, 0)
+	page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "198.51.100.77", "", nil, 50, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1638,7 +1638,7 @@ func TestPruneRepairsDanglingLatestHostProjectionWithoutScanDeletions(t *testing
 			t.Fatal(err)
 		}
 	}
-	stats, err := s.PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
+	stats, err := s.System().PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1661,11 +1661,11 @@ func TestPruneRetentionClassesAndAuditPolicy(t *testing.T) {
 	cutoff := time.Now().UTC().Add(-24 * time.Hour)
 	oldText := old.Format(time.RFC3339Nano)
 
-	job, err := s.CreateJob(ctx, testJob("retention"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("retention"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetJobEnabledWithRevision(ctx, job.ID, false, job.Revision); err != nil {
+	if err := defaultTenant(s).SetJobEnabledWithRevision(ctx, job.ID, false, job.Revision); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE job_revisions SET created_at=? WHERE job_id=? AND revision=1`, oldText, job.ID); err != nil {
@@ -1678,26 +1678,26 @@ func TestPruneRetentionClassesAndAuditPolicy(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO security_audit(action,detail,created_at) VALUES(?,?,?)`, "old-audit", "keep", oldText); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.QueueEvent(ctx, "sent", model.Event{Type: "sent", Job: "retention", CreatedAt: old}); err != nil {
+	if err := s.System().QueueEvent(ctx, "sent", model.Event{Type: "sent", Job: "retention", CreatedAt: old}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET sent_at=? WHERE destination=?`, oldText, "sent"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.QueueEvent(ctx, "failed", model.Event{Type: "failed", Job: "retention", CreatedAt: old}); err != nil {
+	if err := s.System().QueueEvent(ctx, "failed", model.Event{Type: "failed", Job: "retention", CreatedAt: old}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=? WHERE destination=?`, deliveryMaxAttempts, oldText, "failed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.QueueEvent(ctx, "pending", model.Event{Type: "pending", Job: "retention", CreatedAt: old}); err != nil {
+	if err := s.System().QueueEvent(ctx, "pending", model.Event{Type: "pending", Job: "retention", CreatedAt: old}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE destination=?`, oldText, "pending"); err != nil {
 		t.Fatal(err)
 	}
 
-	stats, err := s.PruneWithStats(ctx, cutoff)
+	stats, err := s.System().PruneWithStats(ctx, cutoff)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1740,7 +1740,7 @@ func TestPruneRemovesRDAPEntriesOutsideStaleWindow(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := s.PruneWithStats(ctx, now.Add(-24*time.Hour))
+	stats, err := s.System().PruneWithStats(ctx, now.Add(-24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1755,11 +1755,11 @@ func TestPruneRemovesRDAPEntriesOutsideStaleWindow(t *testing.T) {
 func TestPruneRetainsRevisionsReferencedByScans(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, testJob("revision-reference"))
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("revision-reference"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetJobEnabledWithRevision(ctx, job.ID, false, job.Revision); err != nil {
+	if err := defaultTenant(s).SetJobEnabledWithRevision(ctx, job.ID, false, job.Revision); err != nil {
 		t.Fatal(err)
 	}
 	old := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339Nano)
@@ -1767,10 +1767,10 @@ func TestPruneRetainsRevisionsReferencedByScans(t *testing.T) {
 		t.Fatal(err)
 	}
 	scan := model.Scan{ID: "retained-revision-scan", JobID: job.ID, Job: job.Job.Name, JobRevision: 1, StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}
-	if err := s.SaveScan(ctx, scan); err != nil {
+	if err := s.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	stats, err := s.PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
+	stats, err := s.System().PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1789,29 +1789,29 @@ func TestPruneRetainsRevisionsReferencedByScans(t *testing.T) {
 func TestHistoryPagesHaveStableMetadataAndOrdering(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	record, err := s.CreateJob(ctx, testJob("paged"))
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("paged"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	when := time.Now().UTC()
 	for i := 0; i < 3; i++ {
-		if err := s.SaveScan(ctx, model.Scan{ID: string(rune('a' + i)), JobID: record.ID, JobRevision: 1, Job: record.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", Snapshot: model.Snapshot{}}); err != nil {
+		if err := s.System().SaveScan(ctx, model.Scan{ID: string(rune('a' + i)), JobID: record.ID, JobRevision: 1, Job: record.Job.Name, StartedAt: when, FinishedAt: when, Status: "success", Snapshot: model.Snapshot{}}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		if _, err := s.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 			return []model.Event{{Type: "page", Job: record.Job.Name, CreatedAt: when}}, nil
 		}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	page, err := s.ListJobScansPage(ctx, record.ID, 2, 1)
+	page, err := defaultTenant(s).ListJobScansPage(ctx, record.ID, 2, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if page.Total != 3 || len(page.Items) != 2 || page.Items[0].ID != "b" || page.Items[1].ID != "a" {
 		t.Fatalf("unexpected scan page: total=%d items=%#v", page.Total, page.Items)
 	}
-	summaryPage, err := s.ListJobScanSummariesPage(ctx, record.ID, 2, 1)
+	summaryPage, err := defaultTenant(s).ListJobScanSummariesPage(ctx, record.ID, 2, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1825,7 +1825,7 @@ func TestHistoryPagesHaveStableMetadataAndOrdering(t *testing.T) {
 	if bytes.Contains(rawSummary, []byte(`"snapshot"`)) {
 		t.Fatal("scan summary unexpectedly contains a snapshot")
 	}
-	events, err := s.ListJobEventsPage(ctx, record.ID, 2, 1)
+	events, err := defaultTenant(s).ListJobEventsPage(ctx, record.ID, 2, 1)
 	if err != nil {
 		t.Fatal(err)
 	}

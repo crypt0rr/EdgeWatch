@@ -22,34 +22,32 @@ type LegacyScanSnapshot struct {
 	Snapshot   []byte
 }
 
-// ListLegacySuccessfulScanSnapshotsPage forwards to
-// SystemStore.ListLegacySuccessfulScanSnapshotsPage.
-func (s *Store) ListLegacySuccessfulScanSnapshotsPage(ctx context.Context, limit, offset int) (Page[LegacyScanSnapshot], error) {
-	return s.System().ListLegacySuccessfulScanSnapshotsPage(ctx, limit, offset)
-}
-
-// ListLegacySuccessfulScanSnapshotsPage returns successful snapshots of every
-// tenant that do not have a derived host index. Rows are ordered newest first
-// so callers can select the latest effective address without reading indexed
-// scans. The query remains paginated, but callers may walk every page when
-// correctness requires a complete legacy projection.
-func (ss *SystemStore) ListLegacySuccessfulScanSnapshotsPage(ctx context.Context, limit, offset int) (Page[LegacyScanSnapshot], error) {
+// ListLegacySuccessfulScanSnapshotsPage returns the tenant's successful
+// snapshots that do not have a derived host index. Rows are ordered newest
+// first so callers can select the latest effective address without reading
+// indexed scans. The query remains paginated, but callers may walk every page
+// when correctness requires a complete legacy projection. Another tenant's
+// scans are not listed, and neither count towards the total.
+func (ts *TenantStore) ListLegacySuccessfulScanSnapshotsPage(ctx context.Context, limit, offset int) (Page[LegacyScanSnapshot], error) {
+	if err := ts.ready(); err != nil {
+		return Page[LegacyScanSnapshot]{}, err
+	}
 	limit, offset = normalizePage(limit, offset)
 	var page Page[LegacyScanSnapshot]
-	reader := ss.store.reader()
+	reader := ts.store.reader()
 	// A completed backfill checkpoint also excludes snapshots that were
 	// malformed or empty. Retrying those on every request would recreate the
 	// history-wide decode cost the migration is designed to remove.
 	const legacyPredicate = `status='success' AND NOT EXISTS (SELECT 1 FROM scan_hosts h WHERE h.scan_id=scans.id) AND NOT EXISTS (SELECT 1 FROM legacy_scan_host_backfill b WHERE b.scan_id=scans.id)`
-	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE `+legacyPredicate).Scan(&page.Total); err != nil {
-		return page, err
+	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE tenant_id=? AND `+legacyPredicate, ts.scope.id).Scan(&page.Total); err != nil {
+		return Page[LegacyScanSnapshot]{}, err
 	}
 	rows, err := reader.QueryContext(ctx, `SELECT id,job_id,job,finished_at,snapshot_json
 FROM scans
-WHERE `+legacyPredicate+`
-ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, limit, offset)
+WHERE tenant_id=? AND `+legacyPredicate+`
+ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, ts.scope.id, limit, offset)
 	if err != nil {
-		return page, err
+		return Page[LegacyScanSnapshot]{}, err
 	}
 	defer rows.Close()
 	for rows.Next() {
@@ -57,7 +55,7 @@ ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, limit, offset)
 		var jobID sql.NullString
 		var finished string
 		if err := rows.Scan(&item.ID, &jobID, &item.Job, &finished, &item.Snapshot); err != nil {
-			return page, err
+			return Page[LegacyScanSnapshot]{}, err
 		}
 		if jobID.Valid {
 			item.JobID = jobID.String
@@ -65,7 +63,10 @@ ORDER BY finished_at DESC,id DESC LIMIT ? OFFSET ?`, limit, offset)
 		item.FinishedAt = scanTime(finished)
 		page.Items = append(page.Items, item)
 	}
-	return page, rows.Err()
+	if err := rows.Err(); err != nil {
+		return Page[LegacyScanSnapshot]{}, err
+	}
+	return page, nil
 }
 
 func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {
@@ -101,28 +102,12 @@ func getScanTx(ctx context.Context, tx *sql.Tx, id string) (model.Scan, error) {
 	return v, nil
 }
 
-// ListScans returns the most recent scans with their results, of every job
-// or of the job with the given name.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListScans.
-func (s *Store) ListScans(ctx context.Context, job string, limit int) ([]model.Scan, error) {
-	return s.Tenant(DefaultTenantScope()).ListScans(ctx, job, limit)
-}
-
 // ListScans returns the tenant's most recent scans with their results, of
 // every job or of the job with the given name. Another tenant's job of the
 // same name is never matched.
 func (ts *TenantStore) ListScans(ctx context.Context, job string, limit int) ([]model.Scan, error) {
 	page, err := ts.ListScansPage(ctx, job, limit, 0)
 	return page.Items, err
-}
-
-// ListScansPage returns a page of scans with their results, of every job or
-// of the job with the given name.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListScansPage.
-func (s *Store) ListScansPage(ctx context.Context, job string, limit, offset int) (Page[model.Scan], error) {
-	return s.Tenant(DefaultTenantScope()).ListScansPage(ctx, job, limit, offset)
 }
 
 // ListScansPage returns a page of the tenant's scans with their results,
@@ -188,14 +173,6 @@ func (ts *TenantStore) ListScansPage(ctx context.Context, job string, limit, off
 		page.Items = append(page.Items, v)
 	}
 	return page, rows.Err()
-}
-
-// ListScanSummariesPage is the metadata-only counterpart to ListScansPage.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ListScanSummariesPage.
-func (s *Store) ListScanSummariesPage(ctx context.Context, job string, limit, offset int) (Page[model.ScanSummary], error) {
-	return s.Tenant(DefaultTenantScope()).ListScanSummariesPage(ctx, job, limit, offset)
 }
 
 // ListScanSummariesPage is the metadata-only counterpart to ListScansPage.
@@ -275,28 +252,12 @@ func (ts *TenantStore) eventsFromSQL() string {
 	return `FROM events WHERE tenant_id=?`
 }
 
-// ListEvents returns the most recent events, of every job or of the job
-// with the given name.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListEvents.
-func (s *Store) ListEvents(ctx context.Context, job string, limit int) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).ListEvents(ctx, job, limit)
-}
-
 // ListEvents returns the tenant's most recent events, of every job or of the
 // job with the given name. Another tenant's job of the same name is never
 // matched.
 func (ts *TenantStore) ListEvents(ctx context.Context, job string, limit int) ([]model.Event, error) {
 	page, err := ts.ListEventsPage(ctx, job, limit, 0)
 	return page.Items, err
-}
-
-// ListEventsPage returns a page of events, of every job or of the job with
-// the given name.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListEventsPage.
-func (s *Store) ListEventsPage(ctx context.Context, job string, limit, offset int) (Page[model.Event], error) {
-	return s.Tenant(DefaultTenantScope()).ListEventsPage(ctx, job, limit, offset)
 }
 
 // ListEventsPage returns a page of the tenant's events, newest first, of
@@ -346,13 +307,6 @@ func (ts *TenantStore) ListEventsPage(ctx context.Context, job string, limit, of
 	return page, rows.Err()
 }
 
-// MaxEventID forwards to SystemStore.MaxEventID. The web server seeds its
-// live-update cursor from it when it starts, before any request names a
-// tenant.
-func (s *Store) MaxEventID(ctx context.Context) (uint64, error) {
-	return s.System().MaxEventID(ctx)
-}
-
 // MaxEventID returns the greatest durable event identifier currently stored,
 // across every tenant and the platform. The web server uses this as the
 // starting point for its in-memory SSE cursor so a process restart cannot
@@ -373,26 +327,11 @@ func (ss *SystemStore) MaxEventID(ctx context.Context) (uint64, error) {
 }
 
 // ListJobEvents returns only events written by the immutable managed job ID.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListJobEvents.
-func (s *Store) ListJobEvents(ctx context.Context, jobID string, limit int) ([]model.Event, error) {
-	return s.Tenant(DefaultTenantScope()).ListJobEvents(ctx, jobID, limit)
-}
-
-// ListJobEvents returns only events written by the immutable managed job ID.
 // Name-based ListEvents is retained for legacy CLI history compatibility. A
 // job of another tenant has no events here.
 func (ts *TenantStore) ListJobEvents(ctx context.Context, jobID string, limit int) ([]model.Event, error) {
 	page, err := ts.ListJobEventsPage(ctx, jobID, limit, 0)
 	return page.Items, err
-}
-
-// ListJobEventsPage returns a page of the events of the managed job with the
-// given ID.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListJobEventsPage.
-func (s *Store) ListJobEventsPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Event], error) {
-	return s.Tenant(DefaultTenantScope()).ListJobEventsPage(ctx, jobID, limit, offset)
 }
 
 // ListJobEventsPage returns a page of the events of the tenant's managed job
@@ -428,14 +367,6 @@ func (ts *TenantStore) ListJobEventsPage(ctx context.Context, jobID string, limi
 	return page, rows.Err()
 }
 
-// FailedDeliveries returns the number of notification deliveries that
-// failed for good.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.FailedDeliveries.
-func (s *Store) FailedDeliveries(ctx context.Context) (int, error) {
-	return s.Tenant(DefaultTenantScope()).FailedDeliveries(ctx)
-}
-
 // FailedDeliveries returns the number of the tenant's notification
 // deliveries that failed for good. A delivery belongs to the tenant of its
 // event; the default tenant's count includes the platform's deliveries, as
@@ -447,14 +378,6 @@ func (ts *TenantStore) FailedDeliveries(ctx context.Context) (int, error) {
 	var count int
 	err := ts.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '') AND `+historyTenantSQL, deliveryMaxAttempts, ts.scope.id).Scan(&count)
 	return count, err
-}
-
-// State returns the stored state of the config.yaml job with the given name,
-// or an empty state when it has none.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.State.
-func (s *Store) State(ctx context.Context, job string) (model.JobState, error) {
-	return s.Tenant(DefaultTenantScope()).State(ctx, job)
 }
 
 // State returns the stored state of the config.yaml job with the given name,
@@ -492,15 +415,6 @@ type JobIncident struct {
 	Incident model.Incident
 }
 
-// ListJobIncidentsPage returns a page of the active incidents of the managed
-// job with the given ID.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.ListJobIncidentsPage.
-func (s *Store) ListJobIncidentsPage(ctx context.Context, jobID string, limit, offset int) (Page[model.Incident], error) {
-	return s.Tenant(DefaultTenantScope()).ListJobIncidentsPage(ctx, jobID, limit, offset)
-}
-
 // ListJobIncidentsPage returns a page of the active incidents of the
 // tenant's managed job with the given ID, ordered by key. A job of another
 // tenant has no incidents here.
@@ -532,14 +446,6 @@ func (ts *TenantStore) ListJobIncidentsPage(ctx context.Context, jobID string, l
 		page.Items = append(page.Items, incident)
 	}
 	return page, rows.Err()
-}
-
-// ListIncidentsPage returns a page of the active incidents of every managed
-// job.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListIncidentsPage.
-func (s *Store) ListIncidentsPage(ctx context.Context, limit, offset int) (Page[JobIncident], error) {
-	return s.Tenant(DefaultTenantScope()).ListIncidentsPage(ctx, limit, offset)
 }
 
 // ListIncidentsPage returns a page of the active incidents of the tenant's

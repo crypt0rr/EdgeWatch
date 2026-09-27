@@ -427,32 +427,6 @@ func checkTenantSecurityWrite(t *testing.T, f tenantFixture, save func(ts *Tenan
 	}
 }
 
-// The deprecated Store wrappers act only on the default tenant's accounts.
-func assertDeprecatedAccountMethodsUseTheDefaultTenant(t *testing.T, f tenantFixture) {
-	t.Helper()
-	ctx := context.Background()
-	if _, err := f.store.GetUser(ctx, accountAdminB); !errors.Is(err, ErrNotFound) {
-		t.Errorf("GetUser read tenant B's account: %v", err)
-	}
-	if user, err := f.store.GetUser(ctx, accountAdminA); err != nil || user.TenantID != DefaultTenantID {
-		t.Errorf("GetUser of tenant A's account = %+v, %v", user, err)
-	}
-	if users, err := f.store.ListUsers(ctx); err != nil || !reflect.DeepEqual(usernames(users), []string{"admin-a", "operator-a"}) {
-		t.Errorf("ListUsers = %v, %v", usernames(users), err)
-	}
-	if count, err := f.store.CountEnabledAdministrators(ctx); err != nil || count != 1 {
-		t.Errorf("CountEnabledAdministrators = %d, %v", count, err)
-	}
-	operator := fixtureAccount(t, f, accountOperatorB)
-	operator.DisplayName = "Renamed"
-	if err := f.store.UpdateUser(ctx, operator, false, AuditEntry{}); !errors.Is(err, ErrNotFound) {
-		t.Errorf("UpdateUser wrote tenant B's account: %v", err)
-	}
-	if _, err := f.store.RevokeUserInvitesWithAudit(ctx, accountOperatorB, time.Now().UTC(), AuditEntry{}); !errors.Is(err, ErrNotFound) {
-		t.Errorf("RevokeUserInvitesWithAudit reached tenant B's account: %v", err)
-	}
-}
-
 // The accounts' global paths, which run before a tenant scope exists, find
 // an account of any tenant and carry its tenant: the session, the account
 // lookups, a link's redemption, a one-time code, a recovery code, and the
@@ -463,8 +437,6 @@ func TestAccountGlobalPathsCarryTheTenant(t *testing.T) {
 	ctx := context.Background()
 	f := newTenantFixture(t)
 	now := time.Now().UTC()
-	t.Run("deprecated wrappers", func(t *testing.T) { assertDeprecatedAccountMethodsUseTheDefaultTenant(t, f) })
-
 	for account, tenant := range map[string]string{"admin-a": DefaultTenantID, "admin-b": secondTenantID} {
 		session, err := f.store.GetSession(ctx, "session-"+account)
 		if err != nil || session.TenantID != tenant {

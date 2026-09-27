@@ -20,10 +20,10 @@ func TestApplicationUpdateStatusIsAuthenticatedAndRedactsSetupState(t *testing.T
 	server, db, admin := newUsersTestServer(t)
 	server.Version = "v1.0.0"
 	ctx := context.Background()
-	if _, err := db.RecordInstalledVersion(ctx, "v1.0.0", "", false, nil); err != nil {
+	if _, err := db.Platform().RecordInstalledVersion(ctx, "v1.0.0", "", false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.RecordReleaseCheck(ctx, "v1.0.0", "v1.1.0", "https://github.com/crypt0rr/EdgeWatch/releases/tag/v1.1.0", "1.1", "2026-09-07T12:00:00Z", `"etag"`, false, nil); err != nil {
+	if _, err := db.Platform().RecordReleaseCheck(ctx, "v1.0.0", "v1.1.0", "https://github.com/crypt0rr/EdgeWatch/releases/tag/v1.1.0", "1.1", "2026-09-07T12:00:00Z", `"etag"`, false, nil); err != nil {
 		t.Fatal(err)
 	}
 	status := server.applicationUpdateStatus(ctx)
@@ -99,11 +99,11 @@ func TestApplicationUpdateStatusCoversVersionStateMatrix(t *testing.T) {
 		{name: "failed", latest: "v1.3.0", check: "failed", want: "check_failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := db.RecordReleaseCheck(ctx, server.Version, tc.latest, "", "", "", "", false, nil); err != nil {
+			if _, err := db.Platform().RecordReleaseCheck(ctx, server.Version, tc.latest, "", "", "", "", false, nil); err != nil {
 				t.Fatal(err)
 			}
 			if tc.check == "failed" {
-				if err := db.RecordReleaseCheckFailure(ctx, "registry unavailable"); err != nil {
+				if err := db.Platform().RecordReleaseCheckFailure(ctx, "registry unavailable"); err != nil {
 					t.Fatal(err)
 				}
 			}

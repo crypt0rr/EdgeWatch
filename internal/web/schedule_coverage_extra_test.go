@@ -57,26 +57,26 @@ func TestScheduleSuggestionValidationAndFiltering(t *testing.T) {
 		t.Fatalf("empty schedule response = %d: %s", rec.Code, rec.Body.String())
 	}
 	job := config.NormalizeJob(config.Job{Name: "active", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
-	if _, err := db.CreateJobWithEnabled(ctx, job, true); err != nil {
+	if _, err := defaultTenant(db).CreateJobWithEnabled(ctx, job, true); err != nil {
 		t.Fatal(err)
 	}
 	archived := job
 	archived.Name = "archived"
-	archivedRecord, err := db.CreateJobWithEnabled(ctx, archived, true)
+	archivedRecord, err := defaultTenant(db).CreateJobWithEnabled(ctx, archived, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetJobArchived(ctx, archivedRecord.ID, true); err != nil {
+	if err := defaultTenant(db).SetJobArchived(ctx, archivedRecord.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	paused := job
 	paused.Name = "paused"
-	if _, err := db.CreateJobWithEnabled(ctx, paused, false); err != nil {
+	if _, err := defaultTenant(db).CreateJobWithEnabled(ctx, paused, false); err != nil {
 		t.Fatal(err)
 	}
 	malformed := job
 	malformed.Name = "malformed"
-	malformedRecord, err := db.CreateJobWithEnabled(ctx, malformed, true)
+	malformedRecord, err := defaultTenant(db).CreateJobWithEnabled(ctx, malformed, true)
 	if err != nil {
 		t.Fatal(err)
 	}

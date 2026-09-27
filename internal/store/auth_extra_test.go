@@ -11,40 +11,40 @@ func TestSetupTokenAndAdministratorCompatibilityLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
-	if _, err := s.GetSetupToken(ctx); !errors.Is(err, ErrNotFound) {
+	if _, err := s.Platform().GetSetupToken(ctx); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing setup token error = %v", err)
 	}
-	if err := s.PutSetupTokenAt(ctx, "setup-hash", now.Add(time.Hour), now); err != nil {
+	if err := s.Platform().PutSetupTokenAt(ctx, "setup-hash", now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
-	token, err := s.GetSetupToken(ctx)
+	token, err := s.Platform().GetSetupToken(ctx)
 	if err != nil || token.Used || !token.ExpiresAt.Equal(now.Add(time.Hour)) || !token.IssuedAt.Equal(now) {
 		t.Fatalf("setup token = %#v, %v", token, err)
 	}
-	if err := s.ConsumeSetupToken(ctx, "setup-hash", now.Add(time.Minute)); err != nil {
+	if err := s.Platform().ConsumeSetupToken(ctx, "setup-hash", now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	token, err = s.GetSetupToken(ctx)
+	token, err = s.Platform().GetSetupToken(ctx)
 	if err != nil || !token.Used {
 		t.Fatalf("consumed setup token = %#v, %v", token, err)
 	}
-	if err := s.ConsumeSetupToken(ctx, "setup-hash", now.Add(2*time.Minute)); err == nil {
+	if err := s.Platform().ConsumeSetupToken(ctx, "setup-hash", now.Add(2*time.Minute)); err == nil {
 		t.Fatal("setup token was consumed twice")
 	}
-	if err := s.PutSetupToken(ctx, "expired-hash", now.Add(-time.Minute)); err != nil {
+	if err := s.Platform().PutSetupToken(ctx, "expired-hash", now.Add(-time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ConsumeSetupToken(ctx, "expired-hash", now); err == nil {
+	if err := s.Platform().ConsumeSetupToken(ctx, "expired-hash", now); err == nil {
 		t.Fatal("expired setup token was accepted")
 	}
-	if configured, err := s.HasAdministrator(ctx); err != nil || configured {
+	if configured, err := s.Platform().HasAdministrator(ctx); err != nil || configured {
 		t.Fatalf("empty administrator state = %v, %v", configured, err)
 	}
 	admin := Admin{Username: "admin", DisplayName: "Administrator", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}
 	if err := s.SaveAdmin(ctx, admin); err != nil {
 		t.Fatal(err)
 	}
-	if configured, err := s.HasAdministrator(ctx); err != nil || !configured {
+	if configured, err := s.Platform().HasAdministrator(ctx); err != nil || !configured {
 		t.Fatalf("configured administrator state = %v, %v", configured, err)
 	}
 	loaded, err := s.GetAdmin(ctx)
@@ -111,34 +111,34 @@ func TestSetupTokenReissueAndCompleteSetup(t *testing.T) {
 	ctx := context.Background()
 	reissue := openTestStore(t)
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
-	if err := reissue.ReissueSetupToken(ctx, "first-reissue", now.Add(time.Hour), now); err != nil {
+	if err := reissue.Platform().ReissueSetupToken(ctx, "first-reissue", now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
-	if err := reissue.ReissueSetupToken(ctx, "too-soon", now.Add(2*time.Hour), now.Add(30*time.Second)); !errors.Is(err, ErrSetupTokenRateLimited) {
+	if err := reissue.Platform().ReissueSetupToken(ctx, "too-soon", now.Add(2*time.Hour), now.Add(30*time.Second)); !errors.Is(err, ErrSetupTokenRateLimited) {
 		t.Fatalf("early reissue error = %v", err)
 	}
-	if err := reissue.ReissueSetupToken(ctx, "second-reissue", now.Add(2*time.Hour), now.Add(time.Minute)); err != nil {
+	if err := reissue.Platform().ReissueSetupToken(ctx, "second-reissue", now.Add(2*time.Hour), now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	if err := reissue.SaveAdmin(ctx, Admin{Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if err := reissue.ReissueSetupToken(ctx, "after-admin", now.Add(3*time.Hour), now.Add(2*time.Minute)); err == nil {
+	if err := reissue.Platform().ReissueSetupToken(ctx, "after-admin", now.Add(3*time.Hour), now.Add(2*time.Minute)); err == nil {
 		t.Fatal("setup token reissued after administrator creation")
 	}
 
 	complete := openTestStore(t)
-	if err := complete.PutSetupTokenAt(ctx, "complete-hash", now.Add(time.Hour), now); err != nil {
+	if err := complete.Platform().PutSetupTokenAt(ctx, "complete-hash", now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
 	admin := Admin{Username: "admin", DisplayName: "", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}
-	if err := complete.CompleteSetup(ctx, "complete-hash", admin, now.Add(time.Minute)); err != nil {
+	if err := complete.Platform().CompleteSetup(ctx, "complete-hash", admin, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if configured, err := complete.HasAdministrator(ctx); err != nil || !configured {
+	if configured, err := complete.Platform().HasAdministrator(ctx); err != nil || !configured {
 		t.Fatalf("completed setup state = %v, %v", configured, err)
 	}
-	if err := complete.CompleteSetup(ctx, "complete-hash", admin, now.Add(2*time.Minute)); err == nil {
+	if err := complete.Platform().CompleteSetup(ctx, "complete-hash", admin, now.Add(2*time.Minute)); err == nil {
 		t.Fatal("completed setup token was reusable")
 	}
 }
@@ -183,7 +183,7 @@ func TestSessionAndRecoveryCodeStoreLifecycle(t *testing.T) {
 	if ok, err := s.ConsumeRecoveryCode(ctx, "legacy-code", now.Add(time.Second)); err != nil || ok {
 		t.Fatalf("reused legacy recovery code = %v, %v", ok, err)
 	}
-	user, err := s.CreateUser(ctx, User{Username: "operator", DisplayName: "Operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "operator", DisplayName: "Operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,14 +253,14 @@ func TestSessionRevocationRemainsEffectiveWhenAuditInsertFails(t *testing.T) {
 	if _, err := s.GetSession(ctx, "delete-all"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("all sessions survived audit failure: %v", err)
 	}
-	user, err := s.CreateUser(ctx, User{Username: "revoked-user", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	user, err := defaultTenant(s).CreateUser(ctx, User{Username: "revoked-user", Role: RoleViewer, PasswordHash: "hash", Enabled: true}, AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := s.CreateSessionForUserWithAuditEntry(ctx, user.ID, "delete-user", "csrf", now, now.Add(time.Hour), AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DeleteUserSessionsWithAudit(ctx, user.ID, AuditEntry{Action: "user.sessions_revoked", Detail: "test"}); !errors.Is(err, ErrAuditUnavailable) {
+	if err := defaultTenant(s).DeleteUserSessionsWithAudit(ctx, user.ID, AuditEntry{Action: "user.sessions_revoked", Detail: "test"}); !errors.Is(err, ErrAuditUnavailable) {
 		t.Fatalf("user-session audit error = %v", err)
 	}
 	if _, err := s.GetSession(ctx, "delete-user"); !errors.Is(err, ErrNotFound) {

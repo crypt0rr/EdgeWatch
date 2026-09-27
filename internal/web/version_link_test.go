@@ -13,7 +13,7 @@ import (
 
 func TestStatusLinksRunningVersionToItsRelease(t *testing.T) {
 	server, db, admin := newUsersTestServer(t)
-	viewerUser, err := db.CreateUser(context.Background(), store.User{Username: "viewer", DisplayName: "Read only", Role: store.RoleViewer, PasswordHash: "hash", Enabled: true}, store.AuditEntry{})
+	viewerUser, err := defaultTenant(db).CreateUser(context.Background(), store.User{Username: "viewer", DisplayName: "Read only", Role: store.RoleViewer, PasswordHash: "hash", Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}

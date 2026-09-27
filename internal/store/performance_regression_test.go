@@ -60,7 +60,7 @@ func TestSeededPerformanceRegressionInvariants(t *testing.T) {
 	seedLatestHostsForPerformance(t, s, seededPerformanceHostCount)
 
 	hasOpen := true
-	page, err := s.ListLatestScanHostsPage(ctx, "", "tcp", &hasOpen, 50, 0)
+	page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "", "tcp", &hasOpen, 50, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,10 +108,10 @@ func TestSeededPerformanceRegressionInvariants(t *testing.T) {
 		job.Snapshot.Hosts = append(job.Snapshot.Hosts, model.HostObservation{Address: address, AddressFamily: "IPv4", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}})
 		selections = append(selections, PublicDashboardHost{JobID: job.JobID, Address: address})
 	}
-	if err := s.SaveScan(ctx, job); err != nil {
+	if err := s.System().SaveScan(ctx, job); err != nil {
 		t.Fatal(err)
 	}
-	results, err := s.GetLatestSuccessfulJobHosts(ctx, selections)
+	results, err := s.Public(DefaultPublicScope()).GetLatestSuccessfulJobHosts(ctx, selections)
 	if err != nil || len(results) != len(selections) {
 		t.Fatalf("seeded public-dashboard lookup = %d, %v; want %d", len(results), err, len(selections))
 	}

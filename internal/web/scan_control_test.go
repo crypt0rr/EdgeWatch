@@ -46,7 +46,7 @@ func TestActiveScanEndpointAndCancellationLifecycle(t *testing.T) {
 	scanner := &blockingWebScanner{started: make(chan struct{})}
 	a.Scanner = scanner
 	job := config.NormalizeJob(config.Job{Name: "cancel-me", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Hour), Timing: "balanced"})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}

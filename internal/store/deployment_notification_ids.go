@@ -10,13 +10,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// EnsureDeploymentNotificationIDs returns the deployment destination IDs
-// through SystemStore.EnsureDeploymentNotificationIDs, until its callers use
-// Store.System themselves.
-func (s *Store) EnsureDeploymentNotificationIDs(ctx context.Context, legacyHashes []string) (map[string]string, error) {
-	return s.System().EnsureDeploymentNotificationIDs(ctx, legacyHashes)
-}
-
 // EnsureDeploymentNotificationIDs returns stable opaque selectors for the
 // deployment-managed destination hashes supplied by the notifier. The legacy
 // hash is retained only as an internal lookup key so existing job selections

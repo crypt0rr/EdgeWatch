@@ -139,13 +139,6 @@ ON CONFLICT(destination_identity) DO UPDATE SET
 	return err
 }
 
-// ListDeliveryHealth returns the delivery health of each destination.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListDeliveryHealth.
-func (s *Store) ListDeliveryHealth(ctx context.Context) (map[string]DeliveryHealth, error) {
-	return s.Tenant(DefaultTenantScope()).ListDeliveryHealth(ctx)
-}
-
 // Delivery health belongs to the tenant that owns the destination: a managed
 // identity ("managed:<id>") is joined to managed_notifications.tenant_id. The
 // default tenant also keeps every identity that names no current destination

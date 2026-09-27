@@ -10,7 +10,7 @@ import (
 
 func TestRuntimeBaselineInfoUsesCompactMetadata(t *testing.T) {
 	ctx, s, job, _ := cycleFixture(t)
-	_, err := s.UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+	_, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineScanID = "baseline-scan"
 		state.BaselineConfigHash = "baseline-hash"
 		state.BaselineModified = true
@@ -27,17 +27,17 @@ func TestRuntimeBaselineInfoUsesCompactMetadata(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE job_runtime SET state_json=? WHERE job_id=?`, []byte("not-json"), job.ID); err != nil {
 		t.Fatal(err)
 	}
-	info, err := s.RuntimeBaselineInfo(ctx, job.ID)
+	info, err := defaultTenant(s).RuntimeBaselineInfo(ctx, job.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if info.BaselineScanID != "baseline-scan" || info.BaselineConfigHash != "baseline-hash" || !info.BaselineModified || info.ProjectionVersion != 1 {
 		t.Fatalf("compact baseline info = %#v", info)
 	}
-	if scanID, hash, err := s.RuntimeBaselineMeta(ctx, job.ID); err != nil || scanID != "baseline-scan" || hash != "baseline-hash" {
+	if scanID, hash, err := defaultTenant(s).RuntimeBaselineMeta(ctx, job.ID); err != nil || scanID != "baseline-scan" || hash != "baseline-hash" {
 		t.Fatalf("compatibility metadata = %q, %q, %v", scanID, hash, err)
 	}
-	if modified, err := s.RuntimeBaselineModified(ctx, job.ID); err != nil || !modified {
+	if modified, err := defaultTenant(s).RuntimeBaselineModified(ctx, job.ID); err != nil || !modified {
 		t.Fatalf("compatibility marker = %t, %v", modified, err)
 	}
 }
@@ -57,7 +57,7 @@ func TestRuntimeMetadataMigrationBackfillsLegacyRows(t *testing.T) {
 	if err := migrate(s.DB); err != nil {
 		t.Fatal(err)
 	}
-	info, err := s.RuntimeBaselineInfo(ctx, "legacy-meta")
+	info, err := defaultTenant(s).RuntimeBaselineInfo(ctx, "legacy-meta")
 	if err != nil {
 		t.Fatal(err)
 	}

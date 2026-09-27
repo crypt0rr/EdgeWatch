@@ -29,7 +29,7 @@ func TestOpenFreshMatchesFreshMigration(t *testing.T) {
 	if got, want := schema(t, copied.DB), schema(t, fresh.DB); !slices.Equal(got, want) {
 		t.Fatalf("schema differs from a fresh migration:\ncopy:  %q\nfresh: %q", got, want)
 	}
-	profiles, err := copied.ListScannerProfiles(context.Background(), true)
+	profiles, err := copied.Tenant(store.DefaultTenantScope()).ListScannerProfiles(context.Background(), true)
 	if err != nil || len(profiles) == 0 {
 		t.Fatalf("ListScannerProfiles() = %d profiles, %v; want the built-in profiles", len(profiles), err)
 	}

@@ -166,14 +166,6 @@ func (s *Store) readUser(ctx context.Context, query string, args ...any) (User, 
 	return u, nil
 }
 
-// GetUser returns an account of the default tenant.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.GetUser, or
-// GetAccount before a tenant scope exists.
-func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
-	return s.Tenant(DefaultTenantScope()).GetUser(ctx, id)
-}
-
 // GetUser returns the tenant's account with the given ID and its decrypted
 // TOTP projection. Another tenant's account is ErrNotFound, as an unknown
 // ID is.
@@ -205,13 +197,6 @@ func (s *Store) GetUserByUsername(ctx context.Context, username string) (User, e
 	return s.readUser(ctx, `SELECT `+userColumns+` FROM users WHERE username=? COLLATE NOCASE`, normalized)
 }
 
-// ListUsers lists the default tenant's accounts.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.ListUsers.
-func (s *Store) ListUsers(ctx context.Context) ([]UserSummary, error) {
-	return s.Tenant(DefaultTenantScope()).ListUsers(ctx)
-}
-
 // ListUsers lists the tenant's accounts by username.
 func (ts *TenantStore) ListUsers(ctx context.Context) ([]UserSummary, error) {
 	if err := ts.ready(); err != nil {
@@ -238,13 +223,6 @@ func (ts *TenantStore) ListUsers(ctx context.Context) ([]UserSummary, error) {
 	return result, rows.Err()
 }
 
-// CreateUser creates an account in the default tenant.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.CreateUser.
-func (s *Store) CreateUser(ctx context.Context, u User, audit AuditEntry) (User, error) {
-	return s.Tenant(DefaultTenantScope()).CreateUser(ctx, u, audit)
-}
-
 // CreateUser creates an account in the tenant, with its audit record.
 func (ts *TenantStore) CreateUser(ctx context.Context, u User, audit AuditEntry) (User, error) {
 	if err := ts.ready(); err != nil {
@@ -257,14 +235,6 @@ type userInviteRecord struct {
 	idHash  string
 	created time.Time
 	expires time.Time
-}
-
-// CreateUserWithInvite creates a pending account in the default tenant.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.CreateUserWithInvite.
-func (s *Store) CreateUserWithInvite(ctx context.Context, u User, idHash string, created, expires time.Time, audit AuditEntry) (User, error) {
-	return s.Tenant(DefaultTenantScope()).CreateUserWithInvite(ctx, u, idHash, created, expires, audit)
 }
 
 // CreateUserWithInvite commits the pending account, one-time activation
@@ -359,13 +329,6 @@ func usernameConflict(err error) error {
 		return ErrUsernameUnavailable
 	}
 	return err
-}
-
-// UpdateUser updates an account of the default tenant.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.UpdateUser.
-func (s *Store) UpdateUser(ctx context.Context, u User, revokeSessions bool, audit AuditEntry) error {
-	return s.Tenant(DefaultTenantScope()).UpdateUser(ctx, u, revokeSessions, audit)
 }
 
 // UpdateUser updates the tenant's account, at its revision when the value
@@ -487,13 +450,6 @@ func (s *Store) SetUserLastLogin(ctx context.Context, id string, at time.Time) e
 	return err
 }
 
-// SetUserPassword sets the password of an account of the default tenant.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.SetUserPassword.
-func (s *Store) SetUserPassword(ctx context.Context, id, hash string, revokeSessions bool, audit AuditEntry) error {
-	return s.Tenant(DefaultTenantScope()).SetUserPassword(ctx, id, hash, revokeSessions, audit)
-}
-
 // SetUserPassword sets the password hash of the tenant's account. Another
 // tenant's account is ErrNotFound.
 func (ts *TenantStore) SetUserPassword(ctx context.Context, id, hash string, revokeSessions bool, audit AuditEntry) error {
@@ -506,27 +462,10 @@ func (ts *TenantStore) SetUserPassword(ctx context.Context, id, hash string, rev
 	return ts.UpdateUser(ctx, u, revokeSessions, audit)
 }
 
-// SaveUserSecurity saves the security state of an account of the default
-// tenant.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.SaveUserSecurity.
-func (s *Store) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry) error {
-	return s.Tenant(DefaultTenantScope()).SaveUserSecurity(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit)
-}
-
 // SaveUserSecurity saves the security state of the tenant's account and
 // revokes all of its sessions when asked.
 func (ts *TenantStore) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry) error {
 	return ts.SaveUserSecurityPreservingSession(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, "")
-}
-
-// SaveUserSecurityPreservingSession saves the security state of an account
-// of the default tenant.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.SaveUserSecurityPreservingSession.
-func (s *Store) SaveUserSecurityPreservingSession(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string) error {
-	return s.Tenant(DefaultTenantScope()).SaveUserSecurityPreservingSession(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, preserveSessionHash)
 }
 
 // SaveUserSecurityPreservingSession is the actor-aware security mutation used
@@ -665,15 +604,6 @@ func (s *Store) userTOTPForSave(u User) (string, error) {
 	return s.sealTOTPSecretForOwner(u.ID, u.TOTPSecret)
 }
 
-// CountEnabledAdministrators counts the default tenant's enabled
-// administrators.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.CountEnabledAdministrators.
-func (s *Store) CountEnabledAdministrators(ctx context.Context) (int, error) {
-	return s.Tenant(DefaultTenantScope()).CountEnabledAdministrators(ctx)
-}
-
 // CountEnabledAdministrators counts the tenant's enabled administrators.
 func (ts *TenantStore) CountEnabledAdministrators(ctx context.Context) (int, error) {
 	if err := ts.ready(); err != nil {
@@ -693,15 +623,6 @@ func (ts *TenantStore) requireTenantUserTx(ctx context.Context, tx *sql.Tx, user
 		return err
 	}
 	return nil
-}
-
-// DeleteUserSessionsWithAudit revokes the sessions of an account of the
-// default tenant.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.DeleteUserSessionsWithAudit.
-func (s *Store) DeleteUserSessionsWithAudit(ctx context.Context, userID string, audit AuditEntry) error {
-	return s.Tenant(DefaultTenantScope()).DeleteUserSessionsWithAudit(ctx, userID, audit)
 }
 
 // DeleteUserSessionsWithAudit revokes every session of the tenant's account
@@ -739,14 +660,6 @@ func (ts *TenantStore) DeleteUserSessionsWithAudit(ctx context.Context, userID s
 	return tx.Commit()
 }
 
-// CreateUserInvite stores an activation link for an account of the default
-// tenant.
-//
-// Deprecated: bound to DefaultTenantScope. Use TenantStore.CreateUserInvite.
-func (s *Store) CreateUserInvite(ctx context.Context, idHash, userID string, created, expires time.Time) error {
-	return s.Tenant(DefaultTenantScope()).CreateUserInvite(ctx, idHash, userID, created, expires)
-}
-
 // CreateUserInvite stores an activation or password-reset link, by the hash
 // of its token, for the tenant's account. Another tenant's account is
 // ErrNotFound, and no link is stored.
@@ -764,15 +677,6 @@ func (ts *TenantStore) CreateUserInvite(ctx context.Context, idHash, userID stri
 		return ErrNotFound
 	}
 	return nil
-}
-
-// CreateUserInviteWithAudit replaces the activation link of an account of
-// the default tenant.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.CreateUserInviteWithAudit.
-func (s *Store) CreateUserInviteWithAudit(ctx context.Context, idHash, userID string, created, expires time.Time, audit AuditEntry) error {
-	return s.Tenant(DefaultTenantScope()).CreateUserInviteWithAudit(ctx, idHash, userID, created, expires, audit)
 }
 
 // CreateUserInviteWithAudit stores a replacement activation/password-reset
@@ -812,15 +716,6 @@ func (ts *TenantStore) CreateUserInviteWithAudit(ctx context.Context, idHash, us
 		}
 	}
 	return tx.Commit()
-}
-
-// RevokeUserInvitesWithAudit revokes the activation links of an account of
-// the default tenant.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.RevokeUserInvitesWithAudit.
-func (s *Store) RevokeUserInvitesWithAudit(ctx context.Context, userID string, now time.Time, audit AuditEntry) (int, error) {
-	return s.Tenant(DefaultTenantScope()).RevokeUserInvitesWithAudit(ctx, userID, now, audit)
 }
 
 // RevokeUserInvitesWithAudit invalidates every outstanding activation or

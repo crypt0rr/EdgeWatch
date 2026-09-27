@@ -33,22 +33,22 @@ func TestPruneUsesCanonicalTimestampCutoff(t *testing.T) {
 			Snapshot:   model.Snapshot{},
 		},
 	} {
-		if err := s.SaveScan(ctx, scan); err != nil {
+		if err := s.System().SaveScan(ctx, scan); err != nil {
 			t.Fatalf("save %s: %v", scan.ID, err)
 		}
 	}
 
-	stats, err := s.PruneWithStats(ctx, cutoff)
+	stats, err := s.System().PruneWithStats(ctx, cutoff)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stats.Scans != 1 {
 		t.Fatalf("pruned scans = %d, want the one row before cutoff: %#v", stats.Scans, stats)
 	}
-	if _, err := s.GetScan(ctx, beforeID); err == nil {
+	if _, err := defaultTenant(s).GetScan(ctx, beforeID); err == nil {
 		t.Fatal("scan before the cutoff was retained")
 	}
-	if _, err := s.GetScan(ctx, afterID); err != nil {
+	if _, err := defaultTenant(s).GetScan(ctx, afterID); err != nil {
 		t.Fatalf("scan after the cutoff was pruned: %v", err)
 	}
 }

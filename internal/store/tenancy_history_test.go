@@ -37,7 +37,7 @@ func addTenantHistory(t *testing.T, s *Store, ids tenantFixtureIDs) {
 	ctx := context.Background()
 	at := time.Date(2026, 9, 20, 13, 0, 0, 0, time.UTC)
 	for _, owner := range []struct{ job, scan, marker string }{{ids.jobA, ids.scanA, "tenant-a"}, {ids.jobB, ids.scanB, "tenant-b"}} {
-		if _, err := s.UpdateRuntimeWithOutbox(ctx, owner.job, []string{"history-destination"}, func(state *model.JobState) ([]model.Event, error) {
+		if _, err := s.System().UpdateRuntimeWithOutbox(ctx, owner.job, []string{"history-destination"}, func(state *model.JobState) ([]model.Event, error) {
 			state.Baseline = &model.Snapshot{Scopes: []model.Scope{{Target: "192.0.2.10", Protocol: "tcp", Ports: "443"}}}
 			state.Incidents[tenantHistoryIncident] = model.Incident{Change: tenantHistoryChange(), ScanID: owner.scan, OpenedAt: at, LastSeenAt: at}
 			return []model.Event{{Type: "changes-detected", Job: "edge", ScanID: owner.scan, Message: owner.marker, CreatedAt: at}}, nil
@@ -46,10 +46,10 @@ func addTenantHistory(t *testing.T, s *Store, ids tenantFixtureIDs) {
 		}
 	}
 	legacy := model.Scan{ID: tenantHistoryLegacyScan, Job: "edge", StartedAt: at.Add(-time.Minute), FinishedAt: at, Status: "failed", Error: "legacy-a"}
-	if err := s.SaveScan(ctx, legacy); err != nil {
+	if err := s.System().SaveScan(ctx, legacy); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateState(ctx, "edge", func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateState(ctx, "edge", func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineScanID = tenantHistoryLegacyScan
 		return []model.Event{{Type: "scan-failure", Job: "edge", ScanID: tenantHistoryLegacyScan, Message: "legacy-a", CreatedAt: at.Add(time.Minute)}}, nil
 	}); err != nil {
@@ -63,7 +63,7 @@ func addTenantHistory(t *testing.T, s *Store, ids tenantFixtureIDs) {
 	if err := insertEventExec(ctx, s.DB, platform, payload, platform.CreatedAt); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.QueueEvent(ctx, "history-platform-destination", platform); err != nil {
+	if err := s.System().QueueEvent(ctx, "history-platform-destination", platform); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempts=?`, deliveryMaxAttempts); err != nil {
@@ -412,13 +412,11 @@ func checkTenantIncidentRefused(t *testing.T, f tenantFixture, action func(ts *T
 }
 
 // The history checks outside the leak suite share one copy of the fixture,
-// because opening a database is the slow part of these tests. The last one
-// writes.
+// because opening a database is the slow part of these tests.
 func TestTenantHistory(t *testing.T) {
 	f := newTenantFixture(t)
 	t.Run("event lists read in order", func(t *testing.T) { assertTenantEventListsReadInOrder(t, f) })
 	t.Run("max event ID is global", func(t *testing.T) { assertMaxEventIDCoversEveryTenant(t, f) })
-	t.Run("deprecated wrappers", func(t *testing.T) { assertDeprecatedHistoryUsesTheDefaultTenant(t, f) })
 }
 
 // The default tenant's event list reads the history in order from the
@@ -437,50 +435,16 @@ func assertTenantEventListsReadInOrder(t *testing.T, f tenantFixture) {
 
 // MaxEventID stays global: the live-update IDs are one sequence for every
 // stream, so the floor covers every tenant's events and the platform's. The
-// fixture's last event is the platform's, above each tenant's last one.
+// fixture's last event is the platform's, above each tenant's last one. The
+// web server reads it through the live-update cursor.
 func assertMaxEventIDCoversEveryTenant(t *testing.T, f tenantFixture) {
 	want := countRows(t, f.store.DB, `SELECT MAX(id) FROM events`)
 	if tenants := countRows(t, f.store.DB, `SELECT MAX(id) FROM events WHERE tenant_id IS NOT NULL`); tenants >= want {
 		t.Fatalf("the fixture's last event (%d) belongs to a tenant; want the platform's last", want)
 	}
-	for label, read := range map[string]func(context.Context) (uint64, error){"system": f.store.System().MaxEventID, "store": f.store.MaxEventID} {
+	for label, read := range map[string]func(context.Context) (uint64, error){"system": f.store.System().MaxEventID, "live-update cursor": f.store.SSECursor().MaxEventID} {
 		if got, err := read(context.Background()); err != nil || got != uint64(want) {
 			t.Errorf("%s: max event ID = %d, %v; want %d", label, got, err, want)
 		}
-	}
-}
-
-// The deprecated Store wrappers read the default tenant, with the platform's
-// history, and act only on its jobs.
-func assertDeprecatedHistoryUsesTheDefaultTenant(t *testing.T, f tenantFixture) {
-	ctx := context.Background()
-	scans, err := f.store.ListScanSummariesPage(ctx, "edge", 10, 0)
-	if err != nil || scans.Total != 2 {
-		t.Fatalf("scan summaries = %+v, %v", scans, err)
-	}
-	events, err := f.store.ListEventsPage(ctx, "", 10, 0)
-	if got := eventMarkers(events.Items); err != nil || !reflect.DeepEqual(got, []string{"legacy-a", "platform", "tenant-a"}) {
-		t.Fatalf("events = %v, %v", got, err)
-	}
-	if page, err := f.store.ListJobEventsPage(ctx, f.jobB, 10, 0); err != nil || page.Total != 0 {
-		t.Fatalf("tenant B's job events = %+v, %v", page, err)
-	}
-	if page, err := f.store.ListIncidentsPage(ctx, 10, 0); err != nil || page.Total != 1 || page.Items[0].JobID != f.jobA {
-		t.Fatalf("incidents = %+v, %v", page, err)
-	}
-	if page, err := f.store.ListJobIncidentsPage(ctx, f.jobB, 10, 0); err != nil || page.Total != 0 {
-		t.Fatalf("tenant B's job incidents = %+v, %v", page, err)
-	}
-	if failed, err := f.store.FailedDeliveries(ctx); err != nil || failed != 2 {
-		t.Fatalf("failed deliveries = %d, %v", failed, err)
-	}
-	if _, err := f.store.SuppressIncidentWithAudit(ctx, f.jobB, "edge", tenantHistoryIncident, AuditEntry{Action: "incident.suppressed"}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("suppress tenant B's incident = %v", err)
-	}
-	if _, err := f.store.AcceptIncidentWithAudit(ctx, f.jobA, "edge", tenantHistoryIncident, AuditEntry{Action: "incident.accepted"}); err != nil {
-		t.Fatalf("accept tenant A's incident = %v", err)
-	}
-	if page, err := f.store.Tenant(f.b).ListJobIncidentsPage(ctx, f.jobB, 10, 0); err != nil || page.Total != 1 {
-		t.Fatalf("tenant B's incident after tenant A's accept = %+v, %v", page, err)
 	}
 }

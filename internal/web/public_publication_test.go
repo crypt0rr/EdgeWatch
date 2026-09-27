@@ -46,7 +46,7 @@ func anonymousPublicRequest(server *Server, remote string) *httptest.ResponseRec
 // publication, then invalidate the anonymous cache.
 func savePublicationAsAdministrator(t *testing.T, server *Server, dashboard store.PublicDashboard) {
 	t.Helper()
-	if err := server.Store.SavePublicDashboard(context.Background(), dashboard, nil, store.AuditEntry{}); err != nil {
+	if err := defaultTenant(server.Store).SavePublicDashboard(context.Background(), dashboard, nil, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	server.invalidatePublicDashboardCache()
@@ -65,7 +65,7 @@ func awaitPublicResponse(t *testing.T, responses <-chan *httptest.ResponseRecord
 
 func TestInFlightPublicBuildCannotRepublishAWithdrawnPage(t *testing.T) {
 	server, db, _ := newUsersTestServer(t)
-	if err := db.SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "published-v1"}, nil, store.AuditEntry{}); err != nil {
+	if err := defaultTenant(db).SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "published-v1"}, nil, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	started, release, calls := blockFirstPublicBuild(server)
@@ -96,7 +96,7 @@ func TestInFlightPublicBuildCannotRepublishAWithdrawnPage(t *testing.T) {
 
 func TestInFlightPublicBuildCannotServeAReplacedPublication(t *testing.T) {
 	server, db, _ := newUsersTestServer(t)
-	if err := db.SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "published-v1", Introduction: "old introduction"}, nil, store.AuditEntry{}); err != nil {
+	if err := defaultTenant(db).SavePublicDashboard(context.Background(), store.PublicDashboard{Enabled: true, Title: "published-v1", Introduction: "old introduction"}, nil, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	started, release, _ := blockFirstPublicBuild(server)
@@ -206,7 +206,7 @@ func TestPublicDashboardEditorRejectsStaleSaves(t *testing.T) {
 			t.Fatalf("%s save = %d: %s", name, recorder.Code, recorder.Body.String())
 		}
 	}
-	current, err := db.GetPublicDashboard(ctx)
+	current, err := defaultTenant(db).GetPublicDashboard(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -236,7 +236,7 @@ func TestPublicDashboardSaveStaysAdministratorOnly(t *testing.T) {
 	token := publicDashboardToken(t, server, store.Session{UserID: store.LegacyAdminUserID, Username: "admin", Role: store.RoleAdministrator})
 	now := time.Now().UTC()
 	for _, role := range []string{store.RoleOperator, store.RoleViewer} {
-		user, err := db.CreateUser(ctx, store.User{Username: "public-" + role, DisplayName: role, Role: role, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+		user, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "public-" + role, DisplayName: role, Role: role, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -260,7 +260,7 @@ func TestPublicDashboardSaveStaysAdministratorOnly(t *testing.T) {
 			t.Fatalf("%s public dashboard save = %d, want 403", role, response.StatusCode)
 		}
 	}
-	current, err := db.GetPublicDashboard(ctx)
+	current, err := defaultTenant(db).GetPublicDashboard(ctx)
 	if err != nil || current.Enabled {
 		t.Fatalf("denied saves changed the publication: %#v (%v)", current, err)
 	}

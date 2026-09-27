@@ -134,9 +134,6 @@ var publicStatusLeakCases = map[string]tenantLeakCase{
 				t.Errorf("tenant %s: page = %+v, %v", scope.ID(), dashboard, err)
 			}
 		}
-		if dashboard, err := f.store.GetPublicDashboard(ctx); err != nil || dashboard.Title != "tenant-a" {
-			t.Errorf("deprecated GetPublicDashboard = %+v, %v; want tenant A's page", dashboard, err)
-		}
 	}},
 	"SavePublicDashboard": {writes: true, run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
@@ -166,13 +163,13 @@ var publicStatusLeakCases = map[string]tenantLeakCase{
 				t.Fatal("tenant B's save changed tenant A's page")
 			}
 		}
-		// The deprecated wrapper writes tenant A's page, not B's.
+		// Tenant A's save writes A's page, not B's.
 		beforeB := publicStatusRows(t, f.store, f.b)
-		if err := f.store.SavePublicDashboard(ctx, PublicDashboard{Title: "default"}, nil, AuditEntry{}); err != nil {
+		if err := f.store.Tenant(f.a).SavePublicDashboard(ctx, PublicDashboard{Title: "default"}, nil, AuditEntry{}); err != nil {
 			t.Fatal(err)
 		}
 		if dashboard, err := f.store.Tenant(f.a).GetPublicDashboard(ctx); err != nil || dashboard.Title != "default" || publicStatusRows(t, f.store, f.b) != beforeB {
-			t.Fatalf("deprecated SavePublicDashboard wrote %+v, %v, or changed tenant B's page", dashboard, err)
+			t.Fatalf("tenant A's save wrote %+v, %v, or changed tenant B's page", dashboard, err)
 		}
 	}},
 	"SavePublicDashboardIfCurrent": {writes: true, run: func(t *testing.T, f tenantFixture) {
@@ -395,27 +392,11 @@ func newPublicStatusFixture(t *testing.T) tenantFixture {
 	return f
 }
 
-// Every exported PublicStore method has a case, and every case names a
-// method.
-func TestEveryPublicStoreMethodHasACase(t *testing.T) {
-	methods := reflect.TypeOf(&PublicStore{})
-	for i := 0; i < methods.NumMethod(); i++ {
-		if name := methods.Method(i).Name; publicStoreCases[name] == nil {
-			t.Errorf("PublicStore.%s has no case; add one to publicStoreCases that shows it reads only its tenant's rows", name)
-		}
-	}
-	for name := range publicStoreCases {
-		if _, ok := methods.MethodByName(name); !ok {
-			t.Errorf("publicStoreCases has a case for %s, which is not an exported PublicStore method", name)
-		}
-	}
-}
-
 // TestPublicStoreIsolation runs every PublicStore case with tenant A read
 // through the default public scope, as the legacy public URLs read it, and
 // tenant B through its slug. It then checks that every PublicStore method
-// refuses a store without a valid scope, and that the deprecated Store
-// wrappers read only the default tenant.
+// refuses a store without a valid scope. TestEveryScopedStoreMethodHasALeakCase
+// checks that every method has a case.
 func TestPublicStoreIsolation(t *testing.T) {
 	names := make([]string, 0, len(publicStoreCases))
 	for name := range publicStoreCases {
@@ -434,7 +415,6 @@ func TestPublicStoreIsolation(t *testing.T) {
 	}
 	f := newPublicStatusFixture(t)
 	t.Run("invalid scope", func(t *testing.T) { assertPublicStoreRefusesInvalidScopes(t, f) })
-	t.Run("deprecated wrappers", func(t *testing.T) { assertDeprecatedPublicReadsUseTheDefaultTenant(t, f) })
 }
 
 // assertPublicStoreRefusesInvalidScopes calls every PublicStore method on a
@@ -472,38 +452,6 @@ func assertPublicStoreRefusesInvalidScopes(t *testing.T, f tenantFixture) {
 				}
 			}
 		}
-	}
-}
-
-// assertDeprecatedPublicReadsUseTheDefaultTenant checks that the deprecated
-// Store wrappers read only the default tenant, exactly as the default public
-// scope does.
-func assertDeprecatedPublicReadsUseTheDefaultTenant(t *testing.T, f tenantFixture) {
-	t.Helper()
-	ctx := context.Background()
-	all := append(publicFixtureHosts(f.jobA), publicFixtureHosts(f.jobB)...)
-	results, err := f.store.GetLatestSuccessfulJobHosts(ctx, all)
-	if err != nil {
-		t.Fatal(err)
-	}
-	scoped, err := f.store.Public(DefaultPublicScope()).GetLatestSuccessfulJobHosts(ctx, all)
-	if err != nil || !reflect.DeepEqual(results, scoped) {
-		t.Fatalf("GetLatestSuccessfulJobHosts differs from the default public scope: %v", err)
-	}
-	if got, want := publicResultOwners(results), wantPublicOwners(f.scanA, f.jobA); !reflect.DeepEqual(got, want) {
-		t.Errorf("GetLatestSuccessfulJobHosts = %v, want %v", got, want)
-	}
-	if _, _, err := f.store.GetLatestSuccessfulJobHost(ctx, f.jobB, fixtureHost(0).Address); !errors.Is(err, ErrNotFound) {
-		t.Errorf("GetLatestSuccessfulJobHost read tenant B's host: %v", err)
-	}
-	if host, _, err := f.store.GetLatestSuccessfulJobHost(ctx, f.jobA, fixtureHost(0).Address); err != nil || host.ScanID != f.scanA {
-		t.Errorf("GetLatestSuccessfulJobHost = %s, %v; want %s", host.ScanID, err, f.scanA)
-	}
-	if scans, err := f.store.ListLegacyPublicScans(ctx, f.jobB, 10); err != nil || len(scans) != 0 {
-		t.Errorf("ListLegacyPublicScans read tenant B's scans: %d, %v", len(scans), err)
-	}
-	if scans, err := f.store.ListLegacyPublicScans(ctx, f.jobA, 10); err != nil || len(scans) != 1 || scans[0].ID != "legacy-"+f.jobA {
-		t.Errorf("ListLegacyPublicScans = %+v, %v", scans, err)
 	}
 }
 

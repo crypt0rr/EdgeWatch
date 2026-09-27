@@ -172,7 +172,7 @@ func TestTenantNotifierKeepsEachTenantToItsDestinations(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, key := range append(defaultKeys, tenantKeys...) {
-		if err := db.QueueEvent(ctx, key, event); err != nil {
+		if err := db.System().QueueEvent(ctx, key, event); err != nil {
 			t.Fatal(err)
 		}
 	}

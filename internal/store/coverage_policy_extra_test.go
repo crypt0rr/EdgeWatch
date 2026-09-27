@@ -75,36 +75,36 @@ func TestCoveragePolicyErrorAndIdentityHelpers(t *testing.T) {
 
 func TestCoveragePolicySSEAndUpdateEdgeCases(t *testing.T) {
 	ctx := context.Background()
-	if _, _, err := (*Store)(nil).ReserveSSEEventIDs(ctx, 1); err == nil {
+	if _, _, err := (*Store)(nil).System().ReserveSSEEventIDs(ctx, 1); err == nil {
 		t.Fatal("nil store reserved SSE IDs")
 	}
 	s := openTestStore(t)
-	if _, _, err := s.ReserveSSEEventIDs(ctx, 0); err == nil {
+	if _, _, err := s.System().ReserveSSEEventIDs(ctx, 0); err == nil {
 		t.Fatal("empty SSE range accepted")
 	}
-	if _, _, err := s.ReserveSSEEventIDs(ctx, uint64(^uint64(0))); err == nil {
+	if _, _, err := s.System().ReserveSSEEventIDs(ctx, uint64(^uint64(0))); err == nil {
 		t.Fatal("oversized SSE range accepted")
 	}
-	if _, _, err := s.ReserveSSEEventIDsAfter(ctx, 1, uint64(^uint64(0))); err == nil {
+	if _, _, err := s.System().ReserveSSEEventIDsAfter(ctx, 1, uint64(^uint64(0))); err == nil {
 		t.Fatal("exhausted SSE cursor accepted")
 	}
-	if _, err := s.RecordInstalledVersion(ctx, "", "", true, nil); err != nil {
+	if _, err := s.Platform().RecordInstalledVersion(ctx, "", "", true, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.DB.QueryRowContext(ctx, applicationUpdateStateQuery()).Scan(new(string), new(string), new(string), new(string), new(string), new(string), new(string), new(string), new(string), new(string), new(string), new(string), new(string)); err != nil {
+	if _, err := s.Platform().GetApplicationUpdateState(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE tenants SET update_destinations_json=? WHERE is_default=1`, `not-json`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GetApplicationUpdateState(ctx); err == nil {
+	if _, err := defaultTenant(s).ApplicationUpdateRouting(ctx); err == nil {
 		t.Fatal("malformed update destinations were accepted")
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE tenants SET update_destinations_json='' WHERE is_default=1`); err != nil {
 		t.Fatal(err)
 	}
-	if state, err := s.GetApplicationUpdateState(ctx); err != nil || state.UpdateNotificationDestinationsConfigured {
-		t.Fatalf("empty update destinations = %#v, %v", state, err)
+	if routing, err := defaultTenant(s).ApplicationUpdateRouting(ctx); err != nil || routing.Configured {
+		t.Fatalf("empty update destinations = %#v, %v", routing, err)
 	}
 
 	// Exercise the time parser fallback used by legacy rows.

@@ -129,14 +129,14 @@ func newWithKeyFile(s *store.Store, urls []string, keyPath string, autoCreateKey
 		// A URL that the daemon imported as a web-managed destination is no
 		// longer a deployment destination, even while config.yaml still lists
 		// it. Before the import, every configured URL is delivered as before.
-		imported, err := s.ImportedDeploymentNotifications(context.Background(), sortedKeys(legacyURLs))
+		imported, err := s.System().ImportedDeploymentNotifications(context.Background(), sortedKeys(legacyURLs))
 		if err != nil {
 			return nil, fmt.Errorf("load imported notification URLs: %w", err)
 		}
 		for digest := range imported {
 			delete(legacyURLs, digest)
 		}
-		opaqueIDs, err = s.EnsureDeploymentNotificationIDs(context.Background(), sortedKeys(legacyURLs))
+		opaqueIDs, err = s.System().EnsureDeploymentNotificationIDs(context.Background(), sortedKeys(legacyURLs))
 		if err != nil {
 			return nil, fmt.Errorf("persist deployment notification IDs: %w", err)
 		}

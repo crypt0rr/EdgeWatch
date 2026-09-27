@@ -194,7 +194,7 @@ func TestRequestWrappersMapTokenStoreErrorsAndDisabledAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateUser(ctx, store.User{Username: "disabled", DisplayName: "Disabled", Role: store.RoleViewer, PasswordHash: hash, Enabled: false}, store.AuditEntry{}); err != nil {
+	if _, err := db.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "disabled", DisplayName: "Disabled", Role: store.RoleViewer, PasswordHash: hash, Enabled: false}, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)

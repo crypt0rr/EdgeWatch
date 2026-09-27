@@ -7,13 +7,6 @@ import (
 	"time"
 )
 
-// SetupTokenUsable reports whether the setup token is valid and unused.
-//
-// Deprecated: use Store.Platform().SetupTokenUsable.
-func (s *Store) SetupTokenUsable(ctx context.Context, tokenHash string, now time.Time) (bool, error) {
-	return s.Platform().SetupTokenUsable(ctx, tokenHash, now)
-}
-
 // SetupTokenUsable performs the cheap, read-only part of setup validation.
 // Callers should use it before scheduling Argon2 work so obviously stale or
 // already-consumed tokens cannot be used as a password-hashing oracle.

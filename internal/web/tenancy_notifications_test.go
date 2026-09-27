@@ -36,7 +36,7 @@ func TestNotificationRoutesUseTheSessionTenant(t *testing.T) {
 	const jobB = "00000000-0000-0000-0000-000000000b01"
 	now := time.Now().UTC()
 	stamp := now.Format(time.RFC3339Nano)
-	other, err := db.CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "other-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}

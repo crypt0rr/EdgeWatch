@@ -22,14 +22,14 @@ func TestHealthStatusReportsMigrationProgressAsHealthyStarting(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	status, err := s.HealthStatus(context.Background())
+	status, err := s.System().HealthStatus(context.Background())
 	if err != nil {
 		t.Fatalf("active migration reported unhealthy: %v", err)
 	}
 	if status.Status != "starting" || status.Phase != "host-search" || status.Progress != 500 || status.Total != 1000 {
 		t.Fatalf("migration health status = %#v", status)
 	}
-	if err := s.Healthy(context.Background()); err != nil {
+	if err := s.System().Healthy(context.Background()); err != nil {
 		t.Fatalf("Healthy rejected active migration: %v", err)
 	}
 }
@@ -45,14 +45,14 @@ func TestHealthStatusRejectsStaleOrFailedMigration(t *testing.T) {
 	if _, err := s.DB.ExecContext(context.Background(), `UPDATE startup_state SET state='migrating',updated_at=?,last_error='' WHERE id=1`, old); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Healthy(context.Background()); err == nil || !strings.Contains(err.Error(), "migration heartbeat is stale") {
+	if err := s.System().Healthy(context.Background()); err == nil || !strings.Contains(err.Error(), "migration heartbeat is stale") {
 		t.Fatalf("stale migration health error = %v", err)
 	}
 
 	if _, err := s.DB.ExecContext(context.Background(), `UPDATE startup_state SET state='failed',updated_at=?,last_error='index rebuild failed' WHERE id=1`, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Healthy(context.Background()); err == nil || !strings.Contains(err.Error(), "index rebuild failed") {
+	if err := s.System().Healthy(context.Background()); err == nil || !strings.Contains(err.Error(), "index rebuild failed") {
 		t.Fatalf("failed migration health error = %v", err)
 	}
 }
@@ -63,10 +63,10 @@ func TestHealthStatusFallsBackToDaemonLeaseWhenReady(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if err := s.AcquireLease(context.Background(), "health-test"); err != nil {
+	if err := s.System().AcquireLease(context.Background(), "health-test"); err != nil {
 		t.Fatal(err)
 	}
-	status, err := s.HealthStatus(context.Background())
+	status, err := s.System().HealthStatus(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestHealthStatusFallsBackToDaemonLeaseWhenReady(t *testing.T) {
 	if _, err := s.DB.ExecContext(context.Background(), `UPDATE startup_state SET state='ready',last_error='' WHERE id=1`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.Healthy(context.Background()); err != nil {
+	if err := s.System().Healthy(context.Background()); err != nil {
 		t.Fatalf("ready health unexpectedly failed: %v", err)
 	}
 }

@@ -8,21 +8,21 @@ func TestScanCycleFailureBudgetIgnoresClaimsAndResetsSplitChildren(t *testing.T)
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
 
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
 		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
 		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimed, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence)
+	claimed, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,14 +31,14 @@ func TestScanCycleFailureBudgetIgnoresClaimsAndResetsSplitChildren(t *testing.T)
 	}
 
 	// A restart reclaims an in-flight unit, but no scanner execution failed.
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	unit, err = s.NextScanCycleUnit(ctx, cycle.ID)
+	unit, err = s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	claimed, err = s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence)
+	claimed, err = s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,10 +46,10 @@ func TestScanCycleFailureBudgetIgnoresClaimsAndResetsSplitChildren(t *testing.T)
 		t.Fatalf("reclaimed unit = attempts %d failures %d, want 2/0", claimed.Attempts, claimed.Failures)
 	}
 
-	if err := s.RetryScanCycleUnitAfterFailure(ctx, cycle.ID, claimed.Sequence, "transient scanner failure"); err != nil {
+	if err := s.System().RetryScanCycleUnitAfterFailure(ctx, cycle.ID, claimed.Sequence, "transient scanner failure"); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err = s.ClaimScanCycleUnit(ctx, cycle.ID, claimed.Sequence)
+	claimed, err = s.System().ClaimScanCycleUnit(ctx, cycle.ID, claimed.Sequence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,10 +59,10 @@ func TestScanCycleFailureBudgetIgnoresClaimsAndResetsSplitChildren(t *testing.T)
 
 	// Timeout/cancellation returns the unit to pending without recording a
 	// failed execution, so a later claim retains the one real failure.
-	if err := s.RetryScanCycleUnit(ctx, cycle.ID, claimed.Sequence, "scan timed out"); err != nil {
+	if err := s.System().RetryScanCycleUnit(ctx, cycle.ID, claimed.Sequence, "scan timed out"); err != nil {
 		t.Fatal(err)
 	}
-	claimed, err = s.ClaimScanCycleUnit(ctx, cycle.ID, claimed.Sequence)
+	claimed, err = s.System().ClaimScanCycleUnit(ctx, cycle.ID, claimed.Sequence)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,10 +76,10 @@ func TestScanCycleFailureBudgetIgnoresClaimsAndResetsSplitChildren(t *testing.T)
 	second.Sequence = 1
 	second.Ports = "2"
 	second.PortCount = 1
-	if err := s.SplitScanCycleUnit(ctx, cycle.ID, claimed.Sequence, first, second, "split after timeout"); err != nil {
+	if err := s.System().SplitScanCycleUnit(ctx, cycle.ID, claimed.Sequence, first, second, "split after timeout"); err != nil {
 		t.Fatal(err)
 	}
-	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	summaries, err := defaultTenant(s).ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

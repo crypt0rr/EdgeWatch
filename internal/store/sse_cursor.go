@@ -9,11 +9,33 @@ import (
 
 const maxSQLiteInt64 = int64(^uint64(0) >> 1)
 
-// ReserveSSEEventIDs reserves SSE identifiers through
-// SystemStore.ReserveSSEEventIDs, until its callers use a system store
-// themselves.
-func (s *Store) ReserveSSEEventIDs(ctx context.Context, count uint64) (uint64, uint64, error) {
-	return s.System().ReserveSSEEventIDs(ctx, count)
+// SSECursor is the web server's narrow access to the identifiers of live
+// updates. It is global on purpose: the streams of every tenant share one
+// sequence of identifiers, so a floor or a range taken for one tenant could
+// reuse an identifier that a browser of another tenant already acknowledged.
+// The cursor returns only numbers, never a row of any tenant. Web code may
+// not call Store.System, so it reserves identifiers through this cursor.
+type SSECursor struct{ system *SystemStore }
+
+// SSECursor returns the cursor of the live-update identifiers.
+func (s *Store) SSECursor() *SSECursor { return &SSECursor{system: s.System()} }
+
+// Reserve reserves a contiguous, durable range of identifiers; see
+// SystemStore.ReserveSSEEventIDs.
+func (c *SSECursor) Reserve(ctx context.Context, count uint64) (uint64, uint64, error) {
+	return c.system.ReserveSSEEventIDs(ctx, count)
+}
+
+// ReserveAfter reserves a range that starts after minimum; see
+// SystemStore.ReserveSSEEventIDsAfter.
+func (c *SSECursor) ReserveAfter(ctx context.Context, count, minimum uint64) (uint64, uint64, error) {
+	return c.system.ReserveSSEEventIDsAfter(ctx, count, minimum)
+}
+
+// MaxEventID returns the greatest durable event identifier of every tenant
+// and the platform; see SystemStore.MaxEventID.
+func (c *SSECursor) MaxEventID(ctx context.Context) (uint64, error) {
+	return c.system.MaxEventID(ctx)
 }
 
 // ReserveSSEEventIDs reserves a contiguous, durable range of SSE identifiers.
@@ -25,13 +47,6 @@ func (s *Store) ReserveSSEEventIDs(ctx context.Context, count uint64) (uint64, u
 // tenant's events.
 func (ss *SystemStore) ReserveSSEEventIDs(ctx context.Context, count uint64) (uint64, uint64, error) {
 	return ss.reserveSSEEventIDs(ctx, count, 0)
-}
-
-// ReserveSSEEventIDsAfter reserves SSE identifiers through
-// SystemStore.ReserveSSEEventIDsAfter, until its callers use a system store
-// themselves.
-func (s *Store) ReserveSSEEventIDsAfter(ctx context.Context, count, minimum uint64) (uint64, uint64, error) {
-	return s.System().ReserveSSEEventIDsAfter(ctx, count, minimum)
 }
 
 // ReserveSSEEventIDsAfter is the cursor-aware variant used when an in-memory

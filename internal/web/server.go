@@ -165,7 +165,7 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	}
 	v := &Server{App: a, Store: s, Auth: auth.NewManager(s), RDAP: rdapClient, Log: logger, Version: buildVersion, now: time.Now, subscribers: map[chan sseMessage]struct{}{}, shutdown: make(chan struct{}), sseCancels: map[chan sseMessage]context.CancelFunc{}, sseSessionKey: map[chan sseMessage]string{}, sseUserKey: map[chan sseMessage]string{}, sseAuthCache: map[string]sseAuthCacheEntry{}, sseAuthTTL: defaultSSEAuthCacheTTL, pendingTOTP: map[string]pendingTOTP{}, testLast: map[string]time.Time{}, publicHits: map[string][]time.Time{}}
 	if s != nil {
-		if start, end, err := s.ReserveSSEEventIDs(context.Background(), sseEventIDBlockSize); err != nil {
+		if start, end, err := s.SSECursor().Reserve(context.Background(), sseEventIDBlockSize); err != nil {
 			logger.Warn("SSE event cursor could not be reserved", "error", err)
 			// A timestamp seed keeps a degraded/read-only fixture monotonic for
 			// the lifetime of this process. The recoverable cursor state below

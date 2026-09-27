@@ -110,7 +110,7 @@ func TestScannerProfilesRouteLifecycleAndValidationBranches(t *testing.T) {
 	}
 
 	// A built-in profile exercises the immutable lifecycle and update guards.
-	builtin, err := db.GetScannerProfile(ctx, store.BuiltinNmapProfileID)
+	builtin, err := defaultTenant(db).GetScannerProfile(ctx, store.BuiltinNmapProfileID)
 	if err != nil {
 		t.Fatal(err)
 	}

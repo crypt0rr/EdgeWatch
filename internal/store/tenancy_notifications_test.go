@@ -439,10 +439,6 @@ var notificationLeakCases = map[string]tenantLeakCase{
 		if err != nil || !platform.UpdateNotificationDestinationsConfigured || len(platform.UpdateNotificationDestinations) != 0 {
 			t.Errorf("platform routing = %+v, %v", platform, err)
 		}
-		legacy, err := f.store.GetApplicationUpdateState(ctx)
-		if err != nil || !reflect.DeepEqual(legacy.UpdateNotificationDestinations, sortedIDs(ids.a, ids.pausedA)) {
-			t.Errorf("the default tenant's routing through the Store wrapper = %v, %v", legacy.UpdateNotificationDestinations, err)
-		}
 	}},
 }
 
@@ -548,7 +544,7 @@ func TestQueuedAlertsStayWithTheirTenant(t *testing.T) {
 
 	// A single queued delivery follows the same rule, and the discarded one
 	// is audited with the destination ID only.
-	if err := f.store.QueueEvent(ctx, managedNotificationKey(ids.a, 1), model.Event{Type: "changes-detected", JobID: f.jobB, Job: "edge", Message: "single-b", CreatedAt: at}); err != nil {
+	if err := f.store.System().QueueEvent(ctx, managedNotificationKey(ids.a, 1), model.Event{Type: "changes-detected", JobID: f.jobB, Job: "edge", Message: "single-b", CreatedAt: at}); err != nil {
 		t.Fatal(err)
 	}
 	var leaked int
@@ -558,59 +554,5 @@ func TestQueuedAlertsStayWithTheirTenant(t *testing.T) {
 	var detail string
 	if err := f.store.DB.QueryRowContext(ctx, `SELECT detail FROM security_audit WHERE action='notifications.pending_discarded' ORDER BY id DESC LIMIT 1`).Scan(&detail); err != nil || !strings.Contains(detail, ids.a) || strings.Contains(detail, "sealed") {
 		t.Fatalf("discard audit = %q, %v", detail, err)
-	}
-}
-
-// The deprecated Store methods read and write only the default tenant's
-// destinations and routing.
-func TestDeprecatedNotificationMethodsUseTheDefaultTenant(t *testing.T) {
-	ctx := context.Background()
-	f := newTenantFixture(t)
-	ids := tenantFixtureNotifications
-	destinations, err := f.store.ListManagedNotifications(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := notificationIDs(destinations), sortedIDs(ids.a, ids.pausedA); !reflect.DeepEqual(got, want) {
-		t.Errorf("ListManagedNotifications = %v, want %v", got, want)
-	}
-	for _, id := range []string{ids.b, ids.platform} {
-		if _, err := f.store.GetManagedNotification(ctx, id); !errors.Is(err, ErrNotFound) {
-			t.Errorf("GetManagedNotification read %s: %v", id, err)
-		}
-		if _, err := f.store.UpdateManagedNotification(ctx, id, 1, "stolen", "generic", []byte("x"), []byte("y"), true); !errors.Is(err, ErrNotFound) {
-			t.Errorf("UpdateManagedNotification wrote %s: %v", id, err)
-		}
-		if err := f.store.DeleteManagedNotification(ctx, id, 1); !errors.Is(err, ErrNotFound) {
-			t.Errorf("DeleteManagedNotification removed %s: %v", id, err)
-		}
-	}
-	queueFixtureDeliveries(t, f)
-	health, err := f.store.ListDeliveryHealth(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, leaked := health["managed:"+ids.b]; leaked || health["managed:"+ids.a].Pending != 1 {
-		t.Errorf("ListDeliveryHealth = %v", health)
-	}
-	state, err := f.store.GetApplicationUpdateState(ctx)
-	if err != nil || !reflect.DeepEqual(state.UpdateNotificationDestinations, []string{ids.a}) {
-		t.Errorf("GetApplicationUpdateState routing = %v, %v", state.UpdateNotificationDestinations, err)
-	}
-	if err := f.store.SetApplicationUpdateDestinations(ctx, []string{}, AuditEntry{}); err != nil {
-		t.Fatal(err)
-	}
-	if routing, err := f.store.Tenant(f.b).ApplicationUpdateRouting(ctx); err != nil || !reflect.DeepEqual(routing.Destinations, []string{ids.b}) {
-		t.Errorf("SetApplicationUpdateDestinations changed tenant B's routing: %+v, %v", routing, err)
-	}
-	if count, err := f.store.MaterializeLegacyNotificationSelections(ctx, []string{ids.a}); err != nil || count != 2 {
-		t.Fatalf("MaterializeLegacyNotificationSelections = %d, %v", count, err)
-	}
-	if selection, _ := jobSelection(t, f, f.b, f.jobB); selection != nil {
-		t.Errorf("MaterializeLegacyNotificationSelections froze tenant B's job to %v", selection)
-	}
-	created, err := f.store.CreateManagedNotification(ctx, "", "default", "generic", []byte("x"), []byte("y"), true)
-	if err != nil || created.TenantID != DefaultTenantID {
-		t.Fatalf("CreateManagedNotification = %+v, %v", created, err)
 	}
 }

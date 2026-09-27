@@ -28,7 +28,7 @@ func openImportStore(t *testing.T) (*store.Store, string) {
 
 func managedCount(t *testing.T, db *store.Store) int {
 	t.Helper()
-	records, err := db.ListManagedNotifications(context.Background())
+	records, err := db.Tenant(store.DefaultTenantScope()).ListManagedNotifications(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestImportConfiguredURLsCreatesMissingDefaultKey(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("notification key mode = %v, want 0600", info.Mode().Perm())
 	}
-	records, err := db.ListManagedNotifications(ctx)
+	records, err := db.Tenant(store.DefaultTenantScope()).ListManagedNotifications(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestImportConfiguredURLsFailureImportsNothing(t *testing.T) {
 			if got := managedCount(t, db); got != before {
 				t.Fatalf("managed destinations after a failed import = %d, want %d", got, before)
 			}
-			imported, err := db.ImportedDeploymentNotifications(ctx, []string{hashURL(raw)})
+			imported, err := db.System().ImportedDeploymentNotifications(ctx, []string{hashURL(raw)})
 			if err != nil || len(imported) != 0 {
 				t.Fatalf("failed import recorded the URL: %v, %v", imported, err)
 			}
@@ -231,7 +231,7 @@ func TestImportConfiguredURLsDeliversQueuedAlerts(t *testing.T) {
 	if err := before.Queue(ctx, []model.Event{{Type: "scan_failed", Job: "queued-opaque", CreatedAt: time.Now().UTC()}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueueEvent(ctx, hashURL(raw), model.Event{Type: "scan_failed", Job: "queued-legacy", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := db.System().QueueEvent(ctx, hashURL(raw), model.Event{Type: "scan_failed", Job: "queued-legacy", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	result, err := ImportConfiguredURLs(ctx, db, []string{raw}, "")
@@ -251,7 +251,7 @@ func TestImportConfiguredURLsDeliversQueuedAlerts(t *testing.T) {
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("queued alerts delivered after import = %d, want 2", got)
 	}
-	health, err := db.ListDeliveryHealth(ctx)
+	health, err := db.Tenant(store.DefaultTenantScope()).ListDeliveryHealth(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,7 +289,7 @@ func TestImportConfiguredURLsIsIdempotentAndImportsNewURLs(t *testing.T) {
 	if err := os.WriteFile(keyPath, key, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.DeleteManagedNotification(ctx, first.Imported[0].ID, 1); err != nil {
+	if err := db.Tenant(store.DefaultTenantScope()).DeleteManagedNotification(ctx, first.Imported[0].ID, 1); err != nil {
 		t.Fatal(err)
 	}
 	afterDelete, err := ImportConfiguredURLs(ctx, db, []string{original}, "")
@@ -362,7 +362,7 @@ func TestNotifierStatusReportsConfigImport(t *testing.T) {
 		{store.NotificationConfigImport{Status: store.NotificationConfigImportImported, ConfiguredURLs: 1, ImportedURLs: 1}, "imported"},
 		{store.NotificationConfigImport{Status: store.NotificationConfigImportFailed, ConfiguredURLs: 1, ErrorCode: "key_unavailable"}, "failed"},
 	} {
-		if err := db.RecordNotificationConfigImport(ctx, test.state); err != nil {
+		if err := db.System().RecordNotificationConfigImport(ctx, test.state); err != nil {
 			t.Fatal(err)
 		}
 		if got := notifier.StatusContext(ctx)["config_import"]; got != test.want {

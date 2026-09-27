@@ -62,7 +62,7 @@ func countBaselineSearchRows(t *testing.T, db *sql.DB) (indexed, keyed int) {
 
 func assertBaselineSearchTotal(t *testing.T, s *Store, jobID, query string, want int) {
 	t.Helper()
-	page, err := s.ListBaselineHostsPage(context.Background(), jobID, query, "", nil, 10, 0)
+	page, err := defaultTenant(s).ListBaselineHostsPage(context.Background(), jobID, query, "", nil, 10, 0)
 	if err != nil {
 		t.Fatalf("baseline search %s %q: %v", jobID, query, err)
 	}
@@ -104,11 +104,11 @@ func TestMigration48RebuildsBaselineHostSearchByRowid(t *testing.T) {
 			}
 			insertBaselineSearchJob(t, s, "upgrade-web", "upgrade-web")
 			insertBaselineSearchJob(t, s, "upgrade-mail", "upgrade-mail")
-			if err := s.ReplaceBaselineHostProjection(ctx, "upgrade-web", baselineSearchSnapshot(1, webHosts)); err != nil {
+			if err := s.System().ReplaceBaselineHostProjection(ctx, "upgrade-web", baselineSearchSnapshot(1, webHosts)); err != nil {
 				s.Close()
 				t.Fatal(err)
 			}
-			if err := s.ReplaceBaselineHostProjection(ctx, "upgrade-mail", baselineSearchSnapshot(2, mailHosts)); err != nil {
+			if err := s.System().ReplaceBaselineHostProjection(ctx, "upgrade-mail", baselineSearchSnapshot(2, mailHosts)); err != nil {
 				s.Close()
 				t.Fatal(err)
 			}
@@ -184,7 +184,7 @@ func TestMigration48RebuildsBaselineHostSearchByRowid(t *testing.T) {
 			assertBaselineSearchTotal(t, upgraded, "upgrade-mail", "renamed-upgrade", 0)
 
 			// Later maintenance reuses the rowid-keyed triggers.
-			if err := upgraded.ReplaceBaselineHostProjection(ctx, "upgrade-web", baselineSearchSnapshot(1, 5)); err != nil {
+			if err := upgraded.System().ReplaceBaselineHostProjection(ctx, "upgrade-web", baselineSearchSnapshot(1, 5)); err != nil {
 				t.Fatal(err)
 			}
 			if indexed, keyed := countBaselineSearchRows(t, upgraded.DB); indexed != 5+mailHosts || keyed != 5+mailHosts {
@@ -201,7 +201,7 @@ func TestBaselineHostSearchBackfillResumesAfterCancellation(t *testing.T) {
 	insertBaselineSearchJob(t, s, "resume-web", "resume-web")
 	insertBaselineSearchJob(t, s, "resume-mail", "resume-mail")
 	const webHosts = ftsBackfillBatchSize + 17
-	if err := s.ReplaceBaselineHostProjection(ctx, "resume-web", baselineSearchSnapshot(1, webHosts)); err != nil {
+	if err := s.System().ReplaceBaselineHostProjection(ctx, "resume-web", baselineSearchSnapshot(1, webHosts)); err != nil {
 		t.Fatal(err)
 	}
 	// Request the same rebuild that the schema 48 migration records.
@@ -251,7 +251,7 @@ func TestBaselineHostSearchBackfillResumesAfterCancellation(t *testing.T) {
 
 	// A baseline written while the rebuild is interrupted is indexed by the
 	// triggers; resuming must not index those rows a second time.
-	if err := s.ReplaceBaselineHostProjection(ctx, "resume-mail", baselineSearchSnapshot(2, 3)); err != nil {
+	if err := s.System().ReplaceBaselineHostProjection(ctx, "resume-mail", baselineSearchSnapshot(2, 3)); err != nil {
 		t.Fatal(err)
 	}
 	if err := backfillHostSearchIndexesContext(ctx, s.DB); err != nil {
@@ -272,13 +272,13 @@ func TestBaselineHostSearchRebuildReportsStoreErrors(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertBaselineSearchJob(t, s, "error-web", "error-web")
-	if err := s.ReplaceBaselineHostProjection(ctx, "error-web", baselineSearchSnapshot(1, 2)); err != nil {
+	if err := s.System().ReplaceBaselineHostProjection(ctx, "error-web", baselineSearchSnapshot(1, 2)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE baseline_hosts SET host_json='{' WHERE address='10.1.0.1'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ListBaselineHostsPage(ctx, "error-web", "", "", nil, 10, 0); err == nil {
+	if _, err := defaultTenant(s).ListBaselineHostsPage(ctx, "error-web", "", "", nil, 10, 0); err == nil {
 		t.Fatal("malformed baseline host evidence was returned without an error")
 	}
 
@@ -332,7 +332,7 @@ func TestBaselineHostSearchRebuildReportsStoreErrors(t *testing.T) {
 	if state := readBaselineSearchBackfillState(t, s.DB); state.complete != 0 {
 		t.Fatalf("failed baseline search rebuild was recorded as complete: %#v", state)
 	}
-	if _, err := s.ListBaselineHostsPage(ctx, "error-web", "", "", nil, 10, 0); err == nil {
+	if _, err := defaultTenant(s).ListBaselineHostsPage(ctx, "error-web", "", "", nil, 10, 0); err == nil {
 		t.Fatal("baseline search succeeded without baseline_hosts")
 	}
 }

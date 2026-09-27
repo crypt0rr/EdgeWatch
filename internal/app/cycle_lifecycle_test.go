@@ -162,7 +162,13 @@ func TestResumedCycleRecordsPinnedScannerProfileRevision(t *testing.T) {
 	probe := &lifecycleScanner{}
 	a, db := newLifecycleTestApp(t, probe, nil)
 	job := lifecycleJob("profile-pinned")
-	job.TCP.ProfileID, job.TCP.ProfileRevision = "custom", 1
+	// The store accepts a pinned profile only when it is built in or the
+	// tenant's own.
+	profile, err := defaultTenant(db).CreateScannerProfile(ctx, "Custom", "", config.ScannerProfile{Engine: config.EngineNmap}, "admin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job.TCP.ProfileID, job.TCP.ProfileRevision = profile.ID, 1
 	job.TCP.NmapArgs = []string{config.PlaceholderAddress, config.PlaceholderPorts, config.PlaceholderStructuredOutput, "--max-rate", "1000"}
 	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
@@ -199,7 +205,7 @@ func TestResumedCycleRecordsPinnedScannerProfileRevision(t *testing.T) {
 	if err := db.DB.QueryRowContext(ctx, `SELECT job_revision,scanner_profile_id,scanner_profile_revision FROM scans WHERE id=?`, resumed.ID).Scan(&jobRevision, &profileID, &profileRevision); err != nil {
 		t.Fatal(err)
 	}
-	if profileID != "custom" || profileRevision != used.TCP.ProfileRevision || jobRevision != record.Revision {
+	if profileID != profile.ID || profileRevision != used.TCP.ProfileRevision || jobRevision != record.Revision {
 		t.Fatalf("stored scan provenance = job revision %d profile %s revision %d; resumed units ran job revision %d profile revision %d", jobRevision, profileID, profileRevision, record.Revision, used.TCP.ProfileRevision)
 	}
 }

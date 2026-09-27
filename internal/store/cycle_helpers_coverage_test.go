@@ -90,7 +90,7 @@ func TestBuildCycleUDPUnitsCoversFamiliesChunksAndInvalidPlans(t *testing.T) {
 
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestBuildCycleUDPUnitsCoversFamiliesChunksAndInvalidPlans(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GetScanCycle(ctx, cycle.ID); err != nil {
+	if _, err := defaultTenant(s).GetScanCycle(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
 	if !errors.Is(ErrNoScanCycle, ErrNoScanCycle) {

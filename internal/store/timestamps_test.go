@@ -13,13 +13,13 @@ import (
 func TestTimestampNormalizationPreservesChronologicalScanOrdering(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	record, err := s.CreateJob(ctx, testJob("timestamp-ordering"))
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("timestamp-ordering"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	base := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
 	for _, id := range []string{"earlier", "later"} {
-		if err := s.SaveScan(ctx, model.Scan{
+		if err := s.System().SaveScan(ctx, model.Scan{
 			ID:         id,
 			JobID:      record.ID,
 			Job:        record.Job.Name,
@@ -54,7 +54,7 @@ func TestTimestampNormalizationPreservesChronologicalScanOrdering(t *testing.T) 
 	if finished != "2026-09-19T12:00:00.100000000Z" {
 		t.Fatalf("normalized timestamp = %q", finished)
 	}
-	latest, err := s.GetLatestSuccessfulJobScanSummary(ctx, record.ID)
+	latest, err := defaultTenant(s).GetLatestSuccessfulJobScanSummary(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

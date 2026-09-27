@@ -557,7 +557,7 @@ func (s *Server) latestScannedHosts(ctx context.Context, ts *store.TenantStore) 
 	const pageSize = 100
 	const maxLegacySnapshotBytes = 8 << 20
 	for offset := 0; ; offset += pageSize {
-		page, err := s.Store.ListLegacySuccessfulScanSnapshotsPage(ctx, pageSize, offset)
+		page, err := ts.ListLegacySuccessfulScanSnapshotsPage(ctx, pageSize, offset)
 		if err != nil {
 			return nil, err
 		}

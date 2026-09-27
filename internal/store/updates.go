@@ -77,20 +77,11 @@ func scanApplicationUpdateState(scanner interface{ Scan(...any) error }) (Applic
 // application_update_state row.
 const applicationReleaseColumns = `installed_version,latest_version,release_url,release_name,published_at,etag,last_checked_at,last_successful_check_at,check_status,last_error,announced_available_version,announced_upgrade_version`
 
-// applicationUpdateStateColumns reads the release check with the update
-// routing of the default tenant. Since schema 51,
-// application_update_state.notification_destinations_json holds the routing
-// to platform destinations only; with a single tenant there are none, so the
-// default tenant's routing is the complete update alert routing.
-const applicationUpdateStateColumns = applicationReleaseColumns + `,COALESCE((SELECT update_destinations_json FROM tenants WHERE id='` + DefaultTenantID + `'),'')`
-
 // platformUpdateStateColumns reads the release check with the platform's own
-// update routing.
+// update routing. Since schema 51,
+// application_update_state.notification_destinations_json holds the routing
+// to platform destinations only; each tenant's routing is on its tenants row.
 const platformUpdateStateColumns = applicationReleaseColumns + `,notification_destinations_json`
-
-func applicationUpdateStateQuery() string {
-	return `SELECT ` + applicationUpdateStateColumns + ` FROM application_update_state WHERE id=1`
-}
 
 // insertApplicationUpdateStateRow creates the singleton row when it is
 // missing. Its notification_destinations_json is the platform routing, which
@@ -137,17 +128,6 @@ func normalizeUpdateDestinations(values []string) []string {
 	}
 	sort.Strings(result)
 	return result
-}
-
-// GetApplicationUpdateState returns the release check with the default
-// tenant's update routing, which drives the update alerts while there is one
-// tenant.
-//
-// Deprecated: bound to DefaultTenantScope for the routing. Use
-// PlatformStore.GetApplicationUpdateState for the release check and
-// TenantStore.ApplicationUpdateRouting for a tenant's routing.
-func (s *Store) GetApplicationUpdateState(ctx context.Context) (ApplicationUpdateState, error) {
-	return readApplicationUpdateState(ctx, s, applicationUpdateStateColumns)
 }
 
 // GetApplicationUpdateState returns the release check with the platform's
@@ -204,15 +184,6 @@ func (ts *TenantStore) ApplicationUpdateRouting(ctx context.Context) (Applicatio
 		return ApplicationUpdateRouting{}, err
 	}
 	return ApplicationUpdateRouting{Destinations: normalizeUpdateDestinations(destinations), Configured: true}, nil
-}
-
-// SetApplicationUpdateDestinations stores the administrator's explicit update
-// notification routing.
-//
-// Deprecated: bound to DefaultTenantScope. Use
-// TenantStore.SetApplicationUpdateDestinations.
-func (s *Store) SetApplicationUpdateDestinations(ctx context.Context, destinations []string, audit AuditEntry) error {
-	return s.Tenant(DefaultTenantScope()).SetApplicationUpdateDestinations(ctx, destinations, audit)
 }
 
 // SetApplicationUpdateDestinations stores the tenant administrator's explicit
@@ -317,12 +288,6 @@ func replaceApplicationUpdateDestinationsTx(ctx context.Context, tx *sql.Tx, ten
 	return replaced, nil
 }
 
-// RecordInstalledVersion persists the running build version. It forwards to
-// PlatformStore.RecordInstalledVersion.
-func (s *Store) RecordInstalledVersion(ctx context.Context, current, releaseURL string, notify bool, destinations []string) ([]model.Event, error) {
-	return s.Platform().RecordInstalledVersion(ctx, current, releaseURL, notify, destinations)
-}
-
 // RecordInstalledVersion persists the running build version. When notify is
 // true, the transition and its notification intent are committed atomically.
 // The first observed version is intentionally seeded without an event by the
@@ -400,12 +365,6 @@ func (ps *PlatformStore) RecordInstalledVersion(ctx context.Context, current, re
 	return []model.Event{event}, nil
 }
 
-// RecordReleaseCheck stores a successful release response. It forwards to
-// PlatformStore.RecordReleaseCheck.
-func (s *Store) RecordReleaseCheck(ctx context.Context, current, version, releaseURL, releaseName, publishedAt, etag string, notify bool, destinations []string) ([]model.Event, error) {
-	return s.Platform().RecordReleaseCheck(ctx, current, version, releaseURL, releaseName, publishedAt, etag, notify, destinations)
-}
-
 // RecordReleaseCheck stores a successful release response and, when a newer
 // release is available, queues one notification for the installation to the
 // destinations that the update routing resolved.
@@ -458,24 +417,12 @@ func (ps *PlatformStore) RecordReleaseCheck(ctx context.Context, current, versio
 	return events, nil
 }
 
-// RecordReleaseNotModified refreshes the check timestamps. It forwards to
-// PlatformStore.RecordReleaseNotModified.
-func (s *Store) RecordReleaseNotModified(ctx context.Context, etag string) error {
-	return s.Platform().RecordReleaseNotModified(ctx, etag)
-}
-
 // RecordReleaseNotModified refreshes check timestamps while retaining the
 // cached release metadata and current availability state.
 func (ps *PlatformStore) RecordReleaseNotModified(ctx context.Context, etag string) error {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	_, err := ps.store.DB.ExecContext(ctx, `UPDATE application_update_state SET etag=CASE WHEN ? <> '' THEN ? ELSE etag END,last_checked_at=?,last_successful_check_at=?,check_status='ok',last_error='' WHERE id=1`, strings.TrimSpace(etag), strings.TrimSpace(etag), now, now)
 	return err
-}
-
-// RecordReleaseCheckFailure records a failed release check. It forwards to
-// PlatformStore.RecordReleaseCheckFailure.
-func (s *Store) RecordReleaseCheckFailure(ctx context.Context, message string) error {
-	return s.Platform().RecordReleaseCheckFailure(ctx, message)
 }
 
 // RecordReleaseCheckFailure leaves the last successful release untouched and

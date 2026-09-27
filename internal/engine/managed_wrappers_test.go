@@ -20,11 +20,11 @@ func TestManagedEngineWrappersUseJobIdentityAndQueueDestinations(t *testing.T) {
 	}
 	defer db.Close()
 	job := config.NormalizeJob(config.Job{Name: "managed-wrapper", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}, Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.CreateManagedNotification(ctx, "destination", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
+	if _, err := defaultTenant(db).CreateManagedNotification(ctx, "destination", "Test destination", "generic", []byte{1}, []byte{2}, true); err != nil {
 		t.Fatal(err)
 	}
 	e := Engine{Store: db}

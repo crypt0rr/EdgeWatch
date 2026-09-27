@@ -23,16 +23,16 @@ func TestExportBaselinesRoundTripsManagedAndLegacyEntries(t *testing.T) {
 		Name: "managed-export", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.20"},
 		TCP: &config.Protocol{Ports: "22,443", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced",
 	})
-	record, err := s.CreateJob(ctx, job)
+	record, err := defaultTenant(s).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Truncate(time.Second)
 	scan := model.Scan{ID: "export-source", JobID: record.ID, JobRevision: record.Revision, Job: job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: job.SecurityHash(), Snapshot: model.Snapshot{Units: []model.Unit{{Target: "198.51.100.20", Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open", Service: "https"}}}}}}
-	if err := s.SaveScan(ctx, scan); err != nil {
+	if err := s.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = &scan.Snapshot
 		state.BaselineScanID = scan.ID
 		state.BaselineConfigHash = scan.ConfigHash
@@ -56,7 +56,7 @@ func TestExportBaselinesRoundTripsManagedAndLegacyEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	export, err := s.ExportBaselines(ctx, "")
+	export, err := defaultTenant(s).ExportBaselines(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestExportBaselinesRoundTripsManagedAndLegacyEntries(t *testing.T) {
 	if bytes.Contains(encoded, []byte(`"exported_at"`)) || !bytes.Contains(encoded, []byte(`"shadowed_by_job_id":"`+record.ID+`"`)) {
 		t.Fatalf("canonical export metadata = %s", encoded)
 	}
-	second, err := s.ExportBaselines(ctx, "")
+	second, err := defaultTenant(s).ExportBaselines(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,11 +115,11 @@ func TestExportBaselinesRoundTripsManagedAndLegacyEntries(t *testing.T) {
 		t.Fatalf("equivalent exports differ:\n%s\n%s", encoded, secondEncoded)
 	}
 
-	one, err := s.ExportBaselines(ctx, record.ID)
+	one, err := defaultTenant(s).ExportBaselines(ctx, record.ID)
 	if err != nil || len(one.Jobs) != 1 || one.Jobs[0].Name != job.Name {
 		t.Fatalf("per-ID export = %#v, %v", one, err)
 	}
-	if _, err := s.ExportBaselines(ctx, "does-not-exist"); !errors.Is(err, ErrNotFound) {
+	if _, err := defaultTenant(s).ExportBaselines(ctx, "does-not-exist"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("unknown job error = %v", err)
 	}
 }
@@ -130,10 +130,10 @@ func TestExportBaselinesIncludesJobsWithoutReadyBaseline(t *testing.T) {
 		Name: "not-ready-export", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.22"},
 		UDP: &config.Protocol{Ports: "53"}, Timeout: config.Duration(time.Minute), Timing: "balanced",
 	})
-	if _, err := s.CreateJob(context.Background(), job); err != nil {
+	if _, err := defaultTenant(s).CreateJob(context.Background(), job); err != nil {
 		t.Fatal(err)
 	}
-	export, err := s.ExportBaselines(context.Background(), job.Name)
+	export, err := defaultTenant(s).ExportBaselines(context.Background(), job.Name)
 	if err != nil || len(export.Jobs) != 1 {
 		t.Fatalf("not-ready export = %#v, %v", export, err)
 	}
@@ -142,10 +142,10 @@ func TestExportBaselinesIncludesJobsWithoutReadyBaseline(t *testing.T) {
 	}
 }
 
-func TestBaselineExportCompatibilityWrappers(t *testing.T) {
+func TestBaselineExportEntriesOfTheDefaultTenant(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	record, err := s.CreateJob(ctx, testJob("wrapper-export"))
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("wrapper-export"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,13 +157,13 @@ func TestBaselineExportCompatibilityWrappers(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO job_states(job,state_json,updated_at) VALUES(?,?,?)`, "wrapper-legacy", raw, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
-	if entry, err := s.exportLegacyBaseline(ctx, "wrapper-legacy"); err != nil || !entry.Legacy || entry.Status != "ready" {
-		t.Fatalf("legacy wrapper = %#v, %v", entry, err)
+	if entry, err := exportLegacyBaselineForQuery(ctx, s.reader(), DefaultTenantID, "wrapper-legacy"); err != nil || !entry.Legacy || entry.Status != "ready" {
+		t.Fatalf("legacy entry = %#v, %v", entry, err)
 	}
-	if entry, err := s.exportLegacyBaselineJSON(ctx, "wrapper-json", raw); err != nil || !entry.Legacy || entry.Name != "wrapper-json" {
-		t.Fatalf("legacy JSON wrapper = %#v, %v", entry, err)
+	if entry, err := exportLegacyBaselineJSONForQuery(ctx, s.reader(), DefaultTenantID, "wrapper-json", raw); err != nil || !entry.Legacy || entry.Name != "wrapper-json" {
+		t.Fatalf("legacy JSON entry = %#v, %v", entry, err)
 	}
-	if entry, err := s.exportManagedBaseline(ctx, record); err != nil || entry.JobID != record.ID || entry.Status != "not_ready" {
-		t.Fatalf("managed wrapper = %#v, %v", entry, err)
+	if entry, err := exportManagedBaselineForQuery(ctx, s.reader(), DefaultTenantID, record); err != nil || entry.JobID != record.ID || entry.Status != "not_ready" {
+		t.Fatalf("managed entry = %#v, %v", entry, err)
 	}
 }

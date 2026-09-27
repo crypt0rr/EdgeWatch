@@ -95,7 +95,7 @@ func TestActivateRequestConsumesInviteOnceAndEnforcesPasswordLength(t *testing.T
 		t.Fatal(err)
 	}
 	created := time.Now().UTC()
-	user, err := db.CreateUserWithInvite(ctx, store.User{Username: "invitee", DisplayName: "Invitee", Role: store.RoleViewer, PasswordHash: "!pending", Enabled: false}, hash, created, created.Add(time.Hour), store.AuditEntry{})
+	user, err := db.Tenant(store.DefaultTenantScope()).CreateUserWithInvite(ctx, store.User{Username: "invitee", DisplayName: "Invitee", Role: store.RoleViewer, PasswordHash: "!pending", Enabled: false}, hash, created, created.Add(time.Hour), store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestActivateRequestConsumesInviteOnceAndEnforcesPasswordLength(t *testing.T
 	if _, err := m.ActivateRequest(ctx, request, plain, "another account password"); err == nil {
 		t.Fatal("activation invite was reusable")
 	}
-	activated, err := db.GetUser(ctx, user.ID)
+	activated, err := db.Tenant(store.DefaultTenantScope()).GetUser(ctx, user.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

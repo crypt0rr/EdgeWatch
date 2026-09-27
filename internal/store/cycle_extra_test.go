@@ -18,7 +18,7 @@ import (
 func TestScanCycleUnitIdentityBackfillIsBoundedAndDeterministic(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
 		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
 		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan,
 	})
@@ -54,7 +54,7 @@ func TestScanCycleUnitIdentityBackfillIsBoundedAndDeterministic(t *testing.T) {
 func TestScanCycleExpiryAndDiscardRespectLiveJobLease(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
 		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
 		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(),
 		Plan: plan, ExpiresAt: time.Now().UTC().Add(time.Hour),
@@ -62,28 +62,28 @@ func TestScanCycleExpiryAndDiscardRespectLiveJobLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET expires_at=? WHERE id=?`, sqliteTimestamp(time.Now().UTC().Add(-time.Minute)), cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireJobLease(ctx, job.ID, "cycle-owner", time.Now().UTC().Add(time.Minute)); err != nil {
+	if err := s.System().AcquireJobLease(ctx, job.ID, "cycle-owner", time.Now().UTC().Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if expired, err := s.ExpireScanCycles(ctx, time.Now().UTC()); err != nil || expired != 0 {
+	if expired, err := s.System().ExpireScanCycles(ctx, time.Now().UTC()); err != nil || expired != 0 {
 		t.Fatalf("live cycle expiry = %d, %v", expired, err)
 	}
-	if err := s.DiscardScanCycle(ctx, cycle.ID); !errors.Is(err, ErrJobScanActive) {
+	if err := defaultTenant(s).DiscardScanCycle(ctx, cycle.ID); !errors.Is(err, ErrJobScanActive) {
 		t.Fatalf("live cycle discard error = %v, want ErrJobScanActive", err)
 	}
-	if err := s.ReleaseJobLease(ctx, job.ID, "cycle-owner"); err != nil {
+	if err := s.System().ReleaseJobLease(ctx, job.ID, "cycle-owner"); err != nil {
 		t.Fatal(err)
 	}
-	if expired, err := s.ExpireScanCycles(ctx, time.Now().UTC()); err != nil || expired != 1 {
+	if expired, err := s.System().ExpireScanCycles(ctx, time.Now().UTC()); err != nil || expired != 1 {
 		t.Fatalf("expired cycle cleanup = %d, %v", expired, err)
 	}
-	updated, err := s.GetScanCycle(ctx, cycle.ID)
+	updated, err := defaultTenant(s).GetScanCycle(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestScanCycleExpiryAndDiscardRespectLiveJobLease(t *testing.T) {
 func TestExpireScanCycleEndsLeaseOwnersCycleAfterItsWindow(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	now := time.Now().UTC()
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
 		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
 		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(),
 		Plan: plan, ExpiresAt: now.Add(time.Hour),
@@ -102,34 +102,34 @@ func TestExpireScanCycleEndsLeaseOwnersCycleAfterItsWindow(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, 0); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}}}}); err != nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}}}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.MarkScanCycleStalled(ctx, cycle.ID, "unit failed"); err != nil {
+	if _, err := s.System().MarkScanCycleStalled(ctx, cycle.ID, "unit failed"); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireJobLease(ctx, job.ID, "cycle-owner", now.Add(3*time.Hour)); err != nil {
+	if err := s.System().AcquireJobLease(ctx, job.ID, "cycle-owner", now.Add(3*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 
 	// Inside the resume window the cycle stays stalled.
-	if got, err := s.ExpireScanCycle(ctx, cycle.ID, now); err != nil || got.Status != "stalled" {
+	if got, err := s.System().ExpireScanCycle(ctx, cycle.ID, now); err != nil || got.Status != "stalled" {
 		t.Fatalf("expiry inside the window = %#v, %v", got, err)
 	}
 
 	// After the window, housekeeping still skips the leased job, but the lease
 	// owner can record the expiry.
 	after := now.Add(2 * time.Hour)
-	if expired, err := s.ExpireScanCycles(ctx, after); err != nil || expired != 0 {
+	if expired, err := s.System().ExpireScanCycles(ctx, after); err != nil || expired != 0 {
 		t.Fatalf("housekeeping expiry of leased cycle = %d, %v", expired, err)
 	}
-	got, err := s.ExpireScanCycle(ctx, cycle.ID, after)
+	got, err := s.System().ExpireScanCycle(ctx, cycle.ID, after)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,10 +145,10 @@ func TestExpireScanCycleEndsLeaseOwnersCycleAfterItsWindow(t *testing.T) {
 	}
 
 	// A terminal cycle is returned unchanged.
-	if again, err := s.ExpireScanCycle(ctx, cycle.ID, after.Add(time.Hour)); err != nil || again.Status != "expired" || !again.FinishedAt.Equal(got.FinishedAt) {
+	if again, err := s.System().ExpireScanCycle(ctx, cycle.ID, after.Add(time.Hour)); err != nil || again.Status != "expired" || !again.FinishedAt.Equal(got.FinishedAt) {
 		t.Fatalf("second expiry = %#v, %v", again, err)
 	}
-	if _, err := s.ExpireScanCycle(ctx, "missing-cycle", after); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := s.System().ExpireScanCycle(ctx, "missing-cycle", after); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing cycle expiry error = %v, want ErrNoScanCycle", err)
 	}
 }
@@ -168,28 +168,28 @@ func TestDiscardRunningScanCycleAtomicallyClearsProgress(t *testing.T) {
 			second := plan.Units[0]
 			second.Sequence, second.Ports = 1, "2"
 			plan.Units = append(plan.Units, second)
-			cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+			cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
 				JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
 				ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+			if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 				t.Fatal(err)
 			}
 			for sequence := 0; sequence < tc.completedUnits; sequence++ {
-				if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, sequence); err != nil {
+				if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, sequence); err != nil {
 					t.Fatal(err)
 				}
-				if err := s.CompleteScanCycleUnit(ctx, cycle.ID, sequence, model.Snapshot{}); err != nil {
+				if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, sequence, model.Snapshot{}); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if err := s.DiscardScanCycle(ctx, cycle.ID); err != nil {
+			if err := defaultTenant(s).DiscardScanCycle(ctx, cycle.ID); err != nil {
 				t.Fatal(err)
 			}
-			got, err := s.GetScanCycle(ctx, cycle.ID)
+			got, err := defaultTenant(s).GetScanCycle(ctx, cycle.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -225,23 +225,23 @@ func TestDiscardScanCycleRollsBackWhenTransitionOrCleanupFails(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx, s, job, plan := cycleFixture(t)
 			defer s.Close()
-			cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), Plan: plan})
+			cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), Plan: plan})
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+			if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, 0); err != nil {
+			if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, 0); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err != nil {
+			if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := s.DB.ExecContext(ctx, tc.trigger); err != nil {
 				t.Fatal(err)
 			}
-			discardErr := s.DiscardScanCycle(ctx, cycle.ID)
+			discardErr := defaultTenant(s).DiscardScanCycle(ctx, cycle.ID)
 			if tc.wantErr != nil {
 				if !errors.Is(discardErr, tc.wantErr) {
 					t.Fatalf("discard error = %v, want %v", discardErr, tc.wantErr)
@@ -249,7 +249,7 @@ func TestDiscardScanCycleRollsBackWhenTransitionOrCleanupFails(t *testing.T) {
 			} else if discardErr == nil || !strings.Contains(discardErr.Error(), tc.wantMessage) {
 				t.Fatalf("discard error = %v, want message %q", discardErr, tc.wantMessage)
 			}
-			got, err := s.GetScanCycle(ctx, cycle.ID)
+			got, err := defaultTenant(s).GetScanCycle(ctx, cycle.ID)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -270,7 +270,7 @@ func TestDiscardScanCycleRollsBackWhenTransitionOrCleanupFails(t *testing.T) {
 func TestScanCyclePhaseAndProbeMetadataUsesIndexedColumns(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +295,7 @@ func TestScanCyclePhaseAndProbeMetadataUsesIndexedColumns(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET work_unit_json=? WHERE cycle_id=? AND sequence=0`, []byte("not-json"), cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	discovery, nmap, err := s.ScanCycleProbeTotals(ctx, cycle.ID)
+	discovery, nmap, err := defaultTenant(s).ScanCycleProbeTotals(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,21 +321,21 @@ func TestScanCycleHasScanRequiresPromotedFinalRecord(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			ctx, s, job, plan := cycleFixture(t)
 			defer s.Close()
-			cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+			cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 			if err != nil {
 				t.Fatal(err)
 			}
 			now := time.Now().UTC()
-			if err := s.SaveScan(ctx, model.Scan{ID: "attempt-" + test.name, JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: test.status, CycleID: cycle.ID, CycleStatus: test.cycleStatus, ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+			if err := s.System().SaveScan(ctx, model.Scan{ID: "attempt-" + test.name, JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: test.status, CycleID: cycle.ID, CycleStatus: test.cycleStatus, ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 				t.Fatal(err)
 			}
-			if hasScan, err := s.ScanCycleHasScan(ctx, cycle.ID); err != nil || hasScan {
+			if hasScan, err := defaultTenant(s).ScanCycleHasScan(ctx, cycle.ID); err != nil || hasScan {
 				t.Fatalf("attempt row proved promotion = %v, %v", hasScan, err)
 			}
-			if err := s.SaveScan(ctx, model.Scan{ID: "promoted-" + test.name, JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+			if err := s.System().SaveScan(ctx, model.Scan{ID: "promoted-" + test.name, JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 				t.Fatal(err)
 			}
-			if hasScan, err := s.ScanCycleHasScan(ctx, cycle.ID); err != nil || !hasScan {
+			if hasScan, err := defaultTenant(s).ScanCycleHasScan(ctx, cycle.ID); err != nil || !hasScan {
 				t.Fatalf("promoted row did not prove promotion = %v, %v", hasScan, err)
 			}
 		})
@@ -344,7 +344,7 @@ func TestScanCycleHasScanRequiresPromotedFinalRecord(t *testing.T) {
 
 func TestScanCycleAuxiliaryLifecycleAndFragments(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
 		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
 		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan,
 	})
@@ -352,23 +352,23 @@ func TestScanCycleAuxiliaryLifecycleAndFragments(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := s.GetActiveScanCycle(ctx, "missing-job"); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := defaultTenant(s).GetActiveScanCycle(ctx, "missing-job"); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing active cycle error = %v", err)
 	}
-	if _, err := s.GetLatestScanCycle(ctx, "missing-job"); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := defaultTenant(s).GetLatestScanCycle(ctx, "missing-job"); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing latest cycle error = %v", err)
 	}
-	if _, err := s.GetScanCycle(ctx, "missing-cycle"); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := defaultTenant(s).GetScanCycle(ctx, "missing-cycle"); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing cycle error = %v", err)
 	}
-	if notified, err := s.ScanCycleExpiryNotified(ctx, cycle.ID); err != nil || notified {
+	if notified, err := defaultTenant(s).ScanCycleExpiryNotified(ctx, cycle.ID); err != nil || notified {
 		t.Fatalf("initial expiry notification = %v, %v", notified, err)
 	}
-	if hasScan, err := s.ScanCycleHasScan(ctx, cycle.ID); err != nil || hasScan {
+	if hasScan, err := defaultTenant(s).ScanCycleHasScan(ctx, cycle.ID); err != nil || hasScan {
 		t.Fatalf("initial cycle scan state = %v, %v", hasScan, err)
 	}
 
-	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	summaries, err := defaultTenant(s).ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil || len(summaries) != 1 {
 		t.Fatalf("initial unit summaries = %#v, %v", summaries, err)
 	}
@@ -376,53 +376,53 @@ func TestScanCycleAuxiliaryLifecycleAndFragments(t *testing.T) {
 		t.Fatalf("initial unit summary = %#v", summaries[0])
 	}
 
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if active, err := s.GetActiveScanCycle(ctx, job.ID); err != nil || active.ID != cycle.ID || active.Status != "running" {
+	if active, err := defaultTenant(s).GetActiveScanCycle(ctx, job.ID); err != nil || active.ID != cycle.ID || active.Status != "running" {
 		t.Fatalf("active cycle = %#v, %v", active, err)
 	}
-	if latest, err := s.GetLatestScanCycle(ctx, job.ID); err != nil || latest.ID != cycle.ID {
+	if latest, err := defaultTenant(s).GetLatestScanCycle(ctx, job.ID); err != nil || latest.ID != cycle.ID {
 		t.Fatalf("latest cycle = %#v, %v", latest, err)
 	}
 
-	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp"}}}); err != nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp"}}}); err != nil {
 		t.Fatal(err)
 	}
-	if fragmentsPlan, fragments, err := s.LoadScanCycleFragments(ctx, cycle.ID); err != nil || len(fragmentsPlan.Units) != 1 || len(fragments) != 1 {
+	if fragmentsPlan, fragments, err := s.System().LoadScanCycleFragments(ctx, cycle.ID); err != nil || len(fragmentsPlan.Units) != 1 || len(fragments) != 1 {
 		t.Fatalf("cycle fragments = %#v, %#v, %v", fragmentsPlan, fragments, err)
 	}
-	if _, err := s.CompleteScanCycle(ctx, cycle.ID); err != nil {
+	if _, err := s.System().CompleteScanCycle(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GetActiveScanCycle(ctx, job.ID); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := defaultTenant(s).GetActiveScanCycle(ctx, job.ID); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("completed cycle remained active: %v", err)
 	}
-	if _, err := s.NextScanCycleUnit(ctx, cycle.ID); !errors.Is(err, ErrNoPendingUnit) {
+	if _, err := s.System().NextScanCycleUnit(ctx, cycle.ID); !errors.Is(err, ErrNoPendingUnit) {
 		t.Fatalf("completed cycle next unit error = %v", err)
 	}
 
 	now := time.Now().UTC()
-	if err := s.SaveScan(ctx, model.Scan{ID: "cycle-timeout", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "timed_out", CycleID: cycle.ID, CycleStatus: "expired", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "cycle-timeout", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "timed_out", CycleID: cycle.ID, CycleStatus: "expired", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
-	if hasScan, err := s.ScanCycleHasScan(ctx, cycle.ID); err != nil || hasScan {
+	if hasScan, err := defaultTenant(s).ScanCycleHasScan(ctx, cycle.ID); err != nil || hasScan {
 		t.Fatalf("attempt scan incorrectly proved promotion = %v, %v", hasScan, err)
 	}
-	if notified, err := s.ScanCycleExpiryNotified(ctx, cycle.ID); err != nil || !notified {
+	if notified, err := defaultTenant(s).ScanCycleExpiryNotified(ctx, cycle.ID); err != nil || !notified {
 		t.Fatalf("expiry notification after timeout = %v, %v", notified, err)
 	}
-	if err := s.SaveScan(ctx, model.Scan{ID: "cycle-final", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "incomplete", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "cycle-final", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "incomplete", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
-	if hasScan, err := s.ScanCycleHasScan(ctx, cycle.ID); err != nil || !hasScan {
+	if hasScan, err := defaultTenant(s).ScanCycleHasScan(ctx, cycle.ID); err != nil || !hasScan {
 		t.Fatalf("promoted cycle scan state = %v, %v", hasScan, err)
 	}
 }
@@ -432,54 +432,54 @@ func TestReconcileNaabuDiscoveryAddsDeterministicEnrichmentAndUDP(t *testing.T) 
 	s := openTestStore(t)
 	defer s.Close()
 	jobValue := config.NormalizeJob(config.Job{Name: "naabu-cycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"edge.example"}, MaxExpandedHosts: 1, TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{AddressBatchSize: 1}}, UDP: &config.Protocol{Ports: "53"}})
-	job, err := s.CreateJob(ctx, jobValue)
+	job, err := defaultTenant(s).CreateJob(ctx, jobValue)
 	if err != nil {
 		t.Fatal(err)
 	}
 	plan := scanner.WorkPlan{Job: job.Job, Targets: []scanner.ResolvedTarget{{Name: "edge.example", ConfiguredTarget: "edge.example", Addresses: []string{"192.0.2.1"}, Aggregate: true, Hostname: true}}, DNS: map[string][]string{"edge.example": {"192.0.2.1"}}, Scopes: []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "1-65535"}, {Target: "edge.example", Protocol: "udp", Ports: "53"}}, Units: []scanner.WorkUnit{{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Targets: []scanner.ResolvedTarget{{Name: "edge.example", ConfiguredTarget: "edge.example", Addresses: []string{"192.0.2.1"}, Aggregate: true, Hostname: true}}, Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535}}, TotalUnits: 1, TotalProbes: 65535}
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
 		t.Fatal(err)
 	}
 	fragment := model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", DiscoveryEngine: "naabu", DiscoveredPorts: []model.PortObservation{{Port: 22, State: "open", Verification: "discovered"}, {Port: 443, State: "open", Verification: "discovered"}}}}}}}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+	if err := s.System().ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := s.GetScanCycle(ctx, cycle.ID)
+	updated, err := defaultTenant(s).GetScanCycle(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if updated.TotalUnits != 3 || updated.TotalProbes <= 65535 {
 		t.Fatalf("dynamic phase expansion = units %d probes %d", updated.TotalUnits, updated.TotalProbes)
 	}
-	discoveryProbes, nmapProbes, err := s.ScanCycleProbeTotals(ctx, cycle.ID)
+	discoveryProbes, nmapProbes, err := defaultTenant(s).ScanCycleProbeTotals(ctx, cycle.ID)
 	if err != nil || discoveryProbes != 65535 || nmapProbes <= 0 {
 		t.Fatalf("probe categories = discovery %d nmap %d error %v", discoveryProbes, nmapProbes, err)
 	}
-	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	summaries, err := defaultTenant(s).ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil || len(summaries) != 3 {
 		t.Fatalf("expanded summaries = %#v, %v", summaries, err)
 	}
 	if summaries[1].Phase != "enrichment" || summaries[1].Engine != config.EngineNmap || summaries[1].Ports != "22,443" || summaries[2].Phase != "udp" {
 		t.Fatalf("expanded phase order = %#v", summaries)
 	}
-	if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+	if err := s.System().ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	again, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	again, err := defaultTenant(s).ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil || len(again) != 3 {
 		t.Fatalf("reconciliation duplicated units: %#v, %v", again, err)
 	}
@@ -494,7 +494,7 @@ func TestReconcileNaabuDiscoveryIncludesBaselineExpectedPorts(t *testing.T) {
 		Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
 		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{AddressBatchSize: 1}},
 	})
-	job, err := s.CreateJob(ctx, jobValue)
+	job, err := defaultTenant(s).CreateJob(ctx, jobValue)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,7 @@ func TestReconcileNaabuDiscoveryIncludesBaselineExpectedPorts(t *testing.T) {
 		Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}},
 		Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 443, State: "open"}}}},
 	}
-	if _, err := s.UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = &baseline
 		state.BaselineScanID = "baseline"
 		state.BaselineConfigHash = job.Job.SecurityHash()
@@ -517,30 +517,30 @@ func TestReconcileNaabuDiscoveryIncludesBaselineExpectedPorts(t *testing.T) {
 		Units:      []scanner.WorkUnit{{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Targets: []scanner.ResolvedTarget{target}, Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535}},
 		TotalUnits: 1, TotalProbes: 65535,
 	}
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
 		t.Fatal(err)
 	}
 	// Naabu sees only 22 in this run. The active baseline still expects 443,
 	// so resumable reconciliation must create one Nmap unit for both ports.
 	fragment := model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.1", Protocols: []model.ProtocolObservation{{Protocol: "tcp", DiscoveryEngine: "naabu", DiscoveredPorts: []model.PortObservation{{Port: 22, State: "open", Verification: "discovered"}}}}}}}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+	if err := s.System().ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	summaries, err := defaultTenant(s).ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -564,7 +564,7 @@ func TestReconcileNaabuDiscoveryIncludesTrackedChangePorts(t *testing.T) {
 		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{AddressBatchSize: 16}},
 		UDP: &config.Protocol{Ports: "53"},
 	})
-	job, err := s.CreateJob(ctx, jobValue)
+	job, err := defaultTenant(s).CreateJob(ctx, jobValue)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -575,7 +575,7 @@ func TestReconcileNaabuDiscoveryIncludesTrackedChangePorts(t *testing.T) {
 		Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-65535"}, {Target: "edge.example", Protocol: "tcp", Ports: "1-65535"}},
 		Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 443, State: "open"}}}},
 	}
-	if _, err := s.UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = &baseline
 		state.BaselineScanID = "baseline"
 		state.BaselineConfigHash = job.Job.SecurityHash()
@@ -610,18 +610,18 @@ func TestReconcileNaabuDiscoveryIncludesTrackedChangePorts(t *testing.T) {
 		Units:      []scanner.WorkUnit{{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Targets: targets, Addresses: addresses, Ports: "1-65535", PortCount: 65535, Probes: 3 * 65535}},
 		TotalUnits: 1, TotalProbes: 3 * 65535,
 	}
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
 		t.Fatal(err)
 	}
 	// Naabu misses every tracked port in this run; it only reports 22.
@@ -633,10 +633,10 @@ func TestReconcileNaabuDiscoveryIncludesTrackedChangePorts(t *testing.T) {
 		return model.HostObservation{Address: address, Protocols: []model.ProtocolObservation{protocol}}
 	}
 	fragment := model.Snapshot{Hosts: []model.HostObservation{discovered("192.0.2.1", 22), discovered("192.0.2.7", 22), discovered("192.0.2.8")}}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+	if err := s.System().ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
 	rows, err := s.DB.QueryContext(ctx, `SELECT work_unit_json FROM scan_cycle_units WHERE cycle_id=? AND phase='enrichment' ORDER BY sequence`, cycle.ID)
@@ -690,7 +690,7 @@ func TestReconcileNaabuDiscoveryChunksLargePortSets(t *testing.T) {
 		Targets: []string{"192.0.2.1"}, MaxExpandedHosts: 1,
 		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", ServiceDetection: true, Naabu: &config.NaabuOptions{AddressBatchSize: 1}},
 	})
-	job, err := s.CreateJob(ctx, jobValue)
+	job, err := defaultTenant(s).CreateJob(ctx, jobValue)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -705,21 +705,21 @@ func TestReconcileNaabuDiscoveryChunksLargePortSets(t *testing.T) {
 		}},
 		TotalUnits: 1, TotalProbes: 65535,
 	}
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
 		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
 		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
 		t.Fatal(err)
 	}
 	discovered := make([]model.PortObservation, 5000)
@@ -732,13 +732,13 @@ func TestReconcileNaabuDiscoveryChunksLargePortSets(t *testing.T) {
 			Protocol: "tcp", DiscoveryEngine: "naabu", DiscoveredPorts: discovered,
 		}},
 	}}}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+	if err := s.System().ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	summaries, err := defaultTenant(s).ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -764,7 +764,7 @@ func TestReconcileNaabuDiscoveryIsIncremental(t *testing.T) {
 		Targets: []string{"192.0.2.1", "192.0.2.2"}, MaxExpandedHosts: 2,
 		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{AddressBatchSize: 1}},
 	})
-	job, err := s.CreateJob(ctx, jobValue)
+	job, err := defaultTenant(s).CreateJob(ctx, jobValue)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -781,7 +781,7 @@ func TestReconcileNaabuDiscoveryIsIncremental(t *testing.T) {
 		},
 		TotalUnits: 2, TotalProbes: 131070,
 	}
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -789,23 +789,23 @@ func TestReconcileNaabuDiscoveryIsIncremental(t *testing.T) {
 	if err := s.DB.QueryRowContext(ctx, `SELECT plan_json FROM scan_cycles WHERE id=?`, cycle.ID).Scan(&planBefore); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
 	completeDiscovery := func(port, sequence int, address string) {
 		t.Helper()
-		unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+		unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 		if err != nil || unit.Sequence != sequence {
 			t.Fatalf("next discovery unit = %#v, %v", unit, err)
 		}
-		if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, sequence); err != nil {
+		if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, sequence); err != nil {
 			t.Fatal(err)
 		}
 		fragment := model.Snapshot{Hosts: []model.HostObservation{{Address: address, Protocols: []model.ProtocolObservation{{Protocol: "tcp", DiscoveryEngine: "naabu", DiscoveredPorts: []model.PortObservation{{Port: port, State: "open", Verification: "discovered"}}}}}}}
-		if err := s.CompleteScanCycleUnit(ctx, cycle.ID, sequence, fragment); err != nil {
+		if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, sequence, fragment); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+		if err := s.System().ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -824,7 +824,7 @@ func TestReconcileNaabuDiscoveryIsIncremental(t *testing.T) {
 	if !bytes.Equal(planBefore, planAfter) {
 		t.Fatal("incremental reconciliation rewrote the persisted plan blob")
 	}
-	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	summaries, err := defaultTenant(s).ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil || len(summaries) != 3 {
 		t.Fatalf("first incremental reconciliation = %#v, %v", summaries, err)
 	}
@@ -835,17 +835,17 @@ func TestReconcileNaabuDiscoveryIsIncremental(t *testing.T) {
 	if checkpoints != 2 {
 		t.Fatalf("checkpoint count after second batch = %d, want 2", checkpoints)
 	}
-	summaries, err = s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	summaries, err = defaultTenant(s).ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil || len(summaries) != 4 {
 		t.Fatalf("second incremental reconciliation = %#v, %v", summaries, err)
 	}
 	if summaries[2].Ports != "22" || summaries[3].Ports != "443" {
 		t.Fatalf("incremental enrichment scopes = %#v", summaries)
 	}
-	if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+	if err := s.System().ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	again, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	again, err := defaultTenant(s).ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil || len(again) != 4 {
 		t.Fatalf("reconciliation duplicated units: %#v, %v", again, err)
 	}
@@ -860,7 +860,7 @@ func TestReconcileNaabuDiscoveryRepairsSplitPlanCounters(t *testing.T) {
 		Targets: []string{"192.0.2.1", "192.0.2.2"}, MaxExpandedHosts: 2,
 		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{AddressBatchSize: 1}},
 	})
-	job, err := s.CreateJob(ctx, jobValue)
+	job, err := defaultTenant(s).CreateJob(ctx, jobValue)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -874,18 +874,18 @@ func TestReconcileNaabuDiscoveryRepairsSplitPlanCounters(t *testing.T) {
 		Units:      []scanner.WorkUnit{{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Targets: targets[:1], Addresses: []string{"192.0.2.1"}, Ports: "1-65535", PortCount: 65535, Probes: 65535}},
 		TotalUnits: 1, TotalProbes: 65535,
 	}
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
 		t.Fatal(err)
 	}
 	first := unit.Unit
@@ -894,20 +894,20 @@ func TestReconcileNaabuDiscoveryRepairsSplitPlanCounters(t *testing.T) {
 	second := unit.Unit
 	second.Addresses = []string{"192.0.2.2"}
 	second.Targets = targets[1:]
-	if err := s.SplitScanCycleUnit(ctx, cycle.ID, unit.Sequence, first, second, "split for test"); err != nil {
+	if err := s.System().SplitScanCycleUnit(ctx, cycle.ID, unit.Sequence, first, second, "split for test"); err != nil {
 		t.Fatal(err)
 	}
 
 	complete := func(sequence int, address string, port int) {
 		t.Helper()
-		if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, sequence); err != nil {
+		if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, sequence); err != nil {
 			t.Fatal(err)
 		}
 		fragment := model.Snapshot{Hosts: []model.HostObservation{{Address: address, Protocols: []model.ProtocolObservation{{Protocol: "tcp", DiscoveryEngine: "naabu", DiscoveredPorts: []model.PortObservation{{Port: port, State: "open", Verification: "discovered"}}}}}}}
-		if err := s.CompleteScanCycleUnit(ctx, cycle.ID, sequence, fragment); err != nil {
+		if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, sequence, fragment); err != nil {
 			t.Fatal(err)
 		}
-		if err := s.ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+		if err := s.System().ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -915,7 +915,7 @@ func TestReconcileNaabuDiscoveryRepairsSplitPlanCounters(t *testing.T) {
 	// The split leaves plan_json with one unit while the durable table has two.
 	// Reconciliation must preserve the durable counters before adding enrichment.
 	complete(0, "192.0.2.1", 22)
-	updated, err := s.GetScanCycle(ctx, cycle.ID)
+	updated, err := defaultTenant(s).GetScanCycle(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -923,7 +923,7 @@ func TestReconcileNaabuDiscoveryRepairsSplitPlanCounters(t *testing.T) {
 		t.Fatalf("split counters after first discovery = total=%d plan=%d probes=%d", updated.TotalUnits, updated.Plan.TotalUnits, updated.TotalProbes)
 	}
 	complete(1, "192.0.2.2", 443)
-	updated, err = s.GetScanCycle(ctx, cycle.ID)
+	updated, err = defaultTenant(s).GetScanCycle(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -932,36 +932,36 @@ func TestReconcileNaabuDiscoveryRepairsSplitPlanCounters(t *testing.T) {
 	}
 	complete(2, "192.0.2.1", 22)
 	complete(3, "192.0.2.2", 443)
-	if _, err := s.CompleteScanCycle(ctx, cycle.ID); err != nil {
+	if _, err := s.System().CompleteScanCycle(ctx, cycle.ID); err != nil {
 		t.Fatalf("completed split cycle = %v", err)
 	}
 }
 
 func TestScanCycleRetrySplitStallAndDiscard(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
 		t.Fatal(err)
 	}
 	longError := strings.Repeat("x", 600)
-	if err := s.RetryScanCycleUnit(ctx, cycle.ID, unit.Sequence, longError); err != nil {
+	if err := s.System().RetryScanCycleUnit(ctx, cycle.ID, unit.Sequence, longError); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	pending, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil || pending.LastError != strings.Repeat("x", 500)+"…" {
 		t.Fatalf("retried unit = %#v, %v", pending, err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, pending.Sequence); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, pending.Sequence); err != nil {
 		t.Fatal(err)
 	}
 	first := pending.Unit
@@ -970,97 +970,97 @@ func TestScanCycleRetrySplitStallAndDiscard(t *testing.T) {
 	second := pending.Unit
 	second.Ports = "2"
 	second.PortCount = 1
-	if err := s.SplitScanCycleUnit(ctx, cycle.ID, pending.Sequence, first, second, "split after timeout"); err != nil {
+	if err := s.System().SplitScanCycleUnit(ctx, cycle.ID, pending.Sequence, first, second, "split after timeout"); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := s.GetScanCycle(ctx, cycle.ID)
+	updated, err := defaultTenant(s).GetScanCycle(ctx, cycle.ID)
 	if err != nil || updated.TotalUnits != 2 || updated.LastError != "split after timeout" {
 		t.Fatalf("split cycle = %#v, %v", updated, err)
 	}
-	summaries, err := s.ListScanCycleUnitSummaries(ctx, cycle.ID)
+	summaries, err := defaultTenant(s).ListScanCycleUnitSummaries(ctx, cycle.ID)
 	if err != nil || len(summaries) != 2 || summaries[1].Sequence != 1 {
 		t.Fatalf("split summaries = %#v, %v", summaries, err)
 	}
 
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, 0); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err != nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, 1); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, 1); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, 1, model.Snapshot{}); err != nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, 1, model.Snapshot{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CompleteScanCycle(ctx, cycle.ID); err != nil {
+	if _, err := s.System().CompleteScanCycle(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.RetryScanCycleUnit(ctx, cycle.ID, 0, "late retry"); !errors.Is(err, ErrCycleNotResumable) {
+	if err := s.System().RetryScanCycleUnit(ctx, cycle.ID, 0, "late retry"); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("late retry error = %v", err)
 	}
 
-	secondCycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	secondCycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, secondCycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, secondCycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if stalled, err := s.MarkScanCycleStalled(ctx, secondCycle.ID, "no progress"); err != nil || stalled.Status != "stalled" {
+	if stalled, err := s.System().MarkScanCycleStalled(ctx, secondCycle.ID, "no progress"); err != nil || stalled.Status != "stalled" {
 		t.Fatalf("stalled cycle = %#v, %v", stalled, err)
 	}
-	if resumed, err := s.StartScanCycleAttempt(ctx, secondCycle.ID); err != nil || resumed.Status != "running" || resumed.AttemptCount != 2 {
+	if resumed, err := s.System().StartScanCycleAttempt(ctx, secondCycle.ID); err != nil || resumed.Status != "running" || resumed.AttemptCount != 2 {
 		t.Fatalf("resumed stalled cycle = %#v, %v", resumed, err)
 	}
-	if paused, err := s.PauseScanCycle(ctx, secondCycle.ID, true, "paused again"); err != nil || paused.Status != "paused" || paused.NoProgressAttempts != 1 {
+	if paused, err := s.System().PauseScanCycle(ctx, secondCycle.ID, true, "paused again"); err != nil || paused.Status != "paused" || paused.NoProgressAttempts != 1 {
 		t.Fatalf("paused cycle = %#v, %v", paused, err)
 	}
-	if err := s.DiscardScanCycle(ctx, secondCycle.ID); err != nil {
+	if err := defaultTenant(s).DiscardScanCycle(ctx, secondCycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.GetActiveScanCycle(ctx, job.ID); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := defaultTenant(s).GetActiveScanCycle(ctx, job.ID); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("discarded cycle remained active: %v", err)
 	}
-	if err := s.DiscardScanCycle(ctx, secondCycle.ID); !errors.Is(err, ErrCycleNotResumable) {
+	if err := defaultTenant(s).DiscardScanCycle(ctx, secondCycle.ID); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("discarded cycle second discard error = %v", err)
 	}
 }
 
 func TestScanCycleValidationAndMissingOperations(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	if _, err := s.CreateScanCycle(ctx, ScanCycleRecord{Plan: plan}); err == nil {
+	if _, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{Plan: plan}); err == nil {
 		t.Fatal("cycle without job was accepted")
 	}
-	if _, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name}); err == nil {
+	if _, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name}); err == nil {
 		t.Fatal("cycle without units was accepted")
 	}
-	if _, err := s.NextScanCycleUnit(ctx, "missing"); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := s.System().NextScanCycleUnit(ctx, "missing"); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing next unit error = %v", err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, "missing", 0); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, "missing", 0); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing claim error = %v", err)
 	}
-	if err := s.RetryScanCycleUnit(ctx, "missing", 0, "error"); !errors.Is(err, ErrNoScanCycle) {
+	if err := s.System().RetryScanCycleUnit(ctx, "missing", 0, "error"); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing retry error = %v", err)
 	}
-	if err := s.SplitScanCycleUnit(ctx, "missing", 0, scanner.WorkUnit{}, scanner.WorkUnit{}, "error"); err == nil {
+	if err := s.System().SplitScanCycleUnit(ctx, "missing", 0, scanner.WorkUnit{}, scanner.WorkUnit{}, "error"); err == nil {
 		t.Fatal("missing split unexpectedly succeeded")
 	}
-	if err := s.DiscardScanCycle(ctx, "missing"); !errors.Is(err, ErrNoScanCycle) {
+	if err := defaultTenant(s).DiscardScanCycle(ctx, "missing"); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing discard error = %v", err)
 	}
-	if _, err := s.MarkScanCycleStalled(ctx, "missing", "error"); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := s.System().MarkScanCycleStalled(ctx, "missing", "error"); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing stalled lookup error = %v", err)
 	}
-	if _, err := s.PauseScanCycle(ctx, "missing", false, "error"); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := s.System().PauseScanCycle(ctx, "missing", false, "error"); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing pause lookup error = %v", err)
 	}
-	if _, err := s.CompleteScanCycle(ctx, "missing"); !errors.Is(err, ErrNoScanCycle) {
+	if _, err := s.System().CompleteScanCycle(ctx, "missing"); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing completion error = %v", err)
 	}
-	if _, _, err := s.LoadScanCycleFragments(ctx, "missing"); !errors.Is(err, ErrNoScanCycle) {
+	if _, _, err := s.System().LoadScanCycleFragments(ctx, "missing"); !errors.Is(err, ErrNoScanCycle) {
 		t.Fatalf("missing fragments error = %v", err)
 	}
 	if trimCycleError(strings.Repeat("z", 600)) != strings.Repeat("z", 500)+"…" {

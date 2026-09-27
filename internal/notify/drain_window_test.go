@@ -85,7 +85,7 @@ func TestDrainWithinLetsInFlightSendsFinishAfterDispatchWindow(t *testing.T) {
 	if charged != 0 || claimed != 0 {
 		t.Fatalf("pass window charged a budget or kept a claim: charged=%d claimed=%d", charged, claimed)
 	}
-	health, err := db.ListDeliveryHealth(ctx)
+	health, err := db.Tenant(store.DefaultTenantScope()).ListDeliveryHealth(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

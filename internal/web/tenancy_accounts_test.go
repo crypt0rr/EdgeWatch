@@ -307,7 +307,7 @@ func TestStatusUsesTheSessionTenant(t *testing.T) {
 	}
 
 	own := f.statusBody(t, "own")
-	deployment, err := f.db.DeploymentTelemetry(ctx)
+	deployment, err := f.db.System().DeploymentTelemetry(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

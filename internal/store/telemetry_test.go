@@ -29,7 +29,7 @@ func TestDeploymentTelemetryReportsBoundedCounts(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `INSERT INTO outbox(destination,payload_json,attempts,next_at) VALUES(?,?,?,?)`, "failed", []byte(`{"failed":true}`), deliveryMaxAttempts, now); err != nil {
 		t.Fatal(err)
 	}
-	telemetry, err := s.DeploymentTelemetry(ctx)
+	telemetry, err := s.System().DeploymentTelemetry(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

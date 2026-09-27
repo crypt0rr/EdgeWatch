@@ -49,7 +49,7 @@ func (s *Server) applySelectedScannerProfile(ctx context.Context, ts *store.Tena
 	}
 	profile, err := ts.GetScannerProfile(ctx, job.TCP.ProfileID)
 	if errors.Is(err, store.ErrNotFound) {
-		return invalidProfileSelection("selected scanner profile was not found")
+		return store.ErrScannerProfileNotFound
 	}
 	if err != nil {
 		return err

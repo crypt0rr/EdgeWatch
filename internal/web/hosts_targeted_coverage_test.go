@@ -31,16 +31,16 @@ func TestExpectedHostAndPublishedHostCompatibilityBranches(t *testing.T) {
 	}
 	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	job := config.NormalizeJob(config.Job{Name: "targeted-hosts", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"198.51.100.10"}, TCP: &config.Protocol{Ports: "22,443", Mode: "connect"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	scan := model.Scan{ID: "targeted-baseline", JobID: record.ID, JobRevision: record.Revision, Job: job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{{Address: "198.51.100.10", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "22,443", ScannedPortCount: 2, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}}}}
-	if err := db.SaveScan(ctx, scan); err != nil {
+	if err := db.System().SaveScan(ctx, scan); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ApproveRuntime(ctx, record.ID, record.Job.Name, scan); err != nil {
+	if _, err := defaultTenant(db).ApproveRuntime(ctx, record.ID, record.Job.Name, scan); err != nil {
 		t.Fatal(err)
 	}
 
@@ -57,7 +57,7 @@ func TestExpectedHostAndPublishedHostCompatibilityBranches(t *testing.T) {
 	// Mark the runtime baseline as an accepted overlay. The indexed projection
 	// is preferred, then the JSON baseline is used as the legacy fallback when
 	// the projection is absent.
-	if _, err := db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineModified = true
 		return nil, nil
 	}); err != nil {
@@ -75,7 +75,7 @@ func TestExpectedHostAndPublishedHostCompatibilityBranches(t *testing.T) {
 
 	// With no overlay, remove the indexed source rows to exercise the pre-index
 	// runtime snapshot fallback and its missing-address result.
-	if _, err := db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.BaselineModified = false
 		return nil, nil
 	}); err != nil {
@@ -96,7 +96,7 @@ func TestExpectedHostAndPublishedHostCompatibilityBranches(t *testing.T) {
 		t.Fatalf("legacy fallback for unindexed source = %#v, %#v, %v", host, summary, err)
 	}
 	legacy := model.Scan{ID: "targeted-legacy", JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, StartedAt: now.Add(-time.Minute), FinishedAt: now.Add(-time.Minute), Status: "success", Snapshot: model.Snapshot{Units: []model.Unit{{Target: "198.51.100.10", Protocol: "tcp", Addresses: []string{"198.51.100.10"}, Ports: []model.PortState{{Port: 22, State: "open"}}}}}}
-	if err := db.SaveScan(ctx, legacy); err != nil {
+	if err := db.System().SaveScan(ctx, legacy); err != nil {
 		t.Fatal(err)
 	}
 	if host, summary, err := server.latestLegacyPublicHost(ctx, record.ID, "198.51.100.10"); err != nil || host.Host.Address != "198.51.100.10" || summary.ID == "" {

@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+// defaultTenant returns the store of the default tenant, which owns every
+// job, scan and destination that a test creates without naming a tenant.
+func defaultTenant(s *Store) *TenantStore { return s.Tenant(DefaultTenantScope()) }
+
 // tenantFixture is a database with two tenants that look alike: each has an
 // active job named "edge" and an archived job named "edge-archived", and
 // the scan of each "edge" job found the same addresses; only the changes and
@@ -85,11 +89,11 @@ func buildTenantFixture(t *testing.T) (string, tenantFixtureIDs) {
 	t.Helper()
 	ctx := context.Background()
 	s := openTestStore(t)
-	jobA, err := s.CreateJob(ctx, testJob("edge"))
+	jobA, err := defaultTenant(s).CreateJob(ctx, testJob("edge"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	archivedA, err := s.CreateJob(ctx, testJob("edge-archived"))
+	archivedA, err := defaultTenant(s).CreateJob(ctx, testJob("edge-archived"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,28 +202,45 @@ var tenantStoreLeakCases = map[string]tenantLeakCase{
 	}},
 }
 
-// Every exported TenantStore method has a leak case, and every leak case
-// names a method, so a method cannot move to TenantStore without one.
-func TestEveryTenantStoreMethodHasALeakCase(t *testing.T) {
-	methods := reflect.TypeOf(&TenantStore{})
-	if methods.NumMethod() == 0 {
-		t.Fatal("TenantStore has no exported methods")
+// Every exported method of the tenant-scoped stores, TenantStore and
+// PublicStore, has a leak case, and every leak case names such a method, so
+// a method cannot reach tenant data without one.
+func TestEveryScopedStoreMethodHasALeakCase(t *testing.T) {
+	publicCases := make(map[string]bool, len(publicStoreCases))
+	for name, run := range publicStoreCases {
+		publicCases[name] = run != nil
 	}
-	for i := 0; i < methods.NumMethod(); i++ {
-		if name := methods.Method(i).Name; tenantStoreLeakCases[name].run == nil {
-			t.Errorf("TenantStore.%s has no leak case; add one to tenantStoreLeakCases that shows tenant B cannot reach tenant A's rows", name)
+	tenantCases := make(map[string]bool, len(tenantStoreLeakCases))
+	for name, leak := range tenantStoreLeakCases {
+		tenantCases[name] = leak.run != nil
+	}
+	for _, check := range []struct {
+		store    reflect.Type
+		registry string
+		cases    map[string]bool
+	}{
+		{reflect.TypeOf(&TenantStore{}), "tenantStoreLeakCases", tenantCases},
+		{reflect.TypeOf(&PublicStore{}), "publicStoreCases", publicCases},
+	} {
+		name := check.store.Elem().Name()
+		if check.store.NumMethod() == 0 {
+			t.Errorf("%s has no exported methods", name)
 		}
-	}
-	for name := range tenantStoreLeakCases {
-		if _, ok := methods.MethodByName(name); !ok {
-			t.Errorf("tenantStoreLeakCases has a case for %s, which is not an exported TenantStore method", name)
+		for i := 0; i < check.store.NumMethod(); i++ {
+			if method := check.store.Method(i).Name; !check.cases[method] {
+				t.Errorf("%s.%s has no leak case; add one to %s that shows tenant B cannot reach tenant A's rows", name, method, check.registry)
+			}
+		}
+		for method := range check.cases {
+			if _, ok := check.store.MethodByName(method); !ok {
+				t.Errorf("%s has a case for %s, which is not an exported %s method", check.registry, method, name)
+			}
 		}
 	}
 }
 
 // TestTenantStoreIsolation runs every leak case, then checks that every
-// TenantStore method refuses a store without a valid scope and that the
-// deprecated Store wrappers read only the default tenant. The read-only
+// TenantStore method refuses a store without a valid scope. The read-only
 // checks share one copy of the fixture.
 func TestTenantStoreIsolation(t *testing.T) {
 	shared := newTenantFixture(t)
@@ -239,7 +260,6 @@ func TestTenantStoreIsolation(t *testing.T) {
 		})
 	}
 	t.Run("invalid scope", func(t *testing.T) { assertTenantStoreRefusesInvalidScopes(t, shared) })
-	t.Run("deprecated wrappers", func(t *testing.T) { assertDeprecatedJobReadsUseTheDefaultTenant(t, shared) })
 }
 
 // assertTenantStoreRefusesInvalidScopes calls every TenantStore method on a
@@ -283,26 +303,6 @@ func assertTenantStoreRefusesInvalidScopes(t *testing.T, f tenantFixture) {
 				}
 			}
 		}
-	}
-}
-
-// assertDeprecatedJobReadsUseTheDefaultTenant checks that the deprecated
-// Store wrappers read only the default tenant.
-func assertDeprecatedJobReadsUseTheDefaultTenant(t *testing.T, f tenantFixture) {
-	t.Helper()
-	ctx := context.Background()
-	if _, err := f.store.GetJob(ctx, f.jobB); !errors.Is(err, ErrNotFound) {
-		t.Errorf("GetJob read tenant B's job: %v", err)
-	}
-	if record, err := f.store.GetJobByName(ctx, "edge"); err != nil || record.ID != f.jobA {
-		t.Errorf("GetJobByName = %s, %v; want %s", record.ID, err, f.jobA)
-	}
-	records, err := f.store.ListJobs(ctx, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got, want := jobIDs(records), sortedIDs(f.jobA, f.archivedA); !reflect.DeepEqual(got, want) {
-		t.Errorf("ListJobs = %v, want %v", got, want)
 	}
 }
 

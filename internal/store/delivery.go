@@ -32,12 +32,6 @@ func ensureMaps(s *model.JobState) {
 	}
 }
 
-// UpdateState changes a config.yaml job's state through
-// SystemStore.UpdateState, until its callers use Store.System themselves.
-func (s *Store) UpdateState(ctx context.Context, job string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {
-	return s.System().UpdateState(ctx, job, fn)
-}
-
 // UpdateState applies fn to the stored state of the config.yaml job with the
 // given name and records the events it returns, in one transaction. Those
 // jobs keep their state in job_states, and their events belong to the
@@ -87,12 +81,6 @@ func (ss *SystemStore) UpdateState(ctx context.Context, job string, fn func(*mod
 		return nil, err
 	}
 	return events, nil
-}
-
-// QueueEvent queues a delivery through SystemStore.QueueEvent, until its
-// callers use Store.System themselves.
-func (s *Store) QueueEvent(ctx context.Context, destination string, event model.Event) error {
-	return s.System().QueueEvent(ctx, destination, event)
 }
 
 // QueueEvent queues the delivery of an event to one destination. The
@@ -151,12 +139,6 @@ type Delivery struct {
 	TenantID string
 }
 
-// DueDeliveries claims due deliveries through SystemStore.DueDeliveries,
-// until its callers use Store.System themselves.
-func (s *Store) DueDeliveries(ctx context.Context, limit int) ([]Delivery, error) {
-	return s.System().DueDeliveries(ctx, limit)
-}
-
 // DueDeliveries claims up to limit due deliveries for a new owner.
 func (ss *SystemStore) DueDeliveries(ctx context.Context, limit int) ([]Delivery, error) {
 	return ss.ClaimDueDeliveries(ctx, limit, uuid.NewString())
@@ -194,26 +176,12 @@ const (
 // and is never held.
 const heldDeliverySQL = `(due.tenant_id IS NULL OR EXISTS (SELECT 1 FROM tenants WHERE tenants.id=due.tenant_id AND tenants.state='` + TenantStateActive + `'))`
 
-// ClaimDueDeliveries claims due deliveries through
-// SystemStore.ClaimDueDeliveries, until its callers use Store.System
-// themselves.
-func (s *Store) ClaimDueDeliveries(ctx context.Context, limit int, owner string) ([]Delivery, error) {
-	return s.System().ClaimDueDeliveries(ctx, limit, owner)
-}
-
 // ClaimDueDeliveries atomically leases due outbox rows to one drain owner.
 // Expired claims can be recovered by a later process, while active claims are
 // invisible to concurrent drains until the owner records a result. The rows
 // of a tenant that is not active are held, as heldDeliverySQL describes.
 func (ss *SystemStore) ClaimDueDeliveries(ctx context.Context, limit int, owner string) ([]Delivery, error) {
 	return ss.claimDueDeliveries(ctx, limit, owner, nil)
-}
-
-// ClaimDueDeliveriesExcluding claims due deliveries through
-// SystemStore.ClaimDueDeliveriesExcluding, until its callers use
-// Store.System themselves.
-func (s *Store) ClaimDueDeliveriesExcluding(ctx context.Context, limit int, owner string, excluded []string) ([]Delivery, error) {
-	return s.System().ClaimDueDeliveriesExcluding(ctx, limit, owner, excluded)
 }
 
 // ClaimDueDeliveriesExcluding leases due outbox rows while skipping the
@@ -223,13 +191,6 @@ func (s *Store) ClaimDueDeliveriesExcluding(ctx context.Context, limit int, owne
 // tenant that is not active are held, as in ClaimDueDeliveries.
 func (ss *SystemStore) ClaimDueDeliveriesExcluding(ctx context.Context, limit int, owner string, excluded []string) ([]Delivery, error) {
 	return ss.claimDueDeliveries(ctx, limit, owner, excluded)
-}
-
-// AgeLockedDeliveries ages locked deliveries through
-// SystemStore.AgeLockedDeliveries, until its callers use Store.System
-// themselves.
-func (s *Store) AgeLockedDeliveries(ctx context.Context, destinations []string) error {
-	return s.System().AgeLockedDeliveries(ctx, destinations)
 }
 
 // AgeLockedDeliveries advances the separate deferral budget for outbox rows
@@ -337,13 +298,6 @@ WHERE id=? AND sent_at IS NULL AND terminal_at='' AND attempts<? AND deferrals=?
 	return tx.Commit()
 }
 
-// WakeLockedDeliveries wakes locked deliveries through
-// SystemStore.WakeLockedDeliveries, until its callers use Store.System
-// themselves.
-func (s *Store) WakeLockedDeliveries(ctx context.Context, destinations []string) error {
-	return s.System().WakeLockedDeliveries(ctx, destinations)
-}
-
 // WakeLockedDeliveries makes rows immediately due when a previously locked
 // managed destination becomes usable again. Locked aging uses a one-hour
 // cadence to avoid touching the same rows on every worker tick; clearing that
@@ -431,13 +385,6 @@ func (ss *SystemStore) claimDueDeliveries(ctx context.Context, limit int, owner 
 	return out, rows.Err()
 }
 
-// ReleaseDeliveryClaims clears the outbox leases through
-// SystemStore.ReleaseDeliveryClaims, until the daemon uses Store.System
-// itself.
-func (s *Store) ReleaseDeliveryClaims(ctx context.Context) (int64, error) {
-	return s.System().ReleaseDeliveryClaims(ctx)
-}
-
 // ReleaseDeliveryClaims clears all active outbox leases. It is used when a
 // daemon starts (or shuts down cleanly) so rows claimed by a previous process
 // do not remain unavailable for the full claim lease. Delivery attempts and
@@ -448,13 +395,6 @@ func (ss *SystemStore) ReleaseDeliveryClaims(ctx context.Context) (int64, error)
 		return 0, err
 	}
 	return result.RowsAffected()
-}
-
-// ReleaseDeliveryClaim releases one delivery claim through
-// SystemStore.ReleaseDeliveryClaim, until its callers use Store.System
-// themselves.
-func (s *Store) ReleaseDeliveryClaim(ctx context.Context, id int64, claim string, delay time.Duration) error {
-	return s.System().ReleaseDeliveryClaim(ctx, id, claim, delay)
 }
 
 // ReleaseDeliveryClaim returns one in-flight delivery to the due queue without
@@ -484,12 +424,6 @@ func (ss *SystemStore) ReleaseDeliveryClaim(ctx context.Context, id int64, claim
 	return nil
 }
 
-// DeliveryResult records a delivery result through
-// SystemStore.DeliveryResult, until its callers use Store.System themselves.
-func (s *Store) DeliveryResult(ctx context.Context, id int64, sendErr error) error {
-	return s.System().DeliveryResult(ctx, id, sendErr)
-}
-
 // DeliveryResult records the result for the current claim. It retains the
 // original API used by CLI/tests by looking up the row's active claim token.
 func (ss *SystemStore) DeliveryResult(ctx context.Context, id int64, sendErr error) error {
@@ -498,13 +432,6 @@ func (ss *SystemStore) DeliveryResult(ctx context.Context, id int64, sendErr err
 		return err
 	}
 	return ss.DeliveryResultClaim(ctx, id, claim, sendErr)
-}
-
-// DeliveryResultClaim records a delivery result through
-// SystemStore.DeliveryResultClaim, until its callers use Store.System
-// themselves.
-func (s *Store) DeliveryResultClaim(ctx context.Context, id int64, claim string, sendErr error) error {
-	return s.System().DeliveryResultClaim(ctx, id, claim, sendErr)
 }
 
 // DeliveryResultClaim records the outcome of the claimed delivery: sent, or
@@ -622,12 +549,6 @@ func deliveryRetryDelay(attempts int) time.Duration {
 	return delay
 }
 
-// DeferDelivery defers a delivery through SystemStore.DeferDelivery, until
-// its callers use Store.System themselves.
-func (s *Store) DeferDelivery(ctx context.Context, id int64, claim, reason string, delay time.Duration) error {
-	return s.System().DeferDelivery(ctx, id, claim, reason, delay)
-}
-
 // DeferDelivery releases a claim without consuming an attempt. This is used
 // when an encrypted managed destination is temporarily locked or unavailable.
 func (ss *SystemStore) DeferDelivery(ctx context.Context, id int64, claim, reason string, delay time.Duration) error {
@@ -649,13 +570,6 @@ func legacyDeliveryError(reason string) error {
 	default:
 		return errors.New("notification delivery deferred")
 	}
-}
-
-// DeferDeliveryWithError defers a delivery through
-// SystemStore.DeferDeliveryWithError, until its callers use Store.System
-// themselves.
-func (s *Store) DeferDeliveryWithError(ctx context.Context, id int64, claim string, reason error, delay time.Duration) error {
-	return s.System().DeferDeliveryWithError(ctx, id, claim, reason, delay)
 }
 
 // DeferDeliveryWithError releases a claim without consuming an ordinary

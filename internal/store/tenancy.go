@@ -92,6 +92,117 @@ func (s *Store) TenantScopeByID(ctx context.Context, id string) (TenantScope, er
 	return TenantScope{id: id}, nil
 }
 
+// Why a method may stay on Store. Store itself holds no tenant scope, so it
+// keeps only what is global: work on one tenant's data goes through Tenant
+// or Public, the daemon's work across tenants through System, and platform
+// data through Platform.
+const (
+	// globalLifecycle: construction, lifecycle and deployment settings.
+	globalLifecycle = "lifecycle"
+	// globalScopes: the scoped stores and the resolvers that make their
+	// scopes.
+	globalScopes = "scopes"
+	// globalMaintenance: backup, verification and startup migration of the
+	// whole database.
+	globalMaintenance = "maintenance"
+	// globalAccount: sign-in, sessions, one-time codes, recovery codes,
+	// invitations and the audit records of sign-in and the host CLI. They run
+	// before any tenant scope exists and act on one account, named by its
+	// ID, a username, a session, or a token, whatever its tenant. What they
+	// return carries the account's tenant, from which TenantScopeForSession
+	// makes the scope. Expiry and "sign out everyone" act on every account.
+	globalAccount = "account"
+	// globalLegacyAdmin: the original administrator's account, fixed to
+	// LegacyAdminUserID in the default tenant, which the host CLI resets
+	// without a scope and whose owner changes it from the console.
+	globalLegacyAdmin = "legacy administrator"
+	// globalShared: data that every tenant shares, the public RDAP cache and
+	// the identifiers of live updates.
+	globalShared = "shared"
+)
+
+// globalStoreMethods lists every method that stays on Store, exported or
+// not, with the reason it is global. A test keeps the list in step with the
+// methods, so a method that works on one tenant's data cannot be added to
+// Store. The tenant SQL lint accepts statements that touch tenant data
+// without the tenant predicate only in the account and legacy administrator
+// methods, which are global by design.
+var globalStoreMethods = map[string]string{
+	"Close":               globalLifecycle,
+	"FilePath":            globalLifecycle,
+	"SetAuthKeyPath":      globalLifecycle,
+	"SetTargetExclusions": globalLifecycle,
+	"authKeyForWrite":     globalLifecycle,
+	"reader":              globalLifecycle,
+	"validateManagedJob":  globalLifecycle,
+
+	"Tenant":                globalScopes,
+	"System":                globalScopes,
+	"Platform":              globalScopes,
+	"Public":                globalScopes,
+	"TenantScopeForSession": globalScopes,
+	"TenantScopeByID":       globalScopes,
+	"PublicScopeBySlug":     globalScopes,
+
+	"Backup":                    globalMaintenance,
+	"Verify":                    globalMaintenance,
+	"MigrateAdminCompatibility": globalMaintenance,
+	"maintainSearchIndexes":     globalMaintenance,
+	"rebuildLatestScanHosts":    globalMaintenance,
+	"repairLatestScanHosts":     globalMaintenance,
+
+	"GetSession":                              globalAccount,
+	"GetAccount":                              globalAccount,
+	"GetUserByUsername":                       globalAccount,
+	"readUser":                                globalAccount,
+	"SetUserLastLogin":                        globalAccount,
+	"ActivateUser":                            globalAccount,
+	"ActivationTokenUsable":                   globalAccount,
+	"ConsumeUserInvite":                       globalAccount,
+	"ConsumeTOTPStep":                         globalAccount,
+	"CreateSession":                           globalAccount,
+	"CreateSessionWithAudit":                  globalAccount,
+	"CreateSessionForUserWithAudit":           globalAccount,
+	"CreateSessionForUserWithAuditEntry":      globalAccount,
+	"CreateSessionForUserIfCurrent":           globalAccount,
+	"CreateSessionForUserWithPasswordUpgrade": globalAccount,
+	"CreateSessionForUserWithPasswordUpgradeIfCurrent": globalAccount,
+	"TouchSession":                   globalAccount,
+	"TouchSessionIfStale":            globalAccount,
+	"DeleteSession":                  globalAccount,
+	"DeleteSessionWithAudit":         globalAccount,
+	"DeleteSessionWithAuditEntry":    globalAccount,
+	"deleteSessionWithoutAudit":      globalAccount,
+	"DeleteAllSessions":              globalAccount,
+	"DeleteAllSessionsWithAudit":     globalAccount,
+	"DeleteExpiredSessions":          globalAccount,
+	"SaveRecoveryCodes":              globalAccount,
+	"SaveRecoveryCodesForUser":       globalAccount,
+	"ConsumeRecoveryCode":            globalAccount,
+	"ConsumeRecoveryCodeForUser":     globalAccount,
+	"ConsumeRecoveryCodeTextForUser": globalAccount,
+	"RecoveryCodeCount":              globalAccount,
+	"Audit":                          globalAccount,
+	"AuditEntry":                     globalAccount,
+	"sealTOTPSecret":                 globalAccount,
+	"sealTOTPSecretForOwner":         globalAccount,
+	"sealTOTPSecretVersion":          globalAccount,
+	"openTOTPSecret":                 globalAccount,
+	"openTOTPSecretForOwner":         globalAccount,
+	"userTOTPForSave":                globalAccount,
+
+	"GetAdmin":                   globalLegacyAdmin,
+	"SaveAdmin":                  globalLegacyAdmin,
+	"SaveAdminSecurity":          globalLegacyAdmin,
+	"SaveAdminSecurityWithAudit": globalLegacyAdmin,
+	"SaveAdminSecurityWithAuditPreservingSession": globalLegacyAdmin,
+	"adminTOTPForSave": globalLegacyAdmin,
+
+	"GetRDAPCache": globalShared,
+	"PutRDAPCache": globalShared,
+	"SSECursor":    globalShared,
+}
+
 // TenantStore reads and writes the data of one tenant. Every method puts the
 // tenant predicate in the same SQL statement that reads the rows: a table
 // with a tenant_id column is filtered on it, and a table that belongs to a

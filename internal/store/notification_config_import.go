@@ -102,13 +102,6 @@ func importedDeploymentColumnExists(ctx context.Context, q interface {
 	return columns > 0, nil
 }
 
-// ImportedDeploymentNotifications reports the imported URL digests through
-// SystemStore.ImportedDeploymentNotifications, until its callers use
-// Store.System themselves.
-func (s *Store) ImportedDeploymentNotifications(ctx context.Context, legacyHashes []string) (map[string]bool, error) {
-	return s.System().ImportedDeploymentNotifications(ctx, legacyHashes)
-}
-
 // ImportedDeploymentNotifications returns the supplied URL digests that an
 // import has recorded, including those whose destination was deleted later.
 // Such a URL is no longer a deployment destination.
@@ -141,13 +134,6 @@ func (ss *SystemStore) ImportedDeploymentNotifications(ctx context.Context, lega
 		}
 	}
 	return imported, rows.Err()
-}
-
-// ImportDeploymentNotifications imports the config.yaml notification URLs
-// through SystemStore.ImportDeploymentNotifications, until its callers use
-// Store.System themselves.
-func (s *Store) ImportDeploymentNotifications(ctx context.Context, items []DeploymentNotificationImport) (DeploymentNotificationImportResult, error) {
-	return s.System().ImportDeploymentNotifications(ctx, items)
 }
 
 // ImportDeploymentNotifications creates each sealed destination and moves every
@@ -506,13 +492,6 @@ func uniqueStrings(values []string) []string {
 	return out
 }
 
-// RecordNotificationConfigImport stores the import outcome through
-// SystemStore.RecordNotificationConfigImport, until the daemon uses
-// Store.System itself.
-func (s *Store) RecordNotificationConfigImport(ctx context.Context, state NotificationConfigImport) error {
-	return s.System().RecordNotificationConfigImport(ctx, state)
-}
-
 // RecordNotificationConfigImport stores the outcome of this daemon start's
 // import for the read-only health command and the console.
 func (ss *SystemStore) RecordNotificationConfigImport(ctx context.Context, state NotificationConfigImport) error {
@@ -523,13 +502,6 @@ func (ss *SystemStore) RecordNotificationConfigImport(ctx context.Context, state
 ON CONFLICT(id) DO UPDATE SET status=excluded.status,configured_urls=excluded.configured_urls,imported_urls=excluded.imported_urls,error_code=excluded.error_code,updated_at=excluded.updated_at`,
 		state.Status, state.ConfiguredURLs, state.ImportedURLs, truncate(state.ErrorCode, 64), state.UpdatedAt.UTC().Format(time.RFC3339Nano))
 	return err
-}
-
-// NotificationConfigImportState reads the import outcome through
-// SystemStore.NotificationConfigImportState, until its callers use
-// Store.System themselves.
-func (s *Store) NotificationConfigImportState(ctx context.Context) (NotificationConfigImport, error) {
-	return s.System().NotificationConfigImportState(ctx)
 }
 
 // NotificationConfigImportState returns the recorded import outcome. A

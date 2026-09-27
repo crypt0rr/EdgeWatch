@@ -25,7 +25,7 @@ func TestScanRoutesUseTheSessionTenant(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)
 	job := config.NormalizeJob(config.Job{Name: "tenant-scan-job", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.10"}, TCP: &config.Protocol{Ports: "443", Mode: "connect"}})
-	recordA, err := db.CreateJob(ctx, job)
+	recordA, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,11 +51,11 @@ func TestScanRoutesUseTheSessionTenant(t *testing.T) {
 	for scanID, jobID := range map[string]string{"scan-tenant-a": recordA.ID, "scan-tenant-b": jobB} {
 		host := model.HostObservation{Address: address, AddressFamily: "IPv4", Protocols: []model.ProtocolObservation{{Protocol: "tcp", ScannedPorts: "443", ScannedPortCount: 1, Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}
 		scan := model.Scan{ID: scanID, JobID: jobID, Job: job.Name, StartedAt: now.Add(-time.Minute), FinishedAt: now, Status: "success", ConfigHash: job.SecurityHash(), Snapshot: model.Snapshot{Hosts: []model.HostObservation{host}}}
-		if err := db.SaveScan(ctx, scan); err != nil {
+		if err := db.System().SaveScan(ctx, scan); err != nil {
 			t.Fatal(err)
 		}
 	}
-	other, err := db.CreateUser(ctx, store.User{Username: "other-scan-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	other, err := defaultTenant(db).CreateUser(ctx, store.User{Username: "other-scan-admin", DisplayName: "Other", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,6 +134,25 @@ func TestScanRoutesUseTheSessionTenant(t *testing.T) {
 			if got := inventory(account, query); len(got) != 1 || got[0] != want {
 				t.Errorf("%s: host inventory%s = %v, want [%s]", account, query, got, want)
 			}
+		}
+	}
+
+	// A scan from before the host index holds only units, and the inventory
+	// reads its snapshot. Each tenant's inventory merges its own such scans
+	// and never the other tenant's.
+	for scanID, legacy := range map[string]struct{ job, address string }{"legacy-tenant-a": {recordA.ID, "192.0.2.20"}, "legacy-tenant-b": {jobB, "192.0.2.30"}} {
+		scan := model.Scan{ID: scanID, JobID: legacy.job, Job: job.Name, StartedAt: now.Add(-2 * time.Minute), FinishedAt: now.Add(-time.Minute), Status: "success", ConfigHash: job.SecurityHash(),
+			Snapshot: model.Snapshot{Units: []model.Unit{{Target: legacy.address, Addresses: []string{legacy.address}, Protocol: "tcp", Ports: []model.PortState{{Port: 443, State: "open"}}}}}}
+		if err := db.System().SaveScan(ctx, scan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for account, want := range map[string][]string{
+		"own":   {"legacy-tenant-a@" + recordA.ID + "/192.0.2.20", "scan-tenant-a@" + recordA.ID + "/" + address},
+		"other": {"legacy-tenant-b@" + jobB + "/192.0.2.30", "scan-tenant-b@" + jobB + "/" + address},
+	} {
+		if got := inventory(account, ""); strings.Join(got, ",") != strings.Join(want, ",") {
+			t.Errorf("%s: host inventory with legacy scans = %v, want %v", account, got, want)
 		}
 	}
 }

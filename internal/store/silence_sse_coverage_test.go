@@ -25,20 +25,20 @@ func TestSilenceDecisionHelpersAndEventCursorMinimum(t *testing.T) {
 
 	ctx := context.Background()
 	s := openTestStore(t)
-	if due, err := s.JobSilenceDue(ctx, "", time.Time{}, time.Now(), time.Hour); err != nil || due {
+	if due, err := s.System().JobSilenceDue(ctx, "", time.Time{}, time.Now(), time.Hour); err != nil || due {
 		t.Fatalf("empty silence check = %t, %v", due, err)
 	}
-	if due, err := s.JobSilenceDue(ctx, "missing", time.Now().Add(-time.Hour), time.Now(), 0); err != nil || due {
+	if due, err := s.System().JobSilenceDue(ctx, "missing", time.Now().Add(-time.Hour), time.Now(), 0); err != nil || due {
 		t.Fatalf("zero-threshold silence check = %t, %v", due, err)
 	}
-	if max, err := s.MaxEventID(ctx); err != nil || max != 0 {
+	if max, err := s.System().MaxEventID(ctx); err != nil || max != 0 {
 		t.Fatalf("empty event high-water mark = %d, %v", max, err)
 	}
-	start, end, err := s.ReserveSSEEventIDsAfter(ctx, 2, 50)
+	start, end, err := s.System().ReserveSSEEventIDsAfter(ctx, 2, 50)
 	if err != nil || start != 51 || end != 52 {
 		t.Fatalf("minimum SSE range = %d-%d, %v", start, end, err)
 	}
-	if start, end, err := s.ReserveSSEEventIDsAfter(ctx, 1, 1); err != nil || start != 53 || end != 53 {
+	if start, end, err := s.System().ReserveSSEEventIDsAfter(ctx, 1, 1); err != nil || start != 53 || end != 53 {
 		t.Fatalf("cursor-following SSE range = %d-%d, %v", start, end, err)
 	}
 }

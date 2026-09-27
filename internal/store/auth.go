@@ -151,13 +151,6 @@ func (s *Store) GetAdmin(ctx context.Context) (Admin, error) {
 	return a, nil
 }
 
-// HasAdministrator reports whether an administrator account exists.
-//
-// Deprecated: use Store.Platform().HasAdministrator.
-func (s *Store) HasAdministrator(ctx context.Context) (bool, error) {
-	return s.Platform().HasAdministrator(ctx)
-}
-
 // HasAdministrator reports whether the installation is configured: whether
 // an administrator account exists in any tenant. Setup creates the first
 // one, so setup stays closed once any tenant has an administrator. Only
@@ -324,13 +317,6 @@ func (s *Store) adminTOTPForSave(a Admin) (string, error) {
 	return s.sealTOTPSecretForOwner(LegacyAdminUserID, a.TOTPSecret)
 }
 
-// PutSetupToken stores a fresh setup token issued now.
-//
-// Deprecated: use Store.Platform().PutSetupToken.
-func (s *Store) PutSetupToken(ctx context.Context, hash string, expires time.Time) error {
-	return s.Platform().PutSetupToken(ctx, hash, expires)
-}
-
 // PutSetupToken stores a fresh setup token issued now. The setup token is
 // the installation's one-time credential for creating the first
 // administrator, so it belongs to the platform.
@@ -339,25 +325,11 @@ func (ps *PlatformStore) PutSetupToken(ctx context.Context, hash string, expires
 }
 
 // PutSetupTokenAt stores a fresh setup token and records when it was issued.
-//
-// Deprecated: use Store.Platform().PutSetupTokenAt.
-func (s *Store) PutSetupTokenAt(ctx context.Context, hash string, expires, issuedAt time.Time) error {
-	return s.Platform().PutSetupTokenAt(ctx, hash, expires, issuedAt)
-}
-
-// PutSetupTokenAt stores a fresh setup token and records when it was issued.
 // The timestamp is persisted so host recovery commands can enforce a rate
 // limit across short-lived CLI processes.
 func (ps *PlatformStore) PutSetupTokenAt(ctx context.Context, hash string, expires, issuedAt time.Time) error {
 	_, err := ps.store.DB.ExecContext(ctx, `INSERT INTO setup_tokens(id,token_hash,expires_at,used_at,issued_at) VALUES(1,?,?,NULL,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at,used_at=NULL,issued_at=excluded.issued_at`, hash, expires.UTC().Format(time.RFC3339Nano), issuedAt.UTC().Format(time.RFC3339Nano))
 	return err
-}
-
-// GetSetupToken returns the state of the setup token.
-//
-// Deprecated: use Store.Platform().GetSetupToken.
-func (s *Store) GetSetupToken(ctx context.Context) (SetupToken, error) {
-	return s.Platform().GetSetupToken(ctx)
 }
 
 // GetSetupToken returns the state of the setup token, or ErrNotFound when
@@ -377,13 +349,6 @@ func (ps *PlatformStore) GetSetupToken(ctx context.Context) (SetupToken, error) 
 }
 
 var ErrSetupTokenRateLimited = errors.New("setup token was issued too recently; try again later")
-
-// ReissueSetupToken replaces the setup token while no administrator exists.
-//
-// Deprecated: use Store.Platform().ReissueSetupToken.
-func (s *Store) ReissueSetupToken(ctx context.Context, hash string, expires, now time.Time) error {
-	return s.Platform().ReissueSetupToken(ctx, hash, expires, now)
-}
 
 // ReissueSetupToken atomically replaces the one-time setup token, but only
 // while no administrator exists. It is intended for a host-authorized CLI
@@ -430,13 +395,6 @@ func requireNoAdministratorTx(ctx context.Context, tx *sql.Tx) error {
 	return nil
 }
 
-// CompleteSetup consumes the token and creates the first administrator.
-//
-// Deprecated: use Store.Platform().CompleteSetup.
-func (s *Store) CompleteSetup(ctx context.Context, tokenHash string, admin Admin, now time.Time) error {
-	return s.Platform().CompleteSetup(ctx, tokenHash, admin, now)
-}
-
 // CompleteSetup consumes the token and creates the one permitted administrator
 // in the default tenant in one transaction, preventing a token race from
 // creating two accounts.
@@ -479,13 +437,6 @@ func (ps *PlatformStore) CompleteSetup(ctx context.Context, tokenHash string, ad
 		return err
 	}
 	return tx.Commit()
-}
-
-// ConsumeSetupToken marks a valid setup token used.
-//
-// Deprecated: use Store.Platform().ConsumeSetupToken.
-func (s *Store) ConsumeSetupToken(ctx context.Context, hash string, now time.Time) error {
-	return s.Platform().ConsumeSetupToken(ctx, hash, now)
 }
 
 // ConsumeSetupToken marks a valid, unexpired setup token used.

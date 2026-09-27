@@ -55,7 +55,7 @@ func TestLoginRehashesWeakerArgon2Parameters(t *testing.T) {
 	if _, _, err := m.LoginAs(ctx, request, "admin", password, "", ""); err != nil {
 		t.Fatalf("legacy login failed: %v", err)
 	}
-	user, err := s.GetUser(ctx, store.LegacyAdminUserID)
+	user, err := s.Tenant(store.DefaultTenantScope()).GetUser(ctx, store.LegacyAdminUserID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestLoginDoesNotRewriteCurrentArgon2Hash(t *testing.T) {
 	if _, _, err := m.LoginAs(ctx, request, "admin", password, "", ""); err != nil {
 		t.Fatalf("current login failed: %v", err)
 	}
-	user, err := s.GetUser(ctx, store.LegacyAdminUserID)
+	user, err := s.Tenant(store.DefaultTenantScope()).GetUser(ctx, store.LegacyAdminUserID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,7 +525,7 @@ func TestLoginAsUserAndPasswordConfirmationAreScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := s.CreateUser(ctx, store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: operatorHash, Enabled: true}, store.AuditEntry{})
+	operator, err := s.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: operatorHash, Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,7 +550,7 @@ func TestLoginAsUserAndPasswordConfirmationAreScoped(t *testing.T) {
 	}
 	operator.Enabled = false
 	operator.UpdatedAt = time.Now().UTC()
-	if err := s.UpdateUser(ctx, operator, false, store.AuditEntry{}); err != nil {
+	if err := s.Tenant(store.DefaultTenantScope()).UpdateUser(ctx, operator, false, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	request.AddCookie(&http.Cookie{Name: SessionCookie, Value: raw})
@@ -578,7 +578,7 @@ func TestLoginFailuresDoNotLockOutAnotherAccountBehindSameSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	operator, err := s.CreateUser(ctx, store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
+	operator, err := s.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "operator", DisplayName: "Operator", Role: store.RoleOperator, PasswordHash: hash, Enabled: true}, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -698,7 +698,7 @@ func TestEnsureSetupTokenHonorsAuthoritativeAdministratorUser(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateUser(ctx, store.User{Username: "managed-admin", DisplayName: "Managed Admin", Role: store.RoleAdministrator, PasswordHash: hash, Enabled: true}, store.AuditEntry{}); err != nil {
+	if _, err := s.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "managed-admin", DisplayName: "Managed Admin", Role: store.RoleAdministrator, PasswordHash: hash, Enabled: true}, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	token, err := NewManager(s).EnsureSetupToken(ctx)

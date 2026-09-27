@@ -15,7 +15,7 @@ func cycleFixture(t *testing.T) (context.Context, *Store, JobRecord, scanner.Wor
 	t.Helper()
 	ctx := context.Background()
 	s := openTestStore(t)
-	job, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "cycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1", Mode: "syn"}}))
+	job, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "cycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1", Mode: "syn"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,16 +25,16 @@ func cycleFixture(t *testing.T) (context.Context, *Store, JobRecord, scanner.Wor
 
 func TestListActiveScanCycleSummariesFiltersArchiveAndOmitsPlan(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	active, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	active, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	active, err = s.StartScanCycleAttempt(ctx, active.ID)
+	active, err = s.System().StartScanCycleAttempt(ctx, active.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	archivedJob, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "archived-cycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.2"}, TCP: &config.Protocol{Ports: "1", Mode: "syn"}}))
+	archivedJob, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "archived-cycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.2"}, TCP: &config.Protocol{Ports: "1", Mode: "syn"}}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestListActiveScanCycleSummariesFiltersArchiveAndOmitsPlan(t *testing.T) {
 	archivedPlan.Job = archivedJob.Job
 	archivedPlan.Scopes = []model.Scope{{Target: "192.0.2.2", Protocol: "tcp", Ports: "1"}}
 	archivedPlan.Units = []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Family: 4, Addresses: []string{"192.0.2.2"}, Ports: "1", PortCount: 1, Probes: 1}}
-	archivedCycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: archivedJob.ID, Job: archivedJob.Job.Name, JobRevision: archivedJob.Revision, ConfigHash: archivedJob.Job.SecurityHash(), ExecutionHash: archivedJob.Job.ExecutionHash(), Plan: archivedPlan})
+	archivedCycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: archivedJob.ID, Job: archivedJob.Job.Name, JobRevision: archivedJob.Revision, ConfigHash: archivedJob.Job.SecurityHash(), ExecutionHash: archivedJob.Job.ExecutionHash(), Plan: archivedPlan})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestListActiveScanCycleSummariesFiltersArchiveAndOmitsPlan(t *testing.T) {
 		}
 	}
 
-	visible, err := s.ListActiveScanCycleSummaries(ctx, false)
+	visible, err := defaultTenant(s).ListActiveScanCycleSummaries(ctx, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestListActiveScanCycleSummariesFiltersArchiveAndOmitsPlan(t *testing.T) {
 		t.Fatal("archived job cycle appeared when archived jobs were excluded")
 	}
 
-	all, err := s.ListActiveScanCycleSummaries(ctx, true)
+	all, err := defaultTenant(s).ListActiveScanCycleSummaries(ctx, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,23 +87,23 @@ func TestListActiveScanCycleSummariesReportsQueryAndScanErrors(t *testing.T) {
 		if _, err := s.DB.ExecContext(ctx, `DROP TABLE scan_cycles`); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.ListActiveScanCycleSummaries(ctx, false); err == nil {
+		if _, err := defaultTenant(s).ListActiveScanCycleSummaries(ctx, false); err == nil {
 			t.Fatal("expected missing scan cycle table to fail")
 		}
 	})
 	t.Run("row scan failure", func(t *testing.T) {
 		ctx, s, job, plan := cycleFixture(t)
-		cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+		cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+		if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycles SET attempt_count='not-a-number' WHERE id=?`, cycle.ID); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := s.ListActiveScanCycleSummaries(ctx, false); err == nil {
+		if _, err := defaultTenant(s).ListActiveScanCycleSummaries(ctx, false); err == nil {
 			t.Fatal("expected malformed scan cycle counter to fail scanning")
 		}
 	})
@@ -111,32 +111,32 @@ func TestListActiveScanCycleSummariesReportsQueryAndScanErrors(t *testing.T) {
 
 func TestScanCycleCheckpointsAndCompletes(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cycle, err = s.StartScanCycleAttempt(ctx, cycle.ID)
+	cycle, err = s.System().StartScanCycleAttempt(ctx, cycle.ID)
 	if err != nil || cycle.Status != "running" || cycle.AttemptCount != 1 {
 		t.Fatalf("start cycle = %#v, %v", cycle, err)
 	}
-	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp"}}}); err != nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp"}}}); err != nil {
 		t.Fatal(err)
 	}
-	cycle, err = s.CompleteScanCycle(ctx, cycle.ID)
+	cycle, err = s.System().CompleteScanCycle(ctx, cycle.ID)
 	if err != nil || cycle.Status != "completed" || cycle.CompletedUnits != 1 || cycle.CompletedProbes != 1 {
 		t.Fatalf("completed cycle = %#v, %v", cycle, err)
 	}
-	if _, err := s.NextScanCycleUnit(ctx, cycle.ID); !errors.Is(err, ErrNoPendingUnit) {
+	if _, err := s.System().NextScanCycleUnit(ctx, cycle.ID); !errors.Is(err, ErrNoPendingUnit) {
 		t.Fatalf("expected no pending unit, got %v", err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); !errors.Is(err, ErrCycleNotResumable) {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("completed cycle restart error = %v", err)
 	}
 	var checkpoint []byte
@@ -146,7 +146,7 @@ func TestScanCycleCheckpointsAndCompletes(t *testing.T) {
 	if string(checkpoint) == "{}" {
 		t.Fatal("completed cycle checkpoint was reclaimed before scan promotion")
 	}
-	if err := s.SaveScan(ctx, model.Scan{
+	if err := s.System().SaveScan(ctx, model.Scan{
 		ID: "cycle-promoted", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name,
 		StartedAt: time.Now().UTC(), FinishedAt: time.Now().UTC(), Status: "success",
 		ConfigHash: job.Job.SecurityHash(), CycleID: cycle.ID, CycleStatus: "completed", Snapshot: model.Snapshot{},
@@ -171,29 +171,29 @@ func TestScanCycleCheckpointsAndCompletes(t *testing.T) {
 func TestRetentionDoesNotClearCycleCheckpointForAttemptOnly(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
 		t.Fatal(err)
 	}
 	fragment := model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}}}}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CompleteScanCycle(ctx, cycle.ID); err != nil {
+	if _, err := s.System().CompleteScanCycle(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if err := s.SaveScan(ctx, model.Scan{ID: "timeout-attempt", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "timed_out", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "timeout-attempt", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "timed_out", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.System().clearCompletedCyclePayloads(ctx); err != nil {
@@ -206,7 +206,7 @@ func TestRetentionDoesNotClearCycleCheckpointForAttemptOnly(t *testing.T) {
 	if string(checkpoint) == "{}" {
 		t.Fatal("attempt-only scan caused checkpoint reclamation")
 	}
-	if err := s.SaveScan(ctx, model.Scan{ID: "promoted-final", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "promoted-final", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: now, FinishedAt: now, Status: "success", CycleID: cycle.ID, CycleStatus: "completed", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.System().clearCompletedCyclePayloads(ctx); err != nil {
@@ -223,45 +223,45 @@ func TestRetentionDoesNotClearCycleCheckpointForAttemptOnly(t *testing.T) {
 func TestLoadScanCycleFragmentsRejectsReclaimedCheckpoint(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
 	defer s.Close()
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.ExecContext(ctx, `UPDATE scan_cycle_units SET status='completed',snapshot_json='{}' WHERE cycle_id=? AND sequence=0`, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.LoadScanCycleFragments(ctx, cycle.ID); !errors.Is(err, ErrMissingCheckpoint) {
+	if _, _, err := s.System().LoadScanCycleFragments(ctx, cycle.ID); !errors.Is(err, ErrMissingCheckpoint) {
 		t.Fatalf("reclaimed checkpoint error = %v, want ErrMissingCheckpoint", err)
 	}
 }
 
 func TestScanCycleCompletionRequiresAllUnits(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CompleteScanCycle(ctx, cycle.ID); !errors.Is(err, ErrCycleIncomplete) {
+	if _, err := s.System().CompleteScanCycle(ctx, cycle.ID); !errors.Is(err, ErrCycleIncomplete) {
 		t.Fatalf("incomplete cycle completion error = %v", err)
 	}
 }
 
 func TestScanCyclePauseAndExpiryClearCheckpoints(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), Plan: plan, ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), Plan: plan, ExpiresAt: time.Now().UTC().Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.PauseScanCycle(ctx, cycle.ID, true, "timeout"); err != nil {
+	if _, err := s.System().PauseScanCycle(ctx, cycle.ID, true, "timeout"); err != nil {
 		t.Fatal(err)
 	}
-	if expired, err := s.ExpireScanCycles(ctx, time.Now().UTC().Add(2*time.Hour)); err != nil || expired != 1 {
+	if expired, err := s.System().ExpireScanCycles(ctx, time.Now().UTC().Add(2*time.Hour)); err != nil || expired != 1 {
 		t.Fatalf("expiry = %d, %v", expired, err)
 	}
 	var raw string
@@ -272,7 +272,7 @@ func TestScanCyclePauseAndExpiryClearCheckpoints(t *testing.T) {
 
 func TestScanCycleStartExpiresAtomically(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{
 		JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision,
 		ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(),
 		Plan: plan, ExpiresAt: time.Now().UTC().Add(-time.Minute),
@@ -280,7 +280,7 @@ func TestScanCycleStartExpiresAtomically(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); !errors.Is(err, ErrCycleNotResumable) {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("expired cycle start error = %v", err)
 	}
 	var status string
@@ -301,41 +301,41 @@ func TestScanCycleStartExpiresAtomically(t *testing.T) {
 
 func TestExpiredScanCycleRejectsLateCheckpoint(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan, ExpiresAt: time.Now().UTC().Add(time.Hour)})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan, ExpiresAt: time.Now().UTC().Add(time.Hour)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
-	unit, err := s.NextScanCycleUnit(ctx, cycle.ID)
+	unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+	if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
 		t.Fatal(err)
 	}
-	if expired, err := s.ExpireScanCycles(ctx, time.Now().UTC().Add(2*time.Hour)); err != nil || expired != 1 {
+	if expired, err := s.System().ExpireScanCycles(ctx, time.Now().UTC().Add(2*time.Hour)); err != nil || expired != 1 {
 		t.Fatalf("expiry = %d, %v", expired, err)
 	}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{}); !errors.Is(err, ErrCycleNotResumable) {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, model.Snapshot{}); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("late checkpoint error = %v", err)
 	}
-	if _, err := s.CompleteScanCycle(ctx, cycle.ID); !errors.Is(err, ErrCycleNotResumable) {
+	if _, err := s.System().CompleteScanCycle(ctx, cycle.ID); !errors.Is(err, ErrCycleNotResumable) {
 		t.Fatalf("expired cycle completion error = %v", err)
 	}
 }
 
 func TestScanCycleUnitCompletionRequiresClaim(t *testing.T) {
 	ctx, s, job, plan := cycleFixture(t)
-	cycle, err := s.CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err == nil {
+	if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, 0, model.Snapshot{}); err == nil {
 		t.Fatal("unclaimed unit was completed")
 	}
-	if _, err := s.GetLatestScanCycle(ctx, job.ID); err != nil {
+	if _, err := defaultTenant(s).GetLatestScanCycle(ctx, job.ID); err != nil {
 		t.Fatalf("latest cycle lookup failed: %v", err)
 	}
 }

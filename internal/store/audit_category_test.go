@@ -29,6 +29,7 @@ var knownAuditActions = map[string][]string{
 		"auth.rate_limited", "auth.recovery_code_used", "auth.setup_failed",
 		"auth.totp_confirmation_failed", "auth.totp_failed",
 		"platform_admin.setup", "platform_admin.setup_token_issued",
+		"platform_admin.invited", "platform_admin.updated",
 		"user.activated", "user.activation_issued", "user.activation_revoked",
 		"user.created", "user.display_name_changed", "user.login", "user.logout",
 		"user.password_changed", "user.password_reset", "user.password_reset_issued",
@@ -41,6 +42,8 @@ var knownAuditActions = map[string][]string{
 		"tenant.capacity_changed",
 		"tenant.created", "tenant.deletion_requested", "tenant.disabled",
 		"tenant.enabled", "tenant.purged", "tenant.renamed",
+		"platform_notifications.created", "platform_notifications.deleted",
+		"platform_notifications.update_routing", "platform_notifications.updated",
 	},
 	auditCategoryData: {
 		"baseline.approved", "baseline.reset",

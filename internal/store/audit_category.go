@@ -51,6 +51,8 @@ var auditActionCategories = map[string]string{
 	"admin.setup_token_reissued":        auditCategoryAccount,
 	"platform_admin.setup":              auditCategoryAccount,
 	"platform_admin.setup_token_issued": auditCategoryAccount,
+	auditPlatformAdminInvited:           auditCategoryAccount,
+	auditPlatformAdminUpdated:           auditCategoryAccount,
 	"admin.display_name_changed":        auditCategoryAccount,
 	"admin.password_changed":            auditCategoryAccount,
 	"admin.password_reset":              auditCategoryAccount,
@@ -88,6 +90,13 @@ var auditActionCategories = map[string]string{
 	auditTenantEnabled:           auditCategoryPlatform,
 	auditTenantDeletionRequested: auditCategoryPlatform,
 	auditTenantPurged:            auditCategoryPlatform,
+
+	// The platform's own notification destinations and update routing,
+	// recorded without a tenant.
+	auditPlatformNotificationsCreated:       auditCategoryPlatform,
+	auditPlatformNotificationsUpdated:       auditCategoryPlatform,
+	auditPlatformNotificationsDeleted:       auditCategoryPlatform,
+	auditPlatformNotificationsUpdateRouting: auditCategoryPlatform,
 
 	// Monitored data and its configuration.
 	"baseline.approved":                     auditCategoryData,

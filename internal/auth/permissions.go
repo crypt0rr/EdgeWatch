@@ -30,8 +30,11 @@ const (
 	PermissionNotificationsRead   = "notifications.read"
 	PermissionNotificationsManage = "notifications.manage"
 	PermissionUsersManage         = "users.manage"
-	// PermissionAuditRead remains source-compatible until an audit read
-	// endpoint exists, but is intentionally not granted to any role.
+	// PermissionAuditRead reads the unit's security audit. Only
+	// administrators hold it. The unit audit route belongs to the
+	// experimental business units: while experimental.business_units is
+	// off, the web API refuses the route and leaves the permission out of
+	// the lists it returns (see WithoutBusinessUnitPermissions).
 	PermissionAuditRead             = "audit.read"
 	PermissionPublicManage          = "public_dashboard.manage"
 	PermissionStreamRead            = "stream.read"
@@ -64,6 +67,7 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionNotificationsManage: true, PermissionUsersManage: true,
 		PermissionPublicManage: true, PermissionStreamRead: true,
 		PermissionScannerProfilesRead: true, PermissionScannerProfilesManage: true,
+		PermissionAuditRead:   true,
 		PermissionAccountSelf: true,
 	},
 	store.RoleOperator: {
@@ -91,6 +95,27 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionPlatformStatusRead: true,
 		PermissionAccountSelf:        true,
 	},
+}
+
+// businessUnitPermissions are the permissions of a unit's role that only the
+// routes of the experimental business units grant. While
+// experimental.business_units is off, the web API refuses those routes and
+// leaves these permissions out of the lists it returns, so a single-unit
+// installation describes its sessions exactly as before.
+var businessUnitPermissions = map[string]bool{PermissionAuditRead: true}
+
+// WithoutBusinessUnitPermissions returns the permissions without those that
+// only the routes of the experimental business units grant. The web API
+// applies it to the lists it returns while experimental.business_units is
+// off.
+func WithoutBusinessUnitPermissions(permissions []string) []string {
+	result := make([]string, 0, len(permissions))
+	for _, permission := range permissions {
+		if !businessUnitPermissions[permission] {
+			result = append(result, permission)
+		}
+	}
+	return result
 }
 
 func PermissionsForRole(role string) []string {

@@ -93,7 +93,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		"username":              user.Username,
 		"display_name":          user.DisplayName,
 		"role":                  user.Role,
-		"permissions":           auth.PermissionsForRole(user.Role),
+		"permissions":           s.offeredPermissions(auth.PermissionsForRole(user.Role)),
 		"version":               s.Version,
 		"retention":             s.App.Config.Retention.Value().String(),
 		"max_concurrent_scans":  s.App.Config.Scheduler.MaxConcurrent,
@@ -364,7 +364,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	response := map[string]any{"username": user.Username, "display_name": user.DisplayName, "role": user.Role, "csrf_token": session.CSRFToken, "totp_required": user.TOTPEnabled}
-	addSessionPermissions(response, store.Session{Role: user.Role, TOTPEnrollmentRequired: s.Auth.TOTPEnrollmentRequired(r.Context(), user)})
+	s.addSessionPermissions(response, store.Session{Role: user.Role, TOTPEnrollmentRequired: s.Auth.TOTPEnrollmentRequired(r.Context(), user)})
 	writeJSON(w, http.StatusOK, response)
 }
 
@@ -372,9 +372,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 // describes the signed-in account. A session that must enrol TOTP before it
 // may do anything else also carries totp_enrollment_required, and holds only
 // its own account's self-service; the key is absent otherwise, so a session
-// without the requirement is described exactly as before.
-func addSessionPermissions(response map[string]any, session store.Session) {
-	response["permissions"] = auth.PermissionsForSession(session)
+// without the requirement is described exactly as before. The permissions
+// that only the experimental business units grant are listed only while
+// they are on.
+func (s *Server) addSessionPermissions(response map[string]any, session store.Session) {
+	response["permissions"] = s.offeredPermissions(auth.PermissionsForSession(session))
 	if session.TOTPEnrollmentRequired {
 		response["totp_enrollment_required"] = true
 	}
@@ -414,7 +416,16 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request, session store.S
 		return
 	}
 	response := map[string]any{"user_id": user.ID, "username": user.Username, "display_name": user.DisplayName, "role": user.Role, "csrf_token": session.CSRFToken, "totp_enabled": user.TOTPEnabled, "password_requirements": auth.PasswordRequirements(), "timezone": s.deploymentTimezone()}
-	addSessionPermissions(response, store.Session{Role: user.Role, TOTPEnrollmentRequired: session.TOTPEnrollmentRequired})
+	s.addSessionPermissions(response, store.Session{Role: user.Role, TOTPEnrollmentRequired: session.TOTPEnrollmentRequired})
+	// With business units on, the session also names its console, the
+	// platform's or a unit's, and its unit. With them off, the keys are
+	// absent, so a single-unit session is described exactly as before.
+	if s.businessUnitsEnabled() {
+		if err := s.addSessionScope(r.Context(), response, user); err != nil {
+			s.writeInternalError(w, r, "store", err)
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 

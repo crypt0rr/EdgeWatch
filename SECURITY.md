@@ -57,12 +57,17 @@ A platform administrator is a separate account without a unit. It manages
 the units and their administrators and holds no permission on any unit's
 jobs, scans, baselines, incidents, notifications, or public status: every
 route of a unit's console refuses it except its own account's password,
-TOTP, session, and sign-out routes. Only the host creates one: `edgewatch
-admin platform-setup-token` prints a one-time token, valid for 15 minutes,
-once the first administrator exists and while no enabled platform
+TOTP, session, and sign-out routes. Only the host creates the first one:
+`edgewatch admin platform-setup-token` prints a one-time token, valid for 15
+minutes, once the first administrator exists and while no enabled platform
 administrator does, at most once a minute, and replaces an unused token only
 with `--force`. The token cannot complete the first setup, and the first
-setup token cannot create a platform administrator. Usernames stay unique
+setup token cannot create a platform administrator. An enabled platform
+administrator can then invite another after confirming its password; the
+invited account stays pending and disabled until it redeems its one-time
+link, which expires after 30 minutes. A platform administrator can disable
+or enable another, never its own account, and disabling one ends its
+sessions and revokes the links it issued or received. Usernames stay unique
 across every unit and the platform.
 
 A platform administrator invites only unit administrators, and resets only
@@ -97,6 +102,23 @@ unit's security audit with the `platform` actor kind, so the unit's
 administrators see it. The platform administrator's own actions, sign-in
 attempts on its account, and sign-in attempts with a username that no account
 has are recorded in platform scope, outside every unit's audit.
+
+The platform console's API, under `/api/v1/platform/`, and the unit audit,
+`/api/v1/audit`, exist only while the flag is on; otherwise every request to
+them is refused exactly like an unknown route. Only a platform administrator
+reaches the platform routes, and they never return a unit's data: a unit
+appears with its name, slug, state, and counts of its accounts,
+administrators, jobs, and scan slots in use; its accounts as summaries
+without credentials; and its capacity as numbers. Disabling, enabling, and
+deleting a unit, inviting an administrator, issuing a password reset, and
+revoking an account's sessions each require the platform administrator's
+password, and deleting also the unit's typed name. The platform's own
+notification destinations are write-only like a unit's, and the platform
+cannot read, select, or change a unit's destinations. A unit's
+administrators read their unit's audit, which hides the source address of a
+platform administrator's actions; the platform audit shows the records in
+platform scope and every unit's account and platform records, never a unit's
+data records.
 
 ## Live-update streams and session revocation
 

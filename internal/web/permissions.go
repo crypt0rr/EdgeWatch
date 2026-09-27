@@ -94,6 +94,12 @@ func requiredPermission(path, method string) string {
 		if method == http.MethodGet {
 			return auth.PermissionScansRead
 		}
+	case path == "/audit":
+		if method == http.MethodGet {
+			return auth.PermissionAuditRead
+		}
+	case strings.HasPrefix(path, "/platform/"):
+		return requiredPlatformPermission(path, method)
 	case path == "/jobs":
 		switch method {
 		case http.MethodGet:
@@ -435,6 +441,18 @@ type apiRoute struct {
 	// although Server.api has no handler for it. Authorized requests receive
 	// the not-found default.
 	NoHandler bool
+	// BusinessUnits marks a route of the experimental business units. It
+	// exists only while experimental.business_units is on; otherwise
+	// Server.api refuses it like an unknown route. businessUnitsRoute
+	// decides which paths these are.
+	BusinessUnits bool
+}
+
+// businessUnitsRoute reports whether a path, relative to /api/v1, belongs
+// to the experimental business units: the platform console's routes and
+// the unit audit.
+func businessUnitsRoute(path string) bool {
+	return path == "/audit" || path == "/platform" || strings.HasPrefix(path, "/platform/")
 }
 
 // apiRoutes is the route inventory: every method and path that the API
@@ -565,6 +583,37 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/accept", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/accept"},
 	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/suppress", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/suppress"},
 	{Method: http.MethodGet, Template: "/jobs/{id}/events", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/events"},
+
+	// The unit's security audit, for its administrators.
+	{Method: http.MethodGet, Template: "/audit", Permission: auth.PermissionAuditRead, Example: "/audit", BusinessUnits: true},
+
+	// The platform console, for platform administrators: the business
+	// units, their administrators and capacity, the platform
+	// administrators, the platform audit, the platform's notification
+	// destinations and update routing, and the deployment status.
+	{Method: http.MethodGet, Template: "/platform/units", Permission: auth.PermissionUnitsManage, Example: "/platform/units", BusinessUnits: true},
+	{Method: http.MethodPost, Template: "/platform/units", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units", BusinessUnits: true},
+	{Method: http.MethodGet, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1", BusinessUnits: true},
+	{Method: http.MethodPatch, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1", BusinessUnits: true},
+	{Method: http.MethodDelete, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1", BusinessUnits: true},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/disable", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/disable", BusinessUnits: true},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/enable", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/enable", BusinessUnits: true},
+	{Method: http.MethodGet, Template: "/platform/units/{id}/capacity", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1/capacity", BusinessUnits: true},
+	{Method: http.MethodPatch, Template: "/platform/units/{id}/capacity", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/capacity", BusinessUnits: true},
+	{Method: http.MethodGet, Template: "/platform/units/{id}/accounts", Permission: auth.PermissionUnitAccountsManage, Example: "/platform/units/unit-1/accounts", BusinessUnits: true},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/accounts", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts", BusinessUnits: true},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/accounts/{uid}/password-reset", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts/user-1/password-reset", BusinessUnits: true},
+	{Method: http.MethodDelete, Template: "/platform/units/{id}/accounts/{uid}/sessions", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts/user-1/sessions", BusinessUnits: true},
+	{Method: http.MethodGet, Template: "/platform/admins", Permission: auth.PermissionUnitAccountsManage, Example: "/platform/admins", BusinessUnits: true},
+	{Method: http.MethodPost, Template: "/platform/admins", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins", BusinessUnits: true},
+	{Method: http.MethodPatch, Template: "/platform/admins/{id}", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1", BusinessUnits: true},
+	{Method: http.MethodGet, Template: "/platform/audit", Permission: auth.PermissionPlatformAuditRead, Example: "/platform/audit", BusinessUnits: true},
+	{Method: http.MethodGet, Template: "/platform/notifications", Permission: auth.PermissionPlatformNotificationsManage, Example: "/platform/notifications", BusinessUnits: true},
+	{Method: http.MethodPost, Template: "/platform/notifications", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications", BusinessUnits: true},
+	{Method: http.MethodPut, Template: "/platform/notifications/update-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/update-routing", BusinessUnits: true},
+	{Method: http.MethodPatch, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1", BusinessUnits: true},
+	{Method: http.MethodDelete, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1", BusinessUnits: true},
+	{Method: http.MethodGet, Template: "/platform/status", Permission: auth.PermissionPlatformStatusRead, Example: "/platform/status", BusinessUnits: true},
 
 	// Unauthenticated public status projection, relative to publicAPIBase:
 	// the default business unit's page, and a unit's page by its slug.

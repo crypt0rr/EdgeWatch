@@ -15,8 +15,9 @@ import (
 // account without a tenant that manages the tenants and their
 // administrators, and never a tenant's data:
 //
-//   - it is created only by redeeming a platform setup token, which the
-//     host issues;
+//   - the first one is created by redeeming a platform setup token, which
+//     the host issues, and any other by redeeming the invitation of an
+//     enabled platform administrator (InvitePlatformAdmin);
 //   - it invites only a tenant's administrators, and a tenant's
 //     administrators invite their own operators and viewers;
 //   - it resets only a tenant's administrators, never another platform

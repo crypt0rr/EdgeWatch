@@ -86,7 +86,7 @@ func TestRunRestoreDryRunExitsNonZeroWhenRestoreWouldBeRefused(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := owner.AcquireDaemonLease(context.Background(), "daemon-probe"); err != nil {
+		if _, err := owner.System().AcquireDaemonLease(context.Background(), "daemon-probe"); err != nil {
 			owner.Close()
 			t.Fatal(err)
 		}
@@ -187,7 +187,7 @@ func TestRunJSONOutputKeepsApplicationLogsOnStderr(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateJob(context.Background(), managedCLIJob("managed")); err != nil {
+	if _, err := s.Tenant(store.DefaultTenantScope()).CreateJob(context.Background(), managedCLIJob("managed")); err != nil {
 		s.Close()
 		t.Fatal(err)
 	}
@@ -240,20 +240,21 @@ func TestRunStatusReportsJobStateAndSchedulesOnlyActiveJobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.CreateJob(ctx, managedCLIJob("active-job")); err != nil {
+	tenant := s.Tenant(store.DefaultTenantScope())
+	if _, err := tenant.CreateJob(ctx, managedCLIJob("active-job")); err != nil {
 		s.Close()
 		t.Fatal(err)
 	}
-	if _, err := s.CreateJobWithEnabled(ctx, managedCLIJob("paused-job"), false); err != nil {
+	if _, err := tenant.CreateJobWithEnabled(ctx, managedCLIJob("paused-job"), false); err != nil {
 		s.Close()
 		t.Fatal(err)
 	}
-	archived, err := s.CreateJob(ctx, managedCLIJob("archived-job"))
+	archived, err := tenant.CreateJob(ctx, managedCLIJob("archived-job"))
 	if err != nil {
 		s.Close()
 		t.Fatal(err)
 	}
-	if err := s.SetJobArchived(ctx, archived.ID, true); err != nil {
+	if err := tenant.SetJobArchived(ctx, archived.ID, true); err != nil {
 		s.Close()
 		t.Fatal(err)
 	}
@@ -302,7 +303,7 @@ func TestRunScanRecordsHostAuditEntry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := s.CreateJob(ctx, managedCLIJob("managed"))
+	record, err := s.Tenant(store.DefaultTenantScope()).CreateJob(ctx, managedCLIJob("managed"))
 	if err != nil {
 		s.Close()
 		t.Fatal(err)

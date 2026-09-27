@@ -203,6 +203,12 @@ func run(args []string) error {
 	if cmd == "admin" {
 		return adminActionForUser(context.Background(), action, s, *passwordFile, *username, *force)
 	}
+	// scan, status, history, baseline, and notify test act on the default
+	// tenant's jobs, scans, baselines, and destinations until the CLI can
+	// name a tenant. The daemon, backup, verify, and health work on the whole
+	// database, and admin recovery above works in the tenant of the account
+	// it changes.
+	tenant := s.Tenant(store.DefaultTenantScope())
 	var application *app.App
 	needApplication := cmd == "daemon" || cmd == "scan" || cmd == "notify" || (cmd == "baseline" && action != "export")
 	if needApplication {
@@ -224,24 +230,24 @@ func run(args []string) error {
 		if *jobName == "" {
 			return errors.New("--job is required")
 		}
-		record, err := s.GetJobByName(ctx, *jobName)
+		record, err := tenant.GetJobByName(ctx, *jobName)
 		if err != nil {
 			return fmt.Errorf("unknown managed job %q; YAML jobs are inactive and must be recreated in the web console", *jobName)
 		}
 		scan, events, err := application.RunJobRecord(ctx, record)
-		auditHostCommand(ctx, s, store.AuditEntry{Action: "scan.run_requested", Detail: scanAuditDetail(record.ID, scan.Status, err)})
+		auditHostCommand(ctx, tenant, store.AuditEntry{Action: "scan.run_requested", Detail: scanAuditDetail(record.ID, scan.Status, err)})
 		if printErr := printValue(*output, map[string]any{"scan": scan, "events": events}); printErr != nil {
 			return printErr
 		}
 		return err
 	case "status":
-		return status(ctx, s, cfg, *jobName, *output)
+		return status(ctx, tenant, cfg, *jobName, *output)
 	case "history":
-		scans, err := s.ListScans(ctx, *jobName, *limit)
+		scans, err := tenant.ListScans(ctx, *jobName, *limit)
 		if err != nil {
 			return err
 		}
-		events, err := s.ListEvents(ctx, *jobName, *limit)
+		events, err := tenant.ListEvents(ctx, *jobName, *limit)
 		if err != nil {
 			return err
 		}
@@ -250,17 +256,17 @@ func run(args []string) error {
 		if action == "export" {
 			// Baseline export is deliberately read-only. Persisting an audit row
 			// here would violate the command's no-side-effects contract.
-			return exportBaseline(ctx, s, *jobName, *outPath, *output)
+			return exportBaseline(ctx, tenant, *jobName, *outPath, *output)
 		}
-		return baseline(ctx, action, s, application, *jobName, *scanID, *output)
+		return baseline(ctx, action, tenant, application, *jobName, *scanID, *output)
 	case "notify":
 		if action != "test" {
 			return errors.New("expected: notify test")
 		}
 		// A locked web-managed destination fails the test, so restoring the
 		// wrong notification key is not reported as a successful check.
-		summary, err := application.Notifier.TestSummaryContext(ctx)
-		auditHostCommand(ctx, s, store.AuditEntry{Action: "notifications.test", Detail: hostAuditDetail("operation", "global", err)})
+		summary, err := application.Notifier.Tenant(tenant).TestSummary(ctx)
+		auditHostCommand(ctx, tenant, store.AuditEntry{Action: "notifications.test", Detail: hostAuditDetail("operation", "global", err)})
 		if printErr := printValue(*output, summary); printErr != nil {
 			return errors.Join(err, printErr)
 		}
@@ -276,7 +282,7 @@ func run(args []string) error {
 		err := verify(ctx, s, *output)
 		return err
 	case "health":
-		health, err := s.HealthStatus(ctx)
+		health, err := s.System().HealthStatus(ctx)
 		if err != nil {
 			return err
 		}
@@ -536,7 +542,9 @@ func normalizedConfig(cfg *config.Config) map[string]any {
 	return map[string]any{"valid": true, "version": cfg.Version, "database": cfg.Database, "timezone": cfg.Timezone, "web_listen": cfg.Web.Listen, "log_level": cfg.LogLevel(), "max_probe_count": cfg.Scheduler.MaxProbeCount, "max_naabu_probe_count": cfg.Scheduler.MaxNaabuProbeCount, "target_exclusions": append([]string(nil), cfg.Scanner.TargetExclusions...), "rdap_enabled": cfg.RDAPEnabled(), "updates_enabled": cfg.UpdatesEnabled(), "jobs": jobs, "legacy_jobs_inactive": len(jobs) > 0, "notification_destinations": len(cfg.Notifications.URLs)}
 }
 
-func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, output string) error {
+// status reports the managed jobs of the tenant of ts, followed by the
+// inactive legacy YAML jobs that no managed job of that tenant replaces.
+func status(ctx context.Context, ts *store.TenantStore, cfg *config.Config, filter, output string) error {
 	type row struct {
 		Name string `json:"name"`
 		// State is scheduled, paused, archived, or legacy (an inactive YAML
@@ -556,11 +564,11 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 	}
 	var rows []row
 	display := deploymentLocation(cfg)
-	failedDeliveries, err := s.FailedDeliveries(ctx)
+	failedDeliveries, err := ts.FailedDeliveries(ctx)
 	if err != nil {
 		return err
 	}
-	managed, err := s.ListJobs(ctx, true)
+	managed, err := ts.ListJobs(ctx, true)
 	if err != nil {
 		return err
 	}
@@ -570,7 +578,7 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 		if filter != "" && record.Job.Name != filter {
 			continue
 		}
-		state, err := s.RuntimeState(ctx, record.ID)
+		state, err := ts.RuntimeState(ctx, record.ID)
 		if err != nil {
 			return err
 		}
@@ -581,7 +589,7 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 			progress = fmt.Sprintf("updating %d/%d", state.CandidateCount, record.Job.Baseline.Samples)
 		}
 		entry := row{Name: record.Job.Name, State: managedJobState(record), Schedule: record.Job.Schedule, Timezone: record.Job.Timezone, BaselineScanID: state.BaselineScanID, BaselineProgress: progress, ActiveIncidents: len(state.Incidents), ConsecutiveFailures: state.ConsecutiveFailures, FailedDeliveries: failedDeliveries}
-		if scans, listErr := s.ListJobScans(ctx, record.ID, 1); listErr != nil {
+		if scans, listErr := ts.ListJobScans(ctx, record.ID, 1); listErr != nil {
 			return listErr
 		} else if len(scans) == 1 {
 			entry.LastScanID, entry.LastScanStatus = scans[0].ID, scans[0].Status
@@ -604,7 +612,7 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 		if filter != "" && j.Name != filter {
 			continue
 		}
-		state, err := s.State(ctx, j.Name)
+		state, err := ts.State(ctx, j.Name)
 		if err != nil {
 			return err
 		}
@@ -617,7 +625,7 @@ func status(ctx context.Context, s *store.Store, cfg *config.Config, filter, out
 		// Legacy YAML jobs are inactive: the daemon never schedules them, so
 		// they have no next run.
 		entry := row{Name: j.Name, State: jobStateLegacy, Schedule: j.Schedule, Timezone: j.Timezone, BaselineScanID: state.BaselineScanID, BaselineProgress: progress, ActiveIncidents: len(state.Incidents), ConsecutiveFailures: state.ConsecutiveFailures, FailedDeliveries: failedDeliveries}
-		if scans, listErr := s.ListScans(ctx, j.Name, 1); listErr != nil {
+		if scans, listErr := ts.ListScans(ctx, j.Name, 1); listErr != nil {
 			return listErr
 		} else if len(scans) == 1 {
 			entry.LastScanID = scans[0].ID
@@ -671,15 +679,17 @@ func statusLocation(timezone string) *time.Location {
 	return location
 }
 
-func baseline(ctx context.Context, action string, s *store.Store, a *app.App, job, scanID, output string) error {
+// baseline approves or resets the baseline of a managed job of the tenant of
+// ts, and routes the resulting alerts to that tenant's destinations.
+func baseline(ctx context.Context, action string, ts *store.TenantStore, a *app.App, job, scanID, output string) error {
 	if job == "" {
 		return errors.New("--job is required")
 	}
-	if record, managedErr := s.GetJobByName(ctx, job); managedErr == nil {
+	if record, managedErr := ts.GetJobByName(ctx, job); managedErr == nil {
 		var events []model.Event
 		var err error
 		var destinations []string
-		destinations, err = a.Notifier.QueueDestinationsForJob(ctx, record.Job)
+		destinations, err = a.Notifier.Tenant(ts).QueueDestinationsForJob(ctx, record.Job)
 		if err != nil {
 			return err
 		}
@@ -688,14 +698,14 @@ func baseline(ctx context.Context, action string, s *store.Store, a *app.App, jo
 			if scanID == "" {
 				return errors.New("--scan-id is required")
 			}
-			scan, getErr := s.GetScan(ctx, scanID)
+			scan, getErr := ts.GetScan(ctx, scanID)
 			if getErr != nil {
 				return getErr
 			}
 			if scan.JobID != record.ID || scan.ConfigHash != record.Job.SecurityHash() {
 				return errors.New("scan does not match the current managed job")
 			}
-			events, err = s.ApproveRuntimeWithOutboxAndAudit(ctx, record.ID, record.Job.Name, scan, destinations, store.AuditEntry{
+			events, err = ts.ApproveRuntimeWithOutboxAndAudit(ctx, record.ID, record.Job.Name, scan, destinations, store.AuditEntry{
 				Action:        "baseline.approved",
 				Detail:        record.ID + ":" + scan.ID,
 				ActorUserID:   store.LegacyAdminUserID,
@@ -703,7 +713,7 @@ func baseline(ctx context.Context, action string, s *store.Store, a *app.App, jo
 				ActorKind:     store.AuditActorHost,
 			})
 		case "reset":
-			events, err = s.ResetRuntimeWithOutboxAndAudit(ctx, record.ID, record.Job.Name, destinations, store.AuditEntry{
+			events, err = ts.ResetRuntimeWithOutboxAndAudit(ctx, record.ID, record.Job.Name, destinations, store.AuditEntry{
 				Action:        "baseline.reset",
 				Detail:        record.ID,
 				ActorUserID:   store.LegacyAdminUserID,

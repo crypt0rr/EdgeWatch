@@ -203,7 +203,7 @@ func TestHealthDoesNotConstructScannerApplication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AcquireLease(context.Background(), "health-test"); err != nil {
+	if err := s.System().AcquireLease(context.Background(), "health-test"); err != nil {
 		s.Close()
 		t.Fatal(err)
 	}
@@ -256,7 +256,7 @@ func TestStatusFallsBackToUTCForInvalidTimezone(t *testing.T) {
 	}
 	defer s.Close()
 	cfg := &config.Config{Jobs: []config.Job{{Name: "invalid-zone", Schedule: "0 * * * *", Timezone: "Not/AZone"}}}
-	if err := status(context.Background(), s, cfg, "", "json"); err != nil {
+	if err := status(context.Background(), s.Tenant(store.DefaultTenantScope()), cfg, "", "json"); err != nil {
 		t.Fatalf("status returned an error for an invalid timezone: %v", err)
 	}
 	// Only scheduled managed jobs compute a next run, and those zones are
@@ -278,14 +278,14 @@ func TestRunStatusHistoryAndBaselineForManagedJob(t *testing.T) {
 		Name: "managed", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"},
 		TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced",
 	})
-	record, err := s.CreateJob(ctx, job)
+	record, err := s.Tenant(store.DefaultTenantScope()).CreateJob(ctx, job)
 	if err != nil {
 		s.Close()
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
 	scan := model.Scan{ID: "managed-scan", JobID: record.ID, JobRevision: record.Revision, Job: job.Name, StartedAt: now, FinishedAt: now, Status: "success", ConfigHash: job.SecurityHash(), Snapshot: model.Snapshot{Units: []model.Unit{{Target: "127.0.0.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}}}}}
-	if err := s.SaveScan(ctx, scan); err != nil {
+	if err := s.System().SaveScan(ctx, scan); err != nil {
 		s.Close()
 		t.Fatal(err)
 	}
@@ -443,7 +443,7 @@ func TestReadOnlyCommandsDoNotModifySQLiteArtifacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AcquireDaemonLease(context.Background(), "read-only-test"); err != nil {
+	if _, err := s.System().AcquireDaemonLease(context.Background(), "read-only-test"); err != nil {
 		s.Close()
 		t.Fatal(err)
 	}

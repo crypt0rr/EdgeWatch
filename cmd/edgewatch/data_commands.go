@@ -17,11 +17,19 @@ import (
 
 const hostCLIActor = "host-cli"
 
+// hostAuditor keeps the audit record of a host command: the TenantStore of
+// the tenant whose data the command used, which records it in that tenant,
+// or the Store for a command on the whole database, such as backup or
+// restore.
+type hostAuditor interface {
+	AuditEntry(context.Context, store.AuditEntry) error
+}
+
 // auditHostCommand records an explicitly mutating host-authorized operation
 // using the already-open writable store. Read-only commands intentionally do
 // not call this helper: adding an audit row would make verify, health, status,
 // history, and baseline export mutate the database they promise to inspect.
-func auditHostCommand(ctx context.Context, current *store.Store, entry store.AuditEntry) {
+func auditHostCommand(ctx context.Context, current hostAuditor, entry store.AuditEntry) {
 	if current == nil {
 		logAuditFailure(entry.Action)
 		return
@@ -121,11 +129,13 @@ func verify(ctx context.Context, s *store.Store, format string) error {
 	return err
 }
 
-func exportBaseline(ctx context.Context, s *store.Store, job, output, format string) error {
+// exportBaseline writes the baselines of the jobs of the tenant of ts, or of
+// its one job named job, to output.
+func exportBaseline(ctx context.Context, ts *store.TenantStore, job, output, format string) error {
 	if strings.TrimSpace(output) == "" {
 		return errors.New("--out is required")
 	}
-	export, err := s.ExportBaselines(ctx, job)
+	export, err := ts.ExportBaselines(ctx, job)
 	if err != nil {
 		return err
 	}

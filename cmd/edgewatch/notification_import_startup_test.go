@@ -71,7 +71,7 @@ func TestNotifyTestBeforeImportUsesConfiguredURLs(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reader.Close()
-	records, err := reader.ListManagedNotifications(context.Background())
+	records, err := reader.Tenant(store.DefaultTenantScope()).ListManagedNotifications(context.Background())
 	if err != nil || len(records) != 0 {
 		t.Fatalf("notify test imported destinations: %d, %v", len(records), err)
 	}
@@ -97,14 +97,15 @@ func TestDaemonStartImportsConfiguredNotificationURLs(t *testing.T) {
 		seed.Close()
 		t.Fatal(err)
 	}
-	selection := previous.LegacySelection()
-	if len(selection) != 1 || !strings.HasPrefix(selection[0], "file:") {
+	seedTenant := seed.Tenant(store.DefaultTenantScope())
+	selection, err := previous.Tenant(seedTenant).LegacySelection(ctx)
+	if err != nil || len(selection) != 1 || !strings.HasPrefix(selection[0], "file:") {
 		seed.Close()
-		t.Fatalf("previous deployment selection = %v", selection)
+		t.Fatalf("previous deployment selection = %v, %v", selection, err)
 	}
 	job := managedCLIJob("imported-routing")
 	job.NotificationDestinations = selection
-	record, err := seed.CreateJob(ctx, job)
+	record, err := seedTenant.CreateJob(ctx, job)
 	if err != nil {
 		seed.Close()
 		t.Fatal(err)
@@ -134,19 +135,20 @@ func TestDaemonStartImportsConfiguredNotificationURLs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	records, err := s.ListManagedNotifications(ctx)
+	tenant := s.Tenant(store.DefaultTenantScope())
+	records, err := tenant.ListManagedNotifications(ctx)
 	if err != nil || len(records) != 1 || records[0].Name != "Deployment destination" {
 		s.Close()
 		t.Fatalf("imported destinations = %#v, %v", records, err)
 	}
-	stored, err := s.GetJob(ctx, record.ID)
+	stored, err := tenant.GetJob(ctx, record.ID)
 	if err != nil || !slices.Equal(stored.Job.NotificationDestinations, []string{records[0].ID}) {
 		s.Close()
 		t.Fatalf("job routing after the daemon import = %v, %v", stored.Job.NotificationDestinations, err)
 	}
 	// The daemon released its lease on exit; stand in for a running daemon so
 	// the health command reaches its warnings.
-	if _, err := s.AcquireDaemonLease(ctx, "running-daemon"); err != nil {
+	if _, err := s.System().AcquireDaemonLease(ctx, "running-daemon"); err != nil {
 		s.Close()
 		t.Fatal(err)
 	}

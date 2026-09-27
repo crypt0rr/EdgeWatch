@@ -39,7 +39,7 @@ func TestRunNotifyTestFailsWhenManagedDestinationIsLocked(t *testing.T) {
 				t.Fatal(err)
 			}
 			// The destination is never contacted: it is locked before the test.
-			if _, err := notifier.CreateManaged(ctx, "Ops", "generic://127.0.0.1:9/ops?disabletls=yes", true); err != nil {
+			if _, err := notifier.Tenant(s.Tenant(store.DefaultTenantScope())).CreateManagedWithAudit(ctx, "Ops", "generic://127.0.0.1:9/ops?disabletls=yes", true, store.AuditEntry{}); err != nil {
 				s.Close()
 				t.Fatal(err)
 			}

@@ -192,27 +192,19 @@ func saturatingProbeAdd(a, b int64) int64 {
 	return a + b
 }
 
-func (a *App) checkResolvedProbeBudget(job config.Job, discovery, nmapProbes int64) error {
+// checkResolvedProbeBudget checks resolved work against budget, the probe
+// budget of the job's tenant.
+func checkResolvedProbeBudget(budget probeBudget, job config.Job, discovery, nmapProbes int64) error {
 	discovery = maxNonNegative(discovery)
 	nmapProbes = maxNonNegative(nmapProbes)
 	total := saturatingProbeAdd(discovery, nmapProbes)
 	estimate := config.WorkEstimate{Probes: total, NaabuProbes: discovery, NmapProbes: nmapProbes}
 	// The absolute ceiling applies to each engine and to the combined run. A
-	// high-cost opt-in can bypass deployment budgets, never this hard limit.
+	// high-cost opt-in can raise the budgets, never above this hard limit.
 	if discovery > config.MaxProbeCountLimit || nmapProbes > config.MaxProbeCountLimit || total > config.MaxProbeCountLimit {
 		return &ScanWorkBudgetError{Estimate: estimate, Budget: config.MaxProbeCountLimit}
 	}
-	if job.AllowHighCost {
-		return nil
-	}
-	naabuBudget := a.Config.Scheduler.MaxNaabuProbeCount
-	if naabuBudget <= 0 {
-		naabuBudget = config.DefaultNaabuMaxProbeCount
-	}
-	nmapBudget := a.Config.Scheduler.MaxProbeCount
-	if nmapBudget <= 0 {
-		nmapBudget = config.DefaultMaxProbeCount
-	}
+	nmapBudget, naabuBudget := budget.limits(job)
 	if discovery > naabuBudget {
 		return &ScanWorkBudgetError{Estimate: estimate, Budget: naabuBudget}
 	}
@@ -222,53 +214,59 @@ func (a *App) checkResolvedProbeBudget(job config.Job, discovery, nmapProbes int
 	return nil
 }
 
-func (a *App) CheckScanWorkBudget(job config.Job) (config.WorkEstimate, error) {
+// CheckScanWorkBudget estimates a job's work and checks it against the probe
+// budget of the tenant of ts. A failure to read that budget wraps
+// ErrProbeBudgetUnavailable.
+func (a *App) CheckScanWorkBudget(ctx context.Context, ts *store.TenantStore, job config.Job) (config.WorkEstimate, error) {
 	estimate, err := config.EstimateJobWork(job)
 	if err != nil {
 		return estimate, err
 	}
+	budget, err := a.tenantProbeBudget(ctx, ts)
+	if err != nil {
+		return estimate, err
+	}
+	return estimate, checkEstimatedProbeBudget(budget, job, estimate)
+}
+
+// checkEstimatedProbeBudget checks a job's estimated work against budget.
+func checkEstimatedProbeBudget(budget probeBudget, job config.Job, estimate config.WorkEstimate) error {
 	// A Naabu pipeline always performs a full-range discovery pass. Keep its
 	// discovery budget separate from Nmap work (including UDP) so selecting the
 	// faster discovery engine cannot weaken the Nmap safety rail for the same
 	// job.
 	effectiveJob := config.NormalizeJob(job)
-	nmapBudget := a.Config.Scheduler.MaxProbeCount
-	if nmapBudget <= 0 {
-		nmapBudget = config.DefaultMaxProbeCount
-	}
-	naabuBudget := a.Config.Scheduler.MaxNaabuProbeCount
-	if naabuBudget <= 0 {
-		naabuBudget = config.DefaultNaabuMaxProbeCount
-	}
-	// allow_high_cost is an explicit opt-in to the configured engine budget,
-	// never permission to schedule an unbounded scan. Keep this check before
-	// the opt-in branch so even administrators cannot exceed the hard ceiling.
+	// allow_high_cost is an explicit opt-in to the tenant's high-cost
+	// ceiling, never permission to schedule an unbounded scan. Keep this
+	// check first so even administrators cannot exceed the hard ceiling.
 	if estimate.Probes > config.MaxProbeCountLimit {
-		return estimate, &ScanWorkBudgetError{Estimate: estimate, Budget: config.MaxProbeCountLimit}
+		return &ScanWorkBudgetError{Estimate: estimate, Budget: config.MaxProbeCountLimit}
 	}
-	if job.AllowHighCost {
-		return estimate, nil
-	}
+	nmapBudget, naabuBudget := budget.limits(job)
 	if effectiveJob.TCP != nil && effectiveJob.TCP.Engine == config.EngineNaabuNmap && estimate.NaabuProbes > naabuBudget {
-		return estimate, &ScanWorkBudgetError{Estimate: estimate, Budget: naabuBudget}
+		return &ScanWorkBudgetError{Estimate: estimate, Budget: naabuBudget}
 	}
 	if estimate.NmapProbes > nmapBudget {
-		return estimate, &ScanWorkBudgetError{Estimate: estimate, Budget: nmapBudget}
+		return &ScanWorkBudgetError{Estimate: estimate, Budget: nmapBudget}
 	}
-	return estimate, nil
+	return nil
 }
 
 // CheckScanCycleProbeBudget applies the same safety rails to durable work
 // totals before the next process starts. For Naabu cycles this covers the
 // data-dependent Nmap enrichment phase; for ordinary Nmap/UDP cycles it also
-// keeps resolved DNS/CIDR work within the same deployment budgets. ts is the
-// store of the tenant that owns the cycle's job.
+// keeps resolved DNS/CIDR work within the same budgets. ts is the store of
+// the tenant that owns the cycle's job, and its probe budget applies.
 func (a *App) CheckScanCycleProbeBudget(ctx context.Context, ts *store.TenantStore, cycle store.ScanCycleRecord, job config.Job) error {
 	discovery, nmapProbes, err := ts.ScanCycleProbeTotals(ctx, cycle.ID)
 	if err != nil {
 		return err
 	}
-	return a.checkResolvedProbeBudget(job, discovery, nmapProbes)
+	budget, err := a.tenantProbeBudget(ctx, ts)
+	if err != nil {
+		return err
+	}
+	return checkResolvedProbeBudget(budget, job, discovery, nmapProbes)
 }
 
 // Scanner is the small boundary used by the application. Production uses
@@ -717,8 +715,18 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 			return model.Scan{}, nil, queuedErr
 		}
 	}
-	estimate, err := a.CheckScanWorkBudget(job)
+	estimate, err := config.EstimateJobWork(job)
 	if err != nil {
+		return model.Scan{}, nil, err
+	}
+	// The run reads its tenant's probe budget once. The estimate, the
+	// resolved plan and the direct scanner's own check all use it; the
+	// resumable path checks each attempt against the current budget.
+	budget, err := a.tenantProbeBudget(ctx, ts)
+	if err != nil {
+		return model.Scan{}, nil, err
+	}
+	if err := checkEstimatedProbeBudget(budget, job, estimate); err != nil {
 		return model.Scan{}, nil, err
 	}
 	if managed && !manual {
@@ -829,7 +837,7 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 					scanErr = planErr
 				} else {
 					discoveryProbes, nmapProbes := resolvedPlanProbeTotals(plan)
-					scanErr = a.checkResolvedProbeBudget(job, discoveryProbes, nmapProbes)
+					scanErr = checkResolvedProbeBudget(budget, job, discoveryProbes, nmapProbes)
 				}
 			}
 		}
@@ -841,7 +849,7 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 				snapshot, scanErr = budgetedScanner.ScanWithProgressBudget(scanCtx, job, func(progress scanner.Progress) {
 					a.updateActiveProgress(scan.ID, progress)
 				}, func(discoveryProbes, nmapProbes int64) error {
-					return a.checkResolvedProbeBudget(job, discoveryProbes, nmapProbes)
+					return checkResolvedProbeBudget(budget, job, discoveryProbes, nmapProbes)
 				})
 			} else if progressScanner, ok := a.Scanner.(ProgressScanner); ok {
 				snapshot, scanErr = progressScanner.ScanWithProgress(scanCtx, job, func(progress scanner.Progress) {
@@ -1550,6 +1558,11 @@ func (a *App) reconcileSchedules(ctx context.Context, runOnStart bool) error {
 	a.scheduleMu.Unlock()
 	if c == nil {
 		return nil
+	}
+	// Reload the tenants' slot caps first, so a job that runs on start
+	// already queues under them. A failed read keeps the caps in place.
+	if err := a.refreshSlotCaps(ctx); err != nil && a.Logger != nil {
+		a.Logger.Warn("tenant slot caps could not be refreshed", "error", err)
 	}
 	// Every active tenant's jobs are scheduled. A paused tenant's jobs are
 	// left out, so their entries are removed below and return when the

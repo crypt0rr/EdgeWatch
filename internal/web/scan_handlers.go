@@ -439,10 +439,14 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Se
 		writeError(w, 409, "archived", "archived jobs cannot run", nil)
 		return
 	}
-	if estimate, budgetErr := s.App.CheckScanWorkBudget(record.Job); budgetErr != nil {
+	if estimate, budgetErr := s.App.CheckScanWorkBudget(r.Context(), ts, record.Job); budgetErr != nil {
 		var workErr *app.ScanWorkBudgetError
 		if errors.As(budgetErr, &workErr) {
 			writeError(w, http.StatusUnprocessableEntity, "scan_work_budget_exceeded", budgetErr.Error(), map[string]any{"estimate": workErr.Estimate, "budget": workErr.Budget, "allow_high_cost": record.Job.AllowHighCost})
+			return
+		}
+		if errors.Is(budgetErr, app.ErrProbeBudgetUnavailable) {
+			s.writeStoreWriteError(w, r, budgetErr, "job not found")
 			return
 		}
 		writeError(w, http.StatusBadRequest, "scan_work_estimate_failed", budgetErr.Error(), map[string]any{"estimate": estimate})

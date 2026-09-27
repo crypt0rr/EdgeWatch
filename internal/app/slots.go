@@ -15,7 +15,8 @@ var errSlotWaitFailed = errors.New("scan slot wait failed")
 // number of slots, max_concurrent_scans. A key identifies a tenant: a run
 // takes a slot under the ID of its job's tenant, and a config.yaml job under
 // the default tenant's. capFor may limit a key to fewer slots than the global
-// capacity, and 0 means no limit below it.
+// capacity, and 0 means no limit below it. The application builds capFor
+// from each tenant's max_concurrent_scans; see tenantSlotCaps.
 //
 // Each key has a FIFO queue of waiters. When a slot is free, it goes to the
 // head waiter of the eligible key that was granted a slot least recently, so
@@ -170,6 +171,16 @@ func (p *slotPool) SetCapacity(capacity int, capFor func(key string) int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.capacity = max(capacity, 0)
+	p.capFor = capFor
+	p.dispatchLocked()
+}
+
+// SetCaps replaces the per-key cap source and keeps the global capacity. Like
+// SetCapacity, a larger cap grants queued waiters at once, and a smaller one
+// only holds back new grants.
+func (p *slotPool) SetCaps(capFor func(key string) int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.capFor = capFor
 	p.dispatchLocked()
 }

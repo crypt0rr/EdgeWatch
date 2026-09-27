@@ -37,6 +37,7 @@ var knownAuditActions = map[string][]string{
 	auditCategoryPlatform: {
 		"database.backup", "database.restore", "database.restore.pending_deliveries",
 		"notifications.config_imported",
+		"tenant.capacity_changed",
 	},
 	auditCategoryData: {
 		"baseline.approved", "baseline.reset",

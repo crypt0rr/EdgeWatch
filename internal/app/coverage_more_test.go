@@ -187,7 +187,7 @@ func TestStartManagedRunReportsLookupAndArchivedErrors(t *testing.T) {
 	var calls sync.WaitGroup
 	calls.Add(1)
 	var lookupErr error
-	if err := a.StartManagedRun("missing", func(_ model.Scan, _ []model.Event, err error) { lookupErr = err; calls.Done() }); err != nil {
+	if err := a.StartManagedRun(defaultTenant(a.Store), "missing", func(_ model.Scan, _ []model.Event, err error) { lookupErr = err; calls.Done() }); err != nil {
 		t.Fatal(err)
 	}
 	calls.Wait()
@@ -197,16 +197,16 @@ func TestStartManagedRunReportsLookupAndArchivedErrors(t *testing.T) {
 	a.StopRun()
 
 	job := config.NormalizeJob(config.Job{Name: "archived-run", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SetJobArchived(ctx, record.ID, true); err != nil {
+	if err := defaultTenant(db).SetJobArchived(ctx, record.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	calls.Add(1)
 	var archivedErr error
-	if err := a.StartManagedRun(record.ID, func(_ model.Scan, _ []model.Event, err error) { archivedErr = err; calls.Done() }); err != nil {
+	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, func(_ model.Scan, _ []model.Event, err error) { archivedErr = err; calls.Done() }); err != nil {
 		t.Fatal(err)
 	}
 	calls.Wait()
@@ -229,22 +229,22 @@ func TestManagedRunReservationsRejectDuplicateAndScheduledStarts(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := config.NormalizeJob(config.Job{Name: "reserved", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
 	a.managedReservations.Store(record.ID, "already-queued")
-	if err := a.StartManagedRun(record.ID, nil); !errors.Is(err, scanner.ErrBusy) {
+	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, nil); !errors.Is(err, scanner.ErrBusy) {
 		t.Fatalf("duplicate reservation error = %v, want ErrBusy", err)
 	}
 	a.managedReservations.Delete(record.ID)
 	a.active.Store(record.ID, true)
-	if err := a.StartManagedRun(record.ID, nil); !errors.Is(err, scanner.ErrBusy) {
+	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, nil); !errors.Is(err, scanner.ErrBusy) {
 		t.Fatalf("active reservation error = %v, want ErrBusy", err)
 	}
 	a.active.Delete(record.ID)
 	a.managedReservations.Store(record.ID, "scheduled-reservation")
-	if _, _, err := a.runJob(ctx, record.Job, record.ID, record.Revision, true, false); !errors.Is(err, scanner.ErrBusy) {
+	if _, _, err := a.runJob(ctx, store.DefaultTenantScope(), record.Job, record.ID, record.Revision, true, false); !errors.Is(err, scanner.ErrBusy) {
 		t.Fatalf("scheduled reservation error = %v, want ErrBusy", err)
 	}
 }

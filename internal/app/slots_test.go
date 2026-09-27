@@ -7,7 +7,12 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/store"
 )
+
+// defaultSlotKey is the scan-slot key of the default tenant's jobs.
+const defaultSlotKey = store.DefaultTenantID
 
 type slotResult struct {
 	release func()

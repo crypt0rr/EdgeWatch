@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
-	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 	"github.com/crypt0rr/edgewatch/internal/updatecheck"
@@ -53,7 +52,7 @@ func TestRunUpdateCheckTracksAndDeduplicatesReleases(t *testing.T) {
 	a.ReleaseChecker = checker
 	ctx := context.Background()
 	a.runUpdateCheck(ctx)
-	state, err := db.GetApplicationUpdateState(ctx)
+	state, err := db.Platform().GetApplicationUpdateState(ctx)
 	if err != nil || state.InstalledVersion != "v1.0.0" {
 		t.Fatalf("initial version state=%#v err=%v", state, err)
 	}
@@ -61,7 +60,7 @@ func TestRunUpdateCheckTracksAndDeduplicatesReleases(t *testing.T) {
 	checker.result.Release.URL = updatecheck.ReleasePageURL("v1.1.0")
 	a.runUpdateCheck(ctx)
 	a.runUpdateCheck(ctx)
-	events, err := db.ListEvents(ctx, "", 20)
+	events, err := defaultTenant(db).ListEvents(ctx, "", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +70,7 @@ func TestRunUpdateCheckTracksAndDeduplicatesReleases(t *testing.T) {
 	a.Version = "v1.1.0"
 	a.runUpdateCheck(ctx)
 	a.runUpdateCheck(ctx)
-	events, err = db.ListEvents(ctx, "", 20)
+	events, err = defaultTenant(db).ListEvents(ctx, "", 20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +98,7 @@ func TestRunUpdateCheckPreservesReleaseOnFailureAndHonorsDisable(t *testing.T) {
 	checker := &fakeReleaseChecker{err: errors.New("offline")}
 	a.ReleaseChecker = checker
 	a.runUpdateCheck(context.Background())
-	state, err := db.GetApplicationUpdateState(context.Background())
+	state, err := db.Platform().GetApplicationUpdateState(context.Background())
 	if err != nil || state.CheckStatus != "unknown" || checker.calls != 0 {
 		t.Fatalf("disabled update state=%#v calls=%d err=%v", state, checker.calls, err)
 	}
@@ -121,7 +120,7 @@ func TestRunUpdateCheckCoversFailureNotModifiedRollbackAndRouting(t *testing.T) 
 	checker := &fakeReleaseChecker{err: errors.New("temporary GitHub outage")}
 	a.ReleaseChecker = checker
 	a.runUpdateCheck(ctx)
-	state, err := db.GetApplicationUpdateState(ctx)
+	state, err := db.Platform().GetApplicationUpdateState(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +131,7 @@ func TestRunUpdateCheckCoversFailureNotModifiedRollbackAndRouting(t *testing.T) 
 	checker.err = nil
 	checker.result = updatecheck.Result{NotModified: true, ETag: "etag-2"}
 	a.runUpdateCheck(ctx)
-	state, err = db.GetApplicationUpdateState(ctx)
+	state, err = db.Platform().GetApplicationUpdateState(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +143,7 @@ func TestRunUpdateCheckCoversFailureNotModifiedRollbackAndRouting(t *testing.T) 
 	// fallback and the legacy all-destinations routing path.
 	checker.result = updatecheck.Result{Release: updatecheck.Release{Version: "v3.0.0"}, ETag: "etag-3"}
 	a.runUpdateCheck(ctx)
-	state, err = db.GetApplicationUpdateState(ctx)
+	state, err = db.Platform().GetApplicationUpdateState(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,18 +153,22 @@ func TestRunUpdateCheckCoversFailureNotModifiedRollbackAndRouting(t *testing.T) 
 
 	// Materialize an explicit empty selection and verify the configured routing
 	// branch remains silent while still updating the cached release.
-	if err := db.SetApplicationUpdateDestinations(ctx, []string{}, store.AuditEntry{}); err != nil {
+	if err := defaultTenant(db).SetApplicationUpdateDestinations(ctx, []string{}, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
 	checker.result.Release.Version = "v4.0.0"
 	checker.result.Release.URL = ""
 	a.runUpdateCheck(ctx)
-	state, err = db.GetApplicationUpdateState(ctx)
+	state, err = db.Platform().GetApplicationUpdateState(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !state.UpdateNotificationDestinationsConfigured || len(state.UpdateNotificationDestinations) != 0 || state.LatestVersion != "v4.0.0" {
-		t.Fatalf("explicit routing state = %#v", state)
+	routing, err := defaultTenant(db).ApplicationUpdateRouting(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !routing.Configured || len(routing.Destinations) != 0 || state.LatestVersion != "v4.0.0" {
+		t.Fatalf("explicit routing state = %#v, release state = %#v", routing, state)
 	}
 
 	// A rollback is recorded without an upgrade event and clears the previous
@@ -173,7 +176,7 @@ func TestRunUpdateCheckCoversFailureNotModifiedRollbackAndRouting(t *testing.T) 
 	a.Version = "v1.0.0"
 	a.ReleaseChecker = nil
 	a.runUpdateCheck(ctx)
-	state, err = db.GetApplicationUpdateState(ctx)
+	state, err = db.Platform().GetApplicationUpdateState(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,24 +221,14 @@ func TestRunUpdateCheckCoversPersistenceFailureBranches(t *testing.T) {
 		t.Fatal("closed store returned update destinations")
 	}
 
-	// A healthy state store with a notifier whose metadata store is unavailable
-	// exercises the second routing failure branch.
+	// Readable update routing with destinations that cannot be read
+	// exercises the second routing failure branch. The notifier reads the
+	// default tenant's destinations through that tenant's store.
 	a, db = newApp(t)
-	notifierStore, err := store.Open(storetest.FreshPath(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	notifier, err := notify.New(notifierStore, nil)
-	if err != nil {
-		notifierStore.Close()
+	if _, err := db.DB.ExecContext(ctx, `ALTER TABLE managed_notifications RENAME TO managed_notifications_unavailable`); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
-	if err := notifierStore.Close(); err != nil {
-		db.Close()
-		t.Fatal(err)
-	}
-	a.Notifier = notifier
 	a.Logger = nil
 	if got := a.updateDestinations(ctx); got != nil {
 		t.Fatal("unavailable notifier returned update destinations")

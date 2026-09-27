@@ -87,7 +87,7 @@ func TestCheckScanCycleProbeBudgetCoversSplitAndHardLimits(t *testing.T) {
 		Name: "budget-cycle", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
 		TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Mode: "connect", Ports: "1-65535", Naabu: &config.NaabuOptions{ScanType: "connect"}},
 	})
-	record, err := s.CreateJob(ctx, jobValue)
+	record, err := defaultTenant(s).CreateJob(ctx, jobValue)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,24 +98,24 @@ func TestCheckScanCycleProbeBudgetCoversSplitAndHardLimits(t *testing.T) {
 			{Sequence: 1, Engine: config.EngineNmap, Phase: "enrichment", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "22", Probes: 3},
 		},
 	}
-	cycle, err := s.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	a := &App{Store: s, Config: &config.Config{Scheduler: config.Scheduler{MaxProbeCount: 2, MaxNaabuProbeCount: 1}}}
-	if err := a.CheckScanCycleProbeBudget(ctx, cycle, record.Job); err == nil || !errors.Is(err, ErrScanWorkBudget) {
+	if err := a.CheckScanCycleProbeBudget(ctx, defaultTenant(a.Store), cycle, record.Job); err == nil || !errors.Is(err, ErrScanWorkBudget) {
 		t.Fatalf("Naabu budget result = %v", err)
 	}
 	a.Config.Scheduler.MaxNaabuProbeCount = 10
-	if err := a.CheckScanCycleProbeBudget(ctx, cycle, record.Job); err == nil || !errors.Is(err, ErrScanWorkBudget) {
+	if err := a.CheckScanCycleProbeBudget(ctx, defaultTenant(a.Store), cycle, record.Job); err == nil || !errors.Is(err, ErrScanWorkBudget) {
 		t.Fatalf("Nmap budget result = %v", err)
 	}
 	record.Job.AllowHighCost = true
-	if err := a.CheckScanCycleProbeBudget(ctx, cycle, record.Job); err != nil {
+	if err := a.CheckScanCycleProbeBudget(ctx, defaultTenant(a.Store), cycle, record.Job); err != nil {
 		t.Fatalf("high-cost cycle result = %v", err)
 	}
-	if err := a.CheckScanCycleProbeBudget(ctx, cycle, config.Job{TCP: &config.Protocol{Engine: config.EngineNmap}}); err == nil || !errors.Is(err, ErrScanWorkBudget) {
+	if err := a.CheckScanCycleProbeBudget(ctx, defaultTenant(a.Store), cycle, config.Job{TCP: &config.Protocol{Engine: config.EngineNmap}}); err == nil || !errors.Is(err, ErrScanWorkBudget) {
 		t.Fatalf("Nmap-only cycle result = %v, want budget error", err)
 	}
 	// SQLite's aggregate query intentionally treats an unknown cycle as an
@@ -127,22 +127,22 @@ func TestCheckScanCycleProbeBudgetCoversSplitAndHardLimits(t *testing.T) {
 	if err := closedStore.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := (&App{Store: closedStore, Config: a.Config}).CheckScanCycleProbeBudget(ctx, store.ScanCycleRecord{ID: "missing"}, record.Job); err == nil {
+	if err := (&App{Store: closedStore, Config: a.Config}).CheckScanCycleProbeBudget(ctx, defaultTenant(closedStore), store.ScanCycleRecord{ID: "missing"}, record.Job); err == nil {
 		t.Fatal("closed store error was swallowed")
 	}
 
 	hardJob := jobValue
 	hardJob.Name = "hard-limit"
-	hardRecord, err := s.CreateJob(ctx, hardJob)
+	hardRecord, err := defaultTenant(s).CreateJob(ctx, hardJob)
 	if err != nil {
 		t.Fatal(err)
 	}
 	hardPlan := scanner.WorkPlan{Job: hardRecord.Job, Units: []scanner.WorkUnit{{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1-65535", Probes: config.MaxProbeCountLimit + 1}}}
-	hardCycle, err := s.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: hardRecord.ID, Job: hardRecord.Job.Name, JobRevision: hardRecord.Revision, StartedAt: time.Now().UTC(), Plan: hardPlan})
+	hardCycle, err := s.System().CreateScanCycle(ctx, store.ScanCycleRecord{JobID: hardRecord.ID, Job: hardRecord.Job.Name, JobRevision: hardRecord.Revision, StartedAt: time.Now().UTC(), Plan: hardPlan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.CheckScanCycleProbeBudget(ctx, hardCycle, hardRecord.Job); err == nil || !errors.Is(err, ErrScanWorkBudget) {
+	if err := a.CheckScanCycleProbeBudget(ctx, defaultTenant(a.Store), hardCycle, hardRecord.Job); err == nil || !errors.Is(err, ErrScanWorkBudget) {
 		t.Fatalf("hard ceiling result = %v", err)
 	}
 }
@@ -195,7 +195,7 @@ func TestResolvedPlanBudgetRejectsExpandedWorkBeforeCycleCreation(t *testing.T) 
 		Name: "expanded-budget", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"edge.example"},
 		TCP: &config.Protocol{Ports: "1-6", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour),
 	})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,11 +203,11 @@ func TestResolvedPlanBudgetRejectsExpandedWorkBeforeCycleCreation(t *testing.T) 
 	// one Nmap unit even though the preflight logical-target estimate is one.
 	plan := scanner.WorkPlan{Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.1", "192.0.2.2"}, Ports: "1-3", Probes: 6}}}
 	var scan model.Scan
-	handled, _, runErr := a.runResumableAttempt(ctx, ctx, job, record.ID, &scan, nil, coverageResumableScanner{plan: plan}, false)
+	handled, _, runErr := a.runResumableAttempt(ctx, ctx, defaultTenant(a.Store), job, record.ID, &scan, nil, coverageResumableScanner{plan: plan}, false)
 	if !handled || !errors.Is(runErr, ErrScanWorkBudget) || scan.Status != "failed" {
 		t.Fatalf("resolved budget result = handled %v scan %#v err %v", handled, scan, runErr)
 	}
-	if _, err := db.GetActiveScanCycle(ctx, record.ID); !errors.Is(err, store.ErrNoScanCycle) {
+	if _, err := defaultTenant(db).GetActiveScanCycle(ctx, record.ID); !errors.Is(err, store.ErrNoScanCycle) {
 		t.Fatalf("over-budget plan created a cycle: %v", err)
 	}
 }
@@ -273,7 +273,7 @@ func TestDirectScanRechecksProbeBudgetAfterResolvingAgain(t *testing.T) {
 			var scan model.Scan
 			var runErr error
 			if managed {
-				record, err := db.CreateJob(ctx, job)
+				record, err := defaultTenant(db).CreateJob(ctx, job)
 				if err != nil {
 					t.Fatal(err)
 				}

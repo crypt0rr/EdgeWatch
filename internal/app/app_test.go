@@ -87,14 +87,14 @@ func TestNewFreezesLegacyNotificationSelections(t *testing.T) {
 		Timeout:  config.Duration(time.Minute),
 		Timing:   "balanced",
 	})
-	legacyRecord, err := s.CreateJob(ctx, legacy)
+	legacyRecord, err := defaultTenant(s).CreateJob(ctx, legacy)
 	if err != nil {
 		t.Fatal(err)
 	}
 	silent := legacy
 	silent.Name = "silent-routing"
 	silent.NotificationDestinations = []string{}
-	silentRecord, err := s.CreateJob(ctx, silent)
+	silentRecord, err := defaultTenant(s).CreateJob(ctx, silent)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,14 +109,14 @@ func TestNewFreezesLegacyNotificationSelections(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	storedLegacy, err := s.GetJob(ctx, legacyRecord.ID)
+	storedLegacy, err := defaultTenant(s).GetJob(ctx, legacyRecord.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if storedLegacy.Revision != legacyRecord.Revision+1 || storedLegacy.Job.NotificationDestinations == nil || len(storedLegacy.Job.NotificationDestinations) != 1 || !strings.HasPrefix(storedLegacy.Job.NotificationDestinations[0], "file:") {
 		t.Fatalf("legacy job after startup freeze = %#v, want one deployment selector at revision 2", storedLegacy)
 	}
-	storedSilent, err := s.GetJob(ctx, silentRecord.ID)
+	storedSilent, err := defaultTenant(s).GetJob(ctx, silentRecord.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestScanWorkBudgetIsCheckedBeforeLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "budget", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	record, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "budget", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,14 +184,14 @@ func TestScanWorkBudgetIsCheckedBeforeLease(t *testing.T) {
 	if !errors.As(err, &budgetErr) {
 		t.Fatalf("expected budget error, got %v", err)
 	}
-	active, err := s.JobActive(ctx, record.ID)
+	active, err := defaultTenant(s).JobActive(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if active {
 		t.Fatal("budget rejection acquired a lease")
 	}
-	if _, err := s.ListJobScans(ctx, record.ID, 10); err != nil {
+	if _, err := defaultTenant(s).ListJobScans(ctx, record.ID, 10); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -209,7 +209,7 @@ func TestResumableScanCheckpointsTimeoutAndRecovers(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Scanner = &resumableTestScanner{}
-	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "broad", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "syn"}, Timeout: config.Duration(time.Second), ResumeWindow: config.Duration(time.Hour)}))
+	record, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "broad", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "syn"}, Timeout: config.Duration(time.Second), ResumeWindow: config.Duration(time.Hour)}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,11 +217,11 @@ func TestResumableScanCheckpointsTimeoutAndRecovers(t *testing.T) {
 	if firstErr == nil || first.Status != "timed_out" || !first.Resumable || first.CycleStatus != "paused" {
 		t.Fatalf("first resumable attempt = %#v, events=%#v, err=%v", first, events, firstErr)
 	}
-	cycle, err := s.GetActiveScanCycle(ctx, record.ID)
+	cycle, err := defaultTenant(s).GetActiveScanCycle(ctx, record.ID)
 	if err != nil || cycle.Status != "paused" || cycle.CompletedUnits != 1 {
 		t.Fatalf("paused cycle = %#v, %v", cycle, err)
 	}
-	state, err := s.RuntimeState(ctx, record.ID)
+	state, err := defaultTenant(s).RuntimeState(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestResumableScanCheckpointsTimeoutAndRecovers(t *testing.T) {
 	if secondErr != nil || second.Status != "success" || second.CycleStatus != "completed" || second.CompletedUnits != 2 {
 		t.Fatalf("recovered attempt = %#v, events=%#v, err=%v", second, events, secondErr)
 	}
-	state, err = s.RuntimeState(ctx, record.ID)
+	state, err = defaultTenant(s).RuntimeState(ctx, record.ID)
 	if err != nil || state.Baseline == nil {
 		t.Fatalf("completed cycle did not establish baseline: %#v, %v", state, err)
 	}
@@ -264,7 +264,7 @@ func TestExpiredResumableCycleProducesFailureBeforeFreshCycle(t *testing.T) {
 	}
 	probe := &resumableTestScanner{}
 	a.Scanner = probe
-	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "expired", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "syn"}, Timeout: config.Duration(time.Second), ResumeWindow: config.Duration(time.Hour)}))
+	record, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "expired", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "syn"}, Timeout: config.Duration(time.Second), ResumeWindow: config.Duration(time.Hour)}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +272,7 @@ func TestExpiredResumableCycleProducesFailureBeforeFreshCycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cycle, err := s.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), ExecutionHash: record.Job.ExecutionHash(), Plan: plan, ExpiresAt: time.Now().UTC().Add(-time.Minute)})
+	cycle, err := s.System().CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), ExecutionHash: record.Job.ExecutionHash(), Plan: plan, ExpiresAt: time.Now().UTC().Add(-time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,7 +286,7 @@ func TestExpiredResumableCycleProducesFailureBeforeFreshCycle(t *testing.T) {
 	if len(events) != 1 || events[0].Type != "scan-failure" {
 		t.Fatalf("expired cycle events = %#v", events)
 	}
-	if _, err := s.GetActiveScanCycle(ctx, record.ID); !errors.Is(err, store.ErrNoScanCycle) {
+	if _, err := defaultTenant(s).GetActiveScanCycle(ctx, record.ID); !errors.Is(err, store.ErrNoScanCycle) {
 		t.Fatalf("expired cycle remained active: %v", err)
 	}
 	// A later trigger creates a new cycle after the expiry failure has been
@@ -314,7 +314,7 @@ func TestCompletedCycleWithoutScanIsRecovered(t *testing.T) {
 	}
 	probe := &resumableTestScanner{}
 	a.Scanner = probe
-	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "promote", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "syn"}, Timeout: config.Duration(time.Second), ResumeWindow: config.Duration(time.Hour)}))
+	record, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "promote", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "syn"}, Timeout: config.Duration(time.Second), ResumeWindow: config.Duration(time.Hour)}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,23 +322,23 @@ func TestCompletedCycleWithoutScanIsRecovered(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cycle, err := s.CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), ExecutionHash: record.Job.ExecutionHash(), Plan: plan})
+	cycle, err := s.System().CreateScanCycle(ctx, store.ScanCycleRecord{JobID: record.ID, Job: record.Job.Name, JobRevision: record.Revision, ConfigHash: record.Job.SecurityHash(), ExecutionHash: record.Job.ExecutionHash(), Plan: plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+	if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
 	for _, unit := range plan.Units {
-		claimed, claimErr := s.ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence)
+		claimed, claimErr := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence)
 		if claimErr != nil {
 			t.Fatal(claimErr)
 		}
-		if err := s.CompleteScanCycleUnit(ctx, cycle.ID, claimed.Sequence, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: claimed.Unit.PortCount, State: "open"}}}}}); err != nil {
+		if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, claimed.Sequence, model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: claimed.Unit.PortCount, State: "open"}}}}}); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := s.CompleteScanCycle(ctx, cycle.ID); err != nil {
+	if _, err := s.System().CompleteScanCycle(ctx, cycle.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -346,7 +346,7 @@ func TestCompletedCycleWithoutScanIsRecovered(t *testing.T) {
 	if runErr != nil || scan.Status != "success" || scan.CycleID != cycle.ID || scan.CycleStatus != "completed" {
 		t.Fatalf("recovered cycle = %#v events=%#v err=%v", scan, events, runErr)
 	}
-	rows, err := s.ListJobScans(ctx, record.ID, 5)
+	rows, err := defaultTenant(s).ListJobScans(ctx, record.ID, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,7 +376,7 @@ func TestStopRunWaitsForManualManagedRun(t *testing.T) {
 	}
 	blocking := &releaseOnlyScanner{started: make(chan struct{}), release: make(chan struct{})}
 	a.Scanner = blocking
-	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "shutdown", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	record, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "shutdown", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -384,7 +384,7 @@ func TestStopRunWaitsForManualManagedRun(t *testing.T) {
 		t.Fatal("expected test to own the run context")
 	}
 	completed := make(chan error, 1)
-	if err := a.StartManagedRun(record.ID, func(_ model.Scan, _ []model.Event, runErr error) { completed <- runErr }); err != nil {
+	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, func(_ model.Scan, _ []model.Event, runErr error) { completed <- runErr }); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -416,7 +416,7 @@ func TestStopRunWaitsForManualManagedRun(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("manual scan callback did not run")
 	}
-	scans, err := s.ListJobScans(ctx, record.ID, 5)
+	scans, err := defaultTenant(s).ListJobScans(ctx, record.ID, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -446,7 +446,7 @@ func newManagedRunTestApp(t *testing.T, scan Scanner) (*App, *store.Store, store
 		t.Fatal(err)
 	}
 	a.Scanner = scan
-	record, err := s.CreateJob(context.Background(), config.NormalizeJob(config.Job{Name: "scan-now", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	record, err := defaultTenant(s).CreateJob(context.Background(), config.NormalizeJob(config.Job{Name: "scan-now", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,9 +461,9 @@ func TestStartManagedRunAcceptsNextRunFromCompletionCallback(t *testing.T) {
 	firstErr := make(chan error, 1)
 	restartErr := make(chan error, 1)
 	secondErr := make(chan error, 1)
-	if err := a.StartManagedRun(record.ID, func(_ model.Scan, _ []model.Event, runErr error) {
+	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, func(_ model.Scan, _ []model.Event, runErr error) {
 		firstErr <- runErr
-		restartErr <- a.StartManagedRun(record.ID, func(_ model.Scan, _ []model.Event, runErr error) { secondErr <- runErr })
+		restartErr <- a.StartManagedRun(defaultTenant(a.Store), record.ID, func(_ model.Scan, _ []model.Event, runErr error) { secondErr <- runErr })
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestStartManagedRunAcceptsNextRunFromCompletionCallback(t *testing.T) {
 		}
 	}
 	a.StopRun()
-	scans, err := s.ListJobScans(context.Background(), record.ID, 5)
+	scans, err := defaultTenant(s).ListJobScans(context.Background(), record.ID, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -497,7 +497,7 @@ func TestManagedRunReleaseKeepsNewerReservation(t *testing.T) {
 	blocking := &releaseOnlyScanner{started: make(chan struct{}), release: make(chan struct{})}
 	a, _, record := newManagedRunTestApp(t, blocking)
 	seen := make(chan any, 1)
-	if err := a.StartManagedRun(record.ID, func(model.Scan, []model.Event, error) {
+	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, func(model.Scan, []model.Event, error) {
 		value, _ := a.managedReservations.Load(record.ID)
 		seen <- value
 	}); err != nil {
@@ -530,7 +530,7 @@ func TestManagedRunReleaseKeepsNewerReservation(t *testing.T) {
 func TestManagedRunReleasesReservationAfterPanic(t *testing.T) {
 	panicking := panicScanner{started: make(chan struct{})}
 	a, _, record := newManagedRunTestApp(t, panicking)
-	if err := a.StartManagedRun(record.ID, func(model.Scan, []model.Event, error) {
+	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, func(model.Scan, []model.Event, error) {
 		t.Error("completion callback ran after a panic")
 	}); err != nil {
 		t.Fatal(err)
@@ -600,7 +600,7 @@ func TestDaemonStopsSharedManagedRunWhenLeaseIsLost(t *testing.T) {
 	a.heartbeatInterval = 10 * time.Millisecond
 	scanner := &blockingScanner{started: make(chan struct{}), release: make(chan struct{})}
 	a.Scanner = scanner
-	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{
+	record, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{
 		Name: "shared-lease-loss-shutdown", Schedule: "0 * * * *", Timezone: "UTC",
 		Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"},
 		Timeout: config.Duration(time.Minute), Timing: "balanced",
@@ -626,7 +626,7 @@ func TestDaemonStopsSharedManagedRunWhenLeaseIsLost(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	completed := make(chan error, 1)
-	if err := a.StartManagedRun(record.ID, func(_ model.Scan, _ []model.Event, runErr error) { completed <- runErr }); err != nil {
+	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, func(_ model.Scan, _ []model.Event, runErr error) { completed <- runErr }); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -668,7 +668,7 @@ func TestDaemonStartupPreservesLiveJobLease(t *testing.T) {
 	}
 	defer s.Close()
 	now := time.Now().UTC()
-	if err := s.AcquireJobLease(ctx, "job", "cli-scan", now.Add(time.Hour)); err != nil {
+	if err := s.System().AcquireJobLease(ctx, "job", "cli-scan", now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{Version: 1, Database: "test", Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
@@ -726,7 +726,7 @@ func TestManagedScanLeaseBlocksScopeEditUntilScanCompletes(t *testing.T) {
 	}
 	blocking := &blockingScanner{started: make(chan struct{}), release: make(chan struct{})}
 	a.Scanner = blocking
-	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "locked", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	record, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "locked", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,7 +742,7 @@ func TestManagedScanLeaseBlocksScopeEditUntilScanCompletes(t *testing.T) {
 	}
 	changed := record.Job
 	changed.Targets = []string{"127.0.0.2"}
-	if _, _, updateErr := s.UpdateJob(ctx, record.ID, record.Revision, changed, true, false, true); !errors.Is(updateErr, store.ErrJobScanActive) {
+	if _, _, updateErr := defaultTenant(s).UpdateJob(ctx, record.ID, record.Revision, changed, true, false, true); !errors.Is(updateErr, store.ErrJobScanActive) {
 		t.Fatalf("scope edit was allowed during active scan: %v", updateErr)
 	}
 	close(blocking.release)
@@ -770,7 +770,7 @@ func TestActiveScansReportsInFlightManagedScan(t *testing.T) {
 	}
 	blocking := &blockingScanner{started: make(chan struct{}), release: make(chan struct{})}
 	a.Scanner = blocking
-	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "active", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	record, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "active", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -816,7 +816,7 @@ func TestHighCostManagedScanReportsProgressAndCanBeCanceled(t *testing.T) {
 	}
 	blocking := &progressBlockingScanner{started: make(chan struct{})}
 	a.Scanner = blocking
-	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "high-cost", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced", AllowHighCost: true}))
+	record, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "high-cost", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced", AllowHighCost: true}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -846,7 +846,7 @@ func TestHighCostManagedScanReportsProgressAndCanBeCanceled(t *testing.T) {
 	if scan.Status != "canceled" || scan.Error != "scan canceled" {
 		t.Fatalf("unexpected canceled scan: %#v", scan)
 	}
-	state, err := s.RuntimeState(ctx, record.ID)
+	state, err := defaultTenant(s).RuntimeState(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -884,7 +884,7 @@ func TestManagedTerminalOutcomesQueueNotifications(t *testing.T) {
 		TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timing: "balanced", Timeout: config.Duration(time.Minute),
 		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
 	})
-	record, err := s.CreateJob(ctx, job)
+	record, err := defaultTenant(s).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -972,7 +972,7 @@ func TestManagedRunQueuesOnlyJobSelectedNotifications(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	managed, err := a.Notifier.CreateManaged(ctx, "Operations", "generic://localhost/managed?disabletls=yes&template=json", true)
+	managed, err := a.Notifier.Tenant(defaultTenant(s)).CreateManagedWithAudit(ctx, "Operations", "generic://localhost/managed?disabletls=yes&template=json", true, store.AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -982,7 +982,7 @@ func TestManagedRunQueuesOnlyJobSelectedNotifications(t *testing.T) {
 		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
 		NotificationDestinations: []string{managed.ID},
 	})
-	record, err := s.CreateJob(ctx, job)
+	record, err := defaultTenant(s).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1024,7 +1024,7 @@ func TestManagedTimeoutIsPersistedAsDistinctTerminalStatus(t *testing.T) {
 		TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timing: "balanced", Timeout: config.Duration(time.Second),
 		Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1},
 	})
-	record, err := s.CreateJob(ctx, job)
+	record, err := defaultTenant(s).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1035,7 +1035,7 @@ func TestManagedTimeoutIsPersistedAsDistinctTerminalStatus(t *testing.T) {
 	if len(events) != 1 || events[0].Type != "scan-failure" || !strings.Contains(events[0].Message, "Scan timed out") {
 		t.Fatalf("timeout event = %#v", events)
 	}
-	stored, err := s.ListJobScans(ctx, record.ID, 5)
+	stored, err := defaultTenant(s).ListJobScans(ctx, record.ID, 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1059,7 +1059,7 @@ func TestManagedSchedulerReconcilesCreateUpdateAndArchive(t *testing.T) {
 	c := cron.New(cron.WithParser(cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)))
 	a.cron = c
 	job := config.NormalizeJob(config.Job{Name: "hourly", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"})
-	record, err := s.CreateJob(context.Background(), job)
+	record, err := defaultTenant(s).CreateJob(context.Background(), job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1078,7 +1078,7 @@ func TestManagedSchedulerReconcilesCreateUpdateAndArchive(t *testing.T) {
 	}
 	updated := record.Job
 	updated.Schedule = "15 * * * *"
-	if _, _, err := s.UpdateJob(context.Background(), record.ID, record.Revision, updated, true, false, false); err != nil {
+	if _, _, err := defaultTenant(s).UpdateJob(context.Background(), record.ID, record.Revision, updated, true, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.reconcileSchedules(context.Background(), false); err != nil {
@@ -1087,7 +1087,7 @@ func TestManagedSchedulerReconcilesCreateUpdateAndArchive(t *testing.T) {
 	if len(a.entries) != 1 {
 		t.Fatalf("entries after update: %d", len(a.entries))
 	}
-	if err := s.SetJobArchived(context.Background(), record.ID, true); err != nil {
+	if err := defaultTenant(s).SetJobArchived(context.Background(), record.ID, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := a.reconcileSchedules(context.Background(), false); err != nil {
@@ -1113,7 +1113,7 @@ func TestManagedSchedulerRejectsInvalidDesiredSetWithoutUnscheduling(t *testing.
 	c := cron.New(cron.WithParser(cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)))
 	a.cron = c
 	job := config.NormalizeJob(config.Job{Name: "stable", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"})
-	record, err := s.CreateJobWithEnabled(ctx, job, true)
+	record, err := defaultTenant(s).CreateJobWithEnabled(ctx, job, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1123,7 +1123,7 @@ func TestManagedSchedulerRejectsInvalidDesiredSetWithoutUnscheduling(t *testing.
 	entry := a.entries[record.ID]
 	otherJob := job
 	otherJob.Name = "other"
-	otherRecord, err := s.CreateJobWithEnabled(ctx, otherJob, true)
+	otherRecord, err := defaultTenant(s).CreateJobWithEnabled(ctx, otherJob, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1182,7 +1182,7 @@ func TestManagedScanPublishesLifecycleEvents(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Scanner = schedulerFake{}
-	record, err := s.CreateJob(ctx, config.NormalizeJob(config.Job{Name: "events", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
+	record, err := defaultTenant(s).CreateJob(ctx, config.NormalizeJob(config.Job{Name: "events", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Minute), Timing: "balanced"}))
 	if err != nil {
 		t.Fatal(err)
 	}

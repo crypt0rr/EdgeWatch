@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"sort"
 	"testing"
@@ -340,5 +341,84 @@ func TestImportDeploymentNotificationsNamesWithinTheDefaultTenant(t *testing.T) 
 	var tenants int
 	if err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM managed_notifications WHERE id IN ('free','taken') AND tenant_id=?`, DefaultTenantID).Scan(&tenants); err != nil || tenants != 2 {
 		t.Fatalf("imported destinations in the default tenant = %d, %v; want 2", tenants, err)
+	}
+}
+
+// A scan lease refuses a job whose tenant is paused or being deleted, so
+// the daemon starts no scan for it, whether scheduled or manual. The other
+// tenant's jobs lease as before, and the job leases again once its tenant
+// is active.
+func TestJobLeaseRefusesATenantThatIsNotActive(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	system := f.store.System()
+	expires := time.Now().UTC().Add(time.Hour)
+	revision := func(jobID string) int64 {
+		t.Helper()
+		var revision int64
+		if err := f.store.DB.QueryRowContext(ctx, `SELECT revision FROM jobs WHERE id=?`, jobID).Scan(&revision); err != nil {
+			t.Fatal(err)
+		}
+		return revision
+	}
+	leases := func() int {
+		t.Helper()
+		var count int
+		if err := f.store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM job_leases WHERE job=?`, f.jobB).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	for _, state := range []string{TenantStateDisabled, TenantStateDeleting} {
+		setTenantState(t, f.store, secondTenantID, state)
+		if err := system.AcquireJobLeaseForRevision(ctx, f.jobB, "owner-b", revision(f.jobB), expires); !errors.Is(err, ErrTenantNotActive) {
+			t.Errorf("lease of tenant B's job while the tenant is %s = %v, want %v", state, err, ErrTenantNotActive)
+		}
+		if count := leases(); count != 0 {
+			t.Fatalf("a refused lease left %d rows", count)
+		}
+		owner := "owner-a-" + state
+		if err := system.AcquireJobLeaseForRevision(ctx, f.jobA, owner, revision(f.jobA), expires); err != nil {
+			t.Fatalf("lease of tenant A's job while tenant B is %s: %v", state, err)
+		}
+		if err := system.ReleaseJobLease(ctx, f.jobA, owner); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setTenantState(t, f.store, secondTenantID, TenantStateActive)
+	if err := system.AcquireJobLeaseForRevision(ctx, f.jobB, "owner-b", revision(f.jobB), expires); err != nil {
+		t.Fatalf("lease of tenant B's job after the tenant was enabled: %v", err)
+	}
+}
+
+// The scheduler and the silence watchdog go through the active tenants
+// only: a paused tenant, one being deleted, and a deleted one are left out.
+func TestActiveTenantScopesLeaveOutTenantsThatAreNotActive(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	active := func() []string {
+		t.Helper()
+		scopes, err := f.store.System().ActiveTenantScopes(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var ids []string
+		for _, scope := range scopes {
+			ids = append(ids, scope.ID())
+		}
+		return ids
+	}
+	if got, want := active(), []string{DefaultTenantID, secondTenantID}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("active tenants = %v, want %v", got, want)
+	}
+	for _, state := range []string{TenantStateDisabled, TenantStateDeleting, TenantStateDeleted} {
+		setTenantState(t, f.store, secondTenantID, state)
+		if got, want := active(), []string{DefaultTenantID}; !reflect.DeepEqual(got, want) {
+			t.Errorf("active tenants with tenant B %s = %v, want %v", state, got, want)
+		}
+	}
+	setTenantState(t, f.store, secondTenantID, TenantStateActive)
+	if got, want := active(), []string{DefaultTenantID, secondTenantID}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("active tenants after tenant B was enabled = %v, want %v", got, want)
 	}
 }

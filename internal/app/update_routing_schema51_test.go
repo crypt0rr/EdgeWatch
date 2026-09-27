@@ -76,7 +76,7 @@ func TestUpdateAlertsReachTheSameDestinationsAfterSchema51(t *testing.T) {
 			}
 			var ids []string
 			for _, name := range []string{"Operations", "Security", "Paused"} {
-				destination, err := before.Notifier.CreateManaged(ctx, name, "generic://127.0.0.1:9/"+name+"?disabletls=yes&template=json", name != "Paused")
+				destination, err := before.Notifier.Tenant(defaultTenant(previous)).CreateManagedWithAudit(ctx, name, "generic://127.0.0.1:9/"+name+"?disabletls=yes&template=json", name != "Paused", store.AuditEntry{})
 				if err != nil {
 					previous.Close()
 					t.Fatal(err)
@@ -85,14 +85,14 @@ func TestUpdateAlertsReachTheSameDestinationsAfterSchema51(t *testing.T) {
 			}
 			var want []string
 			if tc.selection == nil {
-				want, err = before.Notifier.QueueDestinations(ctx)
+				want, err = before.Notifier.Tenant(defaultTenant(previous)).QueueDestinationsForSelection(ctx, nil)
 			} else {
 				selection := tc.selection(ids[0], ids[1])
-				if err := previous.SetApplicationUpdateDestinations(ctx, selection, store.AuditEntry{}); err != nil {
+				if err := defaultTenant(previous).SetApplicationUpdateDestinations(ctx, selection, store.AuditEntry{}); err != nil {
 					previous.Close()
 					t.Fatal(err)
 				}
-				want, err = before.Notifier.QueueDestinationsForSelection(ctx, selection)
+				want, err = before.Notifier.Tenant(defaultTenant(previous)).QueueDestinationsForSelection(ctx, selection)
 			}
 			if err != nil {
 				previous.Close()
@@ -120,7 +120,7 @@ func TestUpdateAlertsReachTheSameDestinationsAfterSchema51(t *testing.T) {
 			a.ReleaseChecker = &fakeReleaseChecker{result: updatecheck.Result{Release: updatecheck.Release{Version: "v1.1.0"}}}
 			a.runUpdateCheck(ctx)
 
-			events, err := upgraded.ListEvents(ctx, "", 10)
+			events, err := defaultTenant(upgraded).ListEvents(ctx, "", 10)
 			if err != nil {
 				t.Fatal(err)
 			}

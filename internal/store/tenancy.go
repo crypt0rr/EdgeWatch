@@ -129,7 +129,19 @@ func (s *Store) System() *SystemStore { return &SystemStore{store: s} }
 // the default tenant first, so daemon work can go through the tenants in
 // turn.
 func (ss *SystemStore) TenantScopes(ctx context.Context) ([]TenantScope, error) {
-	rows, err := ss.store.reader().QueryContext(ctx, `SELECT id FROM tenants WHERE state<>? ORDER BY is_default DESC, id`, TenantStateDeleted)
+	return ss.tenantScopes(ctx, `SELECT id FROM tenants WHERE state<>? ORDER BY is_default DESC, id`, TenantStateDeleted)
+}
+
+// ActiveTenantScopes returns the scope of every active tenant, the default
+// tenant first. The scheduler and the silence watchdog go through these, so
+// a paused tenant's jobs are neither scheduled nor judged silent.
+func (ss *SystemStore) ActiveTenantScopes(ctx context.Context) ([]TenantScope, error) {
+	return ss.tenantScopes(ctx, `SELECT id FROM tenants WHERE state=? ORDER BY is_default DESC, id`, TenantStateActive)
+}
+
+// tenantScopes returns a scope for each tenant ID that query selects.
+func (ss *SystemStore) tenantScopes(ctx context.Context, query string, args ...any) ([]TenantScope, error) {
+	rows, err := ss.store.reader().QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

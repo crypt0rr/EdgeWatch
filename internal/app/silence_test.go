@@ -29,7 +29,7 @@ func TestJobSilenceWatchdogAlertsOncePerScheduleWindow(t *testing.T) {
 		Targets:  []string{"192.0.2.1"},
 		TCP:      &config.Protocol{Ports: "443", Mode: "connect"},
 	})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestJobSilenceWatchdogAlertsOncePerScheduleWindow(t *testing.T) {
 	a.checkJobSilence(ctx, now)
 	a.checkJobSilence(ctx, now.Add(30*time.Minute))
 
-	page, err := db.ListJobEventsPage(ctx, record.ID, 10, 0)
+	page, err := defaultTenant(db).ListJobEventsPage(ctx, record.ID, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,7 +72,7 @@ func TestJobSilenceWatchdogRetriesWhenDestinationsCannotBeResolved(t *testing.T)
 		Targets:  []string{"192.0.2.3"},
 		TCP:      &config.Protocol{Ports: "443", Mode: "connect"},
 	})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,7 @@ func TestJobSilenceWatchdogSkipsActiveJob(t *testing.T) {
 		Targets:  []string{"192.0.2.2"},
 		TCP:      &config.Protocol{Ports: "443", Mode: "connect"},
 	})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestJobSilenceWatchdogSkipsActiveJob(t *testing.T) {
 	}
 	a := &App{Store: db, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	a.checkJobSilence(ctx, now)
-	page, err := db.ListJobEventsPage(ctx, record.ID, 10, 0)
+	page, err := defaultTenant(db).ListJobEventsPage(ctx, record.ID, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +356,7 @@ func TestJobSilenceWatchdogUsesReferenceSpecificDeadline(t *testing.T) {
 		Targets:  []string{"192.0.2.3"},
 		TCP:      &config.Protocol{Ports: "443", Mode: "connect"},
 	})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -373,7 +373,7 @@ func TestJobSilenceWatchdogUsesReferenceSpecificDeadline(t *testing.T) {
 	}
 	a := &App{Store: db, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	a.checkJobSilence(ctx, time.Date(2026, time.January, 5, 10, 0, 0, 0, time.UTC)) // Monday, before Tuesday deadline
-	page, err := db.ListJobEventsPage(ctx, record.ID, 10, 0)
+	page, err := defaultTenant(db).ListJobEventsPage(ctx, record.ID, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,7 +381,7 @@ func TestJobSilenceWatchdogUsesReferenceSpecificDeadline(t *testing.T) {
 		t.Fatalf("weekday job alerted during the grace window: %#v", page.Items)
 	}
 	a.checkJobSilence(ctx, time.Date(2026, time.January, 6, 9, 0, 0, 0, time.UTC)) // Tuesday deadline
-	page, err = db.ListJobEventsPage(ctx, record.ID, 10, 0)
+	page, err = defaultTenant(db).ListJobEventsPage(ctx, record.ID, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestJobSilenceWatchdogHonorsFutureEligibility(t *testing.T) {
 		Targets:  []string{"192.0.2.4"},
 		TCP:      &config.Protocol{Ports: "443", Mode: "connect"},
 	})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,7 +422,7 @@ func TestJobSilenceWatchdogHonorsFutureEligibility(t *testing.T) {
 	// The watchdog may run before the lifecycle grace begins. It must not use
 	// the older creation marker and start a silence window prematurely.
 	a.checkJobSilence(ctx, now)
-	page, err := db.ListJobEventsPage(ctx, record.ID, 10, 0)
+	page, err := defaultTenant(db).ListJobEventsPage(ctx, record.ID, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -434,7 +434,7 @@ func TestJobSilenceWatchdogHonorsFutureEligibility(t *testing.T) {
 	// representative schedule window (04:30 eligibility, 05:00 firing,
 	// 06:00 deadline).
 	a.checkJobSilence(ctx, now.Add(90*time.Minute))
-	page, err = db.ListJobEventsPage(ctx, record.ID, 10, 0)
+	page, err = defaultTenant(db).ListJobEventsPage(ctx, record.ID, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -443,7 +443,7 @@ func TestJobSilenceWatchdogHonorsFutureEligibility(t *testing.T) {
 	}
 
 	a.checkJobSilence(ctx, now.Add(2*time.Hour))
-	page, err = db.ListJobEventsPage(ctx, record.ID, 10, 0)
+	page, err = defaultTenant(db).ListJobEventsPage(ctx, record.ID, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +466,7 @@ func TestJobSilenceAlertTextFollowsDeploymentTimezone(t *testing.T) {
 		Targets:  []string{"192.0.2.4"},
 		TCP:      &config.Protocol{Ports: "443", Mode: "connect"},
 	})
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -481,7 +481,7 @@ func TestJobSilenceAlertTextFollowsDeploymentTimezone(t *testing.T) {
 	a := &App{Config: &config.Config{Timezone: "Europe/Amsterdam"}, Store: db, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)), clock: func() time.Time { return now }}
 	a.checkJobSilence(ctx, now)
 
-	page, err := db.ListJobEventsPage(ctx, record.ID, 10, 0)
+	page, err := defaultTenant(db).ListJobEventsPage(ctx, record.ID, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

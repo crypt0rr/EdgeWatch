@@ -175,7 +175,7 @@ func (n *Notifier) completeStatus(ctx context.Context, set destinationSet, ts *s
 		// Tell the console when config.yaml still lists URLs that were
 		// imported, or when their import failed and they are still delivered
 		// from config.yaml.
-		if state, err := n.Store.NotificationConfigImportState(ctx); err == nil {
+		if state, err := n.Store.System().NotificationConfigImportState(ctx); err == nil {
 			switch {
 			case state.Status == store.NotificationConfigImportFailed:
 				status["config_import"] = store.NotificationConfigImportFailed

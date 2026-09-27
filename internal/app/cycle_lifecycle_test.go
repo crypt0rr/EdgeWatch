@@ -104,13 +104,13 @@ func hasEventType(events []model.Event, eventType string) bool {
 func TestAcceptedIncidentDuringPausedCycleStartsFreshCycle(t *testing.T) {
 	ctx := context.Background()
 	a, db := newLifecycleTestApp(t, &lifecycleScanner{}, nil)
-	record, err := db.CreateJob(ctx, lifecycleJob("accept-paused"))
+	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("accept-paused"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	key := "port|192.0.2.1|tcp|2"
 	now := time.Now().UTC()
-	if _, err := db.UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+	if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Baseline = &model.Snapshot{Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "1-2"}}, Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 1, State: "open"}}}}}
 		state.BaselineConfigHash = record.Job.SecurityHash()
 		state.Incidents[key] = model.Incident{Change: model.Change{Key: key, Kind: "port", Target: "192.0.2.1", Protocol: "tcp", Port: 2, Old: "not-open", New: "open", Severity: "critical"}, ScanID: "seed-scan", OpenedAt: now, LastSeenAt: now}
@@ -123,10 +123,10 @@ func TestAcceptedIncidentDuringPausedCycleStartsFreshCycle(t *testing.T) {
 	if pausedErr == nil || paused.CycleStatus != "paused" {
 		t.Fatalf("first trigger = %#v, err=%v", paused, pausedErr)
 	}
-	if _, err := db.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, key, store.AuditEntry{Action: "incident.accepted", Detail: key}); err != nil {
+	if _, err := defaultTenant(db).AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, key, store.AuditEntry{Action: "incident.accepted", Detail: key}); err != nil {
 		t.Fatal(err)
 	}
-	before, err := db.RuntimeState(ctx, record.ID)
+	before, err := defaultTenant(db).RuntimeState(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,14 +141,14 @@ func TestAcceptedIncidentDuringPausedCycleStartsFreshCycle(t *testing.T) {
 	if next.CycleID == "" || next.CycleID == paused.CycleID {
 		t.Fatalf("trigger after accept did not start a fresh cycle: %#v", next)
 	}
-	after, err := db.RuntimeState(ctx, record.ID)
+	after, err := defaultTenant(db).RuntimeState(ctx, record.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if after.ConsecutiveFailures != before.ConsecutiveFailures {
 		t.Fatalf("consecutive failures changed from %d to %d", before.ConsecutiveFailures, after.ConsecutiveFailures)
 	}
-	old, err := db.GetScanCycle(ctx, paused.CycleID)
+	old, err := defaultTenant(db).GetScanCycle(ctx, paused.CycleID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestResumedCycleRecordsPinnedScannerProfileRevision(t *testing.T) {
 	job := lifecycleJob("profile-pinned")
 	job.TCP.ProfileID, job.TCP.ProfileRevision = "custom", 1
 	job.TCP.NmapArgs = []string{config.PlaceholderAddress, config.PlaceholderPorts, config.PlaceholderStructuredOutput, "--max-rate", "1000"}
-	record, err := db.CreateJob(ctx, job)
+	record, err := defaultTenant(db).CreateJob(ctx, job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,11 +178,11 @@ func TestResumedCycleRecordsPinnedScannerProfileRevision(t *testing.T) {
 	*edited.TCP = *record.Job.TCP
 	edited.TCP.ProfileRevision = 2
 	edited.TCP.NmapArgs = []string{config.PlaceholderAddress, config.PlaceholderPorts, config.PlaceholderStructuredOutput, "--max-rate", "10"}
-	updated, _, err := db.UpdateJob(ctx, record.ID, record.Revision, edited, true, false, false)
+	updated, _, err := defaultTenant(db).UpdateJob(ctx, record.ID, record.Revision, edited, true, false, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cycle, err := db.GetActiveScanCycle(ctx, record.ID); err != nil || cycle.ID != paused.CycleID {
+	if cycle, err := defaultTenant(db).GetActiveScanCycle(ctx, record.ID); err != nil || cycle.ID != paused.CycleID {
 		t.Fatalf("execution-only edit did not keep the paused cycle: %#v, %v", cycle, err)
 	}
 
@@ -208,7 +208,7 @@ func TestStalledCyclePastResumeWindowExpiresOnScheduledTrigger(t *testing.T) {
 	ctx := context.Background()
 	probe := &lifecycleScanner{}
 	a, db := newLifecycleTestApp(t, probe, nil)
-	record, err := db.CreateJob(ctx, lifecycleJob("stalled-expiry"))
+	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("stalled-expiry"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestStalledCyclePastResumeWindowExpiresOnScheduledTrigger(t *testing.T) {
 	if pausedErr == nil || paused.CycleStatus != "paused" {
 		t.Fatalf("first trigger = %#v, err=%v", paused, pausedErr)
 	}
-	if _, err := db.MarkScanCycleStalled(ctx, paused.CycleID, "operator attention required"); err != nil {
+	if _, err := db.System().MarkScanCycleStalled(ctx, paused.CycleID, "operator attention required"); err != nil {
 		t.Fatal(err)
 	}
 	// Inside the resume window a scheduled trigger still waits for an
@@ -235,7 +235,7 @@ func TestStalledCyclePastResumeWindowExpiresOnScheduledTrigger(t *testing.T) {
 	if !hasEventType(events, "scan-failure") {
 		t.Fatalf("expiry was not reported: %#v", events)
 	}
-	if cycle, err := db.GetScanCycle(ctx, paused.CycleID); err != nil || cycle.Status != "expired" {
+	if cycle, err := defaultTenant(db).GetScanCycle(ctx, paused.CycleID); err != nil || cycle.Status != "expired" {
 		t.Fatalf("stalled cycle after expiry = %#v, %v", cycle, err)
 	}
 
@@ -243,7 +243,7 @@ func TestStalledCyclePastResumeWindowExpiresOnScheduledTrigger(t *testing.T) {
 	if errors.Is(freshErr, ErrScanCycleStalled) || fresh.CycleID == "" || fresh.CycleID == paused.CycleID {
 		t.Fatalf("trigger after recorded expiry = %#v, err=%v", fresh, freshErr)
 	}
-	scans, err := db.ListJobScans(ctx, record.ID, 10)
+	scans, err := defaultTenant(db).ListJobScans(ctx, record.ID, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,7 +283,7 @@ func TestQueuedRunsUseJobEditedWhileWaitingForSlot(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 			a, db := newLifecycleTestApp(t, schedulerFake{}, nil)
-			record, err := db.CreateJob(ctx, lifecycleJob("queued-"+name))
+			record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("queued-"+name))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -294,7 +294,7 @@ func TestQueuedRunsUseJobEditedWhileWaitingForSlot(t *testing.T) {
 			}
 			done := make(chan result, 1)
 			if manual {
-				if err := a.StartManagedRun(record.ID, func(scan model.Scan, _ []model.Event, err error) {
+				if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, func(scan model.Scan, _ []model.Event, err error) {
 					done <- result{scan, err}
 				}); err != nil {
 					t.Fatal(err)
@@ -309,7 +309,7 @@ func TestQueuedRunsUseJobEditedWhileWaitingForSlot(t *testing.T) {
 			edited := record.Job
 			edited.Name = "queued-" + name + "-renamed"
 			edited.Schedule = "30 * * * *"
-			updated, _, err := db.UpdateJob(ctx, record.ID, record.Revision, edited, true, false, false)
+			updated, _, err := defaultTenant(db).UpdateJob(ctx, record.ID, record.Revision, edited, true, false, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -318,7 +318,7 @@ func TestQueuedRunsUseJobEditedWhileWaitingForSlot(t *testing.T) {
 			if got.err != nil || got.scan.ID == "" || got.scan.JobRevision != updated.Revision || got.scan.Job != edited.Name {
 				t.Fatalf("queued run = %#v, err=%v", got.scan, got.err)
 			}
-			scans, err := db.ListJobScans(ctx, record.ID, 10)
+			scans, err := defaultTenant(db).ListJobScans(ctx, record.ID, 10)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -341,24 +341,24 @@ func TestQueuedScheduledRunSkipsJobArchivedOrPausedWhileWaiting(t *testing.T) {
 			a, db := newLifecycleTestApp(t, schedulerFake{}, &lockedWriter{mu: &logMu, w: &logs})
 			ctx, _ := a.BeginRun(context.Background())
 			defer a.StopRun()
-			record, err := db.CreateJob(ctx, lifecycleJob("queued-skip-"+name))
+			record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("queued-skip-"+name))
 			if err != nil {
 				t.Fatal(err)
 			}
 			releaseSlot := holdScanSlot(t, a)
-			a.startManagedScheduled(ctx, record.ID)
+			a.startManagedScheduled(ctx, store.DefaultTenantScope(), record.ID)
 			waitForQueuedRun(t, a, record.ID)
 			if archive {
-				err = db.SetJobArchived(ctx, record.ID, true)
+				err = defaultTenant(db).SetJobArchived(ctx, record.ID, true)
 			} else {
-				err = db.SetJobEnabled(ctx, record.ID, false)
+				err = defaultTenant(db).SetJobEnabled(ctx, record.ID, false)
 			}
 			if err != nil {
 				t.Fatal(err)
 			}
 			releaseSlot()
 			a.wg.Wait()
-			scans, err := db.ListJobScans(ctx, record.ID, 10)
+			scans, err := defaultTenant(db).ListJobScans(ctx, record.ID, 10)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -419,11 +419,11 @@ func TestQueuedRunsStartInArrivalOrderWithOneSlot(t *testing.T) {
 	ctx := context.Background()
 	sc := gatedScanner{started: make(chan string, 2), finish: make(chan struct{})}
 	a, db := newLifecycleTestApp(t, sc, nil)
-	first, err := db.CreateJob(ctx, lifecycleJob("slot-first"))
+	first, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("slot-first"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := db.CreateJob(ctx, lifecycleJob("slot-second"))
+	second, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("slot-second"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,13 +478,13 @@ func TestQueuedRunsStartInArrivalOrderWithOneSlot(t *testing.T) {
 func TestCanceledQueuedManualRunReleasesNoSlot(t *testing.T) {
 	a, db := newLifecycleTestApp(t, schedulerFake{}, nil)
 	ctx, _ := a.BeginRun(context.Background())
-	record, err := db.CreateJob(ctx, lifecycleJob("slot-canceled"))
+	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("slot-canceled"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	releaseSlot := holdScanSlot(t, a)
 	done := make(chan error, 1)
-	if err := a.StartManagedRun(record.ID, func(_ model.Scan, _ []model.Event, err error) {
+	if err := a.StartManagedRun(defaultTenant(a.Store), record.ID, func(_ model.Scan, _ []model.Event, err error) {
 		done <- err
 	}); err != nil {
 		t.Fatal(err)
@@ -513,7 +513,7 @@ func TestCanceledQueuedManualRunReleasesNoSlot(t *testing.T) {
 	if got := a.slots.CapacitySnapshot(); got.InUse != 0 || got.Queued != 0 || len(got.Keys) != 0 {
 		t.Fatalf("slots after release = %#v", got)
 	}
-	scans, err := db.ListJobScans(context.Background(), record.ID, 10)
+	scans, err := defaultTenant(db).ListJobScans(context.Background(), record.ID, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -525,30 +525,30 @@ func TestCanceledQueuedManualRunReleasesNoSlot(t *testing.T) {
 func TestQueuedManagedJobKeepsUnchangedRevisionAndManualRunsOfPausedJobs(t *testing.T) {
 	ctx := context.Background()
 	a, db := newLifecycleTestApp(t, schedulerFake{}, nil)
-	record, err := db.CreateJob(ctx, lifecycleJob("queued-helper"))
+	record, err := defaultTenant(db).CreateJob(ctx, lifecycleJob("queued-helper"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// An unchanged revision keeps the definition the caller captured.
 	captured := record.Job
 	captured.Timing = "fast"
-	job, revision, err := a.queuedManagedJob(ctx, captured, record.ID, record.Revision, false)
+	job, revision, err := a.queuedManagedJob(ctx, defaultTenant(a.Store), captured, record.ID, record.Revision, false)
 	if err != nil || revision != record.Revision || job.Timing != "fast" {
 		t.Fatalf("unchanged revision = %q revision %d, %v", job.Timing, revision, err)
 	}
-	if err := db.SetJobEnabled(ctx, record.ID, false); err != nil {
+	if err := defaultTenant(db).SetJobEnabled(ctx, record.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	// A manual run may start a paused job, so it continues with the current
 	// revision; a scheduled run is skipped.
-	job, revision, err = a.queuedManagedJob(ctx, record.Job, record.ID, record.Revision, true)
+	job, revision, err = a.queuedManagedJob(ctx, defaultTenant(a.Store), record.Job, record.ID, record.Revision, true)
 	if err != nil || revision != record.Revision+1 || job.Name != record.Job.Name {
 		t.Fatalf("manual run of paused job = %q revision %d, %v", job.Name, revision, err)
 	}
-	if _, _, err := a.queuedManagedJob(ctx, record.Job, record.ID, record.Revision, false); !errors.Is(err, ErrQueuedRunSkipped) {
+	if _, _, err := a.queuedManagedJob(ctx, defaultTenant(a.Store), record.Job, record.ID, record.Revision, false); !errors.Is(err, ErrQueuedRunSkipped) {
 		t.Fatalf("scheduled run of paused job error = %v, want %v", err, ErrQueuedRunSkipped)
 	}
-	if _, _, err := a.queuedManagedJob(ctx, record.Job, "missing-job", 1, true); !errors.Is(err, store.ErrNotFound) {
+	if _, _, err := a.queuedManagedJob(ctx, defaultTenant(a.Store), record.Job, "missing-job", 1, true); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("missing job error = %v, want %v", err, store.ErrNotFound)
 	}
 }

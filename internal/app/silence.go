@@ -8,6 +8,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/robfig/cron/v3"
 )
 
@@ -42,21 +43,39 @@ func (a *App) displayLocation() *time.Location {
 // non-archived managed jobs and leaves the normal scan/change engine untouched.
 // A store transaction decides whether a job is overdue, active, or already
 // alerted in the current window, then persists the event and outbox together.
+// It goes through the jobs of every active tenant; a paused tenant's jobs are
+// not expected to scan, and the store never finds them due either. Once the
+// tenant is active again, its jobs are judged from their last reference as
+// before; the silence reference is not reset when a tenant is re-enabled.
 func (a *App) checkJobSilence(ctx context.Context, now time.Time) {
 	if a.Store == nil {
 		return
 	}
-	jobs, err := a.Store.ListJobs(ctx, false)
+	scopes, err := a.Store.System().ActiveTenantScopes(ctx)
 	if err != nil {
 		a.silenceLogger().Warn("job silence watchdog could not list jobs", "error", err)
 		return
 	}
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+	for _, scope := range scopes {
+		a.checkTenantJobSilence(ctx, a.Store.Tenant(scope), parser, now)
+	}
+}
+
+// checkTenantJobSilence runs the silence watchdog for the jobs of the tenant
+// of ts. An alert goes to that tenant's destinations only.
+func (a *App) checkTenantJobSilence(ctx context.Context, ts *store.TenantStore, parser cron.Parser, now time.Time) {
+	jobs, err := ts.ListJobs(ctx, false)
+	if err != nil {
+		a.silenceLogger().Warn("job silence watchdog could not list jobs", "error", err)
+		return
+	}
+	system := a.Store.System()
 	for _, record := range jobs {
 		if !record.Enabled || record.Archived {
 			continue
 		}
-		reference, err := a.Store.JobSilenceReference(ctx, record.ID, record.CreatedAt, now)
+		reference, err := system.JobSilenceReference(ctx, record.ID, record.CreatedAt, now)
 		if err != nil {
 			a.silenceLogger().Warn("job silence watchdog could not determine reference", "job", record.Job.Name, "error", err)
 			continue
@@ -75,7 +94,7 @@ func (a *App) checkJobSilence(ctx context.Context, now time.Time) {
 			a.silenceLogger().Debug("job silence watchdog skipped job", "job", record.Job.Name, "error", err)
 			continue
 		}
-		due, err := a.Store.JobSilenceDue(ctx, record.ID, record.CreatedAt, now, threshold)
+		due, err := system.JobSilenceDue(ctx, record.ID, record.CreatedAt, now, threshold)
 		if err != nil {
 			a.silenceLogger().Warn("job silence watchdog failed", "job", record.Job.Name, "error", err)
 			continue
@@ -85,7 +104,7 @@ func (a *App) checkJobSilence(ctx context.Context, now time.Time) {
 		}
 		var destinations []string
 		if a.Notifier != nil {
-			destinations, err = a.Notifier.QueueDestinationsForJob(ctx, record.Job)
+			destinations, err = a.Notifier.Tenant(ts).QueueDestinationsForJob(ctx, record.Job)
 			if err != nil {
 				a.silenceLogger().Warn("job silence notification destinations unavailable", "job", record.Job.Name, "error", err)
 				// Do not advance the durable watchdog state when destinations
@@ -96,7 +115,7 @@ func (a *App) checkJobSilence(ctx context.Context, now time.Time) {
 				continue
 			}
 		}
-		event, created, err := a.Store.RecordJobSilenceAlert(ctx, record.ID, record.Job.Name, record.CreatedAt, now.In(a.displayLocation()), threshold, destinations)
+		event, created, err := system.RecordJobSilenceAlert(ctx, record.ID, record.Job.Name, record.CreatedAt, now.In(a.displayLocation()), threshold, destinations)
 		if err != nil {
 			a.silenceLogger().Warn("job silence watchdog failed", "job", record.Job.Name, "error", err)
 			continue

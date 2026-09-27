@@ -20,7 +20,7 @@ import (
 type Engine struct{ Store *store.Store }
 
 func (e *Engine) Success(ctx context.Context, job config.Job, scan model.Scan) ([]model.Event, error) {
-	return e.Store.UpdateState(ctx, job.Name, func(state *model.JobState) ([]model.Event, error) {
+	return e.Store.System().UpdateState(ctx, job.Name, func(state *model.JobState) ([]model.Event, error) {
 		return processSuccess(state, job, scan)
 	})
 }
@@ -29,13 +29,13 @@ func (e *Engine) Success(ctx context.Context, job config.Job, scan model.Scan) (
 // Its state key is the immutable job ID while event payloads keep the name
 // users recognize.
 func (e *Engine) SuccessForJob(ctx context.Context, jobID string, job config.Job, scan model.Scan) ([]model.Event, error) {
-	return e.Store.UpdateRuntimeForScan(ctx, jobID, scan.ConfigHash, func(state *model.JobState) ([]model.Event, error) {
+	return e.Store.System().UpdateRuntimeForScan(ctx, jobID, scan.ConfigHash, func(state *model.JobState) ([]model.Event, error) {
 		return processSuccess(state, job, scan)
 	})
 }
 
 func (e *Engine) SuccessForJobWithDestinations(ctx context.Context, jobID string, job config.Job, scan model.Scan, destinations []string) ([]model.Event, error) {
-	return e.Store.UpdateRuntimeForScanWithOutbox(ctx, jobID, scan.ConfigHash, destinations, func(state *model.JobState) ([]model.Event, error) {
+	return e.Store.System().UpdateRuntimeForScanWithOutbox(ctx, jobID, scan.ConfigHash, destinations, func(state *model.JobState) ([]model.Event, error) {
 		return processSuccess(state, job, scan)
 	})
 }
@@ -47,7 +47,7 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 	if scan == nil {
 		return nil, fmt.Errorf("scan is required")
 	}
-	return e.Store.FinalizeManagedScan(ctx, scan, jobID, scan.ConfigHash, destinations, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
+	return e.Store.System().FinalizeManagedScan(ctx, scan, jobID, scan.ConfigHash, destinations, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
 		if current.Status == "success" {
 			MarkIncompleteScan(current)
 		}
@@ -794,19 +794,19 @@ func setBaselineService(snapshot *model.Snapshot, target, protocol string, port 
 }
 
 func (e *Engine) Failure(ctx context.Context, job string, scan model.Scan) ([]model.Event, error) {
-	return e.Store.UpdateState(ctx, job, func(state *model.JobState) ([]model.Event, error) {
+	return e.Store.System().UpdateState(ctx, job, func(state *model.JobState) ([]model.Event, error) {
 		return processFailure(state, job, scan)
 	})
 }
 
 func (e *Engine) FailureForJob(ctx context.Context, jobID, job string, scan model.Scan) ([]model.Event, error) {
-	return e.Store.UpdateRuntimeForScan(ctx, jobID, scan.ConfigHash, func(state *model.JobState) ([]model.Event, error) {
+	return e.Store.System().UpdateRuntimeForScan(ctx, jobID, scan.ConfigHash, func(state *model.JobState) ([]model.Event, error) {
 		return processFailure(state, job, scan)
 	})
 }
 
 func (e *Engine) FailureForJobWithDestinations(ctx context.Context, jobID, job string, scan model.Scan, destinations []string) ([]model.Event, error) {
-	return e.Store.UpdateRuntimeForScanWithOutbox(ctx, jobID, scan.ConfigHash, destinations, func(state *model.JobState) ([]model.Event, error) {
+	return e.Store.System().UpdateRuntimeForScanWithOutbox(ctx, jobID, scan.ConfigHash, destinations, func(state *model.JobState) ([]model.Event, error) {
 		return processFailure(state, job, scan)
 	})
 }

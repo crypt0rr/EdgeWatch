@@ -458,7 +458,7 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Se
 	// Manual scans intentionally use the app-owned lifecycle context so they
 	// continue after this HTTP request returns.
 	//nolint:contextcheck // the lifecycle context is managed by App, not the request
-	if runErr := s.App.StartManagedRun(id, func(scan model.Scan, events []model.Event, err error) {
+	if runErr := s.App.StartManagedRun(ts, id, func(scan model.Scan, events []model.Event, err error) {
 		if err != nil {
 			if errors.Is(err, scanner.ErrBusy) {
 				s.Log.Info("manual scan was already in progress", "job_id", id, "scan_id", scan.ID)

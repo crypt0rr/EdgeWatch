@@ -64,12 +64,17 @@ type App struct {
 	ReleaseChecker      ReleaseChecker
 	UpdateInterval      time.Duration
 	clock               func() time.Time
+	// units tracks the business units that this process paused, and wakes
+	// the purge of deleted ones; see units.go.
+	units unitLifecycle
 }
 
 type activeRun struct {
 	mu     sync.RWMutex
 	scan   model.ActiveScan
 	cancel context.CancelFunc
+	// tenant is the ID of the run's tenant, set by registerRun.
+	tenant string
 }
 
 type cronSlogLogger struct{ logger *slog.Logger }
@@ -773,7 +778,7 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	}
 	scanCtx, cancel := context.WithTimeout(ctx, job.Timeout.Value())
 	run := &activeRun{scan: model.ActiveScan{ID: scan.ID, JobID: jobID, Job: job.Name, JobRevision: revision, StartedAt: started, EstimatedProbes: estimate.Probes, NmapInvocations: estimate.NmapInvocations, EstimatedSeconds: estimate.EstimatedSeconds, TotalProbes: estimate.Probes, TotalInvocations: estimate.NmapInvocations, Phase: "starting", Scanner: engineName, ScannerProfileID: profileID, ScannerProfileRevision: profileRevision}, cancel: cancel}
-	a.running.Store(scan.ID, run)
+	a.registerRun(scope.ID(), scan.ID, run)
 	defer func() {
 		cancel()
 		a.running.Delete(scan.ID)
@@ -1238,6 +1243,7 @@ func (a *App) Daemon(ctx context.Context) error {
 	defer updates.Stop()
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	deliveryDone := a.startDeliveryWorker(workerCtx)
+	purgeDone := a.startUnitPurgeWorker(workerCtx)
 	defer func() {
 		// Cancel before joining. This ordering is required on heartbeat/lease
 		// errors, where the parent context may still be live. Cancelling the
@@ -1252,6 +1258,7 @@ func (a *App) Daemon(ctx context.Context) error {
 		stopped := c.Stop()
 		<-stopped.Done()
 		<-deliveryDone
+		<-purgeDone
 		releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if released, err := system.ReleaseDeliveryClaims(releaseCtx); err != nil {

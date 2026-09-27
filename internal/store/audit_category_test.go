@@ -39,6 +39,8 @@ var knownAuditActions = map[string][]string{
 		"database.backup", "database.restore", "database.restore.pending_deliveries",
 		"notifications.config_imported",
 		"tenant.capacity_changed",
+		"tenant.created", "tenant.deletion_requested", "tenant.disabled",
+		"tenant.enabled", "tenant.purged", "tenant.renamed",
 	},
 	auditCategoryData: {
 		"baseline.approved", "baseline.reset",

@@ -93,6 +93,30 @@ test('a platform administrator creates a unit, invites its administrator, recove
   expect(controls.calls['unit-data'] ?? 0).toBe(0)
 })
 
+test('a platform administrator without TOTP gets the forced enrolment as soon as it creates the second unit', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The platform journey runs once on desktop; phone widths are covered separately.')
+  const controls = await mockConsole(page, 'platform_admin', { platformTOTP: false })
+  await page.goto('/platform/units')
+  await expect(page.getByRole('heading', { name: '1 unit', exact: true })).toBeVisible()
+
+  await page.getByRole('button', { name: 'New unit' }).click()
+  const create = page.getByRole('dialog', { name: 'New business unit' })
+  await create.getByLabel('Unit name').fill('Logistics')
+  await create.getByRole('button', { name: 'Create unit' }).click()
+
+  // The second unit restricts the session to its own account. The console
+  // shows the enrolment right away, without first trying the unit list or
+  // the new unit, which the session may no longer read.
+  await expect(page.getByRole('heading', { name: 'Set up an authenticator' })).toBeVisible({ timeout: 2_000 })
+  await expect(page).toHaveURL(/\/security$/)
+  await expect(page.getByRole('status').filter({ hasText: 'Set up TOTP to continue.' })).toBeVisible()
+  await expect(page.getByRole('link')).toHaveCount(0)
+  await expect(page.getByText('This business unit could not be loaded.')).toHaveCount(0)
+  expect(controls.payloads['unit-create']).toEqual([{ name: 'Logistics' }])
+  expect(controls.calls['platform-refused'] ?? 0).toBe(0)
+  expect(controls.calls['unit-data'] ?? 0).toBe(0)
+})
+
 test('a platform administrator gets only a notice and sign-out while business units are off', async ({ page }) => {
   const controls = await mockConsole(page, 'platform_admin', { businessUnits: false })
   for (const path of ['/platform/units', '/jobs', '/']) {

@@ -3,9 +3,10 @@
 import { cleanup, fireEvent, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useQuery } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
 import { APIError, adminStatus, acceptIncident, getSession, listIncidents, listJobs, login, logout, recordActivity, setupStatus, suppressIncident } from './api'
-import { AppContent, AuthRoutes, Incidents, Jobs, ProtectedApp, Shell } from './main'
+import { AppContent, AuthRoutes, createQueryClient, Incidents, Jobs, ProtectedApp, retryQuery, Shell } from './main'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
@@ -376,5 +377,31 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Sign out' })).toBeInTheDocument())
     act(() => window.dispatchEvent(new Event('edgewatch:unauthorized')))
     await waitFor(() => expect(screen.getByRole('heading', { name: /Sign in to EdgeWatch/ })).toBeInTheDocument())
+  })
+})
+
+describe('console query defaults', () => {
+  it('does not retry a refused query, and retries other failures three times', async () => {
+    const refused = new APIError('your account is not allowed to perform this action', 'forbidden', { permission: 'route' }, 403)
+    expect(retryQuery(0, refused)).toBe(false)
+    expect(retryQuery(0, new APIError('authentication required', 'unauthorized', undefined, 401))).toBe(false)
+    for (const error of [new APIError('the store is unavailable', 'store', undefined, 500), new APIError('fixture failure', 'validation_failed'), new Error('offline')]) {
+      expect(retryQuery(0, error)).toBe(true)
+      expect(retryQuery(2, error)).toBe(true)
+      expect(retryQuery(3, error)).toBe(false)
+    }
+
+    // A refused query reports at once instead of waiting through retries.
+    const client = createQueryClient()
+    expect(client.getDefaultOptions().queries?.retry).toBe(retryQuery)
+    const queryFn = vi.fn(async () => { throw refused })
+    function Probe() {
+      const query = useQuery({ queryKey: ['refused'], queryFn })
+      return <output data-testid="query-status">{query.status}</output>
+    }
+    renderWithProviders(<Probe />, { client })
+    await waitFor(() => expect(screen.getByTestId('query-status')).toHaveTextContent('error'))
+    expect(queryFn).toHaveBeenCalledTimes(1)
+    client.clear()
   })
 })

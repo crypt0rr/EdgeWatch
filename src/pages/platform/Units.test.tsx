@@ -1,25 +1,39 @@
 /** @vitest-environment jsdom */
 
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { useQuery } from '@tanstack/react-query'
 import { Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { APIError, createUnit, getUnitCapacity, listUnits } from '../../api'
-import { businessUnit, deploymentLimits as limits } from '../../test/platform-fixtures'
+import { APIError, createUnit, getSession, getUnitCapacity, listUnits } from '../../api'
+import { businessUnit, deploymentLimits as limits, platformSession } from '../../test/platform-fixtures'
 import { renderWithProviders } from '../../test/test-utils'
 import { slugProblem } from './common'
 import { Units } from './Units'
 
 vi.mock('../../api', async () => {
   const actual = await vi.importActual<typeof import('../../api')>('../../api')
-  return { ...actual, createUnit: vi.fn(), getUnitCapacity: vi.fn(), listUnits: vi.fn() }
+  return { ...actual, createUnit: vi.fn(), getSession: vi.fn(), getUnitCapacity: vi.fn(), listUnits: vi.fn() }
 })
 
 function Location() {
   return <output data-testid="location">{useLocation().pathname}</output>
 }
 
-function renderUnits() {
-  return renderWithProviders(<><Routes><Route path="/platform/units" element={<Units />} /><Route path="/platform/units/:id/:tab" element={<p>Unit page</p>} /></Routes><Location /></>, { route: ['/platform/units'] })
+// The console's session, as the signed-in shell reads it.
+function Session() {
+  useQuery({ queryKey: ['session'], queryFn: getSession })
+  return null
+}
+
+function renderUnits({ session = false } = {}) {
+  return renderWithProviders(<>{session && <Session />}<Routes><Route path="/platform/units" element={<Units />} /><Route path="/platform/units/:id/:tab" element={<p>Unit page</p>} /></Routes><Location /></>, { route: ['/platform/units'] })
+}
+
+async function createLogistics() {
+  fireEvent.click(screen.getByRole('button', { name: /New unit/ }))
+  const dialog = await screen.findByRole('dialog')
+  fireEvent.change(within(dialog).getByLabelText('Unit name'), { target: { value: 'Logistics' } })
+  await act(async () => { fireEvent.submit(within(dialog).getByLabelText('Unit name').closest('form')!); await Promise.resolve() })
 }
 
 describe('business unit list', () => {
@@ -85,6 +99,39 @@ describe('business unit list', () => {
     fireEvent.submit(within(dialog).getByLabelText('Unit name').closest('form')!)
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/platform/units/unit-new/accounts'))
     expect(createUnit).toHaveBeenLastCalledWith({ name: 'Logistics' })
+  })
+
+  it('reads the session again after creating a unit, and opens the unit only while the session is not restricted', async () => {
+    // With TOTP, the platform administrator keeps its console and opens
+    // the new unit's accounts.
+    vi.mocked(getSession).mockResolvedValue(platformSession())
+    const view = renderUnits({ session: true })
+    await screen.findByRole('link', { name: 'Open Retail' })
+    await waitFor(() => expect(getSession).toHaveBeenCalledTimes(1))
+    await createLogistics()
+    await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/platform/units/unit-new/accounts'))
+    expect(getSession).toHaveBeenCalledTimes(2)
+    expect(vi.mocked(getSession).mock.invocationCallOrder[1]).toBeGreaterThan(vi.mocked(createUnit).mock.invocationCallOrder[0])
+    view.unmount()
+
+    // Without TOTP, the second unit restricts the session: the console
+    // shows the enrolment instead, so this page neither reloads the list
+    // nor opens the unit.
+    vi.mocked(getSession).mockReset()
+    vi.mocked(getSession).mockResolvedValue(platformSession({ totp_enabled: false }))
+    vi.mocked(createUnit).mockImplementationOnce(async () => {
+      vi.mocked(getSession).mockResolvedValue(platformSession({ totp_enabled: false, totp_enrollment_required: true, permissions: ['account.self'] }))
+      return businessUnit({ id: 'unit-new', name: 'Logistics', slug: 'logistics' })
+    })
+    renderUnits({ session: true })
+    await screen.findByRole('link', { name: 'Open Retail' })
+    await waitFor(() => expect(getSession).toHaveBeenCalledTimes(1))
+    const listReads = vi.mocked(listUnits).mock.calls.length
+    await createLogistics()
+    await waitFor(() => expect(getSession).toHaveBeenCalledTimes(2))
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+    expect(screen.getByTestId('location')).toHaveTextContent(/^\/platform\/units$/)
+    expect(listUnits).toHaveBeenCalledTimes(listReads)
   })
 
   it('reports a list that cannot be loaded and an empty deployment', async () => {

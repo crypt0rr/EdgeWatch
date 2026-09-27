@@ -1,17 +1,18 @@
 /** @vitest-environment jsdom */
 
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act } from 'react'
 import { useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { adminStatus, getPublicDashboard, getPublicDashboardConfig, getSession, listHosts, listIncidents, listJobs, listUnits, platformStatus, recordActivity, setupStatus, unitAudit } from './api'
+import { adminStatus, api, APIError, createUnit, getPublicDashboard, getPublicDashboardConfig, getSession, getUnit, getUnitCapacity, listHosts, listIncidents, listJobs, listUnits, platformStatus, recordActivity, setupStatus, unitAudit } from './api'
 import type { SessionUser } from './api'
 import { ProtectedApp } from './main'
-import { deploymentLimits, platformSession } from './test/platform-fixtures'
+import { businessUnit, deploymentLimits, platformSession, unitCapacity } from './test/platform-fixtures'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, adminStatus: vi.fn(), getPublicDashboard: vi.fn(), getPublicDashboardConfig: vi.fn(), getSession: vi.fn(), listHosts: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listUnits: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), unitAudit: vi.fn() }
+  return { ...actual, adminStatus: vi.fn(), createUnit: vi.fn(), getPublicDashboard: vi.fn(), getPublicDashboardConfig: vi.fn(), getSession: vi.fn(), getUnit: vi.fn(), getUnitCapacity: vi.fn(), listHosts: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listUnits: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), unitAudit: vi.fn() }
 })
 
 class EventSourceStub {
@@ -147,6 +148,70 @@ describe('business units in the console', () => {
     renderApp('/platform/units')
     expect(await screen.findByRole('heading', { name: 'Set up an authenticator' })).toBeInTheDocument()
     expect(listUnits).not.toHaveBeenCalled()
+  })
+
+  it('switches an open console to the enrolment when refused requests find its session restricted, after one session read', async () => {
+    vi.mocked(getSession).mockResolvedValue(unitAdministrator({ totp_enabled: false }))
+    renderApp('/jobs')
+    expect(await screen.findByRole('heading', { name: 'Jobs' })).toBeInTheDocument()
+
+    // Another administrator creates a second business unit: from now on the
+    // server restricts this session to its own account and refuses the rest.
+    const reads = vi.mocked(getSession).mock.calls.length
+    let finishRead: (session: SessionUser) => void = () => {}
+    vi.mocked(getSession).mockImplementation(() => new Promise(resolve => { finishRead = resolve }))
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => new Response(JSON.stringify({ error: { code: 'forbidden', message: 'your account is not allowed to perform this action', details: { permission: 'route' } } }), { status: 403, headers: { 'Content-Type': 'application/json' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    let settled = 0
+    const refused = ['/jobs', '/incidents?limit=1&offset=0', '/status'].map(path => api(path).catch((error: unknown) => error).finally(() => { settled += 1 }))
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(3))
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)) })
+    // The three refusals wait for one session read, and the page stays
+    // until the read answers.
+    expect(getSession).toHaveBeenCalledTimes(reads + 1)
+    expect(settled).toBe(0)
+    expect(screen.getByRole('heading', { name: 'Jobs' })).toBeInTheDocument()
+
+    const restricted = unitAdministrator({ totp_enabled: false, totp_enrollment_required: true, permissions: ['account.self'] })
+    vi.mocked(getSession).mockResolvedValue(restricted)
+    await act(async () => { finishRead(restricted); await Promise.resolve() })
+    for (const error of await Promise.all(refused)) expect(error).toMatchObject({ name: 'APIError', status: 403, code: 'forbidden' })
+    expect(await screen.findByRole('heading', { name: 'Set up an authenticator' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent('/security'))
+    expect(screen.queryByRole('heading', { name: 'Jobs' })).not.toBeInTheDocument()
+  })
+
+  it('gives a platform administrator without TOTP the enrolment, not the new unit, once it creates the second unit', async () => {
+    vi.mocked(getSession).mockResolvedValue(platformSession({ totp_enabled: false }))
+    vi.mocked(listUnits).mockResolvedValue({ limits: deploymentLimits, units: [businessUnit({ id: 'unit-default', name: 'Default', slug: 'default', is_default: true })] })
+    vi.mocked(getUnitCapacity).mockResolvedValue(unitCapacity({ unit_id: 'unit-default' }))
+    const refused = new APIError('your account is not allowed to perform this action', 'forbidden', { permission: 'route' }, 403)
+    vi.mocked(createUnit).mockImplementation(async () => {
+      // From now on two units exist, and the server restricts this session
+      // to its own account.
+      vi.mocked(getSession).mockResolvedValue(platformSession({ totp_enabled: false, totp_enrollment_required: true, permissions: ['account.self'] }))
+      vi.mocked(listUnits).mockRejectedValue(refused)
+      vi.mocked(getUnit).mockRejectedValue(refused)
+      return businessUnit({ id: 'unit-logistics', name: 'Logistics', slug: 'logistics' })
+    })
+    renderApp('/platform/units')
+    expect(await screen.findByRole('link', { name: 'Open Default' })).toBeInTheDocument()
+    const unitListReads = vi.mocked(listUnits).mock.calls.length
+
+    fireEvent.click(screen.getByRole('button', { name: /New unit/ }))
+    const dialog = await screen.findByRole('dialog', { name: 'New business unit' })
+    fireEvent.change(within(dialog).getByLabelText('Unit name'), { target: { value: 'Logistics' } })
+    await act(async () => { fireEvent.submit(within(dialog).getByLabelText('Unit name').closest('form')!); await Promise.resolve() })
+
+    expect(await screen.findByRole('heading', { name: 'Set up an authenticator' })).toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent('/security'))
+    expect(createUnit).toHaveBeenCalledWith({ name: 'Logistics' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    // The console neither reloads the list nor opens the new unit, which
+    // the restricted session may not read.
+    expect(listUnits).toHaveBeenCalledTimes(unitListReads)
+    expect(getUnit).not.toHaveBeenCalled()
+    expect(screen.queryByText('This business unit could not be loaded.')).not.toBeInTheDocument()
   })
 
   it('gives a platform administrator only a notice and sign-out while business units are off', async () => {

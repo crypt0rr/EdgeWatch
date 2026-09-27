@@ -135,9 +135,13 @@ function platformAccount(overrides: Record<string, unknown>) {
  * high-risk console flow has a browser-level error path. With businessUnits
  * false, a platform administrator is served as while
  * experimental.business_units is off: its session has no scope and lists
- * only account.self, and the platform routes are refused.
+ * only account.self, and the platform routes are refused. With platformTOTP
+ * false, the platform administrator has no TOTP and the deployment starts
+ * with the default unit only; once a second unit exists, its session must
+ * enrol TOTP and holds only account.self, and the platform routes are
+ * refused, as the server's permission gate does.
  */
-export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', { businessUnits = true }: { businessUnits?: boolean } = {}): Promise<ConsoleMockControls> {
+export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', { businessUnits = true, platformTOTP = true }: { businessUnits?: boolean; platformTOTP?: boolean } = {}): Promise<ConsoleMockControls> {
   let incidents: any[] = [{
     job_id: 'job-1',
     job: 'fixture-job',
@@ -159,7 +163,9 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
   const units: any[] = [
     platformUnit({ id: 'unit-default', name: 'Default', slug: 'default', is_default: true, accounts: 3, administrators: 1, jobs: 1 }),
     platformUnit({ id: 'unit-retail', name: 'Retail', slug: 'retail', accounts: 3, administrators: 1, jobs: 2, slots: { in_use: 1, queued: 0 } }),
-  ]
+  ].slice(0, platformTOTP ? 2 : 1)
+  const multipleUnits = () => units.filter(unit => unit.status !== 'deleted').length > 1
+  const mustEnrol = () => role === 'platform_admin' && !platformTOTP && multipleUnits()
   const unitAccounts: Record<string, any[]> = {
     'unit-default': [platformAccount({ id: 'acct-admin', username: 'admin', display_name: 'Administrator', role: 'administrator', totp_enabled: true })],
     'unit-retail': [
@@ -210,9 +216,16 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       // A platform administrator's session names the platform console, as
       // the server's does while business units are on. While they are off it
       // has no scope and holds only its own account's self-service.
-      const scope = role === 'platform_admin' && businessUnits ? { scope: 'platform', unit: null, multi_unit: true } : {}
-      const permissions = role === 'platform_admin' && !businessUnits ? ['account.self'] : rolePermissions[role]
-      await json({ user_id: `user-${role}`, username: role === 'administrator' ? 'admin' : role === 'platform_admin' ? 'platform' : role, display_name: role, role, permissions, csrf_token: 'fixture-csrf', totp_enabled: role === 'platform_admin', password_requirements: { minimum_length: 12 }, ...scope })
+      const scope = role === 'platform_admin' && businessUnits ? { scope: 'platform', unit: null, multi_unit: multipleUnits() } : {}
+      const permissions = (role === 'platform_admin' && !businessUnits) || mustEnrol() ? ['account.self'] : rolePermissions[role]
+      const enrolment = mustEnrol() ? { totp_enrollment_required: true } : {}
+      await json({ user_id: `user-${role}`, username: role === 'administrator' ? 'admin' : role === 'platform_admin' ? 'platform' : role, display_name: role, role, permissions, csrf_token: 'fixture-csrf', totp_enabled: role === 'platform_admin' && platformTOTP, password_requirements: { minimum_length: 12 }, ...scope, ...enrolment })
+      return
+    }
+    if (mustEnrol() && path.startsWith('/platform/')) {
+      // A session that must enrol TOTP holds only its own account.
+      record('platform-refused', `${method} ${path}`)
+      await json({ error: { code: 'forbidden', message: 'your account is not allowed to perform this action', details: { permission: 'route' } } }, 403)
       return
     }
     if (!businessUnits && path.startsWith('/platform/')) {

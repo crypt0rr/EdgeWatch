@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
 import { Building2, Plus } from 'lucide-react'
 import { createUnit, getUnitCapacity, listUnits } from '../../api'
-import type { BusinessUnit } from '../../api'
+import type { BusinessUnit, SessionUser } from '../../api'
 import { ActionDialog } from '../../components/ActionDialog'
 import { errorMessage, formatCount, Loading, plural, slugProblem, UnitStatusPill } from './common'
 
@@ -29,6 +29,12 @@ export function Units() {
     }
     try {
       const unit = await createUnit({ name: name.trim(), ...(slug ? { slug } : {}) })
+      // A second unit restricts every administrator without TOTP to its own
+      // account, this one included. Read the session again first: when it
+      // now requires enrolment, the console shows the enrolment instead of
+      // this page, and neither the list nor the new unit can be loaded.
+      await client.refetchQueries({ queryKey: ['session'], exact: true })
+      if (client.getQueryData<SessionUser>(['session'])?.totp_enrollment_required) return
       await client.invalidateQueries({ queryKey: ['platform-units'] })
       setCreating(false)
       navigate(`/platform/units/${encodeURIComponent(unit.id)}/accounts`)

@@ -48,7 +48,7 @@ func TestStoreBackedNotificationTestSendsOncePerDeploymentDestination(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	summary, err := notifier.TestSummaryContext(ctx)
+	summary, err := defaultNotifier(notifier).TestSummary(ctx)
 	if err != nil {
 		t.Fatalf("notification test: %v", err)
 	}
@@ -84,10 +84,10 @@ func TestNotificationTestKeepsManagedDestinationSharingDeploymentURL(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := notifier.CreateManaged(ctx, "Shared", raw, true); err != nil {
+	if _, err := defaultNotifier(notifier).createManaged(ctx, "Shared", raw, true, nil); err != nil {
 		t.Fatal(err)
 	}
-	summary, err := notifier.TestSummaryContext(ctx)
+	summary, err := defaultNotifier(notifier).TestSummary(ctx)
 	if err != nil {
 		t.Fatalf("notification test: %v", err)
 	}
@@ -106,7 +106,7 @@ func lockManagedDestination(t *testing.T, db *store.Store, keyPath string, remov
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := creator.CreateManaged(context.Background(), "Ops", "generic://127.0.0.1:9/ops?disabletls=yes&template=json", true)
+	created, err := defaultNotifier(creator).createManaged(context.Background(), "Ops", "generic://127.0.0.1:9/ops?disabletls=yes&template=json", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestNotificationTestFailsForLockedManagedDestination(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			summary, err := notifier.TestSummaryContext(ctx)
+			summary, err := defaultNotifier(notifier).TestSummary(ctx)
 			if !errors.Is(err, ErrManagedNotificationLocked) {
 				t.Fatalf("locked destination test error = %v, want ErrManagedNotificationLocked", err)
 			}
@@ -163,7 +163,7 @@ func TestNotificationTestFailsForLockedManagedDestination(t *testing.T) {
 			if summary != (TestSummary{Locked: 1}) {
 				t.Fatalf("locked test summary = %#v, want one locked destination", summary)
 			}
-			if err := notifier.Test(); !errors.Is(err, ErrManagedNotificationLocked) {
+			if err := defaultTest(context.Background(), notifier); !errors.Is(err, ErrManagedNotificationLocked) {
 				t.Fatalf("Test() error = %v, want ErrManagedNotificationLocked", err)
 			}
 		})
@@ -184,7 +184,7 @@ func TestNotificationTestFailsWhenWorkingDeploymentAndLockedManagedDestinationMi
 	if err != nil {
 		t.Fatal(err)
 	}
-	summary, err := notifier.TestSummaryContext(ctx)
+	summary, err := defaultNotifier(notifier).TestSummary(ctx)
 	if !errors.Is(err, ErrManagedNotificationLocked) {
 		t.Fatalf("mixed test error = %v, want ErrManagedNotificationLocked", err)
 	}
@@ -210,7 +210,9 @@ func TestCanceledNotificationTestCountsEveryDestinationAsFailed(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	summary, err := notifier.TestSummaryContext(ctx)
+	// A notifier without a store has no tenant, so the test runs over its
+	// deployment destinations directly.
+	summary, err := testSet(ctx, notifier.defaultSet())
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled test error = %v, want context.Canceled", err)
 	}
@@ -240,10 +242,10 @@ func TestNotificationTestIgnoresPausedLockedManagedDestination(t *testing.T) {
 	}
 	// Pausing a locked destination is allowed without the key. A paused
 	// destination is not part of the global test, locked or not.
-	if _, err := notifier.UpdateManaged(ctx, created.ID, created.Revision, created.Name, nil, boolPtr(false)); err != nil {
+	if _, err := defaultNotifier(notifier).updateManaged(ctx, created.ID, created.Revision, created.Name, nil, boolPtr(false), nil); err != nil {
 		t.Fatal(err)
 	}
-	summary, err := notifier.TestSummaryContext(ctx)
+	summary, err := defaultNotifier(notifier).TestSummary(ctx)
 	if err != nil {
 		t.Fatalf("paused locked destination failed the global test: %v", err)
 	}

@@ -167,7 +167,7 @@ func TestDeliveryRetryPolicyIsDurableAndBounded(t *testing.T) {
 
 	ctx := context.Background()
 	s := openTestStore(t)
-	if err := s.System().QueueEvent(ctx, "retry-policy", model.Event{Type: "retry-policy", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, "retry-policy", model.Event{Type: "retry-policy", TenantID: DefaultTenantID, CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	for attempt := 0; attempt < deliveryMaxAttempts; attempt++ {
@@ -287,7 +287,7 @@ func TestDeliveryHealthTracksRedactedOutcomesAndTerminalEvent(t *testing.T) {
 func TestDeliveryDeferralsAreBoundedAndVisible(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
-	if err := s.System().QueueEvent(ctx, "deferred", model.Event{Type: "deferred", Message: "locked", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, "deferred", model.Event{Type: "deferred", Message: "locked", TenantID: DefaultTenantID, CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	for deferral := 0; deferral < deliveryMaxDeferrals; deferral++ {

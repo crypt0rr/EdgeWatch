@@ -230,27 +230,16 @@ func (ts *TenantStore) ListScanSummariesPage(ctx context.Context, job string, li
 
 // historyTenantSQL is the tenant predicate of the event and delivery
 // history, the events and outbox tables. It takes one argument, the tenant
-// ID. A history row without a tenant belongs to the platform: an update
-// alert, its deliveries, and the events about them. While there is one
-// tenant, its administrators are the installation's administrators, so the
-// default tenant's history keeps holding the platform's rows, as it did
-// before tenants existed. No other tenant sees them.
-//
-// The predicate attributes a platform row to the default tenant instead of
-// adding "OR tenant_id IS NULL": with an OR, SQLite reads both halves from
-// the tenant index and sorts the whole history for every page, while this
-// form keeps reading it in order from the created_at index.
-const historyTenantSQL = `COALESCE(tenant_id,'` + DefaultTenantID + `')=?`
+// ID. A history row without a tenant belongs to the platform, such as the
+// platform's copy of an update alert and its deliveries, and no tenant's
+// history holds it, the default tenant's included: each tenant has its own
+// copy of an update alert. The platform's rows are read through
+// PlatformStore.
+const historyTenantSQL = `tenant_id=?`
 
-// eventsFromSQL returns the FROM clause that selects the tenant's events. It
-// takes one argument, the tenant ID. Another tenant's events are read from
-// the tenant index; the default tenant's also include the platform's.
-func (ts *TenantStore) eventsFromSQL() string {
-	if ts.scope.id == DefaultTenantID {
-		return `FROM events WHERE ` + historyTenantSQL
-	}
-	return `FROM events WHERE tenant_id=?`
-}
+// eventsFromSQL is the FROM clause that selects the tenant's events, in
+// order from the tenant index. It takes one argument, the tenant ID.
+const eventsFromSQL = `FROM events WHERE ` + historyTenantSQL
 
 // ListEvents returns the tenant's most recent events, of every job or of the
 // job with the given name. Another tenant's job of the same name is never
@@ -263,8 +252,8 @@ func (ts *TenantStore) ListEvents(ctx context.Context, job string, limit int) ([
 // ListEventsPage returns a page of the tenant's events, newest first, of
 // every job or of the job with the given name. The name filter is
 // tenant-qualified: another tenant's job of the same name, managed or from
-// config.yaml, is never matched. The default tenant's events include the
-// platform's, as historyTenantSQL describes.
+// config.yaml, is never matched. The platform's events are not the tenant's,
+// as historyTenantSQL describes.
 func (ts *TenantStore) ListEventsPage(ctx context.Context, job string, limit, offset int) (Page[model.Event], error) {
 	if err := ts.ready(); err != nil {
 		return Page[model.Event]{}, err
@@ -272,7 +261,7 @@ func (ts *TenantStore) ListEventsPage(ctx context.Context, job string, limit, of
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Event]
 	readDB := ts.store.reader()
-	from := ts.eventsFromSQL()
+	from := eventsFromSQL
 	query := `SELECT payload_json ` + from
 	countQuery := `SELECT COUNT(*) ` + from
 	args := []any{ts.scope.id}
@@ -305,6 +294,47 @@ func (ts *TenantStore) ListEventsPage(ctx context.Context, job string, limit, of
 		page.Items = append(page.Items, event)
 	}
 	return page, rows.Err()
+}
+
+// platformHistorySQL is the predicate of the platform's event and delivery
+// history: the rows without a tenant.
+const platformHistorySQL = `tenant_id IS NULL`
+
+// ListEventsPage returns a page of the platform's events, newest first: its
+// copies of the update alerts and the events about their deliveries. The
+// events of a tenant, the default tenant's included, are never returned.
+func (ps *PlatformStore) ListEventsPage(ctx context.Context, limit, offset int) (Page[model.Event], error) {
+	limit, offset = normalizePage(limit, offset)
+	var page Page[model.Event]
+	readDB := ps.store.reader()
+	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE `+platformHistorySQL).Scan(&page.Total); err != nil {
+		return page, err
+	}
+	rows, err := readDB.QueryContext(ctx, `SELECT payload_json FROM events WHERE `+platformHistorySQL+` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, limit, offset)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			return page, err
+		}
+		var event model.Event
+		if err := json.Unmarshal(raw, &event); err != nil {
+			return page, err
+		}
+		page.Items = append(page.Items, event)
+	}
+	return page, rows.Err()
+}
+
+// FailedDeliveries returns the number of the platform's notification
+// deliveries that failed for good. A tenant's deliveries are not counted.
+func (ps *PlatformStore) FailedDeliveries(ctx context.Context) (int, error) {
+	var count int
+	err := ps.store.reader().QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND (attempts >= ? OR terminal_at <> '') AND `+platformHistorySQL, deliveryMaxAttempts).Scan(&count)
+	return count, err
 }
 
 // MaxEventID returns the greatest durable event identifier currently stored,
@@ -344,7 +374,7 @@ func (ts *TenantStore) ListJobEventsPage(ctx context.Context, jobID string, limi
 	limit, offset = normalizePage(limit, offset)
 	var page Page[model.Event]
 	readDB := ts.store.reader()
-	from := ts.eventsFromSQL() + ` AND job_id=?`
+	from := eventsFromSQL + ` AND job_id=?`
 	if err := readDB.QueryRowContext(ctx, `SELECT COUNT(*) `+from, ts.scope.id, jobID).Scan(&page.Total); err != nil {
 		return page, err
 	}
@@ -369,7 +399,7 @@ func (ts *TenantStore) ListJobEventsPage(ctx context.Context, jobID string, limi
 
 // FailedDeliveries returns the number of the tenant's notification
 // deliveries that failed for good. A delivery belongs to the tenant of its
-// event; the default tenant's count includes the platform's deliveries, as
+// event; the platform's deliveries are not the tenant's, as
 // historyTenantSQL describes.
 func (ts *TenantStore) FailedDeliveries(ctx context.Context) (int, error) {
 	if err := ts.ready(); err != nil {

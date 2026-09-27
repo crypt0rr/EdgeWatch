@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -45,6 +46,52 @@ func TestApplicationUpdateStatusIsAuthenticatedAndRedactsSetupState(t *testing.T
 	disabled := server.applicationUpdateStatus(ctx)
 	if disabled["status"] != "disabled" || disabled["enabled"] != false {
 		t.Fatalf("disabled update status=%#v", disabled)
+	}
+}
+
+// A single-unit installation keeps showing its update alert in /events and
+// its failed update delivery in /status, now as the default unit's own
+// copy. The platform's copy of the alert is not the unit's.
+func TestEventsShowTheDefaultUnitsUpdateAlert(t *testing.T) {
+	server, db, admin := newUsersTestServer(t)
+	ctx := context.Background()
+	if _, err := db.Platform().RecordInstalledVersion(ctx, "v1.0.0", "", false, nil); err != nil {
+		t.Fatal(err)
+	}
+	routes := []store.UpdateAlertRoute{{}, {TenantID: store.DefaultTenantID, Destinations: []string{"deployment-updates"}}}
+	if events, err := db.Platform().RecordReleaseCheck(ctx, "v1.0.0", "v1.1.0", "https://github.com/crypt0rr/EdgeWatch/releases/tag/v1.1.0", "1.1", "2026-09-07T12:00:00Z", `"etag"`, true, routes); err != nil || len(events) != 2 {
+		t.Fatalf("update alert = %v, %v", events, err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `UPDATE outbox SET attempts=8,terminal_at=next_at`); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.listEvents(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/events", nil), defaultTenantStore(server), "")
+	var listed struct {
+		Events []struct {
+			Type          string `json:"type"`
+			LatestVersion string `json:"latest_version"`
+		} `json:"events"`
+	}
+	if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &listed) != nil {
+		t.Fatalf("events = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if len(listed.Events) != 1 || listed.Events[0].Type != "application-update-available" || listed.Events[0].LatestVersion != "v1.1.0" {
+		t.Fatalf("events = %+v, want the update alert once", listed.Events)
+	}
+	status := httptest.NewRecorder()
+	server.adminStatus(status, httptest.NewRequest(http.MethodGet, "/api/v1/status", nil), admin, defaultTenantStore(server))
+	var body struct {
+		Telemetry struct {
+			Events       int `json:"events"`
+			OutboxFailed int `json:"outbox_failed"`
+		} `json:"telemetry"`
+	}
+	if status.Code != http.StatusOK || json.Unmarshal(status.Body.Bytes(), &body) != nil {
+		t.Fatalf("status = %d: %s", status.Code, status.Body.String())
+	}
+	if body.Telemetry.Events != 1 || body.Telemetry.OutboxFailed != 1 {
+		t.Fatalf("status telemetry = %+v, want the update alert and its failed delivery once", body.Telemetry)
 	}
 }
 

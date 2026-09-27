@@ -169,7 +169,7 @@ func TestNotifierRecoversInterruptedKeyAndResolvesManagedSelectors(t *testing.T)
 	if _, err := notifier.ensureKey(ctx); err != nil {
 		t.Fatalf("interrupted key recovery failed: %v", err)
 	}
-	if _, err := notifier.CreateManaged(ctx, "Recovered", "generic://localhost/recovered?disabletls=yes&template=json", true); err != nil {
+	if _, err := defaultNotifier(notifier).createManaged(ctx, "Recovered", "generic://localhost/recovered?disabletls=yes&template=json", true, nil); err != nil {
 		t.Fatalf("managed destination creation after key recovery failed: %v", err)
 	}
 	notifier.mu.Lock()
@@ -211,7 +211,7 @@ func TestNotifierDeploymentSelectorCompatibilityBranches(t *testing.T) {
 	withoutStore.mu.Lock()
 	withoutStore.fileURLs["opaque-id"] = url
 	withoutStore.fileLegacy["legacy-id"] = "opaque-id"
-	if key, ok := withoutStore.destinationKeyLocked("file:legacy-id"); !ok || key != "opaque-id" {
+	if key, ok := withoutStore.defaultSetLocked().keyFor("file:legacy-id"); !ok || key != "opaque-id" {
 		withoutStore.mu.Unlock()
 		t.Fatalf("legacy selector resolution = %q, %v", key, ok)
 	}
@@ -240,33 +240,33 @@ func TestNotifierLockedAndErrorBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := notifier.CreateManaged(ctx, "", "generic://localhost/path?disabletls=yes", true); err == nil {
+	if _, err := defaultNotifier(notifier).createManaged(ctx, "", "generic://localhost/path?disabletls=yes", true, nil); err == nil {
 		t.Fatal("empty notification name was accepted")
 	}
-	if _, err := notifier.CreateManaged(ctx, "bad", "not-a-shoutrrr-url", true); err == nil {
+	if _, err := defaultNotifier(notifier).createManaged(ctx, "bad", "not-a-shoutrrr-url", true, nil); err == nil {
 		t.Fatal("invalid notification URL was accepted")
 	}
 	if got := notifier.view("missing"); got.ID != "" {
 		t.Fatalf("missing view = %#v", got)
 	}
-	if _, err := notifier.Destination(ctx, "missing"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := defaultNotifier(notifier).Destination(ctx, "missing"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("missing destination error = %v", err)
 	}
-	if err := notifier.ValidateDestinationSelection(ctx, []string{"file:"}); !errors.Is(err, ErrInvalidDestinationSelection) {
+	if err := defaultNotifier(notifier).ValidateDestinationSelection(ctx, []string{"file:"}); !errors.Is(err, ErrInvalidDestinationSelection) {
 		t.Fatalf("empty file selection error = %v", err)
 	}
 
-	created, err := notifier.CreateManaged(ctx, "Locked", "generic://localhost/locked?disabletls=yes&template=json", true)
+	created, err := defaultNotifier(notifier).createManaged(ctx, "Locked", "generic://localhost/locked?disabletls=yes&template=json", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := notifier.UpdateManaged(ctx, "missing", 1, "name", nil, nil); !errors.Is(err, store.ErrNotFound) {
+	if _, err := defaultNotifier(notifier).updateManaged(ctx, "missing", 1, "name", nil, nil, nil); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("missing notification update error = %v", err)
 	}
-	if _, err := notifier.UpdateManaged(ctx, created.ID, created.Revision, "", nil, nil); err == nil {
+	if _, err := defaultNotifier(notifier).updateManaged(ctx, created.ID, created.Revision, "", nil, nil, nil); err == nil {
 		t.Fatal("empty notification update name was accepted")
 	}
-	if _, err := notifier.UpdateManaged(ctx, created.ID, created.Revision, "Locked", stringPtr("not-a-url"), nil); err == nil {
+	if _, err := defaultNotifier(notifier).updateManaged(ctx, created.ID, created.Revision, "Locked", stringPtr("not-a-url"), nil, nil); err == nil {
 		t.Fatal("invalid notification update URL was accepted")
 	}
 
@@ -278,25 +278,24 @@ func TestNotifierLockedAndErrorBranches(t *testing.T) {
 	if err := notifier.Reload(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := notifier.UpdateManaged(ctx, created.ID, created.Revision, "Locked", nil, boolPtr(true)); !errors.Is(err, ErrManagedNotificationLocked) {
+	if _, err := defaultNotifier(notifier).updateManaged(ctx, created.ID, created.Revision, "Locked", nil, boolPtr(true), nil); !errors.Is(err, ErrManagedNotificationLocked) {
 		t.Fatalf("locked re-enable error = %v", err)
 	}
-	if err := notifier.TestDestinationContext(ctx, "missing"); !errors.Is(err, store.ErrNotFound) {
+	if err := defaultNotifier(notifier).TestDestination(ctx, "missing"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("missing destination test error = %v", err)
 	}
-	if err := notifier.TestDestinationContext(ctx, created.ID); !errors.Is(err, ErrManagedNotificationLocked) {
+	if err := defaultNotifier(notifier).TestDestination(ctx, created.ID); !errors.Is(err, ErrManagedNotificationLocked) {
 		t.Fatalf("locked destination test error = %v", err)
 	}
 
-	// The enabled destination is locked, so the global test must fail.
-	//nolint:staticcheck // TestContext deliberately tolerates a nil context.
-	if err := notifier.TestContext(nil); !errors.Is(err, ErrManagedNotificationLocked) {
-		t.Fatalf("nil notification test context = %v, want ErrManagedNotificationLocked", err)
+	// The enabled destination is locked, so the tenant's test must fail.
+	if err := defaultTest(ctx, notifier); !errors.Is(err, ErrManagedNotificationLocked) {
+		t.Fatalf("notification test = %v, want ErrManagedNotificationLocked", err)
 	}
 	if err := notifier.Drain(nil); err != nil {
 		t.Fatalf("nil drain context = %v", err)
 	}
-	if _, err := notifier.QueueDestinationsForSelection(ctx, nil); err != nil {
+	if _, err := defaultNotifier(notifier).QueueDestinationsForSelection(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -348,7 +347,7 @@ func TestNotifierDeliveryFailureAndCancellationBranches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := failing.TestContext(ctx); err == nil {
+	if err := defaultTest(ctx, failing); err == nil {
 		t.Fatal("failing notification provider unexpectedly succeeded")
 	}
 }

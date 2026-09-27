@@ -200,6 +200,14 @@ var tenantStoreLeakCases = map[string]tenantLeakCase{
 			}
 		}
 	}},
+	"Scope": {run: func(t *testing.T, f tenantFixture) {
+		// Each store names its own tenant, never another.
+		for _, scope := range []TenantScope{f.a, f.b} {
+			if got, err := f.store.Tenant(scope).Scope(); err != nil || got != scope {
+				t.Errorf("tenant %s: scope = %q, %v", scope.ID(), got.ID(), err)
+			}
+		}
+	}},
 }
 
 // Every exported method of the tenant-scoped stores, TenantStore and

@@ -184,11 +184,15 @@ var tenantHistoryLeakCases = map[string]tenantLeakCase{
 		}
 	}},
 	"FailedDeliveries": {run: func(t *testing.T, f tenantFixture) {
-		// The default tenant's count includes the platform's delivery.
-		for scope, want := range map[TenantScope]int{f.a: 2, f.b: 1} {
+		// Each tenant counts its own delivery. The platform's is counted by
+		// the platform only, not by the default tenant.
+		for scope, want := range map[TenantScope]int{f.a: 1, f.b: 1} {
 			if got, err := f.store.Tenant(scope).FailedDeliveries(context.Background()); err != nil || got != want {
 				t.Errorf("tenant %s: failed deliveries = %d, %v; want %d", scope.ID(), got, err, want)
 			}
+		}
+		if got, err := f.store.Platform().FailedDeliveries(context.Background()); err != nil || got != 1 {
+			t.Errorf("the platform's failed deliveries = %d, %v; want its own one", got, err)
 		}
 	}},
 	"State": {run: func(t *testing.T, f tenantFixture) {
@@ -288,7 +292,8 @@ func eventMarkers(events []model.Event) []string {
 }
 
 // checkTenantEventLists checks an event list with and without the name
-// filter. The default tenant's list also holds the platform's event.
+// filter. No tenant's list holds the platform's event, the default
+// tenant's included.
 func checkTenantEventLists(t *testing.T, f tenantFixture, list func(ts *TenantStore, job string) ([]model.Event, int, error)) {
 	t.Helper()
 	for _, check := range []struct {
@@ -299,7 +304,7 @@ func checkTenantEventLists(t *testing.T, f tenantFixture, list func(ts *TenantSt
 		{f.b, "", []string{"tenant-b"}},
 		{f.b, "edge", []string{"tenant-b"}},
 		{f.b, "missing", nil},
-		{f.a, "", []string{"legacy-a", "platform", "tenant-a"}},
+		{f.a, "", []string{"legacy-a", "tenant-a"}},
 		{f.a, "edge", []string{"legacy-a", "tenant-a"}},
 	} {
 		events, total, err := list(f.store.Tenant(check.scope), check.job)
@@ -417,19 +422,51 @@ func TestTenantHistory(t *testing.T) {
 	f := newTenantFixture(t)
 	t.Run("event lists read in order", func(t *testing.T) { assertTenantEventListsReadInOrder(t, f) })
 	t.Run("max event ID is global", func(t *testing.T) { assertMaxEventIDCoversEveryTenant(t, f) })
+	t.Run("platform history is the platform's", func(t *testing.T) { assertPlatformHistoryIsThePlatforms(t, f) })
 }
 
-// The default tenant's event list reads the history in order from the
-// created_at index, as before tenants existed, although it also takes the
-// platform's rows. Another tenant's list reads its own rows in order from
-// the tenant index. Neither sorts the history.
+// Each tenant's event list, the default tenant's included, reads its own
+// rows in order from the tenant index, and so does the platform's. None
+// sorts the history.
 func assertTenantEventListsReadInOrder(t *testing.T, f tenantFixture) {
-	for scope, index := range map[TenantScope]string{f.a: "events_created_at", f.b: "events_tenant_id_time"} {
-		query := `SELECT payload_json ` + f.store.Tenant(scope).eventsFromSQL() + ` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`
+	for _, scope := range []TenantScope{f.a, f.b} {
+		query := `SELECT payload_json ` + eventsFromSQL + ` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`
 		plan := queryPlan(t, f.store.DB, query, scope.ID(), 10, 0)
-		if !strings.Contains(plan, index) || strings.Contains(plan, "TEMP B-TREE") {
-			t.Errorf("tenant %s: plan = %q, want %s without a sort", scope.ID(), plan, index)
+		if !strings.Contains(plan, "events_tenant_id_time") || strings.Contains(plan, "TEMP B-TREE") {
+			t.Errorf("tenant %s: plan = %q, want events_tenant_id_time without a sort", scope.ID(), plan)
 		}
+	}
+	plan := queryPlan(t, f.store.DB, `SELECT payload_json FROM events WHERE `+platformHistorySQL+` ORDER BY created_at DESC,id DESC LIMIT ? OFFSET ?`, 10, 0)
+	if !strings.Contains(plan, "events_tenant_id_time") || strings.Contains(plan, "TEMP B-TREE") {
+		t.Errorf("platform: plan = %q, want events_tenant_id_time without a sort", plan)
+	}
+}
+
+// The platform's events and deliveries belong to the platform's history
+// only. The default tenant's history does not show them, while the default
+// tenant's own rows are not the platform's.
+func assertPlatformHistoryIsThePlatforms(t *testing.T, f tenantFixture) {
+	ctx := context.Background()
+	page, err := f.store.Platform().ListEventsPage(ctx, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := eventMarkers(page.Items); !reflect.DeepEqual(got, []string{"platform"}) || page.Total != 1 {
+		t.Fatalf("the platform's events = %v (total %d), want its own event", got, page.Total)
+	}
+	for _, scope := range []TenantScope{f.a, f.b} {
+		events, err := f.store.Tenant(scope).ListEventsPage(ctx, "", 10, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, marker := range eventMarkers(events.Items) {
+			if marker == "platform" {
+				t.Errorf("tenant %s lists the platform's event", scope.ID())
+			}
+		}
+	}
+	if page, err := f.store.Platform().ListEventsPage(ctx, 10, 1); err != nil || len(page.Items) != 0 || page.Total != 1 {
+		t.Fatalf("the platform's second page = %+v, %v", page, err)
 	}
 }
 

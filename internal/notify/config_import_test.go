@@ -101,7 +101,7 @@ func TestImportConfiguredURLsCreatesMissingDefaultKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deployment, web := deploymentViews(notifier.DestinationsContext(ctx))
+	deployment, web := deploymentViews(defaultDestinations(t, notifier))
 	if len(deployment) != 0 || len(web) != 2 || web[0].Name != "Deployment destination" || web[1].Name != "Deployment destination 2" {
 		t.Fatalf("destinations after import = deployment %#v, web %#v", deployment, web)
 	}
@@ -116,7 +116,7 @@ func TestImportConfiguredURLsCreatesMissingDefaultKey(t *testing.T) {
 	if !urls[first] || !urls[second] {
 		t.Fatalf("imported destinations do not decrypt to the configured URLs")
 	}
-	if status := notifier.StatusContext(ctx); status["deployment"] != 0 || status["managed"] != 2 || status["active"] != 2 {
+	if status := defaultStatus(t, notifier); status["deployment"] != 0 || status["managed"] != 2 || status["active"] != 2 {
 		t.Fatalf("notifier status after import = %#v", status)
 	}
 }
@@ -138,7 +138,7 @@ func TestImportConfiguredURLsUsesConfiguredKeyFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, web := deploymentViews(notifier.DestinationsContext(ctx))
+	_, web := deploymentViews(defaultDestinations(t, notifier))
 	if len(web) != 1 || web[0].Locked || notifier.managed[web[0].ID].url != raw {
 		t.Fatalf("imported destination with configured key = %#v", web)
 	}
@@ -199,7 +199,7 @@ func TestImportConfiguredURLsFailureImportsNothing(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if deployment, _ := deploymentViews(notifier.DestinationsContext(ctx)); len(deployment) != 1 {
+			if deployment, _ := deploymentViews(defaultDestinations(t, notifier)); len(deployment) != 1 {
 				t.Fatalf("configured URL is no longer a deployment destination after a failed import: %#v", deployment)
 			}
 		})
@@ -212,7 +212,7 @@ func createExistingDestination(t *testing.T, db *store.Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := notifier.CreateManaged(context.Background(), "Existing", "generic://127.0.0.1:9/existing?disabletls=yes", true); err != nil {
+	if _, err := defaultNotifier(notifier).createManaged(context.Background(), "Existing", "generic://127.0.0.1:9/existing?disabletls=yes", true, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -307,7 +307,7 @@ func TestImportConfiguredURLsIsIdempotentAndImportsNewURLs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deployment, web := deploymentViews(notifier.DestinationsContext(ctx))
+	deployment, web := deploymentViews(defaultDestinations(t, notifier))
 	if len(deployment) != 0 || len(web) != 1 || notifier.managed[web[0].ID].url != changed {
 		t.Fatalf("destinations after a changed URL = deployment %#v, web %#v", deployment, web)
 	}
@@ -351,7 +351,7 @@ func TestNotifierStatusReportsConfigImport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := notifier.StatusContext(ctx)["config_import"]; ok {
+	if _, ok := defaultStatus(t, notifier)["config_import"]; ok {
 		t.Fatal("status reports a config import before any daemon start")
 	}
 	for _, test := range []struct {
@@ -365,7 +365,7 @@ func TestNotifierStatusReportsConfigImport(t *testing.T) {
 		if err := db.System().RecordNotificationConfigImport(ctx, test.state); err != nil {
 			t.Fatal(err)
 		}
-		if got := notifier.StatusContext(ctx)["config_import"]; got != test.want {
+		if got := defaultStatus(t, notifier)["config_import"]; got != test.want {
 			t.Fatalf("config_import for %#v = %v, want %v", test.state, got, test.want)
 		}
 	}

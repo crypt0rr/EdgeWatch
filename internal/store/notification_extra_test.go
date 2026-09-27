@@ -97,7 +97,7 @@ func TestManagedNotificationMetadataEditPreservesPendingDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldKey := managedNotificationKey(created.ID, created.Revision)
-	if err := s.System().QueueEvent(ctx, oldKey, model.Event{Type: "metadata-preserved", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, oldKey, model.Event{Type: "metadata-preserved", TenantID: DefaultTenantID, CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := defaultTenant(s).UpdateManagedNotificationWithAudit(ctx, created.ID, created.Revision, "Operations renamed", created.Provider, created.Ciphertext, created.Nonce, false, AuditEntry{Action: "notifications.updated", ActorUsername: "admin"})
@@ -128,7 +128,7 @@ func TestManagedNotificationCredentialEditDiscardsAndAuditsPendingDelivery(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.System().QueueEvent(ctx, managedNotificationKey(created.ID, created.Revision), model.Event{Type: "credential-discarded", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := s.System().QueueEvent(ctx, managedNotificationKey(created.ID, created.Revision), model.Event{Type: "credential-discarded", TenantID: DefaultTenantID, CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := defaultTenant(s).UpdateManagedNotificationWithAudit(ctx, created.ID, created.Revision, created.Name, created.Provider, []byte{3}, []byte{4}, true, AuditEntry{Action: "notifications.updated", ActorUsername: "admin"}); err != nil {

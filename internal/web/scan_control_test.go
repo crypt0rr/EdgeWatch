@@ -31,6 +31,108 @@ func (s *blockingWebScanner) Scan(ctx context.Context, _ config.Job) (model.Snap
 	return model.Snapshot{}, ctx.Err()
 }
 
+// /scans/active and /scans/{id}/cancel act on the request's tenant only.
+// Another tenant does not list the running scan, and its cancel is answered
+// exactly as for a scan that is no longer active, while the scan keeps
+// running until its own tenant cancels it.
+func TestActiveScanEndpointsStayInTheRequestTenant(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := app.New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.DB.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,created_at,updated_at) VALUES(?,'Other','other',?,?)`, tenantAccountsOtherID, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	otherScope, err := db.TenantScopeByID(ctx, tenantAccountsOtherID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := db.Tenant(otherScope)
+	scanner := &blockingWebScanner{started: make(chan struct{})}
+	a.Scanner = scanner
+	job := config.NormalizeJob(config.Job{Name: "cancel-me", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"127.0.0.1"}, TCP: &config.Protocol{Ports: "1", Mode: "connect"}, Timeout: config.Duration(time.Hour), Timing: "balanced"})
+	record, err := defaultTenant(db).CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.BeginRun(ctx)
+	defer a.StopRun()
+	finished := make(chan error, 1)
+	if err := a.StartManagedRun(defaultTenant(db), record.ID, func(_ model.Scan, _ []model.Event, runErr error) { finished <- runErr }); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-scanner.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("managed scan did not start")
+	}
+	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	list := func(ts *store.TenantStore) []model.ActiveScan {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		server.activeScans(recorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/active", nil), ts)
+		var response struct {
+			Scans []model.ActiveScan `json:"scans"`
+		}
+		if recorder.Code != http.StatusOK || json.Unmarshal(recorder.Body.Bytes(), &response) != nil {
+			t.Fatalf("active scans = %d: %s", recorder.Code, recorder.Body.String())
+		}
+		return response.Scans
+	}
+	cancel := func(ts *store.TenantStore, id string) *httptest.ResponseRecorder {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		server.cancelScan(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/scans/"+id+"/cancel", nil), store.Session{UserID: "other-operator", Username: "other"}, ts, id)
+		return recorder
+	}
+	own := list(defaultTenantStore(server))
+	if len(own) != 1 || own[0].JobID != record.ID {
+		t.Fatalf("the tenant's active scans = %+v", own)
+	}
+	if scans := list(other); len(scans) != 0 {
+		t.Fatalf("another tenant lists the running scan: %+v", scans)
+	}
+	foreign, unknown := cancel(other, own[0].ID), cancel(other, "scan-unknown")
+	if foreign.Code != http.StatusConflict || foreign.Body.String() != unknown.Body.String() {
+		t.Fatalf("another tenant's cancel = %d %s; an unknown scan's = %d %s", foreign.Code, foreign.Body.String(), unknown.Code, unknown.Body.String())
+	}
+	if scans := list(defaultTenantStore(server)); len(scans) != 1 || scans[0].Phase == "cancelling" {
+		t.Fatalf("the scan after another tenant's cancel = %+v", scans)
+	}
+	select {
+	case err := <-finished:
+		t.Fatalf("another tenant's cancel stopped the scan: %v", err)
+	default:
+	}
+	if recorder := cancel(defaultTenantStore(server), own[0].ID); recorder.Code != http.StatusAccepted {
+		t.Fatalf("the tenant's own cancel = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	select {
+	case <-finished:
+	case <-time.After(3 * time.Second):
+		t.Fatal("cancelled scan did not finish")
+	}
+
+	// A store without a tenant is refused before either action.
+	invalid := db.Tenant(store.TenantScope{})
+	listed := httptest.NewRecorder()
+	server.activeScans(listed, httptest.NewRequest(http.MethodGet, "/api/v1/scans/active", nil), invalid)
+	if listed.Code != http.StatusInternalServerError {
+		t.Errorf("list without a tenant = %d: %s", listed.Code, listed.Body.String())
+	}
+	if recorder := cancel(invalid, own[0].ID); recorder.Code != http.StatusInternalServerError {
+		t.Errorf("cancel without a tenant = %d: %s", recorder.Code, recorder.Body.String())
+	}
+}
+
 func TestActiveScanEndpointAndCancellationLifecycle(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))
@@ -60,7 +162,7 @@ func TestActiveScanEndpointAndCancellationLifecycle(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("managed scan did not start")
 	}
-	active := a.ActiveScans()
+	active := a.ActiveScans(store.DefaultTenantScope())
 	if len(active) != 1 || active[0].JobID != record.ID || active[0].ProcessAlive {
 		// The scanner has not emitted process progress, so ProcessAlive is
 		// advisory and may remain false; the important contract is visibility.

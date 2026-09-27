@@ -79,9 +79,9 @@ func databaseBytes(ctx context.Context, reader *sql.DB) (int64, error) {
 type TenantTelemetry struct {
 	CollectedAt time.Time `json:"collected_at"`
 	// DatabaseBytes is the size of the deployment's database. The database
-	// holds every tenant's data, so only the default tenant reports it, as
-	// it reports the platform's events and deliveries while it owns the
-	// deployment. For another tenant it is zero and left out of the JSON.
+	// holds every tenant's data, so only the default tenant reports it while
+	// it owns the deployment. For another tenant it is zero and left out of
+	// the JSON.
 	DatabaseBytes    int64 `json:"database_bytes,omitempty"`
 	Jobs             int64 `json:"jobs"`
 	Scans            int64 `json:"scans"`
@@ -96,22 +96,13 @@ type TenantTelemetry struct {
 
 // Telemetry returns the tenant's aggregate counters, for the tenant's own
 // console. Host observations are counted through the tenant's scans and scan
-// cycles through its jobs. The default tenant's events and deliveries also
-// count the platform's, which it shows in its history, and it alone reports
-// the database size, so while there is one tenant the counters equal the
-// deployment's. Callers should cache the value, as they cache
-// DeploymentTelemetry.
+// cycles through its jobs. The events and deliveries are the tenant's own,
+// counted from the tenant index; the platform's, such as its copies of the
+// update alerts, are not. The default tenant alone reports the database
+// size. Callers should cache the value, as they cache DeploymentTelemetry.
 func (ts *TenantStore) Telemetry(ctx context.Context) (TenantTelemetry, error) {
 	if err := ts.ready(); err != nil {
 		return TenantTelemetry{}, err
-	}
-	// The events are counted from the tenant index. The default tenant also
-	// counts the platform's rows, with a second lookup of the same index,
-	// instead of the COALESCE form that the history pages use for ordered
-	// reads, which would read every event.
-	eventTenant := `tenant_id=?`
-	if ts.scope.id == DefaultTenantID {
-		eventTenant = `(tenant_id=? OR tenant_id IS NULL)`
 	}
 	var telemetry TenantTelemetry
 	id := ts.scope.id
@@ -120,7 +111,7 @@ func (ts *TenantStore) Telemetry(ctx context.Context) (TenantTelemetry, error) {
 		COALESCE((SELECT COUNT(*) FROM scans WHERE tenant_id=?),0),
 		COALESCE((SELECT COUNT(*) FROM scans AS s JOIN scan_hosts AS h ON h.scan_id=s.id WHERE s.tenant_id=?),0),
 		COALESCE((SELECT COUNT(*) FROM latest_scan_hosts WHERE tenant_id=?),0),
-		COALESCE((SELECT COUNT(*) FROM events WHERE `+eventTenant+`),0),
+		COALESCE((SELECT COUNT(*) FROM events WHERE `+historyTenantSQL+`),0),
 		COALESCE((SELECT COUNT(*) FROM scan_cycles AS c JOIN jobs AS j ON j.id=c.job_id AND j.tenant_id=?),0),
 		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND `+historyTenantSQL+`),0),
 		COALESCE((SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND terminal_at='' AND attempts > 0 AND attempts < ? AND `+historyTenantSQL+`),0),

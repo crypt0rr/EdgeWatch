@@ -113,7 +113,7 @@ func TestQueueDestinationsForJobUsesStableSelection(t *testing.T) {
 		t.Fatal(err)
 	}
 	var deploymentSelector string
-	for _, view := range notifier.Destinations() {
+	for _, view := range defaultDestinations(t, notifier) {
 		if view.Source == "deployment" {
 			deploymentSelector = view.ID
 			break
@@ -122,45 +122,45 @@ func TestQueueDestinationsForJobUsesStableSelection(t *testing.T) {
 	if deploymentSelector == "" {
 		t.Fatal("deployment destination selector is empty")
 	}
-	managed, err := notifier.CreateManaged(ctx, "Operations", "generic://localhost/managed?disabletls=yes&template=json", true)
+	managed, err := defaultNotifier(notifier).createManaged(ctx, "Operations", "generic://localhost/managed?disabletls=yes&template=json", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	all, err := notifier.QueueDestinationsForJob(ctx, config.Job{})
+	all, err := defaultNotifier(notifier).QueueDestinationsForJob(ctx, config.Job{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(all) != 2 {
 		t.Fatalf("legacy selection returned %d destinations, want 2", len(all))
 	}
-	selected, err := notifier.QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{managed.ID}})
+	selected, err := defaultNotifier(notifier).QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{managed.ID}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(selected) != 1 || selected[0] != managedKey(managed.ID, managed.Revision) {
 		t.Fatalf("managed selection = %#v, want current managed revision", selected)
 	}
-	selected, err = notifier.QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{deploymentSelector}})
+	selected, err = defaultNotifier(notifier).QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{deploymentSelector}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(selected) != 1 || selected[0] != strings.TrimPrefix(deploymentSelector, "file:") {
 		t.Fatalf("deployment selection = %#v, want opaque file key", selected)
 	}
-	none, err := notifier.QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{}})
+	none, err := defaultNotifier(notifier).QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(none) != 0 {
 		t.Fatalf("explicit empty selection returned %#v", none)
 	}
-	if err := notifier.ValidateDestinationSelection(ctx, []string{managed.ID, deploymentSelector}); err != nil {
+	if err := defaultNotifier(notifier).ValidateDestinationSelection(ctx, []string{managed.ID, deploymentSelector}); err != nil {
 		t.Fatalf("valid selection rejected: %v", err)
 	}
-	if err := notifier.ValidateDestinationSelection(ctx, []string{"file:" + hashURL(deployment)}); err != nil {
+	if err := defaultNotifier(notifier).ValidateDestinationSelection(ctx, []string{"file:" + hashURL(deployment)}); err != nil {
 		t.Fatalf("legacy valid selection rejected: %v", err)
 	}
-	if err := notifier.ValidateDestinationSelection(ctx, []string{"managed:missing"}); err == nil {
+	if err := defaultNotifier(notifier).ValidateDestinationSelection(ctx, []string{"managed:missing"}); err == nil {
 		t.Fatal("unknown destination selection accepted")
 	}
 }
@@ -196,7 +196,7 @@ func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	var deploymentSelector string
-	for _, view := range notifier.Destinations() {
+	for _, view := range defaultDestinations(t, notifier) {
 		if view.Source == "deployment" {
 			deploymentSelector = view.ID
 			break
@@ -205,7 +205,7 @@ func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
 	if deploymentSelector == "" {
 		t.Fatal("deployment destination selector is empty")
 	}
-	created, err := notifier.CreateManaged(ctx, "Operations", "generic://localhost/managed?disabletls=yes&template=json", true)
+	created, err := defaultNotifier(notifier).createManaged(ctx, "Operations", "generic://localhost/managed?disabletls=yes&template=json", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestCreateManagedDoesNotOptInExistingLegacyJobs(t *testing.T) {
 	if stored.Job.NotificationDestinations[0] == created.ID {
 		t.Fatalf("new managed destination was added to legacy job selection: %#v", stored.Job.NotificationDestinations)
 	}
-	keys, err := notifier.QueueDestinationsForJob(ctx, stored.Job)
+	keys, err := defaultNotifier(notifier).QueueDestinationsForJob(ctx, stored.Job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,15 +246,15 @@ func TestQueueDestinationsForJobTracksManagedRevision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := notifier.CreateManaged(ctx, "Operations", "generic://localhost/first?disabletls=yes&template=json", true)
+	created, err := defaultNotifier(notifier).createManaged(ctx, "Operations", "generic://localhost/first?disabletls=yes&template=json", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	updatedURL := "generic://localhost/second?disabletls=yes&template=json"
-	if _, err := notifier.UpdateManaged(ctx, created.ID, created.Revision, created.Name, &updatedURL, nil); err != nil {
+	if _, err := defaultNotifier(notifier).updateManaged(ctx, created.ID, created.Revision, created.Name, &updatedURL, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	keys, err := notifier.QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{created.ID}})
+	keys, err := defaultNotifier(notifier).QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{created.ID}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,7 +331,7 @@ func TestLockedManagedDeliveryIsDeferredWithoutAttempts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := creator.CreateManaged(ctx, "Locked", "generic://localhost/locked?disabletls=yes&template=json", true)
+	created, err := defaultNotifier(creator).createManaged(ctx, "Locked", "generic://localhost/locked?disabletls=yes&template=json", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +370,7 @@ func TestLockedDestinationDoesNotStarveHealthyDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := creator.CreateManaged(ctx, "Locked", "generic://localhost/locked?disabletls=yes&template=json", true)
+	created, err := defaultNotifier(creator).createManaged(ctx, "Locked", "generic://localhost/locked?disabletls=yes&template=json", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +629,7 @@ func TestManagedNotificationCRUDEncryptsAndCancelsOldDeliveries(t *testing.T) {
 	}
 	firstURL := "generic://localhost/first?disabletls=yes&template=json"
 	secondURL := "generic://localhost/second?disabletls=yes&template=json"
-	created, err := notifier.CreateManaged(ctx, "Operations", firstURL, true)
+	created, err := defaultNotifier(notifier).createManaged(ctx, "Operations", firstURL, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -657,14 +657,14 @@ func TestManagedNotificationCRUDEncryptsAndCancelsOldDeliveries(t *testing.T) {
 	if err := db.System().QueueEvent(ctx, managedKey(created.ID, created.Revision), model.Event{Type: "test", Job: "ops", CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	updated, err := notifier.UpdateManaged(ctx, created.ID, created.Revision, "Operations", &secondURL, boolPtr(true))
+	updated, err := defaultNotifier(notifier).updateManaged(ctx, created.ID, created.Revision, "Operations", &secondURL, boolPtr(true), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if updated.Revision != 2 || updated.Provider != "generic" || updated.Locked {
 		t.Fatalf("unexpected updated destination: %#v", updated)
 	}
-	if _, err := notifier.UpdateManaged(ctx, created.ID, created.Revision, "stale", nil, nil); !errors.Is(err, store.ErrConflict) {
+	if _, err := defaultNotifier(notifier).updateManaged(ctx, created.ID, created.Revision, "stale", nil, nil, nil); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("stale update error = %v, want conflict", err)
 	}
 	var pending int
@@ -678,10 +678,10 @@ func TestManagedNotificationCRUDEncryptsAndCancelsOldDeliveries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if views := restarted.Destinations(); len(views) != 1 || views[0].Locked || views[0].Provider != "generic" {
+	if views := defaultDestinations(t, restarted); len(views) != 1 || views[0].Locked || views[0].Provider != "generic" {
 		t.Fatalf("managed destination did not survive reload: %#v", views)
 	}
-	if err := restarted.DeleteManaged(ctx, created.ID, updated.Revision); err != nil {
+	if err := defaultDelete(ctx, restarted, created.ID, updated.Revision); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.Tenant(store.DefaultTenantScope()).GetManagedNotification(ctx, created.ID); !errors.Is(err, store.ErrNotFound) {
@@ -704,7 +704,7 @@ func TestManagedNotificationLocksWhenKeyIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := creator.CreateManaged(ctx, "Locked", "generic://localhost/locked?disabletls=yes&template=json", true)
+	created, err := defaultNotifier(creator).createManaged(ctx, "Locked", "generic://localhost/locked?disabletls=yes&template=json", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -716,7 +716,7 @@ func TestManagedNotificationLocksWhenKeyIsUnavailable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	views := locked.Destinations()
+	views := defaultDestinations(t, locked)
 	if len(views) != 2 {
 		t.Fatalf("unexpected destination count: %#v", views)
 	}
@@ -729,8 +729,8 @@ func TestManagedNotificationLocksWhenKeyIsUnavailable(t *testing.T) {
 	if managedView.ID == "" || !managedView.Locked || managedView.ErrorCode != "key_unavailable" {
 		t.Fatalf("unexpected locked view: %#v", views)
 	}
-	if locked.ActiveCount() != 1 {
-		t.Fatalf("active destination count = %d, want deployment destination only", locked.ActiveCount())
+	if defaultActiveCount(t, locked) != 1 {
+		t.Fatalf("active destination count = %d, want deployment destination only", defaultActiveCount(t, locked))
 	}
 	var deploymentSelector string
 	for _, view := range views {
@@ -759,16 +759,16 @@ func TestManagedNotificationLocksWhenKeyIsUnavailable(t *testing.T) {
 	if managedQueued != 1 {
 		t.Fatalf("managed notification was dropped while key was locked: %d", managedQueued)
 	}
-	if err := locked.TestDestination(created.ID); !errors.Is(err, ErrManagedNotificationLocked) {
+	if err := defaultNotifier(locked).TestDestination(context.Background(), created.ID); !errors.Is(err, ErrManagedNotificationLocked) {
 		t.Fatalf("locked test error = %v", err)
 	}
-	if _, err := locked.UpdateManaged(ctx, created.ID, created.Revision, "Locked renamed", nil, boolPtr(true)); !errors.Is(err, ErrKeyUnavailable) {
+	if _, err := defaultNotifier(locked).updateManaged(ctx, created.ID, created.Revision, "Locked renamed", nil, boolPtr(true), nil); !errors.Is(err, ErrKeyUnavailable) {
 		t.Fatalf("enabling without key error = %v", err)
 	}
 	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing key was silently regenerated: %v", err)
 	}
-	if updated, err := locked.UpdateManaged(ctx, created.ID, created.Revision, "Locked renamed", nil, boolPtr(false)); err != nil || !updated.Locked {
+	if updated, err := defaultNotifier(locked).updateManaged(ctx, created.ID, created.Revision, "Locked renamed", nil, boolPtr(false), nil); err != nil || !updated.Locked {
 		t.Fatalf("disabling locked destination: %#v %v", updated, err)
 	}
 }
@@ -790,7 +790,7 @@ func TestManagedNotificationWrongKeyIsReportedAsDecryptFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := creator.CreateManaged(ctx, "Wrong key", "generic://localhost/wrong?disabletls=yes&template=json", true); err != nil {
+	if _, err := defaultNotifier(creator).createManaged(ctx, "Wrong key", "generic://localhost/wrong?disabletls=yes&template=json", true, nil); err != nil {
 		t.Fatal(err)
 	}
 	wrong := make([]byte, notificationKeySize)
@@ -804,7 +804,7 @@ func TestManagedNotificationWrongKeyIsReportedAsDecryptFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status := locked.Status()
+	status := defaultStatus(t, locked)
 	if status["key_state"] != "decrypt_failed" || status["locked"] != 1 {
 		t.Fatalf("wrong key status = %#v", status)
 	}
@@ -823,7 +823,7 @@ func TestNotifierDoesNotReplaceInvalidKeyWhenManagedDestinationsExist(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := creator.CreateManaged(ctx, "Protected", "generic://localhost/protected?disabletls=yes&template=json", true)
+	created, err := defaultNotifier(creator).createManaged(ctx, "Protected", "generic://localhost/protected?disabletls=yes&template=json", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -835,7 +835,7 @@ func TestNotifierDoesNotReplaceInvalidKeyWhenManagedDestinationsExist(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	if status := locked.Status(); status["key_state"] != "key_invalid" || status["locked"] != 1 {
+	if status := defaultStatus(t, locked); status["key_state"] != "key_invalid" || status["locked"] != 1 {
 		t.Fatalf("invalid-key status = %#v", status)
 	}
 	canceled, cancel := context.WithCancel(ctx)
@@ -843,10 +843,10 @@ func TestNotifierDoesNotReplaceInvalidKeyWhenManagedDestinationsExist(t *testing
 	if _, err := locked.ensureKey(canceled); !errors.Is(err, context.Canceled) {
 		t.Fatalf("invalid-key store lookup error = %v, want context.Canceled", err)
 	}
-	if _, err := locked.UpdateManaged(ctx, created.ID, created.Revision, "Protected", nil, boolPtr(true)); !errors.Is(err, ErrKeyInvalid) {
+	if _, err := defaultNotifier(locked).updateManaged(ctx, created.ID, created.Revision, "Protected", nil, boolPtr(true), nil); !errors.Is(err, ErrKeyInvalid) {
 		t.Fatalf("update with invalid key error = %v, want ErrKeyInvalid", err)
 	}
-	if _, err := locked.CreateManaged(ctx, "Another", "generic://localhost/another?disabletls=yes&template=json", true); !errors.Is(err, ErrKeyInvalid) {
+	if _, err := defaultNotifier(locked).createManaged(ctx, "Another", "generic://localhost/another?disabletls=yes&template=json", true, nil); !errors.Is(err, ErrKeyInvalid) {
 		t.Fatalf("create with invalid key error = %v, want ErrKeyInvalid", err)
 	}
 	info, err := os.Stat(keyPath)
@@ -870,7 +870,7 @@ func TestExplicitKeyPathIsNotGenerated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := notifier.CreateManaged(ctx, "External", "generic://localhost/external?disabletls=yes&template=json", true); !errors.Is(err, ErrKeyUnavailable) {
+	if _, err := defaultNotifier(notifier).createManaged(ctx, "External", "generic://localhost/external?disabletls=yes&template=json", true, nil); !errors.Is(err, ErrKeyUnavailable) {
 		t.Fatalf("missing external key error = %v, want ErrKeyUnavailable", err)
 	}
 	if _, err := os.Stat(keyPath); !errors.Is(err, os.ErrNotExist) {

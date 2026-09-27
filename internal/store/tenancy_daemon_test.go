@@ -47,29 +47,42 @@ var daemonTenantLeakCases = map[string]tenantLeakCase{
 		if want := (TenantTelemetry{Jobs: 2, Scans: 1, HostObservations: 3, EffectiveHosts: 3, Events: 1, OutboxPending: 1, OutboxFailed: 1}); got != want {
 			t.Errorf("tenant B's telemetry = %+v, want %+v", got, want)
 		}
-		// Every row is counted for exactly one tenant, and the default tenant
-		// also counts the platform's events and deliveries, so the two views
-		// add up to the deployment's.
-		for _, counter := range []struct {
-			name             string
-			a, b, deployment int64
-		}{
-			{"jobs", a.Jobs, b.Jobs, deployment.Jobs},
-			{"scans", a.Scans, b.Scans, deployment.Scans},
-			{"host observations", a.HostObservations, b.HostObservations, deployment.HostObservations},
-			{"effective hosts", a.EffectiveHosts, b.EffectiveHosts, deployment.EffectiveHosts},
-			{"events", a.Events, b.Events, deployment.Events},
-			{"scan cycles", a.ScanCycles, b.ScanCycles, deployment.ScanCycles},
-			{"pending deliveries", a.OutboxPending, b.OutboxPending, deployment.OutboxPending},
-			{"retrying deliveries", a.OutboxRetrying, b.OutboxRetrying, deployment.OutboxRetrying},
-			{"failed deliveries", a.OutboxFailed, b.OutboxFailed, deployment.OutboxFailed},
-		} {
-			if counter.a+counter.b != counter.deployment {
-				t.Errorf("%s: tenant A %d + tenant B %d, want the deployment's %d", counter.name, counter.a, counter.b, counter.deployment)
-			}
+		// Every row is counted for exactly one owner. The platform's events
+		// and deliveries belong to no tenant, the default tenant included,
+		// so the two tenants and the platform add up to the deployment.
+		var platform TenantTelemetry
+		events, err := f.store.Platform().ListEventsPage(ctx, 1, 0)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if a.Events <= b.Events || a.OutboxPending <= b.OutboxPending {
-			t.Errorf("the default tenant does not count the platform's history: %+v", a)
+		failed, err := f.store.Platform().FailedDeliveries(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		platform.Events, platform.OutboxFailed = int64(events.Total), int64(failed)
+		if err := f.store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE sent_at IS NULL AND tenant_id IS NULL`).Scan(&platform.OutboxPending); err != nil {
+			t.Fatal(err)
+		}
+		if platform.Events == 0 || platform.OutboxPending == 0 || platform.OutboxFailed == 0 {
+			t.Fatalf("the fixture has no platform history: %+v", platform)
+		}
+		for _, counter := range []struct {
+			name                       string
+			a, b, platform, deployment int64
+		}{
+			{"jobs", a.Jobs, b.Jobs, 0, deployment.Jobs},
+			{"scans", a.Scans, b.Scans, 0, deployment.Scans},
+			{"host observations", a.HostObservations, b.HostObservations, 0, deployment.HostObservations},
+			{"effective hosts", a.EffectiveHosts, b.EffectiveHosts, 0, deployment.EffectiveHosts},
+			{"events", a.Events, b.Events, platform.Events, deployment.Events},
+			{"scan cycles", a.ScanCycles, b.ScanCycles, 0, deployment.ScanCycles},
+			{"pending deliveries", a.OutboxPending, b.OutboxPending, platform.OutboxPending, deployment.OutboxPending},
+			{"retrying deliveries", a.OutboxRetrying, b.OutboxRetrying, 0, deployment.OutboxRetrying},
+			{"failed deliveries", a.OutboxFailed, b.OutboxFailed, platform.OutboxFailed, deployment.OutboxFailed},
+		} {
+			if counter.a+counter.b+counter.platform != counter.deployment {
+				t.Errorf("%s: tenant A %d + tenant B %d + the platform %d, want the deployment's %d", counter.name, counter.a, counter.b, counter.platform, counter.deployment)
+			}
 		}
 		// The database holds every tenant's data, so only the default
 		// tenant reports its size, the deployment's.

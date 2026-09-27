@@ -234,8 +234,8 @@ func TestRegisterRunCancelsARunOfAPausedUnit(t *testing.T) {
 	if other.Err() != nil {
 		t.Fatal("a run of another unit was cancelled")
 	}
-	if got := len(a.ActiveScans()); got != 2 {
-		t.Fatalf("active scans = %d, want both runs", got)
+	if got := len(a.ActiveScans(store.DefaultTenantScope())); got != 1 {
+		t.Fatalf("the default unit's active scans = %d, want its run", got)
 	}
 }
 

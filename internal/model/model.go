@@ -339,6 +339,12 @@ type Event struct {
 	ChangesCount     int       `json:"changes_count,omitempty"`
 	ChangesTruncated bool      `json:"changes_truncated,omitempty"`
 	CreatedAt        time.Time `json:"created_at"`
+	// TenantID names the tenant of an event without a job, such as a
+	// tenant's copy of an update alert. An event without a job or a tenant
+	// belongs to the platform, and a job's event always belongs to the job's
+	// tenant, whatever this says. It is never part of a payload or an API
+	// response.
+	TenantID string `json:"-"`
 }
 
 // EventPayloadLimit is the maximum serialized size of a durable event or

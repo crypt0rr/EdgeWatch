@@ -1055,7 +1055,7 @@
 .unit-row-name strong, .unit-row-name small { display: block; overflow-wrap: anywhere; }
 .unit-row-name small { color: #7c98b6; font-size: 11px; margin-top: 3px; }
 .unit-row-badges, .account-badges { display: flex; flex-wrap: wrap; gap: 6px; }
-.unit-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.unit-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(120px, 100%), 1fr)); gap: 12px; margin: 0; }
 .unit-facts dt { color: #7895b2; font-size: 9px; letter-spacing: .08em; text-transform: uppercase; }
 .unit-facts dd { margin: 4px 0 0; color: #d4e5f6; font-size: 12px; }
 .unit-overview-facts dd { overflow-wrap: anywhere; }

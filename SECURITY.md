@@ -89,11 +89,13 @@ in, but its session holds only its own account's self-service, and the
 console shows it only a notice that business units are turned off, with
 sign-out. Only a platform administrator reaches the platform routes,
 and they never return a unit's data: a unit appears with its name, slug,
-state, and counts of its accounts, administrators, jobs, and scan slots in
-use; its accounts as summaries without credentials; and its capacity as
-numbers. The platform's own notification destinations are write-only like a
-unit's, and the platform cannot read, select, or change a unit's
-destinations. Usernames stay unique across every unit and the platform.
+state, and counts of its accounts, administrators, jobs, stored scans, and
+scan slots in use; its accounts as summaries without credentials; and its
+capacity as numbers. The stored scan count is a number of rows, never a
+scan's content. The platform's own notification destinations are
+write-only like a unit's, and the platform cannot read, select, or change a
+unit's destinations. Usernames stay unique across every unit and the
+platform.
 
 Only the host creates the first platform administrator: `edgewatch admin
 platform-setup-token` prints a one-time token, valid for 15 minutes, once the

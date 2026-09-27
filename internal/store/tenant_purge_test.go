@@ -402,6 +402,68 @@ func TestTenantPurgeResumesAfterInterruption(t *testing.T) {
 	}
 }
 
+// A tenant being deleted reports the scans that the purge has not erased
+// yet: the count holds until the purge reaches the scans, falls with each
+// batch there, and is zero on the tombstone. Tenant A's count is unchanged.
+func TestTenantPurgeLowersTheStoredScanCount(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantPurgeFixture(t)
+	a, err := f.store.Platform().GetTenant(ctx, DefaultTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requestSecondTenantDeletion(t, f)
+	deleting, err := f.store.Platform().GetTenant(ctx, secondTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := deleting.StoredScans
+	if deleting.State != TenantStateDeleting || stored < 2 || int(stored) != len(rowids(t, f.store, `SELECT rowid FROM scans WHERE tenant_id=?`, secondTenantID)) {
+		t.Fatalf("tenant B being deleted = %+v; want every one of its scans, at least two, still counted", deleting)
+	}
+
+	stepOf := func(table string) int {
+		return slices.IndexFunc(tenantPurgeSteps, func(step tenantPurgeStep) bool { return step.table == table })
+	}
+	var falling []int64
+	results, err := f.store.System().purgeDeletingTenants(ctx, tenantPurgeOptions{batchSize: 1, afterBatch: func(ctx context.Context, conn *sql.Conn, phase string) error {
+		// The batch has committed; the purge connection reads the record
+		// as the platform console would between two batches.
+		record, err := getTenantRecord(ctx, conn, secondTenantID)
+		if err != nil {
+			return err
+		}
+		switch step := stepOf(phase); {
+		case step < stepOf("scans") && record.StoredScans != stored:
+			t.Errorf("after a batch of %s tenant B reports %d stored scans, want all %d", phase, record.StoredScans, stored)
+		case phase == "scans":
+			falling = append(falling, record.StoredScans)
+		case step > stepOf("scans") && record.StoredScans != 0:
+			t.Errorf("after a batch of %s tenant B reports %d stored scans, want none", phase, record.StoredScans)
+		}
+		return nil
+	}})
+	if err != nil || len(results) != 1 || !results[0].Complete {
+		t.Fatalf("purge = %+v, %v", results, err)
+	}
+	// One scan per batch, then the batch that finds none left.
+	want := make([]int64, 0, stored+1)
+	for remaining := stored - 1; remaining >= 0; remaining-- {
+		want = append(want, remaining)
+	}
+	want = append(want, 0)
+	if !slices.Equal(falling, want) {
+		t.Fatalf("stored scans after each batch of the scans step = %v, want %v", falling, want)
+	}
+	tombstone, err := f.store.Platform().GetTenant(ctx, secondTenantID)
+	if err != nil || tombstone.State != TenantStateDeleted || tombstone.StoredScans != 0 {
+		t.Fatalf("tombstone = %+v, %v", tombstone, err)
+	}
+	if after, err := f.store.Platform().GetTenant(ctx, DefaultTenantID); err != nil || after.StoredScans != a.StoredScans || a.StoredScans == 0 {
+		t.Fatalf("tenant A's stored scans went from %d to %d: %v", a.StoredScans, after.StoredScans, err)
+	}
+}
+
 // While a job of the tenant holds a live scan lease the purge leaves the
 // tenant alone, and it proceeds once the lease has expired.
 func TestTenantPurgeWaitsForLiveLeases(t *testing.T) {

@@ -72,6 +72,25 @@ describe('business unit list', () => {
     expect(screen.getByText(/Deployment limits: 4 scan slots · 5,000,000 Nmap and 20,000,000 Naabu probes per run/)).toBeInTheDocument()
   })
 
+  it('shows each unit’s stored scans with its other counts, and what is left of a unit being deleted', async () => {
+    vi.mocked(listUnits).mockResolvedValue({ limits, units: [
+      businessUnit({ id: 'unit-default', name: 'Default', slug: 'default', is_default: true, stored_scans: 1 }),
+      businessUnit(),
+      businessUnit({ id: 'unit-new', name: 'New', slug: 'new', jobs: 0, stored_scans: 0 }),
+      businessUnit({ id: 'unit-old', name: 'Old', slug: 'old', status: 'deleting', jobs: 0, stored_scans: 40, purge: { phase: 'scans', rows: 5200 } }),
+    ] })
+    renderUnits()
+    const fact = (unit: string) => within(within(screen.getByRole('link', { name: `Open ${unit}` })).getByText('Stored scans').closest('div')!)
+    await screen.findByRole('link', { name: 'Open Retail' })
+    expect(fact('Retail').getByText('1,234 scans')).toBeInTheDocument()
+    expect(fact('Default').getByText('1 scan')).toBeInTheDocument()
+    expect(fact('New').getByText('0 scans')).toBeInTheDocument()
+    expect(fact('Old').getByText('40 scans')).toBeInTheDocument()
+    for (const [unit, slots] of [['Retail', '1 in use · 2 queued · cap 2'], ['New', '1 in use · 2 queued · cap 2'], ['Default', '1 in use · 2 queued · cap unavailable']]) {
+      await waitFor(() => expect(within(screen.getByRole('link', { name: `Open ${unit}` })).getByText(slots)).toBeInTheDocument())
+    }
+  })
+
   it('creates a unit with a derived or a chosen slug and opens its accounts', async () => {
     renderUnits()
     await screen.findByRole('link', { name: 'Open Retail' })

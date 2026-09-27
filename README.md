@@ -553,8 +553,11 @@ the other platform administrators and the platform's own notification
 destinations, and reads the platform audit and status. It never sees a
 unit's jobs, scans, hosts, baselines, incidents, destinations, or public
 status settings: the platform console shows each unit with its name, slug,
-state, and counts of accounts, administrators, jobs, and scan slots in use,
-and lists the unit's accounts without credentials.
+state, and counts of accounts, administrators, jobs, stored scans, and scan
+slots in use, and lists the unit's accounts without credentials. Stored
+scans counts every scan the unit's history holds, those of archived jobs
+included; retention lowers it, and while a unit is being deleted it shows
+the scans that are left to erase.
 
 The host creates the first platform administrator, after the first
 administrator exists. Print a one-time platform setup token:

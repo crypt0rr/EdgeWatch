@@ -224,6 +224,15 @@ describe('business unit detail', () => {
       expect(await screen.findByText('Saved.')).toBeInTheDocument()
     })
 
+    it('shows the unit’s stored scans with its other counts', async () => {
+      renderUnit('overview')
+      expect(await screen.findByRole('heading', { name: 'Public status page' })).toBeInTheDocument()
+      expect(screen.getByText(/^\/public\/retail · 5 accounts · 7 jobs · 1,234 stored scans · created /)).toBeInTheDocument()
+      const fact = screen.getByText('Stored scans', { selector: 'dt' }).closest('div')!
+      expect(within(fact).getByText('1,234 scans', { selector: 'dd' })).toBeInTheDocument()
+      expect(within(screen.getByText('Jobs', { selector: 'dt' }).closest('div')!).getByText('7 jobs')).toBeInTheDocument()
+    })
+
     it('shows the default unit’s legacy public address and a disabled unit’s banner', async () => {
       vi.mocked(getUnit).mockResolvedValue(businessUnit({ is_default: true, status: 'disabled', name: 'Default', slug: 'default' }))
       renderUnit('overview')
@@ -329,10 +338,12 @@ describe('business unit detail', () => {
   })
 
   it('follows a deletion in progress and shows a deleted unit', async () => {
-    vi.mocked(getUnit).mockResolvedValue(businessUnit({ status: 'deleting', purge: { phase: 'scan_hosts', rows: 1500 } }))
+    vi.mocked(getUnit).mockResolvedValue(businessUnit({ status: 'deleting', jobs: 0, stored_scans: 40, purge: { phase: 'scan_hosts', rows: 1500 } }))
     const view = renderUnit('danger')
     expect(await screen.findByRole('heading', { name: 'Deleting Retail…' })).toBeInTheDocument()
     expect(screen.getByText('Erasing scan hosts · 1,500 rows erased so far.')).toBeInTheDocument()
+    // The heading counts the scans that the purge has yet to erase.
+    expect(screen.getByText(/ · 0 jobs · 40 stored scans · created /)).toBeInTheDocument()
     expect(screen.queryByRole('navigation', { name: 'Retail sections' })).not.toBeInTheDocument()
     view.unmount()
     vi.mocked(getUnit).mockResolvedValue(businessUnit({ status: 'deleting' }))

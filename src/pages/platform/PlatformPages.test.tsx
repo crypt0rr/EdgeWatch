@@ -195,7 +195,7 @@ describe('platform audit', () => {
 
 describe('platform status', () => {
   it('shows the deployment as numbers and its release status', async () => {
-    vi.mocked(platformStatus).mockResolvedValue({ version: 'v0.19.0', version_release_url: 'https://example.test/v0.19.0', updates: { enabled: true, status: 'update_available', available: true, current_version: 'v0.19.0', latest_version: 'v0.20.0', release_url: 'https://example.test/v0.20.0' }, units: { total: 3, active: 2, disabled: 1, deleting: 0 }, accounts: 12, jobs: 9, platform_admins: { total: 2, enabled: 1 }, capacity: { limits, slots: { capacity: 4, in_use: 3, queued: 1 } } })
+    vi.mocked(platformStatus).mockResolvedValue({ version: 'v0.19.0', version_release_url: 'https://example.test/v0.19.0', updates: { enabled: true, status: 'update_available', available: true, current_version: 'v0.19.0', latest_version: 'v0.20.0', release_url: 'https://example.test/v0.20.0' }, units: { total: 3, active: 2, disabled: 1, deleting: 0 }, accounts: 12, jobs: 9, stored_scans: 4321, platform_admins: { total: 2, enabled: 1 }, capacity: { limits, slots: { capacity: 4, in_use: 3, queued: 1 } } })
     renderWithProviders(<PlatformStatusPage />)
     expect(await screen.findByText('2 active · 1 disabled · 0 deleting')).toBeInTheDocument()
     expect(screen.getByText('9 jobs across all units')).toBeInTheDocument()

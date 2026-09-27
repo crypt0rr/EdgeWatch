@@ -30,7 +30,7 @@ export function UnitDetail({ permissions }: { permissions: string[] }) {
   if (unit.error || !unit.data) return <section className="page"><Link className="back-link" to="/platform/units">← Business units</Link><div className="error-card" role="alert">This business unit could not be loaded.</div></section>
   const value = unit.data
   return <section className="page">
-    <div className="page-heading"><div><Link className="back-link" to="/platform/units">← Business units</Link><div className="title-row"><h1>{value.name}</h1><UnitStatusPill status={value.status} />{value.is_default && <span className="pill blue">Default</span>}</div><p className="muted">/public/{value.slug} · {plural(value.accounts, 'account')} · {plural(value.jobs, 'job')} · created {formatDateTime(value.created_at)}</p></div></div>
+    <div className="page-heading"><div><Link className="back-link" to="/platform/units">← Business units</Link><div className="title-row"><h1>{value.name}</h1><UnitStatusPill status={value.status} />{value.is_default && <span className="pill blue">Default</span>}</div><p className="muted">/public/{value.slug} · {plural(value.accounts, 'account')} · {plural(value.jobs, 'job')} · {plural(value.stored_scans, 'stored scan')} · created {formatDateTime(value.created_at)}</p></div></div>
     {value.status === 'deleted' ? <DeletedNotice unit={value} /> : value.status === 'deleting' ? <DeleteProgress unit={value} /> : <>
       {value.status === 'disabled' && <div className="legacy-banner" role="status"><AlertTriangle size={17} /><span><strong>This unit is disabled.</strong> Its members cannot sign in, its schedules are stopped, and its public page is offline. Its data is kept until the unit is deleted.</span></div>}
       <nav className="tab-bar" aria-label={`${value.name} sections`}>{visibleTabs.map(item => <Link key={item.key} to={`/platform/units/${encodeURIComponent(value.id)}/${item.key}`} aria-current={active === item.key ? 'page' : undefined} className={active === item.key ? 'tab active' : 'tab'}>{item.label}</Link>)}</nav>
@@ -95,6 +95,7 @@ function UnitOverview({ unit }: { unit: BusinessUnit }) {
         {unit.is_default && <div><dt>Legacy address</dt><dd>{window.location.origin}/public also serves this unit</dd></div>}
         <div><dt>Accounts</dt><dd>{plural(unit.accounts, 'account')}, {plural(unit.administrators, 'enabled administrator')}</dd></div>
         <div><dt>Jobs</dt><dd>{plural(unit.jobs, 'job')}</dd></div>
+        <div><dt>Stored scans</dt><dd>{plural(unit.stored_scans, 'scan')}</dd></div>
         <div><dt>Created</dt><dd>{formatDateTime(unit.created_at)}</dd></div>
         {unit.status === 'disabled' && <div><dt>Disabled</dt><dd>{formatDateTime(unit.state_changed_at)}</dd></div>}
       </dl>

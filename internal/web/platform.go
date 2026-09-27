@@ -223,10 +223,12 @@ type platformUnitView struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 	StateChangedAt time.Time `json:"state_changed_at"`
 	// Accounts counts every account of the unit, Administrators its enabled
-	// administrators, and Jobs its jobs that are not archived.
+	// administrators, Jobs its jobs that are not archived, and StoredScans
+	// the scans its history holds, those of archived jobs included.
 	Accounts       int                `json:"accounts"`
 	Administrators int                `json:"administrators"`
 	Jobs           int                `json:"jobs"`
+	StoredScans    int64              `json:"stored_scans"`
 	Slots          platformSlotView   `json:"slots"`
 	Purge          *platformPurgeView `json:"purge,omitempty"`
 }
@@ -260,7 +262,7 @@ func (s *Server) platformLimits() platformLimitsView {
 }
 
 func platformUnitViewOf(record store.TenantRecord, usage app.SlotUsage) platformUnitView {
-	view := platformUnitView{ID: record.ID, Name: record.Name, Slug: record.Slug, Status: record.State, IsDefault: record.IsDefault, Revision: record.Revision, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, StateChangedAt: record.StateChangedAt, Accounts: record.Accounts, Administrators: record.Administrators, Jobs: record.Jobs}
+	view := platformUnitView{ID: record.ID, Name: record.Name, Slug: record.Slug, Status: record.State, IsDefault: record.IsDefault, Revision: record.Revision, CreatedAt: record.CreatedAt, UpdatedAt: record.UpdatedAt, StateChangedAt: record.StateChangedAt, Accounts: record.Accounts, Administrators: record.Administrators, Jobs: record.Jobs, StoredScans: record.StoredScans}
 	if unit, ok := usage.Units[record.ID]; ok {
 		view.Slots = platformSlotView{InUse: unit.InUse, Queued: unit.Queued}
 	}
@@ -955,8 +957,8 @@ func (s *Server) updatePlatformNotificationRouting(w http.ResponseWriter, r *htt
 }
 
 // platformStatus reports the deployment as numbers: the units by state,
-// their accounts and jobs, the platform administrators, the scan capacity
-// and its use, and the version and update status.
+// their accounts, jobs and stored scans, the platform administrators, the
+// scan capacity and its use, and the version and update status.
 func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 	platform := s.Store.Platform()
 	records, err := platform.ListTenants(r.Context())
@@ -971,10 +973,12 @@ func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	units := map[string]int{"total": len(records), store.TenantStateActive: 0, store.TenantStateDisabled: 0, store.TenantStateDeleting: 0}
 	var accounts, jobs int
+	var storedScans int64
 	for _, record := range records {
 		units[record.State]++
 		accounts += record.Accounts
 		jobs += record.Jobs
+		storedScans += record.StoredScans
 	}
 	enabledAdmins := 0
 	for _, admin := range admins {
@@ -989,6 +993,7 @@ func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 		"units":           units,
 		"accounts":        accounts,
 		"jobs":            jobs,
+		"stored_scans":    storedScans,
 		"platform_admins": map[string]int{"total": len(admins), "enabled": enabledAdmins},
 		"capacity": map[string]any{
 			"limits": s.platformLimits(),

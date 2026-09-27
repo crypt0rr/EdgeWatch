@@ -14,7 +14,7 @@ vi.mock('../../api', async () => {
   return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), getSession: vi.fn(), getUnitCapacity: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), listUnits: vi.fn(), platformAudit: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn() }
 })
 
-const status: PlatformStatus = { version: 'v0.19.0', units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 5, jobs: 3, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 4, in_use: 1, queued: 0 } } }
+const status: PlatformStatus = { version: 'v0.19.0', units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 5, jobs: 3, stored_scans: 12, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 4, in_use: 1, queued: 0 } } }
 
 function Location() {
   return <output data-testid="location">{useLocation().pathname}</output>

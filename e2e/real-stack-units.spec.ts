@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test'
+import { expect, test, type Locator, type Page } from '@playwright/test'
 import { createHmac } from 'node:crypto'
 import { callAPI, clickScanNow, createHarness, delay, navigateFromShell, password, waitForScan, type Harness } from './real-stack-harness'
 
@@ -138,6 +138,11 @@ async function issuePlatformSetupToken(harness: Harness): Promise<string> {
   }
 }
 
+/** The stored scans that a unit's row in the platform console's unit list shows. */
+function storedScans(row: Locator): Locator {
+  return row.locator('div', { has: row.page().locator('dt', { hasText: 'Stored scans' }) }).locator('dd')
+}
+
 /** Creates the fixture job through the console's job editor and returns its ID. */
 async function createJob(page: Page): Promise<string> {
   await navigateFromShell(page, 'Jobs')
@@ -217,6 +222,7 @@ test('two business units stay apart through the real console, TOTP enrolment, pu
     await expect(platform.getByRole('heading', { name: 'Business units' })).toBeVisible()
     await expect(platform.getByRole('heading', { name: '1 unit', exact: true })).toBeVisible()
     await expect(platform.getByRole('link', { name: 'Open Default' })).toContainText('1 job')
+    await expect(storedScans(platform.getByRole('link', { name: 'Open Default' }))).toHaveText('1 scan')
     expect(await platform.locator('main').innerText()).not.toContain(jobName)
     expect((await callAPI(platform, '/jobs', 'GET')).status).toBe(403)
 
@@ -341,13 +347,15 @@ test('two business units stay apart through the real console, TOTP enrolment, pu
     expect({ status: unpublished.status(), body: await unpublished.text() }).toEqual({ status: unknownSlug.status(), body: await unknownSlug.text() })
     expect(await guestContext.cookies()).toEqual([])
 
-    // The platform console counts both units' jobs and accounts, and neither
-    // the console nor its API names a job.
+    // The platform console counts both units' jobs, stored scans and
+    // accounts, and neither the console nor its API names a job.
     await navigateFromShell(platform, 'Units')
     const unitBRow = platform.getByRole('link', { name: 'Open Unit B' })
     await expect(unitBRow).toContainText('1 account · 1 admin')
     await expect(unitBRow).toContainText('1 job')
+    await expect(storedScans(unitBRow)).toHaveText('1 scan')
     await expect(platform.getByRole('link', { name: 'Open Default' })).toContainText('1 job')
+    await expect(storedScans(platform.getByRole('link', { name: 'Open Default' }))).toHaveText('1 scan')
     expect(await platform.locator('main').innerText()).not.toContain(jobName)
     for (const path of ['/platform/units', `/platform/units/${unitBID}`, `/platform/units/${unitBID}/accounts`, '/platform/status']) {
       const response = await rawAPI(platform, path)

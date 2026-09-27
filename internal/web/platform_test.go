@@ -6,12 +6,15 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
+	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -105,6 +108,7 @@ type unitPayload struct {
 	Accounts       int    `json:"accounts"`
 	Administrators int    `json:"administrators"`
 	Jobs           int    `json:"jobs"`
+	StoredScans    int64  `json:"stored_scans"`
 	Purge          *struct {
 		Phase string `json:"phase"`
 	} `json:"purge"`
@@ -672,6 +676,92 @@ func TestPlatformStatus(t *testing.T) {
 		t.Fatalf("platform status = %s", response.Body.String())
 	}
 	expectNoMarkers(t, response.Body.String(), "platform status", "bravo", "alpha", "shared-job", platformFixtureAddress)
+}
+
+// The platform console counts each unit's stored scans in the unit list, the
+// unit detail and the status total, the scans of an archived job included,
+// and never another unit's. It gets the number only, never a scan. No route
+// that a unit's account may read carries the count, and the platform routes
+// stay refused to them.
+func TestPlatformUnitsReportStoredScans(t *testing.T) {
+	f := newPlatformFixture(t)
+	ctx := context.Background()
+	// Unit B's "shared-job" is archived with a failed scan it keeps.
+	finished := time.Now().UTC()
+	archived := model.Scan{ID: "scan-bravo-archived", JobID: f.sharedJobB, Job: "shared-job", StartedAt: finished.Add(-time.Minute), FinishedAt: finished, Status: "failed", Error: "nmap exited"}
+	if err := f.db.System().SaveScan(ctx, archived); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.b.SetJobArchived(ctx, f.sharedJobB, true); err != nil {
+		t.Fatal(err)
+	}
+
+	var list struct {
+		Units []unitPayload `json:"units"`
+	}
+	response := f.call(t, actorPlatform, http.MethodGet, "/platform/units", "")
+	expectResponse(t, response, http.StatusOK, "list units", &list)
+	counts := map[string]int64{}
+	for _, unit := range list.Units {
+		counts[unit.ID] = unit.StoredScans
+	}
+	if want := map[string]int64{store.DefaultTenantID: 1, f.unitB: 2}; !reflect.DeepEqual(counts, want) {
+		t.Fatalf("stored scans in the unit list = %v, want %v: %s", counts, want, response.Body.String())
+	}
+	expectNoMarkers(t, response.Body.String(), "unit list", f.dataMarkers()...)
+	expectNoMarkers(t, response.Body.String(), "unit list", archived.ID, archived.Error)
+
+	var detail unitPayload
+	response = f.call(t, actorPlatform, http.MethodGet, "/platform/units/"+f.unitB, "")
+	expectResponse(t, response, http.StatusOK, "unit B", &detail)
+	if detail.StoredScans != 2 || !strings.Contains(response.Body.String(), `"stored_scans":2`) {
+		t.Fatalf("unit B's detail = %s, want 2 stored scans", response.Body.String())
+	}
+	expectNoMarkers(t, response.Body.String(), "unit B", f.dataMarkers()...)
+	expectNoMarkers(t, response.Body.String(), "unit B", archived.ID, archived.Error)
+
+	var created unitPayload
+	expectResponse(t, f.call(t, actorPlatform, http.MethodPost, "/platform/units", `{"name":"Charlie Unit"}`), http.StatusCreated, "create unit", &created)
+	response = f.call(t, actorPlatform, http.MethodGet, "/platform/units/"+created.ID, "")
+	expectResponse(t, response, http.StatusOK, "new unit", &detail)
+	if detail.StoredScans != 0 || !strings.Contains(response.Body.String(), `"stored_scans":0`) {
+		t.Fatalf("a new unit's detail = %s, want 0 stored scans", response.Body.String())
+	}
+
+	var status struct {
+		StoredScans *int64 `json:"stored_scans"`
+	}
+	expectResponse(t, f.call(t, actorPlatform, http.MethodGet, "/platform/status", ""), http.StatusOK, "status", &status)
+	if status.StoredScans == nil || *status.StoredScans != 3 {
+		t.Fatalf("platform status stored scans = %v, want 3", status.StoredScans)
+	}
+
+	// A unit's accounts read their own routes without the count, and the
+	// platform routes refuse them.
+	checked := 0
+	for _, route := range apiRoutes {
+		if route.Access != routeSession || route.Mutates || route.NoHandler {
+			continue
+		}
+		for _, actor := range []string{actorAdminA, actorOperatorA, actorViewerA, actorAdminB} {
+			unit := "A"
+			if actor == actorAdminB {
+				unit = "B"
+			}
+			name := routeInventoryName(route) + " as " + actor
+			response := f.isolationRequest(t, actor, route, f.unitIDs(unit).path(t, route.Template))
+			if strings.Contains(response.body, "stored_scans") {
+				t.Errorf("%s = %d %s, want no stored scan count", name, response.status, response.body)
+			}
+			if strings.HasPrefix(route.Template, "/platform/") && (response.status != http.StatusForbidden || response.code != "forbidden") {
+				t.Errorf("%s = %d %s, want 403", name, response.status, response.body)
+			}
+			checked++
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no route was read as a unit's account")
+	}
 }
 
 // The platform audit shows the platform's records and the account and

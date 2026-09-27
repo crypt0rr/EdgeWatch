@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
 // platformAdminID is a platform administrator that the lifecycle tests add.
@@ -276,6 +279,82 @@ func TestCreateTenantStartsWithUpdateAlertsOff(t *testing.T) {
 	}
 	if routing, err := defaultTenant(f.store).ApplicationUpdateRouting(ctx); err != nil || routing.Configured || routing.Destinations != nil {
 		t.Fatalf("the default tenant's update routing = %#v, %v; want it never configured", routing, err)
+	}
+}
+
+// The platform counts each tenant's stored scans: every scan of the tenant,
+// whatever its status, those of archived jobs and, for the default tenant,
+// those without a job ID included, and never another tenant's, although the
+// two tenants' jobs and scans look alike. A new tenant has none. The count
+// reads the tenant's entries of the scans_tenant_id_time index.
+func TestTenantRecordsCountStoredScans(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	platform := f.store.Platform()
+	storedScans := func() map[string]int64 {
+		t.Helper()
+		records, err := platform.ListTenants(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts := map[string]int64{}
+		for _, record := range records {
+			counts[record.ID] = record.StoredScans
+			single, err := platform.GetTenant(ctx, record.ID)
+			if err != nil || single.StoredScans != record.StoredScans {
+				t.Fatalf("tenant %s alone has %d stored scans, %v; the list says %d", record.ID, single.StoredScans, err, record.StoredScans)
+			}
+		}
+		return counts
+	}
+	// Tenant A holds the scan of its "edge" job and a legacy scan without a
+	// job ID; tenant B only the scan of its "edge" job.
+	if got, want := storedScans(), map[string]int64{DefaultTenantID: 2, secondTenantID: 1}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("stored scans = %v, want %v", got, want)
+	}
+
+	// Tenant B's archived job keeps a failed scan and a successful one.
+	finished := time.Date(2026, 9, 21, 12, 0, 0, 0, time.UTC)
+	failed := fixtureScan("scan-archived-b-failed", f.archivedB, "edge-archived", finished, nil)
+	failed.Status, failed.Error = "failed", "nmap exited"
+	for _, scan := range []model.Scan{failed, fixtureScan("scan-archived-b", f.archivedB, "edge-archived", finished.Add(time.Minute), fixtureHosts(0, 1))} {
+		if err := f.store.System().SaveScan(ctx, scan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if archived, err := f.store.Tenant(f.b).GetJob(ctx, f.archivedB); err != nil || !archived.Archived {
+		t.Fatalf("tenant B's job %s = %+v, %v; want it archived", f.archivedB, archived, err)
+	}
+	third, err := platform.CreateTenant(ctx, "Third", "third", testCapacityLimits, AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if third.StoredScans != 0 {
+		t.Fatalf("a new tenant has %d stored scans", third.StoredScans)
+	}
+	if got, want := storedScans(), map[string]int64{DefaultTenantID: 2, secondTenantID: 3, third.ID: 0}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("stored scans with tenant B's archived job's scans = %v, want %v", got, want)
+	}
+
+	rows, err := f.store.DB.QueryContext(ctx, `EXPLAIN QUERY PLAN SELECT `+tenantRecordColumns+` FROM tenants AS t WHERE t.state<>?`, TenantStateDeleted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(plan, "SEARCH s USING COVERING INDEX scans_tenant_id_time (tenant_id=?)") {
+		t.Fatalf("the tenant list's plan = %q, want the stored scans counted from scans_tenant_id_time", plan)
 	}
 }
 

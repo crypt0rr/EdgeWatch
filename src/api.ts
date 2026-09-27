@@ -294,7 +294,8 @@ export type BusinessUnitStatus = 'active' | 'disabled' | 'deleting' | 'deleted'
 /** A unit's scan slots. limit is present only in a unit's capacity. */
 export type UnitSlots = { in_use: number; queued: number; limit?: number }
 export type DeploymentLimits = { max_concurrent_scans: number; max_probe_count: number; max_naabu_probe_count: number; max_probe_count_limit: number }
-export type BusinessUnit = UnitRef & { status: BusinessUnitStatus; is_default: boolean; revision: number; created_at: string; updated_at: string; state_changed_at: string; accounts: number; administrators: number; jobs: number; slots: UnitSlots; purge?: { phase: string; rows: number } }
+/** jobs counts the jobs that are not archived; stored_scans counts every scan the unit's history holds, those of archived jobs included. */
+export type BusinessUnit = UnitRef & { status: BusinessUnitStatus; is_default: boolean; revision: number; created_at: string; updated_at: string; state_changed_at: string; accounts: number; administrators: number; jobs: number; stored_scans: number; slots: UnitSlots; purge?: { phase: string; rows: number } }
 /** A unit's own capacity settings; null inherits the deployment's setting. */
 export type UnitCapacitySettings = { max_concurrent_scans: number | null; max_probe_count: number | null; max_naabu_probe_count: number | null; high_cost_ceiling: number | null }
 export type UnitCapacity = { unit_id: string; capacity: UnitCapacitySettings; limits: DeploymentLimits; slots: UnitSlots }
@@ -302,7 +303,7 @@ export type UnitAccount = Omit<UserSummary, 'role'> & { role: UnitRole }
 export type AccountInvitation<T> = { user: T; activation_token: string; activation_path: string }
 /** totp_enrolled tells whether the account keeps its authenticator after the reset. */
 export type PasswordResetLink = { activation_token: string; activation_path: string; expires_at: string; totp_enrolled: boolean }
-export type PlatformStatus = { version: string; version_release_url?: string; updates?: ApplicationUpdateStatus; units: { total: number; active: number; disabled: number; deleting: number }; accounts: number; jobs: number; platform_admins: { total: number; enabled: number }; capacity: { limits: DeploymentLimits; slots: { capacity: number; in_use: number; queued: number } } }
+export type PlatformStatus = { version: string; version_release_url?: string; updates?: ApplicationUpdateStatus; units: { total: number; active: number; disabled: number; deleting: number }; accounts: number; jobs: number; stored_scans: number; platform_admins: { total: number; enabled: number }; capacity: { limits: DeploymentLimits; slots: { capacity: number; in_use: number; queued: number } } }
 /** Who acted: a unit's account, a platform administrator, the host command line, or EdgeWatch itself. Records from before business units have no kind. */
 export type AuditActorKind = 'unit' | 'platform' | 'host' | 'system' | ''
 export type AuditEntry = { id: number; created_at: string; action: string; category: string; actor: { kind: AuditActorKind; user_id?: string; username?: string; display_name?: string }; detail: string; request_id?: string; source_ip?: string; unit?: UnitRef }

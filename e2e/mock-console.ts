@@ -121,7 +121,7 @@ function pagination(total: number, limit = 50) {
 const deploymentLimits = { max_concurrent_scans: 4, max_probe_count: 5_000_000, max_naabu_probe_count: 20_000_000, max_probe_count_limit: 100_000_000 }
 
 function platformUnit(overrides: Record<string, unknown>) {
-  return { status: 'active', is_default: false, revision: 1, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', state_changed_at: '2026-01-01T00:00:00Z', accounts: 0, administrators: 0, jobs: 0, slots: { in_use: 0, queued: 0 }, ...overrides }
+  return { status: 'active', is_default: false, revision: 1, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', state_changed_at: '2026-01-01T00:00:00Z', accounts: 0, administrators: 0, jobs: 0, stored_scans: 0, slots: { in_use: 0, queued: 0 }, ...overrides }
 }
 
 function platformAccount(overrides: Record<string, unknown>) {
@@ -161,8 +161,8 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
   let updateRouting = { configured: true, destinations: ['dest-1'] }
   // The platform console's state, used when the role is platform_admin.
   const units: any[] = [
-    platformUnit({ id: 'unit-default', name: 'Default', slug: 'default', is_default: true, accounts: 3, administrators: 1, jobs: 1 }),
-    platformUnit({ id: 'unit-retail', name: 'Retail', slug: 'retail', accounts: 3, administrators: 1, jobs: 2, slots: { in_use: 1, queued: 0 } }),
+    platformUnit({ id: 'unit-default', name: 'Default', slug: 'default', is_default: true, accounts: 3, administrators: 1, jobs: 1, stored_scans: 12 }),
+    platformUnit({ id: 'unit-retail', name: 'Retail', slug: 'retail', accounts: 3, administrators: 1, jobs: 2, stored_scans: 1480, slots: { in_use: 1, queued: 0 } }),
   ].slice(0, platformTOTP ? 2 : 1)
   const multipleUnits = () => units.filter(unit => unit.status !== 'deleted').length > 1
   const mustEnrol = () => role === 'platform_admin' && !platformTOTP && multipleUnits()
@@ -309,7 +309,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
         await json(platformRouting); return
       }
       if (parts.length === 1 && parts[0] === 'status' && method === 'GET') {
-        await json({ version: 'v0.18.65', units: { total: units.length, active: units.filter(item => item.status === 'active').length, disabled: units.filter(item => item.status === 'disabled').length, deleting: units.filter(item => item.status === 'deleting').length }, accounts: 6, jobs: 3, platform_admins: { total: platformAdmins.length, enabled: 1 }, capacity: { limits: deploymentLimits, slots: { capacity: 4, in_use: 1, queued: 0 } }, updates: { enabled: true, status: 'up_to_date', current_version: 'v0.18.65' } }); return
+        await json({ version: 'v0.18.65', units: { total: units.length, active: units.filter(item => item.status === 'active').length, disabled: units.filter(item => item.status === 'disabled').length, deleting: units.filter(item => item.status === 'deleting').length }, accounts: 6, jobs: 3, stored_scans: 1492, platform_admins: { total: platformAdmins.length, enabled: 1 }, capacity: { limits: deploymentLimits, slots: { capacity: 4, in_use: 1, queued: 0 } }, updates: { enabled: true, status: 'up_to_date', current_version: 'v0.18.65' } }); return
       }
       await json({ error: { code: 'not_found', message: `${method} ${path}` } }, 404); return
     }

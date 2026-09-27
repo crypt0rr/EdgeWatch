@@ -15,6 +15,7 @@ test('a platform administrator creates a unit, invites its administrator, recove
   const retail = page.getByRole('link', { name: 'Open Retail' })
   await expect(retail).toContainText('3 accounts · 1 admin')
   await expect(retail).toContainText('2 jobs')
+  await expect(retail).toContainText('1,480 scans')
   await expect(retail).toContainText('1 in use · 0 queued · cap 2')
 
   // A new unit opens on its accounts, where only an administrator can be invited.
@@ -136,7 +137,7 @@ test('the platform console fits a phone', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === 'desktop', 'The responsive smoke runs in the mobile projects.')
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await mockConsole(page, 'platform_admin')
-  for (const path of ['/platform/units', '/platform/units/unit-retail/accounts', '/platform/units/unit-retail/capacity', '/platform/audit', '/platform/status']) {
+  for (const path of ['/platform/units', '/platform/units/unit-retail', '/platform/units/unit-retail/accounts', '/platform/units/unit-retail/capacity', '/platform/audit', '/platform/status']) {
     await page.goto(path)
     await expect(page.locator('.page h1')).toBeVisible()
     await expectNoHorizontalScroll(page)

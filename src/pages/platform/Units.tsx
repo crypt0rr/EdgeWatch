@@ -9,9 +9,9 @@ import { errorMessage, formatCount, Loading, plural, slugProblem, UnitStatusPill
 
 /**
  * The platform administrator's list of business units. It shows each unit's
- * identity, state, and counts only: accounts, administrators, jobs, and scan
- * slot use against the unit's cap. A unit's jobs, results, and destinations
- * are never shown here.
+ * identity, state, and counts only: accounts, administrators, jobs, stored
+ * scans, and scan slot use against the unit's cap. A unit's jobs, results,
+ * and destinations are never shown here.
  */
 export function Units() {
   const navigate = useNavigate()
@@ -65,6 +65,7 @@ function UnitRow({ unit }: { unit: BusinessUnit }) {
     <dl className="unit-facts">
       <div><dt>Accounts</dt><dd>{plural(unit.accounts, 'account')} · {plural(unit.administrators, 'admin')}</dd></div>
       <div><dt>Jobs</dt><dd>{plural(unit.jobs, 'job')}</dd></div>
+      <div><dt>Stored scans</dt><dd>{plural(unit.stored_scans, 'scan')}</dd></div>
       <div><dt>Scan slots</dt><dd>{unit.purge ? `Deleting · ${formatCount(unit.purge.rows)} rows erased` : [`${unit.slots.in_use} in use`, `${unit.slots.queued} queued`, cap].filter(Boolean).join(' · ')}</dd></div>
     </dl>
   </Link>

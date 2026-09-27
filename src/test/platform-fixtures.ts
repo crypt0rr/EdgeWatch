@@ -8,7 +8,7 @@ export const deploymentLimits: DeploymentLimits = { max_concurrent_scans: 4, max
 export const platformPermissions = ['account.self', 'platform_audit.read', 'platform_notifications.manage', 'platform_status.read', 'unit_accounts.manage', 'units.manage']
 
 export function businessUnit(overrides: Partial<BusinessUnit> = {}): BusinessUnit {
-  return { id: 'unit-retail', name: 'Retail', slug: 'retail', status: 'active', is_default: false, revision: 3, created_at: '2026-08-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z', state_changed_at: '2026-08-01T00:00:00Z', accounts: 5, administrators: 2, jobs: 7, slots: { in_use: 1, queued: 2 }, ...overrides }
+  return { id: 'unit-retail', name: 'Retail', slug: 'retail', status: 'active', is_default: false, revision: 3, created_at: '2026-08-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z', state_changed_at: '2026-08-01T00:00:00Z', accounts: 5, administrators: 2, jobs: 7, stored_scans: 1234, slots: { in_use: 1, queued: 2 }, ...overrides }
 }
 
 export function unitAccount(overrides: Partial<UnitAccount> & Pick<UnitAccount, 'id' | 'username' | 'role'>): UnitAccount {

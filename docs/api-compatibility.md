@@ -71,9 +71,9 @@ tombstone.
 
 | Endpoint | Permission | Request and response |
 | --- | --- | --- |
-| `GET /api/v1/platform/units` | `units.manage` | Units that are not deleted, with their counts and slot use, and the deployment's `limits`. |
+| `GET /api/v1/platform/units` | `units.manage` | Units that are not deleted, with their counts (`accounts`, `administrators`, `jobs`, and `stored_scans`) and slot use, and the deployment's `limits`. `stored_scans` counts every scan the unit's history holds, those of archived jobs included. |
 | `POST /api/v1/platform/units` | `units.manage` | `{name, slug}`; the slug is derived from the name when empty. `201` with the unit. |
-| `GET /api/v1/platform/units/{id}` | `units.manage` | One unit, including a deleted unit's tombstone and a deleting unit's `purge` progress. |
+| `GET /api/v1/platform/units/{id}` | `units.manage` | One unit with the same counts, including a deleted unit's tombstone and a deleting unit's `purge` progress; a deleting unit's `stored_scans` counts the scans that are left to erase. |
 | `PATCH /api/v1/platform/units/{id}` | `units.manage` | `{revision, name, slug}`, name and slug optional. A stale revision gets `409` with `details.current`. |
 | `DELETE /api/v1/platform/units/{id}` | `units.manage` | `{confirm_name, password}` for a disabled unit that is not the default. The unit in the `deleting` state. |
 | `POST /api/v1/platform/units/{id}/disable` | `units.manage` | `{password, revision}`, revision optional. |
@@ -92,4 +92,4 @@ tombstone.
 | `PATCH /api/v1/platform/notifications/{id}` | `platform_notifications.manage` | `{revision, name, url, enabled, password}`; an absent `url` or `enabled`, or an empty `name`, keeps its value. |
 | `DELETE /api/v1/platform/notifications/{id}` | `platform_notifications.manage` | `{revision, password}`. `204`. |
 | `PUT /api/v1/platform/notifications/update-routing` | `platform_notifications.manage` | `{destinations, password}`; platform destination IDs only, and an empty array selects none. |
-| `GET /api/v1/platform/status` | `platform_status.read` | Units by state, account and job totals, platform administrator counts, the deployment's scan limits and slot use, and the version and update status. |
+| `GET /api/v1/platform/status` | `platform_status.read` | Units by state, account, job, and stored scan totals (`accounts`, `jobs`, `stored_scans`), platform administrator counts, the deployment's scan limits and slot use, and the version and update status. |

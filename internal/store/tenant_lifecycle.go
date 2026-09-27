@@ -82,8 +82,8 @@ var reservedTenantSlugs = map[string]bool{
 }
 
 // TenantRecord is a tenant as the platform manages it, with counts of its
-// accounts and jobs. The platform sees counts only, never the tenant's
-// accounts, jobs or results themselves.
+// accounts, jobs and stored scans. The platform sees counts only, never the
+// tenant's accounts, jobs or results themselves.
 type TenantRecord struct {
 	Tenant
 	Revision       int64
@@ -104,6 +104,10 @@ type TenantRecord struct {
 	Accounts       int
 	Administrators int
 	Jobs           int
+	// StoredScans counts the scans the tenant's history holds, whatever
+	// their status, including the scans of archived jobs. Retention, and
+	// the purge of a tenant being deleted, lower it as they erase scans.
+	StoredScans int64
 }
 
 // ValidateTenantName returns the trimmed name, or a validation error when it
@@ -142,13 +146,14 @@ func ValidateTenantSlug(slug string) (string, error) {
 const tenantRecordColumns = `t.id,t.name,t.slug,t.state,t.is_default,t.revision,t.created_at,t.updated_at,t.state_changed_at,t.state_changed_by,t.purge_phase,t.purge_rows,` +
 	`(SELECT COUNT(*) FROM users AS u WHERE u.tenant_id=t.id),` +
 	`(SELECT COUNT(*) FROM users AS u WHERE u.tenant_id=t.id AND u.role='` + RoleAdministrator + `' AND u.enabled=1),` +
-	`(SELECT COUNT(*) FROM jobs AS j WHERE j.tenant_id=t.id AND j.archived=0)`
+	`(SELECT COUNT(*) FROM jobs AS j WHERE j.tenant_id=t.id AND j.archived=0),` +
+	`(SELECT COUNT(*) FROM scans AS s WHERE s.tenant_id=t.id)`
 
 func scanTenantRecord(row interface{ Scan(...any) error }) (TenantRecord, error) {
 	var record TenantRecord
 	var isDefault int
 	var created, updated, changed string
-	if err := row.Scan(&record.ID, &record.Name, &record.Slug, &record.State, &isDefault, &record.Revision, &created, &updated, &changed, &record.StateChangedBy, &record.PurgePhase, &record.PurgeRows, &record.Accounts, &record.Administrators, &record.Jobs); err != nil {
+	if err := row.Scan(&record.ID, &record.Name, &record.Slug, &record.State, &isDefault, &record.Revision, &created, &updated, &changed, &record.StateChangedBy, &record.PurgePhase, &record.PurgeRows, &record.Accounts, &record.Administrators, &record.Jobs, &record.StoredScans); err != nil {
 		return TenantRecord{}, err
 	}
 	record.IsDefault = isDefault != 0

@@ -77,6 +77,9 @@ describe('notification update-alert routing', () => {
       await Promise.resolve()
     })
     await vi.waitFor(() => expect(container.querySelectorAll('.notification-row')).toHaveLength(2), { timeout: 1000 })
+    // The update-alert toggles follow the session's permissions, which can
+    // resolve after the destinations on a slow runner.
+    await vi.waitFor(() => expect(container.querySelectorAll('.notification-update-toggle input')).toHaveLength(2), { timeout: 1000 })
   }
 
   it('uses globally enabled destinations when update routing has never been configured', async () => {
@@ -153,6 +156,7 @@ describe('notification update-alert routing', () => {
         await Promise.resolve()
       })
       await vi.waitFor(() => expect(container.querySelectorAll('.notification-row')).toHaveLength(3), { timeout: 1000 })
+      await vi.waitFor(() => expect(container.querySelectorAll('.notification-update-toggle input')).toHaveLength(3), { timeout: 1000 })
     }
 
     async function confirm(password: string) {

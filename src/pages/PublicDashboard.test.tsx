@@ -107,6 +107,24 @@ describe('public dashboard pages', () => {
     expect(container.textContent).toContain('No confirmed open ports')
   })
 
+  it('loads the page of the business unit named by the slug, and the default page without one', async () => {
+    await renderPage(<PublicDashboardView slug="other" />)
+    expect(getPublicDashboard).toHaveBeenCalledWith('other')
+    expect(container.querySelector('h1')?.textContent).toBe('Edge status')
+    act(() => root.unmount())
+    root = createRoot(container)
+    vi.mocked(getPublicDashboard).mockClear()
+    await renderPage(<PublicDashboardView />)
+    expect(getPublicDashboard).toHaveBeenCalledWith(undefined)
+  })
+
+  it('shows the same message for any page that is not published', async () => {
+    vi.mocked(getPublicDashboard).mockRejectedValue(new APIError('public status is not enabled', 'public_disabled'))
+    await renderPage(<PublicDashboardView slug="nobody" />)
+    expect(container.querySelector('h1')?.textContent).toBe('Public status unavailable')
+    expect(container.textContent).toContain('This status page is not enabled by the administrator.')
+  })
+
   it('shows a safe message for rate-limited public status requests', async () => {
     vi.mocked(getPublicDashboard).mockRejectedValue(new APIError('try later', 'rate_limited'))
     await renderPage(<PublicDashboardView />)

@@ -234,6 +234,19 @@ describe('authentication and public API contracts', () => {
     })
     vi.stubGlobal('fetch', successFetch)
     await expect(getPublicDashboard()).resolves.toMatchObject({ title: 'Status', hosts: [] })
+    expect(String(successFetch.mock.calls[0][0])).toBe('/api/public/v1/dashboard')
+  })
+
+  it('requests a business unit public page by its encoded slug', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.credentials).toBe('omit')
+      return new Response(JSON.stringify({ title: 'Unit status', hosts: [] }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(getPublicDashboard('other')).resolves.toMatchObject({ title: 'Unit status' })
+    await getPublicDashboard('a/b?c')
+    await getPublicDashboard('')
+    expect(fetchMock.mock.calls.map(call => String(call[0]))).toEqual(['/api/public/v1/dashboard/other', '/api/public/v1/dashboard/a%2Fb%3Fc', '/api/public/v1/dashboard'])
   })
 
   it('uses safe fallback messages and omits optional event filters', async () => {

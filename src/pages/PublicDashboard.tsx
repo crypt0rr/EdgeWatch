@@ -57,8 +57,9 @@ function useStateFromValue<T>(value: T | undefined, fallback: T) {
   return [state, setState] as const
 }
 
-export function PublicDashboard() {
-  const dashboard = useQuery({ queryKey: ['public-dashboard'], queryFn: getPublicDashboard, retry: false })
+/** `slug` selects a business unit's page (/public/<slug>); without it the default unit's page is shown. */
+export function PublicDashboard({ slug }: { slug?: string } = {}) {
+  const dashboard = useQuery({ queryKey: ['public-dashboard', slug ?? ''], queryFn: () => getPublicDashboard(slug), retry: false })
   if (dashboard.isLoading) return <div className="public-page loading"><span className="spinner" />Loading public status…</div>
   if (dashboard.error || !dashboard.data) {
     const message = dashboard.error instanceof APIError && dashboard.error.code === 'rate_limited'

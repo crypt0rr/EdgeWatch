@@ -504,6 +504,13 @@ names, latest successful scan time, positive ports, service names, and cached
 normalized network-registration data. It does not expose raw Nmap evidence,
 product fingerprints, credentials, or an arbitrary RDAP proxy.
 
+With the experimental business units switched on, each unit publishes its own
+page at /public/<slug>, where slug is the unit's slug; /public keeps serving the
+default unit's page. A slug without a published page answers exactly like a
+page that is not enabled, whether the slug is unknown, the unit's page is off,
+or the unit is paused or deleted. Each page has its own anonymous rate limit
+and cache.
+
 A public-status save applies only to the configuration the editor loaded. If
 another administrator saved in the meantime, EdgeWatch rejects the save with a
 conflict and the editor reloads the current settings, so an outdated editor

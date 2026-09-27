@@ -55,6 +55,7 @@ type Config struct {
 	Enrichment    Enrichment    `yaml:"enrichment"`
 	Updates       Updates       `yaml:"updates"`
 	Notifications Notifications `yaml:"notifications"`
+	Experimental  Experimental  `yaml:"experimental"`
 	Jobs          []Job         `yaml:"jobs"`
 	// retentionSet distinguishes an omitted deployment setting (which keeps
 	// the safe 90-day default) from an explicit zero value. It is populated
@@ -95,6 +96,16 @@ func DefaultTargetExclusions() []string {
 // preserves an omission-defaulted setting in the same way as RDAP.Enabled.
 type Updates struct {
 	Enabled *bool `yaml:"enabled"`
+}
+
+// Experimental gates features that are still under development. Every field
+// defaults to off, and an installation behaves exactly as without the section
+// while a feature stays off.
+type Experimental struct {
+	// BusinessUnits allows more than one business unit (tenant) and the
+	// platform administrator role. While it is off, creating a second unit,
+	// a platform administrator, or a platform setup token is refused.
+	BusinessUnits bool `yaml:"business_units"`
 }
 
 // Enrichment controls optional, on-demand metadata lookups. RDAP is enabled
@@ -690,6 +701,13 @@ func (c Config) RDAPEnabled() bool {
 // UpdatesEnabled resolves the omission-defaulted deployment setting.
 func (c Config) UpdatesEnabled() bool {
 	return c.Updates.Enabled == nil || *c.Updates.Enabled
+}
+
+// BusinessUnitsEnabled reports whether the experimental business units
+// feature is switched on. It is off unless experimental.business_units is
+// explicitly true.
+func (c Config) BusinessUnitsEnabled() bool {
+	return c.Experimental.BusinessUnits
 }
 
 // LogLevel resolves the omission-defaulted structured logging level.

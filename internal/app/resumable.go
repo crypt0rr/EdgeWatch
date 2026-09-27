@@ -150,7 +150,11 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, ts *store.Tenant
 		// before a one-unit plan can fall back to the legacy scanner path or a
 		// multi-unit plan can be persisted for execution.
 		discoveryProbes, nmapProbes := resolvedPlanProbeTotals(plan)
-		if budgetErr := a.checkResolvedProbeBudget(job, discoveryProbes, nmapProbes); budgetErr != nil {
+		budget, budgetErr := a.tenantProbeBudget(stateCtx, ts)
+		if budgetErr == nil {
+			budgetErr = checkResolvedProbeBudget(budget, job, discoveryProbes, nmapProbes)
+		}
+		if budgetErr != nil {
 			scan.Status = "failed"
 			scan.Error = budgetErr.Error()
 			return true, model.Snapshot{}, budgetErr

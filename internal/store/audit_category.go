@@ -75,6 +75,8 @@ var auditActionCategories = map[string]string{
 	"database.restore":                    auditCategoryPlatform,
 	"database.restore.pending_deliveries": auditCategoryPlatform,
 	"notifications.config_imported":       auditCategoryPlatform,
+	// A platform administrator's change to a tenant's scan capacity.
+	"tenant.capacity_changed": auditCategoryPlatform,
 
 	// Monitored data and its configuration.
 	"baseline.approved":                     auditCategoryData,

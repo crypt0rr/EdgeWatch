@@ -100,16 +100,16 @@ func TestActiveProgressDoesNotRegressWhenPhasesExpandWork(t *testing.T) {
 }
 
 func TestCheckScanWorkBudgetAndBeginRunFallback(t *testing.T) {
-	a := &App{Config: &config.Config{Scheduler: config.Scheduler{MaxProbeCount: 1}}}
+	a := &App{Store: storetest.OpenFresh(t), Config: &config.Config{Scheduler: config.Scheduler{MaxProbeCount: 1}}}
 	job := config.Job{Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}}
-	if _, err := a.CheckScanWorkBudget(job); !errors.Is(err, ErrScanWorkBudget) {
+	if _, err := a.CheckScanWorkBudget(context.Background(), defaultTenant(a.Store), job); !errors.Is(err, ErrScanWorkBudget) {
 		t.Fatalf("budget error = %v", err)
 	}
 	job.AllowHighCost = true
-	if _, err := a.CheckScanWorkBudget(job); err != nil {
+	if _, err := a.CheckScanWorkBudget(context.Background(), defaultTenant(a.Store), job); err != nil {
 		t.Fatalf("high-cost override error = %v", err)
 	}
-	if _, err := a.CheckScanWorkBudget(config.Job{TCP: &config.Protocol{Ports: "invalid"}}); err == nil {
+	if _, err := a.CheckScanWorkBudget(context.Background(), defaultTenant(a.Store), config.Job{TCP: &config.Protocol{Ports: "invalid"}}); err == nil {
 		t.Fatal("invalid estimate was accepted")
 	}
 
@@ -123,7 +123,7 @@ func TestCheckScanWorkBudgetAndBeginRunFallback(t *testing.T) {
 }
 
 func TestNaabuUsesDedicatedBudgetAndHardCeiling(t *testing.T) {
-	a := &App{Config: &config.Config{Scheduler: config.Scheduler{
+	a := &App{Store: storetest.OpenFresh(t), Config: &config.Config{Scheduler: config.Scheduler{
 		MaxProbeCount:      config.DefaultMaxProbeCount,
 		MaxNaabuProbeCount: config.DefaultNaabuMaxProbeCount,
 	}}}
@@ -131,7 +131,7 @@ func TestNaabuUsesDedicatedBudgetAndHardCeiling(t *testing.T) {
 		Targets: []string{"192.0.2.0/24"},
 		TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Mode: "connect", Ports: "1-65535"},
 	})
-	estimate, err := a.CheckScanWorkBudget(job)
+	estimate, err := a.CheckScanWorkBudget(context.Background(), defaultTenant(a.Store), job)
 	if err != nil {
 		t.Fatalf("default Naabu /24 budget rejected: %v (estimate %#v)", err, estimate)
 	}
@@ -144,17 +144,17 @@ func TestNaabuUsesDedicatedBudgetAndHardCeiling(t *testing.T) {
 
 	oversized := job
 	oversized.Targets = []string{"192.0.0.0/16"}
-	if _, err := a.CheckScanWorkBudget(oversized); !errors.Is(err, ErrScanWorkBudget) {
+	if _, err := a.CheckScanWorkBudget(context.Background(), defaultTenant(a.Store), oversized); !errors.Is(err, ErrScanWorkBudget) {
 		t.Fatalf("oversized Naabu job error = %v, want probe budget error", err)
 	}
 	oversized.AllowHighCost = true
-	if _, err := a.CheckScanWorkBudget(oversized); !errors.Is(err, ErrScanWorkBudget) {
+	if _, err := a.CheckScanWorkBudget(context.Background(), defaultTenant(a.Store), oversized); !errors.Is(err, ErrScanWorkBudget) {
 		t.Fatalf("hard ceiling override error = %v, want probe budget error", err)
 	}
 }
 
 func TestNaabuAndUDPUseSeparateProbeBudgets(t *testing.T) {
-	a := &App{Config: &config.Config{Scheduler: config.Scheduler{
+	a := &App{Store: storetest.OpenFresh(t), Config: &config.Config{Scheduler: config.Scheduler{
 		MaxProbeCount:      5,
 		MaxNaabuProbeCount: config.DefaultNaabuMaxProbeCount,
 	}}}
@@ -163,7 +163,7 @@ func TestNaabuAndUDPUseSeparateProbeBudgets(t *testing.T) {
 		TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{ScanType: "connect"}},
 		UDP:     &config.Protocol{Ports: "1-6"},
 	})
-	estimate, err := a.CheckScanWorkBudget(job)
+	estimate, err := a.CheckScanWorkBudget(context.Background(), defaultTenant(a.Store), job)
 	if !errors.Is(err, ErrScanWorkBudget) {
 		t.Fatalf("Naabu+UDP budget error = %v (estimate %#v)", err, estimate)
 	}

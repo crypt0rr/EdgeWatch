@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base32"
 	"errors"
+	"net/http"
 	"strings"
 	"time"
 
@@ -76,6 +77,31 @@ func (m *Manager) CompletePlatformSetup(ctx context.Context, token, username, pa
 		return store.User{}, err
 	}
 	return m.Store.Platform().CompletePlatformSetup(ctx, digest(token), username, hash, m.now())
+}
+
+// PlatformSetupRequest is CompletePlatformSetup for the web console, with
+// the per-client failure budget of the first setup: a client that sends too
+// many wrong tokens is refused with ErrRateLimited before any check, and
+// each failure is recorded in platform scope. The token's own failure count
+// is kept apart from the first setup's.
+func (m *Manager) PlatformSetupRequest(ctx context.Context, request *http.Request, token, username, password string) (store.User, error) {
+	source := m.sourceScopeFor(request, "platform-setup")
+	account := "platform-setup:" + digest(strings.TrimSpace(token))
+	if !m.allowScoped(source, account) {
+		m.auditRateLimitIn(ctx, "platform-setup", request, true)
+		return store.User{}, ErrRateLimited
+	}
+	defer m.releaseScoped(source, account)
+	user, err := m.CompletePlatformSetup(ctx, token, username, password)
+	if err != nil {
+		if !errors.Is(err, ErrRateLimited) {
+			m.failedScoped(source, account, "", false)
+		}
+		m.recordAuthEvent(ctx, "auth.platform_setup_failed", "platform-setup", "", true, request)
+		return store.User{}, err
+	}
+	m.clearScoped(source, account, "")
+	return user, nil
 }
 
 // TOTPEnrollmentRequired reports whether the account must enrol an

@@ -120,6 +120,22 @@ func (ps *PlatformStore) IssuePlatformSetupToken(ctx context.Context, hash strin
 	return tx.Commit()
 }
 
+// GetPlatformSetupToken returns the state of the platform setup token, or
+// ErrNotFound when the setup token row holds none. An initial setup token is
+// not reported.
+func (ps *PlatformStore) GetPlatformSetupToken(ctx context.Context) (SetupToken, error) {
+	var expires, issued string
+	var used sql.NullString
+	err := ps.store.reader().QueryRowContext(ctx, `SELECT expires_at,used_at,issued_at FROM setup_tokens WHERE id=1 AND purpose=?`, SetupTokenPurposePlatform).Scan(&expires, &used, &issued)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SetupToken{}, ErrNotFound
+	}
+	if err != nil {
+		return SetupToken{}, err
+	}
+	return SetupToken{ExpiresAt: scanTime(expires), IssuedAt: scanTime(issued), Used: used.Valid}, nil
+}
+
 // PlatformSetupTokenUsable reports whether the platform setup token with the
 // hash is unused and unexpired. It is the cheap check before hashing a
 // password; an initial setup token is never usable here.

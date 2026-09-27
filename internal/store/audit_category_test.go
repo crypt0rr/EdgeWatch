@@ -26,7 +26,7 @@ var knownAuditActions = map[string][]string{
 		"admin.totp_enabled", "admin.totp_recovery_codes_rotated",
 		"auth.activation_failed", "auth.legacy_recovery_codes_retired",
 		"auth.login_failed", "auth.password_confirmation_failed",
-		"auth.rate_limited", "auth.recovery_code_used", "auth.setup_failed",
+		"auth.platform_setup_failed", "auth.rate_limited", "auth.recovery_code_used", "auth.setup_failed",
 		"auth.totp_confirmation_failed", "auth.totp_failed",
 		"platform_admin.setup", "platform_admin.setup_token_issued",
 		"platform_admin.invited", "platform_admin.updated",

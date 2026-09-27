@@ -17,6 +17,7 @@ func requiredPermission(path, method string) string {
 	// silently become an authorization exemption.
 	if (path == "/setup/status" && method == http.MethodGet) ||
 		(path == "/setup" && method == http.MethodPost) ||
+		(path == "/setup/platform" && method == http.MethodPost) ||
 		(path == "/auth/login" && method == http.MethodPost) ||
 		(path == "/auth/activate" && method == http.MethodPost) ||
 		(path == "/auth/session" && method == http.MethodGet) {
@@ -443,16 +444,17 @@ type apiRoute struct {
 	NoHandler bool
 	// BusinessUnits marks a route of the experimental business units. It
 	// exists only while experimental.business_units is on; otherwise
-	// Server.api refuses it like an unknown route. businessUnitsRoute
-	// decides which paths these are.
+	// Server.api refuses it like an unknown route: an unauthenticated one is
+	// not dispatched early and meets the session gate as an unknown path.
+	// businessUnitsRoute decides which paths these are.
 	BusinessUnits bool
 }
 
 // businessUnitsRoute reports whether a path, relative to /api/v1, belongs
-// to the experimental business units: the platform console's routes and
-// the unit audit.
+// to the experimental business units: the platform console's routes, the
+// unit audit, and the platform setup.
 func businessUnitsRoute(path string) bool {
-	return path == "/audit" || path == "/platform" || strings.HasPrefix(path, "/platform/")
+	return path == "/audit" || path == "/platform" || strings.HasPrefix(path, "/platform/") || path == "/setup/platform"
 }
 
 // apiRoutes is the route inventory: every method and path that the API
@@ -464,6 +466,9 @@ var apiRoutes = []apiRoute{
 	// Entry points dispatched before the session gate.
 	{Method: http.MethodGet, Template: "/setup/status", Example: "/setup/status", Access: routeUnauthenticated},
 	{Method: http.MethodPost, Template: "/setup", Mutates: true, Example: "/setup", Access: routeUnauthenticated},
+	// The platform setup redeems the host's platform setup token. Like the
+	// other business units routes it exists only while they are on.
+	{Method: http.MethodPost, Template: "/setup/platform", Mutates: true, Example: "/setup/platform", Access: routeUnauthenticated, BusinessUnits: true},
 	{Method: http.MethodPost, Template: "/auth/login", Mutates: true, Example: "/auth/login", Access: routeUnauthenticated},
 	{Method: http.MethodPost, Template: "/auth/activate", Mutates: true, Example: "/auth/activate", Access: routeUnauthenticated},
 	// The session probe authenticates itself but needs no capability.

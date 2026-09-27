@@ -62,6 +62,13 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 			status["setup_available"] = !token.Used && time.Now().UTC().Before(token.ExpiresAt)
 		}
 	}
+	// With business units on, the sign-in page offers the platform setup
+	// while the host's platform setup token is valid, as it offers the first
+	// setup while that token is. With them off the key is absent.
+	if configured && s.businessUnitsEnabled() {
+		token, tokenErr := s.Store.Platform().GetPlatformSetupToken(r.Context())
+		status["platform_setup_available"] = tokenErr == nil && !token.Used && time.Now().UTC().Before(token.ExpiresAt)
+	}
 	writeJSON(w, http.StatusOK, status)
 }
 
@@ -117,9 +124,19 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		}
 		status["legacy_yaml_jobs"] = legacy
 	}
-	s.mu.Lock()
-	status["live_updates"] = map[string]any{"history_size": len(s.history), "dropped_events": s.dropped}
-	s.mu.Unlock()
+	// The live-update counters describe the whole deployment's stream, so
+	// once several business units exist they are left out: they would tell a
+	// unit about the others' activity.
+	multipleUnits := false
+	if s.businessUnitsEnabled() {
+		multiple, unitsErr := s.Store.Platform().HasMultipleTenants(r.Context())
+		multipleUnits = unitsErr != nil || multiple
+	}
+	if !multipleUnits {
+		s.mu.Lock()
+		status["live_updates"] = map[string]any{"history_size": len(s.history), "dropped_events": s.dropped}
+		s.mu.Unlock()
+	}
 	status["updates"] = s.applicationUpdateStatus(r.Context())
 	if telemetry, telemetryErr := s.cachedTenantTelemetry(r.Context(), ts); telemetryErr != nil {
 		s.Log.Warn("deployment telemetry refresh failed", "error", telemetryErr)
@@ -316,6 +333,48 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Log.Info("administrator configured")
 	writeJSON(w, http.StatusCreated, map[string]any{"configured": true})
+}
+
+// platformSetup redeems the platform setup token that the host printed with
+// `edgewatch admin platform-setup-token` and creates the first platform
+// administrator with the chosen username and password. Server.api serves it
+// only while experimental.business_units is on. A wrong, used, or expired
+// token, and an enabled platform administrator that already exists, get one
+// generic answer; the username and password rules, which are public, are
+// explained.
+func (s *Server) platformSetup(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Token    string `json:"token"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if _, err := store.NormalizeUsername(input.Username); err != nil {
+		writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]string{"username": err.Error()})
+		return
+	}
+	user, err := s.Auth.PlatformSetupRequest(r.Context(), r, input.Token, input.Username, input.Password)
+	if err != nil {
+		switch {
+		case errors.Is(err, auth.ErrRateLimited):
+			w.Header().Set("Retry-After", "300")
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many setup attempts; try again later", nil)
+		case errors.Is(err, store.ErrAuditUnavailable):
+			s.auditFailure(err, "platform_admin.setup")
+			writeError(w, http.StatusServiceUnavailable, "audit_unavailable", "setup could not be completed because the security audit is unavailable", nil)
+		case errors.Is(err, store.ErrUsernameUnavailable):
+			writeError(w, http.StatusConflict, "conflict", store.ErrUsernameUnavailable.Error(), map[string]string{"username": store.ErrUsernameUnavailable.Error()})
+		case strings.HasPrefix(err.Error(), "password must be at least "):
+			writeError(w, http.StatusBadRequest, "setup_failed", err.Error(), map[string]string{"password": err.Error()})
+		default:
+			writeError(w, http.StatusBadRequest, "setup_failed", "platform administrator setup could not be completed", nil)
+		}
+		return
+	}
+	s.Log.Info("platform administrator configured", "username", user.Username)
+	writeJSON(w, http.StatusCreated, map[string]any{"configured": true, "username": user.Username})
 }
 
 func (s *Server) login(w http.ResponseWriter, r *http.Request) {

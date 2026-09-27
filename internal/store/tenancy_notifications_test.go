@@ -486,10 +486,11 @@ func assertDeleteStaysInTenant(t *testing.T, f tenantFixture, remove func(ts *Te
 	return changed
 }
 
-// A job's alert goes only to its own tenant's destinations: queueing tenant
-// B's alert to tenant A's or the platform's destination creates no delivery,
-// exactly as for a deleted destination, while an update alert of the
-// platform may use any tenant's destination, as the update routing selects.
+// An alert goes only to its owner's destinations: queueing tenant B's alert
+// to tenant A's or the platform's destination creates no delivery, exactly
+// as for a deleted destination. The same holds for each copy of an update
+// alert: a tenant's copy reaches only that tenant's destinations, and the
+// platform's copy only the platform's.
 func TestQueuedAlertsStayWithTheirTenant(t *testing.T) {
 	ctx := context.Background()
 	f := newTenantFixture(t)
@@ -528,14 +529,13 @@ func TestQueuedAlertsStayWithTheirTenant(t *testing.T) {
 		event model.Event
 		want  []string
 	}{
-		"tenant B's job":                {model.Event{Type: "changes-detected", JobID: f.jobB, Job: "edge", Message: "queued-b", CreatedAt: at}, []string{managedNotificationKey(ids.b, 1) + " " + secondTenantID}},
-		"tenant A's job":                {model.Event{Type: "changes-detected", JobID: f.jobA, Job: "edge", Message: "queued-a", CreatedAt: at}, []string{managedNotificationKey(ids.a, 1) + " " + DefaultTenantID}},
-		"a config.yaml job of tenant A": {model.Event{Type: "scan-failure", Job: "edge", Message: "queued-legacy", CreatedAt: at}, []string{managedNotificationKey(ids.a, 1) + " " + DefaultTenantID}},
-		"the platform": {model.Event{Type: "application-update-available", Message: "queued-platform", CreatedAt: at}, sortedIDs(
-			managedNotificationKey(ids.a, 1)+" platform",
-			managedNotificationKey(ids.b, 1)+" platform",
-			managedNotificationKey(ids.platform, 1)+" platform",
-		)},
+		"tenant B's job":                       {model.Event{Type: "changes-detected", JobID: f.jobB, Job: "edge", Message: "queued-b", CreatedAt: at}, []string{managedNotificationKey(ids.b, 1) + " " + secondTenantID}},
+		"tenant A's job":                       {model.Event{Type: "changes-detected", JobID: f.jobA, Job: "edge", Message: "queued-a", CreatedAt: at}, []string{managedNotificationKey(ids.a, 1) + " " + DefaultTenantID}},
+		"a config.yaml job of tenant A":        {model.Event{Type: "scan-failure", Job: "edge", Message: "queued-legacy", CreatedAt: at}, []string{managedNotificationKey(ids.a, 1) + " " + DefaultTenantID}},
+		"the platform's update alert":          {model.Event{Type: "application-update-available", Message: "queued-platform", CreatedAt: at}, []string{managedNotificationKey(ids.platform, 1) + " platform"}},
+		"tenant A's update alert":              {model.Event{Type: "application-update-available", Message: "queued-update-a", TenantID: DefaultTenantID, CreatedAt: at}, []string{managedNotificationKey(ids.a, 1) + " " + DefaultTenantID}},
+		"tenant B's update alert":              {model.Event{Type: "application-update-available", Message: "queued-update-b", TenantID: secondTenantID, CreatedAt: at}, []string{managedNotificationKey(ids.b, 1) + " " + secondTenantID}},
+		"tenant A's job alert naming tenant B": {model.Event{Type: "changes-detected", JobID: f.jobA, Job: "edge", Message: "queued-named-b", TenantID: secondTenantID, CreatedAt: at}, []string{managedNotificationKey(ids.a, 1) + " " + DefaultTenantID}},
 	} {
 		if got := queued(check.event, every); !reflect.DeepEqual(got, check.want) {
 			t.Errorf("%s: queued %v, want %v", label, got, check.want)

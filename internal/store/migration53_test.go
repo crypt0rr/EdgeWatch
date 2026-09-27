@@ -130,7 +130,13 @@ func newSchema52Fixture(t *testing.T) schema52Fixture {
 	if err := s.System().QueueEvent(ctx, "deployment-legacy", model.Event{Type: "change", Job: "legacy", Message: "legacy change", CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Platform().RecordReleaseCheck(ctx, "1.0.0", "1.1.0", "https://example.invalid/releases/1.1.0", "EdgeWatch 1.1.0", "", "etag", true, []string{"deployment-alerts"}); err != nil {
+	// Before schema 53, an update alert was one event, queued to the
+	// deployment's destinations.
+	alerts, err := s.Platform().RecordReleaseCheck(ctx, "1.0.0", "1.1.0", "https://example.invalid/releases/1.1.0", "EdgeWatch 1.1.0", "", "etag", true, nil)
+	if err != nil || len(alerts) != 1 {
+		t.Fatalf("update alert = %v, %v", alerts, err)
+	}
+	if err := s.System().QueueEvent(ctx, "deployment-alerts", alerts[0]); err != nil {
 		t.Fatal(err)
 	}
 	exec(`INSERT INTO restore_quarantined_deliveries(restore_epoch,destination,payload_json,next_at,quarantined_at,tenant_id) VALUES('epoch-1','deployment-alerts','{"type":"job"}',?,?,?)`, sqliteTimestamp(now), sqliteTimestamp(now), DefaultTenantID)
@@ -825,24 +831,26 @@ func TestSchema53WritersAttributeTheirTenant(t *testing.T) {
 		t.Fatalf("default-tenant reset events = %d, want 2", got)
 	}
 
-	// Update alerts are platform events: neither they nor their deliveries
-	// have a tenant.
+	// An update alert has the platform's copy, without a tenant, and a copy
+	// for each tenant it is routed to. The deliveries of a copy belong to
+	// its owner.
 	if _, err := s.Platform().RecordInstalledVersion(ctx, "1.0.0", "", false, nil); err != nil {
 		t.Fatal(err)
 	}
-	if events, err := s.Platform().RecordInstalledVersion(ctx, "1.1.0", "https://example.invalid/1.1.0", true, []string{"updates"}); err != nil || len(events) != 1 {
+	routes := []UpdateAlertRoute{{}, {TenantID: DefaultTenantID, Destinations: []string{"updates"}}, {TenantID: secondTenantID}}
+	if events, err := s.Platform().RecordInstalledVersion(ctx, "1.1.0", "https://example.invalid/1.1.0", true, routes); err != nil || len(events) != 3 {
 		t.Fatalf("upgrade alert = %v, %v", events, err)
 	}
-	if events, err := s.Platform().RecordReleaseCheck(ctx, "1.1.0", "1.2.0", "https://example.invalid/1.2.0", "EdgeWatch 1.2.0", "", "etag", true, []string{"updates"}); err != nil || len(events) != 1 {
+	if events, err := s.Platform().RecordReleaseCheck(ctx, "1.1.0", "1.2.0", "https://example.invalid/1.2.0", "EdgeWatch 1.2.0", "", "etag", true, routes); err != nil || len(events) != 3 {
 		t.Fatalf("update available alert = %v, %v", events, err)
 	}
 	for _, eventType := range []string{"application-updated", "application-update-available"} {
-		if got := tenantOf(t, s.DB, `SELECT tenant_id FROM events WHERE type=?`, eventType); got != platform {
-			t.Fatalf("%s event tenant = %s, want none", eventType, got)
+		if got := queryStrings(t, s.DB, `SELECT tenant_id FROM events WHERE type=? ORDER BY tenant_id`, eventType); !slices.Equal(got, []string{platform, DefaultTenantID, secondTenantID}) {
+			t.Fatalf("%s event tenants = %v, want the platform, then each tenant", eventType, got)
 		}
 	}
-	if got := countRows(t, s.DB, `SELECT COUNT(*) FROM outbox WHERE destination='updates' AND tenant_id IS NULL`); got != 2 {
-		t.Fatalf("platform update deliveries = %d, want 2", got)
+	if got := countRows(t, s.DB, `SELECT COUNT(*) FROM outbox WHERE destination='updates' AND tenant_id=?`, DefaultTenantID); got != 2 {
+		t.Fatalf("default tenant update deliveries = %d, want 2", got)
 	}
 
 	// A config.yaml job's events and deliveries belong to the default

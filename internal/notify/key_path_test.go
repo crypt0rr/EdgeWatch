@@ -48,7 +48,7 @@ func TestDefaultNotificationKeyFollowsNormalizedDatabasePath(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if _, err := notifier.CreateManaged(context.Background(), "Ops", "generic://127.0.0.1:9/ops?disabletls=yes&template=json", true); err != nil {
+			if _, err := defaultNotifier(notifier).createManaged(context.Background(), "Ops", "generic://127.0.0.1:9/ops?disabletls=yes&template=json", true, nil); err != nil {
 				t.Fatal(err)
 			}
 			info, err := os.Stat(want)

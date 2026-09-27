@@ -319,10 +319,13 @@ func TestStatusUsesTheSessionTenant(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("default tenant's telemetry = %v, want the deployment's %v", got, want)
 	}
-	// The default-bound status is what /status reported before it took the
-	// session's tenant.
-	//nolint:staticcheck // compares with the deprecated default-bound view on purpose.
-	notifications := jsonValue(t, f.server.App.Notifier.StatusContext(ctx))
+	// The default tenant's status is what /status reported before it took
+	// the session's tenant.
+	status, err := f.server.App.Notifier.Tenant(f.own).Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notifications := jsonValue(t, status)
 	if !reflect.DeepEqual(own["notifications"], notifications) {
 		t.Fatalf("default tenant's notifications = %v, want %v", own["notifications"], notifications)
 	}

@@ -18,7 +18,8 @@ import (
 // before tenants existed: every enabled destination while the routing was
 // never configured, the selection when it was, and none when it was
 // silenced. A second tenant, with destinations and routing of its own, does
-// not change that, and its routing is left as it is.
+// not change that: its own copy of the alert goes to its own destination
+// only, and its routing is left as it is.
 func TestUpdateAlertsFollowTheDefaultTenantRouting(t *testing.T) {
 	const otherTenantID = "00000000-0000-0000-0000-000000000200"
 	for _, tc := range []struct {
@@ -111,11 +112,18 @@ func TestUpdateAlertsFollowTheDefaultTenantRouting(t *testing.T) {
 				for _, id := range tc.want(operations, security) {
 					want = append(want, "managed:"+id+":1")
 				}
+				if other != nil {
+					want = append(want, "managed:"+otherDestination+":1")
+				}
 				slices.Sort(want)
 				if !slices.Equal(got, want) {
 					t.Fatalf("update alert destinations = %v, want %v", got, want)
 				}
 				if other != nil {
+					var owner string
+					if err := db.DB.QueryRowContext(ctx, `SELECT tenant_id FROM outbox WHERE destination=?`, "managed:"+otherDestination+":1").Scan(&owner); err != nil || owner != otherTenantID {
+						t.Fatalf("the second tenant's update delivery belongs to %q, %v", owner, err)
+					}
 					routing, err := other.ApplicationUpdateRouting(ctx)
 					if err != nil || !slices.Equal(routing.Destinations, []string{otherDestination}) {
 						t.Fatalf("the second tenant's routing = %+v, %v", routing, err)

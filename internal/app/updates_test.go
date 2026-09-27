@@ -36,6 +36,16 @@ func (f *fakeReleaseChecker) Check(context.Context, string) (updatecheck.Result,
 	return f.result, f.err
 }
 
+// routedDestinations returns the destinations of every route of an update
+// alert, or nil when no route has one.
+func routedDestinations(routes []store.UpdateAlertRoute) []string {
+	var destinations []string
+	for _, route := range routes {
+		destinations = append(destinations, route.Destinations...)
+	}
+	return destinations
+}
+
 func TestRunUpdateCheckTracksAndDeduplicatesReleases(t *testing.T) {
 	db, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -217,7 +227,7 @@ func TestRunUpdateCheckCoversPersistenceFailureBranches(t *testing.T) {
 	}
 	a.Logger = nil
 	a.runUpdateCheck(ctx)
-	if got := a.updateDestinations(ctx); got != nil {
+	if got := routedDestinations(a.updateAlertRoutes(ctx)); got != nil {
 		t.Fatal("closed store returned update destinations")
 	}
 
@@ -230,7 +240,7 @@ func TestRunUpdateCheckCoversPersistenceFailureBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Logger = nil
-	if got := a.updateDestinations(ctx); got != nil {
+	if got := routedDestinations(a.updateAlertRoutes(ctx)); got != nil {
 		t.Fatal("unavailable notifier returned update destinations")
 	}
 	if err := db.Close(); err != nil {

@@ -28,9 +28,9 @@ type destinationSet struct {
 }
 
 // defaultSetLocked returns the default tenant's destinations as the last
-// Reload read them. The caller holds n.mu. The notifier methods that take no
-// tenant serve the default tenant: the daemon and the host CLI act only for
-// that tenant until they choose a tenant for each job.
+// Reload read them. The caller holds n.mu. Queue uses it for the alerts of
+// config.yaml jobs, which belong to the default tenant; everything else
+// reads a tenant's destinations through Notifier.Tenant.
 func (n *Notifier) defaultSetLocked() destinationSet {
 	managed := make(map[string]managedDestination, len(n.managed))
 	for id, entry := range n.managed {
@@ -48,6 +48,38 @@ func (n *Notifier) defaultSet() destinationSet {
 	set := n.defaultSetLocked()
 	set.fileURLs, set.fileLegacy = cloneStrings(set.fileURLs), cloneStrings(set.fileLegacy)
 	return set
+}
+
+// platformSet returns the platform's destinations as the last Reload read
+// them: the web-managed destinations without a tenant. The deployment
+// destinations from config.yaml belong to the default tenant, not to the
+// platform.
+func (n *Notifier) platformSet() destinationSet {
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	managed := map[string]managedDestination{}
+	for id, entry := range n.managed {
+		if entry.record.TenantID == "" {
+			managed[id] = entry
+		}
+	}
+	return destinationSet{managed: managed, fileURLs: map[string]string{}, fileLegacy: map[string]string{}, keyErr: n.keyErr}
+}
+
+// PlatformUpdateDestinations resolves the platform's update routing to the
+// queue keys of the enabled platform destinations it selects. A tenant's
+// destination and a deployment destination are never selected, exactly as
+// an unknown one is not. The platform routing has no legacy "every
+// destination" mode, so a nil selection, like an empty one, selects
+// nothing.
+func (n *Notifier) PlatformUpdateDestinations(ctx context.Context, selection []string) ([]string, error) {
+	if len(selection) == 0 {
+		return []string{}, nil
+	}
+	if err := n.Reload(ctx); err != nil {
+		return nil, err
+	}
+	return n.platformSet().queue(selection), nil
 }
 
 func cloneStrings(values map[string]string) map[string]string {
@@ -127,16 +159,6 @@ func (set destinationSet) legacySelection() []string {
 	}
 	sort.Strings(selection)
 	return selection
-}
-
-func (set destinationSet) activeCount() int {
-	count := len(set.fileURLs)
-	for _, entry := range set.managed {
-		if entry.record.Enabled && !entry.locked {
-			count++
-		}
-	}
-	return count
 }
 
 // status counts the destinations and reports the state of the key that the
@@ -304,7 +326,7 @@ func (set destinationSet) validate(selection []string) error {
 }
 
 // canonical prepares a saved routing selection for display; see
-// Notifier.CanonicalSelection.
+// TenantNotifier.CanonicalSelection.
 func (set destinationSet) canonical(selection []string) (canonical, missing []string) {
 	if selection == nil {
 		return nil, nil
@@ -481,10 +503,16 @@ func (tn *TenantNotifier) ValidateDestinationSelection(ctx context.Context, sele
 	return set.validate(selection)
 }
 
-// CanonicalSelection prepares a saved selection for display against the
-// tenant's destinations, as Notifier.CanonicalSelection describes. A
-// selector of another tenant's destination is reported missing, as a
-// deleted one is.
+// CanonicalSelection prepares a saved routing selection for display against
+// the tenant's destinations. A legacy deployment digest is replaced by the
+// opaque ID of the same destination, so the console can match it against
+// the destination list without seeing the digest. Selectors that no longer
+// identify a destination of the tenant are kept in the selection and also
+// returned in missing. That happens when a deployment URL changes, because
+// the changed URL is a new destination, and for a selector of another
+// tenant's destination, as for a deleted one. Paused and locked managed
+// destinations still exist and are never reported missing. The result never
+// contains destination URLs.
 func (tn *TenantNotifier) CanonicalSelection(ctx context.Context, selection []string) (canonical, missing []string, err error) {
 	set, err := tn.destinations(ctx)
 	if err != nil {
@@ -524,7 +552,9 @@ func (tn *TenantNotifier) TestDestination(ctx context.Context, id string) error 
 }
 
 // TestSummary sends one test message to each enabled destination of the
-// tenant and reports the counts, as Notifier.TestSummaryContext does.
+// tenant and reports the counts, as testSet describes. It reads the
+// tenant's destinations with the current key, so an operator restoring an
+// external key can verify it without restarting the daemon.
 func (tn *TenantNotifier) TestSummary(ctx context.Context) (TestSummary, error) {
 	set, err := tn.destinations(ctx)
 	if err != nil {

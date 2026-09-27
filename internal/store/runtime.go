@@ -805,11 +805,11 @@ const (
 //   - a destination paused in the meantime is skipped without an audit, as
 //     alerts raised while it is paused are.
 //
-// The alert of a job, or of a config.yaml job, goes only to a destination of
-// the job's tenant: a destination of another tenant or of the platform is
-// handled exactly as a deleted one, so the alert never reaches it. An update
-// alert belongs to the platform, which routes it through the update routing
-// of a tenant or of the platform, so its destination may belong to either.
+// An alert goes only to a destination of its event's owner: the alert of a
+// job, or of a config.yaml job, to one of the job's tenant; a tenant's copy
+// of an update alert to one of that tenant; and the platform's copy to a
+// platform destination, which has no tenant. Any other destination is
+// handled exactly as a deleted one, so the alert never reaches it.
 //
 // An empty key means that no row is created.
 func resolveManagedIntentTx(ctx context.Context, tx *sql.Tx, destination string, event model.Event) (key, discardReason string, err error) {
@@ -824,9 +824,12 @@ func resolveManagedIntentTx(ctx context.Context, tx *sql.Tx, destination string,
 	var enabled int
 	var revision, credentialRevision int64
 	var row *sql.Row
-	if platformEvent(event) {
-		row = tx.QueryRowContext(ctx, `SELECT enabled,revision,credential_revision FROM managed_notifications WHERE id=?`, parts[1])
-	} else {
+	switch {
+	case platformEvent(event):
+		row = tx.QueryRowContext(ctx, `SELECT enabled,revision,credential_revision FROM managed_notifications WHERE id=? AND tenant_id IS NULL`, parts[1])
+	case tenantEvent(event):
+		row = tx.QueryRowContext(ctx, `SELECT enabled,revision,credential_revision FROM managed_notifications WHERE id=? AND tenant_id=?`, parts[1], event.TenantID)
+	default:
 		row = tx.QueryRowContext(ctx, `SELECT enabled,revision,credential_revision FROM managed_notifications WHERE id=? AND tenant_id=`+jobTenantSQL, parts[1], event.JobID)
 	}
 	err = row.Scan(&enabled, &revision, &credentialRevision)
@@ -851,10 +854,10 @@ func parseManagedRevision(value string) (int64, bool) {
 	return revision, err == nil && revision >= 1
 }
 
-// managedIntentDiscards counts discarded managed intents per job, destination
-// and reason, so one event transaction writes one bounded audit entry for
-// each. The job names the tenant whose audit records the discard; an event
-// without a job ID, from config.yaml or the platform, has the empty job.
+// managedIntentDiscards counts discarded managed intents per event owner, as
+// eventOwner names it, destination and reason, so one event transaction
+// writes one bounded audit entry for each. The owner names the audit that
+// records the discard.
 type managedIntentDiscards map[[3]string]int
 
 func (d *managedIntentDiscards) add(event model.Event, destination, reason string, count int) {
@@ -865,14 +868,16 @@ func (d *managedIntentDiscards) add(event model.Event, destination, reason strin
 		*d = managedIntentDiscards{}
 	}
 	id := strings.Split(destination, ":")[1]
-	(*d)[[3]string{event.JobID, id, reason}] += count
+	(*d)[[3]string{eventOwner(event), id, reason}] += count
 }
 
 // audit records discarded intents like the pending deliveries discarded by a
 // credential change. Only the stable destination ID and a count are recorded.
-// The record belongs to the tenant of the event's job, read in the same
-// transaction, since the discard follows that tenant's action or scan. An
-// event without a job ID keeps the default tenant.
+// The record belongs to the owner of the event: the tenant of the event's
+// job, read in the same transaction, since the discard follows that tenant's
+// action or scan; the tenant of a tenant's copy of an update alert; or the
+// platform, for the platform's copy. The event of a config.yaml job, which
+// has no job ID, keeps the default tenant.
 func (d managedIntentDiscards) audit(ctx context.Context, tx *sql.Tx) error {
 	if len(d) == 0 {
 		return nil
@@ -892,19 +897,26 @@ func (d managedIntentDiscards) audit(ctx context.Context, tx *sql.Tx) error {
 	tenants := map[string]string{}
 	entries := make([]AuditEntry, 0, len(keys))
 	for _, key := range keys {
-		jobID := key[0]
-		tenant, known := tenants[jobID]
-		if !known && jobID != "" {
-			if err := tx.QueryRowContext(ctx, `SELECT tenant_id FROM jobs WHERE id=?`, jobID).Scan(&tenant); err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return err
-			}
-			tenants[jobID] = tenant
+		entry := AuditEntry{
+			Action: "notifications.pending_discarded",
+			Detail: fmt.Sprintf("discarded %d new deliveries for managed notification %s after %s", d[key], key[1], key[2]),
 		}
-		entries = append(entries, AuditEntry{
-			Action:   "notifications.pending_discarded",
-			Detail:   fmt.Sprintf("discarded %d new deliveries for managed notification %s after %s", d[key], key[1], key[2]),
-			TenantID: tenant,
-		})
+		owner := key[0]
+		if tenantID, ok := strings.CutPrefix(owner, "tenant:"); ok {
+			entry.TenantID = tenantID
+		} else if jobID, ok := strings.CutPrefix(owner, "job:"); ok {
+			tenant, known := tenants[jobID]
+			if !known && jobID != "" {
+				if err := tx.QueryRowContext(ctx, `SELECT tenant_id FROM jobs WHERE id=?`, jobID).Scan(&tenant); err != nil && !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+				tenants[jobID] = tenant
+			}
+			entry.TenantID = tenant
+		} else {
+			entry.platform = true
+		}
+		entries = append(entries, entry)
 	}
 	return insertAuditEntries(ctx, tx, entries, time.Now().UTC())
 }

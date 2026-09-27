@@ -41,6 +41,78 @@ func twoTenantNotifier(t *testing.T) (*Notifier, *store.Store, *store.TenantStor
 	return notifier, db, db.Tenant(store.DefaultTenantScope()), db.Tenant(scope)
 }
 
+// defaultNotifier returns the notifier as the default tenant sees it. Each
+// call reads the tenant's destinations afresh, so a test can use it after
+// any change.
+func defaultNotifier(n *Notifier) *TenantNotifier {
+	return n.Tenant(n.Store.Tenant(store.DefaultTenantScope()))
+}
+
+// defaultDestinations returns the default tenant's destination views.
+func defaultDestinations(t *testing.T, n *Notifier) []DestinationView {
+	t.Helper()
+	views, err := defaultNotifier(n).Destinations(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return views
+}
+
+// defaultStatus returns the default tenant's notification status.
+func defaultStatus(t *testing.T, n *Notifier) map[string]any {
+	t.Helper()
+	status, err := defaultNotifier(n).Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return status
+}
+
+// defaultActiveCount returns the number of the default tenant's
+// destinations that can deliver now.
+func defaultActiveCount(t *testing.T, n *Notifier) int {
+	t.Helper()
+	active, ok := defaultStatus(t, n)["active"].(int)
+	if !ok {
+		t.Fatal("the status has no active count")
+	}
+	return active
+}
+
+// defaultLegacySelection returns the default tenant's legacy selection.
+func defaultLegacySelection(t *testing.T, n *Notifier) []string {
+	t.Helper()
+	selection, err := defaultNotifier(n).LegacySelection(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return selection
+}
+
+// defaultCanonical prepares a selection for display against the default
+// tenant's destinations.
+func defaultCanonical(t *testing.T, n *Notifier, selection []string) (canonical, missing []string) {
+	t.Helper()
+	canonical, missing, err := defaultNotifier(n).CanonicalSelection(context.Background(), selection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical, missing
+}
+
+// defaultTest sends a test message to each enabled destination of the
+// default tenant.
+func defaultTest(ctx context.Context, n *Notifier) error {
+	_, err := defaultNotifier(n).TestSummary(ctx)
+	return err
+}
+
+// defaultDelete deletes one of the default tenant's destinations.
+func defaultDelete(ctx context.Context, n *Notifier, id string, expectedRevision int64) error {
+	_, err := defaultNotifier(n).DeleteManagedWithAudit(ctx, id, expectedRevision, store.AuditEntry{Action: "notifications.deleted"})
+	return err
+}
+
 // Each tenant lists, reads, changes, tests, selects, and routes alerts to its
 // own destinations only. Another tenant's destination is not found, exactly
 // as an unknown one, and nothing about it changes. No error or view names a
@@ -140,16 +212,10 @@ func TestTenantNotifierKeepsEachTenantToItsDestinations(t *testing.T) {
 		t.Fatalf("the first tenant's destination = %+v, %v", opened, err)
 	}
 
-	// The notifier methods without a tenant serve the default tenant, and the
-	// delivery worker holds the destinations of both.
-	if keys, err := notifier.QueueDestinationsForJob(ctx, config.Job{Name: "edge"}); err != nil || !reflect.DeepEqual(keys, []string{managedKey(ownOps.ID, 1)}) {
+	// The default tenant's nil selection follows its own destinations only,
+	// and the delivery worker holds the destinations of both tenants.
+	if keys, err := defaultNotifier(notifier).QueueDestinationsForJob(ctx, config.Job{Name: "edge"}); err != nil || !reflect.DeepEqual(keys, []string{managedKey(ownOps.ID, 1)}) {
 		t.Fatalf("default tenant nil selection = %v, %v", keys, err)
-	}
-	if views := notifier.Destinations(); len(views) != 1 || views[0].ID != ownOps.ID {
-		t.Fatalf("default tenant destinations = %+v", views)
-	}
-	if err := notifier.ValidateDestinationSelection(ctx, []string{otherOps.ID}); !errors.Is(err, ErrInvalidDestinationSelection) {
-		t.Fatalf("the default tenant selected the other tenant's destination: %v", err)
 	}
 	snapshot := notifier.destinationSnapshot()
 	if snapshot[managedKey(ownOps.ID, 1)] != secrets["own"] || snapshot[managedKey(otherOps.ID, 1)] != secrets["other"] {
@@ -163,7 +229,7 @@ func TestTenantNotifierKeepsEachTenantToItsDestinations(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := model.Event{Type: "changes-detected", JobID: otherJob.ID, Job: "edge", Message: "other tenant alert", CreatedAt: time.Now().UTC()}
-	defaultKeys, err := notifier.QueueDestinationsForJob(ctx, otherJob.Job)
+	defaultKeys, err := defaultNotifier(notifier).QueueDestinationsForJob(ctx, otherJob.Job)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,6 +268,50 @@ func TestTenantNotifierKeepsEachTenantToItsDestinations(t *testing.T) {
 		}
 	}
 }
+
+// The platform's update routing reaches only enabled platform destinations:
+// a tenant's destination, a deployment destination and an unknown one are
+// never selected, and neither is a paused platform destination. A nil
+// selection, like an empty one, selects nothing.
+func TestPlatformUpdateDestinationsAreThePlatforms(t *testing.T) {
+	ctx := context.Background()
+	notifier, db, own, other := twoTenantNotifier(t)
+	audit := store.AuditEntry{Action: "notifications.created"}
+	ownOps, err := notifier.Tenant(own).CreateManagedWithAudit(ctx, "Operations", "generic://127.0.0.1:9/own?disabletls=yes&template=json", true, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherOps, err := notifier.Tenant(other).CreateManagedWithAudit(ctx, "Operations", "generic://127.0.0.1:9/other?disabletls=yes&template=json", true, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const platformOps, platformPaused = "00000000-0000-0000-0000-0000000000f1", "00000000-0000-0000-0000-0000000000f2"
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for id, enabled := range map[string]int{platformOps: 1, platformPaused: 0} {
+		if _, err := db.DB.ExecContext(ctx, `INSERT INTO managed_notifications(id,tenant_id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at) VALUES(?,NULL,?,'generic',?,?,?,1,1,?,?)`, id, id, []byte("sealed"), []byte("nonce"), enabled, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, selection := range [][]string{nil, {}} {
+		if keys, err := notifier.PlatformUpdateDestinations(ctx, selection); err != nil || len(keys) != 0 {
+			t.Fatalf("platform selection %v = %v, %v; want none", selection, keys, err)
+		}
+	}
+	selection := []string{platformOps, platformPaused, ownOps.ID, otherOps.ID, "file:deployment", unknownDestinationID}
+	keys, err := notifier.PlatformUpdateDestinations(ctx, selection)
+	if err != nil || !reflect.DeepEqual(keys, []string{managedKey(platformOps, 1)}) {
+		t.Fatalf("platform destinations = %v, %v; want only the enabled platform destination", keys, err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if keys, err := notifier.PlatformUpdateDestinations(ctx, selection); err == nil || keys != nil {
+		t.Fatalf("platform destinations from a closed store = %v, %v", keys, err)
+	}
+}
+
+// unknownDestinationID names no destination anywhere.
+const unknownDestinationID = "00000000-0000-0000-0000-00000000dead"
 
 // A tenant store without a valid tenant fails every read and changes
 // nothing.

@@ -188,11 +188,14 @@ administrator. Schema 53 attributes each scan, event, and notification
 delivery to the tenant of its job, and database triggers refuse a scan or
 event in another tenant than its job, a new scan or event for a tenant that
 is being deleted, a later change of that tenant, and a published host whose
-job belongs to another tenant than the public page. Update alerts and their
-deliveries belong to no tenant. Schema 54 keeps the newest observation of an
-address per tenant, and a database trigger refuses a latest-host row in
-another tenant than its scan or for a tenant that is being deleted. Back up
-the complete `./data` directory before the upgrade.
+job belongs to another tenant than the public page. An update alert has one
+copy for the platform, which belongs to no tenant, and one for each active
+tenant; each copy and its deliveries belong to their owner, reach only the
+owner's destinations, and appear only in the owner's history. Schema 54
+keeps the newest observation of an address per tenant, and a database
+trigger refuses a latest-host row in another tenant than its scan or for a
+tenant that is being deleted. Back up the complete `./data` directory before
+the upgrade.
 
 Recovery codes are stored in the salted `v2` representation. Schema 38 removes
 legacy unsalted SHA-256 recovery-code digests and records only their count in

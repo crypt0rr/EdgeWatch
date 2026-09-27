@@ -29,12 +29,12 @@ type ApplicationUpdateState struct {
 	LastError                 string
 	AnnouncedAvailableVersion string
 	AnnouncedUpgradeVersion   string
-	// UpdateNotificationDestinations is nil when the administrator has not
-	// configured update routing yet, preserving the legacy "all enabled"
-	// behavior. An explicitly configured empty slice intentionally silences
-	// update notifications while retaining the update state and UI indicator.
-	// Store.GetApplicationUpdateState returns the default tenant's routing
-	// here, and PlatformStore.GetApplicationUpdateState the platform's.
+	// UpdateNotificationDestinations is the platform's update routing, the
+	// platform destinations that the platform's copy of an update alert goes
+	// to. It is nil when the routing was never configured, and the platform
+	// routing has no legacy "every destination" mode, so nil and an empty
+	// slice both select nothing. A tenant's routing is read with
+	// TenantStore.ApplicationUpdateRouting.
 	UpdateNotificationDestinations           []string
 	UpdateNotificationDestinationsConfigured bool
 }
@@ -288,13 +288,104 @@ func replaceApplicationUpdateDestinationsTx(ctx context.Context, tx *sql.Tx, ten
 	return replaced, nil
 }
 
+// UpdateAlertRoute is where one owner's copy of an update alert goes. The
+// platform and each tenant have their own copy, which only their own
+// administrators see and which goes only to their own destinations.
+type UpdateAlertRoute struct {
+	// TenantID is the tenant whose copy this is, or "" for the platform's.
+	TenantID string
+	// Destinations are the queue keys that the owner's update routing
+	// resolved to. The platform's may name only platform destinations,
+	// which are web-managed destinations without a tenant. A tenant's may
+	// name only that tenant's destinations, and the deployment destinations
+	// from config.yaml only for the default tenant, which owns them.
+	Destinations []string
+}
+
+// recordUpdateAlertTx records one update alert in tx: the platform's event,
+// which has no tenant, and a copy for each tenant route whose tenant is
+// still active, each queued only to its owner's destinations. A tenant that
+// is paused or being deleted gets no copy, and neither does an active tenant
+// without a route. The events are returned in the order of the routes, the
+// platform's first.
+//
+// The owner of each destination is checked here as well as by the caller's
+// routing: queueEventsTx discards a managed destination of another owner as
+// a deleted one, and a deployment destination, which is not a managed one,
+// is queued only for the default tenant's copy.
+func recordUpdateAlertTx(ctx context.Context, tx *sql.Tx, event model.Event, now time.Time, routes []UpdateAlertRoute) ([]model.Event, error) {
+	event.JobID, event.Job, event.TenantID = "", "", ""
+	bounded, payload, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
+	if err != nil {
+		return nil, err
+	}
+	var platform []string
+	var tenantRoutes []UpdateAlertRoute
+	seen := map[string]bool{}
+	for _, route := range routes {
+		if route.TenantID == "" {
+			platform = append(platform, route.Destinations...)
+			continue
+		}
+		if !seen[route.TenantID] {
+			seen[route.TenantID] = true
+			tenantRoutes = append(tenantRoutes, route)
+		}
+	}
+	if err := insertEventExec(ctx, tx, bounded, payload, now); err != nil {
+		return nil, err
+	}
+	if err := queueEventsTx(ctx, tx, []model.Event{bounded}, ownedUpdateDestinations("", platform)); err != nil {
+		return nil, err
+	}
+	events := []model.Event{bounded}
+	for _, route := range tenantRoutes {
+		var active int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants WHERE id=? AND state=?`, route.TenantID, TenantStateActive).Scan(&active); err != nil {
+			return nil, err
+		}
+		if active == 0 {
+			continue
+		}
+		tenantCopy := bounded
+		tenantCopy.TenantID = route.TenantID
+		if err := insertEventExec(ctx, tx, tenantCopy, payload, now); err != nil {
+			return nil, err
+		}
+		if err := queueEventsTx(ctx, tx, []model.Event{tenantCopy}, ownedUpdateDestinations(route.TenantID, route.Destinations)); err != nil {
+			return nil, err
+		}
+		events = append(events, tenantCopy)
+	}
+	return events, nil
+}
+
+// ownedUpdateDestinations drops the deployment destinations from the
+// destinations of an update alert copy, unless the copy is the default
+// tenant's: config.yaml destinations belong to the default tenant. The
+// managed destinations are checked against the copy's owner when they are
+// queued.
+func ownedUpdateDestinations(tenantID string, destinations []string) []string {
+	if tenantID == DefaultTenantID {
+		return destinations
+	}
+	owned := make([]string, 0, len(destinations))
+	for _, destination := range destinations {
+		if strings.HasPrefix(destination, "managed:") {
+			owned = append(owned, destination)
+		}
+	}
+	return owned
+}
+
 // RecordInstalledVersion persists the running build version. When notify is
 // true, the transition and its notification intent are committed atomically.
 // The first observed version is intentionally seeded without an event by the
 // caller, preventing a false "updated from unknown" alert after migration.
-// The alert is a platform event, and destinations are the selectors that the
-// update routing resolved.
-func (ps *PlatformStore) RecordInstalledVersion(ctx context.Context, current, releaseURL string, notify bool, destinations []string) ([]model.Event, error) {
+// The alert is recorded for the platform and for each active tenant of
+// routes, and queued to the destinations of each route, as
+// recordUpdateAlertTx describes.
+func (ps *PlatformStore) RecordInstalledVersion(ctx context.Context, current, releaseURL string, notify bool, routes []UpdateAlertRoute) ([]model.Event, error) {
 	current = strings.TrimSpace(current)
 	if current == "" {
 		return nil, nil
@@ -343,32 +434,24 @@ func (ps *PlatformStore) RecordInstalledVersion(ctx context.Context, current, re
 		ReleaseURL:      strings.TrimSpace(releaseURL),
 		CreatedAt:       now,
 	}
-	bounded, payload, err := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
+	events, err := recordUpdateAlertTx(ctx, tx, event, now, routes)
 	if err != nil {
-		return nil, err
-	}
-	event = bounded
-	// The update alert is a platform event, so the event and its deliveries
-	// have no tenant.
-	if err = insertEventExec(ctx, tx, event, payload, now); err != nil {
 		return nil, err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE application_update_state SET announced_upgrade_version=? WHERE id=1`, current); err != nil {
 		return nil, err
 	}
-	if err = queueEventsTx(ctx, tx, []model.Event{event}, destinations); err != nil {
-		return nil, err
-	}
 	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
-	return []model.Event{event}, nil
+	return events, nil
 }
 
 // RecordReleaseCheck stores a successful release response and, when a newer
-// release is available, queues one notification for the installation to the
-// destinations that the update routing resolved.
-func (ps *PlatformStore) RecordReleaseCheck(ctx context.Context, current, version, releaseURL, releaseName, publishedAt, etag string, notify bool, destinations []string) ([]model.Event, error) {
+// release is available, records one alert for the installation: the
+// platform's and each active tenant's copy of routes, queued to the
+// destinations of each route, as recordUpdateAlertTx describes.
+func (ps *PlatformStore) RecordReleaseCheck(ctx context.Context, current, version, releaseURL, releaseName, publishedAt, etag string, notify bool, routes []UpdateAlertRoute) ([]model.Event, error) {
 	current = strings.TrimSpace(current)
 	version = strings.TrimSpace(version)
 	releaseURL = strings.TrimSpace(releaseURL)
@@ -394,22 +477,12 @@ func (ps *PlatformStore) RecordReleaseCheck(ctx context.Context, current, versio
 	var events []model.Event
 	if notify && version != "" && version != current && announced != version {
 		event := model.Event{Type: "application-update-available", Message: "EdgeWatch update available", CurrentVersion: current, LatestVersion: version, ReleaseURL: releaseURL, CreatedAt: now}
-		bounded, payload, marshalErr := model.MarshalBoundedEvent(event, model.EventPayloadLimit)
-		if marshalErr != nil {
-			return nil, marshalErr
-		}
-		event = bounded
-		// A platform event, like the upgrade alert above.
-		if err = insertEventExec(ctx, tx, event, payload, now); err != nil {
+		if events, err = recordUpdateAlertTx(ctx, tx, event, now, routes); err != nil {
 			return nil, err
 		}
 		if _, err = tx.ExecContext(ctx, `UPDATE application_update_state SET announced_available_version=? WHERE id=1`, version); err != nil {
 			return nil, err
 		}
-		if err = queueEventsTx(ctx, tx, []model.Event{event}, destinations); err != nil {
-			return nil, err
-		}
-		events = append(events, event)
 	}
 	if err = tx.Commit(); err != nil {
 		return nil, err

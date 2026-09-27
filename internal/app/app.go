@@ -978,13 +978,15 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	return scan, events, nil
 }
 
-// ActiveScans returns a stable snapshot of scans that are currently executing.
-// A scan only enters this set after its database lease is acquired, so a
-// queued or rejected request is not reported as running.
-func (a *App) ActiveScans() []model.ActiveScan {
+// ActiveScans returns a stable snapshot of the scans of the tenant of scope
+// that are currently executing. A scan only enters this set after its
+// database lease is acquired, so a queued or rejected request is not
+// reported as running. Another tenant's scans are never listed, and a scope
+// without a tenant lists none.
+func (a *App) ActiveScans(scope store.TenantScope) []model.ActiveScan {
 	var scans []model.ActiveScan
 	a.running.Range(func(_, value any) bool {
-		if run, ok := value.(*activeRun); ok {
+		if run, ok := value.(*activeRun); ok && run.inTenant(scope) {
 			scans = append(scans, run.snapshot())
 		}
 		return true
@@ -998,16 +1000,17 @@ func (a *App) ActiveScans() []model.ActiveScan {
 	return scans
 }
 
-// CancelScan requests cancellation of an active scan. The scanner owns the
-// process context and will persist a canceled terminal record without
-// mutating baseline or incident state.
-func (a *App) CancelScan(id string) error {
+// CancelScan requests cancellation of an active scan of the tenant of scope.
+// The scanner owns the process context and will persist a canceled terminal
+// record without mutating baseline or incident state. Another tenant's scan
+// is store.ErrNotFound, exactly as an unknown one, and keeps running.
+func (a *App) CancelScan(scope store.TenantScope, id string) error {
 	value, ok := a.running.Load(id)
 	if !ok {
 		return store.ErrNotFound
 	}
 	run, ok := value.(*activeRun)
-	if !ok {
+	if !ok || !run.inTenant(scope) {
 		return store.ErrNotFound
 	}
 	run.mu.Lock()
@@ -1107,6 +1110,13 @@ func (a *App) updateActivePhase(id, phase string) {
 	run.scan.Phase = phase
 	run.scan.ProcessAlive = false
 	run.mu.Unlock()
+}
+
+// inTenant reports whether the run belongs to the tenant of scope. A scope
+// without a tenant matches no run. registerRun sets the run's tenant before
+// the run can be found, and it never changes.
+func (r *activeRun) inTenant(scope store.TenantScope) bool {
+	return scope.Valid() && r.tenant == scope.ID()
 }
 
 func (r *activeRun) snapshot() model.ActiveScan {
@@ -1340,39 +1350,79 @@ func (a *App) Daemon(ctx context.Context) error {
 	}
 }
 
-// updateDestinations resolves the destinations of an update alert. The update
-// check is platform-wide and its alerts follow the default tenant's update
-// routing to that tenant's destinations, as they did before tenants existed.
-// Routing the alerts of every tenant to its own destinations comes with the
-// per-tenant update fan-out.
-func (a *App) updateDestinations(ctx context.Context) []string {
+// updateAlertRoutes resolves where an update alert goes. The update check is
+// platform-wide, and its alert is fanned out: the platform's copy follows
+// the platform's update routing to platform destinations, and each active
+// tenant's copy follows that tenant's update routing to its own
+// destinations. A tenant whose routing cannot be resolved still gets its
+// copy, without destinations, as the platform's copy does when the platform
+// routing cannot be read. The platform's route comes first.
+func (a *App) updateAlertRoutes(ctx context.Context) []store.UpdateAlertRoute {
+	if a.Store == nil {
+		return nil
+	}
+	logger := a.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	platform := store.UpdateAlertRoute{}
+	if a.Notifier != nil {
+		if state, err := a.Store.Platform().GetApplicationUpdateState(ctx); err != nil {
+			logger.Warn("platform update notification routing unavailable", "error", err)
+		} else if platform.Destinations, err = a.Notifier.PlatformUpdateDestinations(ctx, state.UpdateNotificationDestinations); err != nil {
+			logger.Warn("platform update notification destinations unavailable", "error", err)
+		}
+	}
+	routes := []store.UpdateAlertRoute{platform}
+	scopes, err := a.Store.System().ActiveTenantScopes(ctx)
+	if err != nil {
+		logger.Warn("business units unavailable for the update alert", "error", err)
+		return routes
+	}
+	for _, scope := range scopes {
+		route := store.UpdateAlertRoute{TenantID: scope.ID()}
+		route.Destinations = a.tenantUpdateDestinations(ctx, logger, a.Store.Tenant(scope))
+		routes = append(routes, route)
+	}
+	return routes
+}
+
+// tenantUpdateDestinations resolves a tenant's update routing to the queue
+// keys of its destinations, or nil when it cannot.
+func (a *App) tenantUpdateDestinations(ctx context.Context, logger *slog.Logger, ts *store.TenantStore) []string {
 	if a.Notifier == nil {
 		return nil
 	}
-	ts := a.Store.Tenant(store.DefaultTenantScope())
 	routing, err := ts.ApplicationUpdateRouting(ctx)
 	if err != nil {
-		logger := a.Logger
-		if logger == nil {
-			logger = slog.Default()
-		}
 		logger.Warn("application update notification routing unavailable", "error", err)
 		return nil
 	}
 	// Routing that was never configured has nil destinations, which keeps the
 	// original behavior of sending update events to every enabled destination
-	// until an administrator saves a selection. A saved empty selection
-	// silences them.
+	// of the tenant until an administrator saves a selection. A saved empty
+	// selection silences them.
 	destinations, err := a.Notifier.Tenant(ts).QueueDestinationsForSelection(ctx, routing.Destinations)
 	if err != nil {
-		logger := a.Logger
-		if logger == nil {
-			logger = slog.Default()
-		}
 		logger.Warn("application update notification destinations unavailable", "error", err)
 		return nil
 	}
 	return destinations
+}
+
+// emitUpdateAlert publishes an update alert that the store recorded as a
+// live update. Every live-update stream receives it, so only the platform's
+// copy is published, once per alert, as before the alert had a copy for
+// each tenant.
+func (a *App) emitUpdateAlert(events []model.Event) {
+	var platform []model.Event
+	for _, event := range events {
+		if event.TenantID == "" {
+			platform = append(platform, event)
+		}
+	}
+	a.emitEvents(platform)
+	a.wakeDelivery()
 }
 
 func (a *App) emitUpdateStatus() {
@@ -1408,16 +1458,15 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 			if releaseURL == "" {
 				releaseURL = updatecheck.ReleasePageURL(current)
 			}
-			var destinations []string
+			var routes []store.UpdateAlertRoute
 			if notifyUpgrade {
-				destinations = a.updateDestinations(ctx)
+				routes = a.updateAlertRoutes(ctx)
 			}
-			events, recordErr := a.Store.Platform().RecordInstalledVersion(ctx, current, releaseURL, notifyUpgrade, destinations)
+			events, recordErr := a.Store.Platform().RecordInstalledVersion(ctx, current, releaseURL, notifyUpgrade, routes)
 			if recordErr != nil {
 				logger.Warn("application version state update failed", "error", recordErr)
 			} else if len(events) > 0 {
-				a.emitEvents(events)
-				a.wakeDelivery()
+				a.emitUpdateAlert(events)
 			}
 		}
 	}
@@ -1454,18 +1503,17 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 	if release.URL == "" {
 		release.URL = updatecheck.ReleasePageURL(release.Version)
 	}
-	var destinations []string
+	var routes []store.UpdateAlertRoute
 	if newer {
-		destinations = a.updateDestinations(ctx)
+		routes = a.updateAlertRoutes(ctx)
 	}
-	events, recordErr := a.Store.Platform().RecordReleaseCheck(ctx, current, release.Version, release.URL, release.Name, release.PublishedAt, result.ETag, newer, destinations)
+	events, recordErr := a.Store.Platform().RecordReleaseCheck(ctx, current, release.Version, release.URL, release.Name, release.PublishedAt, result.ETag, newer, routes)
 	if recordErr != nil {
 		logger.Warn("application release state update failed", "error", recordErr)
 		return
 	}
 	if len(events) > 0 {
-		a.emitEvents(events)
-		a.wakeDelivery()
+		a.emitUpdateAlert(events)
 	}
 	a.emitUpdateStatus()
 }

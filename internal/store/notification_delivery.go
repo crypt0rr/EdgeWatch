@@ -45,13 +45,18 @@ func deliveryIdentity(selector string) string {
 type managedIntent struct{ key, discardReason string }
 
 // eventOwner names whose destinations an event's alert may go to: the
-// platform's routing for a platform event, or the tenant of the event's job.
-// Events with the same owner resolve a managed selector the same way.
+// platform's for a platform event, the named tenant's for a tenant's event
+// without a job, or else those of the tenant of the event's job. Events with
+// the same owner resolve a managed selector the same way.
 func eventOwner(event model.Event) string {
-	if platformEvent(event) {
+	switch {
+	case platformEvent(event):
 		return ""
+	case tenantEvent(event):
+		return "tenant:" + event.TenantID
+	default:
+		return "job:" + event.JobID
 	}
-	return "job:" + event.JobID
 }
 
 func deliveryErrorCode(err error) string {

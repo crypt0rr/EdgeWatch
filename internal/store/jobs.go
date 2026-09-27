@@ -88,11 +88,20 @@ func (ts *TenantStore) CreateJobWithEnabledAndAudit(ctx context.Context, job con
 // the console refused.
 var ErrScannerProfileNotFound = NewValidationError(errors.New("selected scanner profile was not found"))
 
+// ErrUDPScannerProfile refuses a job whose UDP scan pins a scanner profile.
+// UDP always uses the Nmap defaults and a scan never applies a UDP profile,
+// so the store refuses one, whoever owns it, as the console does.
+var ErrUDPScannerProfile = NewValidationError(errors.New("udp scanner profiles are not supported; UDP uses Nmap defaults"))
+
 // checkPinnedScannerProfileTx refuses a job whose TCP scan pins a scanner
 // profile that is neither built in nor the tenant's own. The TCP profile is
-// the one a scan applies, and the one the console checks. It reads in the
-// job write's transaction, so the check and the write see the same profiles.
+// the one a scan applies, and the one the console checks. A UDP profile is
+// refused whatever it is, since no scan applies one. It reads in the job
+// write's transaction, so the check and the write see the same profiles.
 func (ts *TenantStore) checkPinnedScannerProfileTx(ctx context.Context, tx *sql.Tx, job config.Job) error {
+	if job.UDP != nil && strings.TrimSpace(job.UDP.ProfileID) != "" {
+		return ErrUDPScannerProfile
+	}
 	if job.TCP == nil || strings.TrimSpace(job.TCP.ProfileID) == "" {
 		return nil
 	}

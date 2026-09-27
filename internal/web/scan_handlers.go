@@ -17,20 +17,33 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
+// activeScans lists the running scans of the request's tenant only.
 func (s *Server) activeScans(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
-	scans := s.App.ActiveScans()
+	scope, err := ts.Scope()
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
+	}
+	scans := s.App.ActiveScans(scope)
 	if scans == nil {
 		scans = []model.ActiveScan{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"scans": scans})
 }
 
+// cancelScan cancels a running scan of the request's tenant. Another tenant's
+// scan is answered as a scan that is no longer active, and keeps running.
 func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore, id string) {
 	if strings.TrimSpace(id) == "" {
 		writeError(w, http.StatusNotFound, "not_found", "scan not found", nil)
 		return
 	}
-	if err := s.App.CancelScan(id); err != nil {
+	scope, err := ts.Scope()
+	if err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
+	}
+	if err := s.App.CancelScan(scope, id); err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusConflict, "scan_not_active", "scan is no longer active", nil)
 			return

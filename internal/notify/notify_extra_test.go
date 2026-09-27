@@ -42,15 +42,15 @@ func TestManagedDeliverySurvivesMetadataEditAndPause(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := notifier.CreateManaged(ctx, "Operations", rawURL, true)
+	created, err := defaultNotifier(notifier).createManaged(ctx, "Operations", rawURL, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	oldKey := managedKey(created.ID, created.Revision)
-	if err := db.System().QueueEvent(ctx, oldKey, model.Event{Type: "rename", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := db.System().QueueEvent(ctx, oldKey, model.Event{Type: "rename", TenantID: store.DefaultTenantID, CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	renamed, err := notifier.UpdateManaged(ctx, created.ID, created.Revision, "Operations renamed", nil, boolPtr(true))
+	renamed, err := defaultNotifier(notifier).updateManaged(ctx, created.ID, created.Revision, "Operations renamed", nil, boolPtr(true), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,10 +64,10 @@ func TestManagedDeliverySurvivesMetadataEditAndPause(t *testing.T) {
 		t.Fatalf("metadata-edited delivery calls = %d, want 1", calls.Load())
 	}
 
-	if err := db.System().QueueEvent(ctx, managedKey(renamed.ID, renamed.Revision), model.Event{Type: "pause", CreatedAt: time.Now().UTC()}); err != nil {
+	if err := db.System().QueueEvent(ctx, managedKey(renamed.ID, renamed.Revision), model.Event{Type: "pause", TenantID: store.DefaultTenantID, CreatedAt: time.Now().UTC()}); err != nil {
 		t.Fatal(err)
 	}
-	paused, err := notifier.UpdateManaged(ctx, renamed.ID, renamed.Revision, renamed.Name, nil, boolPtr(false))
+	paused, err := defaultNotifier(notifier).updateManaged(ctx, renamed.ID, renamed.Revision, renamed.Name, nil, boolPtr(false), nil)
 	if err != nil || paused.Enabled {
 		t.Fatalf("pause result = %#v, %v", paused, err)
 	}
@@ -89,7 +89,7 @@ func TestManagedDeliverySurvivesMetadataEditAndPause(t *testing.T) {
 	} else if health["managed:"+created.ID].Pending != 0 {
 		t.Fatalf("paused delivery counted as pending: %#v", health["managed:"+created.ID])
 	}
-	resumed, err := notifier.UpdateManaged(ctx, paused.ID, paused.Revision, paused.Name, nil, boolPtr(true))
+	resumed, err := defaultNotifier(notifier).updateManaged(ctx, paused.ID, paused.Revision, paused.Name, nil, boolPtr(true), nil)
 	if err != nil || !resumed.Enabled {
 		t.Fatalf("resume result = %#v, %v", resumed, err)
 	}
@@ -113,7 +113,7 @@ func TestAuditedNotificationWrappersAndReadViews(t *testing.T) {
 		t.Fatal(err)
 	}
 	url := "generic://localhost/ops?disabletls=yes&template=json"
-	created, err := notifier.CreateManagedWithAudit(ctx, "Operations", url, true, store.AuditEntry{Action: "notifications.created", Detail: "created"})
+	created, err := defaultNotifier(notifier).CreateManagedWithAudit(ctx, "Operations", url, true, store.AuditEntry{Action: "notifications.created", Detail: "created"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,41 +124,41 @@ func TestAuditedNotificationWrappersAndReadViews(t *testing.T) {
 	if err != nil || strings.Contains(string(encoded), url) || strings.Contains(string(encoded), `"url"`) {
 		t.Fatalf("notification URL leaked in view: %s (%v)", encoded, err)
 	}
-	view, err := notifier.Destination(ctx, created.ID)
+	view, err := defaultNotifier(notifier).Destination(ctx, created.ID)
 	if err != nil || view.ID != created.ID || view.Name != "Operations" {
 		t.Fatalf("destination view = %#v, %v", view, err)
 	}
-	if _, err := notifier.Destination(ctx, "missing"); !errors.Is(err, store.ErrNotFound) {
+	if _, err := defaultNotifier(notifier).Destination(ctx, "missing"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("missing destination error = %v", err)
 	}
-	if err := notifier.ValidateDestinationSelection(ctx, nil); err != nil {
+	if err := defaultNotifier(notifier).ValidateDestinationSelection(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := notifier.ValidateDestinationSelection(ctx, []string{created.ID, created.ID}); err != nil {
+	if err := defaultNotifier(notifier).ValidateDestinationSelection(ctx, []string{created.ID, created.ID}); err != nil {
 		t.Fatalf("duplicate valid selection rejected: %v", err)
 	}
-	if err := notifier.ValidateDestinationSelection(ctx, []string{""}); !errors.Is(err, ErrInvalidDestinationSelection) {
+	if err := defaultNotifier(notifier).ValidateDestinationSelection(ctx, []string{""}); !errors.Is(err, ErrInvalidDestinationSelection) {
 		t.Fatalf("empty selection error = %v", err)
 	}
-	if status := notifier.Status(); status["managed"] != 1 || status["active"] != 1 || status["key_state"] != "ready" {
+	if status := defaultStatus(t, notifier); status["managed"] != 1 || status["active"] != 1 || status["key_state"] != "ready" {
 		t.Fatalf("notification status = %#v", status)
 	}
-	if count := notifier.ActiveCount(); count != 1 {
+	if count := defaultActiveCount(t, notifier); count != 1 {
 		t.Fatalf("active destination count = %d", count)
 	}
 
 	disabled := false
-	updated, err := notifier.UpdateManagedWithAudit(ctx, created.ID, created.Revision, "Ops renamed", nil, &disabled, store.AuditEntry{Action: "notifications.updated", Detail: "updated"})
+	updated, err := defaultNotifier(notifier).UpdateManagedWithAudit(ctx, created.ID, created.Revision, "Ops renamed", nil, &disabled, store.AuditEntry{Action: "notifications.updated", Detail: "updated"})
 	if err != nil || updated.Revision != 2 || updated.Enabled {
 		t.Fatalf("updated view = %#v, %v", updated, err)
 	}
-	if err := notifier.TestContext(ctx); err != nil {
+	if err := defaultTest(ctx, notifier); err != nil {
 		t.Fatalf("test with only disabled destination: %v", err)
 	}
-	if changedJobs, err := notifier.DeleteManagedWithAudit(ctx, created.ID, updated.Revision, store.AuditEntry{Action: "notifications.deleted", Detail: "deleted"}); err != nil || len(changedJobs) != 0 {
+	if changedJobs, err := defaultNotifier(notifier).DeleteManagedWithAudit(ctx, created.ID, updated.Revision, store.AuditEntry{Action: "notifications.deleted", Detail: "deleted"}); err != nil || len(changedJobs) != 0 {
 		t.Fatalf("delete without routed jobs = %#v, %v", changedJobs, err)
 	}
-	if err := notifier.Test(); err != nil {
+	if err := defaultTest(context.Background(), notifier); err != nil {
 		t.Fatalf("empty notification test: %v", err)
 	}
 	var audits int
@@ -181,19 +181,19 @@ func TestQueueDestinationsResolvesLegacyAndJobSelections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := notifier.CreateManaged(ctx, "Ops", "generic://localhost/ops?disabletls=yes", true)
+	created, err := defaultNotifier(notifier).createManaged(ctx, "Ops", "generic://localhost/ops?disabletls=yes", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	all, err := notifier.QueueDestinations(ctx)
+	all, err := defaultNotifier(notifier).QueueDestinationsForSelection(ctx, nil)
 	if err != nil || len(all) != 1 || all[0] == "" {
 		t.Fatalf("all destination keys = %#v, %v", all, err)
 	}
-	selected, err := notifier.QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{created.ID}})
+	selected, err := defaultNotifier(notifier).QueueDestinationsForJob(ctx, config.Job{NotificationDestinations: []string{created.ID}})
 	if err != nil || len(selected) != 1 || selected[0] != all[0] {
 		t.Fatalf("selected destination keys = %#v, %v", selected, err)
 	}
-	silent, err := notifier.QueueDestinationsForSelection(ctx, []string{})
+	silent, err := defaultNotifier(notifier).QueueDestinationsForSelection(ctx, []string{})
 	if err != nil || len(silent) != 0 {
 		t.Fatalf("silent destination keys = %#v, %v", silent, err)
 	}
@@ -210,7 +210,7 @@ func TestDeleteManagedRejectsStaleRevisionWithoutChangingRouting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	created, err := notifier.CreateManaged(ctx, "Ops", "generic://localhost/ops?disabletls=yes", true)
+	created, err := defaultNotifier(notifier).createManaged(ctx, "Ops", "generic://localhost/ops?disabletls=yes", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -219,21 +219,21 @@ func TestDeleteManagedRejectsStaleRevisionWithoutChangingRouting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := notifier.DeleteManaged(ctx, created.ID, created.Revision+1); !errors.Is(err, store.ErrConflict) {
+	if err := defaultDelete(ctx, notifier, created.ID, created.Revision+1); !errors.Is(err, store.ErrConflict) {
 		t.Fatalf("stale delete error = %v, want conflict", err)
 	}
-	if changed, err := notifier.DeleteManagedWithAudit(ctx, created.ID, created.Revision+1, store.AuditEntry{Action: "notifications.deleted"}); !errors.Is(err, store.ErrConflict) || changed != nil {
+	if changed, err := defaultNotifier(notifier).DeleteManagedWithAudit(ctx, created.ID, created.Revision+1, store.AuditEntry{Action: "notifications.deleted"}); !errors.Is(err, store.ErrConflict) || changed != nil {
 		t.Fatalf("stale audited delete = %#v, %v; want conflict", changed, err)
 	}
 	stored, err := db.Tenant(store.DefaultTenantScope()).GetJob(ctx, record.ID)
 	if err != nil || stored.Revision != record.Revision || strings.Join(stored.Job.NotificationDestinations, ",") != created.ID {
 		t.Fatalf("job routing after rejected deletes = %#v, %v", stored, err)
 	}
-	changed, err := notifier.DeleteManagedWithAudit(ctx, created.ID, created.Revision, store.AuditEntry{Action: "notifications.deleted"})
+	changed, err := defaultNotifier(notifier).DeleteManagedWithAudit(ctx, created.ID, created.Revision, store.AuditEntry{Action: "notifications.deleted"})
 	if err != nil || strings.Join(changed, ",") != record.ID {
 		t.Fatalf("audited delete changed jobs %#v, %v; want %s", changed, err, record.ID)
 	}
-	if views := notifier.Destinations(); len(views) != 0 {
+	if views := defaultDestinations(t, notifier); len(views) != 0 {
 		t.Fatalf("destinations after delete = %#v", views)
 	}
 }
@@ -250,13 +250,13 @@ func TestCanonicalSelectionReportsMissingDestinations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deployment := notifier.LegacySelection()[0]
-	paused, err := notifier.CreateManaged(ctx, "Paused", "generic://localhost/paused?disabletls=yes", false)
+	deployment := defaultLegacySelection(t, notifier)[0]
+	paused, err := defaultNotifier(notifier).createManaged(ctx, "Paused", "generic://localhost/paused?disabletls=yes", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	legacyDigest := "file:" + hashURL(deploymentURL)
-	canonical, missing := notifier.CanonicalSelection([]string{legacyDigest, paused.ID, " file:rotated ", "deleted", "", deployment})
+	canonical, missing := defaultCanonical(t, notifier, []string{legacyDigest, paused.ID, " file:rotated ", "deleted", "", deployment})
 	wantCanonical := []string{deployment, paused.ID, "deleted", "file:rotated"}
 	sort.Strings(wantCanonical)
 	if strings.Join(canonical, ",") != strings.Join(wantCanonical, ",") {
@@ -265,10 +265,10 @@ func TestCanonicalSelectionReportsMissingDestinations(t *testing.T) {
 	if strings.Join(missing, ",") != "deleted,file:rotated" {
 		t.Fatalf("missing selectors = %#v", missing)
 	}
-	if canonical, missing := notifier.CanonicalSelection(nil); canonical != nil || missing != nil {
+	if canonical, missing := defaultCanonical(t, notifier, nil); canonical != nil || missing != nil {
 		t.Fatalf("legacy nil selection = %#v, %#v", canonical, missing)
 	}
-	if canonical, missing := notifier.CanonicalSelection([]string{}); canonical == nil || len(canonical) != 0 || missing != nil {
+	if canonical, missing := defaultCanonical(t, notifier, []string{}); canonical == nil || len(canonical) != 0 || missing != nil {
 		t.Fatalf("explicit empty selection = %#v, %#v", canonical, missing)
 	}
 }

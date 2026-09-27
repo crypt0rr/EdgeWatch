@@ -16,18 +16,34 @@ const jobTenantSQL = `(SELECT CASE WHEN owner.id='' THEN '` + DefaultTenantID + 
 
 // eventTenantSQL returns the tenant_id of an event row, and of the outbox
 // rows queued for the event, with its arguments. A job's event belongs to
-// the job's tenant, as the job's scans do. An event without a job, such as
-// an update alert, belongs to the platform and has no tenant.
+// the job's tenant, as the job's scans do. An event without a job belongs to
+// the tenant it names, as a tenant's copy of an update alert does, or else
+// to the platform, with no tenant.
 func eventTenantSQL(event model.Event) (string, []any) {
-	if platformEvent(event) {
+	switch {
+	case platformEvent(event):
 		return "NULL", nil
+	case tenantEvent(event):
+		return "?", []any{event.TenantID}
+	default:
+		return jobTenantSQL, []any{event.JobID}
 	}
-	return jobTenantSQL, []any{event.JobID}
 }
 
 // platformEvent reports whether an event belongs to the platform: an event
-// without a job, such as an update alert.
+// without a job or a tenant, such as the platform's copy of an update alert.
 func platformEvent(event model.Event) bool {
+	return jobless(event) && event.TenantID == ""
+}
+
+// tenantEvent reports whether an event without a job belongs to the tenant
+// it names, such as a tenant's copy of an update alert.
+func tenantEvent(event model.Event) bool {
+	return jobless(event) && event.TenantID != ""
+}
+
+// jobless reports whether an event has no job, managed or from config.yaml.
+func jobless(event model.Event) bool {
 	return event.JobID == "" && event.Job == ""
 }
 

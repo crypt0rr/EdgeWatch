@@ -784,7 +784,7 @@ func TestActiveScansReportsInFlightManagedScan(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("scan did not start")
 	}
-	active := a.ActiveScans()
+	active := a.ActiveScans(store.DefaultTenantScope())
 	if len(active) != 1 || active[0].ID == "" || active[0].JobID != record.ID || active[0].Job != record.Job.Name {
 		t.Fatalf("unexpected active scan snapshot: %#v", active)
 	}
@@ -797,7 +797,7 @@ func TestActiveScansReportsInFlightManagedScan(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("scan did not complete")
 	}
-	if active := a.ActiveScans(); len(active) != 0 {
+	if active := a.ActiveScans(store.DefaultTenantScope()); len(active) != 0 {
 		t.Fatalf("completed scan remained active: %#v", active)
 	}
 }
@@ -831,11 +831,11 @@ func TestHighCostManagedScanReportsProgressAndCanBeCanceled(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("high-cost scan did not start")
 	}
-	active := a.ActiveScans()
+	active := a.ActiveScans(store.DefaultTenantScope())
 	if len(active) != 1 || active[0].TotalProbes != 2 || active[0].ProgressPercent != 0 || active[0].Phase != "scanning" {
 		t.Fatalf("unexpected progress snapshot: %#v", active)
 	}
-	if err := a.CancelScan(active[0].ID); err != nil {
+	if err := a.CancelScan(store.DefaultTenantScope(), active[0].ID); err != nil {
 		t.Fatalf("cancel scan: %v", err)
 	}
 	select {
@@ -853,7 +853,7 @@ func TestHighCostManagedScanReportsProgressAndCanBeCanceled(t *testing.T) {
 	if state.Baseline != nil || state.CandidateCount != 0 || len(state.Incidents) != 0 {
 		t.Fatalf("canceled scan mutated baseline state: %#v", state)
 	}
-	if active := a.ActiveScans(); len(active) != 0 {
+	if active := a.ActiveScans(store.DefaultTenantScope()); len(active) != 0 {
 		t.Fatalf("canceled scan remained active: %#v", active)
 	}
 }
@@ -910,11 +910,11 @@ func TestManagedTerminalOutcomesQueueNotifications(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("cancellable scan did not start")
 	}
-	active := a.ActiveScans()
+	active := a.ActiveScans(store.DefaultTenantScope())
 	if len(active) != 1 {
 		t.Fatalf("active scans = %#v", active)
 	}
-	if err := a.CancelScan(active[0].ID); err != nil {
+	if err := a.CancelScan(store.DefaultTenantScope(), active[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	select {

@@ -219,6 +219,17 @@ func (s *Store) Tenant(scope TenantScope) *TenantStore {
 	return &TenantStore{store: s, scope: scope}
 }
 
+// Scope returns the scope of the store's tenant. It names the tenant of work
+// that is not in the database, such as the scans that are running, so that a
+// request acts on its own tenant's work only. A store without a valid scope
+// returns ErrNoTenantScope.
+func (ts *TenantStore) Scope() (TenantScope, error) {
+	if err := ts.ready(); err != nil {
+		return TenantScope{}, err
+	}
+	return ts.scope, nil
+}
+
 // ready returns ErrNoTenantScope unless the store is bound to a tenant.
 func (ts *TenantStore) ready() error {
 	if ts == nil || ts.store == nil || !ts.scope.Valid() {

@@ -6,6 +6,15 @@ import (
 	"testing"
 )
 
+// defaultUpdateRoutes routes an update alert as a single-tenant installation
+// does: the platform's copy has no destinations, and the default tenant's
+// copy goes to the given ones.
+func defaultUpdateRoutes(destinations ...string) []UpdateAlertRoute {
+	return []UpdateAlertRoute{{}, {TenantID: DefaultTenantID, Destinations: destinations}}
+}
+
+// Each alert is recorded once, as the platform's copy and the default
+// tenant's, and is delivered once.
 func TestApplicationUpdateStateAndNotificationDeduplication(t *testing.T) {
 	s, err := Open(freshTestDatabasePath(t))
 	if err != nil {
@@ -19,10 +28,10 @@ func TestApplicationUpdateStateAndNotificationDeduplication(t *testing.T) {
 	if events, err := s.Platform().RecordInstalledVersion(ctx, "v1.0.0", "", false, nil); err != nil || len(events) != 0 {
 		t.Fatalf("first version seed events=%#v err=%v", events, err)
 	}
-	if events, err := s.Platform().RecordReleaseCheck(ctx, "v1.0.0", "v1.1.0", "https://github.com/crypt0rr/EdgeWatch/releases/tag/v1.1.0", "1.1", "2026-09-07T12:00:00Z", `"etag"`, true, []string{"file:test"}); err != nil || len(events) != 1 {
+	if events, err := s.Platform().RecordReleaseCheck(ctx, "v1.0.0", "v1.1.0", "https://github.com/crypt0rr/EdgeWatch/releases/tag/v1.1.0", "1.1", "2026-09-07T12:00:00Z", `"etag"`, true, defaultUpdateRoutes("file:test")); err != nil || len(events) != 2 {
 		t.Fatalf("new release events=%#v err=%v", events, err)
 	}
-	if events, err := s.Platform().RecordReleaseCheck(ctx, "v1.0.0", "v1.1.0", "https://github.com/crypt0rr/EdgeWatch/releases/tag/v1.1.0", "1.1", "2026-09-07T12:00:00Z", `"etag"`, true, []string{"file:test"}); err != nil || len(events) != 0 {
+	if events, err := s.Platform().RecordReleaseCheck(ctx, "v1.0.0", "v1.1.0", "https://github.com/crypt0rr/EdgeWatch/releases/tag/v1.1.0", "1.1", "2026-09-07T12:00:00Z", `"etag"`, true, defaultUpdateRoutes("file:test")); err != nil || len(events) != 0 {
 		t.Fatalf("duplicate release events=%#v err=%v", events, err)
 	}
 	var deliveries int
@@ -36,16 +45,16 @@ func TestApplicationUpdateStateAndNotificationDeduplication(t *testing.T) {
 	if err != nil || state.LatestVersion != "v1.1.0" || state.AnnouncedAvailableVersion != "v1.1.0" {
 		t.Fatalf("release state=%#v err=%v", state, err)
 	}
-	if events, err := s.Platform().RecordInstalledVersion(ctx, "v1.1.0", state.ReleaseURL, true, []string{"file:test"}); err != nil || len(events) != 1 {
+	if events, err := s.Platform().RecordInstalledVersion(ctx, "v1.1.0", state.ReleaseURL, true, defaultUpdateRoutes("file:test")); err != nil || len(events) != 2 {
 		t.Fatalf("upgrade events=%#v err=%v", events, err)
 	}
-	if events, err := s.Platform().RecordInstalledVersion(ctx, "v1.1.0", state.ReleaseURL, true, []string{"file:test"}); err != nil || len(events) != 0 {
+	if events, err := s.Platform().RecordInstalledVersion(ctx, "v1.1.0", state.ReleaseURL, true, defaultUpdateRoutes("file:test")); err != nil || len(events) != 0 {
 		t.Fatalf("duplicate upgrade events=%#v err=%v", events, err)
 	}
 	if events, err := s.Platform().RecordInstalledVersion(ctx, "v1.0.0", state.ReleaseURL, false, nil); err != nil || len(events) != 0 {
 		t.Fatalf("rollback events=%#v err=%v", events, err)
 	}
-	if events, err := s.Platform().RecordInstalledVersion(ctx, "v1.1.0", state.ReleaseURL, true, []string{"file:test"}); err != nil || len(events) != 1 {
+	if events, err := s.Platform().RecordInstalledVersion(ctx, "v1.1.0", state.ReleaseURL, true, defaultUpdateRoutes("file:test")); err != nil || len(events) != 2 {
 		t.Fatalf("re-upgrade events=%#v err=%v", events, err)
 	}
 	if err := s.Platform().RecordReleaseCheckFailure(ctx, "temporary upstream failure"); err != nil {

@@ -158,6 +158,11 @@ func assertTenantCreatesJobs(t *testing.T, f tenantFixture, create func(ts *Tena
 		pinned++
 		return create(ts, pinnedJob(fmt.Sprintf("edge-pinned-%d", pinned), profileID))
 	})
+	assertTenantPinsNoUDPProfile(t, f, func(ts *TenantStore, job config.Job) (JobRecord, error) {
+		pinned++
+		job.Name = fmt.Sprintf("edge-udp-%d", pinned)
+		return create(ts, job)
+	})
 }
 
 // pinnedJob returns a job whose TCP scan pins the scanner profile.
@@ -192,6 +197,27 @@ func assertTenantPinsOnlyItsProfiles(t *testing.T, f tenantFixture, write func(t
 	}
 	if tenantJobDigest(t, f.store, f.a) != beforeA {
 		t.Fatal("tenant B's scanner profile pins changed tenant A's jobs")
+	}
+}
+
+// assertTenantPinsNoUDPProfile writes a job of tenant B whose UDP scan pins
+// a scanner profile. No scan applies a UDP profile, so every one is refused
+// with ErrUDPScannerProfile, a validation error: tenant A's profiles, an
+// unknown ID, and also B's own and the built-in ones. No tenant's jobs
+// change.
+func assertTenantPinsNoUDPProfile(t *testing.T, f tenantFixture, write func(ts *TenantStore, job config.Job) (JobRecord, error)) {
+	t.Helper()
+	p := tenantFixtureProfiles
+	beforeA, beforeB := tenantJobDigest(t, f.store, f.a), tenantJobDigest(t, f.store, f.b)
+	for _, profileID := range []string{p.a, p.archivedA, unknownScannerProfileID, p.b, BuiltinNmapProfileID, BuiltinNaabuProfileID} {
+		job := testJob("edge")
+		job.UDP = &config.Protocol{Ports: "53", ProfileID: profileID}
+		if _, err := write(f.store.Tenant(f.b), config.NormalizeJob(job)); !errors.Is(err, ErrUDPScannerProfile) || !errors.Is(err, ErrValidation) {
+			t.Errorf("tenant B pinned UDP scanner profile %s: %v, want ErrUDPScannerProfile", profileID, err)
+		}
+	}
+	if tenantJobDigest(t, f.store, f.a) != beforeA || tenantJobDigest(t, f.store, f.b) != beforeB {
+		t.Fatal("a refused UDP scanner profile changed a tenant's jobs")
 	}
 }
 
@@ -230,6 +256,14 @@ func assertTenantUpdatesOnlyItsJobs(t *testing.T, f tenantFixture, update func(t
 			return JobRecord{}, err
 		}
 		return update(ts, f.jobB, current.Revision, pinnedJob("edge", profileID))
+	})
+	assertTenantPinsNoUDPProfile(t, f, func(ts *TenantStore, job config.Job) (JobRecord, error) {
+		current, err := ts.GetJob(context.Background(), f.jobB)
+		if err != nil {
+			return JobRecord{}, err
+		}
+		job.Targets = current.Job.Targets
+		return update(ts, f.jobB, current.Revision, job)
 	})
 }
 

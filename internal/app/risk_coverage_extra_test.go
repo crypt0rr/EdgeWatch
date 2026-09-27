@@ -121,8 +121,8 @@ func TestAppStartTrackedAndManagedSchedulerSkips(t *testing.T) {
 		t.Fatal("archived record was accepted")
 	}
 
-	if got := (&App{}).updateDestinations(ctx); got != nil {
-		t.Fatal("nil notifier returned destinations")
+	if got := (&App{}).updateAlertRoutes(ctx); got != nil {
+		t.Fatal("an app without a store returned update alert routes")
 	}
 	var events []model.Event
 	a.SetEventHandler(func(event model.Event) { events = append(events, event) })

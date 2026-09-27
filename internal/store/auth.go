@@ -55,6 +55,11 @@ type AuditEntry struct {
 	// with an ActorUserID takes the kind of that account, and a record
 	// without one is the daemon's.
 	ActorKind string
+	// platform records the entry in platform scope, with no tenant, whatever
+	// TenantID and the actor say. Only the store's platform writers set it,
+	// so no caller outside the store can move a record out of a tenant's
+	// audit.
+	platform bool
 }
 
 // Audit actor kinds, as security_audit.actor_kind stores them. A record
@@ -113,6 +118,11 @@ type Session struct {
 	// SourceIP is populated by the HTTP authentication layer after resolving
 	// a trusted proxy chain. It is not persisted in the session row.
 	SourceIP string
+	// TOTPEnrollmentRequired restricts the session to the account's own
+	// self-service until the account enrols an authenticator. The HTTP
+	// authentication layer sets it on every request, from the account and
+	// the number of tenants. It is not persisted in the session row.
+	TOTPEnrollmentRequired bool
 }
 
 type SetupToken struct {
@@ -328,17 +338,33 @@ func (ps *PlatformStore) PutSetupToken(ctx context.Context, hash string, expires
 // The timestamp is persisted so host recovery commands can enforce a rate
 // limit across short-lived CLI processes.
 func (ps *PlatformStore) PutSetupTokenAt(ctx context.Context, hash string, expires, issuedAt time.Time) error {
-	_, err := ps.store.DB.ExecContext(ctx, `INSERT INTO setup_tokens(id,token_hash,expires_at,used_at,issued_at) VALUES(1,?,?,NULL,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at,used_at=NULL,issued_at=excluded.issued_at`, hash, expires.UTC().Format(time.RFC3339Nano), issuedAt.UTC().Format(time.RFC3339Nano))
+	_, err := ps.store.DB.ExecContext(ctx, initialSetupTokenSQL, hash, expires.UTC().Format(time.RFC3339Nano), issuedAt.UTC().Format(time.RFC3339Nano))
 	return err
 }
 
-// GetSetupToken returns the state of the setup token, or ErrNotFound when
-// none was issued.
+// Setup token purposes, as setup_tokens.purpose stores them. The table holds
+// one token at a time: an initial token creates the default tenant's first
+// administrator, and a platform token creates a platform administrator. Each
+// token is accepted only for its own purpose.
+const (
+	SetupTokenPurposeInitial  = "initial"
+	SetupTokenPurposePlatform = "platform"
+)
+
+// initialSetupTokenSQL replaces the setup token with an initial one. REPLACE
+// deletes the previous row, so the new row takes the purpose column's
+// default, the initial purpose, whatever the previous token was for. The
+// statement names no purpose so that it also fits a database before schema
+// 51, which a host command may open without migrating it.
+const initialSetupTokenSQL = `INSERT OR REPLACE INTO setup_tokens(id,token_hash,expires_at,used_at,issued_at) VALUES(1,?,?,NULL,?)`
+
+// GetSetupToken returns the state of the initial setup token, or ErrNotFound
+// when none was issued. A platform setup token is not reported.
 func (ps *PlatformStore) GetSetupToken(ctx context.Context) (SetupToken, error) {
 	var expires string
 	var issued string
 	var used sql.NullString
-	err := ps.store.reader().QueryRowContext(ctx, `SELECT expires_at,used_at,issued_at FROM setup_tokens WHERE id=1`).Scan(&expires, &used, &issued)
+	err := ps.store.reader().QueryRowContext(ctx, `SELECT expires_at,used_at,issued_at FROM setup_tokens WHERE id=1 AND purpose=?`, SetupTokenPurposeInitial).Scan(&expires, &used, &issued)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SetupToken{}, ErrNotFound
 	}
@@ -371,7 +397,7 @@ func (ps *PlatformStore) ReissueSetupToken(ctx context.Context, hash string, exp
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO setup_tokens(id,token_hash,expires_at,used_at,issued_at) VALUES(1,?,?,NULL,?) ON CONFLICT(id) DO UPDATE SET token_hash=excluded.token_hash,expires_at=excluded.expires_at,used_at=NULL,issued_at=excluded.issued_at`, hash, expires.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano)); err != nil {
+	if _, err = tx.ExecContext(ctx, initialSetupTokenSQL, hash, expires.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano)); err != nil {
 		return err
 	}
 	// The token creates the default tenant's first administrator, so the
@@ -410,7 +436,7 @@ func (ps *PlatformStore) CompleteSetup(ctx context.Context, tokenHash string, ad
 	defer tx.Rollback()
 	var expires string
 	var used sql.NullString
-	if err = tx.QueryRowContext(ctx, `SELECT expires_at,used_at FROM setup_tokens WHERE id=1 AND token_hash=?`, tokenHash).Scan(&expires, &used); errors.Is(err, sql.ErrNoRows) {
+	if err = tx.QueryRowContext(ctx, `SELECT expires_at,used_at FROM setup_tokens WHERE id=1 AND token_hash=? AND purpose=?`, tokenHash, SetupTokenPurposeInitial).Scan(&expires, &used); errors.Is(err, sql.ErrNoRows) {
 		return errors.New("invalid setup token")
 	} else if err != nil {
 		return err
@@ -424,7 +450,7 @@ func (ps *PlatformStore) CompleteSetup(ctx context.Context, tokenHash string, ad
 	if _, err = tx.ExecContext(ctx, `INSERT INTO users(id,tenant_id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, LegacyAdminUserID, DefaultTenantID, admin.Username, adminDisplayName(admin), RoleAdministrator, admin.PasswordHash, storedSecret, boolInt(admin.TOTPEnabled), 1, admin.CreatedAt.UTC().Format(time.RFC3339Nano), admin.UpdatedAt.UTC().Format(time.RFC3339Nano), ""); err != nil {
 		return err
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1 AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano))
+	result, err := tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1 AND used_at IS NULL AND purpose=?`, now.UTC().Format(time.RFC3339Nano), SetupTokenPurposeInitial)
 	if err != nil {
 		return err
 	}
@@ -439,7 +465,7 @@ func (ps *PlatformStore) CompleteSetup(ctx context.Context, tokenHash string, ad
 	return tx.Commit()
 }
 
-// ConsumeSetupToken marks a valid, unexpired setup token used.
+// ConsumeSetupToken marks a valid, unexpired initial setup token used.
 func (ps *PlatformStore) ConsumeSetupToken(ctx context.Context, hash string, now time.Time) error {
 	tx, err := ps.store.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -448,7 +474,7 @@ func (ps *PlatformStore) ConsumeSetupToken(ctx context.Context, hash string, now
 	defer tx.Rollback()
 	var expires string
 	var used sql.NullString
-	if err = tx.QueryRowContext(ctx, `SELECT expires_at,used_at FROM setup_tokens WHERE id=1 AND token_hash=?`, hash).Scan(&expires, &used); errors.Is(err, sql.ErrNoRows) {
+	if err = tx.QueryRowContext(ctx, `SELECT expires_at,used_at FROM setup_tokens WHERE id=1 AND token_hash=? AND purpose=?`, hash, SetupTokenPurposeInitial).Scan(&expires, &used); errors.Is(err, sql.ErrNoRows) {
 		return errors.New("invalid setup token")
 	} else if err != nil {
 		return err
@@ -456,7 +482,7 @@ func (ps *PlatformStore) ConsumeSetupToken(ctx context.Context, hash string, now
 	if used.Valid || !now.Before(scanTime(expires)) {
 		return errors.New("setup token expired or already used")
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1 AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano))
+	result, err := tx.ExecContext(ctx, `UPDATE setup_tokens SET used_at=? WHERE id=1 AND used_at IS NULL AND purpose=?`, now.UTC().Format(time.RFC3339Nano), SetupTokenPurposeInitial)
 	if err != nil {
 		return err
 	}
@@ -904,7 +930,15 @@ func (ts *TenantStore) AuditEntry(ctx context.Context, entry AuditEntry) error {
 // entry or its actor: a platform administrator acting on a tenant is
 // recorded in that tenant as a platform actor.
 func (ts *TenantStore) insertAuditEntry(ctx context.Context, execer contextExecer, entry AuditEntry, now time.Time) error {
-	entry.TenantID = ts.scope.id
+	entry.TenantID, entry.platform = ts.scope.id, false
+	return insertAuditEntryExec(ctx, execer, entry, now)
+}
+
+// insertPlatformAuditEntry writes an audit record in platform scope: its
+// tenant is NULL, whatever the entry or its actor names, so the record
+// belongs to the platform's audit and to no tenant's.
+func insertPlatformAuditEntry(ctx context.Context, execer contextExecer, entry AuditEntry, now time.Time) error {
+	entry.TenantID, entry.platform = "", true
 	return insertAuditEntryExec(ctx, execer, entry, now)
 }
 
@@ -926,19 +960,19 @@ func insertAuditExec(ctx context.Context, execer contextExecer, action, detail s
 	return insertAuditEntryExec(ctx, execer, AuditEntry{Action: action, Detail: detail}, now)
 }
 
-// auditInsertSQL writes one audit record. Its tenant and actor kind come
-// from the entry when the entry names them. Otherwise they come from the
-// account in actor_user_id, read in the same statement: the account's
-// tenant, which is NULL for a platform administrator, and the platform kind
-// for a platform administrator or the unit kind for any other account. A
-// record without an account belongs to the default tenant and to the
-// daemon. The last three arguments are the entry's tenant, actor kind, and
-// actor account.
+// auditInsertSQL writes one audit record. A record in platform scope has no
+// tenant. Otherwise its tenant and actor kind come from the entry when the
+// entry names them, or else from the account in actor_user_id, read in the
+// same statement: the account's tenant, which is NULL for a platform
+// administrator, and the platform kind for a platform administrator or the
+// unit kind for any other account. A record without an account belongs to
+// the default tenant and to the daemon. The last four arguments are the
+// entry's tenant, actor kind, and actor account, and 1 for platform scope.
 const auditInsertSQL = `INSERT INTO security_audit(action,detail,actor_user_id,actor_username,source_ip,request_id,category,created_at,tenant_id,actor_kind) ` +
 	`SELECT ?,?,?,?,?,?,?,?,` +
-	`CASE WHEN entry.tenant<>'' THEN entry.tenant WHEN actor.id IS NOT NULL THEN actor.tenant_id ELSE '` + DefaultTenantID + `' END,` +
+	`CASE WHEN entry.platform=1 THEN NULL WHEN entry.tenant<>'' THEN entry.tenant WHEN actor.id IS NOT NULL THEN actor.tenant_id ELSE '` + DefaultTenantID + `' END,` +
 	`CASE WHEN entry.kind<>'' THEN entry.kind WHEN actor.role='` + RolePlatformAdmin + `' THEN '` + AuditActorPlatform + `' WHEN entry.actor<>'' THEN '` + AuditActorUnit + `' ELSE '` + AuditActorSystem + `' END ` +
-	`FROM (SELECT ? AS tenant,? AS kind,? AS actor) AS entry LEFT JOIN users AS actor ON actor.id=entry.actor`
+	`FROM (SELECT ? AS tenant,? AS kind,? AS actor,? AS platform) AS entry LEFT JOIN users AS actor ON actor.id=entry.actor`
 
 func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry AuditEntry, now time.Time) error {
 	if strings.TrimSpace(entry.Action) == "" {
@@ -957,7 +991,7 @@ func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry Audit
 		entry.SourceIP = requestContext.SourceIP
 	}
 	createdAt := now.UTC().Format(time.RFC3339Nano)
-	_, err := execer.ExecContext(ctx, auditInsertSQL, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, auditCategory(entry.Action), createdAt, entry.TenantID, entry.ActorKind, entry.ActorUserID)
+	_, err := execer.ExecContext(ctx, auditInsertSQL, entry.Action, entry.Detail, entry.ActorUserID, entry.ActorUsername, entry.SourceIP, entry.RequestID, auditCategory(entry.Action), createdAt, entry.TenantID, entry.ActorKind, entry.ActorUserID, boolInt(entry.platform))
 	if err != nil {
 		// Host commands open the database without migrating it, for example
 		// the restored copy of an older backup, so the record may have to
@@ -972,8 +1006,12 @@ func insertAuditEntryExec(ctx context.Context, execer contextExecer, entry Audit
 		case schema == auditSchemaBefore52:
 			// Accounts have no tenant before schema 52: each one belongs
 			// to the default tenant, and none is a platform administrator.
-			tenant, kind := entry.TenantID, entry.ActorKind
-			if tenant == "" {
+			var tenant any = entry.TenantID
+			kind := entry.ActorKind
+			switch {
+			case entry.platform:
+				tenant = nil
+			case entry.TenantID == "":
 				tenant = DefaultTenantID
 			}
 			if kind == "" {

@@ -102,6 +102,7 @@ func TestBaselineRoutesUseTheSessionTenant(t *testing.T) {
 		}
 		cookies[name] = raw
 	}
+	enrollAdministratorsInTOTP(t, db)
 	call := func(account, method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))
 		req.AddCookie(&http.Cookie{Name: "edgewatch_session", Value: cookies[account]})

@@ -25,6 +25,22 @@ func defaultTenantStore(server *Server) *store.TenantStore {
 	return defaultTenant(server.Store)
 }
 
+// enrollAdministratorsInTOTP gives every administrator without TOTP an
+// authenticator, as more than one unit requires: until it enrols, an
+// administrator's session holds only its own account's self-service. The
+// two-unit fixtures call it so their administrators have full sessions. The
+// seed is stored in the legacy plaintext form, which the store still reads,
+// so the accounts' revisions and sessions stay as the fixture made them.
+func enrollAdministratorsInTOTP(t *testing.T, db *store.Store) {
+	t.Helper()
+	if _, err := db.DB.Exec(`UPDATE users SET totp_enabled=1,totp_secret=? WHERE role IN (?,?) AND totp_enabled=0`, testTOTPSeed, store.RoleAdministrator, store.RolePlatformAdmin); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// testTOTPSeed is the authenticator seed of the test accounts that enrol.
+const testTOTPSeed = "JBSWY3DPEHPK3PXP"
+
 // defaultTenant returns the default tenant's store of a database, for the
 // tests that seed or check data without a server.
 func defaultTenant(s *store.Store) *store.TenantStore {
@@ -207,6 +223,7 @@ func TestJobRoutesUseTheSessionTenant(t *testing.T) {
 		}
 		cookies[name] = raw
 	}
+	enrollAdministratorsInTOTP(t, db)
 	get := func(account, path string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.AddCookie(&http.Cookie{Name: "edgewatch_session", Value: cookies[account]})

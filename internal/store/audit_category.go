@@ -45,9 +45,12 @@ var auditActionCategories = map[string]string{
 	"auth.legacy_recovery_codes_retired": auditCategoryAccount,
 
 	// Account lifecycle, credentials, and sessions. The setup token is the
-	// one-time credential for creating the first administrator account.
+	// one-time credential for creating the first administrator account, and
+	// the platform setup token for creating a platform administrator.
 	"admin.setup":                       auditCategoryAccount,
 	"admin.setup_token_reissued":        auditCategoryAccount,
+	"platform_admin.setup":              auditCategoryAccount,
+	"platform_admin.setup_token_issued": auditCategoryAccount,
 	"admin.display_name_changed":        auditCategoryAccount,
 	"admin.password_changed":            auditCategoryAccount,
 	"admin.password_reset":              auditCategoryAccount,

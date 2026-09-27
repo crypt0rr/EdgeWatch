@@ -98,6 +98,7 @@ func newTenantAccountsFixture(t *testing.T) tenantAccountsFixture {
 		}
 		f.cookies[name] = raw
 	}
+	enrollAdministratorsInTOTP(t, db)
 	return f
 }
 

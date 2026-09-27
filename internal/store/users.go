@@ -228,7 +228,7 @@ func (ts *TenantStore) CreateUser(ctx context.Context, u User, audit AuditEntry)
 	if err := ts.ready(); err != nil {
 		return User{}, err
 	}
-	return ts.createUser(ctx, u, nil, audit)
+	return ts.createUser(ctx, u, nil, audit, nil)
 }
 
 type userInviteRecord struct {
@@ -250,14 +250,20 @@ func (ts *TenantStore) CreateUserWithInvite(ctx context.Context, u User, idHash 
 	if !expires.After(created) {
 		return User{}, errors.New("activation token expiry must be after creation")
 	}
-	return ts.createUser(ctx, u, &userInviteRecord{idHash: idHash, created: created, expires: expires}, audit)
+	return ts.createUser(ctx, u, &userInviteRecord{idHash: idHash, created: created, expires: expires}, audit, nil)
 }
+
+// userWriteCheck is a policy check that an account write runs first in its
+// own transaction, so the policy holds for the state the write changes.
+type userWriteCheck func(ctx context.Context, tx *sql.Tx) error
 
 // createUser creates the account in the store's tenant. Only the roles of a
 // tenant's account are accepted, so a platform administrator is never
 // created here. Usernames are unique across tenants; a name that any
-// account holds is ErrUsernameUnavailable, which does not say where.
-func (ts *TenantStore) createUser(ctx context.Context, u User, invite *userInviteRecord, audit AuditEntry) (User, error) {
+// account holds is ErrUsernameUnavailable, which does not say where. A
+// non-nil check runs first in the transaction, and its error stops the
+// write.
+func (ts *TenantStore) createUser(ctx context.Context, u User, invite *userInviteRecord, audit AuditEntry, check userWriteCheck) (User, error) {
 	if u.ID == "" {
 		u.ID = uuid.NewString()
 	}
@@ -300,6 +306,11 @@ func (ts *TenantStore) createUser(ctx context.Context, u User, invite *userInvit
 		return User{}, err
 	}
 	defer tx.Rollback()
+	if check != nil {
+		if err := check(ctx, tx); err != nil {
+			return User{}, err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id,tenant_id,username,display_name,role,password_hash,totp_secret,totp_enabled,enabled,created_at,updated_at,last_login_at,revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, u.ID, ts.scope.id, u.Username, u.DisplayName, u.Role, u.PasswordHash, stored, boolInt(u.TOTPEnabled), boolInt(u.Enabled), u.CreatedAt.UTC().Format(time.RFC3339Nano), u.UpdatedAt.UTC().Format(time.RFC3339Nano), "", u.Revision); err != nil {
 		return User{}, usernameConflict(err)
 	}
@@ -687,6 +698,13 @@ func (ts *TenantStore) CreateUserInviteWithAudit(ctx context.Context, idHash, us
 	if err := ts.ready(); err != nil {
 		return err
 	}
+	return ts.createUserInviteWithAudit(ctx, idHash, userID, created, expires, audit, nil)
+}
+
+// createUserInviteWithAudit is CreateUserInviteWithAudit with a policy check
+// that runs first in the transaction; its error stops the write. The
+// account must still belong to the tenant.
+func (ts *TenantStore) createUserInviteWithAudit(ctx context.Context, idHash, userID string, created, expires time.Time, audit AuditEntry, check userWriteCheck) error {
 	if strings.TrimSpace(idHash) == "" || strings.TrimSpace(userID) == "" {
 		return errors.New("activation token and user are required")
 	}
@@ -698,6 +716,11 @@ func (ts *TenantStore) CreateUserInviteWithAudit(ctx context.Context, idHash, us
 		return err
 	}
 	defer tx.Rollback()
+	if check != nil {
+		if err := check(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if err := ts.requireTenantUserTx(ctx, tx, userID); err != nil {
 		return err
 	}

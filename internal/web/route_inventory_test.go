@@ -126,10 +126,13 @@ func newRouteMatrixSessions(t *testing.T) (*Server, []routeMatrixSession) {
 	t.Helper()
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
-	accounts := []routeMatrixSession{{role: store.RoleAdministrator}, {role: store.RoleOperator}, {role: store.RoleViewer}}
+	accounts := []routeMatrixSession{{role: store.RoleAdministrator}, {role: store.RoleOperator}, {role: store.RoleViewer}, {role: store.RolePlatformAdmin}}
 	for index, account := range accounts {
 		username, password := "admin", "administrator password"
-		if account.role != store.RoleAdministrator {
+		if account.role == store.RolePlatformAdmin {
+			username, password = "platform", "platform administrator password"
+			createWebPlatformAdmin(t, server, username, password)
+		} else if account.role != store.RoleAdministrator {
 			username, password = account.role, account.role+" account password"
 			hash, err := auth.PasswordHash(password)
 			if err != nil {

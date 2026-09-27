@@ -46,6 +46,49 @@ verification codes. A mistyped code can be retried against the same secret;
 after the fifth incorrect code, or once the ten minutes pass, the pending secret
 is discarded and setup must start again.
 
+## Business units and the platform administrator (experimental)
+
+Business units are under development and stay off unless
+`experimental.business_units` is `true`. While the flag is off, EdgeWatch
+refuses to issue a platform setup token or to create a platform
+administrator, and a single unit behaves as before.
+
+A platform administrator is a separate account without a unit. It manages
+the units and their administrators and holds no permission on any unit's
+jobs, scans, baselines, incidents, notifications, or public status: every
+route of a unit's console refuses it except its own account's password,
+TOTP, session, and sign-out routes. Only the host creates one: `edgewatch
+admin platform-setup-token` prints a one-time token, valid for 15 minutes,
+once the first administrator exists and while no enabled platform
+administrator does, at most once a minute, and replaces an unused token only
+with `--force`. The token cannot complete the first setup, and the first
+setup token cannot create a platform administrator. Usernames stay unique
+across every unit and the platform.
+
+A platform administrator invites only unit administrators, and resets only
+unit administrators' passwords; a unit's administrators invite and reset the
+accounts of their own unit, including its operators and viewers, and cannot
+reach another unit's accounts or a platform administrator. The rule follows
+the target account's role and unit, not the request. No platform administrator can reset another through
+the product; the host commands `admin reset-password` and `admin
+disable-totp` remain the break-glass path for every account. Each unit keeps
+at least one enabled administrator, and the platform at least one enabled
+platform administrator, whose role never changes.
+
+Once more than one unit exists, every unit administrator and platform
+administrator must use TOTP. Until one without TOTP enrols, its sessions
+report `totp_enrollment_required` and may only use its own account's
+settings (password, TOTP enrolment, display name, and sessions) and sign
+out; everything else is refused.
+If the units cannot be counted, the restriction applies. With a single unit
+nothing changes.
+
+A platform administrator's action on a unit's account is recorded in that
+unit's security audit with the `platform` actor kind, so the unit's
+administrators see it. The platform administrator's own actions, sign-in
+attempts on its account, and sign-in attempts with a username that no account
+has are recorded in platform scope, outside every unit's audit.
+
 ## Live-update streams and session revocation
 
 The authenticated live-update stream (`/api/v1/stream`) is authorized to the

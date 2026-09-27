@@ -722,12 +722,13 @@ func TestAuditEntryBeforeSchema52UsesTheDefaultTenant(t *testing.T) {
 		{AuditEntry{Action: "user.login", ActorUserID: accountAdminA}, DefaultTenantID, AuditActorUnit},
 		{AuditEntry{Action: "notifications.pending_discarded"}, DefaultTenantID, AuditActorSystem},
 		{AuditEntry{Action: "database.restore", ActorKind: AuditActorHost, TenantID: secondTenantID}, secondTenantID, AuditActorHost},
+		{AuditEntry{Action: "platform_admin.setup_token_issued", ActorKind: AuditActorHost, TenantID: secondTenantID, platform: true}, "<null>", AuditActorHost},
 	} {
 		if err := insertAuditEntryExec(ctx, db, check.entry, time.Now().UTC()); err != nil {
 			t.Fatalf("%s: %v", check.entry.Action, err)
 		}
 		var tenant, kind, category string
-		if err := db.QueryRowContext(ctx, `SELECT tenant_id,actor_kind,category FROM security_audit WHERE action=?`, check.entry.Action).Scan(&tenant, &kind, &category); err != nil {
+		if err := db.QueryRowContext(ctx, `SELECT COALESCE(tenant_id,'<null>'),actor_kind,category FROM security_audit WHERE action=?`, check.entry.Action).Scan(&tenant, &kind, &category); err != nil {
 			t.Fatal(err)
 		}
 		if tenant != check.tenant || kind != check.kind || category != auditCategory(check.entry.Action) {

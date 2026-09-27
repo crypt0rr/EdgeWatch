@@ -42,6 +42,16 @@ const (
 	// it explicit prevents a newly added /auth/* mutation from becoming an
 	// accidental authorization exemption.
 	PermissionAccountSelf = "account.self"
+
+	// The platform permissions belong to the platform administrator, who
+	// manages the business units and their administrators, reads the
+	// platform audit and status, and routes platform notifications. They
+	// grant nothing on a unit's data, and no route grants them yet.
+	PermissionUnitsManage                 = "units.manage"
+	PermissionUnitAccountsManage          = "unit_accounts.manage"
+	PermissionPlatformAuditRead           = "platform_audit.read"
+	PermissionPlatformNotificationsManage = "platform_notifications.manage"
+	PermissionPlatformStatusRead          = "platform_status.read"
 )
 
 var rolePermissions = map[string]map[string]bool{
@@ -73,6 +83,14 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionJobsRead: true, PermissionBaselinesRead: true,
 		PermissionAccountSelf: true,
 	},
+	store.RolePlatformAdmin: {
+		// A platform administrator has no unit and holds no permission on a
+		// unit's data: every route of a unit's console refuses it.
+		PermissionUnitsManage: true, PermissionUnitAccountsManage: true,
+		PermissionPlatformAuditRead: true, PermissionPlatformNotificationsManage: true,
+		PermissionPlatformStatusRead: true,
+		PermissionAccountSelf:        true,
+	},
 }
 
 func PermissionsForRole(role string) []string {
@@ -86,6 +104,26 @@ func PermissionsForRole(role string) []string {
 	return result
 }
 
+// PermissionsForSession returns the permissions of the signed-in session. A
+// session that must enrol TOTP first holds only its own account's
+// self-service; any other session holds those of its role.
+func PermissionsForSession(session store.Session) []string {
+	if session.TOTPEnrollmentRequired {
+		result := []string{}
+		if rolePermissions[session.Role][PermissionAccountSelf] {
+			result = append(result, PermissionAccountSelf)
+		}
+		return result
+	}
+	return PermissionsForRole(session.Role)
+}
+
+// HasPermission reports whether the session holds the permission. A session
+// that must enrol TOTP holds only PermissionAccountSelf, which covers the
+// enrolment, a password change, and signing out, until the account enrols.
 func HasPermission(session store.Session, permission string) bool {
+	if session.TOTPEnrollmentRequired && permission != PermissionAccountSelf {
+		return false
+	}
 	return rolePermissions[session.Role][permission]
 }

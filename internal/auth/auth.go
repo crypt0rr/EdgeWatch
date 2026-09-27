@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -130,6 +131,9 @@ type Manager struct {
 	trustedProxies       []*net.IPNet
 	forwardedHeader      string
 	argon2Sem            chan struct{}
+	// businessUnits mirrors experimental.business_units. While it is off,
+	// no platform setup token is issued or redeemed.
+	businessUnits atomic.Bool
 }
 
 func NewManager(s *store.Store) *Manager {
@@ -615,7 +619,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			}
 			return "", store.User{}, err
 		}
-		m.auditAuthFailure(ctx, "auth.login_failed", identity, request)
+		m.auditUnknownAccountFailure(ctx, "auth.login_failed", identity, request)
 		return "", store.User{}, errors.New("invalid credentials")
 	}
 	if !user.Enabled {
@@ -632,7 +636,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			}
 			return "", user, err
 		}
-		m.auditAccountFailure(ctx, "auth.login_failed", identity, user.TenantID, request)
+		m.auditAccountFailure(ctx, "auth.login_failed", identity, user, request)
 		return "", user, errors.New("invalid credentials")
 	}
 	var passwordValid bool
@@ -647,7 +651,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	}
 	if !passwordValid {
 		m.failedScoped(source, account, "", false)
-		m.auditAccountFailure(ctx, "auth.login_failed", identity, user.TenantID, request)
+		m.auditAccountFailure(ctx, "auth.login_failed", identity, user, request)
 		return "", user, errors.New("invalid credentials")
 	}
 	totpAccepted := false
@@ -671,12 +675,12 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		if !valid && recovery != "" {
 			valid, err = m.Store.ConsumeRecoveryCodeTextForUser(ctx, user.ID, recovery, m.now())
 			if valid {
-				m.auditAccountFailure(ctx, "auth.recovery_code_used", identity, user.TenantID, request)
+				m.auditAccountFailure(ctx, "auth.recovery_code_used", identity, user, request)
 			}
 		}
 		if !valid {
 			m.failedScoped(source, account, "", false)
-			m.auditAccountFailure(ctx, "auth.totp_failed", identity, user.TenantID, request)
+			m.auditAccountFailure(ctx, "auth.totp_failed", identity, user, request)
 			return "", user, errors.New("one-time code is required")
 		}
 	}
@@ -725,7 +729,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			// answer is the one a wrong password gets, so it does not tell
 			// the caller that the password was right.
 			m.failedScoped(source, account, "", false)
-			m.auditAccountFailure(ctx, "auth.login_failed", identity, user.TenantID, request)
+			m.auditAccountFailure(ctx, "auth.login_failed", identity, user, request)
 			return "", user, errors.New("invalid credentials")
 		}
 		if !errors.Is(err, store.ErrSessionCredentialsChanged) && !errors.Is(err, store.ErrPasswordChangedDuringLogin) {
@@ -826,7 +830,7 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 	}
 	if err != nil || !user.Enabled || !passwordValid {
 		m.failedScoped(source, account, "", false)
-		m.auditAccountFailure(ctx, "auth.password_confirmation_failed", userID, user.TenantID, request)
+		m.auditAccountFailure(ctx, "auth.password_confirmation_failed", userID, user, request)
 		return errors.New("password confirmation failed")
 	}
 	m.clearScoped(source, account, "")
@@ -864,7 +868,7 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 	}
 	if !valid {
 		m.failedScoped(source, account, "", false)
-		m.auditAccountFailure(ctx, "auth.totp_confirmation_failed", userID, user.TenantID, request)
+		m.auditAccountFailure(ctx, "auth.totp_confirmation_failed", userID, user, request)
 		return errors.New("current one-time code is required")
 	}
 	m.clearScoped(source, account, "")
@@ -874,23 +878,43 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 // auditAuthFailure records an authentication security event without allowing
 // an unavailable audit table to alter the response to the original request.
 // Values are bounded and never contain passwords, OTPs, or recovery codes.
-// The event names no known account, so it belongs to the default tenant,
-// whose console serves sign-in.
+// The event names no account, so it belongs to the default tenant, whose
+// console serves setup and activation.
 func (m *Manager) auditAuthFailure(ctx context.Context, action, subject string, request *http.Request) {
-	m.auditAccountFailure(ctx, action, subject, "", request)
+	m.recordAuthEvent(ctx, action, subject, "", false, request)
+}
+
+// auditUnknownAccountFailure is auditAuthFailure for a sign-in with a
+// username that no account has. No tenant owns the name, so the record
+// belongs to the platform, not to the default tenant.
+func (m *Manager) auditUnknownAccountFailure(ctx context.Context, action, subject string, request *http.Request) {
+	m.recordAuthEvent(ctx, action, subject, "", true, request)
 }
 
 // auditAccountFailure is auditAuthFailure for an event about a known
-// account: the record belongs to the account's tenant, tenantID, so that
-// tenant's administrators see the attempts on its accounts. An empty
-// tenantID records the event in the default tenant. The request comes from
-// a tenant's console without a session, so the actor is a unit actor.
-func (m *Manager) auditAccountFailure(ctx context.Context, action, subject, tenantID string, request *http.Request) {
+// account: the record belongs to the account's tenant, so that tenant's
+// administrators see the attempts on its accounts. A platform
+// administrator has no tenant, so the attempts on its account belong to the
+// platform. An account that could not be read names no tenant, and its
+// record belongs to the default tenant.
+func (m *Manager) auditAccountFailure(ctx context.Context, action, subject string, account store.User, request *http.Request) {
+	m.recordAuthEvent(ctx, action, subject, account.TenantID, account.Role == store.RolePlatformAdmin, request)
+}
+
+// recordAuthEvent writes the record of an authentication event in the
+// tenant, or in platform scope. The request comes from a console without a
+// session, so the actor is a unit actor, the kind of an anonymous console
+// request.
+func (m *Manager) recordAuthEvent(ctx context.Context, action, subject, tenantID string, platform bool, request *http.Request) {
 	subject = strings.TrimSpace(subject)
 	if len(subject) > 80 {
 		subject = subject[:80]
 	}
-	if err := m.Store.AuditEntry(ctx, store.AuditEntry{
+	write := m.Store.AuditEntry
+	if platform {
+		write = m.Store.Platform().AuditEntry
+	}
+	if err := write(ctx, store.AuditEntry{
 		Action:        action,
 		Detail:        "authentication event for " + subject,
 		ActorUsername: subject,
@@ -1410,6 +1434,7 @@ func (m *Manager) authenticate(ctx context.Context, r *http.Request, touch bool)
 		_ = m.Store.TouchSession(ctx, session.IDHash, now, session.ExpiresAt)
 	}
 	session.Username, session.DisplayName, session.Role = user.Username, user.DisplayName, user.Role
+	session.TOTPEnrollmentRequired = m.TOTPEnrollmentRequired(ctx, user)
 	session.SourceIP = m.ClientIP(r)
 	return session, true
 }

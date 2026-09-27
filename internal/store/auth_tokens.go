@@ -9,11 +9,19 @@ import (
 
 // SetupTokenUsable performs the cheap, read-only part of setup validation.
 // Callers should use it before scheduling Argon2 work so obviously stale or
-// already-consumed tokens cannot be used as a password-hashing oracle.
+// already-consumed tokens cannot be used as a password-hashing oracle. Only
+// an initial setup token is usable for the first setup, never a platform
+// setup token.
 func (ps *PlatformStore) SetupTokenUsable(ctx context.Context, tokenHash string, now time.Time) (bool, error) {
+	return ps.setupTokenUsable(ctx, tokenHash, SetupTokenPurposeInitial, now)
+}
+
+// setupTokenUsable reports whether the setup token with the hash is for the
+// purpose, unused, and unexpired.
+func (ps *PlatformStore) setupTokenUsable(ctx context.Context, tokenHash, purpose string, now time.Time) (bool, error) {
 	var expires string
 	var used sql.NullString
-	if err := ps.store.reader().QueryRowContext(ctx, `SELECT expires_at,used_at FROM setup_tokens WHERE id=1 AND token_hash=?`, tokenHash).Scan(&expires, &used); errors.Is(err, sql.ErrNoRows) {
+	if err := ps.store.reader().QueryRowContext(ctx, `SELECT expires_at,used_at FROM setup_tokens WHERE id=1 AND token_hash=? AND purpose=?`, tokenHash, purpose).Scan(&expires, &used); errors.Is(err, sql.ErrNoRows) {
 		return false, nil
 	} else if err != nil {
 		return false, err

@@ -193,6 +193,7 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 		if err := v.Auth.SetForwardedHeader(a.Config.Web.ForwardedHeader); err != nil {
 			logger.Error("trusted proxy forwarding header configuration rejected", "error", err)
 		}
+		v.Auth.SetBusinessUnitsEnabled(a.Config.BusinessUnitsEnabled())
 		if len(a.Config.Web.AllowedHosts) > 0 && (len(a.Config.Web.TrustedProxies) == 0 || strings.EqualFold(strings.TrimSpace(a.Config.Web.ForwardedHeader), "none")) {
 			logger.Warn("approved proxy hosts have no trusted client-IP forwarding; remote clients share the loopback login cooldown and audit identity", "hint", "configure web.trusted_proxies and the sanitized web.forwarded_header")
 		}
@@ -473,11 +474,20 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	// belongs to the tenant. Its store is resolved once, here, from the
 	// session. Each handler that reads or changes tenant data takes this
 	// store; handlers never choose a tenant. A nil store refuses every call.
+	// A platform administrator has no tenant: the gate above admits it only
+	// to its own account's routes, which change that account through the
+	// platform's store bound to the signed-in account.
 	var ts *store.TenantStore
-	if path != "/auth/activity" && path != "/auth/logout" {
+	var account accountStore
+	switch {
+	case path == "/auth/activity" || path == "/auth/logout":
+	case session.Role == store.RolePlatformAdmin && permission == auth.PermissionAccountSelf:
+		account = s.Store.Platform().Account(session.UserID)
+	default:
 		if ts, ok = s.requestTenant(w, r, session); !ok {
 			return
 		}
+		account = ts
 	}
 	if isMutation(r.Method) {
 		if err := s.Auth.RecordActivity(r.Context(), session); err != nil {
@@ -493,23 +503,23 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/auth/logout" && r.Method == http.MethodPost:
 		s.logout(w, r, session)
 	case path == "/auth/display-name" && r.Method == http.MethodPut:
-		s.changeDisplayName(w, r, session, ts)
+		s.changeDisplayName(w, r, session, account)
 	case path == "/auth/password" && r.Method == http.MethodPut:
-		s.changePassword(w, r, session, ts)
+		s.changePassword(w, r, session, account)
 	case path == "/auth/totp/setup" && r.Method == http.MethodPost:
-		s.totpSetup(w, r, session, ts)
+		s.totpSetup(w, r, session, account)
 	case path == "/auth/totp/enable" && r.Method == http.MethodPost:
-		s.totpEnable(w, r, session, ts)
+		s.totpEnable(w, r, session, account)
 	case path == "/auth/totp/recovery-codes" && r.Method == http.MethodPost:
-		s.totpRecoveryCodes(w, r, session, ts)
+		s.totpRecoveryCodes(w, r, session, account)
 	case path == "/auth/totp" && r.Method == http.MethodDelete:
-		s.totpDisable(w, r, session, ts)
+		s.totpDisable(w, r, session, account)
 	case path == "/auth/sessions" && r.Method == http.MethodDelete:
 		action := "user.sessions_revoked"
 		if session.Role == store.RoleAdministrator {
 			action = "admin.sessions_revoked"
 		}
-		if err := ts.DeleteUserSessionsWithAudit(r.Context(), session.UserID, actorAudit(session, action, "all sessions revoked")); err != nil {
+		if err := account.DeleteUserSessionsWithAudit(r.Context(), session.UserID, actorAudit(session, action, "all sessions revoked")); err != nil {
 			if errors.Is(err, store.ErrAuditUnavailable) {
 				s.revokeSSEUser(session.UserID)
 				s.auditFailure(err, action)

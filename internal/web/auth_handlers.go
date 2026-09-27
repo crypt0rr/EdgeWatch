@@ -16,6 +16,17 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/updatecheck"
 )
 
+// accountStore changes the signed-in account itself. A tenant's account is
+// changed through its tenant's store, and a platform administrator's, which
+// has no tenant, through the platform's store bound to that one account.
+type accountStore interface {
+	GetUser(ctx context.Context, id string) (store.User, error)
+	UpdateUser(ctx context.Context, u store.User, revokeSessions bool, audit store.AuditEntry) error
+	SaveUserSecurity(ctx context.Context, u store.User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit store.AuditEntry) error
+	SaveUserSecurityPreservingSession(ctx context.Context, u store.User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit store.AuditEntry, preserveSessionHash string) error
+	DeleteUserSessionsWithAudit(ctx context.Context, userID string, audit store.AuditEntry) error
+}
+
 func (s *Server) withAuth(w http.ResponseWriter, r *http.Request, fn func(http.ResponseWriter, *http.Request, store.Session)) {
 	session, ok := s.Auth.AuthenticateReadOnly(r.Context(), r)
 	if !ok {
@@ -352,7 +363,21 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "session_unavailable", "login session could not be established", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"username": user.Username, "display_name": user.DisplayName, "role": user.Role, "permissions": auth.PermissionsForRole(user.Role), "csrf_token": session.CSRFToken, "totp_required": user.TOTPEnabled})
+	response := map[string]any{"username": user.Username, "display_name": user.DisplayName, "role": user.Role, "csrf_token": session.CSRFToken, "totp_required": user.TOTPEnabled}
+	addSessionPermissions(response, store.Session{Role: user.Role, TOTPEnrollmentRequired: s.Auth.TOTPEnrollmentRequired(r.Context(), user)})
+	writeJSON(w, http.StatusOK, response)
+}
+
+// addSessionPermissions adds the session's permissions to a response that
+// describes the signed-in account. A session that must enrol TOTP before it
+// may do anything else also carries totp_enrollment_required, and holds only
+// its own account's self-service; the key is absent otherwise, so a session
+// without the requirement is described exactly as before.
+func addSessionPermissions(response map[string]any, session store.Session) {
+	response["permissions"] = auth.PermissionsForSession(session)
+	if session.TOTPEnrollmentRequired {
+		response["totp_enrollment_required"] = true
+	}
 }
 
 func (s *Server) logout(w http.ResponseWriter, r *http.Request, session store.Session) {
@@ -388,7 +413,9 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request, session store.S
 		writeError(w, http.StatusInternalServerError, "user_missing", "account could not be loaded", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user_id": user.ID, "username": user.Username, "display_name": user.DisplayName, "role": user.Role, "permissions": auth.PermissionsForRole(user.Role), "csrf_token": session.CSRFToken, "totp_enabled": user.TOTPEnabled, "password_requirements": auth.PasswordRequirements(), "timezone": s.deploymentTimezone()})
+	response := map[string]any{"user_id": user.ID, "username": user.Username, "display_name": user.DisplayName, "role": user.Role, "csrf_token": session.CSRFToken, "totp_enabled": user.TOTPEnabled, "password_requirements": auth.PasswordRequirements(), "timezone": s.deploymentTimezone()}
+	addSessionPermissions(response, store.Session{Role: user.Role, TOTPEnrollmentRequired: session.TOTPEnrollmentRequired})
+	writeJSON(w, http.StatusOK, response)
 }
 
 // deploymentTimezone is the optional IANA zone from config.yaml. Signed-in
@@ -423,7 +450,7 @@ func validateDisplayName(value string) (string, error) {
 	return name, nil
 }
 
-func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, session store.Session, account accountStore) {
 	var input struct {
 		DisplayName string `json:"display_name"`
 	}
@@ -435,7 +462,7 @@ func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, sessi
 		writeError(w, http.StatusBadRequest, "invalid_display_name", err.Error(), map[string]string{"display_name": err.Error()})
 		return
 	}
-	user, err := ts.GetUser(r.Context(), session.UserID)
+	user, err := account.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "user_missing", "account could not be loaded", nil)
 		return
@@ -449,7 +476,7 @@ func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, sessi
 		auditAction = "admin.display_name_changed"
 		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, nil, false, false, store.AuditEntry{Action: auditAction, Detail: "administrator display name changed", ActorUserID: session.UserID, ActorUsername: session.Username})
 	} else {
-		saveErr = ts.UpdateUser(r.Context(), user, false, store.AuditEntry{Action: auditAction, Detail: "display name changed", ActorUserID: session.UserID, ActorUsername: session.Username})
+		saveErr = account.UpdateUser(r.Context(), user, false, store.AuditEntry{Action: auditAction, Detail: "display name changed", ActorUserID: session.UserID, ActorUsername: session.Username})
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
@@ -465,7 +492,7 @@ func (s *Server) changeDisplayName(w http.ResponseWriter, r *http.Request, sessi
 	writeJSON(w, http.StatusOK, map[string]string{"display_name": displayName})
 }
 
-func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session store.Session, account accountStore) {
 	var input struct {
 		Current  string `json:"current_password"`
 		Password string `json:"new_password"`
@@ -473,7 +500,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	user, err := ts.GetUser(r.Context(), session.UserID)
+	user, err := account.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		s.writePasswordConfirmationError(w, err, "current password is incorrect")
 		return
@@ -495,7 +522,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 		auditAction = "admin.password_changed"
 		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, nil, false, true, store.AuditEntry{Action: auditAction, Detail: "password changed", ActorUserID: session.UserID, ActorUsername: session.Username})
 	} else {
-		saveErr = ts.UpdateUser(r.Context(), user, true, store.AuditEntry{Action: auditAction, Detail: "password changed", ActorUserID: session.UserID, ActorUsername: session.Username})
+		saveErr = account.UpdateUser(r.Context(), user, true, store.AuditEntry{Action: auditAction, Detail: "password changed", ActorUserID: session.UserID, ActorUsername: session.Username})
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
@@ -512,7 +539,7 @@ func (s *Server) changePassword(w http.ResponseWriter, r *http.Request, session 
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
-func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store.Session, account accountStore) {
 	var input struct {
 		Password string `json:"password"`
 		Code     string `json:"code"`
@@ -521,7 +548,7 @@ func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	user, err := ts.GetUser(r.Context(), session.UserID)
+	user, err := account.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		s.writePasswordConfirmationError(w, err, "password is incorrect")
 		return
@@ -551,7 +578,7 @@ func (s *Server) totpSetup(w http.ResponseWriter, r *http.Request, session store
 	writeJSON(w, http.StatusOK, map[string]any{"secret": secret, "otpauth": "otpauth://totp/EdgeWatch:" + url.QueryEscape(user.Username) + "?secret=" + secret + "&issuer=EdgeWatch"})
 }
 
-func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session store.Session, account accountStore) {
 	var input struct {
 		Code string `json:"code"`
 	}
@@ -582,7 +609,7 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 		writeError(w, http.StatusInternalServerError, "totp_failed", "recovery codes could not be generated", nil)
 		return
 	}
-	user, err := ts.GetUser(r.Context(), session.UserID)
+	user, err := account.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "totp_failed", "account could not be loaded for TOTP setup", nil)
 		return
@@ -596,7 +623,7 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 		auditAction = "admin.totp_enabled"
 		saveErr = s.Store.SaveAdminSecurityWithAuditPreservingSession(r.Context(), admin, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username}, preserveSessionHash)
 	} else {
-		saveErr = ts.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username}, preserveSessionHash)
+		saveErr = account.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username}, preserveSessionHash)
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
@@ -643,7 +670,7 @@ func (s *Server) verifyPendingTOTP(key, code string, now time.Time) (pendingTOTP
 	return pendingTOTP{}, remaining, false
 }
 
-func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session store.Session, account accountStore) {
 	var input struct {
 		Password string `json:"password"`
 		Code     string `json:"code"`
@@ -652,7 +679,7 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	user, err := ts.GetUser(r.Context(), session.UserID)
+	user, err := account.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		s.writePasswordConfirmationError(w, err, "password is incorrect")
 		return
@@ -675,7 +702,7 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 		auditAction = "admin.totp_disabled"
 		saveErr = s.Store.SaveAdminSecurityWithAudit(r.Context(), admin, []string{}, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP disabled", ActorUserID: session.UserID, ActorUsername: session.Username})
 	} else {
-		saveErr = ts.SaveUserSecurity(r.Context(), user, []string{}, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP disabled", ActorUserID: session.UserID, ActorUsername: session.Username})
+		saveErr = account.SaveUserSecurity(r.Context(), user, []string{}, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP disabled", ActorUserID: session.UserID, ActorUsername: session.Username})
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
@@ -696,7 +723,7 @@ func (s *Server) totpDisable(w http.ResponseWriter, r *http.Request, session sto
 // existing hashes. Both the password and the currently configured factor are
 // required, and the current browser session is preserved so the newly issued
 // codes can be copied before the page is left.
-func (s *Server) totpRecoveryCodes(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+func (s *Server) totpRecoveryCodes(w http.ResponseWriter, r *http.Request, session store.Session, account accountStore) {
 	var input struct {
 		Password string `json:"password"`
 		Code     string `json:"code"`
@@ -705,7 +732,7 @@ func (s *Server) totpRecoveryCodes(w http.ResponseWriter, r *http.Request, sessi
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	user, err := ts.GetUser(r.Context(), session.UserID)
+	user, err := account.GetUser(r.Context(), session.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "totp_failed", "account could not be loaded for recovery-code rotation", nil)
 		return
@@ -740,7 +767,7 @@ func (s *Server) totpRecoveryCodes(w http.ResponseWriter, r *http.Request, sessi
 		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Revision: user.Revision}
 		saveErr = s.Store.SaveAdminSecurityWithAuditPreservingSession(r.Context(), admin, hashes, true, true, actorAudit(session, auditAction, "TOTP recovery codes rotated"), preserve)
 	} else {
-		saveErr = ts.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, actorAudit(session, auditAction, "TOTP recovery codes rotated"), preserve)
+		saveErr = account.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, actorAudit(session, auditAction, "TOTP recovery codes rotated"), preserve)
 	}
 	if saveErr != nil {
 		if s.writeAuditUnavailable(w, saveErr, auditAction) {

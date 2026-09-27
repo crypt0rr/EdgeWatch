@@ -201,6 +201,9 @@ func run(args []string) error {
 		}
 	}
 	if cmd == "admin" {
+		if action == "platform-setup-token" {
+			return platformSetupToken(context.Background(), s, cfg.BusinessUnitsEnabled(), *force, os.Stdout)
+		}
 		return adminActionForUser(context.Background(), action, s, *passwordFile, *username, *force)
 	}
 	// scan, status, history, baseline, and notify test act on the default
@@ -294,7 +297,7 @@ func run(args []string) error {
 
 func usage() error {
 	fmt.Fprintln(os.Stderr, `Usage: edgewatch <command> [options]
-	Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, backup, restore, verify, notify test, admin setup-token|reset-password|disable-totp, health, version
+	Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, backup, restore, verify, notify test, admin setup-token|platform-setup-token|reset-password|disable-totp, health, version
 	Admin recovery actions accept --username (default admin) and require host access.`)
 	return errors.New("invalid or missing command")
 }
@@ -354,6 +357,32 @@ func deploymentLocation(cfg *config.Config) *time.Location {
 	return location
 }
 
+// accountRecovery saves an account's security state for the host recovery
+// commands: a tenant's store, or the platform's store of one platform
+// administrator.
+type accountRecovery interface {
+	SaveUserSecurity(ctx context.Context, u store.User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit store.AuditEntry) error
+}
+
+// platformSetupToken prints a one-time token, valid for 15 minutes, that
+// creates a platform administrator. It is refused while
+// experimental.business_units is off, once an enabled platform
+// administrator exists, and before the first administrator setup. An unused
+// token that is still valid is replaced only with --force.
+func platformSetupToken(ctx context.Context, s *store.Store, businessUnits, force bool, out io.Writer) error {
+	manager := auth.NewManager(s)
+	manager.SetBusinessUnitsEnabled(businessUnits)
+	token, err := manager.IssuePlatformSetupToken(ctx, force)
+	if errors.Is(err, store.ErrSetupTokenOutstanding) {
+		return fmt.Errorf("%w; a new platform setup token replaces it, pass --force to confirm", err)
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(out, "EdgeWatch platform setup token (valid for 15 minutes):", token)
+	return nil
+}
+
 func adminAction(ctx context.Context, action string, s *store.Store, passwordFile string, confirmations ...bool) error {
 	return adminActionForUser(ctx, action, s, passwordFile, "admin", confirmations...)
 }
@@ -380,12 +409,19 @@ func adminActionForUser(ctx context.Context, action string, s *store.Store, pass
 		return fmt.Errorf("user %q is not configured", username)
 	}
 	// The host may recover an account of any tenant. The change goes through
-	// the store of the account's own tenant, as the console's would.
-	scope, err := s.TenantScopeByID(ctx, user.TenantID)
-	if err != nil {
-		return fmt.Errorf("user %q is not configured", username)
+	// the store of the account's own tenant, as the console's would. A
+	// platform administrator has no tenant; the host is its break-glass
+	// path, through the platform's store bound to that one account.
+	var accounts accountRecovery
+	if user.Role == store.RolePlatformAdmin {
+		accounts = s.Platform().Account(user.ID)
+	} else {
+		scope, err := s.TenantScopeByID(ctx, user.TenantID)
+		if err != nil {
+			return fmt.Errorf("user %q is not configured", username)
+		}
+		accounts = s.Tenant(scope)
 	}
-	accounts := s.Tenant(scope)
 	switch action {
 	case "reset-password":
 		if passwordFile == "" {

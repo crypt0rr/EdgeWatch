@@ -1,0 +1,93 @@
+package auth
+
+import (
+	"context"
+	"encoding/base32"
+	"errors"
+	"strings"
+	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/store"
+)
+
+// ErrBusinessUnitsDisabled reports that the experimental business units
+// feature is off, so no platform administrator can be created.
+var ErrBusinessUnitsDisabled = errors.New("business units are not enabled; set business_units: true in the experimental section of config.yaml")
+
+// platformSetupTokenTTL is how long a platform setup token is valid, as long
+// as the initial setup token.
+const platformSetupTokenTTL = 15 * time.Minute
+
+// SetBusinessUnitsEnabled applies experimental.business_units. While it is
+// off, which is the default, IssuePlatformSetupToken and
+// CompletePlatformSetup refuse with ErrBusinessUnitsDisabled.
+func (m *Manager) SetBusinessUnitsEnabled(enabled bool) {
+	m.businessUnits.Store(enabled)
+}
+
+// IssuePlatformSetupToken creates a one-time token, valid for 15 minutes,
+// that creates a platform administrator. It is for the host CLI: the clear
+// token is returned only to that caller, and the store keeps its hash. The
+// store refuses it while an enabled platform administrator exists, before
+// the first administrator setup, within a minute of the previous token, and,
+// unless replace confirms it, while an unused token is still valid.
+func (m *Manager) IssuePlatformSetupToken(ctx context.Context, replace bool) (string, error) {
+	if !m.businessUnits.Load() {
+		return "", ErrBusinessUnitsDisabled
+	}
+	raw, err := randomBytes(32)
+	if err != nil {
+		return "", err
+	}
+	plain := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(raw)
+	now := m.now()
+	if err := m.Store.Platform().IssuePlatformSetupToken(ctx, digest(plain), now.Add(platformSetupTokenTTL), now, replace); err != nil {
+		return "", err
+	}
+	return plain, nil
+}
+
+// CompletePlatformSetup redeems a platform setup token and creates the
+// platform administrator with the username and password. The token is
+// checked before the password is hashed, so a wrong token costs no Argon2id
+// work, and the store checks it again in the transaction that creates the
+// account and consumes the token.
+func (m *Manager) CompletePlatformSetup(ctx context.Context, token, username, password string) (store.User, error) {
+	if !m.businessUnits.Load() {
+		return store.User{}, ErrBusinessUnitsDisabled
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return store.User{}, errors.New("setup token is required")
+	}
+	usable, err := m.Store.Platform().PlatformSetupTokenUsable(ctx, digest(token), m.now())
+	if err != nil {
+		return store.User{}, err
+	}
+	if !usable {
+		return store.User{}, errors.New("platform administrator setup could not be completed")
+	}
+	var hash string
+	if err := m.withArgon2(ctx, func() error {
+		var hashErr error
+		hash, hashErr = PasswordHash(password)
+		return hashErr
+	}); err != nil {
+		return store.User{}, err
+	}
+	return m.Store.Platform().CompletePlatformSetup(ctx, digest(token), username, hash, m.now())
+}
+
+// TOTPEnrollmentRequired reports whether the account must enrol an
+// authenticator before it may do more than manage its own account. Once
+// more than one business unit exists, every unit administrator and platform
+// administrator must use TOTP; with a single unit nothing changes. An
+// operator or viewer, and an account with TOTP, never needs to enrol. When
+// the units cannot be counted, the rule fails closed and requires it.
+func (m *Manager) TOTPEnrollmentRequired(ctx context.Context, user store.User) bool {
+	if user.TOTPEnabled || (user.Role != store.RoleAdministrator && user.Role != store.RolePlatformAdmin) {
+		return false
+	}
+	multiple, err := m.Store.Platform().HasMultipleTenants(ctx)
+	return err != nil || multiple
+}

@@ -62,6 +62,7 @@ func TestNotificationRoutesUseTheSessionTenant(t *testing.T) {
 		}
 		cookies[name] = raw
 	}
+	enrollAdministratorsInTOTP(t, db)
 	var bodies []string
 	call := func(account, method, path, body string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(method, path, strings.NewReader(body))

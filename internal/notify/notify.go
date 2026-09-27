@@ -22,7 +22,12 @@ import (
 )
 
 var ErrManagedNotificationLocked = errors.New("managed notification is locked")
-var ErrInvalidDestinationSelection = errors.New("invalid notification destination selection")
+
+// ErrInvalidDestinationSelection reports a routing selection that names a
+// destination outside the caller's own. It is the store's error, so a
+// selection that the store refuses in the transaction of a routing write is
+// handled as one that this package refuses first.
+var ErrInvalidDestinationSelection = store.ErrInvalidDestinationSelection
 
 // ErrNotificationSendIndeterminate means the provider did not report an
 // outcome before cancellation. The outbox claim is deferred for a full lease

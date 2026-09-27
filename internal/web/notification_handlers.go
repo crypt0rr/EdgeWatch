@@ -81,17 +81,16 @@ func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// The routing may select only the tenant's own destinations; another
-	// tenant's destination is refused as an unknown one.
+	// tenant's destination is refused as an unknown one. The store checks
+	// the selection again when it writes it.
 	if err := s.App.Notifier.Tenant(ts).ValidateDestinationSelection(r.Context(), input.Destinations); err != nil {
-		if errors.Is(err, notify.ErrInvalidDestinationSelection) {
-			writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]string{"destinations": err.Error()})
-		} else {
+		if !writeDestinationSelectionError(w, err) {
 			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
 		}
 		return
 	}
 	if err := ts.SetApplicationUpdateDestinations(r.Context(), input.Destinations, store.AuditEntry{Action: "notifications.update_routing", Detail: "application update notification routing changed", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
-		if s.writeAuditUnavailable(w, err, "notifications.update_routing") {
+		if writeDestinationSelectionError(w, err) || s.writeAuditUnavailable(w, err, "notifications.update_routing") {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "notification", "application update notification routing could not be saved", nil)
@@ -106,6 +105,20 @@ func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Reques
 		destinations = current.Destinations
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "destinations": destinations})
+}
+
+// writeDestinationSelectionError answers a routing selection that names a
+// destination outside the caller's own with a 400 that repeats the
+// selector, and reports whether err was one. The notifier's check and the
+// store's check in the routing write refuse with the same error, so both
+// get the same answer, and another owner's destination gets the answer of
+// an unknown one.
+func writeDestinationSelectionError(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, notify.ErrInvalidDestinationSelection) {
+		return false
+	}
+	writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]string{"destinations": err.Error()})
+	return true
 }
 
 func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {

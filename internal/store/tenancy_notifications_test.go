@@ -415,7 +415,10 @@ var notificationLeakCases = map[string]tenantLeakCase{
 		}
 	}},
 	// Each tenant's update routing is its own: silencing or changing B's
-	// leaves A's as it is, and the platform's routing is not touched.
+	// leaves A's as it is, and the platform's routing is not touched. B's
+	// routing cannot select A's destinations, the platform's, the deployment
+	// destinations, which are A's, or an unknown one: each is refused alike,
+	// and neither routing changes.
 	"SetApplicationUpdateDestinations": {writes: true, run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
 		ids := tenantFixtureNotifications
@@ -428,6 +431,14 @@ var notificationLeakCases = map[string]tenantLeakCase{
 		}
 		if routing, err := f.store.Tenant(f.b).ApplicationUpdateRouting(ctx); err != nil || !routing.Configured || len(routing.Destinations) != 0 || routing.Destinations == nil {
 			t.Errorf("tenant B's silenced routing = %+v, %v", routing, err)
+		}
+		beforeB := tenantNotificationDigest(t, f.store, f.b)
+		for _, foreign := range append(foreignNotificationIDs(), "file:deployment") {
+			err := f.store.Tenant(f.b).SetApplicationUpdateDestinations(ctx, []string{foreign}, AuditEntry{Action: "notifications.update_routing"})
+			assertSelectionRefused(t, err, foreign)
+		}
+		if tenantNotificationDigest(t, f.store, f.a) != before || tenantNotificationDigest(t, f.store, f.b) != beforeB {
+			t.Fatal("a refused routing write through tenant B changed a tenant's routing")
 		}
 		if err := f.store.Tenant(f.a).SetApplicationUpdateDestinations(ctx, []string{ids.pausedA, ids.a}, AuditEntry{}); err != nil {
 			t.Fatal(err)

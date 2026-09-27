@@ -333,6 +333,60 @@ func TestPlatformConsoleNotifications(t *testing.T) {
 	}
 }
 
+// The platform's update routing selects only platform destinations. The
+// store checks this in the transaction of the write, after the actor,
+// whatever its caller checked: a unit's destination, a deployment
+// destination, which is the default unit's, an unknown ID, and a platform
+// destination deleted since the caller's check are refused alike, and the
+// routing, the units' routing, and the platform audit stay as they were.
+func TestPlatformUpdateRoutingSelectsOnlyPlatformDestinations(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
+	ps := f.store.Platform()
+	ids := tenantFixtureNotifications
+	if err := ps.SetPlatformUpdateDestinations(ctx, []string{ids.platform}, platformAudit("")); err != nil {
+		t.Fatalf("the platform's own destination: %v", err)
+	}
+	routing := func() []string {
+		t.Helper()
+		state, err := ps.GetApplicationUpdateState(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state.UpdateNotificationDestinations
+	}
+	if got := routing(); !slices.Equal(got, []string{ids.platform}) {
+		t.Fatalf("platform routing = %v", got)
+	}
+	audits := func() int {
+		return countRows(t, f.store.DB, `SELECT COUNT(*) FROM security_audit WHERE action=? AND tenant_id IS NULL`, auditPlatformNotificationsUpdateRouting)
+	}
+	units := func() [2]string {
+		return [2]string{tenantNotificationDigest(t, f.store, f.a), tenantNotificationDigest(t, f.store, f.b)}
+	}
+	beforeAudits, beforeUnits := audits(), units()
+	for _, selector := range []string{ids.a, ids.pausedA, ids.b, unknownNotificationID, "file:deployment"} {
+		assertSelectionRefused(t, ps.SetPlatformUpdateDestinations(ctx, []string{ids.platform, selector}, platformAudit("")), selector)
+	}
+	if err := ps.SetPlatformUpdateDestinations(ctx, []string{ids.b}, accountAudit("")); !errors.Is(err, ErrAccountNotPermitted) {
+		t.Errorf("routing by a unit's administrator = %v, want ErrAccountNotPermitted", err)
+	}
+	if got := routing(); !slices.Equal(got, []string{ids.platform}) || audits() != beforeAudits || units() != beforeUnits {
+		t.Fatalf("a refused routing write changed the routing %v, the platform audit, or a unit", got)
+	}
+
+	// The caller checked the selection before this delete; the write after
+	// it must not store the deleted destination.
+	if err := ps.DeletePlatformNotificationWithAudit(ctx, ids.platform, 1, platformAudit("")); err != nil {
+		t.Fatal(err)
+	}
+	assertSelectionRefused(t, ps.SetPlatformUpdateDestinations(ctx, []string{ids.platform}, platformAudit("")), ids.platform)
+	if got := routing(); len(got) != 0 {
+		t.Fatalf("platform routing after the refused write = %v", got)
+	}
+}
+
 func sortedCopy(values []string) []string {
 	sorted := slices.Clone(values)
 	slices.Sort(sorted)

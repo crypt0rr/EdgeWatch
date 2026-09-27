@@ -478,10 +478,17 @@ func (ps *PlatformStore) DeletePlatformNotificationWithAudit(ctx context.Context
 
 // SetPlatformUpdateDestinations replaces the platform's update routing, the
 // platform destinations that the platform's copy of an update alert goes
-// to. The selectors are stable destination IDs, never URLs; the caller
-// checks them against the platform's destinations first. An empty
-// selection silences the platform's copy. The actor, audit.ActorUserID,
-// must be an enabled platform administrator. No tenant's routing changes.
+// to. The selectors are stable destination IDs, never URLs. Callers check
+// them with the notifier first, for its message; the store checks them
+// again in the transaction of the write, after the actor, so the routing
+// selects only platform destinations, as
+// requirePlatformUpdateDestinationsTx describes, even when a caller skipped
+// its check or a destination was deleted since. A tenant's destination, a
+// deployment destination, and an unknown ID are refused alike with an
+// ErrInvalidDestinationSelection ValidationError, and nothing changes. An
+// empty selection silences the platform's copy. The actor,
+// audit.ActorUserID, must be an enabled platform administrator. No tenant's
+// routing changes.
 func (ps *PlatformStore) SetPlatformUpdateDestinations(ctx context.Context, destinations []string, audit AuditEntry) error {
 	tx, err := ps.store.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -489,6 +496,10 @@ func (ps *PlatformStore) SetPlatformUpdateDestinations(ctx context.Context, dest
 	}
 	defer func() { _ = tx.Rollback() }()
 	if err := requirePlatformActorTx(ctx, tx, audit.ActorUserID); err != nil {
+		return err
+	}
+	destinations = normalizeUpdateDestinations(destinations)
+	if err := requirePlatformUpdateDestinationsTx(ctx, tx, destinations); err != nil {
 		return err
 	}
 	if err := writePlatformUpdateDestinationsTx(ctx, tx, destinations); err != nil {

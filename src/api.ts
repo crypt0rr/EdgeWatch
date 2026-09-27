@@ -79,12 +79,30 @@ export function setCSRF(value: string) { csrf = value }
 export class APIError extends Error {
   code?: string
   details?: Record<string, unknown>
-  constructor(message: string, code?: string, details?: Record<string, unknown>) {
+  /** The HTTP status of the failed request. */
+  status?: number
+  constructor(message: string, code?: string, details?: Record<string, unknown>, status?: number) {
     super(message)
     this.name = 'APIError'
     this.code = code
     this.details = details
+    this.status = status
   }
+}
+let forbiddenHandler: (() => Promise<unknown>) | null = null
+/**
+ * Sets what the signed-in console does when a request is refused with 403,
+ * and returns a function that removes it again. A 403 can mean that the
+ * session changed on the server: once a second business unit exists, an
+ * administrator without TOTP holds only its own account, and an
+ * administrator can change an account's role. The console re-reads its
+ * session then, and api() waits for that before it reports the refusal, so
+ * a page that the new session no longer offers is replaced, for example by
+ * the forced TOTP enrolment, instead of showing the refusal first.
+ */
+export function setForbiddenHandler(handler: () => Promise<unknown>) {
+  forbiddenHandler = handler
+  return () => { if (forbiddenHandler === handler) forbiddenHandler = null }
 }
 export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
@@ -105,7 +123,10 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
     csrf = ''
     if (typeof window !== 'undefined') window.dispatchEvent(new Event('edgewatch:unauthorized'))
   }
-  if (!response.ok) throw new APIError(body?.error?.message || 'Request failed', body?.error?.code, body?.error?.details)
+  // The session read is exempt: it is the read the handler waits for, so a
+  // refused session read must not wait for itself.
+  if (response.status === 403 && path !== '/auth/session' && forbiddenHandler) await forbiddenHandler().catch(() => undefined)
+  if (!response.ok) throw new APIError(body?.error?.message || 'Request failed', body?.error?.code, body?.error?.details, response.status)
   return body as T
 }
 /** `platform_admin` is the platform administrator, who belongs to no business unit. */

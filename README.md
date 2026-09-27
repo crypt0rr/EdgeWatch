@@ -590,10 +590,13 @@ deleted, every unit administrator and platform administrator must use TOTP.
 Operators and viewers are not affected. An administrator without TOTP gets a
 forced enrolment screen after signing in, which offers only the authenticator
 setup, a password change, and sign-out; until TOTP is on, the session can
-manage only its own account. After enabling TOTP and saving the recovery
-codes, sign out and sign in again. Enrol the existing administrators before
-you create the second unit. The host command `admin disable-totp` stays the
-recovery path, and the account then enrols again.
+manage only its own account. A console that is already open switches to that
+screen as soon as the server refuses one of its requests, and the platform
+administrator's console does so right after it creates the second unit.
+After enabling TOTP and saving the recovery codes, sign out and sign in
+again. Enrol the existing administrators before you create the second unit.
+The host command `admin disable-totp` stays the recovery path, and the
+account then enrols again.
 
 ### What belongs to each unit
 

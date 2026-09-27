@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { Activity, ArrowUp, Bell, Boxes, Building2, ClipboardList, Code2, Gauge, Globe2, LogOut, Menu, ScrollText, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
-import { acceptIncident, adminStatus, APIError, getSession, listIncidents, listJobs, setCSRF, setupStatus, suppressIncident, logout as apiLogout } from './api'
+import { acceptIncident, adminStatus, APIError, getSession, listIncidents, listJobs, setCSRF, setForbiddenHandler, setupStatus, suppressIncident, logout as apiLogout } from './api'
 import type { UnitRef } from './api'
 import { useActivityHeartbeat, useNavigationDrawer } from './components/navigation'
 import { Audit } from './pages/Audit'
@@ -35,7 +35,17 @@ import './styles.css'
 
 /** The console's query defaults, shared by the browser bootstrap and tests. */
 export function createQueryClient() {
-  return new QueryClient({ defaultOptions: { queries: { staleTime: 5000, refetchOnWindowFocus: true } } })
+  return new QueryClient({ defaultOptions: { queries: { staleTime: 5000, refetchOnWindowFocus: true, retry: retryQuery } } })
+}
+
+/**
+ * A refused request is not retried: a 401 ends the session, and a 403 makes
+ * the console re-read its session, which may now be restricted. Other
+ * failures keep React Query's default of three retries.
+ */
+export function retryQuery(failureCount: number, error: Error) {
+  if (error instanceof APIError && (error.status === 401 || error.status === 403)) return false
+  return failureCount < 3
 }
 const queryClient = createQueryClient()
 
@@ -269,6 +279,12 @@ function IncidentActions({ row, busy, acceptID, suppressID, onAction }: { row: I
 }
 
 export function ProtectedApp({ onLogout }: { onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate])
+  // A refused request re-reads the session, so the console follows a session
+  // that changed on the server: a second business unit restricts an
+  // administrator without TOTP to the enrolment below, and a role change
+  // changes the navigation. A refusal that arrives while a read is in flight
+  // waits for that read instead of starting another.
+  const client = useQueryClient(); useEffect(() => setForbiddenHandler(() => client.refetchQueries({ queryKey: ['session'], exact: true }, { cancelRefetch: false })), [client])
   // Enabling TOTP lifts the enrolment requirement while the one-time recovery
   // codes are still on screen. Stay on the enrolment screen until sign-out,
   // which ends it, so a session refresh cannot unmount the codes.

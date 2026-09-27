@@ -34,6 +34,18 @@ describe('dashboard footprint with business units', () => {
     expect(within(footprint).queryByText('0 B')).not.toBeInTheDocument()
   })
 
+  it('shows the scan slots that the status reports for the unit, and leaves them out when it reports none', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.19.0', retention: '720h0m0s', max_concurrent_scans: 1 })
+    const capped = renderWithProviders(<Dashboard />)
+    expect(await screen.findByText(/Retention 30 days · 1 scan at a time\./)).toBeInTheDocument()
+    capped.unmount()
+
+    vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.19.0', retention: '720h0m0s' })
+    renderWithProviders(<Dashboard />)
+    expect(await screen.findByText(/Retention 30 days\./)).toBeInTheDocument()
+    expect(screen.queryByText(/at a time/)).not.toBeInTheDocument()
+  })
+
   it('shows the database size when the unit reports it', async () => {
     vi.mocked(adminStatus).mockResolvedValue({ version: 'v0.19.0', telemetry: { ...telemetry, database_bytes: 0 } })
     renderWithProviders(<Dashboard />)

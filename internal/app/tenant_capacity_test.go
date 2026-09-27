@@ -433,6 +433,52 @@ func TestTighterDeploymentBudgetWinsOverTheTenants(t *testing.T) {
 	}
 }
 
+// A tenant's capacity limits are what the scheduler enforces for its runs:
+// the deployment's slots and probe budgets where the tenant has no setting,
+// the tenant's where they are lower, whether business units are on or off,
+// and the deployment's again once config.yaml is tightened below them. A
+// tenant whose settings cannot be read gets no limits.
+func TestTenantCapacityLimitsAreWhatTheSchedulerEnforces(t *testing.T) {
+	ctx := context.Background()
+	f := newCapacityTenants(t, schedulerFake{}, 4)
+	f.app.Config.Scheduler.MaxProbeCount, f.app.Config.Scheduler.MaxNaabuProbeCount = 5_000, 20_000
+	a, b := f.db.Tenant(f.a), f.db.Tenant(f.b)
+	check := func(label string, ts *store.TenantStore, want store.CapacityLimits) {
+		t.Helper()
+		if got, err := f.app.TenantCapacityLimits(ctx, ts); err != nil || got != want {
+			t.Fatalf("%s = %+v, %v; want %+v", label, got, err, want)
+		}
+	}
+	deployment := store.CapacityLimits{MaxConcurrentScans: 4, MaxProbeCount: 5_000, MaxNaabuProbeCount: 20_000}
+	check("tenant A without settings", a, deployment)
+	check("tenant B without settings", b, deployment)
+
+	f.setCapacity(t, f.b, store.TenantCapacity{MaxConcurrentScans: ptrTo(2), MaxProbeCount: ptrTo[int64](1_000), MaxNaabuProbeCount: ptrTo[int64](3_000)})
+	capped := store.CapacityLimits{MaxConcurrentScans: 2, MaxProbeCount: 1_000, MaxNaabuProbeCount: 3_000}
+	check("tenant B with caps", b, capped)
+	check("tenant A beside a capped tenant", a, deployment)
+	release := mustAcquireSlot(t, f.app.slots, f.b.ID())
+	if limit := f.app.slots.CapacitySnapshot().Keys[f.b.ID()].Limit; limit != capped.MaxConcurrentScans {
+		t.Fatalf("the slot pool holds tenant B to %d slots, the limits report %d", limit, capped.MaxConcurrentScans)
+	}
+	release()
+	if budget, err := f.app.tenantProbeBudget(ctx, b); err != nil || budget.nmap != capped.MaxProbeCount || budget.naabu != capped.MaxNaabuProbeCount {
+		t.Fatalf("tenant B's enforced budget = %+v, %v; the limits report %+v", budget, err, capped)
+	}
+
+	f.app.Config.Experimental.BusinessUnits = false
+	check("tenant B with caps and business units off", b, capped)
+	f.app.Config.Scheduler.MaxConcurrent, f.app.Config.Scheduler.MaxProbeCount, f.app.Config.Scheduler.MaxNaabuProbeCount = 1, 500, 2_000
+	check("tenant B under a tightened deployment", b, store.CapacityLimits{MaxConcurrentScans: 1, MaxProbeCount: 500, MaxNaabuProbeCount: 2_000})
+
+	if _, err := f.db.DB.ExecContext(ctx, `UPDATE tenants SET state=? WHERE id=?`, store.TenantStateDeleted, secondTenantID); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.app.TenantCapacityLimits(ctx, b); !errors.Is(err, store.ErrNoTenantScope) || got != (store.CapacityLimits{}) {
+		t.Fatalf("limits of a deleted tenant = %+v, %v", got, err)
+	}
+}
+
 // Changing a tenant's capacity is refused while business units are off, and
 // nothing is written. Capacity stored while they were on keeps applying.
 func TestTenantCapacityNeedsTheBusinessUnitsFlag(t *testing.T) {

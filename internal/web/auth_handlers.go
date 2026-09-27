@@ -96,17 +96,25 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		s.Log.Warn("notification state refresh failed", "error", reloadErr)
 	}
 	status := map[string]any{
-		"configured":            true,
-		"username":              user.Username,
-		"display_name":          user.DisplayName,
-		"role":                  user.Role,
-		"permissions":           s.offeredPermissions(auth.PermissionsForRole(user.Role)),
-		"version":               s.Version,
-		"retention":             s.App.Config.Retention.Value().String(),
-		"max_concurrent_scans":  s.App.Config.Scheduler.MaxConcurrent,
-		"max_probe_count":       s.App.Config.Scheduler.MaxProbeCount,
-		"max_naabu_probe_count": s.App.Config.Scheduler.MaxNaabuProbeCount,
-		"rdap_enabled":          s.App.Config.RDAPEnabled(),
+		"configured":   true,
+		"username":     user.Username,
+		"display_name": user.DisplayName,
+		"role":         user.Role,
+		"permissions":  s.offeredPermissions(auth.PermissionsForRole(user.Role)),
+		"version":      s.Version,
+		"retention":    s.App.Config.Retention.Value().String(),
+		"rdap_enabled": s.App.Config.RDAPEnabled(),
+	}
+	// The scan capacity is the tenant's own, as the scheduler enforces it
+	// for its runs: the deployment's slots and probe budgets, lowered to the
+	// tenant's caps. A tenant without caps reports the deployment's. Like the
+	// telemetry below, it is left out when it cannot be read.
+	if limits, limitsErr := s.App.TenantCapacityLimits(r.Context(), ts); limitsErr != nil {
+		s.Log.Warn("scan capacity could not be read", "error", limitsErr)
+	} else {
+		status["max_concurrent_scans"] = limits.MaxConcurrentScans
+		status["max_probe_count"] = limits.MaxProbeCount
+		status["max_naabu_probe_count"] = limits.MaxNaabuProbeCount
 	}
 	// The destination counts and delivery totals are the tenant's own. Like
 	// the telemetry below, they are left out when they cannot be read.
@@ -126,13 +134,12 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	}
 	// The live-update counters describe the whole deployment's stream, so
 	// once several business units exist they are left out: they would tell a
-	// unit about the others' activity.
-	multipleUnits := false
-	if s.businessUnitsEnabled() {
-		multiple, unitsErr := s.Store.Platform().HasMultipleTenants(r.Context())
-		multipleUnits = unitsErr != nil || multiple
-	}
-	if !multipleUnits {
+	// unit about the others' activity. The units keep working when
+	// experimental.business_units is turned off again, so the rule follows
+	// the number of units, not the flag. If the units cannot be counted, the
+	// counters are left out.
+	multiple, unitsErr := s.Store.Platform().HasMultipleTenants(r.Context())
+	if unitsErr == nil && !multiple {
 		s.mu.Lock()
 		status["live_updates"] = map[string]any{"history_size": len(s.history), "dropped_events": s.dropped}
 		s.mu.Unlock()

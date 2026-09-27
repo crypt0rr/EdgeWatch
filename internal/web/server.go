@@ -457,10 +457,12 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	permission := requestPermission(path, r)
-	if businessUnitsRoute(path) && !s.businessUnitsEnabled() {
+	if (businessUnitsRoute(path) || auth.IsBusinessUnitPermission(permission)) && !s.businessUnitsEnabled() {
 		// The platform routes and the unit audit exist only while
 		// experimental.business_units is on. Otherwise they fail closed
-		// exactly like a path that no route knows.
+		// exactly like a path that no route knows, and no session holds
+		// their permissions: a platform administrator holds only its own
+		// account's self-service.
 		permission = auth.PermissionDenied
 	}
 	if permission == "" || permission == auth.PermissionDenied || !auth.HasPermission(session, permission) {

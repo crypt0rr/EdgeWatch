@@ -93,6 +93,21 @@ test('a platform administrator creates a unit, invites its administrator, recove
   expect(controls.calls['unit-data'] ?? 0).toBe(0)
 })
 
+test('a platform administrator gets only a notice and sign-out while business units are off', async ({ page }) => {
+  const controls = await mockConsole(page, 'platform_admin', { businessUnits: false })
+  for (const path of ['/platform/units', '/jobs', '/']) {
+    await page.goto(path)
+    await expect(page.getByRole('heading', { name: 'Business units are turned off' })).toBeVisible()
+    await expect(page).toHaveURL(new RegExp(`${path}$`))
+    await expect(page.getByRole('link')).toHaveCount(0)
+    await expectNoHorizontalScroll(page)
+  }
+  expect(controls.calls['unit-data'] ?? 0).toBe(0)
+  expect(controls.calls['platform-data'] ?? 0).toBe(0)
+  await page.getByRole('button', { name: 'Sign out' }).click()
+  await expect(page).toHaveURL(/\/login$/)
+})
+
 test('the platform console fits a phone', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === 'desktop', 'The responsive smoke runs in the mobile projects.')
   await page.emulateMedia({ reducedMotion: 'reduce' })

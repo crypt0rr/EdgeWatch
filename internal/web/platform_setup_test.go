@@ -161,15 +161,16 @@ func TestPlatformSetupRouteAbsentWithoutBusinessUnits(t *testing.T) {
 }
 
 // The live-update counters describe the whole deployment, so a unit's
-// status leaves them out once several units exist. With a single unit, and
-// with business units off, they are reported as before.
+// status leaves them out once several units exist, whether business units
+// are on or off: the units keep working when the flag is turned off again.
+// With a single unit they are reported as before, with the flag on or off.
 func TestAdminStatusLeavesOutLiveUpdateCountersWithSeveralUnits(t *testing.T) {
 	f := newPlatformFixture(t)
-	liveUpdates := func() (any, bool) {
+	liveUpdates := func(actor string) (any, bool) {
 		t.Helper()
-		response := callAPI(t, f.server, f.sessions[actorAdminA], http.MethodGet, "/status", "")
+		response := callAPI(t, f.server, f.sessions[actor], http.MethodGet, "/status", "")
 		if response.Code != http.StatusOK {
-			t.Fatalf("/status = %d %s", response.Code, response.Body.String())
+			t.Fatalf("/status as %s = %d %s", actor, response.Code, response.Body.String())
 		}
 		var status map[string]any
 		if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
@@ -178,19 +179,25 @@ func TestAdminStatusLeavesOutLiveUpdateCountersWithSeveralUnits(t *testing.T) {
 		value, ok := status["live_updates"]
 		return value, ok
 	}
-	if value, ok := liveUpdates(); ok {
-		t.Fatalf("live_updates with two units = %v", value)
-	}
-	f.server.App.Config.Experimental.BusinessUnits = false
-	if _, ok := liveUpdates(); !ok {
-		t.Fatal("live_updates are missing with business units off")
+	for _, businessUnits := range []bool{true, false} {
+		f.server.App.Config.Experimental.BusinessUnits = businessUnits
+		f.server.Auth.SetBusinessUnitsEnabled(businessUnits)
+		for _, actor := range []string{actorAdminA, actorOperatorA, actorAdminB} {
+			if value, ok := liveUpdates(actor); ok {
+				t.Errorf("live_updates as %s with two units and business units on %t = %v", actor, businessUnits, value)
+			}
+		}
 	}
 
-	server, _, _ := newUsersTestServer(t)
-	enableBusinessUnits(server)
-	admin := signIn(t, server, store.RoleAdministrator, "admin", "administrator password", "")
-	response := callAPI(t, server, admin, http.MethodGet, "/status", "")
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"live_updates":{"dropped_events":0,"history_size":0}`) {
-		t.Fatalf("/status with a single unit = %d %s", response.Code, response.Body.String())
+	for _, businessUnits := range []bool{true, false} {
+		server, _, _ := newUsersTestServer(t)
+		if businessUnits {
+			enableBusinessUnits(server)
+		}
+		admin := signIn(t, server, store.RoleAdministrator, "admin", "administrator password", "")
+		response := callAPI(t, server, admin, http.MethodGet, "/status", "")
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"live_updates":{"dropped_events":0,"history_size":0}`) {
+			t.Fatalf("/status with a single unit and business units on %t = %d %s", businessUnits, response.Code, response.Body.String())
+		}
 	}
 }

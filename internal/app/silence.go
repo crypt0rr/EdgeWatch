@@ -44,9 +44,9 @@ func (a *App) displayLocation() *time.Location {
 // A store transaction decides whether a job is overdue, active, or already
 // alerted in the current window, then persists the event and outbox together.
 // It goes through the jobs of every active tenant; a paused tenant's jobs are
-// not expected to scan, and the store never finds them due either. Once the
-// tenant is active again, its jobs are judged from their last reference as
-// before; the silence reference is not reset when a tenant is re-enabled.
+// not expected to scan, and the store never finds them due either. Enabling
+// the tenant again restarts the silence reference of its jobs, so the pause
+// does not count as silence.
 func (a *App) checkJobSilence(ctx context.Context, now time.Time) {
 	if a.Store == nil {
 		return

@@ -10,8 +10,10 @@ import (
 )
 
 // ErrCapacityRequiresBusinessUnits is returned when a tenant's capacity is
-// changed while experimental.business_units is off.
-var ErrCapacityRequiresBusinessUnits = errors.New("business unit capacity cannot be changed unless experimental.business_units is enabled")
+// changed while experimental.business_units is off. It wraps
+// ErrBusinessUnitsDisabled, which every business unit operation returns
+// then.
+var ErrCapacityRequiresBusinessUnits = fmt.Errorf("business unit capacity cannot be changed: %w", ErrBusinessUnitsDisabled)
 
 // ErrProbeBudgetUnavailable wraps a failure to read a tenant's probe budget.
 // The run or request stops, because a budget that cannot be read must not

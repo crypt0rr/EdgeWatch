@@ -1402,7 +1402,8 @@ func (a *App) tenantUpdateDestinations(ctx context.Context, logger *slog.Logger,
 	// Routing that was never configured has nil destinations, which keeps the
 	// original behavior of sending update events to every enabled destination
 	// of the tenant until an administrator saves a selection. A saved empty
-	// selection silences them.
+	// selection silences them, and a new business unit starts with one, so
+	// it gets no update alerts until its administrators select destinations.
 	destinations, err := a.Notifier.Tenant(ts).QueueDestinationsForSelection(ctx, routing.Destinations)
 	if err != nil {
 		logger.Warn("application update notification destinations unavailable", "error", err)

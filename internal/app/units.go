@@ -58,6 +58,8 @@ func (a *App) requireBusinessUnits() error {
 // CreateUnit creates an active business unit. It inherits the deployment's
 // scan slots and probe budgets, and may not run high-cost work until a
 // platform administrator raises its high-cost ceiling (SetTenantCapacity).
+// Its update alerts are off: its copy of an update alert goes to none of its
+// destinations until its administrators select some.
 func (a *App) CreateUnit(ctx context.Context, name, slug string, audit store.AuditEntry) (store.TenantRecord, error) {
 	if err := a.requireBusinessUnits(); err != nil {
 		return store.TenantRecord{}, err

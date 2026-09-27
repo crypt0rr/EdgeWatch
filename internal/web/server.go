@@ -14,7 +14,6 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/app"
 	"github.com/crypt0rr/edgewatch/internal/auth"
-	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/rdap"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
@@ -87,6 +86,7 @@ type Server struct {
 	// production uses the bounded defaults below.
 	sseMaxSubscribers        int
 	sseMaxSubscribersPerUser int
+	sseMaxSubscribersPerUnit int
 }
 
 type sseMessage struct {
@@ -129,6 +129,7 @@ const defaultSSEWriteTimeout = 30 * time.Second
 const (
 	defaultMaxSSESubscribers        = 256
 	defaultMaxSSESubscribersPerUser = 4
+	defaultMaxSSESubscribersPerUnit = 64
 	defaultSSEAuthCacheTTL          = 2 * time.Second
 	sseEventIDBlockSize             = uint64(1 << 20)
 	defaultSSEReservationRetry      = time.Second
@@ -206,22 +207,10 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 		}
 	}
 	if a != nil {
-		a.SetEventHandler(func(event model.Event) {
-			payload := map[string]any{"type": event.Type, "job_id": event.JobID, "job": event.Job, "scan_id": event.ScanID, "message": event.Message}
-			if event.PreviousVersion != "" {
-				payload["previous_version"] = event.PreviousVersion
-			}
-			if event.CurrentVersion != "" {
-				payload["current_version"] = event.CurrentVersion
-			}
-			if event.LatestVersion != "" {
-				payload["latest_version"] = event.LatestVersion
-			}
-			if event.ReleaseURL != "" {
-				payload["release_url"] = event.ReleaseURL
-			}
-			v.broadcastTo(context.Background(), audienceEveryone(), payload)
-		})
+		a.SetEventHandler(v.publishAppEvent)
+		// A business unit that is disabled or deleted loses its live
+		// updates at once, whichever caller paused it.
+		a.SetUnitPausedHandler(v.revokeSSETenant)
 	}
 	return v
 }

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
+	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/webui"
 )
@@ -22,6 +23,14 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 		writeError(w, 500, "stream_unsupported", "streaming is unavailable", nil)
 		return
 	}
+	// The stream receives only its own audience's messages: its business
+	// unit's, or the platform's for a platform administrator.
+	subscriber, ok := streamSubscriber(session, ts)
+	if !ok {
+		writeError(w, http.StatusForbidden, "forbidden", "your account is not allowed to perform this action", map[string]string{"permission": "route"})
+		return
+	}
+	maxSubscribersPerUnit := s.sseUnitStreamLimit(r.Context())
 	streamCtx, streamCancel := context.WithCancel(r.Context())
 	defer streamCancel()
 	// http.Server.WriteTimeout protects every ordinary response. SSE is the
@@ -105,15 +114,18 @@ func (s *Server) stream(w http.ResponseWriter, r *http.Request, session store.Se
 		writeSSELimit(w, flusher, "too many live streams")
 		return
 	}
+	if maxSubscribersPerUnit > 0 && s.unitSubscribersLocked(subscriber) >= maxSubscribersPerUnit {
+		s.mu.Unlock()
+		s.setSSEWriteDeadline(w)
+		writeSSELimit(w, flusher, "too many live streams for this business unit")
+		return
+	}
 	if s.subscriberUse[subscriberKey] >= maxSubscribersPerUser {
 		s.mu.Unlock()
 		s.setSSEWriteDeadline(w)
 		writeSSELimit(w, flusher, "too many live streams for this session")
 		return
 	}
-	// Every stream is in the everyone audience today. A narrower audience
-	// derives the stream's viewer attributes from its session here.
-	subscriber := sseSubscriber{}
 	replay := s.replayForLocked(lastID, subscriber)
 	s.subscribers[ch] = struct{}{}
 	s.sseIdentity[ch] = subscriber
@@ -276,6 +288,73 @@ func (s *Server) revokeSSEUser(userID string) {
 
 func (s *Server) revokeSSEUserExcept(userID, exceptSessionID string) {
 	s.revokeSSEStreams("", userID, exceptSessionID)
+}
+
+// revokeSSETenant ends every live-update stream of a business unit and
+// drops the cached authorization of its sessions. The application calls it
+// through the hook that NewServer registers, once DisableUnit or
+// RequestUnitDeletion has committed the pause, which also ended the unit's
+// sessions. The open handlers then stop at once rather than at their next
+// authorization check. The platform's streams and other units' streams are
+// untouched.
+func (s *Server) revokeSSETenant(tenantID string) {
+	tenantID = strings.TrimSpace(tenantID)
+	if tenantID == "" {
+		return
+	}
+	s.sseAuthMu.Lock()
+	for key, entry := range s.sseAuthCache {
+		if strings.TrimSpace(entry.session.TenantID) == tenantID {
+			delete(s.sseAuthCache, key)
+		}
+	}
+	s.sseAuthMu.Unlock()
+
+	s.mu.Lock()
+	cancels := make([]context.CancelFunc, 0)
+	for ch, subscriber := range s.sseIdentity {
+		if subscriber.platform || subscriber.tenantID != tenantID {
+			continue
+		}
+		if cancel := s.sseCancels[ch]; cancel != nil {
+			cancels = append(cancels, cancel)
+		}
+	}
+	s.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel()
+	}
+}
+
+// sseUnitStreamLimit returns how many live-update streams one business
+// unit, or the platform, may hold, or 0 when only the deployment-wide limit
+// applies. With a single unit that is the case, as before business units
+// existed. Once more than one unit exists, each unit gets its own share, so
+// one unit's streams cannot use up the deployment-wide limit and lock the
+// other units out. If the units cannot be counted, the share applies.
+func (s *Server) sseUnitStreamLimit(ctx context.Context) int {
+	limit := s.sseMaxSubscribersPerUnit
+	if limit <= 0 {
+		limit = defaultMaxSSESubscribersPerUnit
+	}
+	if s.Store != nil {
+		if multiple, err := s.Store.Platform().HasMultipleTenants(ctx); err == nil && !multiple {
+			return 0
+		}
+	}
+	return limit
+}
+
+// unitSubscribersLocked counts the open streams with the same business unit,
+// or the platform, as subscriber. The caller holds mu.
+func (s *Server) unitSubscribersLocked(subscriber sseSubscriber) int {
+	count := 0
+	for _, identity := range s.sseIdentity {
+		if identity == subscriber {
+			count++
+		}
+	}
+	return count
 }
 
 func (s *Server) sseWriteTimeoutValue() time.Duration {
@@ -570,33 +649,140 @@ func (s *Server) runSSEReservationRetry(ctx context.Context) {
 
 // sseAudience names the live-update streams that may receive a message. The
 // zero value names no stream: broadcastTo drops such a message rather than
-// sending it to everyone. Narrower audiences, such as one unit or the
-// platform administrators, add fields here and a matching rule to
-// sseSubscriber.matches.
+// sending it to everyone. A message goes to one audience, made by one of the
+// constructors below: every stream, the streams of one business unit, or the
+// streams of the platform administrators.
 type sseAudience struct {
 	everyone bool
+	// tenantID names the business unit whose streams receive the message.
+	tenantID string
+	// platform names the platform administrators' streams.
+	platform bool
 }
 
-// audienceEveryone addresses every authorized live-update stream.
+// audienceEveryone addresses every authorized live-update stream, of every
+// business unit and of the platform. Only a notice that carries no unit's
+// data uses it.
 func audienceEveryone() sseAudience {
 	return sseAudience{everyone: true}
 }
 
+// audienceTenant addresses the streams of the business unit whose data the
+// request's tenant store holds. A handler passes the store that the API
+// router resolved from the session. A store without a tenant addresses no
+// stream, so broadcastTo drops the message.
+func audienceTenant(ts *store.TenantStore) sseAudience {
+	scope, err := ts.Scope()
+	if err != nil {
+		return sseAudience{}
+	}
+	return audienceUnit(scope.ID())
+}
+
+// audienceUnit addresses the streams of the business unit with the given
+// tenant ID. An empty ID addresses no stream.
+func audienceUnit(tenantID string) sseAudience {
+	return sseAudience{tenantID: strings.TrimSpace(tenantID)}
+}
+
+// audiencePlatform addresses the platform administrators' streams. They
+// never receive a business unit's message.
+func audiencePlatform() sseAudience {
+	return sseAudience{platform: true}
+}
+
 // valid reports whether the audience names any stream at all.
 func (a sseAudience) valid() bool {
-	return a.everyone
+	return a.everyone || a.platform || a.tenantID != ""
 }
 
 // sseSubscriber is the stream side of audience matching. Each stream
-// registers one next to its channel, and both live delivery and replay ask it
-// whether a message is meant for the stream. It has no fields while every
-// audience is everyone; narrower audiences add the viewer attributes they
-// match against.
-type sseSubscriber struct{}
+// registers one next to its channel, from its session, and both live
+// delivery and replay ask it whether a message is meant for the stream. The
+// zero value, a stream without a unit or the platform, receives only
+// messages for everyone.
+type sseSubscriber struct {
+	// tenantID is the business unit of a unit account's stream.
+	tenantID string
+	// platform marks a platform administrator's stream.
+	platform bool
+}
 
-// matches reports whether a stream may receive a message for audience.
-func (sseSubscriber) matches(audience sseAudience) bool {
-	return audience.everyone
+// matches reports whether a stream may receive a message for audience. A
+// unit's stream receives its own unit's messages, a platform stream the
+// platform's, and every stream the messages for everyone. A platform stream
+// never receives a unit's message, and a unit's stream never receives
+// another unit's or the platform's.
+func (subscriber sseSubscriber) matches(audience sseAudience) bool {
+	switch {
+	case audience.everyone:
+		return true
+	case subscriber.platform:
+		return audience.platform
+	default:
+		return subscriber.tenantID != "" && audience.tenantID == subscriber.tenantID
+	}
+}
+
+// streamSubscriber derives a stream's audience identity from its session. A
+// platform administrator's stream belongs to the platform, and has no
+// tenant store. Any other stream belongs to the business unit of the tenant
+// store that the API router resolved from the session. A stream with
+// neither identity is refused.
+func streamSubscriber(session store.Session, ts *store.TenantStore) (sseSubscriber, bool) {
+	if session.Role == store.RolePlatformAdmin {
+		return sseSubscriber{platform: true}, ts == nil
+	}
+	scope, err := ts.Scope()
+	if err != nil {
+		return sseSubscriber{}, false
+	}
+	return sseSubscriber{tenantID: scope.ID()}, true
+}
+
+// appEventAudience decides which streams receive a live update from the
+// application:
+//   - an event that names a business unit goes to that unit's streams. The
+//     application names the unit of every event of a job or of a unit's
+//     work, and of each unit's copy of an update alert;
+//   - an event of a job that names no unit is dropped rather than widened:
+//     only its unit may see it, and the application failed to name it;
+//   - application.update_status says only that the deployment's update state
+//     changed. Every console shows that state, so it goes to everyone;
+//   - any other event without a job or a unit belongs to the platform, such
+//     as the platform's copy of an update alert. It goes to the platform's
+//     streams, and each unit receives its own copy instead.
+func appEventAudience(event model.Event) sseAudience {
+	switch {
+	case strings.TrimSpace(event.TenantID) != "":
+		return audienceUnit(event.TenantID)
+	case strings.TrimSpace(event.JobID) != "":
+		return sseAudience{}
+	case event.Type == "application.update_status":
+		return audienceEveryone()
+	default:
+		return audiencePlatform()
+	}
+}
+
+// publishAppEvent sends a live update from the application to the streams
+// that appEventAudience names. NewServer registers it as the application's
+// event handler.
+func (s *Server) publishAppEvent(event model.Event) {
+	payload := map[string]any{"type": event.Type, "job_id": event.JobID, "job": event.Job, "scan_id": event.ScanID, "message": event.Message}
+	if event.PreviousVersion != "" {
+		payload["previous_version"] = event.PreviousVersion
+	}
+	if event.CurrentVersion != "" {
+		payload["current_version"] = event.CurrentVersion
+	}
+	if event.LatestVersion != "" {
+		payload["latest_version"] = event.LatestVersion
+	}
+	if event.ReleaseURL != "" {
+		payload["release_url"] = event.ReleaseURL
+	}
+	s.broadcastTo(context.Background(), appEventAudience(event), payload)
 }
 
 // broadcastTo sends a live update to the streams in audience and keeps it for

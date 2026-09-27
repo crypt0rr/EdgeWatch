@@ -54,7 +54,7 @@ func (s *Server) cancelScan(w http.ResponseWriter, r *http.Request, session stor
 	// Cancellation is an operational action; keep its audit detail opaque and
 	// never include scanner command lines or target payloads.
 	s.auditOptionalEntry(r.Context(), ts, actorAudit(session, "scan.cancel_requested", id))
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "scan.cancellation_requested", "scan_id": id})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "scan.cancellation_requested", "scan_id": id})
 	writeJSON(w, http.StatusAccepted, map[string]any{"status": "cancelling", "scan_id": id})
 }
 
@@ -219,13 +219,13 @@ func (s *Server) updateJob(w http.ResponseWriter, r *http.Request, session store
 	}
 	if changed {
 		for _, event := range events {
-			s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
+			s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
 		}
 		s.App.WakeDelivery()
 	}
 	s.App.RefreshSchedules()
 	state, _ := ts.RuntimeState(r.Context(), id)
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "job.updated", "job_id": id})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "job.updated", "job_id": id})
 	writeJSON(w, 200, s.jobJSONWithCycle(r.Context(), ts, record, state))
 }
 
@@ -369,7 +369,7 @@ func (s *Server) archiveJob(w http.ResponseWriter, r *http.Request, session stor
 		return
 	}
 	s.App.RefreshSchedules()
-	s.broadcastTo(r.Context(), audienceEveryone(), map[string]any{"type": action, "job_id": id})
+	s.broadcastTo(r.Context(), audienceTenant(ts), map[string]any{"type": action, "job_id": id})
 	writeJSON(w, 204, nil)
 }
 
@@ -412,7 +412,7 @@ func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session
 		return
 	}
 	s.App.RefreshSchedules()
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "job.deleted", "job_id": id})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "job.deleted", "job_id": id})
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -442,7 +442,7 @@ func (s *Server) enableJob(w http.ResponseWriter, r *http.Request, session store
 		return
 	}
 	s.App.RefreshSchedules()
-	s.broadcastTo(r.Context(), audienceEveryone(), map[string]any{"type": action, "job_id": id})
+	s.broadcastTo(r.Context(), audienceTenant(ts), map[string]any{"type": action, "job_id": id})
 	writeJSON(w, 204, nil)
 }
 
@@ -484,7 +484,7 @@ func (s *Server) runJob(w http.ResponseWriter, r *http.Request, session store.Se
 			}
 		}
 		if scan.ID != "" {
-			s.broadcastTo(context.Background(), audienceEveryone(), map[string]any{"type": "scan.completed", "job_id": id, "scan_id": scan.ID, "status": scan.Status, "events": len(events)})
+			s.broadcastTo(context.Background(), audienceTenant(ts), map[string]any{"type": "scan.completed", "job_id": id, "scan_id": scan.ID, "status": scan.Status, "events": len(events)})
 		}
 	}); runErr != nil {
 		if errors.Is(runErr, scanner.ErrBusy) {
@@ -562,7 +562,7 @@ func (s *Server) discardScanCycle(w http.ResponseWriter, r *http.Request, sessio
 		return
 	}
 	s.auditOptionalEntry(r.Context(), ts, actorAudit(session, "scan.cycle_discarded", cycleID))
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "scan.cycle_discarded", "job_id": id, "cycle_id": cycleID})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "scan.cycle_discarded", "job_id": id, "cycle_id": cycleID})
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -827,7 +827,7 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session 
 		s.writeIncidentActionErrorWithRequest(w, r, err, "incident.accepted")
 		return
 	}
-	s.broadcastIncidentEvents(context.WithoutCancel(r.Context()), audienceEveryone(), id, events)
+	s.broadcastIncidentEvents(context.WithoutCancel(r.Context()), audienceTenant(ts), id, events)
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -847,7 +847,7 @@ func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, sessio
 		s.writeIncidentActionErrorWithRequest(w, r, err, "incident.suppressed")
 		return
 	}
-	s.broadcastIncidentEvents(context.WithoutCancel(r.Context()), audienceEveryone(), id, events)
+	s.broadcastIncidentEvents(context.WithoutCancel(r.Context()), audienceTenant(ts), id, events)
 	writeJSON(w, http.StatusNoContent, nil)
 }
 
@@ -979,7 +979,7 @@ func (s *Server) resetBaseline(w http.ResponseWriter, r *http.Request, session s
 	}
 	s.App.WakeDelivery()
 	for _, event := range events {
-		s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
+		s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
 	}
 	writeJSON(w, 200, map[string]any{"events": events})
 }
@@ -1043,7 +1043,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 	}
 	s.App.WakeDelivery()
 	for _, event := range events {
-		s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
+		s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": event.Type, "job_id": id, "job": event.Job, "scan_id": event.ScanID, "message": event.Message})
 	}
 	writeJSON(w, 200, map[string]any{"events": events})
 }

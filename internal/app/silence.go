@@ -58,13 +58,15 @@ func (a *App) checkJobSilence(ctx context.Context, now time.Time) {
 	}
 	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
 	for _, scope := range scopes {
-		a.checkTenantJobSilence(ctx, a.Store.Tenant(scope), parser, now)
+		a.checkTenantJobSilence(ctx, scope, parser, now)
 	}
 }
 
 // checkTenantJobSilence runs the silence watchdog for the jobs of the tenant
-// of ts. An alert goes to that tenant's destinations only.
-func (a *App) checkTenantJobSilence(ctx context.Context, ts *store.TenantStore, parser cron.Parser, now time.Time) {
+// of scope. An alert goes to that tenant's destinations and live-update
+// streams only.
+func (a *App) checkTenantJobSilence(ctx context.Context, scope store.TenantScope, parser cron.Parser, now time.Time) {
+	ts := a.Store.Tenant(scope)
 	jobs, err := ts.ListJobs(ctx, false)
 	if err != nil {
 		a.silenceLogger().Warn("job silence watchdog could not list jobs", "error", err)
@@ -121,7 +123,7 @@ func (a *App) checkTenantJobSilence(ctx context.Context, ts *store.TenantStore, 
 			continue
 		}
 		if created {
-			a.emitEvents([]model.Event{event})
+			a.emitTenantEvents(scope, []model.Event{event})
 			a.wakeDelivery()
 		}
 	}

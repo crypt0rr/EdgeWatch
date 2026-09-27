@@ -114,6 +114,26 @@ host recovery tooling) use the bounded revalidation fallback. Server shutdown
 closes all live streams. These bounds are a security property, not a
 replacement for revoking a compromised account or session.
 
+Each live update has one audience, and replay after a reconnect is filtered
+the same way. A business unit's streams receive only that unit's updates: its
+jobs, scans, incidents, baselines, scan cycles, scanner profiles and
+notification destinations, and the unit's own copy of an update alert. The
+notice that the application update status changed carries no unit's data and
+reaches every stream. Platform administrators hold no stream permission and
+receive no live updates; the platform's copy of an update alert is addressed
+to platform streams only, and a platform stream would never receive a unit's
+update. Disabling or deleting a unit through the running daemon ends the
+unit's open streams at once; the change also ends the unit's sessions, so a
+disable from another process takes effect through the revalidation fallback.
+Once more than one unit exists, each unit (and the platform) may hold at most
+64 of the 256 streams that the deployment allows, so one unit cannot lock the
+others out; a stream over either limit receives the in-band `stream_limit`
+backoff. With a single unit only the deployment-wide limit applies. Event IDs
+and the in-memory replay window are shared by every unit: a unit can tell
+from gaps in its event IDs that other units received updates, but not what
+they were, and a burst in another unit can shorten its replay window, after
+which a reconnecting browser receives a full-refresh marker instead.
+
 Other authenticated API reads, including the status and page-polling requests,
 also validate sessions without refreshing their idle timestamp. Actual browser
 pointer, keyboard, click, or scroll input and authorized state-changing

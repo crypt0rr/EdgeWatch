@@ -213,6 +213,38 @@ func TestPlatformSetupTokenNeedsTheFirstSetup(t *testing.T) {
 	}
 }
 
+// GetPlatformSetupToken reports the platform setup token only: nothing
+// before one is issued, never an initial token, and a token that is used or
+// replaced by an initial one.
+func TestGetPlatformSetupTokenReportsOnlyThePlatformToken(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	ps := f.store.Platform()
+	now := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	if _, err := ps.GetPlatformSetupToken(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("platform token before any = %v, want ErrNotFound", err)
+	}
+	if err := ps.IssuePlatformSetupToken(ctx, "platform-hash", now.Add(15*time.Minute), now, false); err != nil {
+		t.Fatal(err)
+	}
+	token, err := ps.GetPlatformSetupToken(ctx)
+	if err != nil || token.Used || !token.ExpiresAt.Equal(now.Add(15*time.Minute)) || !token.IssuedAt.Equal(now) {
+		t.Fatalf("issued platform token = %+v, %v", token, err)
+	}
+	if _, err := ps.CompletePlatformSetup(ctx, "platform-hash", "root", "hash-root", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if token, err := ps.GetPlatformSetupToken(ctx); err != nil || !token.Used {
+		t.Fatalf("redeemed platform token = %+v, %v", token, err)
+	}
+	if err := ps.PutSetupTokenAt(ctx, "initial-hash", now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ps.GetPlatformSetupToken(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("platform token after an initial token = %v, want ErrNotFound", err)
+	}
+}
+
 // A platform administrator invites only a unit's administrators, into an
 // active unit, and only when it is an enabled platform administrator. The
 // invitation is recorded in the unit's audit with the platform actor kind,

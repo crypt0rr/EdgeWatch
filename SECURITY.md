@@ -62,7 +62,14 @@ TOTP, session, and sign-out routes. Only the host creates the first one:
 minutes, once the first administrator exists and while no enabled platform
 administrator does, at most once a minute, and replaces an unused token only
 with `--force`. The token cannot complete the first setup, and the first
-setup token cannot create a platform administrator. An enabled platform
+setup token cannot create a platform administrator. The console's setup page
+redeems it through `POST /api/v1/setup/platform`, which exists only while the
+flag is on, checks the browser origin, and applies the first setup's
+per-client failure budget; a wrong, used, or expired token gets one generic
+answer, and each failure is recorded in platform scope. While the token is
+valid, `/api/v1/setup/status` reports `platform_setup_available`, which the
+sign-in page uses to offer the setup; with the flag off the key is absent.
+An enabled platform
 administrator can then invite another after confirming its password; the
 invited account stays pending and disabled until it redeems its one-time
 link, which expires after 30 minutes. A platform administrator can disable
@@ -163,7 +170,9 @@ backoff. With a single unit only the deployment-wide limit applies. Event IDs
 and the in-memory replay window are shared by every unit: a unit can tell
 from gaps in its event IDs that other units received updates, but not what
 they were, and a burst in another unit can shorten its replay window, after
-which a reconnecting browser receives a full-refresh marker instead.
+which a reconnecting browser receives a full-refresh marker instead. The
+deployment-wide replay counters (`live_updates` in `/api/v1/status`) are
+left out of a unit's status once more than one unit exists.
 
 Other authenticated API reads, including the status and page-polling requests,
 also validate sessions without refreshing their idle timestamp. Actual browser

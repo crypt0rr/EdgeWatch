@@ -137,6 +137,17 @@ docker compose exec edgewatch edgewatch admin setup-token \
 
 This recovery action is refused after an administrator has been created.
 
+With the experimental business units on, the first platform administrator is
+created the same way, once the first administrator exists. Print a one-time
+platform setup token on the host, then open the console: while the token is
+valid, the sign-in page links to the setup page, where the token, a username,
+and a password create the account. The token expires after 15 minutes.
+
+```console
+docker compose exec edgewatch edgewatch admin platform-setup-token \
+  --config /etc/edgewatch/config.yaml
+```
+
 ### Tailscale Serve and reverse proxies
 
 Keep EdgeWatch bound to loopback when exposing it through Tailscale Serve or a

@@ -411,6 +411,17 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.setup(w, r)
 		return
 	}
+	if path == "/setup/platform" && r.Method == http.MethodPost && s.businessUnitsEnabled() {
+		// The platform setup exists only while experimental.business_units
+		// is on. Otherwise the request falls through to the session gate and
+		// is answered exactly like a path that no route knows.
+		if !validateBrowserOrigin(r) {
+			writeError(w, http.StatusForbidden, "origin", "request origin is not allowed", nil)
+			return
+		}
+		s.platformSetup(w, r)
+		return
+	}
 	if path == "/auth/login" && r.Method == http.MethodPost {
 		if !validateBrowserOrigin(r) {
 			writeError(w, http.StatusForbidden, "origin", "request origin is not allowed", nil)

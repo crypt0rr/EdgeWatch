@@ -97,8 +97,8 @@ func TestRouteInventoryEntriesAreWellFormed(t *testing.T) {
 		if want := route.Access != routePublic && businessUnitsRoute(route.Template); route.BusinessUnits != want {
 			t.Errorf("%s BusinessUnits = %t, but the business units gate applies %t", name, route.BusinessUnits, want)
 		}
-		if route.BusinessUnits && (route.Access != routeSession || route.NoHandler) {
-			t.Errorf("%s is a business units route, which must be a session route with a handler", name)
+		if route.BusinessUnits && (route.Access == routePublic || route.NoHandler) {
+			t.Errorf("%s is a business units route, which must be a console route with a handler", name)
 		}
 		if isPlatformPermission(route.Permission) && !strings.HasPrefix(route.Template, "/platform/") {
 			t.Errorf("%s grants platform permission %s outside /platform/", name, route.Permission)
@@ -306,6 +306,23 @@ func runRouteInventoryGateMatrix(t *testing.T, businessUnits bool) {
 				}
 			case routeUnauthenticated:
 				for _, account := range append([]*routeMatrixSession{nil}, sessionPointers(accounts)...) {
+					if route.BusinessUnits && !businessUnits {
+						// The route does not exist: it is not dispatched early,
+						// so with or without a session, a CSRF token, or a
+						// foreign origin it gets exactly the unknown route's
+						// answer.
+						for _, variant := range []struct {
+							csrf   bool
+							origin string
+						}{{false, ""}, {true, ""}, {false, "https://attacker.example"}} {
+							response := serveRouteMatrixRequest(t, server.api, route.Method, target, account, variant.csrf, variant.origin)
+							unknown := serveRouteMatrixRequest(t, server.api, route.Method, consoleAPIBase+"/unknown-route", account, variant.csrf, variant.origin)
+							if response.status != unknown.status || response.body != unknown.body || response.status == http.StatusOK || response.status == http.StatusCreated {
+								t.Errorf("%s as %s (csrf %t, origin %q) = %d %s, want the unknown route's %d %s", target, routeMatrixRole(account), variant.csrf, variant.origin, response.status, response.body, unknown.status, unknown.body)
+							}
+						}
+						continue
+					}
 					if route.Mutates {
 						// No session exists yet to bind a CSRF token to, so the
 						// early dispatch checks the browser origin instead.
@@ -412,6 +429,8 @@ func TestRequiredPermissionFailsClosedOutsideInventory(t *testing.T) {
 		{http.MethodPost, "/auth/session"},
 		{http.MethodDelete, "/setup"},
 		{http.MethodPost, "/setup/status"},
+		{http.MethodGet, "/setup/platform"},
+		{http.MethodPost, "/setup/platform/"},
 		{http.MethodPost, "/incidents"},
 		{http.MethodGet, "/notifications/update-routing"},
 		{http.MethodGet, "/notifications/destinations/"},

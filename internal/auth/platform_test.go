@@ -168,6 +168,56 @@ func TestPlatformSetupNeedsBusinessUnits(t *testing.T) {
 	}
 }
 
+// The web platform setup has the first setup's failure budget: each failure
+// is recorded in platform scope, a client that sent too many wrong tokens is
+// refused before any check, even with the right token, and the refusal is
+// recorded once in platform scope too. Another client still redeems the
+// token.
+func TestPlatformSetupRequestRateLimitsInPlatformScope(t *testing.T) {
+	ctx := context.Background()
+	s, _, _ := platformTestStore(t)
+	m := NewManager(s)
+	m.SetBusinessUnitsEnabled(true)
+	token, err := m.IssuePlatformSetupToken(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocked := httptest.NewRequest(http.MethodPost, "/api/v1/setup/platform", nil)
+	blocked.RemoteAddr = "10.0.0.40:4000"
+	for attempt := 0; attempt < authFailureThreshold; attempt++ {
+		if _, err := m.PlatformSetupRequest(ctx, blocked, "wrong-token", "root", "platform administrator password"); err == nil || errors.Is(err, ErrRateLimited) {
+			t.Fatalf("wrong token attempt %d = %v, want a setup failure", attempt, err)
+		}
+	}
+	if _, err := m.PlatformSetupRequest(ctx, blocked, "wrong-token", "root", "platform administrator password"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("attempt over the budget = %v, want ErrRateLimited", err)
+	}
+	count := func(query string) int {
+		t.Helper()
+		var rows int
+		if err := s.DB.QueryRow(query).Scan(&rows); err != nil {
+			t.Fatal(err)
+		}
+		return rows
+	}
+	if got := count(`SELECT COUNT(*) FROM security_audit WHERE action='auth.platform_setup_failed' AND tenant_id IS NULL`); got != authFailureThreshold {
+		t.Fatalf("platform setup failures in platform scope = %d, want %d", got, authFailureThreshold)
+	}
+	if got := count(`SELECT COUNT(*) FROM security_audit WHERE action='auth.rate_limited' AND tenant_id IS NULL AND actor_username='platform-setup'`); got != 1 {
+		t.Fatalf("platform setup rate-limit records in platform scope = %d, want 1", got)
+	}
+	if got := count(`SELECT COUNT(*) FROM security_audit WHERE tenant_id IS NOT NULL AND (action='auth.platform_setup_failed' OR actor_username='platform-setup')`); got != 0 {
+		t.Fatalf("platform setup records in a unit = %d", got)
+	}
+
+	other := httptest.NewRequest(http.MethodPost, "/api/v1/setup/platform", nil)
+	other.RemoteAddr = "10.0.0.41:4000"
+	user, err := m.PlatformSetupRequest(ctx, other, token, "root", "platform administrator password")
+	if err != nil || user.Role != store.RolePlatformAdmin {
+		t.Fatalf("platform setup from another client = %+v, %v", user, err)
+	}
+}
+
 // Once more than one business unit exists, a unit administrator or a
 // platform administrator without TOTP holds only its own account's
 // self-service until it enrols; an operator is unaffected. With a single

@@ -1,12 +1,12 @@
 import { expect, test } from '@playwright/test'
-import { mockConsole, rolePermissions, type ConsoleRole } from './mock-console'
+import { mockConsole, rolePermissions, type UnitConsoleRole } from './mock-console'
 
 const navigationLabels = [
   'Overview', 'Jobs', 'Hosts', 'Incidents', 'Notifications', 'Users',
   'Public status', 'Scanner profiles', 'Security',
 ]
 
-const expectedNavigation: Record<ConsoleRole, string[]> = {
+const expectedNavigation: Record<UnitConsoleRole, string[]> = {
   administrator: navigationLabels,
   operator: ['Overview', 'Jobs', 'Hosts', 'Incidents', 'Scanner profiles', 'Security'],
   viewer: ['Jobs', 'Security'],
@@ -34,7 +34,7 @@ const routePermissions: Array<{ path: string; permission?: string }> = [
 test('role route and navigation matrix matches the authorization contract', async ({ browser, baseURL }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'The permission matrix runs once on desktop; mobile navigation is covered separately.')
 
-  for (const role of Object.keys(expectedNavigation) as ConsoleRole[]) {
+  for (const role of Object.keys(expectedNavigation) as UnitConsoleRole[]) {
     // Use the configured preview origin so PLAYWRIGHT_PORT is honored.
     const context = await browser.newContext({ baseURL })
     const page = await context.newPage()
@@ -84,5 +84,55 @@ test('role route and navigation matrix matches the authorization contract', asyn
     } finally {
       await context.close()
     }
+  }
+})
+
+// The platform administrator's console: its own navigation, never a unit's,
+// and every unit route leads to the platform's home without a request for a
+// unit's data.
+const platformNavigation = ['Units', 'Platform admins', 'Notifications', 'Audit', 'Status', 'Security']
+
+const platformRoutes: Array<{ path: string; permission: string }> = [
+  { path: '/platform/units', permission: 'units.manage' },
+  { path: '/platform/units/unit-retail/accounts', permission: 'units.manage' },
+  { path: '/platform/admins', permission: 'unit_accounts.manage' },
+  { path: '/platform/notifications', permission: 'platform_notifications.manage' },
+  { path: '/platform/audit', permission: 'platform_audit.read' },
+  { path: '/platform/status', permission: 'platform_status.read' },
+  { path: '/security', permission: 'account.self' },
+]
+
+test('platform administrator route and navigation matrix keeps unit pages out of the platform console', async ({ browser, baseURL }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The permission matrix runs once on desktop; mobile navigation is covered separately.')
+  const context = await browser.newContext({ baseURL })
+  const page = await context.newPage()
+  try {
+    const controls = await mockConsole(page, 'platform_admin')
+    await page.goto('/platform/units')
+    await expect(page.getByRole('heading', { name: 'Business units', exact: true })).toBeVisible()
+    const navigation = page.locator('#primary-navigation nav')
+    for (const label of [...navigationLabels, ...platformNavigation]) {
+      const link = navigation.getByRole('link', { name: label, exact: true })
+      if (platformNavigation.includes(label)) await expect(link).toHaveCount(1)
+      else await expect(link).toHaveCount(0)
+    }
+    await expect(page.getByText('All business units')).toBeVisible()
+
+    for (const route of platformRoutes) {
+      expect(rolePermissions.platform_admin).toContain(route.permission)
+      await page.goto(route.path)
+      await expect.poll(() => new URL(page.url()).pathname).toBe(route.path)
+    }
+    for (const route of routePermissions.filter(route => route.path !== '/security')) {
+      await page.goto(route.path)
+      await expect.poll(() => new URL(page.url()).pathname).toBe('/platform/units')
+    }
+    for (const path of ['/audit', '/highlights', '/platform/unknown']) {
+      await page.goto(path)
+      await expect.poll(() => new URL(page.url()).pathname).toBe('/platform/units')
+    }
+    expect(controls.calls['unit-data'] ?? 0).toBe(0)
+  } finally {
+    await context.close()
   }
 })

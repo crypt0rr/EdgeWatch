@@ -5,7 +5,13 @@ import { useNavigate } from 'react-router-dom'
 import { api, APIError, getSession, logout, logoutAllSessions, setCSRF, updateDisplayName } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
 
-export function Security() {
+/**
+ * The account's security settings. With `enrollment` it is the forced
+ * enrolment screen of an administrator who must set up TOTP before using
+ * the console: it offers only the authenticator setup and a password
+ * change, and the shell around it offers sign-out.
+ */
+export function Security({ enrollment = false }: { enrollment?: boolean } = {}) {
   const client = useQueryClient()
   const navigate = useNavigate()
   const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value } })
@@ -25,6 +31,7 @@ export function Security() {
   const [recoveryBusy, setRecoveryBusy] = useState(false)
   const [displayName, setDisplayName] = useState('')
   const [displayNameBusy, setDisplayNameBusy] = useState(false)
+  const [enrollmentPassword, setEnrollmentPassword] = useState('')
   const displayNameInitialized = useRef(false)
 
   useEffect(() => {
@@ -179,19 +186,22 @@ export function Security() {
     }
   }
 
-  const accountLabel = session.data?.role === 'administrator' ? 'Administrator' : session.data?.role === 'operator' ? 'Operator' : 'Viewer'
+  const accountLabel = session.data?.role === 'administrator' ? 'Administrator' : session.data?.role === 'operator' ? 'Operator' : session.data?.role === 'platform_admin' ? 'Platform administrator' : 'Viewer'
   return <section className="page narrow">
-    <div className="page-heading"><div><p className="eyebrow">{accountLabel} account</p><h1>Security</h1><p className="muted">Protect the local console and keep recovery under your control.</p></div></div>
+    {enrollment
+      ? <div className="page-heading"><div><p className="eyebrow">Required setup</p><h1>Set up an authenticator</h1><p className="muted">This EdgeWatch deployment has more than one business unit, so every administrator signs in with an authenticator app (TOTP).</p></div></div>
+      : <div className="page-heading"><div><p className="eyebrow">{accountLabel} account</p><h1>Security</h1><p className="muted">Protect the local console and keep recovery under your control.</p></div></div>}
+    {enrollment && <div className="notice warning totp-enrollment-notice" role="status"><ShieldCheck size={17} /><span><strong>Set up TOTP to continue.</strong> Until you do, you can only set up an authenticator, change your password, or sign out.</span></div>}
     {message && <div className="success-banner"><Check size={17} />{message}</div>}
     {error && <div className="form-error banner" role="alert">{error}</div>}
     <div className="settings-grid">
-      <div className="panel">
+      {!enrollment && <div className="panel">
         <div className="panel-heading"><div><h2>Profile</h2><p className="muted">Choose the name shown throughout the console.</p></div><UserRound className="muted-icon" size={19} /></div>
         <form className="settings-form" onSubmit={saveDisplayName}>
           <label>Display name<input type="text" value={displayName} onChange={(event) => setDisplayName(event.target.value)} maxLength={80} autoComplete="nickname" required /><small>Shown in the sidebar and dashboard. Your sign-in remains unchanged.</small></label>
           <button className="button primary" type="submit" disabled={displayNameBusy || !displayName.trim()}>{displayNameBusy ? 'Saving…' : 'Save display name'}</button>
         </form>
-      </div>
+      </div>}
       <div className="panel">
         <div className="panel-heading"><div><h2>Password</h2><p className="muted">Your password is protected with Argon2id.</p></div><KeyRound className="muted-icon" size={19} /></div>
         <form className="settings-form" onSubmit={change}>
@@ -199,11 +209,11 @@ export function Security() {
           <label>New password<input type="password" value={next} onChange={(event) => setNext(event.target.value)} minLength={12} autoComplete="new-password" required /><small>At least 12 characters.</small></label>
           <button className="button primary" type="submit">Update password</button>
         </form>
-        <button className="button secondary" type="button" onClick={() => { setError(''); setRevokePrompt(true) }}><LogOut size={16} /> Log out all sessions</button>
+        {!enrollment && <button className="button secondary" type="button" onClick={() => { setError(''); setRevokePrompt(true) }}><LogOut size={16} /> Log out all sessions</button>}
       </div>
       <div className="panel">
-        <div className="panel-heading"><div><h2>Authenticator app</h2><p className="muted">{session.data?.totp_enabled ? 'TOTP is protecting your sign-in.' : 'Optional extra protection for sign-in.'}</p></div><ShieldCheck className={session.data?.totp_enabled ? 'green-icon' : 'muted-icon'} size={20} /></div>
-        {totp ? <div className="settings-form"><p>{session.data?.totp_enabled ? 'Scan this new secret in your authenticator app, then enter the six-digit code.' : 'Scan this secret in your authenticator app, then enter the six-digit code.'}</p><code className="secret">{totp.secret}</code><label>Verification code<input inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} placeholder="123456" /></label><button className="button primary" type="button" onClick={() => void enableTotp()}>{session.data?.totp_enabled ? 'Replace authenticator' : 'Enable TOTP'}</button></div> : session.data?.totp_enabled ? <div className="settings-form"><div className="status-line"><span className="pill green">Enabled</span><span className="muted">Recovery codes are single-use.</span></div><div className="heading-actions"><button className="button secondary" type="button" onClick={() => { setError(''); setRecoveryPrompt(true) }}>Regenerate recovery codes</button><button className="button secondary" type="button" onClick={() => { setError(''); setReplacePrompt(true) }}>Replace authenticator</button><button className="button secondary" type="button" onClick={() => { setError(''); setDisablePrompt(true) }}>Disable TOTP</button></div></div> : <div className="settings-form"><p>Enter your current password, then set up an authenticator app.</p><button className="button secondary" type="button" onClick={() => void beginTotp()}>Set up authenticator</button></div>}
+        <div className="panel-heading"><div><h2>Authenticator app</h2><p className="muted">{session.data?.totp_enabled ? 'TOTP is protecting your sign-in.' : enrollment ? 'Required before you can use the console.' : 'Optional extra protection for sign-in.'}</p></div><ShieldCheck className={session.data?.totp_enabled ? 'green-icon' : 'muted-icon'} size={20} /></div>
+        {totp ? <div className="settings-form"><p>{session.data?.totp_enabled ? 'Scan this new secret in your authenticator app, then enter the six-digit code.' : 'Scan this secret in your authenticator app, then enter the six-digit code.'}</p><code className="secret">{totp.secret}</code><label>Verification code<input inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} placeholder="123456" /></label><button className="button primary" type="button" onClick={() => void enableTotp()}>{session.data?.totp_enabled ? 'Replace authenticator' : 'Enable TOTP'}</button></div> : session.data?.totp_enabled ? <div className="settings-form"><div className="status-line"><span className="pill green">Enabled</span><span className="muted">Recovery codes are single-use.</span></div>{!enrollment && <div className="heading-actions"><button className="button secondary" type="button" onClick={() => { setError(''); setRecoveryPrompt(true) }}>Regenerate recovery codes</button><button className="button secondary" type="button" onClick={() => { setError(''); setReplacePrompt(true) }}>Replace authenticator</button><button className="button secondary" type="button" onClick={() => { setError(''); setDisablePrompt(true) }}>Disable TOTP</button></div>}</div> : enrollment ? <form className="settings-form" onSubmit={event => { event.preventDefault(); void beginTotp(enrollmentPassword) }}><label>Account password<input type="password" value={enrollmentPassword} onChange={(event) => setEnrollmentPassword(event.target.value)} autoComplete="current-password" required /><small>Confirm your password, then scan the secret with your authenticator app.</small></label><button className="button primary" type="submit">Set up authenticator</button></form> : <div className="settings-form"><p>Enter your current password, then set up an authenticator app.</p><button className="button secondary" type="button" onClick={() => void beginTotp()}>Set up authenticator</button></div>}
       </div>
     </div>
     {recovery.length > 0 && <div className="panel recovery"><h2>Save your recovery codes</h2><p className="muted">These are shown once. Store them somewhere offline before leaving this page.</p><div className="code-grid">{recovery.map((value) => <code key={value}>{value}</code>)}</div><label className="checkbox-row"><input type="checkbox" checked={recoveryAcknowledged} onChange={(event) => setRecoveryAcknowledged(event.target.checked)} /> I saved these recovery codes in a secure place.</label><div className="heading-actions"><button className="button secondary" type="button" onClick={() => navigator.clipboard?.writeText(recovery.join('\n'))}><Copy size={16} /> Copy codes</button><button className="button primary" type="button" onClick={finishTotpSetup} disabled={recoveryBusy || !recoveryAcknowledged}>{recoveryBusy ? 'Signing out…' : 'Continue to sign in'}</button></div></div>}

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -389,6 +390,82 @@ func TestAcceptServiceOnNewPortIncludesOpenPortIncident(t *testing.T) {
 				t.Fatalf("accepted baseline ports = %#v", ports)
 			}
 		})
+	}
+}
+
+// A port accepted without its reported service keeps that service under
+// normal comparison until an administrator decides on it. Accepting a service
+// or the port's removal ends that decision, and a state change of a port that
+// is already expected does not start one.
+func TestAcceptIncidentRecordsServiceDecisionForPortAcceptedAlone(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("accept-port-service-decision"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := func(kind string, port int, old, current string) model.Change {
+		return model.Change{Key: fmt.Sprintf("%s|192.0.2.15|tcp|%d", kind, port), Kind: kind, Target: "192.0.2.15", Protocol: "tcp", Port: port, Old: old, New: current}
+	}
+	newPort := change("port", 8080, "not-open", "open")
+	newService := change("service", 8080, "not-open", "http")
+	stateChange := change("port", 443, "open|filtered", "open")
+	removal := change("port", 25, "open", "not-open")
+	_, err = s.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &model.Snapshot{Units: []model.Unit{{Target: "192.0.2.15", Protocol: "tcp", Ports: []model.PortState{
+			{Port: 25, State: "open"}, {Port: 443, State: "open|filtered"},
+		}}}}
+		for _, tracked := range []model.Change{newPort, newService, stateChange, removal} {
+			state.Incidents[tracked.Key] = model.Incident{Change: tracked, ScanID: "scan-2"}
+		}
+		// Left behind by an earlier acceptance of port 25 on its own.
+		state.ServiceDecisionRequired = map[string]bool{"service|192.0.2.15|tcp|25": true}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accept := func(key string) model.JobState {
+		t.Helper()
+		if _, err := defaultTenant(s).AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, key, AuditEntry{Action: "incident.accepted", Detail: record.ID + ":" + key}); err != nil {
+			t.Fatalf("accept %s: %v", key, err)
+		}
+		state, err := defaultTenant(s).RuntimeState(ctx, record.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	serviceKey := "service|192.0.2.15|tcp|8080"
+	if state := accept(newPort.Key); !state.ServiceDecisionRequired[serviceKey] || len(state.ServiceDecisionRequired) != 2 {
+		t.Fatalf("port accepted alone did not keep its service for a decision: %#v", state.ServiceDecisionRequired)
+	}
+	if state := accept(stateChange.Key); state.ServiceDecisionRequired["service|192.0.2.15|tcp|443"] {
+		t.Fatalf("state change of an expected port required a service decision: %#v", state.ServiceDecisionRequired)
+	}
+	if state := accept(removal.Key); state.ServiceDecisionRequired["service|192.0.2.15|tcp|25"] {
+		t.Fatalf("accepted port removal kept its service decision: %#v", state.ServiceDecisionRequired)
+	}
+	state := accept(newService.Key)
+	if len(state.ServiceDecisionRequired) != 0 {
+		t.Fatalf("accepted service kept its decision: %#v", state.ServiceDecisionRequired)
+	}
+	if ports := state.Baseline.Units[0].Ports; len(ports) != 2 || ports[0].Port != 443 || ports[0].State != "open" || ports[1].Port != 8080 || ports[1].Service != "http" {
+		t.Fatalf("accepted baseline ports = %#v", ports)
+	}
+
+	// A baseline reset starts over, so no earlier decision survives it.
+	if _, err := s.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.ServiceDecisionRequired = map[string]bool{serviceKey: true}
+		return nil, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := defaultTenant(s).ResetRuntime(ctx, record.ID, record.Job.Name); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := defaultTenant(s).RuntimeState(ctx, record.ID); err != nil || len(state.ServiceDecisionRequired) != 0 {
+		t.Fatalf("reset kept service decisions: %#v, %v", state.ServiceDecisionRequired, err)
 	}
 }
 

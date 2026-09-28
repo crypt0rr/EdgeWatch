@@ -1215,6 +1215,7 @@ func (ts *TenantStore) resetRuntimeWithAudits(ctx context.Context, jobID, name s
 		state.Suppressed = map[string]int{}
 		state.SuppressedChanges = map[string]model.Change{}
 		state.FingerprintCandidates = map[string]model.ValueCount{}
+		state.ServiceDecisionRequired = nil
 		return []model.Event{{Type: "baseline-reset", Job: name, Message: "Baseline collection reset", CreatedAt: time.Now().UTC()}}, nil
 	})
 	if err != nil {
@@ -1322,6 +1323,7 @@ func (ts *TenantStore) approveRuntimeWithAudits(ctx context.Context, jobID, name
 		state.Suppressed = map[string]int{}
 		state.SuppressedChanges = map[string]model.Change{}
 		state.FingerprintCandidates = map[string]model.ValueCount{}
+		state.ServiceDecisionRequired = nil
 		return []model.Event{{Type: "baseline-approved", Job: name, ScanID: stored.ID, Message: "Baseline manually approved", CreatedAt: time.Now().UTC()}}, nil
 	})
 	if err != nil {

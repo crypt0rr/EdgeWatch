@@ -336,7 +336,9 @@ data, but they do not independently create incidents.
 
 Naabu reports open ports only, so Nmap also confirms every TCP port the job
 still tracks: baseline ports and the ports of open incidents, pending changes,
-and suppressed changes. A single Naabu miss cannot close them. An address with
+and suppressed changes. It checks them on every address the target resolves
+to in that scan, also after a DNS name has moved to a new address. A single
+Naabu miss cannot close them. An address with
 no Naabu result counts as complete coverage only when host discovery is
 skipped (assume_alive, the default). With SYN host discovery, Naabu cannot
 tell a down address from one without open ports, so that address stays
@@ -397,7 +399,9 @@ From **Incidents**, administrators and operators can:
 - **Accept change** to make the current observation expected while preserving
   the original scan history. Accepting a service on a newly opened port also
   accepts that port; accepting the port alone leaves its service for a
-  separate decision.
+  separate decision. Until you accept a service for that port, its
+  fingerprint is reported as a change, also after a suppression or a scan
+  without a fingerprint, and never enters the baseline on its own.
 - **Suppress 1 scan** to defer the alert for the next successful scan. If the
   change remains, it is reported again afterward.
 

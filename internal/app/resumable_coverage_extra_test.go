@@ -699,6 +699,138 @@ func TestNaabuMissDoesNotRecoverIncidentWithoutNmapConfirmation(t *testing.T) {
 	}
 }
 
+// movedDNSConfirmationScanner plays a resumable Naabu pipeline for the DNS
+// target edge.example, which now resolves to 192.0.2.9. Discovery reports
+// only 22; Nmap enrichment reports the requested ports in open as open.
+type movedDNSConfirmationScanner struct {
+	mu       sync.Mutex
+	open     map[int]bool
+	enriched []string
+}
+
+func (s *movedDNSConfirmationScanner) Version(context.Context) string { return "moved-dns" }
+func (s *movedDNSConfirmationScanner) Scan(context.Context, config.Job) (model.Snapshot, error) {
+	return model.Snapshot{}, errors.New("ordinary scan path is not expected")
+}
+func (s *movedDNSConfirmationScanner) target() scanner.ResolvedTarget {
+	return scanner.ResolvedTarget{Name: "edge.example", ConfiguredTarget: "edge.example", Addresses: []string{"192.0.2.9"}, Aggregate: true, Hostname: true}
+}
+func (s *movedDNSConfirmationScanner) Plan(context.Context, config.Job) (scanner.WorkPlan, error) {
+	target := s.target()
+	return scanner.WorkPlan{
+		Targets: []scanner.ResolvedTarget{target}, DNS: map[string][]string{"edge.example": {"192.0.2.9"}},
+		Scopes: []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "1-65535"}},
+		Units: []scanner.WorkUnit{{
+			Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4,
+			Targets: []scanner.ResolvedTarget{target}, Addresses: []string{"192.0.2.9"}, Ports: "1-65535", PortCount: 65535, Probes: 65535,
+		}},
+		TotalUnits: 1, TotalProbes: 65535,
+	}, nil
+}
+func (s *movedDNSConfirmationScanner) ScanWorkUnit(_ context.Context, _ config.Job, unit scanner.WorkUnit, _ scanner.ProgressReporter) (model.Snapshot, error) {
+	if unit.Phase == "discovery" {
+		return model.Snapshot{
+			DNS:   map[string][]string{"edge.example": {"192.0.2.9"}},
+			Units: []model.Unit{{Target: "edge.example", Protocol: "tcp", Addresses: []string{"192.0.2.9"}}},
+			Hosts: []model.HostObservation{{Address: "192.0.2.9", Status: "up", Protocols: []model.ProtocolObservation{{
+				Protocol: "tcp", Status: "up", DiscoveryEngine: "naabu", ScannedPorts: "1-65535", ScannedPortCount: 65535,
+				DiscoveredPorts: []model.PortObservation{{Port: 22, State: "open", Verification: "discovered"}},
+			}}}},
+		}, nil
+	}
+	ports, err := config.ParsePorts(unit.Ports)
+	if err != nil {
+		return model.Snapshot{}, err
+	}
+	s.mu.Lock()
+	s.enriched = append(s.enriched, unit.Ports)
+	s.mu.Unlock()
+	confirmed := model.Unit{Target: "edge.example", Protocol: "tcp", Addresses: unit.Addresses}
+	for _, port := range ports {
+		if s.open[port] {
+			confirmed.Ports = append(confirmed.Ports, model.PortState{Port: port, State: "open", Evidence: []string{"192.0.2.9"}})
+		}
+	}
+	return model.Snapshot{Units: []model.Unit{confirmed}}, nil
+}
+
+// The baseline of a DNS target keeps the address the name resolved to when
+// it was scanned (or none in a legacy state), while the accepted DNS answer
+// has moved to 192.0.2.9. A Naabu miss of a baseline port on the new address
+// must still be checked by Nmap: the port stays expected while Nmap reports
+// it open, and its closure is reported when Nmap reports it closed.
+func TestNaabuMissOnMovedDNSTargetKeepsBaselinePortUnderNmapConfirmation(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		addresses []string
+		open      map[int]bool
+		closed    bool
+	}{
+		{name: "stale address and nmap confirms open", addresses: []string{"192.0.2.7"}, open: map[int]bool{22: true, 443: true}},
+		{name: "no stored address and nmap confirms open", open: map[int]bool{22: true, 443: true}},
+		{name: "stale address and nmap reports closed", addresses: []string{"192.0.2.7"}, open: map[int]bool{22: true}, closed: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := store.Open(storetest.FreshPath(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+			a, err := New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			fake := &movedDNSConfirmationScanner{open: test.open}
+			a.Scanner = fake
+			record, err := defaultTenant(db).CreateJob(ctx, config.NormalizeJob(config.Job{
+				Name: "naabu-moved-dns", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"edge.example"},
+				TCP:     &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Mode: "connect", Naabu: &config.NaabuOptions{ScanType: "connect"}},
+				Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour),
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+				state.Baseline = &model.Snapshot{
+					Scopes: []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "1-65535"}},
+					DNS:    map[string][]string{"edge.example": {"192.0.2.9"}},
+					Units: []model.Unit{{Target: "edge.example", Protocol: "tcp", Addresses: test.addresses, Ports: []model.PortState{
+						{Port: 22, State: "open"}, {Port: 443, State: "open"},
+					}}},
+				}
+				state.BaselineScanID = "baseline"
+				state.BaselineConfigHash = record.Job.SecurityHash()
+				return nil, nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			scan, events, err := a.RunJobRecord(ctx, record)
+			if err != nil || scan.Status != "success" {
+				t.Fatalf("Naabu cycle = %q (%q), err %v", scan.Status, scan.Error, err)
+			}
+			if len(fake.enriched) != 1 || fake.enriched[0] != "22,443" {
+				t.Fatalf("Nmap enrichment ports = %#v, want the discovered and the baseline port", fake.enriched)
+			}
+			var changes []string
+			for _, event := range events {
+				for _, change := range event.Changes {
+					changes = append(changes, event.Type+" "+change.Key+" "+change.Old+"->"+change.New)
+				}
+			}
+			want := []string(nil)
+			if test.closed {
+				want = []string{"changes-detected port|edge.example|tcp|443 open->not-open"}
+			}
+			if strings.Join(changes, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("changes = %q, want %q", changes, want)
+			}
+		})
+	}
+}
+
 func deadlineContext() context.Context {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	cancel()

@@ -73,7 +73,11 @@ func (ts *TenantStore) AcceptIncidentWithExpectedOutboxAndAudit(ctx context.Cont
 			}
 		}
 		hostIndex := buildAcceptedHostAddressIndex(state.Baseline)
+		addedPorts := make(map[string]bool, len(accepted))
 		for _, acceptedChange := range accepted {
+			if acceptedChange.Kind == "port" && !baselineHasPort(state.Baseline, acceptedChange) {
+				addedPorts[fingerprintCandidateKey(acceptedChange)] = true
+			}
 			if err := applyAcceptedChangeWithHostIndex(state.Baseline, acceptedChange, hostIndex); err != nil {
 				return nil, err
 			}
@@ -91,8 +95,24 @@ func (ts *TenantStore) AcceptIncidentWithExpectedOutboxAndAudit(ctx context.Cont
 			delete(state.Pending, acceptedKey)
 			delete(state.Suppressed, acceptedKey)
 			delete(state.SuppressedChanges, acceptedKey)
-			if acceptedChange.Kind == "service" || acceptedChange.Kind == "port" {
-				delete(state.FingerprintCandidates, fingerprintCandidateKey(acceptedChange))
+			if acceptedChange.Kind != "service" && acceptedChange.Kind != "port" {
+				continue
+			}
+			serviceKey := fingerprintCandidateKey(acceptedChange)
+			delete(state.FingerprintCandidates, serviceKey)
+			// A port accepted on its own enters the baseline without the
+			// service that was reported with it. That fingerprint stays under
+			// normal comparison until an administrator accepts a service for
+			// the port, or the port's removal; fingerprint learning must not
+			// take it silently. Changes are applied port first, so a service
+			// accepted together with its new port ends the decision here too.
+			if acceptedChange.Kind == "service" || acceptedChange.New == "not-open" {
+				delete(state.ServiceDecisionRequired, serviceKey)
+			} else if addedPorts[serviceKey] {
+				if state.ServiceDecisionRequired == nil {
+					state.ServiceDecisionRequired = map[string]bool{}
+				}
+				state.ServiceDecisionRequired[serviceKey] = true
 			}
 		}
 		return []model.Event{{Type: "incident-accepted", Job: jobName, ScanID: incident.ScanID, Message: acceptedIncidentMessage(len(accepted)), Changes: accepted, CreatedAt: time.Now().UTC()}}, nil

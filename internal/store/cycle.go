@@ -511,8 +511,8 @@ func (ss *SystemStore) reconcileScanCycleEnrichmentBatch(ctx context.Context, cy
 // expectedTCPPortsTx returns, per effective address, every positive TCP port
 // the job's runtime state currently tracks: baseline ports, and the ports of
 // open incidents, pending changes and suppressed changes that expect the port
-// to be open. Changes name a logical target, so targets maps a DNS or other
-// logical name to the addresses pinned by the cycle plan.
+// to be open. Baseline units and changes name a logical target, so targets
+// maps a DNS or other logical name to the addresses pinned by the cycle plan.
 func expectedTCPPortsTx(ctx context.Context, tx *sql.Tx, jobID string, targets []scanner.ResolvedTarget) (map[string]map[int]struct{}, error) {
 	expected := map[string]map[int]struct{}{}
 	if strings.TrimSpace(jobID) == "" {
@@ -530,18 +530,33 @@ func expectedTCPPortsTx(ctx context.Context, tx *sql.Tx, jobID string, targets [
 		// keep the empty map and let the discovery evidence stand on its own.
 		state = model.JobState{}
 	}
-	addTrackedChangeTCPPorts(expected, state, targets)
+	targetAddresses := make(map[string][]string, len(targets))
+	for _, target := range targets {
+		targetAddresses[target.Name] = append(targetAddresses[target.Name], target.Addresses...)
+	}
+	addTrackedChangeTCPPorts(expected, state, targetAddresses)
 	if state.Baseline == nil {
 		return expected, nil
-	}
-	positive := func(port model.PortState) bool {
-		return port.Port >= 1 && port.Port <= 65535 && isPositiveCyclePortState(port.State)
 	}
 	for _, unit := range state.Baseline.Units {
 		if !strings.EqualFold(unit.Protocol, "tcp") {
 			continue
 		}
-		addresses := unit.Addresses
+		var ports []int
+		for _, port := range unit.Ports {
+			if port.Port >= 1 && port.Port <= 65535 && isPositiveCyclePortState(port.State) {
+				ports = append(ports, port.Port)
+			}
+		}
+		if len(ports) == 0 {
+			continue
+		}
+		// A unit stores the addresses its target resolved to when the baseline
+		// was scanned, and a legacy unit stores none. A DNS target can resolve
+		// elsewhere by now, so its ports are also expected on every address the
+		// plan pinned for the target. The caller drops addresses outside the
+		// current discovery batch.
+		addresses := append(append([]string(nil), unit.Addresses...), targetAddresses[unit.Target]...)
 		if len(addresses) == 0 {
 			addresses = []string{unit.Target}
 		}
@@ -553,16 +568,7 @@ func expectedTCPPortsTx(ctx context.Context, tx *sql.Tx, jobID string, targets [
 			if address == "" {
 				continue
 			}
-			set := expected[address]
-			if set == nil {
-				set = map[int]struct{}{}
-				expected[address] = set
-			}
-			for _, port := range unit.Ports {
-				if positive(port) {
-					set[port.Port] = struct{}{}
-				}
-			}
+			expectTCPPorts(expected, address, ports...)
 		}
 	}
 	return expected, nil
@@ -572,11 +578,7 @@ func expectedTCPPortsTx(ctx context.Context, tx *sql.Tx, jobID string, targets [
 // changes and suppressed changes expect to be open. A change carries only its
 // logical target, so each target maps to every address the plan pinned for it;
 // a target missing from the plan is used only when it is an address itself.
-func addTrackedChangeTCPPorts(expected map[string]map[int]struct{}, state model.JobState, targets []scanner.ResolvedTarget) {
-	targetAddresses := make(map[string][]string, len(targets))
-	for _, target := range targets {
-		targetAddresses[target.Name] = append(targetAddresses[target.Name], target.Addresses...)
-	}
+func addTrackedChangeTCPPorts(expected map[string]map[int]struct{}, state model.JobState, targetAddresses map[string][]string) {
 	add := func(change model.Change) {
 		if !strings.EqualFold(change.Protocol, "tcp") || change.Port < 1 || change.Port > 65535 || !changeExpectsOpenPort(change) {
 			return
@@ -586,16 +588,9 @@ func addTrackedChangeTCPPorts(expected map[string]map[int]struct{}, state model.
 			addresses = []string{change.Target}
 		}
 		for _, address := range addresses {
-			address = normalizeCycleAddress(address)
-			if address == "" {
-				continue
+			if address = normalizeCycleAddress(address); address != "" {
+				expectTCPPorts(expected, address, change.Port)
 			}
-			set := expected[address]
-			if set == nil {
-				set = map[int]struct{}{}
-				expected[address] = set
-			}
-			set[change.Port] = struct{}{}
 		}
 	}
 	for _, incident := range state.Incidents {
@@ -606,6 +601,17 @@ func addTrackedChangeTCPPorts(expected map[string]map[int]struct{}, state model.
 	}
 	for _, change := range state.SuppressedChanges {
 		add(change)
+	}
+}
+
+func expectTCPPorts(expected map[string]map[int]struct{}, address string, ports ...int) {
+	set := expected[address]
+	if set == nil {
+		set = map[int]struct{}{}
+		expected[address] = set
+	}
+	for _, port := range ports {
+		set[port] = struct{}{}
 	}
 }
 

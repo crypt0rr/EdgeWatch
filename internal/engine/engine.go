@@ -629,6 +629,9 @@ func advanceCandidate(state *model.JobState, scan model.Scan, required int, merg
 		state.BaselineScanID = scan.ID
 		state.BaselineConfigHash = scan.ConfigHash
 		state.BaselineModified = false
+		// The new baseline records what the scans observed, so a port without
+		// a stable fingerprint in it may learn one again.
+		state.ServiceDecisionRequired = nil
 		state.Candidate = nil
 		state.CandidateHash = ""
 		state.CandidateCount = 0
@@ -721,8 +724,14 @@ func learnMissingFingerprints(state *model.JobState, current model.Snapshot, req
 			// A service incident reported before its port entered the baseline
 			// (for example, when an operator accepted the port first) stays
 			// under normal comparison until the operator acts on it. Learning it
-			// now would recover an unchanged fingerprint.
-			if _, reported := state.Incidents[key]; reported {
+			// now would recover an unchanged fingerprint. The same holds after
+			// the incident is suppressed or recovers: the port was accepted
+			// without its service, so only an accepted service ends the
+			// comparison. The suppression check also covers a port accepted
+			// before accepted ports were recorded.
+			_, reported := state.Incidents[key]
+			_, suppressed := state.Suppressed[key]
+			if reported || suppressed || state.ServiceDecisionRequired[key] {
 				continue
 			}
 			seen[key] = true

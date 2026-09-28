@@ -644,6 +644,9 @@ account then enrols again.
   list of units, it records no copy, and a later check records every copy.
 - **Scanner profiles:** the built-in profiles are shared and read-only. Custom
   profiles belong to the unit that created them.
+- **YAML jobs:** the inactive jobs in config.yaml belong to the default unit.
+  Only its administrators and operators see them listed on **Overview**, and
+  `edgewatch status` lists them for the default unit only.
 - **Public status:** each unit's administrators publish its page at
   /public/<slug>; /public keeps serving the default unit's page. An unknown
   slug, a page that is not enabled, and a unit that is disabled or being

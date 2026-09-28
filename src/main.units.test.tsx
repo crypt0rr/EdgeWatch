@@ -4,15 +4,16 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { act } from 'react'
 import { useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { adminStatus, api, APIError, createUnit, getPublicDashboard, getPublicDashboardConfig, getSession, getUnit, getUnitCapacity, listHosts, listIncidents, listJobs, listUnits, platformStatus, recordActivity, setupStatus, unitAudit } from './api'
+import { activeScans, adminStatus, api, APIError, createUnit, getPublicDashboard, getPublicDashboardConfig, getSession, getUnit, getUnitCapacity, listHosts, listIncidents, listJobs, listScans, listUnits, login, platformStatus, recordActivity, setupStatus, unitAudit } from './api'
 import type { SessionUser } from './api'
-import { ProtectedApp } from './main'
+import { AppContent, createQueryClient, ProtectedApp } from './main'
+import type { Job } from './types'
 import { businessUnit, deploymentLimits, platformSession, unitCapacity } from './test/platform-fixtures'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
   const actual = await vi.importActual<typeof import('./api')>('./api')
-  return { ...actual, adminStatus: vi.fn(), createUnit: vi.fn(), getPublicDashboard: vi.fn(), getPublicDashboardConfig: vi.fn(), getSession: vi.fn(), getUnit: vi.fn(), getUnitCapacity: vi.fn(), listHosts: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listUnits: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), unitAudit: vi.fn() }
+  return { ...actual, activeScans: vi.fn(), adminStatus: vi.fn(), createUnit: vi.fn(), getPublicDashboard: vi.fn(), getPublicDashboardConfig: vi.fn(), getSession: vi.fn(), getUnit: vi.fn(), getUnitCapacity: vi.fn(), listHosts: vi.fn(), listIncidents: vi.fn(), listJobs: vi.fn(), listScans: vi.fn(), listUnits: vi.fn(), login: vi.fn(), platformStatus: vi.fn(), recordActivity: vi.fn(), setCSRF: vi.fn(), setupStatus: vi.fn(), unitAudit: vi.fn() }
 })
 
 class EventSourceStub {
@@ -26,6 +27,12 @@ class EventSourceStub {
 
 function CurrentPath() {
   return <output data-testid="current-path">{useLocation().pathname}</output>
+}
+
+/** The page that the sign-in page returns to after signing in. */
+function ReturnPath() {
+  const state = useLocation().state as { from?: { pathname?: string } } | null
+  return <output data-testid="return-path">{state?.from?.pathname ?? ''}</output>
 }
 
 const administratorPermissions = ['account.self', 'audit.read', 'baselines.read', 'hosts.read', 'incidents.read', 'jobs.read', 'jobs.write', 'overview.read', 'public_dashboard.manage', 'scans.read', 'stream.read', 'users.manage']
@@ -197,6 +204,60 @@ describe('business units in the console', () => {
     expect(listUnits).toHaveBeenCalledTimes(unitListReads)
     expect(getUnit).not.toHaveBeenCalled()
     expect(screen.queryByText('This business unit could not be loaded.')).not.toBeInTheDocument()
+  })
+
+  it('forgets the cached data of a session that ends, so the next account to sign in on the tab never sees it', async () => {
+    const noIncidents = { incidents: [], pagination: { limit: 1, offset: 0, total: 0, has_more: false, next_offset: null } }
+    const retailJob = { id: 'job-retail', revision: 1, enabled: true, archived: false, job: { name: 'Retail POS network', targets: ['198.51.100.20'], tcp: { ports: '443' }, schedule: '0 * * * *' }, baseline: { status: 'complete', samples: 1 } } as unknown as Job
+    vi.mocked(getSession).mockResolvedValue(unitAdministrator())
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [retailJob] })
+    vi.mocked(listScans).mockResolvedValue({ scans: [], pagination: { limit: 20, offset: 0, total: 0, has_more: false, next_offset: null } })
+    vi.mocked(activeScans).mockResolvedValue({ scans: [] })
+    const client = createQueryClient()
+    const view = renderWithProviders(<><AppContent /><CurrentPath /><ReturnPath /></>, { route: ['/'], client })
+
+    // Riley, a Retail administrator, opens Overview and then Jobs, which
+    // both cache Retail's jobs.
+    expect(await screen.findByText('Retail POS network')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('link', { name: 'Jobs' }))
+    expect(await screen.findByRole('heading', { name: 'Retail POS network' })).toBeInTheDocument()
+
+    // Retail is disabled, which ends Riley's session. The shell's incident
+    // poll, not a request of the page, is the first to be refused.
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({ error: { code: 'unauthorized', message: 'authentication required' } }), { status: 401, headers: { 'Content-Type': 'application/json' } })))
+    vi.mocked(listIncidents).mockImplementation(() => api('/incidents?limit=1&offset=0'))
+    await act(async () => { await client.refetchQueries({ queryKey: ['incidents', 'navigation'] }) })
+    expect(await screen.findByRole('heading', { name: /Sign in to EdgeWatch/ })).toBeInTheDocument()
+    // The sign-in page still knows the page to return to.
+    expect(screen.getByTestId('current-path')).toHaveTextContent('/login')
+    expect(screen.getByTestId('return-path')).toHaveTextContent('/jobs')
+    // Only the anonymous setup status and the ended session remain.
+    expect(client.getQueryCache().getAll().map(query => JSON.stringify(query.queryKey)).sort()).toEqual(['["session"]', '["setup-status"]'])
+    expect(client.getQueryData(['session'])).toBeNull()
+
+    // Bo, a Logistics administrator, signs in on the same tab while
+    // Logistics' jobs are still loading.
+    vi.mocked(listIncidents).mockResolvedValue(noIncidents)
+    vi.mocked(getSession).mockResolvedValue(unitAdministrator({ user_id: 'acct-bo', username: 'bo', display_name: 'Bo Lindqvist', unit: { id: 'unit-logistics', name: 'Logistics', slug: 'logistics' } }))
+    vi.mocked(login).mockResolvedValue({ username: 'bo', display_name: 'Bo Lindqvist', role: 'administrator', permissions: administratorPermissions, csrf_token: 'csrf', totp_required: false })
+    vi.mocked(listJobs).mockReset().mockImplementation(() => new Promise(() => {}))
+    fireEvent.change(screen.getByLabelText('Username'), { target: { value: 'bo' } })
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'logistics password' } })
+    fireEvent.submit(screen.getByRole('button', { name: 'Sign in' }).closest('form')!)
+    expect(await screen.findByTitle('Business unit: Logistics')).toBeInTheDocument()
+    expect(screen.queryByText('Retail POS network')).not.toBeInTheDocument()
+
+    // Neither Jobs nor Overview shows Retail's jobs while Logistics' load.
+    fireEvent.click(screen.getByRole('link', { name: 'Jobs' }))
+    expect(await screen.findByRole('heading', { name: 'Jobs', level: 1 })).toBeInTheDocument()
+    await waitFor(() => expect(listJobs).toHaveBeenCalledWith(true))
+    expect(screen.queryByText('Retail POS network')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('link', { name: 'Overview' }))
+    expect(await screen.findByRole('heading', { name: 'Jobs at a glance' })).toBeInTheDocument()
+    await waitFor(() => expect(listJobs).toHaveBeenCalledWith(false))
+    expect(screen.queryByText('Retail POS network')).not.toBeInTheDocument()
+    view.unmount()
+    client.clear()
   })
 
   it('redirects a session without jobs.read to a page it can open, and stops there', async () => {

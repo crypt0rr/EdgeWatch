@@ -215,7 +215,8 @@ too when the units cannot be counted. A
 unit's status counts, notification totals, and telemetry cover its own rows
 only, its scan slots and probe budgets are its own limits, the Hosts view
 keeps each unit's newest observation of an address apart, and a public slug
-does not reveal whether a unit has it.
+does not reveal whether a unit has it. The inactive YAML jobs in config.yaml
+belong to the default unit, so only its status names them.
 
 ## Live-update streams and session revocation
 

@@ -316,8 +316,16 @@ export function AppContent() {
   const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus, retry: false, enabled: !isPublic })
   const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false, enabled: !isPublic })
   useEffect(() => {
+    // A session that ends on the server, by idle expiry, revocation, or its
+    // account or unit being disabled, leaves nothing of its account behind,
+    // as a sign-out does: the next account to sign in on this tab must not
+    // see the previous one's cached data. Only the anonymous setup status is
+    // kept, together with its read in flight, so the sign-in page shows at
+    // once.
     function handleUnauthorized() {
       setCSRF('')
+      client.removeQueries({ predicate: query => query.queryKey[0] !== 'setup-status' })
+      client.getMutationCache().clear()
       client.setQueryData(['session'], null)
       setSignedOut(true)
     }

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
+	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -412,6 +414,47 @@ func TestSessionDescribesTheBusinessUnit(t *testing.T) {
 	payload, _ := sessionKeys(t, f.call(t, actorViewerA, http.MethodGet, "/auth/session", "").Body.Bytes())
 	if payload["multi_unit"] != false {
 		t.Fatalf("single-unit session = %v", payload)
+	}
+}
+
+// The jobs in config.yaml predate business units and belong to the default
+// unit, so only its administrators and operators find them in the status,
+// as the CLI status lists them for the default unit only. Another unit's
+// status leaves the key out, and a viewer's never has it.
+func TestLegacyYAMLJobsAreOnlyInTheDefaultUnitStatus(t *testing.T) {
+	f := newPlatformFixture(t)
+	f.server.App.Config.Jobs = []config.Job{{Name: "alpha-legacy-perimeter"}, {Name: "alpha-legacy-office"}}
+	// The fixture's unit B has an administrator and a viewer; add an
+	// operator, and sign in the two accounts the fixture leaves signed out.
+	const operatorB, viewerB = "unit B operator", "unit B viewer"
+	operator, err := f.b.CreateUser(context.Background(), store.User{Username: "bravo-operator", DisplayName: "bravo-operator", Role: store.RoleOperator, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: true}, store.AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.users[operatorB] = operator
+	f.sessions[operatorB] = f.signIn(t, operatorB)
+	f.sessions[viewerB] = f.signIn(t, viewerB)
+	for actor, want := range map[string][]any{
+		actorAdminA:    {"alpha-legacy-perimeter", "alpha-legacy-office"},
+		actorOperatorA: {"alpha-legacy-perimeter", "alpha-legacy-office"},
+		actorViewerA:   nil,
+		actorAdminB:    nil,
+		operatorB:      nil,
+		viewerB:        nil,
+	} {
+		response := f.call(t, actor, http.MethodGet, "/status", "")
+		var status map[string]any
+		expectResponse(t, response, http.StatusOK, actor+" status", &status)
+		legacy, present := status["legacy_yaml_jobs"]
+		if want == nil {
+			if present || strings.Contains(response.Body.String(), "alpha-legacy") {
+				t.Errorf("%s status names the default unit's YAML jobs: %s", actor, response.Body.String())
+			}
+			continue
+		}
+		if !reflect.DeepEqual(legacy, want) {
+			t.Errorf("%s legacy_yaml_jobs = %v, want %v", actor, legacy, want)
+		}
 	}
 }
 

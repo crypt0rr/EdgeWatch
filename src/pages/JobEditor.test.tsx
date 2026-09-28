@@ -7,6 +7,7 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities } from '../api'
 import { JobEditor } from './JobEditor'
+import { defaultUnitScope } from '../test/test-utils'
 
 vi.mock('../api', () => ({
   BUILTIN_NAABU_PROFILE_ID: 'builtin-naabu',
@@ -37,7 +38,7 @@ describe('job editor', () => {
       status: { deployment: 0, managed: 0, active: 0, locked: 0, key_state: 'ready' },
     })
     vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [] })
-    vi.mocked(getSession).mockResolvedValue({ role: 'operator', user_id: 'operator', username: 'operator', permissions: ['jobs.write'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'operator', user_id: 'operator', username: 'operator', permissions: ['jobs.write'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(scannerCapabilities).mockResolvedValue({
       engines: ['nmap', 'naabu_nmap'],
       nmap: { available: true, path: '/usr/bin/nmap', version: '7.99' },

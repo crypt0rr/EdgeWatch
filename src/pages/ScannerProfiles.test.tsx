@@ -4,7 +4,7 @@ import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, archiveScannerProfile, createScannerProfile, getSession, listScannerProfiles, restoreScannerProfile, updateScannerProfile, validateScannerProfile } from '../api'
 import type { ScannerProfile } from '../api'
-import { renderWithProviders } from '../test/test-utils'
+import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
 import { ScannerProfiles } from './ScannerProfiles'
 
 vi.mock('../api', async () => {
@@ -16,7 +16,7 @@ const profile = {
   id: 'profile-1', name: 'Managed connect', description: 'safe defaults', built_in: false, archived: false, revision: 3,
   definition: { engine: 'naabu_nmap', naabu: { scan_type: 'connect', rate: 1000, workers: 25, retries: 3, timeout_ms: 1000, warm_up_seconds: 2, verify: true, address_batch_size: 16 }, nmap_args: ['-n', '{address(es)}', '-p', '{ports}', '{structured_output}'], naabu_args: ['-host', '{address(es)}', '-p', '{ports}', '{structured_output}'], enrichment_args: ['-n', '{address(es)}', '-p', '{ports}', '{structured_output}'], operator_adjustable: ['rate'], operator_bounds: { rate: { min: 1, max: 100000 } } },
 } satisfies ScannerProfile
-const administrator = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['scanner_profiles.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } }
+const administrator = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['scanner_profiles.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope }
 
 describe('scanner profiles', () => {
   beforeEach(() => {

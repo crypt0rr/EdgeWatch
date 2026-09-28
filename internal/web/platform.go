@@ -23,29 +23,11 @@ import (
 // status. It never returns a unit's data: a unit appears with its identity,
 // state and counts, and a unit's accounts as summaries without credentials.
 //
-// Every route exists only while experimental.business_units is on, and
-// only a platform administrator's session holds its permissions; Server.api
-// checks both before platformRoute runs, and platformRoute checks them
-// again. The handlers act through the platform's store and the application,
-// which check in their write transactions that the actor is an enabled
-// platform administrator.
-
-// businessUnitsEnabled reports whether experimental.business_units is on.
-func (s *Server) businessUnitsEnabled() bool {
-	return s != nil && s.App != nil && s.App.Config != nil && s.App.Config.BusinessUnitsEnabled()
-}
-
-// offeredPermissions returns the permissions that the deployment's routes
-// grant: while experimental.business_units is off, those that only the
-// business unit routes grant are left out, so a single-unit installation
-// lists exactly what it did before, and a platform administrator lists only
-// account.self.
-func (s *Server) offeredPermissions(permissions []string) []string {
-	if s.businessUnitsEnabled() {
-		return permissions
-	}
-	return auth.WithoutBusinessUnitPermissions(permissions)
-}
+// Only a platform administrator's session holds the permissions of its
+// routes; Server.api checks them before platformRoute runs, and
+// platformRoute checks the role again. The handlers act through the
+// platform's store and the application, which check in their write
+// transactions that the actor is an enabled platform administrator.
 
 // isPlatformPermission reports whether a permission is one of the platform
 // console's, which only a platform administrator holds.
@@ -152,7 +134,7 @@ func requiredPlatformUnitPermission(segments []string, method string) string {
 // platformRoute serves the platform console's routes, the rest of the path
 // after /platform/.
 func (s *Server) platformRoute(w http.ResponseWriter, r *http.Request, session store.Session, rest string) {
-	if session.Role != store.RolePlatformAdmin || !s.businessUnitsEnabled() {
+	if session.Role != store.RolePlatformAdmin {
 		forbiddenRoute(w)
 		return
 	}
@@ -284,8 +266,6 @@ func forbiddenRoute(w http.ResponseWriter) {
 func (s *Server) writePlatformError(w http.ResponseWriter, r *http.Request, err error, action, notFound string) {
 	switch {
 	case s.writeAuditUnavailable(w, err, action):
-	case errors.Is(err, app.ErrBusinessUnitsDisabled):
-		forbiddenRoute(w)
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusNotFound, "not_found", notFound, nil)
 	case errors.Is(err, store.ErrConflict):

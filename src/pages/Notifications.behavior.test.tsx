@@ -4,7 +4,7 @@ import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, createNotificationDestination, deleteNotificationDestination, getSession, listNotificationDestinations, testNotificationDestination, updateNotificationDestination } from '../api'
-import { renderWithProviders } from '../test/test-utils'
+import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
 import { Notifications } from './Notifications'
 
 vi.mock('../api', async () => {
@@ -17,7 +17,7 @@ const response = { destinations: [destination], status: { deployment: 0, managed
 
 describe('notification destination workflows', () => {
   beforeEach(() => {
-    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(listNotificationDestinations).mockResolvedValue(response as never)
     vi.mocked(createNotificationDestination).mockResolvedValue(destination as never)
     vi.mocked(updateNotificationDestination).mockResolvedValue(destination as never)

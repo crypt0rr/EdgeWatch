@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/crypt0rr/edgewatch/internal/app"
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
@@ -20,13 +19,14 @@ import (
 )
 
 // tenantFlagFixture is a database with the default unit and the unit
-// "other" of seedTwoTenants, and a config with business units off and one
-// with them on. Both configs carry an inactive YAML job.
+// "other" of seedTwoTenants, and its config, which carries an inactive YAML
+// job. preview is the same config as written for the business units
+// preview, with experimental.business_units.
 type tenantFlagFixture struct {
-	dir, database string
-	off, on       string
-	ownJob        store.JobRecord
-	webhookCalls  func() int32
+	dir, database   string
+	config, preview string
+	ownJob          store.JobRecord
+	webhookCalls    func() int32
 }
 
 func newTenantFlagFixture(t *testing.T) tenantFlagFixture {
@@ -39,7 +39,7 @@ func newTenantFlagFixture(t *testing.T) tenantFlagFixture {
 		path  *string
 		name  string
 		extra string
-	}{{&f.off, "off.yaml", ""}, {&f.on, "on.yaml", "experimental:\n  business_units: true\n"}} {
+	}{{&f.config, "config.yaml", ""}, {&f.preview, "preview.yaml", "experimental:\n  business_units: true\n"}} {
 		*config.path = filepath.Join(dir, config.name)
 		if err := os.WriteFile(*config.path, []byte("database: "+database+"\n"+config.extra+legacyCLIJobsYAML), 0o600); err != nil {
 			t.Fatal(err)
@@ -90,12 +90,12 @@ func TestHostCommandsWithTenantActOnlyOnThatUnit(t *testing.T) {
 	// Every command that starts the application first freezes the default
 	// unit's legacy notification selections, once. Let that happen before
 	// the snapshot of the default unit's data.
-	if _, err := f.cli(t, f.off, "notify", "test"); err != nil {
+	if _, err := f.cli(t, f.config, "notify", "test"); err != nil {
 		t.Fatal(err)
 	}
 	before := otherTenantRows(t, f.database, store.DefaultTenantID)
 
-	out, err := f.cli(t, f.on, "status", "--tenant", "other")
+	out, err := f.cli(t, f.config, "status", "--tenant", "other")
 	if err != nil {
 		t.Fatalf("status: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestHostCommandsWithTenantActOnlyOnThatUnit(t *testing.T) {
 		t.Fatalf("status rows = %+v, want only the other unit's jobs", rows)
 	}
 
-	out, err = f.cli(t, f.on, "history", "--tenant", "other", "--job", "edge")
+	out, err = f.cli(t, f.config, "history", "--tenant", "other", "--job", "edge")
 	if err != nil {
 		t.Fatalf("history: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestHostCommandsWithTenantActOnlyOnThatUnit(t *testing.T) {
 	}
 
 	exportPath := filepath.Join(f.dir, "export-other.json")
-	if _, err := f.cli(t, f.on, "baseline", "export", "--tenant", "other", "--out", exportPath); err != nil {
+	if _, err := f.cli(t, f.config, "baseline", "export", "--tenant", "other", "--out", exportPath); err != nil {
 		t.Fatalf("baseline export: %v", err)
 	}
 	raw, err := os.ReadFile(exportPath)
@@ -141,18 +141,18 @@ func TestHostCommandsWithTenantActOnlyOnThatUnit(t *testing.T) {
 	}
 
 	// approve takes only the unit's own scan for the unit's job.
-	if _, err := f.cli(t, f.on, "baseline", "approve", "--tenant", "other", "--job", "edge", "--scan-id", "scan-default"); err == nil {
+	if _, err := f.cli(t, f.config, "baseline", "approve", "--tenant", "other", "--job", "edge", "--scan-id", "scan-default"); err == nil {
 		t.Fatal("baseline approve accepted the default unit's scan")
 	}
-	if _, err := f.cli(t, f.on, "baseline", "approve", "--tenant", "other", "--job", "edge", "--scan-id", "scan-other"); err != nil {
+	if _, err := f.cli(t, f.config, "baseline", "approve", "--tenant", "other", "--job", "edge", "--scan-id", "scan-other"); err != nil {
 		t.Fatalf("baseline approve: %v", err)
 	}
-	if _, err := f.cli(t, f.on, "baseline", "reset", "--tenant", "other", "--job", "edge"); err != nil {
+	if _, err := f.cli(t, f.config, "baseline", "reset", "--tenant", "other", "--job", "edge"); err != nil {
 		t.Fatalf("baseline reset: %v", err)
 	}
 
 	nmap := writeFakeNmap(t, f.dir, false)
-	out, err = f.cli(t, f.on, "scan", "--tenant", "other", "--job", "only-other", "--nmap", nmap)
+	out, err = f.cli(t, f.config, "scan", "--tenant", "other", "--job", "only-other", "--nmap", nmap)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestHostCommandsWithTenantActOnlyOnThatUnit(t *testing.T) {
 	}
 
 	callsBefore := f.webhookCalls()
-	out, err = f.cli(t, f.on, "notify", "test", "--tenant", "other")
+	out, err = f.cli(t, f.config, "notify", "test", "--tenant", "other")
 	if err != nil {
 		t.Fatalf("notify test: %v", err)
 	}
@@ -216,43 +216,71 @@ func TestHostCommandsWithTenantActOnlyOnThatUnit(t *testing.T) {
 // the hour.
 var withoutNextRun = regexp.MustCompile(`"next_run":"[^"]*",?`)
 
-// Without --tenant, the host commands act on the default unit whether
-// business units are on or off, with the same output.
+// Without --tenant, the host commands act on the default unit, and
+// --tenant default, the default unit's own slug, names the same data.
 func TestHostCommandsWithoutTenantKeepTheDefaultUnit(t *testing.T) {
 	f := newTenantFlagFixture(t)
-	for _, args := range [][]string{{"status"}, {"history"}, {"history", "--job", "edge"}, {"status", "--tenant", "default"}} {
-		configs := []string{f.off, f.on}
-		if args[len(args)-1] == "default" {
-			// The default unit's own slug names the same data.
-			configs = []string{f.on}
+	for _, args := range [][]string{{"status"}, {"history"}, {"history", "--job", "edge"}} {
+		out, err := f.cli(t, f.config, args...)
+		if err != nil {
+			t.Fatalf("%v: %v", args, err)
 		}
-		for _, config := range configs {
-			out, err := f.cli(t, config, args...)
-			if err != nil {
-				t.Fatalf("%v with %s: %v", args, filepath.Base(config), err)
-			}
-			want, err := f.cli(t, f.off, strings.Fields(strings.ReplaceAll(strings.Join(args, " "), "--tenant default", ""))...)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if out, want = withoutNextRun.ReplaceAllString(out, ""), withoutNextRun.ReplaceAllString(want, ""); out != want {
-				t.Fatalf("%v with %s =\n%s\nwant\n%s", args, filepath.Base(config), out, want)
-			}
-			if !strings.Contains(out, "edge") || strings.Contains(out, "scan-other") || strings.Contains(out, "only-other") {
-				t.Fatalf("%v with %s shows another unit's data: %s", args, filepath.Base(config), out)
-			}
+		if !strings.Contains(out, "edge") || strings.Contains(out, "scan-other") || strings.Contains(out, "only-other") {
+			t.Fatalf("%v shows another unit's data: %s", args, out)
+		}
+		named, err := f.cli(t, f.config, append(args, "--tenant", "default")...)
+		if err != nil {
+			t.Fatalf("%v --tenant default: %v", args, err)
+		}
+		if out, named = withoutNextRun.ReplaceAllString(out, ""), withoutNextRun.ReplaceAllString(named, ""); named != out {
+			t.Fatalf("%v --tenant default =\n%s\nwant\n%s", args, named, out)
 		}
 	}
-	out, err := f.cli(t, f.on, "status")
+	out, err := f.cli(t, f.config, "status")
 	if err != nil || !strings.Contains(out, `"legacy-yaml"`) {
 		t.Fatalf("default unit's status = %s, %v; want its inactive YAML job", out, err)
 	}
 }
 
-// --tenant is refused while business units are off, for an unknown or
-// deleted unit, with an empty slug, and on commands that do not act on a
-// unit's data. A unit that is being deleted is refused, and a disabled unit
-// can be read but not scanned, changed or tested. Nothing is written.
+// A configuration written for the business units preview still works:
+// experimental.business_units is ignored, --tenant acts on the unit as
+// without it, and a command that starts the application warns that the
+// setting is obsolete. Without the setting there is no warning.
+func TestBusinessUnitsPreviewConfigStillWorks(t *testing.T) {
+	f := newTenantFlagFixture(t)
+	want, err := f.cli(t, f.config, "status", "--tenant", "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := f.cli(t, f.preview, "status", "--tenant", "other")
+	if err != nil {
+		t.Fatalf("status --tenant other with the preview config: %v", err)
+	}
+	if got, want = withoutNextRun.ReplaceAllString(got, ""), withoutNextRun.ReplaceAllString(want, ""); got != want || !strings.Contains(got, "only-other") {
+		t.Fatalf("status --tenant other with the preview config =\n%s\nwant\n%s", got, want)
+	}
+	notifyTest := func(configPath string) string {
+		t.Helper()
+		_, stderr, err := captureCLIOutput(t, func() error {
+			return run([]string{"notify", "test", "--config", configPath, "--output", "json"})
+		})
+		if err != nil {
+			t.Fatalf("notify test with %s: %v (stderr=%s)", filepath.Base(configPath), err, stderr)
+		}
+		return stderr
+	}
+	if stderr := notifyTest(f.preview); !strings.Contains(stderr, "obsolete settings") || !strings.Contains(stderr, "experimental.business_units") {
+		t.Fatalf("notify test with the preview config logged %q, want the obsolete setting named", stderr)
+	}
+	if stderr := notifyTest(f.config); strings.Contains(stderr, "obsolete") {
+		t.Fatalf("notify test without the setting logged %q", stderr)
+	}
+}
+
+// --tenant is refused for an unknown or deleted unit, with an empty slug,
+// and on commands that do not act on a unit's data. A unit that is being
+// deleted is refused, and a disabled unit can be read but not scanned,
+// changed or tested. Nothing is written.
 func TestTenantFlagRefusals(t *testing.T) {
 	f := newTenantFlagFixture(t)
 	before := otherTenantRows(t, f.database, otherTenantID) + "\n" + otherTenantRows(t, f.database, store.DefaultTenantID)
@@ -264,13 +292,10 @@ func TestTenantFlagRefusals(t *testing.T) {
 		{"admin", "disable-totp", "--username", "admin"},
 	}
 	for _, args := range commands {
-		if _, err := f.cli(t, f.off, append(args, "--tenant", "other")...); !errors.Is(err, app.ErrBusinessUnitsDisabled) || !strings.Contains(err.Error(), "--tenant") {
-			t.Errorf("%v --tenant with business units off = %v", args, err)
-		}
-		if _, err := f.cli(t, f.on, append(args, "--tenant", "nobody")...); err == nil || !strings.Contains(err.Error(), `unknown business unit "nobody"`) {
+		if _, err := f.cli(t, f.config, append(args, "--tenant", "nobody")...); err == nil || !strings.Contains(err.Error(), `unknown business unit "nobody"`) {
 			t.Errorf("%v --tenant nobody = %v", args, err)
 		}
-		if _, err := f.cli(t, f.on, append(args, "--tenant", " ")...); err == nil || !strings.Contains(err.Error(), "--tenant needs the slug") {
+		if _, err := f.cli(t, f.config, append(args, "--tenant", " ")...); err == nil || !strings.Contains(err.Error(), "--tenant needs the slug") {
 			t.Errorf("%v with an empty --tenant = %v", args, err)
 		}
 	}
@@ -278,7 +303,7 @@ func TestTenantFlagRefusals(t *testing.T) {
 		"backup": {"backup", "--out", filepath.Join(f.dir, "backup.db")}, "verify": {"verify"}, "health": {"health"}, "daemon": {"daemon"},
 		"config validate": {"config", "validate"}, "admin setup-token": {"admin", "setup-token", "--force"}, "admin platform-setup-token": {"admin", "platform-setup-token"},
 	} {
-		if _, err := f.cli(t, f.on, append(args, "--tenant", "other")...); err == nil || !strings.HasPrefix(err.Error(), "--tenant does not apply to "+name+";") {
+		if _, err := f.cli(t, f.config, append(args, "--tenant", "other")...); err == nil || !strings.HasPrefix(err.Error(), "--tenant does not apply to "+name+";") {
 			t.Errorf("%s --tenant = %v", name, err)
 		}
 	}
@@ -286,7 +311,7 @@ func TestTenantFlagRefusals(t *testing.T) {
 		t.Fatalf("a refused backup wrote a file: %v", err)
 	}
 	// Slugs match exactly.
-	if _, err := f.cli(t, f.on, "status", "--tenant", "Other"); err == nil || !strings.Contains(err.Error(), `unknown business unit "Other"`) {
+	if _, err := f.cli(t, f.config, "status", "--tenant", "Other"); err == nil || !strings.Contains(err.Error(), `unknown business unit "Other"`) {
 		t.Fatalf("status --tenant Other = %v", err)
 	}
 	if _, err := os.Stat(exportPath); !errors.Is(err, os.ErrNotExist) {
@@ -296,7 +321,7 @@ func TestTenantFlagRefusals(t *testing.T) {
 	// A disabled unit can be read, but not scanned, changed or tested.
 	f.setUnitState(t, store.TenantStateDisabled)
 	for _, args := range commands[:4] {
-		out, err := f.cli(t, f.on, append(args, "--tenant", "other")...)
+		out, err := f.cli(t, f.config, append(args, "--tenant", "other")...)
 		if args[0] == "scan" {
 			if err == nil || !strings.Contains(err.Error(), `business unit "other" is disabled; enable it before running scan`) {
 				t.Errorf("scan of a disabled unit = %v", err)
@@ -311,7 +336,7 @@ func TestTenantFlagRefusals(t *testing.T) {
 		}
 	}
 	for _, args := range commands[4:7] {
-		if _, err := f.cli(t, f.on, append(args, "--tenant", "other")...); err == nil || !strings.Contains(err.Error(), `business unit "other" is disabled`) {
+		if _, err := f.cli(t, f.config, append(args, "--tenant", "other")...); err == nil || !strings.Contains(err.Error(), `business unit "other" is disabled`) {
 			t.Errorf("%v of a disabled unit = %v", args, err)
 		}
 	}
@@ -319,12 +344,12 @@ func TestTenantFlagRefusals(t *testing.T) {
 	// no slug.
 	f.setUnitState(t, store.TenantStateDeleting)
 	for _, args := range commands[:7] {
-		if _, err := f.cli(t, f.on, append(args, "--tenant", "other")...); err == nil || !strings.Contains(err.Error(), `business unit "other" is being deleted`) {
+		if _, err := f.cli(t, f.config, append(args, "--tenant", "other")...); err == nil || !strings.Contains(err.Error(), `business unit "other" is being deleted`) {
 			t.Errorf("%v of a unit being deleted = %v", args, err)
 		}
 	}
 	f.setUnitState(t, store.TenantStateDeleted)
-	if _, err := f.cli(t, f.on, "status", "--tenant", "other"); err == nil || !strings.Contains(err.Error(), `unknown business unit "other"`) {
+	if _, err := f.cli(t, f.config, "status", "--tenant", "other"); err == nil || !strings.Contains(err.Error(), `unknown business unit "other"`) {
 		t.Fatalf("status of a deleted unit = %v", err)
 	}
 	f.setUnitState(t, store.TenantStateActive)
@@ -339,8 +364,7 @@ func TestTenantFlagRefusals(t *testing.T) {
 
 // The admin recovery commands find the account by its username across every
 // unit. --tenant stops them unless the account belongs to that unit, and
-// with business units on they print the account, its unit and its role
-// before they act. With business units off their output is unchanged.
+// they print the account, its unit and its role before they act.
 func TestAdminRecoveryWithTenant(t *testing.T) {
 	ctx := context.Background()
 	f := newTenantFlagFixture(t)
@@ -362,7 +386,6 @@ func TestAdminRecoveryWithTenant(t *testing.T) {
 		t.Fatal(err)
 	}
 	manager := auth.NewManager(s)
-	manager.SetBusinessUnitsEnabled(true)
 	token, err := manager.IssuePlatformSetupToken(ctx, false)
 	if err != nil {
 		t.Fatal(err)
@@ -392,7 +415,7 @@ func TestAdminRecoveryWithTenant(t *testing.T) {
 	hashes := map[string]string{"admin": passwordOf("admin"), "root": passwordOf("root")}
 	for username, where := range map[string]string{"admin": "the unit default", "root": "the platform"} {
 		for _, action := range [][]string{{"reset-password", "--password-file", passwordPath}, {"disable-totp"}} {
-			out, err := admin(f.on, append(action, "--username", username, "--tenant", "other")...)
+			out, err := admin(f.config, append(action, "--username", username, "--tenant", "other")...)
 			if err == nil || err.Error() != `user "`+username+`" belongs to `+where+`, not to business unit "other"; nothing was changed` || out != "" {
 				t.Errorf("%s %s --tenant other = %q, %v", action[0], username, out, err)
 			}
@@ -401,35 +424,34 @@ func TestAdminRecoveryWithTenant(t *testing.T) {
 			t.Errorf("a refused reset changed %s's password", username)
 		}
 	}
-	if _, err := admin(f.on, "reset-password", "--username", "other-admin", "--tenant", "nobody", "--password-file", passwordPath); err == nil || !strings.Contains(err.Error(), `unknown business unit "nobody"`) {
+	if _, err := admin(f.config, "reset-password", "--username", "other-admin", "--tenant", "nobody", "--password-file", passwordPath); err == nil || !strings.Contains(err.Error(), `unknown business unit "nobody"`) {
 		t.Fatalf("reset-password --tenant nobody = %v", err)
 	}
 
 	// The unit's own account is reset, after the command names it.
-	out, err := admin(f.on, "reset-password", "--username", "other-admin", "--tenant", "other", "--password-file", passwordPath)
+	out, err := admin(f.config, "reset-password", "--username", "other-admin", "--tenant", "other", "--password-file", passwordPath)
 	if err != nil || out != `user "other-admin" (unit other, administrator)`+"\n" {
 		t.Fatalf("reset-password of the unit's account = %q, %v", out, err)
 	}
 	if recovered, err := s.GetUserByUsername(ctx, "other-admin"); err != nil || recovered.ID != other.ID || !auth.VerifyPassword(recovered.PasswordHash, "replacement unit password") {
 		t.Fatalf("the unit's account after reset = %+v, %v", recovered, err)
 	}
-	if out, err := admin(f.on, "disable-totp", "--username", "other-admin", "--tenant", "other"); err != nil || out != `user "other-admin" (unit other, administrator)`+"\n" {
+	if out, err := admin(f.config, "disable-totp", "--username", "other-admin", "--tenant", "other"); err != nil || out != `user "other-admin" (unit other, administrator)`+"\n" {
 		t.Fatalf("disable-totp of the unit's account = %q, %v", out, err)
 	}
 
-	// With business units on, the account is named before the command acts,
-	// with or without --tenant; with them off, nothing is printed.
-	for _, check := range []struct{ config, username, want string }{
-		{f.on, "admin", `user "admin" (unit default, administrator)` + "\n"},
-		{f.on, "root", `user "root" (platform, platform_admin)` + "\n"},
-		{f.off, "admin", ""},
-		{f.off, "other-admin", ""},
+	// The account is named before the command acts, with or without
+	// --tenant.
+	for username, want := range map[string]string{
+		"admin":       `user "admin" (unit default, administrator)` + "\n",
+		"root":        `user "root" (platform, platform_admin)` + "\n",
+		"other-admin": `user "other-admin" (unit other, administrator)` + "\n",
 	} {
-		if out, err := admin(check.config, "disable-totp", "--username", check.username); err != nil || out != check.want {
-			t.Errorf("disable-totp %s with %s = %q, %v; want %q", check.username, filepath.Base(check.config), out, err, check.want)
+		if out, err := admin(f.config, "disable-totp", "--username", username); err != nil || out != want {
+			t.Errorf("disable-totp %s = %q, %v; want %q", username, out, err, want)
 		}
 	}
-	if out, err := admin(f.on, "disable-totp", "--username", "admin", "--tenant", "default"); err != nil || out != `user "admin" (unit default, administrator)`+"\n" {
+	if out, err := admin(f.config, "disable-totp", "--username", "admin", "--tenant", "default"); err != nil || out != `user "admin" (unit default, administrator)`+"\n" {
 		t.Fatalf("disable-totp admin --tenant default = %q, %v", out, err)
 	}
 }

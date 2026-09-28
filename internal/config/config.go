@@ -55,8 +55,10 @@ type Config struct {
 	Enrichment    Enrichment    `yaml:"enrichment"`
 	Updates       Updates       `yaml:"updates"`
 	Notifications Notifications `yaml:"notifications"`
-	Experimental  Experimental  `yaml:"experimental"`
-	Jobs          []Job         `yaml:"jobs"`
+	// Experimental is accepted only so that a configuration written for the
+	// business units preview still starts; see ObsoleteSettings.
+	Experimental obsoleteExperimental `yaml:"experimental"`
+	Jobs         []Job                `yaml:"jobs"`
 	// retentionSet distinguishes an omitted deployment setting (which keeps
 	// the safe 90-day default) from an explicit zero value. It is populated
 	// while decoding YAML and intentionally never serialized.
@@ -98,14 +100,12 @@ type Updates struct {
 	Enabled *bool `yaml:"enabled"`
 }
 
-// Experimental gates features that are still under development. Every field
-// defaults to off, and an installation behaves exactly as without the section
-// while a feature stays off.
-type Experimental struct {
-	// BusinessUnits allows more than one business unit (tenant) and the
-	// platform administrator role. While it is off, creating a second unit,
-	// a platform administrator, or a platform setup token is refused.
-	BusinessUnits bool `yaml:"business_units"`
+// obsoleteExperimental is the experimental section of the business units
+// preview. Business units are always on, so its only key, business_units, is
+// accepted and ignored whatever its value; the decoder still rejects every
+// other key in the section.
+type obsoleteExperimental struct {
+	BusinessUnits *bool `yaml:"business_units"`
 }
 
 // Enrichment controls optional, on-demand metadata lookups. RDAP is enabled
@@ -703,11 +703,15 @@ func (c Config) UpdatesEnabled() bool {
 	return c.Updates.Enabled == nil || *c.Updates.Enabled
 }
 
-// BusinessUnitsEnabled reports whether the experimental business units
-// feature is switched on. It is off unless experimental.business_units is
-// explicitly true.
-func (c Config) BusinessUnitsEnabled() bool {
-	return c.Experimental.BusinessUnits
+// ObsoleteSettings lists the settings in config.yaml that no longer have an
+// effect, by their YAML paths, so that the daemon can ask the operator to
+// remove them. experimental.business_units is one: business units are
+// always on.
+func (c Config) ObsoleteSettings() []string {
+	if c.Experimental.BusinessUnits != nil {
+		return []string{"experimental.business_units"}
+	}
+	return nil
 }
 
 // LogLevel resolves the omission-defaulted structured logging level.

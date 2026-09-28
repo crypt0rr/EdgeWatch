@@ -86,33 +86,18 @@ describe('business units in the console', () => {
     expect(preview).toHaveAttribute('href', '/public/retail')
   })
 
-  it('keeps the single-unit console unchanged without business units or with one unit', async () => {
-    for (const session of [
-      // Business units off: the session has no scope, unit, or multi_unit.
-      { user_id: 'admin', username: 'admin', role: 'administrator' as const, permissions: administratorPermissions.filter(permission => permission !== 'audit.read'), csrf_token: 'csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } },
-      // Business units on with a single unit.
-      unitAdministrator({ multi_unit: false, unit: { id: 'default', name: 'Default', slug: 'default' } }),
-    ]) {
-      vi.mocked(getSession).mockResolvedValue(session)
-      vi.mocked(getPublicDashboard).mockClear()
-      const view = renderApp('/highlights')
-      expect(await screen.findByRole('heading', { name: 'Retail status' })).toBeInTheDocument()
-      expect(getPublicDashboard).toHaveBeenCalledWith(undefined)
-      expect(screen.queryByText('Business unit')).not.toBeInTheDocument()
-      const navigation = screen.getByRole('complementary', { name: 'Primary navigation', hidden: true })
-      expect(within(navigation).queryByRole('link', { name: 'Audit' }) !== null).toBe(session.permissions.includes('audit.read'))
-      view.unmount()
-      const admin = renderApp('/public-dashboard')
-      expect(await screen.findByRole('link', { name: /Preview public page/ })).toHaveAttribute('href', '/public')
-      admin.unmount()
-    }
-  })
-
-  it('treats /audit as an unknown page without business units', async () => {
-    vi.mocked(getSession).mockResolvedValue({ user_id: 'admin', username: 'admin', role: 'administrator', permissions: administratorPermissions.filter(permission => permission !== 'audit.read'), csrf_token: 'csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } })
-    renderApp('/audit')
-    await waitFor(() => expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/$/))
-    expect(unitAudit).not.toHaveBeenCalled()
+  it('keeps the single-unit console as before apart from the audit', async () => {
+    vi.mocked(getSession).mockResolvedValue(unitAdministrator({ multi_unit: false, unit: { id: 'default', name: 'Default', slug: 'default' } }))
+    const view = renderApp('/highlights')
+    expect(await screen.findByRole('heading', { name: 'Retail status' })).toBeInTheDocument()
+    expect(getPublicDashboard).toHaveBeenCalledWith(undefined)
+    expect(screen.queryByText('Business unit')).not.toBeInTheDocument()
+    const navigation = screen.getByRole('complementary', { name: 'Primary navigation', hidden: true })
+    expect(within(navigation).getByRole('link', { name: 'Audit' })).toBeInTheDocument()
+    view.unmount()
+    const admin = renderApp('/public-dashboard')
+    expect(await screen.findByRole('link', { name: /Preview public page/ })).toHaveAttribute('href', '/public')
+    admin.unmount()
   })
 
   it('refuses the unit audit page to accounts without audit.read', async () => {
@@ -212,27 +197,6 @@ describe('business units in the console', () => {
     expect(listUnits).toHaveBeenCalledTimes(unitListReads)
     expect(getUnit).not.toHaveBeenCalled()
     expect(screen.queryByText('This business unit could not be loaded.')).not.toBeInTheDocument()
-  })
-
-  it('gives a platform administrator only a notice and sign-out while business units are off', async () => {
-    // Business units off: the session has no scope, unit, or multi_unit, and
-    // lists only the account's self-service.
-    const { scope: _scope, unit: _unit, multi_unit: _multiUnit, ...offSession } = platformSession({ permissions: ['account.self'] })
-    vi.mocked(getSession).mockResolvedValue(offSession)
-    for (const route of ['/platform/units', '/jobs', '/']) {
-      const onLogout = vi.fn(async () => {})
-      const view = renderWithProviders(<><ProtectedApp onLogout={onLogout} /><CurrentPath /></>, { route: [route] })
-      expect(await screen.findByRole('heading', { name: 'Business units are turned off' })).toBeInTheDocument()
-      expect(screen.getByText('Morgan Reyes')).toBeInTheDocument()
-      expect(screen.getByTestId('current-path')).toHaveTextContent(new RegExp(`^${route}$`))
-      expect(screen.queryByRole('complementary', { name: 'Primary navigation', hidden: true })).not.toBeInTheDocument()
-      expect(screen.queryByRole('link')).not.toBeInTheDocument()
-      fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
-      expect(onLogout).toHaveBeenCalledTimes(1)
-      view.unmount()
-    }
-    for (const request of [listIncidents, listJobs, adminStatus, listUnits, platformStatus, recordActivity]) expect(request).not.toHaveBeenCalled()
-    expect(EventSourceStub.instances).toBe(0)
   })
 
   it('redirects a session without jobs.read to a page it can open, and stops there', async () => {

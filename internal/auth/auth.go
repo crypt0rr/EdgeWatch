@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -131,9 +130,6 @@ type Manager struct {
 	trustedProxies       []*net.IPNet
 	forwardedHeader      string
 	argon2Sem            chan struct{}
-	// businessUnits mirrors experimental.business_units. While it is off,
-	// no platform setup token is issued or redeemed.
-	businessUnits atomic.Bool
 }
 
 func NewManager(s *store.Store) *Manager {

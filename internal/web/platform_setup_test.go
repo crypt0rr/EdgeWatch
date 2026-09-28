@@ -43,8 +43,8 @@ func readSetupStatus(t *testing.T, server *Server) map[string]any {
 	return status
 }
 
-// With business units on, the console redeems the platform setup token that
-// the host printed: the setup status offers it while the token is valid, a
+// The console redeems the platform setup token that the host printed: the
+// setup status offers it while the token is valid, a
 // wrong token gets one generic answer, the public username and password
 // rules are explained, and the redeemed token creates a platform
 // administrator that can sign in, once. Each failed attempt is recorded in
@@ -52,7 +52,6 @@ func readSetupStatus(t *testing.T, server *Server) map[string]any {
 func TestPlatformSetupRouteRedeemsTheHostToken(t *testing.T) {
 	ctx := context.Background()
 	server, db, _ := newUsersTestServer(t)
-	enableBusinessUnits(server)
 	if got, ok := readSetupStatus(t, server)["platform_setup_available"]; !ok || got != false {
 		t.Fatalf("platform_setup_available without a token = %v (present %t), want false", got, ok)
 	}
@@ -131,39 +130,9 @@ func TestPlatformSetupRouteRedeemsTheHostToken(t *testing.T) {
 	}
 }
 
-// With business units off, the setup status is as before and the platform
-// setup is no route: it is answered like an unknown path even when a valid
-// platform setup token exists.
-func TestPlatformSetupRouteAbsentWithoutBusinessUnits(t *testing.T) {
-	ctx := context.Background()
-	server, _, _ := newUsersTestServer(t)
-	server.Auth.SetBusinessUnitsEnabled(true)
-	token, err := server.Auth.IssuePlatformSetupToken(ctx, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := readSetupStatus(t, server)["platform_setup_available"]; ok {
-		t.Fatal("setup status names the platform setup with business units off")
-	}
-	value, _ := json.Marshal(map[string]string{"token": token, "username": "root", "password": "platform administrator password"})
-	response := postPlatformSetup(t, server, string(value), "")
-	unknown := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, consoleAPIBase+"/unknown-route", strings.NewReader(string(value)))
-	request.RemoteAddr = "127.0.0.1:9000"
-	request.Header.Set("Content-Type", "application/json")
-	server.api(unknown, request)
-	if response.Code != http.StatusUnauthorized || response.Body.String() != unknown.Body.String() {
-		t.Fatalf("platform setup with business units off = %d %s, want the unknown route's %d %s", response.Code, response.Body.String(), unknown.Code, unknown.Body.String())
-	}
-	if _, _, err := server.Auth.LoginAs(ctx, httptest.NewRequest(http.MethodPost, consoleAPIBase+"/auth/login", nil), "root", "platform administrator password", "", ""); err == nil {
-		t.Fatal("the platform setup created an account with business units off")
-	}
-}
-
 // The live-update counters describe the whole deployment, so a unit's
-// status leaves them out once several units exist, whether business units
-// are on or off: the units keep working when the flag is turned off again.
-// With a single unit they are reported as before, with the flag on or off.
+// status leaves them out once several units exist. With a single unit they
+// are reported as before.
 func TestAdminStatusLeavesOutLiveUpdateCountersWithSeveralUnits(t *testing.T) {
 	f := newPlatformFixture(t)
 	liveUpdates := func(actor string) (any, bool) {
@@ -179,25 +148,16 @@ func TestAdminStatusLeavesOutLiveUpdateCountersWithSeveralUnits(t *testing.T) {
 		value, ok := status["live_updates"]
 		return value, ok
 	}
-	for _, businessUnits := range []bool{true, false} {
-		f.server.App.Config.Experimental.BusinessUnits = businessUnits
-		f.server.Auth.SetBusinessUnitsEnabled(businessUnits)
-		for _, actor := range []string{actorAdminA, actorOperatorA, actorAdminB} {
-			if value, ok := liveUpdates(actor); ok {
-				t.Errorf("live_updates as %s with two units and business units on %t = %v", actor, businessUnits, value)
-			}
+	for _, actor := range []string{actorAdminA, actorOperatorA, actorAdminB} {
+		if value, ok := liveUpdates(actor); ok {
+			t.Errorf("live_updates as %s with two units = %v", actor, value)
 		}
 	}
 
-	for _, businessUnits := range []bool{true, false} {
-		server, _, _ := newUsersTestServer(t)
-		if businessUnits {
-			enableBusinessUnits(server)
-		}
-		admin := signIn(t, server, store.RoleAdministrator, "admin", "administrator password", "")
-		response := callAPI(t, server, admin, http.MethodGet, "/status", "")
-		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"live_updates":{"dropped_events":0,"history_size":0}`) {
-			t.Fatalf("/status with a single unit and business units on %t = %d %s", businessUnits, response.Code, response.Body.String())
-		}
+	server, _, _ := newUsersTestServer(t)
+	admin := signIn(t, server, store.RoleAdministrator, "admin", "administrator password", "")
+	response := callAPI(t, server, admin, http.MethodGet, "/status", "")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"live_updates":{"dropped_events":0,"history_size":0}`) {
+		t.Fatalf("/status with a single unit = %d %s", response.Code, response.Body.String())
 	}
 }

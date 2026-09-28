@@ -62,10 +62,10 @@ func (s *Server) setupStatus(w http.ResponseWriter, r *http.Request) {
 			status["setup_available"] = !token.Used && time.Now().UTC().Before(token.ExpiresAt)
 		}
 	}
-	// With business units on, the sign-in page offers the platform setup
-	// while the host's platform setup token is valid, as it offers the first
-	// setup while that token is. With them off the key is absent.
-	if configured && s.businessUnitsEnabled() {
+	// Once the first administrator exists, the sign-in page offers the
+	// platform setup while the host's platform setup token is valid, as it
+	// offers the first setup while that token is.
+	if configured {
 		token, tokenErr := s.Store.Platform().GetPlatformSetupToken(r.Context())
 		status["platform_setup_available"] = tokenErr == nil && !token.Used && time.Now().UTC().Before(token.ExpiresAt)
 	}
@@ -100,7 +100,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		"username":     user.Username,
 		"display_name": user.DisplayName,
 		"role":         user.Role,
-		"permissions":  s.offeredPermissions(auth.PermissionsForRole(user.Role)),
+		"permissions":  auth.PermissionsForRole(user.Role),
 		"version":      s.Version,
 		"retention":    s.App.Config.Retention.Value().String(),
 		"rdap_enabled": s.App.Config.RDAPEnabled(),
@@ -134,9 +134,7 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	}
 	// The live-update counters describe the whole deployment's stream, so
 	// once several business units exist they are left out: they would tell a
-	// unit about the others' activity. The units keep working when
-	// experimental.business_units is turned off again, so the rule follows
-	// the number of units, not the flag. If the units cannot be counted, the
+	// unit about the others' activity. If the units cannot be counted, the
 	// counters are left out.
 	multiple, unitsErr := s.Store.Platform().HasMultipleTenants(r.Context())
 	if unitsErr == nil && !multiple {
@@ -344,11 +342,10 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 
 // platformSetup redeems the platform setup token that the host printed with
 // `edgewatch admin platform-setup-token` and creates the first platform
-// administrator with the chosen username and password. Server.api serves it
-// only while experimental.business_units is on. A wrong, used, or expired
-// token, and an enabled platform administrator that already exists, get one
-// generic answer; the username and password rules, which are public, are
-// explained.
+// administrator with the chosen username and password. A wrong, used, or
+// expired token, and an enabled platform administrator that already exists,
+// get one generic answer; the username and password rules, which are public,
+// are explained.
 func (s *Server) platformSetup(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Token    string `json:"token"`
@@ -438,11 +435,9 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 // describes the signed-in account. A session that must enrol TOTP before it
 // may do anything else also carries totp_enrollment_required, and holds only
 // its own account's self-service; the key is absent otherwise, so a session
-// without the requirement is described exactly as before. The permissions
-// that only the experimental business units grant are listed only while
-// they are on.
+// without the requirement is described exactly as before.
 func (s *Server) addSessionPermissions(response map[string]any, session store.Session) {
-	response["permissions"] = s.offeredPermissions(auth.PermissionsForSession(session))
+	response["permissions"] = auth.PermissionsForSession(session)
 	if session.TOTPEnrollmentRequired {
 		response["totp_enrollment_required"] = true
 	}
@@ -483,14 +478,11 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request, session store.S
 	}
 	response := map[string]any{"user_id": user.ID, "username": user.Username, "display_name": user.DisplayName, "role": user.Role, "csrf_token": session.CSRFToken, "totp_enabled": user.TOTPEnabled, "password_requirements": auth.PasswordRequirements(), "timezone": s.deploymentTimezone()}
 	s.addSessionPermissions(response, store.Session{Role: user.Role, TOTPEnrollmentRequired: session.TOTPEnrollmentRequired})
-	// With business units on, the session also names its console, the
-	// platform's or a unit's, and its unit. With them off, the keys are
-	// absent, so a single-unit session is described exactly as before.
-	if s.businessUnitsEnabled() {
-		if err := s.addSessionScope(r.Context(), response, user); err != nil {
-			s.writeInternalError(w, r, "store", err)
-			return
-		}
+	// The session also names its console, the platform's or a unit's, and
+	// its unit.
+	if err := s.addSessionScope(r.Context(), response, user); err != nil {
+		s.writeInternalError(w, r, "store", err)
+		return
 	}
 	writeJSON(w, http.StatusOK, response)
 }

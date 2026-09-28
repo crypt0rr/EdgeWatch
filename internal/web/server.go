@@ -194,7 +194,6 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 		if err := v.Auth.SetForwardedHeader(a.Config.Web.ForwardedHeader); err != nil {
 			logger.Error("trusted proxy forwarding header configuration rejected", "error", err)
 		}
-		v.Auth.SetBusinessUnitsEnabled(a.Config.BusinessUnitsEnabled())
 		if len(a.Config.Web.AllowedHosts) > 0 && (len(a.Config.Web.TrustedProxies) == 0 || strings.EqualFold(strings.TrimSpace(a.Config.Web.ForwardedHeader), "none")) {
 			logger.Warn("approved proxy hosts have no trusted client-IP forwarding; remote clients share the loopback login cooldown and audit identity", "hint", "configure web.trusted_proxies and the sanitized web.forwarded_header")
 		}
@@ -411,10 +410,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.setup(w, r)
 		return
 	}
-	if path == "/setup/platform" && r.Method == http.MethodPost && s.businessUnitsEnabled() {
-		// The platform setup exists only while experimental.business_units
-		// is on. Otherwise the request falls through to the session gate and
-		// is answered exactly like a path that no route knows.
+	if path == "/setup/platform" && r.Method == http.MethodPost {
 		if !validateBrowserOrigin(r) {
 			writeError(w, http.StatusForbidden, "origin", "request origin is not allowed", nil)
 			return
@@ -457,14 +453,6 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	permission := requestPermission(path, r)
-	if (businessUnitsRoute(path) || auth.IsBusinessUnitPermission(permission)) && !s.businessUnitsEnabled() {
-		// The platform routes and the unit audit exist only while
-		// experimental.business_units is on. Otherwise they fail closed
-		// exactly like a path that no route knows, and no session holds
-		// their permissions: a platform administrator holds only its own
-		// account's self-service.
-		permission = auth.PermissionDenied
-	}
 	if permission == "" || permission == auth.PermissionDenied || !auth.HasPermission(session, permission) {
 		details := map[string]string{"permission": permission}
 		if permission == auth.PermissionDenied || permission == "" {

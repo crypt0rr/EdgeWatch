@@ -3,7 +3,7 @@ import { mockConsole, rolePermissions, type UnitConsoleRole } from './mock-conso
 
 const navigationLabels = [
   'Overview', 'Jobs', 'Hosts', 'Incidents', 'Notifications', 'Users',
-  'Public status', 'Scanner profiles', 'Security',
+  'Public status', 'Scanner profiles', 'Audit', 'Security',
 ]
 
 const expectedNavigation: Record<UnitConsoleRole, string[]> = {
@@ -12,7 +12,9 @@ const expectedNavigation: Record<UnitConsoleRole, string[]> = {
   viewer: ['Jobs', 'Security'],
 }
 
-const routePermissions: Array<{ path: string; permission?: string }> = [
+// A refused page leads to /jobs, except the audit, which leads to the
+// role's home: the overview where the role has it.
+const routePermissions: Array<{ path: string; permission?: string; refusedToHome?: boolean }> = [
   { path: '/', permission: 'overview.read' },
   { path: '/jobs', permission: 'jobs.read' },
   { path: '/jobs/new', permission: 'jobs.write' },
@@ -28,6 +30,7 @@ const routePermissions: Array<{ path: string; permission?: string }> = [
   { path: '/users', permission: 'users.manage' },
   { path: '/public-dashboard', permission: 'public_dashboard.manage' },
   { path: '/scanner-profiles', permission: 'scanner_profiles.read' },
+  { path: '/audit', permission: 'audit.read', refusedToHome: true },
   { path: '/security', permission: 'account.self' },
 ]
 
@@ -78,7 +81,8 @@ test('role route and navigation matrix matches the authorization contract', asyn
       for (const route of routePermissions) {
         await page.goto(route.path)
         const allowed = route.permission === undefined || rolePermissions[role].includes(route.permission)
-        const expectedPath = allowed ? new URL(route.path, baseURL).pathname : '/jobs'
+        const home = route.refusedToHome && rolePermissions[role].includes('overview.read') ? '/' : '/jobs'
+        const expectedPath = allowed ? new URL(route.path, baseURL).pathname : home
         await expect.poll(() => new URL(page.url()).pathname).toBe(expectedPath)
       }
     } finally {

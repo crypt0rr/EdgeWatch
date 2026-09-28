@@ -11,7 +11,7 @@ export const rolePermissions: Record<ConsoleRole, string[]> = {
     'incidents.read', 'incidents.manage', 'notification_options.read',
     'notifications.manage', 'users.manage', 'public_dashboard.manage',
     'stream.read', 'scanner_profiles.read', 'scanner_profiles.manage',
-    'account.self',
+    'audit.read', 'account.self',
   ],
   operator: [
     'overview.read', 'jobs.read', 'jobs.write', 'jobs.run',
@@ -132,16 +132,15 @@ function platformAccount(overrides: Record<string, unknown>) {
  * Install a deterministic API surface for browser acceptance tests. The
  * fixture intentionally models the same role/permission contract as the Go
  * authorization table and exposes mutation failures on demand so every
- * high-risk console flow has a browser-level error path. With businessUnits
- * false, a platform administrator is served as while
- * experimental.business_units is off: its session has no scope and lists
- * only account.self, and the platform routes are refused. With platformTOTP
- * false, the platform administrator has no TOTP and the deployment starts
+ * high-risk console flow has a browser-level error path. A unit role's
+ * session belongs to the default unit of a single-unit installation. With
+ * platformTOTP false, the platform administrator has no TOTP and the
+ * deployment starts
  * with the default unit only; once a second unit exists, its session must
  * enrol TOTP and holds only account.self, and the platform routes are
  * refused, as the server's permission gate does.
  */
-export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', { businessUnits = true, platformTOTP = true }: { businessUnits?: boolean; platformTOTP?: boolean } = {}): Promise<ConsoleMockControls> {
+export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', { platformTOTP = true }: { platformTOTP?: boolean } = {}): Promise<ConsoleMockControls> {
   let incidents: any[] = [{
     job_id: 'job-1',
     job: 'fixture-job',
@@ -211,13 +210,12 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     }
 
     if (path === '/stream') { await route.abort(); return }
-    if (path === '/setup/status') { await json({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 } }); return }
+    if (path === '/setup/status') { await json({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 }, platform_setup_available: false }); return }
     if (path === '/auth/session') {
-      // A platform administrator's session names the platform console, as
-      // the server's does while business units are on. While they are off it
-      // has no scope and holds only its own account's self-service.
-      const scope = role === 'platform_admin' && businessUnits ? { scope: 'platform', unit: null, multi_unit: multipleUnits() } : {}
-      const permissions = (role === 'platform_admin' && !businessUnits) || mustEnrol() ? ['account.self'] : rolePermissions[role]
+      // A platform administrator's session names the platform console, and
+      // a unit role's names the default unit.
+      const scope = role === 'platform_admin' ? { scope: 'platform', unit: null, multi_unit: multipleUnits() } : { scope: 'unit', unit: { id: 'unit-default', name: 'Default', slug: 'default' }, multi_unit: false }
+      const permissions = mustEnrol() ? ['account.self'] : rolePermissions[role]
       const enrolment = mustEnrol() ? { totp_enrollment_required: true } : {}
       await json({ user_id: `user-${role}`, username: role === 'administrator' ? 'admin' : role === 'platform_admin' ? 'platform' : role, display_name: role, role, permissions, csrf_token: 'fixture-csrf', totp_enabled: role === 'platform_admin' && platformTOTP, password_requirements: { minimum_length: 12 }, ...scope, ...enrolment })
       return
@@ -225,12 +223,6 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (mustEnrol() && path.startsWith('/platform/')) {
       // A session that must enrol TOTP holds only its own account.
       record('platform-refused', `${method} ${path}`)
-      await json({ error: { code: 'forbidden', message: 'your account is not allowed to perform this action', details: { permission: 'route' } } }, 403)
-      return
-    }
-    if (!businessUnits && path.startsWith('/platform/')) {
-      // The platform routes do not exist while business units are off.
-      record('platform-data', `${method} ${path}`)
       await json({ error: { code: 'forbidden', message: 'your account is not allowed to perform this action', details: { permission: 'route' } } }, 403)
       return
     }
@@ -316,6 +308,9 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/status') {
       await json({ configured: true, username: role, display_name: role, role, version: 'v0.18.65', notification_destinations: 1, notifications: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' }, retention: '90d', max_concurrent_scans: 1, updates: { enabled: true, status: 'up_to_date', current_version: 'v0.18.65' } })
       return
+    }
+    if (path === '/audit' && method === 'GET') {
+      await json({ entries: [{ id: 1, created_at: '2026-01-01T00:00:01Z', action: 'user.login', category: 'account', actor: { kind: 'user', user_id: 'user-administrator', username: 'admin' }, detail: 'signed in', source_ip: '127.0.0.1' }], next_before: null }); return
     }
     if (path === '/incidents' && method === 'GET') { await json({ incidents, pagination: pagination(incidents.length) }); return }
     if (path === '/hosts' && method === 'GET') {

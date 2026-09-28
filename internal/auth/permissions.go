@@ -31,10 +31,7 @@ const (
 	PermissionNotificationsManage = "notifications.manage"
 	PermissionUsersManage         = "users.manage"
 	// PermissionAuditRead reads the unit's security audit. Only
-	// administrators hold it. The unit audit route belongs to the
-	// experimental business units: while experimental.business_units is
-	// off, the web API refuses the route and leaves the permission out of
-	// the lists it returns (see WithoutBusinessUnitPermissions).
+	// administrators hold it.
 	PermissionAuditRead             = "audit.read"
 	PermissionPublicManage          = "public_dashboard.manage"
 	PermissionStreamRead            = "stream.read"
@@ -50,11 +47,7 @@ const (
 	// manages the business units and their administrators, reads the
 	// platform audit and status, and routes platform notifications. They
 	// grant nothing on a unit's data. The platform console's routes, under
-	// /api/v1/platform/, require them, and like the unit audit those routes
-	// exist only while experimental.business_units is on: while it is off,
-	// the web API refuses them and leaves these permissions out of the lists
-	// it returns (see WithoutBusinessUnitPermissions), so a platform
-	// administrator then holds only PermissionAccountSelf.
+	// /api/v1/platform/, require them.
 	PermissionUnitsManage                 = "units.manage"
 	PermissionUnitAccountsManage          = "unit_accounts.manage"
 	PermissionPlatformAuditRead           = "platform_audit.read"
@@ -100,41 +93,6 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionPlatformStatusRead: true,
 		PermissionAccountSelf:        true,
 	},
-}
-
-// businessUnitPermissions are the permissions that only the routes of the
-// experimental business units grant: a unit administrator's unit audit and
-// every platform permission. While experimental.business_units is off, the
-// web API refuses those routes and leaves these permissions out of the lists
-// it returns, so a single-unit installation describes its sessions exactly
-// as before, and a platform administrator's session lists only its own
-// account's self-service.
-var businessUnitPermissions = map[string]bool{
-	PermissionAuditRead:   true,
-	PermissionUnitsManage: true, PermissionUnitAccountsManage: true,
-	PermissionPlatformAuditRead: true, PermissionPlatformNotificationsManage: true,
-	PermissionPlatformStatusRead: true,
-}
-
-// IsBusinessUnitPermission reports whether only the routes of the
-// experimental business units grant the permission. While
-// experimental.business_units is off, no session holds it.
-func IsBusinessUnitPermission(permission string) bool {
-	return businessUnitPermissions[permission]
-}
-
-// WithoutBusinessUnitPermissions returns the permissions without those that
-// only the routes of the experimental business units grant. The web API
-// applies it to the lists it returns while experimental.business_units is
-// off.
-func WithoutBusinessUnitPermissions(permissions []string) []string {
-	result := make([]string, 0, len(permissions))
-	for _, permission := range permissions {
-		if !IsBusinessUnitPermission(permission) {
-			result = append(result, permission)
-		}
-	}
-	return result
 }
 
 func PermissionsForRole(role string) []string {

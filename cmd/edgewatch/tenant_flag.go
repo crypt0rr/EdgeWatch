@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/crypt0rr/edgewatch/internal/app"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -16,11 +15,7 @@ import (
 // then act on that unit instead of the default one. The admin recovery
 // commands, which find their account by a username that is unique across
 // every unit, take it as a safety check: they stop unless the account belongs
-// to that unit. Every other command refuses the flag, and so does every
-// command while experimental.business_units is off.
-
-// errTenantNeedsBusinessUnits refuses --tenant while business units are off.
-var errTenantNeedsBusinessUnits = fmt.Errorf("--tenant names a business unit: %w", app.ErrBusinessUnitsDisabled)
+// to that unit. Every other command refuses the flag.
 
 // flagGiven reports whether the command line set the flag, even to "".
 func flagGiven(fs *flag.FlagSet, name string) bool {
@@ -112,12 +107,9 @@ func hostUnitStore(ctx context.Context, s *store.Store, slug, cmd, action string
 
 // confirmAccountUnit runs before a recovery command changes the account.
 // When --tenant named a business unit, it stops the command unless the
-// account belongs to that unit. With business units on, it then prints the
-// account, its unit (or the platform) and its role.
+// account belongs to that unit. It then prints the account, its unit (or
+// the platform) and its role.
 func confirmAccountUnit(ctx context.Context, s *store.Store, user store.User, options adminRecoveryOptions) error {
-	if options.unit == nil && !options.businessUnits {
-		return nil
-	}
 	where := "platform"
 	if user.Role != store.RolePlatformAdmin {
 		unit, err := s.Platform().GetTenant(ctx, user.TenantID)

@@ -30,11 +30,6 @@ export type Harness = {
   cli: (args: string[]) => Promise<string>
 }
 
-export type HarnessOptions = {
-  /** Turns on experimental.business_units in the daemon's configuration. */
-  businessUnits?: boolean
-}
-
 async function availablePort(): Promise<number> {
   const server = net.createServer()
   await new Promise<void>((resolve, reject) => {
@@ -52,7 +47,7 @@ export async function delay(ms: number): Promise<void> {
   await new Promise(resolve => setTimeout(resolve, ms))
 }
 
-export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
+export async function createHarness(): Promise<Harness> {
   const directory = await mkdtemp(join(tmpdir(), 'edgewatch-real-stack-'))
   const port = await availablePort()
   const counter = join(directory, 'nmap-count')
@@ -97,9 +92,7 @@ web:
   listen: 127.0.0.1:${port}
 notifications:
   urls: []
-${options.businessUnits ? `experimental:
-  business_units: true
-` : ''}`)
+`)
   await run('go', ['build', '-o', binary, './cmd/edgewatch'], { cwd: process.cwd() })
 
   let child: ChildProcess | undefined

@@ -165,16 +165,15 @@ async function createJob(page: Page): Promise<string> {
   return href!.split('/').pop()!
 }
 
-// One daemon with experimental.business_units on and a browser context per
-// person: `page` is the default unit's administrator, then the platform
-// administrator, Unit B's administrator, and an anonymous visitor each get
-// their own cookies.
+// One daemon and a browser context per person: `page` is the default unit's
+// administrator, then the platform administrator, Unit B's administrator,
+// and an anonymous visitor each get their own cookies.
 test('two business units stay apart through the real console, TOTP enrolment, public pages, and disabling', async ({ page, browser }, testInfo) => {
   test.skip(testInfo.project.name !== 'desktop', 'The business units journey runs once on desktop; the mocked platform console covers phone widths.')
   test.setTimeout(180_000)
   // RFC 6238 appendix B: the SHA-1 test secret gives 94287082 at T=59 (step 1).
   expect(totpAt('GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ', 1)).toBe('287082')
-  const harness = await createHarness({ businessUnits: true })
+  const harness = await createHarness()
   const platformContext = await browser.newContext()
   const unitBContext = await browser.newContext()
   const guestContext = await browser.newContext()

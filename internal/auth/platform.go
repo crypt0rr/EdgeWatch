@@ -11,20 +11,9 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
-// ErrBusinessUnitsDisabled reports that the experimental business units
-// feature is off, so no platform administrator can be created.
-var ErrBusinessUnitsDisabled = errors.New("business units are not enabled; set business_units: true in the experimental section of config.yaml")
-
 // platformSetupTokenTTL is how long a platform setup token is valid, as long
 // as the initial setup token.
 const platformSetupTokenTTL = 15 * time.Minute
-
-// SetBusinessUnitsEnabled applies experimental.business_units. While it is
-// off, which is the default, IssuePlatformSetupToken and
-// CompletePlatformSetup refuse with ErrBusinessUnitsDisabled.
-func (m *Manager) SetBusinessUnitsEnabled(enabled bool) {
-	m.businessUnits.Store(enabled)
-}
 
 // IssuePlatformSetupToken creates a one-time token, valid for 15 minutes,
 // that creates a platform administrator. It is for the host CLI: the clear
@@ -33,9 +22,6 @@ func (m *Manager) SetBusinessUnitsEnabled(enabled bool) {
 // the first administrator setup, within a minute of the previous token, and,
 // unless replace confirms it, while an unused token is still valid.
 func (m *Manager) IssuePlatformSetupToken(ctx context.Context, replace bool) (string, error) {
-	if !m.businessUnits.Load() {
-		return "", ErrBusinessUnitsDisabled
-	}
 	raw, err := randomBytes(32)
 	if err != nil {
 		return "", err
@@ -54,9 +40,6 @@ func (m *Manager) IssuePlatformSetupToken(ctx context.Context, replace bool) (st
 // work, and the store checks it again in the transaction that creates the
 // account and consumes the token.
 func (m *Manager) CompletePlatformSetup(ctx context.Context, token, username, password string) (store.User, error) {
-	if !m.businessUnits.Load() {
-		return store.User{}, ErrBusinessUnitsDisabled
-	}
 	token = strings.TrimSpace(token)
 	if token == "" {
 		return store.User{}, errors.New("setup token is required")

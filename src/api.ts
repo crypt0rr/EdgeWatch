@@ -137,15 +137,14 @@ export type UnitRole = Exclude<Role, 'platform_admin'>
 export type UnitRef = { id: string; name: string; slug: string }
 // totp_enrollment_required is present only when the account must set up an
 // authenticator before it may use anything but its own account settings.
-// scope, unit, and multi_unit are present only while business units are on:
 // scope is "platform" for a platform administrator and "unit" otherwise,
 // unit is the account's business unit (null for the platform), and
 // multi_unit reports whether more than one unit exists.
-export type SessionUser = { user_id: string; username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_enabled: boolean; totp_enrollment_required?: boolean; password_requirements: { minimum_length: number }; timezone?: string; scope?: 'unit' | 'platform'; unit?: UnitRef | null; multi_unit?: boolean }
+export type SessionUser = { user_id: string; username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_enabled: boolean; totp_enrollment_required?: boolean; password_requirements: { minimum_length: number }; timezone?: string; scope: 'unit' | 'platform'; unit: UnitRef | null; multi_unit: boolean }
 export type AdminStatus = { configured?: boolean; username?: string; display_name?: string; role?: Role; permissions?: string[]; version: string; version_release_url?: string; legacy_yaml_jobs?: string[]; notification_destinations?: number; notifications?: NotificationStatus; retention?: string; max_concurrent_scans?: number; max_probe_count?: number; max_naabu_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number }; updates?: ApplicationUpdateStatus; telemetry?: DeploymentTelemetry }
-// platform_setup_available is present only while business units are on, and
-// true while the host's platform setup token can create the first platform
-// administrator.
+// platform_setup_available is present once the first administrator exists,
+// and true while the host's platform setup token can create the first
+// platform administrator.
 export const setupStatus = () => api<{ configured: boolean; setup_available?: boolean; public_dashboard_enabled?: boolean; password_requirements: { minimum_length: number }; platform_setup_available?: boolean }>('/setup/status')
 export const adminStatus = () => api<AdminStatus>('/status')
 // The session carries the deployment timezone from config.yaml; apply it before

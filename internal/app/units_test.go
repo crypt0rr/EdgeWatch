@@ -15,10 +15,6 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
-// enableBusinessUnits switches the experimental feature on for the
-// application.
-func enableBusinessUnits(a *App) { a.Config.Experimental.BusinessUnits = true }
-
 // tenantRecord returns the tenant as the platform sees it.
 func tenantRecord(t *testing.T, db *store.Store, id string) store.TenantRecord {
 	t.Helper()
@@ -29,62 +25,38 @@ func tenantRecord(t *testing.T, db *store.Store, id string) store.TenantRecord {
 	return record
 }
 
-// While experimental.business_units is off, every business unit operation
-// is refused, for the default unit and for any other, and nothing changes.
-func TestBusinessUnitOperationsNeedTheExperimentalFlag(t *testing.T) {
-	ctx := context.Background()
-	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
-	before, err := f.db.Platform().ListTenants(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	operations := map[string]func(id string) error{
-		"create": func(string) error {
-			_, err := f.app.CreateUnit(ctx, "Third", "third", store.AuditEntry{})
-			return err
-		},
-		"rename": func(id string) error {
-			_, err := f.app.RenameUnit(ctx, id, 1, "Renamed", "renamed", store.AuditEntry{})
-			return err
-		},
-		"disable": func(id string) error {
-			_, err := f.app.DisableUnit(ctx, id, 1, store.AuditEntry{})
-			return err
-		},
-		"enable": func(id string) error {
-			_, err := f.app.EnableUnit(ctx, id, 1, store.AuditEntry{})
-			return err
-		},
-		"delete": func(id string) error {
-			_, err := f.app.RequestUnitDeletion(ctx, id, "Second", store.AuditEntry{})
-			return err
-		},
-	}
-	for name, operation := range operations {
-		for _, id := range []string{store.DefaultTenantID, secondTenantID} {
-			if err := operation(id); !errors.Is(err, ErrBusinessUnitsDisabled) {
-				t.Errorf("%s %s with the feature off = %v, want %v", name, id, err, ErrBusinessUnitsDisabled)
+// A configuration written for the business units preview still starts, and
+// startup warns that experimental.business_units is obsolete, whatever its
+// value. Without the setting there is no such warning.
+func TestStartupWarnsAboutTheObsoleteBusinessUnitsSetting(t *testing.T) {
+	s := storetest.OpenFresh(t)
+	for name, value := range map[string]*bool{"omitted": nil, "true": ptrTo(true), "false": ptrTo(false)} {
+		cfg := routingTestConfig(s.Path)
+		cfg.Experimental.BusinessUnits = value
+		var logs bytes.Buffer
+		if _, err := New(cfg, s, "missing-nmap", slog.New(slog.NewTextHandler(&logs, nil))); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		warned := false
+		for _, line := range strings.Split(logs.String(), "\n") {
+			if strings.Contains(line, "level=WARN") && strings.Contains(line, "experimental.business_units") {
+				warned = true
 			}
 		}
+		if warned != (value != nil) {
+			t.Fatalf("business_units %s: warned %t; logs:\n%s", name, warned, logs.String())
+		}
 	}
-	// A capacity change is refused with its own error, which is also the
-	// feature's.
-	if err := f.app.SetTenantCapacity(ctx, secondTenantID, store.TenantCapacity{}, store.AuditEntry{}); !errors.Is(err, ErrCapacityRequiresBusinessUnits) || !errors.Is(err, ErrBusinessUnitsDisabled) {
-		t.Errorf("capacity change with the feature off = %v", err)
-	}
-	after, err := f.db.Platform().ListTenants(ctx)
-	if err != nil || !reflect.DeepEqual(after, before) {
-		t.Fatalf("tenants changed while the feature is off:\n%+v\nwant\n%+v (%v)", after, before, err)
-	}
-	withoutConfig := &App{Store: f.db}
-	if _, err := withoutConfig.CreateUnit(ctx, "Third", "third", store.AuditEntry{}); !errors.Is(err, ErrBusinessUnitsDisabled) {
-		t.Fatalf("create without a configuration = %v", err)
-	}
+}
 
-	enableBusinessUnits(f.app)
+// A new unit is active and starts with the initial capacity of the
+// deployment's limits, and it can be renamed.
+func TestCreateAndRenameUnit(t *testing.T) {
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	third, err := f.app.CreateUnit(ctx, "Third", "third", store.AuditEntry{ActorKind: store.AuditActorHost})
 	if err != nil || third.State != store.TenantStateActive {
-		t.Fatalf("create with the feature on = %+v, %v", third, err)
+		t.Fatalf("create = %+v, %v", third, err)
 	}
 	// The new unit starts with the initial capacity of the deployment's
 	// limits: no high-cost work until a platform administrator allows it.
@@ -96,7 +68,7 @@ func TestBusinessUnitOperationsNeedTheExperimentalFlag(t *testing.T) {
 		t.Fatalf("a new unit's capacity = %+v, %v; want %+v", capacity, err, store.InitialTenantCapacity(f.app.capacityLimits()))
 	}
 	if renamed, err := f.app.RenameUnit(ctx, third.ID, third.Revision, "Gamma", "gamma", store.AuditEntry{ActorKind: store.AuditActorHost}); err != nil || renamed.Slug != "gamma" {
-		t.Fatalf("rename with the feature on = %+v, %v", renamed, err)
+		t.Fatalf("rename = %+v, %v", renamed, err)
 	}
 }
 
@@ -109,7 +81,6 @@ func TestDisableUnitPausesTheUnitsWork(t *testing.T) {
 	ctx := context.Background()
 	sc := gatedScanner{started: make(chan string, 2), finish: make(chan struct{})}
 	f := newTwoTenants(t, sc, lifecycleJob)
-	enableBusinessUnits(f.app)
 	b := f.db.Tenant(f.b)
 	second, err := b.CreateJob(ctx, lifecycleJob("edge-2"))
 	if err != nil {
@@ -245,7 +216,6 @@ func TestRegisterRunCancelsARunOfAPausedUnit(t *testing.T) {
 func TestEnableUnitResumesTheUnitWithoutASilenceAlert(t *testing.T) {
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
-	enableBusinessUnits(f.app)
 	old := time.Now().Add(-30 * 24 * time.Hour).UTC().Format(time.RFC3339Nano)
 	for _, statement := range []string{`UPDATE jobs SET created_at=?`, `UPDATE job_silence_state SET eligible_at=?`} {
 		if _, err := f.db.DB.ExecContext(ctx, statement, old); err != nil {
@@ -327,7 +297,6 @@ func TestEnableUnitResumesTheUnitWithoutASilenceAlert(t *testing.T) {
 func TestPurgeDeletedUnitsLogsEachPass(t *testing.T) {
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
-	enableBusinessUnits(f.app)
 	var logs bytes.Buffer
 	f.app.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 	disabled, err := f.app.DisableUnit(ctx, secondTenantID, tenantRecord(t, f.db, secondTenantID).Revision, store.AuditEntry{ActorKind: store.AuditActorHost})
@@ -376,7 +345,6 @@ func TestPurgeDeletedUnitsLogsEachPass(t *testing.T) {
 func TestRequestUnitDeletionPurgesTheUnit(t *testing.T) {
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
-	enableBusinessUnits(f.app)
 	workerCtx, stop := context.WithCancel(ctx)
 	done := f.app.startUnitPurgeWorker(workerCtx)
 	defer func() {

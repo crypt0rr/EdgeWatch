@@ -57,20 +57,26 @@ type publicPageCache struct {
 	publicGen     uint64
 }
 
-// publicPage returns the cache of the scope's page. The default tenant's page
-// keeps the server's own cache, so with one tenant there is one cache, as
-// before tenants. The caller holds publicCacheMu.
+// publicPage returns the cache of the scope's page. The caller holds
+// publicCacheMu.
 func (s *Server) publicPage(scope store.PublicScope) *publicPageCache {
-	if scope == store.DefaultPublicScope() {
+	return s.tenantPublicPage(scope.TenantID())
+}
+
+// tenantPublicPage returns the cache of the page of the tenant with the ID.
+// The default tenant's page keeps the server's own cache, so with one tenant
+// there is one cache, as before tenants. The caller holds publicCacheMu.
+func (s *Server) tenantPublicPage(tenantID string) *publicPageCache {
+	if tenantID == store.DefaultTenantID {
 		return &s.publicPageCache
 	}
-	page := s.publicPages[scope.TenantID()]
+	page := s.publicPages[tenantID]
 	if page == nil {
 		if s.publicPages == nil {
 			s.publicPages = map[string]*publicPageCache{}
 		}
 		page = &publicPageCache{}
-		s.publicPages[scope.TenantID()] = page
+		s.publicPages[tenantID] = page
 	}
 	return page
 }
@@ -344,8 +350,20 @@ func (s *Server) buildPublicDashboardPayload(parent context.Context, scope store
 // already in flight neither caches nor returns its result. The other
 // tenants' pages keep their cache.
 func (s *Server) invalidatePublicPage(scope store.PublicScope) {
+	s.invalidateTenantPublicPage(scope.TenantID())
+}
+
+// invalidateTenantPublicPage drops the cached page of the tenant with the ID
+// and bumps the page's generation, as invalidatePublicPage does. The
+// application's unit-paused hook calls it once a pause of the tenant has
+// committed, so neither the legacy URL, which serves the default tenant's
+// page without resolving the tenant's state, nor the tenant's slug URL
+// serves the page from the cache or from a build that was in flight at the
+// pause. The next request reads the page again, which finds no page while
+// the tenant is not active.
+func (s *Server) invalidateTenantPublicPage(tenantID string) {
 	s.publicCacheMu.Lock()
-	page := s.publicPage(scope)
+	page := s.tenantPublicPage(tenantID)
 	page.publicGen++
 	page.publicCache = nil
 	page.publicFailure = nil

@@ -208,10 +208,21 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 	if a != nil {
 		a.SetEventHandler(v.publishAppEvent)
 		// A business unit that is disabled or deleted loses its live
-		// updates at once, whichever caller paused it.
-		a.SetUnitPausedHandler(v.revokeSSETenant)
+		// updates and its cached public page at once, whichever caller
+		// paused it.
+		a.SetUnitPausedHandler(v.unitPaused)
 	}
 	return v
+}
+
+// unitPaused is the application's unit-paused hook, which runs once
+// DisableUnit or RequestUnitDeletion has committed the pause of a business
+// unit. It ends the unit's live-update streams and drops the unit's public
+// page from the cache, so the page answers as a page that is not enabled
+// from the next request on, on the legacy URL as on the slug URL.
+func (s *Server) unitPaused(tenantID string) {
+	s.revokeSSETenant(tenantID)
+	s.invalidateTenantPublicPage(tenantID)
 }
 
 func (s *Server) Handler() http.Handler {

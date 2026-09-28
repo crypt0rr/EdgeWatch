@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -228,6 +229,84 @@ func TestCreateRenameAndListTenants(t *testing.T) {
 	setTenantState(t, f.store, secondTenantID, TenantStateDeleting)
 	if _, err := platform.RenameTenant(ctx, secondTenantID, 1, "Beta", "beta", AuditEntry{}); !errors.Is(err, ErrTenantStateChange) {
 		t.Fatalf("rename a tenant being deleted = %v, want %v", err, ErrTenantStateChange)
+	}
+}
+
+// A tenant's name is unique among the tenants that are not deleted without
+// regard to the case of any letter, not only of A-Z, the letters that the
+// NOCASE collation of the name column folds. Creating a tenant and renaming
+// one both refuse a name that differs from a live tenant's only in case,
+// and a deleted tenant's name stays free.
+func TestTenantNamesAreUniqueWithoutRegardToCaseBeyondASCII(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	platform := s.Platform()
+	for i, names := range [][]string{{"Ärzte", "ärzte", "ÄRZTE"}, {"Œuvre", "œuvre", "ŒUVRE"}, {"Δέλτα", "δέλτα", "ΔΈΛΤΑ"}} {
+		taken, err := platform.CreateTenant(ctx, names[0], fmt.Sprintf("taken-%d", i), testCapacityLimits, AuditEntry{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		other, err := platform.CreateTenant(ctx, fmt.Sprintf("Other %d", i), fmt.Sprintf("other-%d", i), testCapacityLimits, AuditEntry{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range names[1:] {
+			if _, err := platform.CreateTenant(ctx, name, fmt.Sprintf("created-%d", i), testCapacityLimits, AuditEntry{}); !errors.Is(err, ErrTenantNameInUse) || !errors.Is(err, ErrValidation) {
+				t.Errorf("create %q beside %q = %v, want %v", name, names[0], err, ErrTenantNameInUse)
+			}
+			if _, err := platform.RenameTenant(ctx, other.ID, other.Revision, name, other.Slug, AuditEntry{}); !errors.Is(err, ErrTenantNameInUse) || !errors.Is(err, ErrValidation) {
+				t.Errorf("rename to %q beside %q = %v, want %v", name, names[0], err, ErrTenantNameInUse)
+			}
+		}
+		setTenantState(t, s, taken.ID, TenantStateDeleted)
+		if _, err := platform.RenameTenant(ctx, other.ID, other.Revision, names[1], other.Slug, AuditEntry{}); err != nil {
+			t.Errorf("rename to %q beside a deleted %q: %v", names[1], names[0], err)
+		}
+	}
+	records, err := platform.ListTenants(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := tenantNames(records), []string{"Default", "ärzte", "œuvre", "δέλτα"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("tenants = %v, want %v", got, want)
+	}
+}
+
+// Two live tenants whose names differ only in the case of letters beyond
+// A-Z, which the name check once let through, stay usable: each keeps its
+// name through a change of its slug, and each can take a new name.
+func TestTenantsWhoseNamesDifferOnlyInCaseCanBeRenamed(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	platform := s.Platform()
+	stamp := sqliteTimestamp(time.Now().UTC())
+	pair := []struct{ id, name, slug string }{
+		{"00000000-0000-0000-0000-000000000901", "Ärzte", "aerzte"},
+		{"00000000-0000-0000-0000-000000000902", "ärzte", "aerzte-2"},
+	}
+	for _, tenant := range pair {
+		if _, err := s.DB.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, tenant.id, tenant.name, tenant.slug, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tenant := range pair {
+		current, err := platform.GetTenant(ctx, tenant.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if renamed, err := platform.RenameTenant(ctx, tenant.id, current.Revision, tenant.name, tenant.slug+"-new", AuditEntry{}); err != nil || renamed.Name != tenant.name || renamed.Slug != tenant.slug+"-new" {
+			t.Fatalf("keep %q and change its slug = %+v, %v", tenant.name, renamed, err)
+		}
+	}
+	current, err := platform.GetTenant(ctx, pair[1].id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := platform.RenameTenant(ctx, pair[1].id, current.Revision, "ÄRZTE", current.Slug, AuditEntry{}); !errors.Is(err, ErrTenantNameInUse) {
+		t.Fatalf("rename %q to another case of %q = %v, want %v", pair[1].name, pair[0].name, err, ErrTenantNameInUse)
+	}
+	if renamed, err := platform.RenameTenant(ctx, pair[1].id, current.Revision, "Ärzte Nord", current.Slug, AuditEntry{}); err != nil || renamed.Name != "Ärzte Nord" {
+		t.Fatalf("rename %q to a new name = %+v, %v", pair[1].name, renamed, err)
 	}
 }
 

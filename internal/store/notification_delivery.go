@@ -146,19 +146,20 @@ ON CONFLICT(destination_identity) DO UPDATE SET
 
 // Delivery health belongs to the tenant that owns the destination: a managed
 // identity ("managed:<id>") is joined to managed_notifications.tenant_id. The
-// default tenant also keeps every identity that names no current destination
-// of another tenant or of the platform: the config.yaml destinations, which
-// it owns, and the leftovers of deleted destinations, as the installation's
-// health did before tenants existed. Pending deliveries of a paused
-// destination are not counted. Each predicate takes one argument, the
-// tenant ID.
+// default tenant also keeps every identity that is not managed: those of the
+// config.yaml destinations, which it owns, as the installation's health did
+// before tenants existed. A managed identity that names no current
+// destination belongs to no tenant, so a destination that another tenant or
+// the platform deleted never moves to the default tenant's totals. Pending
+// deliveries of a paused destination are not counted. Each predicate takes
+// one argument, the tenant ID.
 const (
 	deliveryHealthColumns = `h.destination_identity,h.terminal_failures,h.last_success_at,h.last_failure_at,h.last_terminal_at,h.last_error_code,h.last_error_fingerprint`
 	tenantHealthSQL       = `h.destination_identity LIKE 'managed:%' AND EXISTS (SELECT 1 FROM managed_notifications AS m WHERE m.id=substr(h.destination_identity,9) AND m.tenant_id=?)`
-	defaultHealthSQL      = `NOT (h.destination_identity LIKE 'managed:%' AND EXISTS (SELECT 1 FROM managed_notifications AS m WHERE m.id=substr(h.destination_identity,9) AND m.tenant_id IS NOT ?))`
+	defaultHealthSQL      = `(h.destination_identity NOT LIKE 'managed:%' OR EXISTS (SELECT 1 FROM managed_notifications AS m WHERE m.id=substr(h.destination_identity,9) AND m.tenant_id=?))`
 	pendingOutboxColumns  = `o.destination,COUNT(*),COALESCE(SUM(CASE WHEN o.attempts > 0 THEN 1 ELSE 0 END),0),COALESCE(SUM(o.deferrals),0)`
 	tenantPendingSQL      = `o.destination LIKE 'managed:%' AND EXISTS (SELECT 1 FROM managed_notifications AS m WHERE o.destination LIKE 'managed:' || m.id || ':%' AND m.tenant_id=? AND m.enabled=1)`
-	defaultPendingSQL     = `NOT (o.destination LIKE 'managed:%' AND EXISTS (SELECT 1 FROM managed_notifications AS m WHERE o.destination LIKE 'managed:' || m.id || ':%' AND (m.tenant_id IS NOT ? OR m.enabled=0)))`
+	defaultPendingSQL     = `(o.destination NOT LIKE 'managed:%' OR EXISTS (SELECT 1 FROM managed_notifications AS m WHERE o.destination LIKE 'managed:' || m.id || ':%' AND m.tenant_id=? AND m.enabled=1))`
 )
 
 // ListDeliveryHealth returns the durable outcome metadata of the tenant's

@@ -146,6 +146,10 @@ func (ss *SystemStore) DueDeliveries(ctx context.Context, limit int) ([]Delivery
 
 var ErrDeliveryClaimLost = errors.New("notification delivery claim was lost")
 
+// ErrDeliveryHeld reports that a claimed delivery belongs to a tenant that is
+// no longer active, so it must wait in the outbox instead of being sent.
+var ErrDeliveryHeld = errors.New("notification delivery is held")
+
 // Delivery errors are stable, redacted categories shared by the notifier and
 // store. Keeping them in the store package avoids an import cycle while still
 // allowing health accounting and retry policy to use errors.Is rather than
@@ -420,6 +424,31 @@ func (ss *SystemStore) ReleaseDeliveryClaim(ctx context.Context, id int64, claim
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrDeliveryClaimLost
+	}
+	return nil
+}
+
+// CheckDeliveryClaim reports whether a claimed delivery may still be sent,
+// just before a worker sends it. A pass claims a batch at once, and a
+// delivery can wait for a worker while the database changes. The error is
+// ErrDeliveryClaimLost when the claim is gone: the delivery was discarded by
+// a credential change or a deletion, ended, or claimed again. It is
+// ErrDeliveryHeld when the delivery's tenant is no longer active, as
+// heldDeliverySQL describes; the caller then releases the claim, and the
+// delivery waits until the tenant is enabled again.
+func (ss *SystemStore) CheckDeliveryClaim(ctx context.Context, id int64, claim string) error {
+	if claim == "" {
+		return ErrDeliveryClaimLost
+	}
+	var sendable bool
+	err := ss.store.reader().QueryRowContext(ctx, `SELECT `+heldDeliverySQL+` FROM outbox AS due WHERE due.id=? AND due.claim_token=? AND due.sent_at IS NULL AND due.terminal_at=''`, id, claim).Scan(&sendable)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return ErrDeliveryClaimLost
+	case err != nil:
+		return err
+	case !sendable:
+		return ErrDeliveryHeld
 	}
 	return nil
 }

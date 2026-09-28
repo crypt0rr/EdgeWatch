@@ -428,11 +428,13 @@ Each job can select its own destinations. On the **Notifications** page,
 
 Deleting a destination removes it from every job and from the update-alert
 routing in the same change. Each affected job gets a new revision and an
-audit record.
+audit record. Its delivery health goes with it, so its failures no longer
+count in the notification totals.
 
 Renaming a destination keeps its queued alerts, including an alert that is
 raised while the rename is saved. Replacing its URL discards its queued alerts
-instead of sending them to the new URL, and deleting it discards them too. An
+instead of sending them to the new URL, and deleting it discards them too.
+This includes an alert that a delivery pass has picked up but not yet sent. An
 alert raised while either change is saved is also discarded, and the security
 audit log records it as `notifications.pending_discarded`. To rotate a
 credential, such as a webhook token, replace the destination's URL in the
@@ -675,7 +677,8 @@ administrator's password, pauses it and keeps its data:
   does with a wrong password;
 - its running scans are cancelled without changing baselines, its queued runs
   fail, and its jobs leave the schedule;
-- its undelivered alerts are held, and it gets no copy of new update alerts;
+- its undelivered alerts are held, including one that a delivery pass has
+  picked up but not yet sent, and it gets no copy of new update alerts;
 - its public page answers as a page that is not enabled;
 - retention keeps removing its expired history.
 
@@ -871,7 +874,8 @@ docker compose exec edgewatch edgewatch status \
 `scan`, `status`, `history`, `baseline approve|reset|export`, and `notify test`
 act on the default business unit. `--tenant UNIT_SLUG` makes them act on that
 unit's jobs, scans, baselines, and destinations instead, and record their
-audit entries in that unit. A disabled unit can still be read with `status`,
+audit entries in that unit; the key check of `notify test` still covers every
+unit and the platform. A disabled unit can still be read with `status`,
 `history`, and `baseline export`; the other commands refuse it until it is
 enabled, and every command refuses a unit that is being deleted. These rules
 apply to the default unit with or without `--tenant`, even after it is
@@ -885,11 +889,16 @@ account belongs to that unit. Every other command refuses `--tenant`.
 Its `warnings` list actions that do not stop EdgeWatch, such as removing
 imported notification URLs from config.yaml.
 
-`notify test` sends one test message to each enabled destination and prints
-the number of destinations `tested`, `failed`, and `locked`. It exits non-zero
-when a send fails or when an enabled web-managed destination is locked because
-its notification key is missing, replaced, or unreadable, so it can confirm a
-restored key. Paused destinations are not tested.
+`notify test` sends one test message to each enabled destination of the unit
+and prints the number of the unit's destinations `tested`, `failed`, and
+`locked`. The notification key is one for the whole deployment, so it also
+opens every enabled web-managed destination of every unit and of the platform
+with the key, and prints how many it cannot open as `deployment_locked`. It
+exits non-zero when a send fails or when any enabled web-managed destination
+in the deployment is locked because the notification key is missing,
+replaced, or unreadable, whichever unit `--tenant` selects, so it can confirm
+a restored key for the whole deployment. Paused destinations are neither
+tested nor counted.
 
 Each `status` row has a `state`: `scheduled`, `paused`, `archived`,
 `unit_disabled` for an enabled job of a disabled unit, which is off the

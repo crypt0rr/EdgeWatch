@@ -177,9 +177,12 @@ Disabling a unit ends its sessions and revokes its open invitations in the
 same transaction; from then on its accounts cannot sign in or redeem a link,
 and a sign-in gets the answer of a wrong password. Deleting a unit erases its
 rows in bounded batches with SQLite's `secure_delete` on, then compacts the
-search indexes and truncates the write-ahead log. Backups taken before the
-deletion still hold the unit's data, and the records of platform
-administrators' actions on it stay in the platform audit.
+search indexes and truncates the write-ahead log. Deleting a destination
+removes its delivery health; the purge also erases the delivery health that
+earlier releases kept for deleted destinations, which names no owner and
+counts in no unit's totals. Backups taken before the deletion still hold the
+unit's data, and the records of platform administrators' actions on it stay
+in the platform audit.
 
 ### Signals between units
 
@@ -317,10 +320,14 @@ If the key is lost or replaced, web-managed destinations become unavailable;
 they cannot be recovered from the database alone. Restore the original key and
 database together, or delete and recreate the affected destinations after
 confirming that the old credentials are revoked. After restoring a key, run
-`notify test` or the console notification test: it fails while any enabled
-web-managed destination is still locked. A database upgraded to schema
-54 must not be opened by an older EdgeWatch binary; downgrade by restoring the
-complete pre-upgrade `./data` backup before starting the old version. The
+`notify test`: it fails while any enabled web-managed destination of any unit
+or of the platform is still locked, whichever unit `--tenant` selects, and
+reports that count as `deployment_locked`, never a URL. The console
+notification test covers only the unit's own destinations, so a unit's
+administrators learn nothing about another unit's or the platform's. A
+database upgraded to schema 54 must not be opened by an older EdgeWatch
+binary; downgrade by restoring the complete pre-upgrade `./data` backup
+before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
 refuse a schema newer than the binary supports before they write anything.
 Schema 51 keeps every security audit record, attributes it to the default

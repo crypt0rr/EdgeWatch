@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -396,6 +397,22 @@ func (n *Notifier) destinationSnapshot() map[string]string {
 	return out
 }
 
+// managedDelivery is what resolveManagedDelivery made of the managed
+// selector of a claimed delivery.
+type managedDelivery int
+
+const (
+	// managedMissing: the selector names no destination.
+	managedMissing managedDelivery = iota
+	// managedReplaced: the destination's credentials changed after the
+	// alert was queued, so the alert must never be sent with them.
+	managedReplaced
+	// managedDeferred: the destination is paused or locked.
+	managedDeferred
+	// managedReady: the delivery can be sent to the resolved URL.
+	managedReady
+)
+
 // resolveManagedDelivery resolves a queued managed selector by its stable
 // destination ID rather than requiring the revision embedded in the outbox
 // row to still be current. Metadata-only edits intentionally advance that
@@ -403,21 +420,31 @@ func (n *Notifier) destinationSnapshot() map[string]string {
 // carry the previous selector when the edit commits. Returning the current
 // URL here lets that delivery complete with the current credentials and also
 // gives paused/locked destinations the normal deferral path.
-func (n *Notifier) resolveManagedDelivery(selector string) (rawURL string, available bool, deferred bool) {
+//
+// A credential change advances the credential revision too, and an alert
+// queued before it was queued for the old credentials: a selector whose
+// revision is older than the credential revision is managedReplaced, and is
+// never resolved to the replacement URL. The URL and the credential revision
+// come from the same record, so a concurrent reload cannot pair a new URL
+// with an old credential revision.
+func (n *Notifier) resolveManagedDelivery(selector string) (string, managedDelivery) {
 	parts := strings.Split(selector, ":")
 	if len(parts) < 3 || parts[0] != "managed" || parts[1] == "" {
-		return "", false, false
+		return "", managedMissing
 	}
 	n.mu.RLock()
 	entry, ok := n.managed[parts[1]]
 	n.mu.RUnlock()
 	if !ok {
-		return "", false, false
+		return "", managedMissing
+	}
+	if revision, err := strconv.ParseInt(parts[2], 10, 64); err != nil || revision < entry.record.CredentialRevision {
+		return "", managedReplaced
 	}
 	if !entry.record.Enabled || entry.locked {
-		return "", false, true
+		return "", managedDeferred
 	}
-	return entry.url, true, false
+	return entry.url, managedReady
 }
 
 func (n *Notifier) lockedDestinationKeys() []string {
@@ -648,19 +675,40 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 		}
 		destinations = n.destinationSnapshot()
 	}
-	raw, ok := destinations[delivery.Destination]
-	var sendErr error
-	if managedDestination {
-		var deferred bool
-		raw, ok, deferred = n.resolveManagedDelivery(delivery.Destination)
-		if deferred {
-			return n.releaseClaim(ctx, delivery, store.ErrDeliveryDestinationLocked, time.Minute)
+	// A pass claims its batch at once, so a delivery may wait for a worker
+	// while its destination is replaced or deleted, or its tenant disabled.
+	// Check the claim after the reload above: a replacement or deletion that
+	// committed before the check discarded the delivery, so it is not sent,
+	// and a tenant that is no longer active holds it.
+	if err := n.Store.System().CheckDeliveryClaim(ctx, delivery.ID, delivery.ClaimToken); err != nil {
+		switch {
+		case errors.Is(err, store.ErrDeliveryHeld):
+			// Return the delivery without consuming a budget. The claim
+			// query skips it until the tenant is enabled again.
+			return n.releaseClaimWithoutBudget(ctx, delivery, 0)
+		case errors.Is(err, store.ErrDeliveryClaimLost):
+			return err
+		default:
+			return errors.Join(err, n.releaseClaimWithoutBudget(ctx, delivery, 0))
 		}
 	}
-	if !ok {
-		if managedDestination {
+	raw, ok := destinations[delivery.Destination]
+	if managedDestination {
+		var state managedDelivery
+		raw, state = n.resolveManagedDelivery(delivery.Destination)
+		switch state {
+		case managedDeferred:
+			return n.releaseClaim(ctx, delivery, store.ErrDeliveryDestinationLocked, time.Minute)
+		case managedMissing, managedReplaced:
+			// An alert queued for replaced credentials is closed as one of
+			// a deleted destination. The credential change discarded it,
+			// so the claim is normally lost by now and nothing is recorded.
 			return n.releaseClaim(ctx, delivery, store.ErrDeliveryDestinationMissing, time.Minute)
 		}
+		ok = state == managedReady
+	}
+	var sendErr error
+	if !ok {
 		sendErr = store.ErrDeliveryDestinationMissing
 	} else {
 		sendErr = safeSendContext(ctx, raw, engine.FormatEvent(delivery.Event))
@@ -801,6 +849,35 @@ type TestSummary struct {
 	// Locked is the number of enabled web-managed destinations that could not
 	// be tested because their credentials cannot be decrypted.
 	Locked int `json:"locked"`
+}
+
+// LockedDestinations opens every web-managed destination of every tenant and
+// of the platform with the current key, as Reload does, and returns how many
+// enabled ones it cannot open. The notification key is one for the whole
+// deployment, so a host command that confirms a restored key checks them
+// all, although it sends test messages only to one tenant's destinations.
+// When any is locked, the error wraps ErrManagedNotificationLocked. It
+// reports a count only: no URL, and no destination of another owner by ID.
+// Paused destinations are not counted, as a test does not send to them.
+func (n *Notifier) LockedDestinations(ctx context.Context) (int, error) {
+	if n.Store == nil {
+		return 0, nil
+	}
+	records, err := n.Store.System().ListManagedNotifications(ctx)
+	if err != nil {
+		return 0, err
+	}
+	managed, _ := n.openManaged(records)
+	locked := 0
+	for _, entry := range managed {
+		if entry.record.Enabled && entry.locked {
+			locked++
+		}
+	}
+	if locked > 0 {
+		return locked, fmt.Errorf("%w: the notification key cannot open %d of the deployment's enabled web-managed destinations", ErrManagedNotificationLocked, locked)
+	}
+	return 0, nil
 }
 
 // testSet sends one test message to each enabled destination of the set and

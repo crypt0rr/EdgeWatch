@@ -287,10 +287,15 @@ func run(args []string) error {
 			return errors.New("expected: notify test")
 		}
 		// A locked web-managed destination fails the test, so restoring the
-		// wrong notification key is not reported as a successful check.
+		// wrong notification key is not reported as a successful check. The
+		// test messages go to the unit's destinations only, but the key is
+		// one for the deployment: every unit's and the platform's enabled
+		// destinations must open with it, whichever unit --tenant selects.
 		summary, err := application.Notifier.Tenant(tenant).TestSummary(ctx)
+		deploymentLocked, keyErr := application.Notifier.LockedDestinations(ctx)
+		err = errors.Join(err, keyErr)
 		auditHostCommand(ctx, tenant, store.AuditEntry{Action: "notifications.test", Detail: hostAuditDetail("operation", "global", err)})
-		if printErr := printValue(*output, summary); printErr != nil {
+		if printErr := printValue(*output, notifyTestResult{TestSummary: summary, DeploymentLocked: deploymentLocked}); printErr != nil {
 			return errors.Join(err, printErr)
 		}
 		return err
@@ -592,6 +597,16 @@ func contextWithSignals(parent context.Context) (context.Context, func()) {
 	}
 	return ctx, cleanup
 }
+
+// notifyTestResult is what notify test prints: the counts of the test of the
+// selected unit's destinations, and DeploymentLocked, the number of enabled
+// web-managed destinations of every unit and of the platform that the
+// notification key cannot open. It carries counts only, never a URL.
+type notifyTestResult struct {
+	notify.TestSummary
+	DeploymentLocked int `json:"deployment_locked"`
+}
+
 func printValue(format string, v any) error {
 	if format == "json" {
 		b, err := json.MarshalIndent(v, "", "  ")

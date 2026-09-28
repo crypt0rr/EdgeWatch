@@ -100,8 +100,11 @@ var tenantPurgeSteps = []tenantPurgeStep{
 	{table: "restore_quarantined_deliveries", rowids: `SELECT rowid FROM restore_quarantined_deliveries WHERE tenant_id=?1`},
 	{table: "jobs", rowids: `SELECT rowid FROM jobs WHERE tenant_id=?1`},
 	{table: "public_dashboards", rowids: `SELECT rowid FROM public_dashboards WHERE tenant_id=?1`},
-	// Notification destinations and scanner profiles.
-	{table: "notification_delivery_health", rowids: `SELECT h.rowid FROM notification_delivery_health AS h JOIN managed_notifications AS m ON h.destination_identity='managed:' || m.id AND m.tenant_id=?1`},
+	// Notification destinations and scanner profiles. The delivery health of
+	// a destination deleted before deletes removed its health names no
+	// destination, so its owner cannot be told apart; no tenant counts it,
+	// and the purge erases every such row with the tenant's own.
+	{table: "notification_delivery_health", rowids: `SELECT h.rowid FROM notification_delivery_health AS h WHERE h.destination_identity LIKE 'managed:%' AND (EXISTS (SELECT 1 FROM managed_notifications AS m WHERE m.id=substr(h.destination_identity,9) AND m.tenant_id=?1) OR NOT EXISTS (SELECT 1 FROM managed_notifications AS m WHERE m.id=substr(h.destination_identity,9)))`},
 	{table: "managed_notifications", rowids: `SELECT rowid FROM managed_notifications WHERE tenant_id=?1`},
 	{table: "scanner_profile_revisions", rowids: `SELECT rowid FROM scanner_profile_revisions WHERE profile_id IN (` + tenantProfilesSQL + `)`},
 	{table: "scanner_profiles", rowids: `SELECT rowid FROM scanner_profiles WHERE tenant_id=?1`},

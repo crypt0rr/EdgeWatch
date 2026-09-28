@@ -423,10 +423,11 @@ func (ps *PlatformStore) UpdatePlatformNotificationWithAudit(ctx context.Context
 }
 
 // DeletePlatformNotificationWithAudit removes one of the platform's
-// destinations at expectedRevision, with its pending deliveries, and drops
-// it from the platform's update routing, in one transaction with its audit
-// records. A tenant's destination is ErrNotFound, and nothing changes. The
-// actor, audit.ActorUserID, must be an enabled platform administrator.
+// destinations at expectedRevision, with its pending deliveries and its
+// delivery health, and drops it from the platform's update routing, in one
+// transaction with its audit records. A tenant's destination is
+// ErrNotFound, and nothing changes. The actor, audit.ActorUserID, must be an
+// enabled platform administrator.
 func (ps *PlatformStore) DeletePlatformNotificationWithAudit(ctx context.Context, id string, expectedRevision int64, audit AuditEntry) error {
 	tx, err := ps.store.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -444,6 +445,10 @@ func (ps *PlatformStore) DeletePlatformNotificationWithAudit(ctx context.Context
 		return ErrConflict
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE destination LIKE ? AND sent_at IS NULL`+platformDestinationSQL, "managed:"+id+":%", id); err != nil {
+		return err
+	}
+	// The delivery health goes with the destination, as a unit's does.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM notification_delivery_health WHERE destination_identity=? AND EXISTS (SELECT 1 FROM managed_notifications AS owner WHERE owner.id=? AND owner.tenant_id IS NULL)`, "managed:"+id, id); err != nil {
 		return err
 	}
 	deleted, err := execCount(ctx, tx, `DELETE FROM managed_notifications WHERE id=? AND revision=? AND tenant_id IS NULL`, id, expectedRevision)

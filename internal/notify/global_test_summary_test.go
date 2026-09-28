@@ -253,3 +253,56 @@ func TestNotificationTestIgnoresPausedLockedManagedDestination(t *testing.T) {
 		t.Fatalf("paused locked test summary = %#v, want nothing tested", summary)
 	}
 }
+
+// The key check of a host notification test covers the enabled web-managed
+// destinations of every tenant and of the platform, not only those of the
+// tenant that receives the test messages. Paused destinations are not
+// counted, and the result is a count, never a URL.
+func TestLockedDestinationsCoversEveryOwner(t *testing.T) {
+	ctx := context.Background()
+	notifier, db, own, other := twoTenantNotifier(t)
+	audit := addPlatformAdmin(t, db)
+	if _, err := notifier.Tenant(other).CreateManagedWithAudit(ctx, "B hook", "generic://localhost/unit-b?disabletls=yes", true, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := notifier.Platform(db.Platform()).CreateManagedWithAudit(ctx, "Platform hook", "generic://localhost/platform?disabletls=yes", true, audit); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := notifier.Tenant(own).CreateManagedWithAudit(ctx, "Paused", "generic://localhost/paused?disabletls=yes", false, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if locked, err := notifier.LockedDestinations(ctx); err != nil || locked != 0 {
+		t.Fatalf("key check with the right key = %d, %v", locked, err)
+	}
+	wrong := make([]byte, notificationKeySize)
+	if _, err := rand.Read(wrong); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notifier.keyPath, wrong, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	locked, err := notifier.LockedDestinations(ctx)
+	if !errors.Is(err, ErrManagedNotificationLocked) || locked != 2 {
+		t.Fatalf("key check with a wrong key = %d, %v; want unit B's and the platform's destinations locked", locked, err)
+	}
+	if strings.Contains(err.Error(), "generic://") {
+		t.Fatalf("the key check error leaks a URL: %v", err)
+	}
+	// The default tenant's own test still covers only its destinations, of
+	// which the paused one is not tested.
+	if summary, err := defaultNotifier(notifier).TestSummary(ctx); err != nil || summary != (TestSummary{}) {
+		t.Fatalf("default tenant's test = %+v, %v", summary, err)
+	}
+	library, err := newWithKeyFile(nil, nil, filepath.Join(t.TempDir(), "notification.key"), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if locked, err := library.LockedDestinations(ctx); err != nil || locked != 0 {
+		t.Fatalf("key check without a store = %d, %v", locked, err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := notifier.LockedDestinations(canceled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("key check that cannot read the destinations = %v, want the read error", err)
+	}
+}

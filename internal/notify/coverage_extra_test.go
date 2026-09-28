@@ -173,24 +173,34 @@ func TestNotifierRecoversInterruptedKeyAndResolvesManagedSelectors(t *testing.T)
 		t.Fatalf("managed destination creation after key recovery failed: %v", err)
 	}
 	notifier.mu.Lock()
-	notifier.managed["active"] = managedDestination{record: store.ManagedNotification{ID: "active", Enabled: true}, url: "generic://localhost/active?disabletls=yes"}
-	notifier.managed["paused"] = managedDestination{record: store.ManagedNotification{ID: "paused", Enabled: false}, url: "generic://localhost/paused?disabletls=yes"}
-	notifier.managed["locked"] = managedDestination{record: store.ManagedNotification{ID: "locked", Enabled: true}, locked: true}
+	notifier.managed["active"] = managedDestination{record: store.ManagedNotification{ID: "active", Enabled: true, Revision: 1, CredentialRevision: 1}, url: "generic://localhost/active?disabletls=yes"}
+	notifier.managed["paused"] = managedDestination{record: store.ManagedNotification{ID: "paused", Enabled: false, Revision: 1, CredentialRevision: 1}, url: "generic://localhost/paused?disabletls=yes"}
+	notifier.managed["locked"] = managedDestination{record: store.ManagedNotification{ID: "locked", Enabled: true, Revision: 1, CredentialRevision: 1}, locked: true}
+	// Renamed at revision 2 and 3; the credentials are those of revision 1.
+	notifier.managed["renamed"] = managedDestination{record: store.ManagedNotification{ID: "renamed", Enabled: true, Revision: 3, CredentialRevision: 1}, url: "generic://localhost/renamed?disabletls=yes"}
+	// The URL was replaced at revision 3.
+	notifier.managed["rotated"] = managedDestination{record: store.ManagedNotification{ID: "rotated", Enabled: true, Revision: 3, CredentialRevision: 3}, url: "generic://localhost/rotated?disabletls=yes"}
 	notifier.mu.Unlock()
-	if _, available, deferred := notifier.resolveManagedDelivery("invalid"); available || deferred {
-		t.Fatal("malformed selector unexpectedly resolved")
-	}
-	if _, available, deferred := notifier.resolveManagedDelivery("managed:missing:1"); available || deferred {
-		t.Fatal("missing selector unexpectedly resolved")
-	}
-	if _, available, deferred := notifier.resolveManagedDelivery("managed:paused:1"); available || !deferred {
-		t.Fatal("paused selector was not deferred")
-	}
-	if _, available, deferred := notifier.resolveManagedDelivery("managed:locked:1"); available || !deferred {
-		t.Fatal("locked selector was not deferred")
-	}
-	if raw, available, deferred := notifier.resolveManagedDelivery("managed:active:1"); !available || deferred || raw == "" {
-		t.Fatalf("active selector = %q, available=%v deferred=%v", raw, available, deferred)
+	for _, tc := range []struct {
+		selector string
+		want     managedDelivery
+	}{
+		{"invalid", managedMissing},
+		{"managed:missing:1", managedMissing},
+		{"managed:paused:1", managedDeferred},
+		{"managed:locked:1", managedDeferred},
+		{"managed:active:1", managedReady},
+		{"managed:renamed:1", managedReady},
+		{"managed:renamed:3", managedReady},
+		{"managed:rotated:1", managedReplaced},
+		{"managed:rotated:2", managedReplaced},
+		{"managed:rotated:x", managedReplaced},
+		{"managed:rotated:3", managedReady},
+	} {
+		raw, got := notifier.resolveManagedDelivery(tc.selector)
+		if got != tc.want || (got == managedReady) != (raw != "") {
+			t.Errorf("resolve %s = %q, %d; want %d", tc.selector, raw, got, tc.want)
+		}
 	}
 }
 

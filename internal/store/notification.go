@@ -27,13 +27,18 @@ type ManagedNotification struct {
 	Nonce      []byte
 	Enabled    bool
 	Revision   int64
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	// CredentialRevision is the revision at which the credentials last
+	// changed. A metadata-only edit advances Revision but not this, so an
+	// alert queued under an earlier revision may still be delivered only
+	// while that revision is not older than CredentialRevision.
+	CredentialRevision int64
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 // managedNotificationColumns are the columns that scanManagedNotification
 // reads, in order.
-const managedNotificationColumns = `id,name,provider,ciphertext,nonce,enabled,revision,created_at,updated_at`
+const managedNotificationColumns = `id,name,provider,ciphertext,nonce,enabled,revision,credential_revision,created_at,updated_at`
 
 // ownedDestinationSQL limits a statement on the outbox to the deliveries of a
 // destination that the tenant owns. It takes two arguments, the destination
@@ -46,7 +51,7 @@ func scanManagedNotification(scanner interface{ Scan(...any) error }, tail ...an
 	var destination ManagedNotification
 	var enabled int
 	var created, updated string
-	columns := append([]any{&destination.ID, &destination.Name, &destination.Provider, &destination.Ciphertext, &destination.Nonce, &enabled, &destination.Revision, &created, &updated}, tail...)
+	columns := append([]any{&destination.ID, &destination.Name, &destination.Provider, &destination.Ciphertext, &destination.Nonce, &enabled, &destination.Revision, &destination.CredentialRevision, &created, &updated}, tail...)
 	if err := scanner.Scan(columns...); err != nil {
 		return destination, err
 	}
@@ -203,7 +208,7 @@ func (ts *TenantStore) createManagedNotificationWithAuditsAndSelection(ctx conte
 	if err := tx.Commit(); err != nil {
 		return ManagedNotification{}, err
 	}
-	return ManagedNotification{ID: id, TenantID: ts.scope.id, Name: name, Provider: provider, Ciphertext: append([]byte(nil), ciphertext...), Nonce: append([]byte(nil), nonce...), Enabled: enabled, Revision: 1, CreatedAt: now, UpdatedAt: now}, nil
+	return ManagedNotification{ID: id, TenantID: ts.scope.id, Name: name, Provider: provider, Ciphertext: append([]byte(nil), ciphertext...), Nonce: append([]byte(nil), nonce...), Enabled: enabled, Revision: 1, CredentialRevision: 1, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 // MaterializeLegacyNotificationSelections freezes every job of the tenant
@@ -378,6 +383,10 @@ func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, 
 	oldKey := managedNotificationKey(id, current.Revision)
 	newKey := managedNotificationKey(id, next)
 	credentialsChanged := current.Provider != provider || !bytes.Equal(current.Ciphertext, ciphertext) || !bytes.Equal(current.Nonce, nonce)
+	credentialRevision := current.CredentialRevision
+	if credentialsChanged {
+		credentialRevision = next
+	}
 	// credential_revision advances only with the credentials, so an alert that
 	// captured an earlier metadata revision can still be queued (see
 	// resolveManagedIntentTx).
@@ -413,7 +422,7 @@ func (ts *TenantStore) updateManagedNotificationWithAudits(ctx context.Context, 
 	if err := tx.Commit(); err != nil {
 		return ManagedNotification{}, err
 	}
-	return ManagedNotification{ID: id, TenantID: ts.scope.id, Name: name, Provider: provider, Ciphertext: append([]byte(nil), ciphertext...), Nonce: append([]byte(nil), nonce...), Enabled: enabled, Revision: next, CreatedAt: current.CreatedAt, UpdatedAt: now}, nil
+	return ManagedNotification{ID: id, TenantID: ts.scope.id, Name: name, Provider: provider, Ciphertext: append([]byte(nil), ciphertext...), Nonce: append([]byte(nil), nonce...), Enabled: enabled, Revision: next, CredentialRevision: credentialRevision, CreatedAt: current.CreatedAt, UpdatedAt: now}, nil
 }
 
 // DeleteManagedNotification removes one of the tenant's destinations, as
@@ -424,12 +433,12 @@ func (ts *TenantStore) DeleteManagedNotification(ctx context.Context, id string,
 }
 
 // DeleteManagedNotificationWithAudit removes one of the tenant's
-// destinations, its pending delivery intents, and its audit row in one
-// transaction. The same transaction removes the destination from the routing
-// of every job of the tenant and from the tenant's application update
-// routing, so no saved selection keeps pointing at it. It returns the IDs of
-// the jobs whose routing changed. A destination of another tenant or of the
-// platform is ErrNotFound, and nothing changes.
+// destinations, its pending delivery intents, its delivery health, and its
+// audit row in one transaction. The same transaction removes the destination
+// from the routing of every job of the tenant and from the tenant's
+// application update routing, so no saved selection keeps pointing at it. It
+// returns the IDs of the jobs whose routing changed. A destination of another
+// tenant or of the platform is ErrNotFound, and nothing changes.
 func (ts *TenantStore) DeleteManagedNotificationWithAudit(ctx context.Context, id string, expectedRevision int64, audit AuditEntry) ([]string, error) {
 	return ts.deleteManagedNotificationWithAudits(ctx, id, expectedRevision, []AuditEntry{audit})
 }
@@ -455,6 +464,11 @@ func (ts *TenantStore) deleteManagedNotificationWithAudits(ctx context.Context, 
 		return nil, ErrConflict
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM outbox WHERE destination LIKE ? AND sent_at IS NULL`+ownedDestinationSQL, "managed:"+id+":%", id, ts.scope.id); err != nil {
+		return nil, err
+	}
+	// The delivery health goes with the destination. Left behind, it would
+	// name no destination, and no tenant's totals may count it.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM notification_delivery_health WHERE destination_identity=?`+ownedDestinationSQL, "managed:"+id, id, ts.scope.id); err != nil {
 		return nil, err
 	}
 	result, err := tx.ExecContext(ctx, `DELETE FROM managed_notifications WHERE id=? AND revision=? AND tenant_id=?`, id, expectedRevision, ts.scope.id)

@@ -18,12 +18,6 @@ import (
 // default tenant's page with B's title, introduction and ports.
 var publicTenantBPage = strings.NewReplacer("Tenant A status", "Tenant B status", `"introduction":"A"`, `"introduction":"B"`, `"port":443,"service":"https"`, `"port":22,"service":"ssh"`, `"port":443`, `"port":22`).Replace(publicTenantAPage)
 
-// enablePublicUnits switches experimental.business_units on or off for the
-// fixture's server.
-func (f publicTenantFixture) enablePublicUnits(enabled bool) {
-	f.server.App.Config.Experimental.BusinessUnits = enabled
-}
-
 // getPublicPath requests path as an anonymous client through the server's
 // HTTP handler, so the request takes the same route as a browser's.
 func (f publicTenantFixture) getPublicPath(path, remote string) *httptest.ResponseRecorder {
@@ -40,7 +34,6 @@ func (f publicTenantFixture) getPublicPath(path, remote string) *httptest.Respon
 // the default tenant's own slug serves the same page.
 func TestPublicSlugPageServesOnlyItsUnit(t *testing.T) {
 	f := newPublicTenantFixture(t)
-	f.enablePublicUnits(true)
 	for i, check := range []struct{ path, want string }{
 		{"/api/public/v1/dashboard", publicTenantAPage},
 		{"/api/public/v1/dashboard/", publicTenantAPage},
@@ -96,12 +89,11 @@ func observePublicAnswer(rec *httptest.ResponseRecorder) publicAnswer {
 // A slug page that is not published answers exactly as the default tenant's
 // page when that page is not enabled: an unknown slug, a slug that cannot
 // name a unit, a withdrawn page, a unit without a page, a paused unit, a unit
-// being deleted, a deleted unit, and every slug while business units are off.
-// Nothing tells whether a unit has the slug.
+// being deleted, and a deleted unit. Nothing tells whether a unit has the
+// slug.
 func TestPublicSlugPagesThatAreNotPublishedAreIndistinguishable(t *testing.T) {
 	ctx := context.Background()
 	f := newPublicTenantFixture(t)
-	f.enablePublicUnits(true)
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
 	units := []struct{ id, slug, state string }{
 		{"00000000-0000-0000-0000-000000000301", "paused", "disabled"},
@@ -133,19 +125,6 @@ func TestPublicSlugPagesThatAreNotPublishedAreIndistinguishable(t *testing.T) {
 		rec := f.getPublicPath("/api/public/v1/dashboard/"+slug, fmt.Sprintf("198.51.100.82:%d", 1000+i))
 		answers[slug] = observePublicAnswer(rec)
 	}
-	// Business units off: even a published unit's slug has no page, and the
-	// legacy URL still serves the default tenant's page.
-	f.enablePublicUnits(false)
-	for i, slug := range []string{"other", "default", "nobody"} {
-		answers["off:"+slug] = observePublicAnswer(f.getPublicPath("/api/public/v1/dashboard/"+slug, fmt.Sprintf("198.51.100.83:%d", 1000+i)))
-	}
-	if rec := f.getPublicPath("/api/public/v1/dashboard", "198.51.100.83:2000"); rec.Code != http.StatusOK || rec.Body.String() != publicTenantAPage {
-		t.Fatalf("legacy page with business units off = %d: %s", rec.Code, rec.Body.String())
-	}
-	f.enablePublicUnits(true)
-	if rec := f.getPublicPath("/api/public/v1/dashboard/other", "198.51.100.83:2001"); rec.Code != http.StatusOK || rec.Body.String() != publicTenantBPage {
-		t.Fatalf("tenant B's page with business units on again = %d: %s", rec.Code, rec.Body.String())
-	}
 
 	// The reference: the default tenant's page, withdrawn.
 	if err := defaultTenantStore(f.server).SavePublicDashboard(ctx, store.PublicDashboard{Enabled: false, Title: "Tenant A status"}, nil, store.AuditEntry{}); err != nil {
@@ -168,7 +147,6 @@ func TestPublicSlugPagesThatAreNotPublishedAreIndistinguishable(t *testing.T) {
 // without a page is limited as a published one is.
 func TestPublicSlugPagesHaveTheirOwnRateLimit(t *testing.T) {
 	f := newPublicTenantFixture(t)
-	f.enablePublicUnits(true)
 	const client = "198.51.100.85:1000"
 	exhaust := func(path string, status int) {
 		t.Helper()
@@ -241,7 +219,6 @@ func publicUnitAdministrators(t *testing.T, f publicTenantFixture) func(account,
 func TestPublicPageSaveKeepsOtherUnitsCache(t *testing.T) {
 	ctx := context.Background()
 	f := newPublicTenantFixture(t)
-	f.enablePublicUnits(true)
 	editor := publicUnitAdministrators(t, f)
 	scopeB, err := f.db.PublicScopeBySlug(ctx, "other")
 	if err != nil {

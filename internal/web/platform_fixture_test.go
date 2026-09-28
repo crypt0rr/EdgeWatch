@@ -34,8 +34,7 @@ const (
 // platformActors lists the actors in a fixed order.
 var platformActors = []string{actorAdminA, actorOperatorA, actorViewerA, actorAdminB, actorPlatform}
 
-// platformFixture is a server with experimental.business_units on and two
-// units. Unit A is the default unit, with an administrator, an operator and
+// platformFixture is a server with two units. Unit A is the default unit, with an administrator, an operator and
 // a viewer. Unit B, created through the application like any unit, has an
 // administrator and a viewer. Both units have a job named "shared-job" that
 // scans 192.0.2.10; unit B also has "bravo-job", which scans 198.51.100.77
@@ -72,7 +71,7 @@ func newPlatformFixture(t *testing.T) *platformFixture {
 	t.Cleanup(func() { _ = db.Close() })
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	rdap := false
-	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 2}, Web: config.Web{Listen: "127.0.0.1:8080"}, Enrichment: config.Enrichment{RDAP: config.RDAP{Enabled: &rdap}}, Experimental: config.Experimental{BusinessUnits: true}}
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 2}, Web: config.Web{Listen: "127.0.0.1:8080"}, Enrichment: config.Enrichment{RDAP: config.RDAP{Enabled: &rdap}}}
 	application, err := app.New(cfg, db, "missing-nmap", logger)
 	if err != nil {
 		t.Fatal(err)

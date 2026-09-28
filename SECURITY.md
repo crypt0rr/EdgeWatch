@@ -46,12 +46,13 @@ verification codes. A mistyped code can be retried against the same secret;
 after the fifth incorrect code, or once the ten minutes pass, the pending secret
 is discarded and setup must start again.
 
-## Business units and the platform administrator (experimental)
+## Business units and the platform administrator
 
-Business units are under development and stay off unless
-`experimental.business_units` is `true`. While the flag is off, EdgeWatch
-refuses to issue a platform setup token or to create a platform
-administrator, and a single unit behaves as before.
+Every installation has at least one business unit, the default unit, which
+holds everything that existed before business units. A single unit behaves
+as before, apart from the unit audit, the `/public/default` alias of the
+public page, the `--tenant` option of the host commands, and the platform
+setup token that the host can issue.
 
 ### Trust boundary
 
@@ -81,16 +82,11 @@ A platform administrator is a separate account without a unit. It manages
 the units and their administrators and holds no permission on any unit's
 jobs, scans, baselines, incidents, notifications, or public status: every
 route of a unit's console refuses it except its own account's password,
-TOTP, session, and sign-out routes. The platform console's API, under
-`/api/v1/platform/`, and the unit audit, `/api/v1/audit`, exist only while
-the flag is on; otherwise every request to them is refused exactly like an
-unknown route. With the flag off, a platform administrator can still sign
-in, but its session holds only its own account's self-service, and the
-console shows it only a notice that business units are turned off, with
-sign-out. Only a platform administrator reaches the platform routes,
-and they never return a unit's data: a unit appears with its name, slug,
-state, and counts of its accounts, administrators, jobs, stored scans, and
-scan slots in use; its accounts as summaries without credentials; and its
+TOTP, session, and sign-out routes. Only a platform administrator reaches
+the platform console's API, under `/api/v1/platform/`, and it never returns
+a unit's data: a unit appears with its name, slug, state, and counts of its
+accounts, administrators, jobs, stored scans, and scan slots in use; its
+accounts as summaries without credentials; and its
 capacity as numbers. The stored scan count is a number of rows, never a
 scan's content. The platform's own notification destinations are
 write-only like a unit's, and the platform cannot read, select, or change a
@@ -103,12 +99,12 @@ first administrator exists and while no enabled platform administrator does,
 at most once a minute, and replaces an unused token only with `--force`. The
 token cannot complete the first setup, and the first setup token cannot
 create a platform administrator. The console's setup page redeems it through
-`POST /api/v1/setup/platform`, which exists only while the flag is on, checks
-the browser origin, and applies the first setup's per-client failure budget;
-a wrong, used, or expired token gets one generic answer, and each failure is
-recorded in platform scope. While the token is valid, `/api/v1/setup/status`
-reports `platform_setup_available`, which the sign-in page uses to offer the
-setup; with the flag off the key is absent. An enabled platform
+`POST /api/v1/setup/platform`, which checks the browser origin and applies
+the first setup's per-client failure budget; a wrong, used, or expired token
+gets one generic answer, and each failure is recorded in platform scope.
+While the token is valid, `/api/v1/setup/status` reports
+`platform_setup_available`, which the sign-in page uses to offer the setup.
+An enabled platform
 administrator can then invite another after confirming its password; the
 invited account stays pending and disabled until it redeems its one-time
 link, which expires after 30 minutes. A platform administrator can disable
@@ -152,18 +148,17 @@ administrator must use TOTP. Until one without TOTP enrols, its sessions
 report `totp_enrollment_required` and may only use its own account's
 settings (password, TOTP enrolment, display name, and sessions) and sign
 out; everything else is refused. Units that are disabled or being deleted
-count, and the rule follows the number of units, not the flag. If the units
-cannot be counted, the restriction applies. With a single unit nothing
-changes.
+count. If the units cannot be counted, the restriction applies. With a
+single unit nothing changes.
 
 ### Public pages, audit, and deletion
 
 Each unit's public status page is served at `/public/<slug>` and
 `/api/public/v1/dashboard/<slug>`, from that unit's published hosts only;
 `/public` keeps serving the default unit's page. An unknown slug, a unit's
-page that is not enabled, a paused unit, a unit being deleted, and every slug
-while the flag is off get the same 404 `public_disabled` answer as a disabled
-page, so the address does not reveal whether a unit has that slug. Each page
+page that is not enabled, a paused unit, and a unit being deleted get the
+same 404 `public_disabled` answer as a disabled page, so the address does not
+reveal whether a unit has that slug. Each page
 has its own per-client rate limit and its own cache: a busy page does not
 throttle another, and saving one page does not drop another page's cache.
 
@@ -205,14 +200,15 @@ Some signals cross units by design:
   [Live-update streams and session revocation](#live-update-streams-and-session-revocation).
 - The default unit's status reports the size of the whole database, which
   grows with every unit's data.
-- Anonymous callers of `/api/v1/setup/status` can tell from the presence of
-  `platform_setup_available` whether the flag is on.
+- Anonymous callers of `/api/v1/setup/status` can tell from
+  `platform_setup_available` whether a platform setup token is waiting to be
+  used.
 - Behind a proxy that is not listed in `web.trusted_proxies`, the shared
   sign-in cooldown applies to the accounts of every unit.
 
 Other signals are closed. Once more than one unit exists, a unit's status
-leaves out the deployment-wide live-update counters, whether the flag is on
-or off, and it leaves them out too when the units cannot be counted. A
+leaves out the deployment-wide live-update counters, and it leaves them out
+too when the units cannot be counted. A
 unit's status counts, notification totals, and telemetry cover its own rows
 only, its scan slots and probe budgets are its own limits, the Hosts view
 keeps each unit's newest observation of an address apart, and a public slug
@@ -263,8 +259,8 @@ from gaps in its event IDs that other units received updates, but not what
 they were, and a burst in another unit can shorten its replay window, after
 which a reconnecting browser receives a full-refresh marker instead. The
 deployment-wide replay counters (`live_updates` in `/api/v1/status`) are
-left out of a unit's status once more than one unit exists, whether business
-units are on or off, and when the units cannot be counted.
+left out of a unit's status once more than one unit exists, and when the
+units cannot be counted.
 
 Other authenticated API reads, including the status and page-polling requests,
 also validate sessions without refreshing their idle timestamp. Actual browser

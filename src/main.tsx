@@ -8,7 +8,6 @@ import type { UnitRef } from './api'
 import { useActivityHeartbeat, useNavigationDrawer } from './components/navigation'
 import { Audit } from './pages/Audit'
 import { PlatformShell } from './pages/platform/PlatformShell'
-import { PlatformUnavailableShell } from './pages/platform/PlatformUnavailable'
 import { TotpEnrollmentShell } from './pages/TotpEnrollment'
 import { Dashboard } from './pages/Dashboard'
 import { JobEditor } from './pages/JobEditor'
@@ -292,13 +291,9 @@ export function ProtectedApp({ onLogout }: { onLogout: () => Promise<void> }) { 
   if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; const displayName = session.data?.display_name ?? session.data?.username ?? 'admin'; const permissions = session.data?.permissions ?? []
   // An administrator who must enrol TOTP first gets only the enrolment, a
   // password change, and sign-out. A platform administrator gets the
-  // platform console, which never mounts a unit's pages. Without business
-  // units the session has neither key and the unit console is unchanged,
-  // except for a platform administrator, who gets a notice that business
-  // units are turned off, and never the unit console.
+  // platform console, which never mounts a unit's pages.
   if (mustEnrol || enrolling) return <TotpEnrollmentShell displayName={displayName} onLogout={onLogout} />
   if (session.data?.scope === 'platform') return <PlatformShell displayName={displayName} permissions={permissions} onLogout={onLogout} />
-  if (session.data?.role === 'platform_admin') return <PlatformUnavailableShell displayName={displayName} onLogout={onLogout} />
   return <Shell displayName={displayName} role={session.data?.role ?? 'viewer'} permissions={permissions} onLogout={onLogout} unit={session.data?.multi_unit ? session.data.unit : null} /> }
 
 export function AuthRoutes({ configured }: { configured: boolean }) { const location = useLocation(); return <Routes><Route path="/setup" element={<Setup />} /><Route path="/activate" element={<Activate />} /><Route path="/login" element={<Login />} /><Route path="*" element={configured ? <Navigate to="/login" replace state={{ from: { pathname: location.pathname, search: location.search } }} /> : <Navigate to="/setup" replace />} /></Routes> }

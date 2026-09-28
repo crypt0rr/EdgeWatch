@@ -125,25 +125,13 @@ func TestPlatformAdministratorHoldsNoUnitPermission(t *testing.T) {
 	}
 }
 
-// Platform setup is refused while business units are off. With the flag
-// on, the host issues a token, and redeeming it creates the platform
-// administrator; a wrong token costs no password hash and creates nothing.
-func TestPlatformSetupNeedsBusinessUnits(t *testing.T) {
+// The host issues a platform setup token, and redeeming it creates the
+// platform administrator; a wrong token costs no password hash and creates
+// nothing.
+func TestPlatformSetupCreatesThePlatformAdministrator(t *testing.T) {
 	ctx := context.Background()
 	s, _, _ := platformTestStore(t)
 	m := NewManager(s)
-	if _, err := m.IssuePlatformSetupToken(ctx, true); !errors.Is(err, ErrBusinessUnitsDisabled) {
-		t.Fatalf("token with business units off = %v, want ErrBusinessUnitsDisabled", err)
-	}
-	if _, err := m.CompletePlatformSetup(ctx, "token", "root", "platform administrator password"); !errors.Is(err, ErrBusinessUnitsDisabled) {
-		t.Fatalf("setup with business units off = %v, want ErrBusinessUnitsDisabled", err)
-	}
-	var tokens int
-	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM setup_tokens`).Scan(&tokens); err != nil || tokens != 0 {
-		t.Fatalf("setup tokens = %d, %v", tokens, err)
-	}
-
-	m.SetBusinessUnitsEnabled(true)
 	token, err := m.IssuePlatformSetupToken(ctx, false)
 	if err != nil || token == "" {
 		t.Fatalf("platform setup token = %q, %v", token, err)
@@ -177,7 +165,6 @@ func TestPlatformSetupRequestRateLimitsInPlatformScope(t *testing.T) {
 	ctx := context.Background()
 	s, _, _ := platformTestStore(t)
 	m := NewManager(s)
-	m.SetBusinessUnitsEnabled(true)
 	token, err := m.IssuePlatformSetupToken(ctx, false)
 	if err != nil {
 		t.Fatal(err)
@@ -227,7 +214,6 @@ func TestTOTPEnrollmentRequiredOnceUnitsMultiply(t *testing.T) {
 	ctx := context.Background()
 	s, admin, operator := platformTestStore(t)
 	m := NewManager(s)
-	m.SetBusinessUnitsEnabled(true)
 	root := createPlatformAdmin(t, m, "root", "platform administrator password")
 	restricted := []string{PermissionAccountSelf}
 
@@ -301,7 +287,6 @@ func TestPlatformAndUnknownSignInFailuresBelongToThePlatform(t *testing.T) {
 	ctx := context.Background()
 	s, admin, _ := platformTestStore(t)
 	m := NewManager(s)
-	m.SetBusinessUnitsEnabled(true)
 	root := createPlatformAdmin(t, m, "root", "platform administrator password")
 	request := func() *http.Request {
 		r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)

@@ -17,6 +17,7 @@ import {
 } from '../api'
 import type { Job, ScanSummary } from '../types'
 import { JobDetail } from './JobDetail'
+import { defaultUnitScope } from '../test/test-utils'
 
 vi.mock('../api', () => ({
   approveBaseline: vi.fn(),
@@ -106,7 +107,7 @@ describe('job surface overview', () => {
     root = createRoot(container)
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     vi.mocked(getJob).mockResolvedValue(job)
-    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'user-1', username: 'admin', permissions: ['jobs.write', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'user-1', username: 'admin', permissions: ['jobs.write', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(jobBaseline).mockResolvedValue(baselineResponse)
     vi.mocked(latestSuccessfulScan).mockResolvedValue(latestResponse)
     vi.mocked(scanResults).mockResolvedValue(latestResultsResponse)
@@ -146,7 +147,7 @@ describe('job surface overview', () => {
   })
 
   it('limits viewers to expected baseline information', async () => {
-    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'user-2', username: 'viewer', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'user-2', username: 'viewer', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     await renderPage()
     await vi.waitFor(() => expect(container.textContent).toContain('Expected baseline'), { timeout: 1000 })
     expect(container.textContent).toContain('router.example')
@@ -178,7 +179,7 @@ describe('job surface overview', () => {
   })
 
   it('reports several missing destinations without an edit link for viewers', async () => {
-    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'user-2', username: 'viewer', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'user-2', username: 'viewer', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(getJob).mockResolvedValue({ ...job, missing_notification_destinations: ['file:old-uuid', 'deleted-uuid'] })
     await renderPage()
 

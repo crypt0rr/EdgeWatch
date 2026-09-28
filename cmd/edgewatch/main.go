@@ -78,7 +78,7 @@ func run(args []string) error {
 	passwordFile := fs.String("password-file", "", "file containing a new administrator password")
 	username := fs.String("username", "admin", "username for administrator recovery actions")
 	force := fs.Bool("force", false, "confirm replacement of the current setup token")
-	tenantFlag := fs.String("tenant", "", "slug of the business unit a host command acts on (requires experimental.business_units)")
+	tenantFlag := fs.String("tenant", "", "slug of the business unit a host command acts on")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
@@ -105,9 +105,6 @@ func run(args []string) error {
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		return err
-	}
-	if tenantSlug != "" && !cfg.BusinessUnitsEnabled() {
-		return errTenantNeedsBusinessUnits
 	}
 	if cmd == "config" {
 		if action != "validate" {
@@ -210,9 +207,9 @@ func run(args []string) error {
 	}
 	if cmd == "admin" {
 		if action == "platform-setup-token" {
-			return platformSetupToken(context.Background(), s, cfg.BusinessUnitsEnabled(), *force, os.Stdout)
+			return platformSetupToken(context.Background(), s, *force, os.Stdout)
 		}
-		options := adminRecoveryOptions{force: *force, businessUnits: cfg.BusinessUnitsEnabled(), out: os.Stdout}
+		options := adminRecoveryOptions{force: *force, out: os.Stdout}
 		if tenantSlug != "" {
 			unit, _, err := hostUnit(context.Background(), s, tenantSlug)
 			if err != nil {
@@ -320,7 +317,7 @@ func usage() error {
 	fmt.Fprintln(os.Stderr, `Usage: edgewatch <command> [options]
 	Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, backup, restore, verify, notify test, admin setup-token|platform-setup-token|reset-password|disable-totp, health, version
 	Admin recovery actions accept --username (default admin) and require host access.
-	With experimental.business_units on, scan, status, history, baseline, and notify test accept --tenant SLUG to act on that business unit instead of the default one, and admin reset-password and disable-totp accept it to stop unless the account belongs to that unit.`)
+	scan, status, history, baseline, and notify test accept --tenant SLUG to act on that business unit instead of the default one, and admin reset-password and disable-totp accept it to stop unless the account belongs to that unit.`)
 	return errors.New("invalid or missing command")
 }
 
@@ -387,14 +384,11 @@ type accountRecovery interface {
 }
 
 // platformSetupToken prints a one-time token, valid for 15 minutes, that
-// creates a platform administrator. It is refused while
-// experimental.business_units is off, once an enabled platform
-// administrator exists, and before the first administrator setup. An unused
+// creates a platform administrator. It is refused once an enabled platform
+// administrator exists and before the first administrator setup. An unused
 // token that is still valid is replaced only with --force.
-func platformSetupToken(ctx context.Context, s *store.Store, businessUnits, force bool, out io.Writer) error {
-	manager := auth.NewManager(s)
-	manager.SetBusinessUnitsEnabled(businessUnits)
-	token, err := manager.IssuePlatformSetupToken(ctx, force)
+func platformSetupToken(ctx context.Context, s *store.Store, force bool, out io.Writer) error {
+	token, err := auth.NewManager(s).IssuePlatformSetupToken(ctx, force)
 	if errors.Is(err, store.ErrSetupTokenOutstanding) {
 		return fmt.Errorf("%w; a new platform setup token replaces it, pass --force to confirm", err)
 	}
@@ -422,10 +416,9 @@ type adminRecoveryOptions struct {
 	// account must belong to: the command changes nothing for an account of
 	// another unit or of the platform.
 	unit *store.Tenant
-	// businessUnits is experimental.business_units. With it on, the command
-	// prints the account, its unit and its role to out before it acts.
-	businessUnits bool
-	out           io.Writer
+	// out, when set, receives the account, its unit (or the platform) and
+	// its role before the command acts.
+	out io.Writer
 }
 
 // adminRecovery runs a host recovery command on the account with the

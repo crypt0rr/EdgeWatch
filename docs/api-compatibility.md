@@ -15,18 +15,12 @@ that only need scan metadata should use `/summary`, then request paginated
 results or host evidence separately when needed. This avoids loading large
 snapshots just to show scan status and timestamps.
 
-## Business units (experimental)
+## Business units
 
-The routes and response keys below exist only while
-`experimental.business_units` is `true`, except where noted. While it is off,
-the keys are absent, the public slug endpoint answers `404 public_disabled`,
-and a request to any other of these routes is refused like a route that does
-not exist: `401 unauthorized` without a session, which includes
-`POST /api/v1/setup/platform`, and `403 forbidden` with `details.permission`
-set to `route` with one. A single-unit client therefore sees the API as
-before. The route inventory, `apiRoutes` in `internal/web/permissions.go`,
-marks these routes, apart from the public slug endpoint, with
-`BusinessUnits`.
+v0.20.0 adds business units to every installation. The routes and response
+keys below are new or changed in that release; a single-unit installation
+gets them too, with its accounts in the default unit. Every route is in the
+route inventory, `apiRoutes` in `internal/web/permissions.go`.
 
 ### Changed responses
 
@@ -34,9 +28,9 @@ marks these routes, apart from the public slug endpoint, with
 | --- | --- |
 | `GET /api/v1/setup/status` | `platform_setup_available` is true while the token from `edgewatch admin platform-setup-token` is unused and unexpired. Present once the first administrator exists. |
 | `GET /api/v1/auth/session` | `scope` is `platform` for a platform administrator and `unit` otherwise; `unit` is the account's unit as `{id, name, slug}`, or `null` for a platform administrator; `multi_unit` reports whether more than one unit that is not deleted exists. `role` can be `platform_admin`. |
-| `POST /api/v1/auth/login`, `GET /api/v1/auth/session` | `totp_enrollment_required: true` when an administrator or platform administrator without TOTP must enrol first; `permissions` then lists only `account.self`. The key is absent otherwise. It depends on the number of units, not on the flag. |
-| `GET /api/v1/status` | Whatever the flag says: `live_updates` is left out while more than one unit exists or the units cannot be counted; `telemetry` counts the unit's own rows, and only the default unit's status includes `telemetry.database_bytes`; and `max_concurrent_scans`, `max_probe_count`, and `max_naabu_probe_count` are the unit's own limits, which the scheduler enforces: the unit's cap where it has one and it is lower, otherwise the deployment's setting. A unit without caps reports the deployment's settings as before. The three keys are left out when the unit's capacity cannot be read. |
-| `permissions` in the login, session, and status responses | Administrators also hold `audit.read`. A platform administrator holds `units.manage`, `unit_accounts.manage`, `platform_audit.read`, `platform_notifications.manage`, `platform_status.read`, and `account.self`. While the flag is off, a platform administrator can still sign in, and its login and session responses list only `account.self`. |
+| `POST /api/v1/auth/login`, `GET /api/v1/auth/session` | `totp_enrollment_required: true` when an administrator or platform administrator without TOTP must enrol first; `permissions` then lists only `account.self`. The key is absent otherwise. It depends on the number of units. |
+| `GET /api/v1/status` | `live_updates` is left out while more than one unit exists or the units cannot be counted; `telemetry` counts the unit's own rows, and only the default unit's status includes `telemetry.database_bytes`; and `max_concurrent_scans`, `max_probe_count`, and `max_naabu_probe_count` are the unit's own limits, which the scheduler enforces: the unit's cap where it has one and it is lower, otherwise the deployment's setting. A unit without caps reports the deployment's settings as before. The three keys are left out when the unit's capacity cannot be read. |
+| `permissions` in the login, session, and status responses | Administrators also hold `audit.read`. A platform administrator holds `units.manage`, `unit_accounts.manage`, `platform_audit.read`, `platform_notifications.manage`, `platform_status.read`, and `account.self`. |
 
 ### New routes
 
@@ -48,8 +42,8 @@ with `429 rate_limited` and `Retry-After`.
 
 `GET /api/public/v1/dashboard/{slug}` needs no session and returns the same
 projection as `GET /api/public/v1/dashboard`, for the unit with that slug.
-An unknown slug, a page that is not enabled, a unit that is disabled or being
-deleted, and every slug while the flag is off get `404 public_disabled`. Each
+An unknown slug, a page that is not enabled, and a unit that is disabled or
+being deleted get `404 public_disabled`. Each
 slug has its own rate limit and cache.
 
 The audit views are read-only and return `{entries, next_before}`, newest

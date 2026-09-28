@@ -10,6 +10,7 @@ import {
   updateNotificationRouting,
 } from '../api'
 import { Notifications } from './Notifications'
+import { defaultUnitScope } from '../test/test-utils'
 
 vi.mock('../api', () => ({
   APIError: class APIError extends Error {
@@ -57,7 +58,7 @@ describe('notification update-alert routing', () => {
     document.body.appendChild(container)
     root = createRoot(container)
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(listNotificationDestinations).mockResolvedValue(response(false, []))
     vi.mocked(updateNotificationRouting).mockResolvedValue({ configured: true, destinations: [] })
   })
@@ -209,7 +210,7 @@ describe('notification URLs imported from config.yaml', () => {
     document.body.appendChild(container)
     root = createRoot(container)
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
   })
 
   afterEach(() => {

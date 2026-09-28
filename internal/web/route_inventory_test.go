@@ -94,12 +94,6 @@ func TestRouteInventoryEntriesAreWellFormed(t *testing.T) {
 		if route.Mutates != isMutation(route.Method) {
 			t.Errorf("%s Mutates = %t, but isMutation(%s) = %t", name, route.Mutates, route.Method, isMutation(route.Method))
 		}
-		if want := route.Access != routePublic && businessUnitsRoute(route.Template); route.BusinessUnits != want {
-			t.Errorf("%s BusinessUnits = %t, but the business units gate applies %t", name, route.BusinessUnits, want)
-		}
-		if route.BusinessUnits && (route.Access == routePublic || route.NoHandler) {
-			t.Errorf("%s is a business units route, which must be a console route with a handler", name)
-		}
 		if isPlatformPermission(route.Permission) && !strings.HasPrefix(route.Template, "/platform/") {
 			t.Errorf("%s grants platform permission %s outside /platform/", name, route.Permission)
 		}
@@ -264,33 +258,12 @@ func routeMatrixTarget(route apiRoute) string {
 // handler as each role and without a session. Session routes must answer 401
 // without a session, require CSRF for mutations, and admit exactly the roles
 // that auth.HasPermission grants the inventory's capability. Unauthenticated
-// and public routes must be served before, or outside, the session gate.
-// With experimental.business_units off, which is the default, the routes of
-// the business units are refused to every role like an unknown route.
+// and public routes must be served before, or outside, the session gate. The
+// routes of the business units pass the same gate as every other route: the
+// unit audit admits a unit's administrators, and the platform routes admit
+// only platform administrators.
 func TestRouteInventoryGateMatrix(t *testing.T) {
-	runRouteInventoryGateMatrix(t, false)
-}
-
-// With experimental.business_units on, the routes of the business units pass
-// the same gate as every other route: the unit audit admits a unit's
-// administrators, and the platform routes admit only platform
-// administrators.
-func TestRouteInventoryGateMatrixWithBusinessUnits(t *testing.T) {
-	runRouteInventoryGateMatrix(t, true)
-}
-
-// enableBusinessUnits switches experimental.business_units on for a server
-// that a test fixture built with the default configuration.
-func enableBusinessUnits(server *Server) {
-	server.App.Config.Experimental.BusinessUnits = true
-	server.Auth.SetBusinessUnitsEnabled(true)
-}
-
-func runRouteInventoryGateMatrix(t *testing.T, businessUnits bool) {
 	server, accounts := newRouteMatrixSessions(t)
-	if businessUnits {
-		enableBusinessUnits(server)
-	}
 	for _, route := range apiRoutes {
 		t.Run(routeInventoryName(route), func(t *testing.T) {
 			target := routeMatrixTarget(route)
@@ -306,23 +279,6 @@ func runRouteInventoryGateMatrix(t *testing.T, businessUnits bool) {
 				}
 			case routeUnauthenticated:
 				for _, account := range append([]*routeMatrixSession{nil}, sessionPointers(accounts)...) {
-					if route.BusinessUnits && !businessUnits {
-						// The route does not exist: it is not dispatched early,
-						// so with or without a session, a CSRF token, or a
-						// foreign origin it gets exactly the unknown route's
-						// answer.
-						for _, variant := range []struct {
-							csrf   bool
-							origin string
-						}{{false, ""}, {true, ""}, {false, "https://attacker.example"}} {
-							response := serveRouteMatrixRequest(t, server.api, route.Method, target, account, variant.csrf, variant.origin)
-							unknown := serveRouteMatrixRequest(t, server.api, route.Method, consoleAPIBase+"/unknown-route", account, variant.csrf, variant.origin)
-							if response.status != unknown.status || response.body != unknown.body || response.status == http.StatusOK || response.status == http.StatusCreated {
-								t.Errorf("%s as %s (csrf %t, origin %q) = %d %s, want the unknown route's %d %s", target, routeMatrixRole(account), variant.csrf, variant.origin, response.status, response.body, unknown.status, unknown.body)
-							}
-						}
-						continue
-					}
 					if route.Mutates {
 						// No session exists yet to bind a CSRF token to, so the
 						// early dispatch checks the browser origin instead.
@@ -357,14 +313,6 @@ func runRouteInventoryGateMatrix(t *testing.T, businessUnits bool) {
 						}
 					}
 					switch {
-					case route.BusinessUnits && !businessUnits:
-						// The route does not exist: every role, whatever it
-						// holds, gets exactly the unknown route's refusal.
-						response := serveRouteMatrixRequest(t, server.api, route.Method, target, account, true, "")
-						unknown := serveRouteMatrixRequest(t, server.api, route.Method, consoleAPIBase+"/unknown-route", account, true, "")
-						if response.status != http.StatusForbidden || response.code != "forbidden" || response.details["permission"] != "route" || response.body != unknown.body {
-							t.Errorf("%s as %s = %d %s, want the unknown route's 403 %s", target, account.role, response.status, response.body, unknown.body)
-						}
 					case !allowed:
 						response := serveRouteMatrixRequest(t, server.api, route.Method, target, account, true, "")
 						if response.status != http.StatusForbidden || response.code != "forbidden" || response.details["permission"] != route.Permission {

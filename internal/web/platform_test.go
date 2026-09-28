@@ -340,8 +340,7 @@ func TestPlatformUnitCapacity(t *testing.T) {
 // A unit's status reports the scan capacity that the scheduler enforces for
 // the unit: its own caps where it has them, the deployment's settings
 // otherwise. A unit without caps reports exactly the deployment's settings,
-// with one unit or several, and the caps keep applying, and are reported,
-// with business units off. A viewer's status still has no capacity.
+// with one unit or several. A viewer's status still has no capacity.
 func TestUnitStatusReportsTheUnitsCapacity(t *testing.T) {
 	statusCapacity := func(t *testing.T, server *Server, account routeMatrixSession) store.CapacityLimits {
 		t.Helper()
@@ -368,14 +367,11 @@ func TestUnitStatusReportsTheUnitsCapacity(t *testing.T) {
 	}
 	expectResponse(t, f.call(t, actorPlatform, http.MethodPatch, "/platform/units/"+f.unitB+"/capacity", `{"max_concurrent_scans":1,"max_probe_count":1000,"max_naabu_probe_count":3000}`), http.StatusOK, "cap unit B", nil)
 	capped := store.CapacityLimits{MaxConcurrentScans: 1, MaxProbeCount: 1000, MaxNaabuProbeCount: 3000}
-	for _, businessUnits := range []bool{true, false} {
-		f.server.App.Config.Experimental.BusinessUnits = businessUnits
-		if got := statusCapacity(t, f.server, f.sessions[actorAdminB]); got != capped {
-			t.Errorf("capacity of capped unit B with business units on %t = %+v, want %+v", businessUnits, got, capped)
-		}
-		if got := statusCapacity(t, f.server, f.sessions[actorAdminA]); got != deployment {
-			t.Errorf("capacity of unit A beside capped unit B with business units on %t = %+v, want %+v", businessUnits, got, deployment)
-		}
+	if got := statusCapacity(t, f.server, f.sessions[actorAdminB]); got != capped {
+		t.Errorf("capacity of capped unit B = %+v, want %+v", got, capped)
+	}
+	if got := statusCapacity(t, f.server, f.sessions[actorAdminA]); got != deployment {
+		t.Errorf("capacity of unit A beside capped unit B = %+v, want %+v", got, deployment)
 	}
 	if body := f.call(t, actorViewerA, http.MethodGet, "/status", "").Body.String(); strings.Contains(body, "max_concurrent_scans") || strings.Contains(body, "probe_count") {
 		t.Fatalf("viewer status = %s", body)
@@ -893,9 +889,8 @@ func TestPlatformAndUnitAuditViews(t *testing.T) {
 
 // The platform handlers refuse what the store refuses: a reset for a
 // disabled administrator or in a disabled unit, an invitation into a
-// disabled unit, a wrong password, and, when the application refuses a unit
-// change because business units are off, the change itself. A store that
-// cannot be read is an internal error, never a partial answer.
+// disabled unit, and a wrong password. A store that cannot be read is an
+// internal error, never a partial answer.
 func TestPlatformHandlersReportRefusalsAndFailures(t *testing.T) {
 	ctx := context.Background()
 	f := newPlatformFixture(t)
@@ -921,16 +916,6 @@ func TestPlatformHandlersReportRefusalsAndFailures(t *testing.T) {
 		t.Fatalf("accounts of a disabled unit = %+v", accounts.Accounts)
 	}
 
-	// The application refuses a unit change while business units are off,
-	// whichever way a request reached it.
-	f.server.App.Config.Experimental.BusinessUnits = false
-	recorder := httptest.NewRecorder()
-	request := httptest.NewRequest(http.MethodPost, consoleAPIBase+"/platform/units", strings.NewReader(`{"name":"Echo"}`))
-	request.Header.Set("Content-Type", "application/json")
-	f.server.createPlatformUnit(recorder, request, f.sessions[actorPlatform].session)
-	expectError(t, recorder, http.StatusForbidden, "forbidden", "create a unit with business units off")
-	f.server.App.Config.Experimental.BusinessUnits = true
-
 	// With the database closed, every read is an internal error.
 	if err := f.db.Close(); err != nil {
 		t.Fatal(err)
@@ -942,7 +927,7 @@ func TestPlatformHandlersReportRefusalsAndFailures(t *testing.T) {
 			t.Errorf("GET /platform/%s with the database closed = %d %s", rest, recorder.Code, recorder.Body.String())
 		}
 	}
-	recorder = httptest.NewRecorder()
+	recorder := httptest.NewRecorder()
 	f.server.unitAudit(recorder, httptest.NewRequest(http.MethodGet, consoleAPIBase+"/audit", nil), f.b)
 	if recorder.Code != http.StatusInternalServerError {
 		t.Errorf("unit audit with the database closed = %d %s", recorder.Code, recorder.Body.String())

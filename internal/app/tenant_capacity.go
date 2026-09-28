@@ -9,12 +9,6 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
-// ErrCapacityRequiresBusinessUnits is returned when a tenant's capacity is
-// changed while experimental.business_units is off. It wraps
-// ErrBusinessUnitsDisabled, which every business unit operation returns
-// then.
-var ErrCapacityRequiresBusinessUnits = fmt.Errorf("business unit capacity cannot be changed: %w", ErrBusinessUnitsDisabled)
-
 // ErrProbeBudgetUnavailable wraps a failure to read a tenant's probe budget.
 // The run or request stops, because a budget that cannot be read must not
 // fall back to a larger one.
@@ -26,14 +20,7 @@ var ErrProbeBudgetUnavailable = errors.New("the probe budget could not be read")
 // change as a platform action in the tenant's audit. The new slot cap
 // applies to the next grant at once; the budgets apply to the next check,
 // because each check reads them.
-//
-// It is refused with ErrCapacityRequiresBusinessUnits while
-// experimental.business_units is off. Capacity already stored keeps
-// applying when the flag is turned off, so turning it off never lifts a cap.
 func (a *App) SetTenantCapacity(ctx context.Context, tenantID string, capacity store.TenantCapacity, audit store.AuditEntry) error {
-	if a.Config == nil || !a.Config.BusinessUnitsEnabled() {
-		return ErrCapacityRequiresBusinessUnits
-	}
 	if err := a.Store.Platform().SetTenantCapacity(ctx, tenantID, capacity, a.capacityLimits(), audit); err != nil {
 		return err
 	}

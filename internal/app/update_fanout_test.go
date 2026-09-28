@@ -121,7 +121,6 @@ func TestNewBusinessUnitGetsNoUpdateAlertsUntilItSelectsDestinations(t *testing.
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	a := f.app
-	enableBusinessUnits(a)
 	unit, err := a.CreateUnit(ctx, "Charlie", "charlie", store.AuditEntry{ActorKind: store.AuditActorHost})
 	if err != nil {
 		t.Fatal(err)

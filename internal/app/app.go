@@ -391,6 +391,9 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 		}
 		logger.Warn("legacy YAML jobs are inactive; recreate them in the web console", "jobs", legacyNames)
 	}
+	if obsolete := cfg.ObsoleteSettings(); len(obsolete) > 0 {
+		logger.Warn("config.yaml sets obsolete settings that are ignored; business units are always on, so remove the experimental section", "settings", obsolete)
+	}
 	sc := scanner.NewWithNaabu(nmapPath, naabuPath)
 	if err := sc.SetTargetExclusions(cfg.Scanner.TargetExclusions); err != nil {
 		return nil, fmt.Errorf("configure scanner target exclusions: %w", err)

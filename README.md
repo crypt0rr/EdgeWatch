@@ -137,9 +137,9 @@ docker compose exec edgewatch edgewatch admin setup-token \
 
 This recovery action is refused after an administrator has been created.
 
-With the experimental business units on, a platform administrator is created
-the same way once the first administrator exists; see
-[Business units](#business-units-experimental).
+A platform administrator, who manages business units, is created the same
+way once the first administrator exists; see
+[Business units](#business-units).
 
 ### Tailscale Serve and reverse proxies
 
@@ -219,6 +219,14 @@ docker compose pull
 docker compose up -d
 ```
 
+Before upgrading from v0.19.0 to v0.20.0, back up ./data as described in
+[Data, backup, and recovery](#data-backup-and-recovery). The first start of
+v0.20.0 runs the schema 51 to 54 migrations, which move all existing data
+into the default business unit. A v0.19.0 binary cannot open the upgraded
+database, so a rollback means restoring that backup. What a single-unit
+installation notices afterwards is listed under
+[Business units](#business-units).
+
 The image uses a read-only root filesystem, drops all capabilities, and adds
 NET_RAW for the default scanner modes. Host networking is intentional, and the
 administration listener accepts only loopback addresses. Keep the service on
@@ -255,7 +263,6 @@ validated schema.
 | updates.enabled | YAML | Enable or disable the three-hour stable-release check. |
 | notifications.encryption_key_file | YAML/secrets | Optional separate key for the encrypted notification destinations. |
 | notifications.urls, urls_file | YAML/secrets | Deprecated. Imported once as web-managed destinations; see [Notifications](#notifications). |
-| experimental.business_units | YAML | Off by default. Several business units in one deployment; see [Business units](#business-units-experimental). |
 | Jobs, users, profiles, notification destinations | Web console | Runtime administration stored in SQLite. |
 
 The YAML jobs section from older deployments is not imported into the scheduler.
@@ -509,8 +516,8 @@ names, latest successful scan time, positive ports, service names, and cached
 normalized network-registration data. It does not expose raw Nmap evidence,
 product fingerprints, credentials, or an arbitrary RDAP proxy.
 
-With the experimental business units on, each unit publishes its own page;
-see [Business units](#business-units-experimental).
+Each business unit publishes its own page; see
+[Business units](#business-units).
 
 A public-status save applies only to the configuration the editor loaded. If
 another administrator saved in the meantime, EdgeWatch rejects the save with a
@@ -518,7 +525,7 @@ conflict and the editor reloads the current settings, so an outdated editor
 cannot re-publish a withdrawn page. API clients send the `updated_at` value from
 `GET /api/v1/public-dashboard` with each `PUT`.
 
-## Business units (experimental)
+## Business units
 
 Business units let several internal teams share one deployment and its
 database. Each unit has its own accounts, jobs, scans, baselines, incidents,
@@ -526,23 +533,26 @@ notification destinations, custom scanner profiles, and public status page.
 EdgeWatch enforces the separation in the application, not in the host or the
 database; see [Limits](#limits).
 
-The feature is under development and off by default. Turn it on in
-config.yaml, then recreate the container:
+Every installation starts with one unit, the default unit, named `Default`
+with the slug `default`. The upgrade to schema 54 moves everything that
+existed into it, and every account keeps its role there, so existing
+administrators administer the default unit. There is nothing to configure.
+While the default unit is the only one, jobs, schedules, notifications,
+public status, and optional TOTP work as before. After upgrading, an
+administrator notices only this:
 
-```yaml
-experimental:
-  business_units: true
-```
+- administrators get a read-only **Audit** page with the unit's security
+  audit;
+- the public status page is also served at /public/default;
+- host commands accept `--tenant`, and `admin reset-password` and
+  `admin disable-totp` print the account's unit and role before they act
+  (see [Useful commands](#useful-commands));
+- the host can create a platform administrator, who creates further units
+  (see [The platform administrator](#the-platform-administrator)).
 
-No migration is needed: the upgrade to schema 54 already moved everything
-that existed into the default unit, named `Default` with the slug `default`,
-and every account keeps its role there, so existing administrators administer
-the default unit. While it is the only unit, turning the flag on changes
-little. Administrators get a read-only **Audit** page, the host can issue a
-platform setup token, host commands accept `--tenant` (see
-[Useful commands](#useful-commands)), and the default unit's public page is
-also served at /public/default. Jobs, schedules, notifications, public
-status, and optional TOTP work as before.
+A config.yaml written for the preview of business units may still contain
+`experimental.business_units`. EdgeWatch ignores that setting and logs a
+warning at startup; remove the `experimental` section.
 
 ### The platform administrator
 
@@ -569,8 +579,8 @@ docker compose exec edgewatch edgewatch admin platform-setup-token \
 
 The token is valid for 15 minutes. While it is valid, the sign-in page links
 to the setup page, where the token, a username, and a password create the
-account. The command is refused while the flag is off or an enabled platform
-administrator exists, and it replaces an unused token only with `--force`. An
+account. The command is refused once an enabled platform administrator
+exists, and it replaces an unused token only with `--force`. An
 existing platform administrator invites the others from **Platform admins**.
 
 ### Units and their accounts
@@ -621,10 +631,10 @@ account then enrols again.
   profiles belong to the unit that created them.
 - **Public status:** each unit's administrators publish its page at
   /public/<slug>; /public keeps serving the default unit's page. An unknown
-  slug, a page that is not enabled, a unit that is disabled or being deleted,
-  and every slug while the flag is off get the same answer as a page that is
-  not enabled. Each page has its own anonymous rate limit and cache. Changing
-  a unit's slug changes its public address.
+  slug, a page that is not enabled, and a unit that is disabled or being
+  deleted get the same answer as a page that is not enabled. Each page has
+  its own anonymous rate limit and cache. Changing a unit's slug changes its
+  public address.
 - **Capacity:** the `scheduler` settings in config.yaml stay the deployment's
   limits. On a unit's **Capacity** tab, a platform administrator can cap the
   unit's scan slots and its Nmap and Naabu probe budgets below those limits,
@@ -670,15 +680,6 @@ page shows its progress. The records of platform administrators' actions and
 of the deletion stay in the platform audit; the unit's other audit records
 are erased. Afterwards the unit's name and slug can be used again. Backups
 taken before the deletion still contain the unit.
-
-Turning the flag off again removes nothing. The units, their accounts, and
-their jobs keep working, stored capacity caps keep applying, a deletion in
-progress completes, and administrators still need TOTP while more than one
-unit exists. The platform console, the platform setup, the unit audit,
-`--tenant`, and the /public/<slug> pages are unavailable until the flag is
-on again. A platform administrator can still sign in, but its session holds
-only its own account's settings, and the console shows it only a notice that
-business units are turned off, with sign-out.
 
 ### Limits
 
@@ -851,22 +852,21 @@ docker compose exec edgewatch edgewatch history \
 docker compose exec edgewatch edgewatch notify test \
   --config /etc/edgewatch/config.yaml
 
-# With the experimental business units on, act on one unit by its slug
+# Act on one business unit by its slug
 docker compose exec edgewatch edgewatch status \
   --config /etc/edgewatch/config.yaml --tenant UNIT_SLUG --output json
 ```
 
 `scan`, `status`, `history`, `baseline approve|reset|export`, and `notify test`
-act on the default business unit. With `experimental.business_units` on,
-`--tenant UNIT_SLUG` makes them act on that unit's jobs, scans, baselines, and
-destinations instead, and record their audit entries in that unit. A disabled
-unit can still be read with `status`, `history`, and `baseline export`; the
-other commands refuse it until it is enabled, and every command refuses a unit
-that is being deleted. `admin reset-password` and `admin disable-totp` find the
-account by `--username` in any unit; with business units on they print the
-account's unit and role before they act, and `--tenant UNIT_SLUG` makes them
-stop without a change unless the account belongs to that unit. Every other
-command, and every command while business units are off, refuses `--tenant`.
+act on the default business unit. `--tenant UNIT_SLUG` makes them act on that
+unit's jobs, scans, baselines, and destinations instead, and record their
+audit entries in that unit. A disabled unit can still be read with `status`,
+`history`, and `baseline export`; the other commands refuse it until it is
+enabled, and every command refuses a unit that is being deleted.
+`admin reset-password` and `admin disable-totp` find the account by
+`--username` in any unit; they print the account's unit and role before they
+act, and `--tenant UNIT_SLUG` makes them stop without a change unless the
+account belongs to that unit. Every other command refuses `--tenant`.
 
 `health` exits non-zero when migrations or the daemon heartbeat are unhealthy.
 Its `warnings` list actions that do not stop EdgeWatch, such as removing
@@ -928,7 +928,7 @@ More security detail, including the live-update session-revocation and
 isolation bounds, is in [SECURITY.md](SECURITY.md); container capability
 guidance is in [docs/container-hardening.md](docs/container-hardening.md).
 The historical scan API's metadata and full-result endpoints, and the API of
-the experimental business units, are documented in
+the business units, are documented in
 [docs/api-compatibility.md](docs/api-compatibility.md).
 
 ## License

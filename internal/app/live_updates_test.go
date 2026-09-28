@@ -60,7 +60,6 @@ func TestLiveUpdatesNameTheJobsBusinessUnit(t *testing.T) {
 func TestPausingAUnitTellsTheUnitPausedHandler(t *testing.T) {
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
-	enableBusinessUnits(f.app)
 	var mu sync.Mutex
 	var paused []string
 	f.app.SetUnitPausedHandler(func(tenantID string) {

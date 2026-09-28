@@ -235,7 +235,6 @@ func TestLiveUpdatesReachOnlyTheirBusinessUnit(t *testing.T) {
 func TestDisablingABusinessUnitEndsOnlyItsLiveUpdateStreams(t *testing.T) {
 	ctx := context.Background()
 	f := newTenantAccountsFixture(t)
-	f.server.App.Config.Experimental.BusinessUnits = true
 	streamA := f.openLiveStream(t, "own", 0)
 	operatorA := f.openLiveStream(t, "operator", 0)
 	streamsB := []*liveStream{f.openLiveStream(t, "other", 0), f.openLiveStream(t, "other", 0)}

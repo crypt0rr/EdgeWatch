@@ -18,12 +18,11 @@ import (
 
 func ptrTo[T any](value T) *T { return &value }
 
-// newCapacityTenants is newTwoTenants with business units enabled and the
-// given number of deployment scan slots.
+// newCapacityTenants is newTwoTenants with the given number of deployment
+// scan slots.
 func newCapacityTenants(t *testing.T, sc Scanner, slots int) twoTenants {
 	t.Helper()
 	f := newTwoTenants(t, sc, lifecycleJob)
-	f.app.Config.Experimental.BusinessUnits = true
 	f.app.Config.Scheduler.MaxConcurrent = slots
 	f.app.slots.SetCapacity(slots, nil)
 	return f
@@ -221,8 +220,8 @@ func TestTenantSlotCapsKeepRoundRobinGrants(t *testing.T) {
 }
 
 // With every capacity setting inherited, which is how an installation
-// upgrades and all it has while business units are off, the slots and the
-// budgets are the deployment's, and allow_high_cost reaches
+// upgrades and all a unit has until a platform administrator caps it, the
+// slots and the budgets are the deployment's, and allow_high_cost reaches
 // MaxProbeCountLimit as before tenants had capacity.
 func TestInheritedTenantCapacityKeepsTheDeploymentsSlotsAndBudgets(t *testing.T) {
 	ctx := context.Background()
@@ -435,8 +434,8 @@ func TestTighterDeploymentBudgetWinsOverTheTenants(t *testing.T) {
 
 // A tenant's capacity limits are what the scheduler enforces for its runs:
 // the deployment's slots and probe budgets where the tenant has no setting,
-// the tenant's where they are lower, whether business units are on or off,
-// and the deployment's again once config.yaml is tightened below them. A
+// the tenant's where they are lower, and the deployment's again once
+// config.yaml is tightened below them. A
 // tenant whose settings cannot be read gets no limits.
 func TestTenantCapacityLimitsAreWhatTheSchedulerEnforces(t *testing.T) {
 	ctx := context.Background()
@@ -466,8 +465,6 @@ func TestTenantCapacityLimitsAreWhatTheSchedulerEnforces(t *testing.T) {
 		t.Fatalf("tenant B's enforced budget = %+v, %v; the limits report %+v", budget, err, capped)
 	}
 
-	f.app.Config.Experimental.BusinessUnits = false
-	check("tenant B with caps and business units off", b, capped)
 	f.app.Config.Scheduler.MaxConcurrent, f.app.Config.Scheduler.MaxProbeCount, f.app.Config.Scheduler.MaxNaabuProbeCount = 1, 500, 2_000
 	check("tenant B under a tightened deployment", b, store.CapacityLimits{MaxConcurrentScans: 1, MaxProbeCount: 500, MaxNaabuProbeCount: 2_000})
 
@@ -479,35 +476,21 @@ func TestTenantCapacityLimitsAreWhatTheSchedulerEnforces(t *testing.T) {
 	}
 }
 
-// Changing a tenant's capacity is refused while business units are off, and
-// nothing is written. Capacity stored while they were on keeps applying.
-func TestTenantCapacityNeedsTheBusinessUnitsFlag(t *testing.T) {
+// A tenant's capacity change is checked against the deployment's settings,
+// and the stored budget is what the tenant's runs are held to.
+func TestSetTenantCapacityIsCheckedAndApplies(t *testing.T) {
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
 	capacity := store.TenantCapacity{MaxConcurrentScans: ptrTo(1), MaxProbeCount: ptrTo[int64](1)}
-	for _, scope := range []store.TenantScope{f.a, f.b} {
-		if err := f.app.SetTenantCapacity(ctx, scope.ID(), capacity, store.AuditEntry{}); !errors.Is(err, ErrCapacityRequiresBusinessUnits) {
-			t.Fatalf("tenant %s with the flag off: %v", scope.ID(), err)
-		}
-		if got, err := f.db.Tenant(scope).Capacity(ctx); err != nil || !reflect.DeepEqual(got, store.TenantCapacity{}) {
-			t.Fatalf("tenant %s's capacity after a refused change = %+v, %v", scope.ID(), got, err)
-		}
-	}
-	if got := queryStrings(t, f.db, `SELECT id FROM security_audit WHERE action='tenant.capacity_changed'`); len(got) != 0 {
-		t.Fatalf("refused changes were audited: %v", got)
-	}
-	if err := (&App{}).SetTenantCapacity(ctx, secondTenantID, capacity, store.AuditEntry{}); !errors.Is(err, ErrCapacityRequiresBusinessUnits) {
-		t.Fatalf("an application without configuration: %v", err)
-	}
-
-	f.app.Config.Experimental.BusinessUnits = true
 	f.setCapacity(t, f.b, capacity)
 	if err := f.app.SetTenantCapacity(ctx, secondTenantID, store.TenantCapacity{MaxConcurrentScans: ptrTo(2)}, store.AuditEntry{}); !errors.Is(err, store.ErrValidation) {
 		t.Fatalf("a slot cap above the deployment's: %v", err)
 	}
-	f.app.Config.Experimental.BusinessUnits = false
+	if got, err := f.db.Tenant(f.b).Capacity(ctx); err != nil || !reflect.DeepEqual(got, capacity) {
+		t.Fatalf("tenant B's capacity after a refused change = %+v, %v; want %+v", got, err, capacity)
+	}
 	if budget, err := f.app.tenantProbeBudget(ctx, f.db.Tenant(f.b)); err != nil || budget.nmap != 1 {
-		t.Fatalf("tenant B's budget after the flag was turned off = %+v, %v", budget, err)
+		t.Fatalf("tenant B's budget = %+v, %v", budget, err)
 	}
 }
 

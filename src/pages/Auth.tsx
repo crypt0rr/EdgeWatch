@@ -28,10 +28,9 @@ export function Login() {
 }
 
 export function Setup() {
-  // With business units on, an installation that is already set up offers
-  // the platform setup while the token that `edgewatch admin
-  // platform-setup-token` printed on the host is valid. Otherwise this is the
-  // first-run setup, as without business units.
+  // An installation that is already set up offers the platform setup while
+  // the token that `edgewatch admin platform-setup-token` printed on the
+  // host is valid. Otherwise this is the first-run setup.
   const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus, staleTime: 30_000 })
   if (status.data?.platform_setup_available) return <PlatformSetup minimumLength={status.data.password_requirements?.minimum_length ?? 12} />
   return <InitialSetup />

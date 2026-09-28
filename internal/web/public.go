@@ -123,21 +123,14 @@ func publicPageRateLimit(slug string) string {
 	return publicDashboardRateLimit + "/" + slug
 }
 
-// publicSlugPagesEnabled reports whether business units may publish pages
-// under their slugs. While experimental.business_units is off, every slug
-// page answers as a page that is not enabled.
-func (s *Server) publicSlugPagesEnabled() bool {
-	return s.App != nil && s.App.Config != nil && s.App.Config.BusinessUnitsEnabled()
-}
-
 // publicScopeForSlug returns the public scope of the page at
-// /api/public/v1/dashboard/<slug>. It returns the zero scope while business
-// units are off, and for a slug that cannot name a unit, an unknown slug, a
-// unit that is not active, and a page that is not enabled. servePublicPage
-// answers the zero scope exactly as the default tenant's page when that page
-// is not enabled, so the answer never tells whether a unit has the slug.
+// /api/public/v1/dashboard/<slug>. It returns the zero scope for a slug that
+// cannot name a unit, an unknown slug, a unit that is not active, and a page
+// that is not enabled. servePublicPage answers the zero scope exactly as the
+// default tenant's page when that page is not enabled, so the answer never
+// tells whether a unit has the slug.
 func (s *Server) publicScopeForSlug(ctx context.Context, slug string) (store.PublicScope, error) {
-	if !s.publicSlugPagesEnabled() || !publicSlugWellFormed(slug) {
+	if !publicSlugWellFormed(slug) {
 		return store.PublicScope{}, nil
 	}
 	scope, err := s.Store.PublicScopeBySlug(ctx, slug)

@@ -12,7 +12,7 @@ import { TotpEnrollmentShell } from './pages/TotpEnrollment'
 import { Dashboard } from './pages/Dashboard'
 import { JobEditor } from './pages/JobEditor'
 import { JobDetail } from './pages/JobDetail'
-import { Activate, Login, Setup } from './pages/Auth'
+import { Activate, Login, Setup, signInReturnPath } from './pages/Auth'
 import { Security } from './pages/Security'
 import { Notifications } from './pages/Notifications'
 import { BaselineHosts } from './pages/BaselineHosts'
@@ -278,7 +278,7 @@ function IncidentActions({ row, busy, acceptID, suppressID, onAction }: { row: I
   return <div className="incident-actions"><button className="button secondary" type="button" onClick={() => onAction(row, 'accept')} disabled={!key || !!busy}>{busy === acceptID ? 'Accepting…' : 'Accept change'}</button><button className="button ghost" type="button" onClick={() => onAction(row, 'suppress')} disabled={!key || !!busy}>{busy === suppressID ? 'Suppressing…' : 'Suppress 1 scan'}</button></div>
 }
 
-export function ProtectedApp({ onLogout }: { onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate])
+export function ProtectedApp({ onLogout }: { onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); const location = useLocation(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate])
   // A refused request re-reads the session, so the console follows a session
   // that changed on the server: a second business unit restricts an
   // administrator without TOTP to the enrolment below, and a role change
@@ -294,6 +294,13 @@ export function ProtectedApp({ onLogout }: { onLogout: () => Promise<void> }) { 
   // password change, and sign-out. A platform administrator gets the
   // platform console, which never mounts a unit's pages.
   if (mustEnrol || enrolling) return <TotpEnrollmentShell displayName={displayName} onLogout={onLogout} />
+  // Signing in mounts this console while the address is still the sign-in
+  // page, before the sign-in page's own navigation lands, and every shell
+  // sends /login to its home page. Open the page that sent the visitor to
+  // sign in instead. Its permission redirects still apply, and its address
+  // records no return path, so this redirect happens once.
+  const returnPath = location.pathname === '/login' ? signInReturnPath(location.state) : null
+  if (returnPath) return <><Navigate to={returnPath} replace /><Loading /></>
   if (session.data?.scope === 'platform') return <PlatformShell displayName={displayName} permissions={permissions} onLogout={onLogout} />
   return <Shell displayName={displayName} role={session.data?.role ?? 'viewer'} permissions={permissions} onLogout={onLogout} unit={session.data?.multi_unit ? session.data.unit : null} /> }
 

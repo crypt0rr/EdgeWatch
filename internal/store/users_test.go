@@ -11,6 +11,7 @@ func TestUsersValidateAndInviteLifecycle(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Date(2026, 9, 7, 12, 0, 0, 0, time.UTC)
+	seedDefaultAdministrator(t, s)
 	audit := AuditEntry{Action: "user.created", Detail: "created", ActorUserID: LegacyAdminUserID, ActorUsername: "admin"}
 	user, err := defaultTenant(s).CreateUserWithInvite(ctx, User{Username: " operator ", DisplayName: "Network operator", Role: RoleOperator, PasswordHash: "!pending", Enabled: true}, "invite-hash", now, now.Add(30*time.Minute), audit)
 	if err != nil {
@@ -57,7 +58,8 @@ func TestRevokeUserInviteAndDisablePreventActivation(t *testing.T) {
 	if err := defaultTenant(s).CreateUserInvite(ctx, "invite-to-revoke", user.ID, now, now.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	affected, err := defaultTenant(s).RevokeUserInvitesWithAudit(ctx, user.ID, now.Add(time.Minute), AuditEntry{Action: "user.activation_revoked"})
+	seedDefaultAdministrator(t, s)
+	affected, err := defaultTenant(s).RevokeUserInvitesWithAudit(ctx, user.ID, now.Add(time.Minute), defaultAdministratorAudit("user.activation_revoked"))
 	if err != nil || affected != 1 {
 		t.Fatalf("revoked invites = %d, err=%v", affected, err)
 	}
@@ -86,7 +88,8 @@ func TestUpdatePendingUserKeepsActivationInvite(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
-	user, err := defaultTenant(s).CreateUserWithInvite(ctx, User{Username: "pending-edit", DisplayName: "Pending", Role: RoleViewer, PasswordHash: "!pending"}, "pending-edit-invite", now, now.Add(time.Hour), AuditEntry{})
+	seedDefaultAdministrator(t, s)
+	user, err := defaultTenant(s).CreateUserWithInvite(ctx, User{Username: "pending-edit", DisplayName: "Pending", Role: RoleViewer, PasswordHash: "!pending"}, "pending-edit-invite", now, now.Add(time.Hour), defaultAdministratorAudit(""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,7 +136,8 @@ func TestUserInviteAuditFailureRollsBackAndOlderInviteIsInvalidated(t *testing.T
 	if _, err := s.DB.Exec(`CREATE TRIGGER fail_user_invite_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT, 'audit unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if err := defaultTenant(s).CreateUserInviteWithAudit(ctx, "new-hash", user.ID, now.Add(time.Minute), now.Add(2*time.Hour), AuditEntry{Action: "user.activation_issued"}); !errors.Is(err, ErrAuditUnavailable) {
+	seedDefaultAdministrator(t, s)
+	if err := defaultTenant(s).CreateUserInviteWithAudit(ctx, "new-hash", user.ID, now.Add(time.Minute), now.Add(2*time.Hour), defaultAdministratorAudit("user.activation_issued")); !errors.Is(err, ErrAuditUnavailable) {
 		t.Fatalf("expected audit failure, got %v", err)
 	}
 	if _, err := s.ActivateUser(ctx, "old-hash-2", "hash", now.Add(3*time.Minute), AuditEntry{}); err != nil {

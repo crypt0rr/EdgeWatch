@@ -260,6 +260,18 @@ var accountLeakCases = map[string]tenantLeakCase{
 			}
 		}
 	}},
+	"UpdateUserByAdministrator": {writes: true, run: func(t *testing.T, f tenantFixture) {
+		assertTenantWritesOnlyItsAccounts(t, f, func(ts *TenantStore, id string) error {
+			user := fixtureAccount(t, f, id)
+			user.DisplayName, user.Role = "Renamed", RoleViewer
+			return ts.UpdateUserByAdministrator(context.Background(), user, true, accountAudit("user.updated"))
+		}, accountOperatorB, "user.updated")
+		for session, want := range map[string]int{"session-operator-b": 0, "session-operator-a": 1} {
+			if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM sessions WHERE id_hash=?`, session); got != want {
+				t.Errorf("%s: %d rows, want %d", session, got, want)
+			}
+		}
+	}},
 	"SetUserPassword": {writes: true, run: func(t *testing.T, f tenantFixture) {
 		assertTenantWritesOnlyItsAccounts(t, f, func(ts *TenantStore, id string) error {
 			return ts.SetUserPassword(context.Background(), id, "hash-new", true, accountAudit("user.password_reset"))
@@ -286,6 +298,16 @@ var accountLeakCases = map[string]tenantLeakCase{
 		}, accountOperatorB, "user.sessions_revoked")
 		if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM sessions WHERE user_id=?`, accountOperatorB); got != 0 {
 			t.Fatalf("tenant B's operator kept %d sessions", got)
+		}
+	}},
+	"DeleteUserSessionsByAdministrator": {writes: true, run: func(t *testing.T, f tenantFixture) {
+		assertTenantWritesOnlyItsAccounts(t, f, func(ts *TenantStore, id string) error {
+			return ts.DeleteUserSessionsByAdministrator(context.Background(), id, accountAudit("user.sessions_revoked"))
+		}, accountOperatorB, "user.sessions_revoked")
+		for user, want := range map[string]int{accountOperatorB: 0, accountOperatorA: 1} {
+			if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM sessions WHERE user_id=?`, user); got != want {
+				t.Errorf("sessions of %s = %d, want %d", user, got, want)
+			}
 		}
 	}},
 	"CreateUserInvite": {writes: true, run: func(t *testing.T, f tenantFixture) {

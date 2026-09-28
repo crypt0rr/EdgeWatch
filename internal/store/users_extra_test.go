@@ -198,7 +198,8 @@ func TestRevokeUserInvitesIgnoresExpiredLinks(t *testing.T) {
 	if err := defaultTenant(s).CreateUserInvite(ctx, "expired-invite-token", user.ID, now.Add(-2*time.Hour), now.Add(-time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	affected, err := defaultTenant(s).RevokeUserInvitesWithAudit(ctx, user.ID, now, AuditEntry{Action: "user.activation_revoked"})
+	seedDefaultAdministrator(t, s)
+	affected, err := defaultTenant(s).RevokeUserInvitesWithAudit(ctx, user.ID, now, defaultAdministratorAudit("user.activation_revoked"))
 	if err != nil || affected != 0 {
 		t.Fatalf("expired invite revocation = %d, %v", affected, err)
 	}

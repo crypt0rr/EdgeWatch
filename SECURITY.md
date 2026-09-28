@@ -167,27 +167,36 @@ unit's capacity, is recorded in that unit's security audit with the
 `platform` actor kind, so the unit's administrators see it. The unit's
 lifecycle changes, the platform administrator's other actions, sign-in
 attempts on its account, and sign-in attempts with a username that no
-account has are recorded in platform scope, outside every unit's audit. A
-unit's administrators read their unit's audit, which hides the source address
-of a platform administrator's actions; the platform audit shows the records
-in platform scope and every unit's account and platform records, never a
-unit's data records. Both views are read-only.
+account has are recorded in platform scope, outside every unit's audit. The
+record that a sign-in, password confirmation, or TOTP confirmation became
+rate limited follows the same rule: it belongs to the unit of the account it
+names, or to platform scope for a platform administrator or an unknown
+username. A unit's administrators read their unit's audit, which hides the
+source address of a platform administrator's actions; the platform audit
+shows the records in platform scope and every unit's account and platform
+records, never a unit's data records. Both views are read-only.
 
 Disabling a unit ends its sessions and revokes its open invitations in the
 same transaction; from then on its accounts cannot sign in or redeem a link,
-and a sign-in gets the answer of a wrong password. Deleting a unit erases its
-rows in bounded batches with SQLite's `secure_delete` on, then compacts the
-search indexes and truncates the write-ahead log, both of which may still
-hold copies of the erased rows. The unit stays in the deleting state until
-the compaction has finished and a checkpoint has truncated the log: each
-purge pass continues the compaction within a bounded time, and a reader that
-holds an older snapshot of the database, such as a running backup, keeps the
-log from being truncated until it ends, which the daemon logs as a warning.
-Deleting a destination removes its delivery health; the purge also erases
-the delivery health that earlier releases kept for deleted destinations,
-which names no owner and counts in no unit's totals. Backups taken before
-the deletion still hold the unit's data, and the records of platform
-administrators' actions on it stay in the platform audit.
+and a sign-in gets the answer of a wrong password. A unit administrator's
+account changes, including new invitations and password-reset links, check
+again when they are written that the administrator is still an enabled
+administrator of an active unit. A request that is still in progress when
+the administrator is demoted or disabled, or the unit is disabled, is
+refused with `403 forbidden` and writes nothing, so no link outlives the
+change. Deleting a unit erases its rows in bounded batches with SQLite's
+`secure_delete` on, then compacts the search indexes and truncates the
+write-ahead log, both of which may still hold copies of the erased rows. The
+unit stays in the deleting state until the compaction has finished and a
+checkpoint has truncated the log: each purge pass continues the compaction
+within a bounded time, and a reader that holds an older snapshot of the
+database, such as a running backup, keeps the log from being truncated until
+it ends, which the daemon logs as a warning. Deleting a destination removes
+its delivery health; the purge also erases the delivery health that earlier
+releases kept for deleted destinations, which names no owner and counts in
+no unit's totals. Backups taken before the deletion still hold the unit's
+data, and the records of platform administrators' actions on it stay in the
+platform audit.
 
 ### Signals between units
 

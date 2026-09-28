@@ -30,7 +30,8 @@ func TestCheapAuthenticationTokenChecks(t *testing.T) {
 		t.Fatalf("consumed setup token = %v, %v", ok, err)
 	}
 
-	pending, err := defaultTenant(s).CreateUserWithInvite(ctx, User{Username: "token-pending", DisplayName: "Pending", Role: RoleViewer, PasswordHash: "!pending", Enabled: false}, "invite-active", now, now.Add(time.Hour), AuditEntry{})
+	seedDefaultAdministrator(t, s)
+	pending, err := defaultTenant(s).CreateUserWithInvite(ctx, User{Username: "token-pending", DisplayName: "Pending", Role: RoleViewer, PasswordHash: "!pending", Enabled: false}, "invite-active", now, now.Add(time.Hour), defaultAdministratorAudit(""))
 	if err != nil {
 		t.Fatal(err)
 	}

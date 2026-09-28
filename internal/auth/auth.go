@@ -586,7 +586,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	account := "login:" + identity
 	unknownSource := "unknown-login:" + strings.TrimPrefix(source, "source:")
 	if !m.allowScoped(source, account) {
-		m.auditRateLimit(ctx, "login:"+identity, request)
+		m.auditLoginRateLimit(ctx, identity, request)
 		return "", store.User{}, m.rateLimitError(source, account)
 	}
 	defer m.releaseScoped(source, account)
@@ -596,7 +596,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	if err != nil {
 		if !sharedLoopbackLoginSource(source, account) {
 			if !m.allowUnknownSource(unknownSource) {
-				m.auditRateLimit(ctx, "unknown-login:"+identity, request)
+				m.auditRateLimitIn(ctx, "unknown-login:"+identity, request, true)
 				return "", store.User{}, ErrRateLimited
 			}
 			defer m.releaseUnknownSource(unknownSource)
@@ -611,7 +611,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			return nil
 		}); err != nil {
 			if errors.Is(err, ErrRateLimited) {
-				m.auditRateLimit(ctx, "login:"+identity, request)
+				m.auditLoginRateLimit(ctx, identity, request)
 			}
 			return "", store.User{}, err
 		}
@@ -628,7 +628,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			return nil
 		}); err != nil {
 			if errors.Is(err, ErrRateLimited) {
-				m.auditRateLimit(ctx, "login:"+identity, request)
+				m.auditLoginRateLimit(ctx, identity, request)
 			}
 			return "", user, err
 		}
@@ -641,7 +641,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		return nil
 	}); err != nil {
 		if errors.Is(err, ErrRateLimited) {
-			m.auditRateLimit(ctx, "login:"+identity, request)
+			m.auditLoginRateLimit(ctx, identity, request)
 		}
 		return "", user, err
 	}
@@ -693,7 +693,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			}
 			return hashErr
 		}); err != nil && errors.Is(err, ErrRateLimited) {
-			m.auditRateLimit(ctx, "login:"+identity, request)
+			m.auditLoginRateLimit(ctx, identity, request)
 			return "", user, err
 		}
 	}
@@ -748,7 +748,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			return nil
 		})
 		if errors.Is(verifyErr, ErrRateLimited) {
-			m.auditRateLimit(ctx, "login:"+identity, request)
+			m.auditLoginRateLimit(ctx, identity, request)
 			return "", user, verifyErr
 		}
 		if verifyErr != nil || !fallbackValid {
@@ -806,7 +806,7 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 	source := m.sourceScopeFor(request, "confirmation")
 	account := "confirm:" + strings.TrimSpace(userID)
 	if !m.allowScoped(source, account) {
-		m.auditRateLimit(ctx, "password-confirmation", request)
+		m.auditAccountRateLimit(ctx, "password-confirmation", userID, request)
 		return ErrRateLimited
 	}
 	defer m.releaseScoped(source, account)
@@ -818,7 +818,7 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 			return nil
 		}); verifyErr != nil {
 			if errors.Is(verifyErr, ErrRateLimited) {
-				m.auditRateLimit(ctx, "password-confirmation", request)
+				m.auditAccountRateLimit(ctx, "password-confirmation", userID, request)
 				return verifyErr
 			}
 			err = verifyErr
@@ -841,7 +841,7 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 	source := m.sourceScopeFor(request, "totp-confirmation")
 	account := "totp-confirm:" + strings.TrimSpace(userID)
 	if !m.allowScoped(source, account) {
-		m.auditRateLimit(ctx, "totp-confirmation", request)
+		m.auditAccountRateLimit(ctx, "totp-confirmation", userID, request)
 		return ErrRateLimited
 	}
 	defer m.releaseScoped(source, account)
@@ -857,7 +857,7 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 	}
 	if err != nil {
 		if errors.Is(err, ErrRateLimited) {
-			m.auditRateLimit(ctx, "totp-confirmation", request)
+			m.auditAccountRateLimit(ctx, "totp-confirmation", userID, request)
 			return err
 		}
 		valid = false
@@ -929,14 +929,66 @@ func (m *Manager) recordAuthEvent(ctx context.Context, action, subject, tenantID
 // auditRateLimit records only the transition into a rate-limited episode. A
 // blocked client can send an unbounded number of rejected requests; writing an
 // audit row for each one would turn the protection itself into a storage DoS.
+// It is for an operation that names no account, setup and activation, so
+// the record belongs to the default tenant, as auditAuthFailure's does.
+// Sign-in and the confirmations name an account and use
+// auditLoginRateLimit and auditAccountRateLimit.
 func (m *Manager) auditRateLimit(ctx context.Context, subject string, request *http.Request) {
 	m.auditRateLimitIn(ctx, subject, request, false)
 }
 
 // auditRateLimitIn is auditRateLimit that records the transition in
 // platform scope when platform is true, for an operation that belongs to no
-// tenant, such as the platform setup.
+// tenant, such as the platform setup, or a sign-in with a username that no
+// account has.
 func (m *Manager) auditRateLimitIn(ctx context.Context, subject string, request *http.Request, platform bool) {
+	if m.claimRateAudit(subject, request) {
+		m.recordAuthEvent(ctx, "auth.rate_limited", subject, "", platform, request)
+	}
+}
+
+// auditLoginRateLimit is auditRateLimit for a sign-in with the identity.
+// The record belongs where the sign-in's failures do: the tenant of the
+// account with the username, or platform scope for a platform
+// administrator or a username that no account has.
+func (m *Manager) auditLoginRateLimit(ctx context.Context, identity string, request *http.Request) {
+	m.auditAccountRateLimitWith(ctx, "login:"+identity, request, func() (store.User, error) {
+		return m.Store.GetUserByUsername(ctx, identity)
+	})
+}
+
+// auditAccountRateLimit is auditRateLimit for the confirmation of a
+// sensitive operation by the signed-in account with the ID. The record
+// belongs to the account's tenant, or to platform scope for a platform
+// administrator.
+func (m *Manager) auditAccountRateLimit(ctx context.Context, subject, userID string, request *http.Request) {
+	m.auditAccountRateLimitWith(ctx, subject, request, func() (store.User, error) {
+		return m.Store.GetAccount(ctx, userID)
+	})
+}
+
+// auditAccountRateLimitWith records the transition in the tenant of the
+// account that lookup returns. An account without a tenant, a platform
+// administrator's, and an account that lookup cannot find name no tenant,
+// so their record belongs to platform scope and no tenant's audit shows
+// it. The account is looked up only once the transition is to be recorded,
+// so a throttled client costs at most one lookup per window.
+func (m *Manager) auditAccountRateLimitWith(ctx context.Context, subject string, request *http.Request, lookup func() (store.User, error)) {
+	if !m.claimRateAudit(subject, request) {
+		return
+	}
+	account, err := lookup()
+	if err != nil || account.TenantID == "" {
+		m.recordAuthEvent(ctx, "auth.rate_limited", subject, "", true, request)
+		return
+	}
+	m.recordAuthEvent(ctx, "auth.rate_limited", subject, account.TenantID, false, request)
+}
+
+// claimRateAudit reports whether the rate-limit transition of the subject's
+// endpoint from the request's source is to be recorded now, and if so
+// starts its suppression window.
+func (m *Manager) claimRateAudit(subject string, request *http.Request) bool {
 	// A blocked episode belongs to the resolved source and endpoint, not to
 	// attacker-controlled account text. In particular, unknown-login subjects
 	// include the supplied username; using that value here would let a caller
@@ -951,7 +1003,7 @@ func (m *Manager) auditRateLimitIn(ctx context.Context, subject string, request 
 	last, exists := m.rateAudit[key]
 	if exists && now.Sub(last) < authFailureWindow {
 		m.mu.Unlock()
-		return
+		return false
 	}
 	m.rateAudit[key] = now
 	if len(m.rateAudit) > authLimiterMaxEntries {
@@ -962,7 +1014,7 @@ func (m *Manager) auditRateLimitIn(ctx context.Context, subject string, request 
 		}
 	}
 	m.mu.Unlock()
-	m.recordAuthEvent(ctx, "auth.rate_limited", subject, "", platform, request)
+	return true
 }
 
 func rateAuditEndpoint(subject string) string {

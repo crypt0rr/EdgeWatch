@@ -12,7 +12,7 @@ scans, learns what is expected, and notifies you when the observed surface
 changes. It ships as one Docker image with an embedded web console and SQLite
 storage.
 
-![EdgeWatch overview dashboard](EdgeWatch.png)
+https://github.com/user-attachments/assets/ddff32e8-617a-477f-b9b7-8681dbc25b82
 
 > Only scan systems you own or are authorized to assess. Full-range UDP scans
 > can take many hours and generate significant traffic.

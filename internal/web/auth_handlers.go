@@ -125,7 +125,11 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		status["notifications"] = notificationStatus
 	}
 	s.addVersionReleaseURL(status)
-	if user.Role != store.RoleViewer && len(s.App.Config.Jobs) > 0 {
+	// The inactive config.yaml jobs predate business units and belong to the
+	// default unit, as the CLI status reports them, so another unit's status
+	// names none.
+	scope, scopeErr := ts.Scope()
+	if user.Role != store.RoleViewer && len(s.App.Config.Jobs) > 0 && scopeErr == nil && scope == store.DefaultTenantScope() {
 		legacy := make([]string, 0, len(s.App.Config.Jobs))
 		for _, job := range s.App.Config.Jobs {
 			legacy = append(legacy, job.Name)

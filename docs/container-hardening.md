@@ -15,6 +15,9 @@ The image and Compose deployment still apply the following controls:
 - the base deployment adds only `NET_RAW`;
 - `compose.syn.yaml` is an explicit administrator opt-in for `NET_ADMIN`;
 - `no-new-privileges` is enabled;
+- the container is not privileged, sets no `unconfined` seccomp or AppArmor
+  profile, does not join the host PID or IPC namespace, and does not opt out
+  of daemon user-namespace remapping with `userns_mode: host`;
 - the root filesystem is read-only and only `/tmp` is writable through a
   bounded tmpfs;
 - SQLite state is limited to the explicit `./data` bind mount;

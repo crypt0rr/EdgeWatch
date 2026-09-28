@@ -79,9 +79,10 @@ for (const relative of sourceFiles) {
   }
 }
 
-const pageFiles = (await readdir(new URL('../src/pages/', import.meta.url)))
-  .filter((file) => file.endsWith('.tsx') && !file.endsWith('.test.tsx'))
-  .map((file) => `src/pages/${file}`)
+// Every production .tsx module under src/pages is held to the page floor,
+// including the platform console in src/pages/platform and its shared
+// components in common.tsx.
+const pageFiles = sourceFiles.filter((file) => file.startsWith('src/pages/') && file.endsWith('.tsx'))
 
 for (const relative of pageFiles) {
   const limits = { ...pageDefaults, ...critical[relative] }

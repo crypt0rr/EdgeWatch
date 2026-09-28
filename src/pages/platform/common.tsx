@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { AlertTriangle, Check, Copy } from 'lucide-react'
 import { APIError } from '../../api'
 import type { BusinessUnitStatus, UnitRole } from '../../api'
+import { formatDateTime } from '../../format'
 
 const statusPresentation: Record<BusinessUnitStatus, { label: string; tone: string }> = {
   active: { label: 'Active', tone: 'green' },
@@ -42,6 +43,16 @@ export function publicPath(slug: string) {
 
 export function publicURL(slug: string) {
   return `${window.location.origin}${publicPath(slug)}`
+}
+
+/**
+ * The last sign-in of an account row, or nothing for an account that never
+ * signed in. The API leaves last_login_at out for such an account; an older
+ * server sent the zero time, so a time before 1970 is no sign-in either.
+ */
+export function lastSignIn(value?: string) {
+  const time = value ? Date.parse(value) : Number.NaN
+  return time > 0 ? ` · last sign-in ${formatDateTime(time)}` : ''
 }
 
 /** The message of a failed request: the field details when the server names them. */

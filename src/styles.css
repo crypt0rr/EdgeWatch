@@ -1081,6 +1081,7 @@
 .audit-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: -12px 0 18px; color: var(--muted); font-size: 11px; }
 .audit-legend > span { display: flex; align-items: center; gap: 6px; }
 .audit-filters { margin-top: -10px; flex-wrap: wrap; }
+.audit-filter-problem { margin: -6px 0 14px; font-size: 12px; }
 .audit-panel { padding-top: 8px; }
 .audit-list { display: grid; margin: 0; padding: 0; list-style: none; }
 .audit-row { display: grid; grid-template-columns: 170px minmax(0, 1fr) minmax(150px, 220px); gap: 16px; align-items: start; padding: 13px 0; border-top: 1px solid #1c3047; }

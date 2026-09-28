@@ -38,12 +38,13 @@ export function createQueryClient() {
 }
 
 /**
- * A refused request is not retried: a 401 ends the session, and a 403 makes
- * the console re-read its session, which may now be restricted. Other
- * failures keep React Query's default of three retries.
+ * A refused request is not retried: a 400 fails the same way again, a 401
+ * ends the session, and a 403 makes the console re-read its session, which
+ * may now be restricted. Other failures keep React Query's default of three
+ * retries.
  */
 export function retryQuery(failureCount: number, error: Error) {
-  if (error instanceof APIError && (error.status === 401 || error.status === 403)) return false
+  if (error instanceof APIError && (error.status === 400 || error.status === 401 || error.status === 403)) return false
   return failureCount < 3
 }
 const queryClient = createQueryClient()

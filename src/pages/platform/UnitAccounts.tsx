@@ -6,7 +6,7 @@ import type { BusinessUnit, UnitAccount } from '../../api'
 import { ActionDialog } from '../../components/ActionDialog'
 import { formatDateTime } from '../../format'
 import { usernameProblem } from '../Users'
-import { errorMessage, Loading, OneTimeLink, unitRoleLabels } from './common'
+import { errorMessage, lastSignIn, Loading, OneTimeLink, unitRoleLabels } from './common'
 
 type Prompt = { kind: 'sessions' | 'reset'; account: UnitAccount }
 
@@ -108,20 +108,22 @@ export function UnitAccounts({ unit }: { unit: BusinessUnit }) {
         </form>
       </div>
       <div className="panel"><div className="panel-heading"><div><h2>Accounts in {unit.name}</h2><p className="muted">You can reset the password only of an administrator, to recover a unit that is locked out. The unit’s administrators reset operators and viewers.</p></div><ShieldCheck className="muted-icon" size={20} /></div>
-        {accounts.isLoading ? <Loading label="Loading accounts…" /> : !accounts.data ? <div className="error-card" role="alert">Could not load the unit’s accounts.</div> : accounts.data.accounts.length ? <div className="user-list">{accounts.data.accounts.map(account => <AccountRow key={account.id} account={account} onAction={ask} />)}</div> : <div className="inline-empty">No accounts yet. Invite the unit’s first administrator.</div>}
+        {!active && <p className="notice">Enable the unit before resetting passwords or renewing activation links. The accounts of a disabled unit cannot sign in or redeem a link.</p>}
+        {accounts.isLoading ? <Loading label="Loading accounts…" /> : !accounts.data ? <div className="error-card" role="alert">Could not load the unit’s accounts.</div> : accounts.data.accounts.length ? <div className="user-list">{accounts.data.accounts.map(account => <AccountRow key={account.id} account={account} unitActive={active} onAction={ask} />)}</div> : <div className="inline-empty">No accounts yet. Invite the unit’s first administrator.</div>}
       </div>
     </div>
     {prompt && <AccountDialog prompt={prompt} unitName={unit.name} error={promptError} onConfirm={confirm} onCancel={() => { setPrompt(null); setPromptError('') }} />}
   </div>
 }
 
-function AccountRow({ account, onAction }: { account: UnitAccount; onAction: (prompt: Prompt) => void }) {
+function AccountRow({ account, unitActive, onAction }: { account: UnitAccount; unitActive: boolean; onAction: (prompt: Prompt) => void }) {
   const status = account.pending ? ['Pending activation', 'amber'] : account.enabled ? ['Enabled', 'green'] : ['Disabled', 'gray']
   // The server resets an administrator that is enabled or still pending,
-  // which renews its activation link.
-  const resettable = account.role === 'administrator' && (account.enabled || account.pending)
+  // which renews its activation link, and only while the unit is active.
+  // Revoking sessions stays available in a disabled unit.
+  const resettable = unitActive && account.role === 'administrator' && (account.enabled || account.pending)
   return <div className="user-row account-row" data-testid={`account-${account.username}`}>
-    <div><strong>{account.display_name}</strong><span>{account.username} · {unitRoleLabels[account.role] ?? account.role}{account.last_login_at ? ` · last sign-in ${formatDateTime(account.last_login_at)}` : ''}</span></div>
+    <div><strong>{account.display_name}</strong><span>{account.username} · {unitRoleLabels[account.role] ?? account.role}{lastSignIn(account.last_login_at)}</span></div>
     <span className="account-badges"><span className={`pill ${status[1]}`}>{status[0]}</span><span className={account.totp_enabled ? 'pill green' : 'pill amber'}>{account.totp_enabled ? 'TOTP on' : 'No TOTP'}</span></span>
     {(!account.pending || resettable) && <div className="user-row-actions">
       {!account.pending && <button type="button" className="button ghost" onClick={() => onAction({ kind: 'sessions', account })}><LogOut size={14} /> Revoke sessions</button>}

@@ -272,3 +272,46 @@ func TestCanonicalSelectionReportsMissingDestinations(t *testing.T) {
 		t.Fatalf("explicit empty selection = %#v, %#v", canonical, missing)
 	}
 }
+
+// A deployment destination from config.yaml has no stored times, so its view
+// leaves created_at and updated_at out instead of sending the zero time; a
+// managed destination's view carries both.
+func TestDestinationViewsLeaveOutTimesTheyDoNotHave(t *testing.T) {
+	ctx := context.Background()
+	db := storetest.OpenFresh(t)
+	notifier, err := New(db, []string{"generic://localhost/deployment?disabletls=yes&template=json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := defaultNotifier(notifier).createManaged(ctx, "Operations", "generic://localhost/ops?disabletls=yes&template=json", true, nil); err != nil {
+		t.Fatal(err)
+	}
+	views := defaultDestinations(t, notifier)
+	if len(views) != 2 {
+		t.Fatalf("destinations = %#v", views)
+	}
+	for _, view := range views {
+		encoded, err := json.Marshal(view)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(encoded, &fields); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"created_at", "updated_at"} {
+			value, present := fields[key]
+			switch view.Source {
+			case "deployment":
+				if present {
+					t.Errorf("deployment destination %s = %v, want no key: %s", key, value, encoded)
+				}
+			default:
+				text, _ := value.(string)
+				if parsed, err := time.Parse(time.RFC3339Nano, text); err != nil || parsed.IsZero() {
+					t.Errorf("managed destination %s = %v, want an RFC 3339 time: %s", key, value, encoded)
+				}
+			}
+		}
+	}
+}

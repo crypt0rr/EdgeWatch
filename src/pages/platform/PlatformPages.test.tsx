@@ -4,6 +4,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, createPlatformNotification, deletePlatformNotification, getSession, invitePlatformAdmin, listPlatformAdmins, listPlatformNotifications, listUnits, platformAudit, platformStatus, setPlatformAdminEnabled, updatePlatformNotification, updatePlatformNotificationRouting } from '../../api'
 import type { AuditEntry, NotificationDestination, UserSummary } from '../../api'
+import { formatDateTime, setDisplayTimeZone } from '../../format'
 import { businessUnit, deploymentLimits as limits, platformSession } from '../../test/platform-fixtures'
 import { renderWithProviders } from '../../test/test-utils'
 import { PlatformAdmins } from './PlatformAdmins'
@@ -76,6 +77,59 @@ describe('platform administrators', () => {
     fireEvent.click(within(screen.getByTestId('admin-kim')).getByRole('button', { name: 'Enable' }))
     fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('reloads the list when the account changed elsewhere, so confirming again sends the current revision', async () => {
+    let sam = admin({ id: 'acct-sam', username: 'sam', revision: 3 })
+    vi.mocked(listPlatformAdmins).mockImplementation(async () => ({ admins: [admin({ id: 'acct-morgan', username: 'morgan', display_name: 'Morgan Reyes' }), sam] }))
+    renderWithProviders(<PlatformAdmins />)
+    await waitFor(() => expect(within(screen.getByTestId('admin-morgan')).getByText('Morgan Reyes (you)')).toBeInTheDocument())
+    // sam enrols TOTP in the meantime, which moves the account to revision 5.
+    sam = admin({ ...sam, revision: 5 })
+    vi.mocked(setPlatformAdminEnabled).mockRejectedValueOnce(new APIError('the resource was modified; reload and try again', 'conflict'))
+    fireEvent.click(within(screen.getByTestId('admin-sam')).getByRole('button', { name: 'Disable' }))
+    const dialog = await confirmWithPassword()
+    expect(await within(dialog).findByText('sam changed elsewhere. The latest state is loaded; confirm again to disable it.')).toBeInTheDocument()
+    expect(setPlatformAdminEnabled).toHaveBeenLastCalledWith('acct-sam', false, 3, 'my-password')
+    expect(listPlatformAdmins).toHaveBeenCalledTimes(2)
+    await act(async () => {
+      fireEvent.submit(within(dialog).getByLabelText('Your password').closest('form')!)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(setPlatformAdminEnabled).toHaveBeenLastCalledWith('acct-sam', false, 5, 'my-password'))
+    expect(await screen.findByText('sam disabled and signed out.')).toBeInTheDocument()
+  })
+
+  it('closes the dialog after a conflict when the account already has the new state', async () => {
+    let sam = admin({ id: 'acct-sam', username: 'sam', revision: 3 })
+    vi.mocked(listPlatformAdmins).mockImplementation(async () => ({ admins: [admin({ id: 'acct-morgan', username: 'morgan', display_name: 'Morgan Reyes' }), sam] }))
+    renderWithProviders(<PlatformAdmins />)
+    await waitFor(() => expect(within(screen.getByTestId('admin-morgan')).getByText('Morgan Reyes (you)')).toBeInTheDocument())
+    // Another platform administrator disabled sam first.
+    sam = admin({ ...sam, enabled: false, revision: 4 })
+    vi.mocked(setPlatformAdminEnabled).mockRejectedValueOnce(new APIError('the resource was modified; reload and try again', 'conflict'))
+    fireEvent.click(within(screen.getByTestId('admin-sam')).getByRole('button', { name: 'Disable' }))
+    await confirmWithPassword()
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.getByRole('status')).toHaveTextContent('sam changed elsewhere. The latest state is loaded.')
+    expect(within(screen.getByTestId('admin-sam')).getByRole('button', { name: 'Enable' })).toBeInTheDocument()
+    expect(setPlatformAdminEnabled).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows a last sign-in only for an administrator that signed in', async () => {
+    vi.mocked(listPlatformAdmins).mockResolvedValue({ admins: [
+      admin({ id: 'acct-morgan', username: 'morgan', display_name: 'Morgan Reyes', last_login_at: '2026-09-24T08:00:00Z' }),
+      admin({ id: 'acct-sam', username: 'sam' }),
+      // A server before last_login_at was left out sent the zero time.
+      admin({ id: 'acct-lee', username: 'lee', pending: true, enabled: false, last_login_at: '0001-01-01T00:00:00Z' }),
+    ] })
+    renderWithProviders(<PlatformAdmins />)
+    const self = await screen.findByTestId('admin-morgan')
+    await waitFor(() => expect(within(self).getByText('Morgan Reyes (you)')).toBeInTheDocument())
+    expect(within(self).getByText(`morgan · last sign-in ${formatDateTime('2026-09-24T08:00:00Z')}`)).toBeInTheDocument()
+    expect(within(screen.getByTestId('admin-sam')).getByText('sam', { selector: 'span' })).toBeInTheDocument()
+    expect(within(screen.getByTestId('admin-lee')).getByText('lee', { selector: 'span' })).toBeInTheDocument()
+    expect(screen.getAllByText(/last sign-in/)).toHaveLength(1)
   })
 
   it('invites another platform administrator with a one-time link', async () => {
@@ -185,11 +239,86 @@ describe('platform audit', () => {
     await waitFor(() => expect(platformAudit).toHaveBeenLastCalledWith({ before: null, unit: undefined, action: undefined, since: undefined, until: undefined }))
   })
 
-  it('turns a day into a local-midnight RFC 3339 bound', () => {
+  it('filters days in the deployment timezone, where the entries are shown', async () => {
+    // A zone at +05:45 differs from the browser's wherever the test runs.
+    setDisplayTimeZone('Asia/Kathmandu')
+    try {
+      renderWithProviders(<PlatformAudit />)
+      await screen.findByRole('list', { name: 'Audit entries' })
+      fireEvent.change(screen.getByLabelText('On or after'), { target: { value: '2026-09-24' } })
+      fireEvent.change(screen.getByLabelText('On or before'), { target: { value: '2026-09-24' } })
+      await waitFor(() => expect(platformAudit).toHaveBeenLastCalledWith(expect.objectContaining({ since: '2026-09-23T18:15:00Z', until: '2026-09-24T18:15:00Z' })))
+    } finally {
+      setDisplayTimeZone(undefined)
+    }
+  })
+
+  it('turns a day into the RFC 3339 start of that day in the console’s timezone', () => {
     expect(dayBound('')).toBeUndefined()
     expect(dayBound('not a day')).toBeUndefined()
+    // Without a deployment timezone, the day is the browser's.
     expect(dayBound('2026-09-01')).toBe(new Date(2026, 8, 1).toISOString().replace(/\.\d{3}Z$/, 'Z'))
     expect(dayBound('2026-09-30', 1)).toBe(new Date(2026, 9, 1).toISOString().replace(/\.\d{3}Z$/, 'Z'))
+    try {
+      setDisplayTimeZone('Europe/Amsterdam')
+      expect(dayBound('2026-09-24')).toBe('2026-09-23T22:00:00Z')
+      expect(dayBound('2026-09-24', 1)).toBe('2026-09-24T22:00:00Z')
+      // Summer time ends on 2026-10-25 and starts on 2026-03-29.
+      expect(dayBound('2026-10-25')).toBe('2026-10-24T22:00:00Z')
+      expect(dayBound('2026-10-25', 1)).toBe('2026-10-25T23:00:00Z')
+      expect(dayBound('2026-03-29')).toBe('2026-03-28T23:00:00Z')
+      expect(dayBound('2026-03-29', 1)).toBe('2026-03-29T22:00:00Z')
+      // The clock changes between the zone's midnight and midnight UTC.
+      setDisplayTimeZone('Australia/Sydney')
+      expect(dayBound('2026-04-05')).toBe('2026-04-04T13:00:00Z')
+      expect(dayBound('2026-10-04')).toBe('2026-10-03T14:00:00Z')
+      // The clock skips midnight, so the day starts at 01:00.
+      setDisplayTimeZone('Asia/Beirut')
+      expect(dayBound('2026-03-29')).toBe('2026-03-28T22:00:00Z')
+      // The clock repeats midnight, so the day starts at the first one.
+      setDisplayTimeZone('America/Havana')
+      expect(dayBound('2026-11-01')).toBe('2026-11-01T04:00:00Z')
+    } finally {
+      setDisplayTimeZone(undefined)
+    }
+  })
+
+  it('sends an action prefix in lower case, and explains one the server refuses instead of sending it', async () => {
+    renderWithProviders(<PlatformAudit />)
+    await screen.findByRole('list', { name: 'Audit entries' })
+    fireEvent.change(screen.getByLabelText('Action starts with'), { target: { value: 'Tenant' } })
+    await waitFor(() => expect(platformAudit).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'tenant' })))
+    expect(screen.getByLabelText('Action starts with')).toHaveAttribute('aria-invalid', 'false')
+    const sent = vi.mocked(platformAudit).mock.calls.length
+    const problem = 'Actions use only a-z, 0-9, “.”, “_”, and “-”, at most 64 characters.'
+    fireEvent.change(screen.getByLabelText('Action starts with'), { target: { value: 'user created' } })
+    expect(screen.getByRole('alert')).toHaveTextContent(problem)
+    expect(screen.getByLabelText('Action starts with')).toHaveAccessibleDescription(problem)
+    expect(await screen.findByText('Correct the action filter to list audit entries.')).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Action starts with'), { target: { value: 'x'.repeat(65) } })
+    expect(screen.getByRole('alert')).toHaveTextContent(problem)
+    expect(platformAudit).toHaveBeenCalledTimes(sent)
+    fireEvent.change(screen.getByLabelText('Action starts with'), { target: { value: 'User.' } })
+    await waitFor(() => expect(platformAudit).toHaveBeenLastCalledWith(expect.objectContaining({ action: 'user.' })))
+    expect(await screen.findByRole('list', { name: 'Audit entries' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows the server’s reason for a refused filter, which a retry cannot fix, and offers a retry for other failures', async () => {
+    const reason = "action prefix must be at most 64 characters of a-z, 0-9, '.', '_' and '-'"
+    vi.mocked(platformAudit).mockRejectedValue(new APIError(reason, 'validation_failed', { action: reason }, 400))
+    const view = renderWithProviders(<PlatformAudit />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(`The audit log could not be filtered: ${reason}`)
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    view.unmount()
+    vi.mocked(platformAudit).mockRejectedValue(new APIError('invalid filter', 'validation_failed', undefined, 400))
+    const bare = renderWithProviders(<PlatformAudit />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('The audit log could not be filtered: invalid filter')
+    bare.unmount()
+    vi.mocked(platformAudit).mockRejectedValue(new APIError('the store is unavailable', 'store', undefined, 500))
+    renderWithProviders(<PlatformAudit />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load the audit log.')
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument()
   })
 })
 

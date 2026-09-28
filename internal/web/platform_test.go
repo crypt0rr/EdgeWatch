@@ -463,6 +463,69 @@ func TestPlatformAdmins(t *testing.T) {
 	}
 }
 
+// An account that never signed in has no last sign-in: the platform's
+// account lists, an invitation, and a unit's own user list leave
+// last_login_at out instead of sending the zero time, and an account that
+// signed in carries the time of its sign-in.
+func TestAccountSummariesLeaveOutAMissingSignIn(t *testing.T) {
+	f := newPlatformFixture(t)
+	ctx := context.Background()
+	signedIn := time.Date(2026, 9, 24, 8, 0, 0, 0, time.UTC)
+	for _, actor := range []string{actorPlatform, actorAdminB} {
+		if err := f.db.SetUserLastLogin(ctx, f.users[actor].ID, signedIn); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var invitation struct {
+		User map[string]json.RawMessage `json:"user"`
+	}
+	expectResponse(t, f.call(t, actorPlatform, http.MethodPost, "/platform/admins", confirmBody(`"username":"platform-pending"`)), http.StatusCreated, "invite", &invitation)
+	if value, present := invitation.User["last_login_at"]; present {
+		t.Errorf("invited platform administrator last_login_at = %s, want no key", value)
+	}
+
+	for _, view := range []struct {
+		step, actor, path, list string
+		want                    map[string]bool
+	}{
+		{"platform admins", actorPlatform, "/platform/admins", "admins", map[string]bool{"platform-root": true, "platform-second": false, "platform-pending": false}},
+		{"unit B accounts", actorPlatform, "/platform/units/" + f.unitB + "/accounts", "accounts", map[string]bool{"bravo-admin": true, "bravo-viewer": false}},
+		{"unit B users", actorAdminB, "/users", "users", map[string]bool{"bravo-admin": true, "bravo-viewer": false}},
+	} {
+		var body map[string][]map[string]json.RawMessage
+		expectResponse(t, f.call(t, view.actor, http.MethodGet, view.path, ""), http.StatusOK, view.step, &body)
+		seen := 0
+		for _, account := range body[view.list] {
+			var username string
+			if err := json.Unmarshal(account["username"], &username); err != nil {
+				t.Fatalf("%s: username %s: %v", view.step, account["username"], err)
+			}
+			signed, listed := view.want[username]
+			if !listed {
+				continue
+			}
+			seen++
+			raw, present := account["last_login_at"]
+			if !signed {
+				if present {
+					t.Errorf("%s: %s never signed in, last_login_at = %s, want no key", view.step, username, raw)
+				}
+				continue
+			}
+			var text string
+			if err := json.Unmarshal(raw, &text); err != nil {
+				t.Fatalf("%s: %s last_login_at %s: %v", view.step, username, raw, err)
+			}
+			if parsed, err := time.Parse(time.RFC3339, text); err != nil || !parsed.Equal(signedIn) {
+				t.Errorf("%s: %s last_login_at = %q, want %s", view.step, username, text, signedIn.Format(time.RFC3339))
+			}
+		}
+		if seen != len(view.want) {
+			t.Errorf("%s listed %d of the accounts %v", view.step, seen, view.want)
+		}
+	}
+}
+
 type destinationsPayload struct {
 	Destinations []struct {
 		ID       string `json:"id"`

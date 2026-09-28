@@ -1,6 +1,17 @@
 import { useInfiniteQuery } from '@tanstack/react-query'
+import { APIError } from '../api'
 import type { AuditEntry, AuditPage } from '../api'
 import { formatDateTime } from '../format'
+
+/**
+ * The server's explanation of a filter it refused, such as an action prefix
+ * with characters that no action has, or nothing for another failure.
+ */
+function refusedFilter(error: unknown) {
+  if (!(error instanceof APIError) || error.code !== 'validation_failed') return ''
+  const details = Object.values(error.details ?? {}).filter((value): value is string => typeof value === 'string' && value !== '')
+  return details.length ? details.join(' ') : error.message
+}
 
 const actorScopes: Record<string, { label: string; tone: string }> = {
   unit: { label: 'Unit', tone: 'blue' },
@@ -22,7 +33,13 @@ export function AuditLog({ queryKey, load, showUnit = false, emptyMessage = 'No 
     getNextPageParam: last => last.next_before ?? undefined,
   })
   if (audit.isLoading) return <div className="loading"><span className="spinner" />Loading the audit log…</div>
-  if (!audit.data) return <div className="error-card" role="alert">Could not load the audit log. <button type="button" className="button ghost" onClick={() => void audit.refetch()}>Retry</button></div>
+  if (!audit.data) {
+    // A refused filter fails the same way again, so it is explained instead
+    // of offered for a retry.
+    const refused = refusedFilter(audit.error)
+    if (refused) return <div className="error-card" role="alert">The audit log could not be filtered: {refused}</div>
+    return <div className="error-card" role="alert">Could not load the audit log. <button type="button" className="button ghost" onClick={() => void audit.refetch()}>Retry</button></div>
+  }
   const entries = audit.data.pages.flatMap(page => page.entries)
   return <div className="panel audit-panel">
     {entries.length ? <ol className="audit-list" aria-label="Audit entries">{entries.map(entry => <AuditRow key={entry.id} entry={entry} showUnit={showUnit} />)}</ol> : <div className="inline-empty">{emptyMessage}</div>}

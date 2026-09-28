@@ -604,7 +604,9 @@ hyphens and cannot be a reserved word such as `api`, `platform`, or `public`.
 Then invite the unit's first administrator from the unit's **Accounts** tab.
 
 The platform administrator invites and resets only unit administrators, and
-receives each one-time link to pass on. The unit's administrators invite and
+receives each one-time link to pass on. It does both only while the unit is
+active: the **Accounts** tab of a disabled unit offers only to sign an
+account out. The unit's administrators invite and
 manage every account of their unit on **Users**, including further
 administrators, operators, and viewers, and cannot reach another unit's
 accounts or a platform administrator. Each unit keeps at least one enabled
@@ -666,7 +668,11 @@ account then enrols again.
   capacity, without the platform administrator's source address. The platform
   audit shows the records that belong to no unit, such as each unit's
   creation, rename, disabling, enabling, and deletion, and every unit's
-  account records, never its data records. Both views are read-only.
+  account records, never its data records. Both views are read-only. The
+  platform audit filters by unit, by the start of the action, which is
+  lower-case, and by day; a day is a calendar day in the configured
+  `timezone`, in which the entries are shown, or in the browser's timezone
+  when it is omitted.
 
 ### Disabling and deleting a unit
 

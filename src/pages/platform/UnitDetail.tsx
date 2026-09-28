@@ -166,7 +166,9 @@ function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: Un
       const saved = await updateUnitCapacity(unit.id, value)
       client.setQueryData(['platform-unit-capacity', unit.id], saved)
       setDraft(capacityDraft(saved.capacity))
-      await client.invalidateQueries({ queryKey: ['platform-units'] })
+      // Saving the capacity moves the unit to a new revision, so the page
+      // reloads the unit before its next rename, disable, or enable.
+      await refreshUnit(client, unit.id)
       setMessage('Capacity saved. It applies to the next scan this unit queues.')
     } catch (err) {
       setError(errorMessage(err, 'The capacity could not be saved.'))

@@ -4,6 +4,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, deleteUnit, disableUnit, enableUnit, getUnit, getUnitCapacity, inviteUnitAdmin, listUnitAccounts, renameUnit, resetUnitAdminPassword, revokeUnitAccountSessions, updateUnitCapacity } from '../../api'
+import { formatDateTime } from '../../format'
 import { businessUnit, platformPermissions, unitAccount, unitCapacity } from '../../test/platform-fixtures'
 import { renderWithProviders } from '../../test/test-utils'
 import { IMPERSONATION_WARNING } from './UnitAccounts'
@@ -111,6 +112,34 @@ describe('business unit detail', () => {
       expect(within(row('sam')).getByText('Pending activation')).toBeInTheDocument()
       expect(within(row('riley')).getByText('No TOTP')).toBeInTheDocument()
       expect(within(row('jordan')).getByText('TOTP on')).toBeInTheDocument()
+      expect(screen.queryByText(/Enable the unit before resetting passwords/)).not.toBeInTheDocument()
+    })
+
+    it('offers no password reset or activation link while the unit is disabled, and says why', async () => {
+      vi.mocked(getUnit).mockResolvedValue(businessUnit({ status: 'disabled' }))
+      renderUnit('accounts')
+      await screen.findByText('Riley Novak')
+      expect(screen.getByText(/^Enable the unit before resetting passwords or renewing activation links\./)).toBeInTheDocument()
+      for (const username of ['riley', 'jordan', 'sam', 'dana', 'casey', 'taylor']) {
+        expect(within(row(username)).queryByRole('button', { name: /Reset password|New activation link/ })).not.toBeInTheDocument()
+      }
+      // The server still revokes the sessions of a disabled unit's accounts.
+      for (const username of ['riley', 'jordan', 'dana', 'casey', 'taylor']) expect(within(row(username)).getByRole('button', { name: /Revoke sessions/ })).toBeInTheDocument()
+      expect(within(row('sam')).queryByRole('button')).not.toBeInTheDocument()
+    })
+
+    it('shows a last sign-in only for an account that signed in', async () => {
+      vi.mocked(listUnitAccounts).mockResolvedValue({ accounts: [
+        accounts[0],
+        unitAccount({ id: 'a-jordan', username: 'jordan', role: 'administrator' }),
+        // A server before last_login_at was left out sent the zero time.
+        unitAccount({ id: 'a-sam', username: 'sam', role: 'administrator', pending: true, enabled: false, last_login_at: '0001-01-01T00:00:00Z' }),
+      ] })
+      renderUnit('accounts')
+      await screen.findByText('Riley Novak')
+      expect(within(row('riley')).getByText(`riley · Administrator · last sign-in ${formatDateTime('2026-09-24T08:00:00Z')}`)).toBeInTheDocument()
+      expect(within(row('jordan')).getByText('jordan · Administrator')).toBeInTheDocument()
+      expect(within(row('sam')).getByText('sam · Administrator')).toBeInTheDocument()
     })
 
     it('warns that a reset link for an administrator without TOTP signs in as them, and shows the link once', async () => {
@@ -262,6 +291,58 @@ describe('business unit detail', () => {
       fireEvent.submit(slots.closest('form')!)
       await waitFor(() => expect(updateUnitCapacity).toHaveBeenCalledWith('unit-retail', { max_concurrent_scans: 3, max_probe_count: 2_000_000, max_naabu_probe_count: 1_000_000, high_cost_ceiling: null }))
       expect(await screen.findByText('Capacity saved. It applies to the next scan this unit queues.')).toBeInTheDocument()
+    })
+
+    it('reloads the unit after a capacity change, so a rename or a disable that follows it sends the new revision', async () => {
+      // A fake server: a capacity change, like any change, moves the unit
+      // to its next revision, and a stale revision is a conflict.
+      let current = businessUnit()
+      vi.mocked(getUnit).mockImplementation(async () => current)
+      vi.mocked(updateUnitCapacity).mockImplementation(async (_id, value) => {
+        current = businessUnit({ ...current, revision: current.revision + 1 })
+        return unitCapacity({ capacity: { ...unitCapacity().capacity, ...value } })
+      })
+      vi.mocked(renameUnit).mockImplementation(async (_id, value) => {
+        if (value.revision !== current.revision) throw new APIError('the business unit was modified; reload and try again', 'conflict', { current })
+        current = businessUnit({ ...current, name: value.name, revision: current.revision + 1 })
+        return current
+      })
+      vi.mocked(disableUnit).mockImplementation(async (_id, revision) => {
+        if (revision !== current.revision) throw new APIError('the resource was modified; reload and try again', 'conflict')
+        current = businessUnit({ ...current, status: 'disabled', revision: current.revision + 1 })
+        return current
+      })
+      async function saveCapacity() {
+        const slots = await screen.findByLabelText('Scan slot cap', { selector: 'input[type="number"]' })
+        fireEvent.change(slots, { target: { value: '3' } })
+        await act(async () => {
+          fireEvent.submit(slots.closest('form')!)
+          await Promise.resolve()
+        })
+        expect(await screen.findByText('Capacity saved. It applies to the next scan this unit queues.')).toBeInTheDocument()
+      }
+      renderUnit('capacity')
+      await saveCapacity()
+      fireEvent.click(screen.getByRole('link', { name: 'Overview' }))
+      const name = await screen.findByLabelText('Unit name')
+      fireEvent.change(name, { target: { value: 'Stores' } })
+      await act(async () => {
+        fireEvent.submit(name.closest('form')!)
+        await Promise.resolve()
+      })
+      expect(await screen.findByText('Saved.')).toBeInTheDocument()
+      expect(renameUnit).toHaveBeenCalledWith('unit-retail', { revision: 4, name: 'Stores' })
+      expect(screen.queryByText(/Another platform administrator changed this unit/)).not.toBeInTheDocument()
+
+      fireEvent.click(screen.getByRole('link', { name: 'Capacity' }))
+      await saveCapacity()
+      fireEvent.click(screen.getByRole('link', { name: 'Danger zone' }))
+      fireEvent.click(await screen.findByRole('button', { name: 'Disable unit' }))
+      await confirmWithPassword()
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(disableUnit).toHaveBeenCalledTimes(1)
+      expect(disableUnit).toHaveBeenCalledWith('unit-retail', 6, 'my-password')
+      expect(await screen.findByRole('button', { name: 'Enable unit' })).toBeInTheDocument()
     })
 
     it('reports a refused change and a capacity that cannot be loaded', async () => {

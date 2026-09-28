@@ -46,7 +46,9 @@ if (!base) {
   process.exit(0)
 }
 
-const diff = execFileSync('git', ['diff', '--unified=0', '--no-color', `${base}...HEAD`, '--'], { encoding: 'utf8' })
+// A release compares against the previous release, so the diff can span many
+// megabytes; Node's default 1 MiB buffer would fail the gate with ENOBUFS.
+const diff = execFileSync('git', ['diff', '--unified=0', '--no-color', `${base}...HEAD`, '--'], { encoding: 'utf8', maxBuffer: 1024 * 1024 * 1024 })
 const changed = new Map()
 let currentFile = ''
 let nextLine = 0

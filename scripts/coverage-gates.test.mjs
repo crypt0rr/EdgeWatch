@@ -242,6 +242,26 @@ test('diff coverage rejects partially covered changed lines with multiple execut
   })
 })
 
+test('diff coverage reads a diff larger than the default child-process buffer', async () => {
+  await withTempDirectory(async (directory) => {
+    await createDiffFixture(directory)
+    // A release compares against the previous release, so its diff can span
+    // many megabytes; Node's default 1 MiB buffer failed with ENOBUFS.
+    const lines = Array.from({ length: 60000 }, (_, index) => `line ${index} ${'x'.repeat(40)}`).join('\n')
+    await writeFile(join(directory, 'large.txt'), `${lines}\n`)
+    execFileSync('git', ['add', '.'], { cwd: directory })
+    execFileSync('git', ['-c', 'commit.gpgsign=false', 'commit', '-q', '--amend', '--no-edit'], { cwd: directory })
+    const frontendPath = join(directory, 'frontend.json')
+    const goPath = join(directory, 'go.out')
+    await writeFile(frontendPath, JSON.stringify({ 'src/example.ts': { statementMap: { 0: { start: { line: 1 }, end: { line: 1 } } }, s: { 0: 1 } } }))
+    await writeFile(goPath, 'mode: atomic\ninternal/example.go:3.1,3.15 1 1\n')
+    const frontend = runScript('check-diff-coverage.mjs', ['--language', 'frontend', '--coverage', frontendPath, '--base', 'HEAD^', '--require-base'], directory)
+    assert.equal(frontend.status, 0, frontend.stderr)
+    const go = runScript('check-diff-coverage.mjs', ['--language', 'go', '--coverage', goPath, '--base', 'HEAD^', '--require-base'], directory)
+    assert.equal(go.status, 0, go.stderr)
+  })
+})
+
 test('required diff coverage bases reject empty and unresolvable refs', async () => {
   await withTempDirectory(async (directory) => {
     await createDiffFixture(directory)

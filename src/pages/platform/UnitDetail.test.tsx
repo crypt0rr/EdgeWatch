@@ -431,6 +431,18 @@ describe('business unit detail', () => {
     const waiting = renderUnit()
     expect(await screen.findByText('Waiting to start · 0 rows erased so far.')).toBeInTheDocument()
     waiting.unmount()
+    // The phases after the last table name what the deletion does instead.
+    for (const [phase, activity] of [
+      ['verify', 'Checking that nothing is left'],
+      ['compact:baseline_host_search', 'Compacting the search indexes'],
+      ['checkpoint', 'Truncating the database log'],
+    ]) {
+      vi.mocked(getUnit).mockResolvedValue(businessUnit({ status: 'deleting', purge: { phase, rows: 1500 } }))
+      const maintenance = renderUnit()
+      expect(await screen.findByText(`${activity} · 1,500 rows erased so far.`)).toBeInTheDocument()
+      expect(screen.getByText(/a running backup can delay/)).toBeInTheDocument()
+      maintenance.unmount()
+    }
     vi.mocked(getUnit).mockResolvedValue(businessUnit({ status: 'deleted' }))
     renderUnit()
     expect(await screen.findByRole('heading', { name: 'Retail was deleted' })).toBeInTheDocument()

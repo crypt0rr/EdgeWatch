@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"reflect"
@@ -337,6 +338,51 @@ func TestPurgeDeletedUnitsLogsEachPass(t *testing.T) {
 	(&App{Store: closed}).purgeDeletedUnits(ctx)
 	if !strings.Contains(logs.String(), "business unit purge stopped") {
 		t.Fatalf("a failed pass logged %q", logs.String())
+	}
+}
+
+// While a reader of the database, such as a running backup, keeps the purge
+// from truncating the write-ahead log, a pass logs the unit's maintenance as
+// pending and warns about the reader, and the unit stays deleting. The next
+// pass without the reader finishes the purge.
+func TestPurgeDeletedUnitsWarnsWhileAReaderKeepsTheLog(t *testing.T) {
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	var logs bytes.Buffer
+	f.app.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	disabled, err := f.app.DisableUnit(ctx, secondTenantID, tenantRecord(t, f.db, secondTenantID).Revision, store.AuditEntry{ActorKind: store.AuditActorHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.app.RequestUnitDeletion(ctx, secondTenantID, disabled.Name, store.AuditEntry{ActorKind: store.AuditActorHost}); err != nil {
+		t.Fatal(err)
+	}
+	// The checkpoint waits for the busy timeout of the one writer
+	// connection before it gives up.
+	if _, err := f.db.DB.ExecContext(ctx, `PRAGMA busy_timeout=200`); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := f.db.ReadDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = reader.Rollback() }()
+	var units int
+	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants`).Scan(&units); err != nil {
+		t.Fatal(err)
+	}
+
+	f.app.purgeDeletedUnits(ctx)
+	if !strings.Contains(logs.String(), "maintenance_pending=true") || !strings.Contains(logs.String(), "kept the business unit purge from truncating the write-ahead log") || tenantRecord(t, f.db, secondTenantID).State != store.TenantStateDeleting {
+		t.Fatalf("a pass whose checkpoint a reader kept busy logged %q", logs.String())
+	}
+	if err := reader.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	logs.Reset()
+	f.app.purgeDeletedUnits(ctx)
+	if !strings.Contains(logs.String(), "complete=true") || !strings.Contains(logs.String(), "maintenance_pending=false") || strings.Contains(logs.String(), "write-ahead log") || tenantRecord(t, f.db, secondTenantID).State != store.TenantStateDeleted {
+		t.Fatalf("the next pass logged %q", logs.String())
 	}
 }
 

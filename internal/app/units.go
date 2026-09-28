@@ -211,10 +211,13 @@ func (a *App) purgeDeletedUnits(ctx context.Context) {
 		logger = slog.Default()
 	}
 	for _, result := range results {
-		// A deferred pass waits for a running scan to release its lease.
-		logger.Info("business unit purge pass", "tenant_id", result.TenantID, "phase", result.Phase, "rows", result.TotalRows, "complete", result.Complete, "deferred", result.Deferred)
-		if result.MaintenanceErr != nil {
-			logger.Warn("index maintenance after a business unit purge failed; later maintenance continues it", "tenant_id", result.TenantID, "error", result.MaintenanceErr)
+		// A deferred pass waits for a running scan to release its lease. A
+		// pass with maintenance pending has erased the unit's rows, but has
+		// not finished compacting the search indexes or truncating the
+		// write-ahead log; the unit stays deleting until a later pass has.
+		logger.Info("business unit purge pass", "tenant_id", result.TenantID, "phase", result.Phase, "rows", result.TotalRows, "complete", result.Complete, "deferred", result.Deferred, "maintenance_pending", result.MaintenancePending)
+		if result.CheckpointBusy {
+			logger.Warn("a reader of the database, such as a running backup, kept the business unit purge from truncating the write-ahead log, which may still hold the erased rows; the next pass retries it", "tenant_id", result.TenantID)
 		}
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {

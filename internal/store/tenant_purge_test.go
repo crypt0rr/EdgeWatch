@@ -283,7 +283,7 @@ func TestTenantPurgeErasesOnlyTheDeletedTenant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(results) != 1 || !results[0].Complete || results[0].TenantID != secondTenantID || results[0].TotalRows != erasable || results[0].Rows != erasable || results[0].MaintenanceErr != nil {
+	if len(results) != 1 || !results[0].Complete || results[0].TenantID != secondTenantID || results[0].TotalRows != erasable || results[0].Rows != erasable || results[0].MaintenancePending || results[0].CheckpointBusy {
 		t.Fatalf("purge results = %+v, want tenant B complete with %d rows", results, erasable)
 	}
 	if batches < len(tenantPurgeSteps) {
@@ -557,29 +557,5 @@ func TestTenantPurgeStopsWhenTheTenantIsNoLongerBeingDeleted(t *testing.T) {
 	}
 	if jobs := rowids(t, f.store, tenantPurgeOracle["jobs"], secondTenantID); len(jobs) != 2 {
 		t.Fatalf("tenant B's jobs = %v, want both kept", jobs)
-	}
-}
-
-// The index and file maintenance after a purge treats a spent budget as
-// work left for later, but reports a cancelled purge or a failed database.
-func TestTenantPurgeMaintenance(t *testing.T) {
-	s := openTestStore(t)
-	if err := tenantPurgeMaintenance(context.Background(), s.DB, time.Minute); err != nil {
-		t.Fatalf("maintenance: %v", err)
-	}
-	if err := tenantPurgeMaintenance(context.Background(), s.DB, time.Nanosecond); err != nil {
-		t.Fatalf("maintenance past its budget = %v, want the rest left for later", err)
-	}
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	if err := tenantPurgeMaintenance(cancelled, s.DB, time.Minute); !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled maintenance = %v", err)
-	}
-	_ = s.Close()
-	if err := tenantPurgeMaintenance(context.Background(), s.DB, time.Minute); err == nil {
-		t.Fatal("maintenance of a closed database succeeded")
-	}
-	if _, err := s.System().PurgeDeletingTenants(context.Background()); err == nil {
-		t.Fatal("a purge of a closed database succeeded")
 	}
 }

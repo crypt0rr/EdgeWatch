@@ -385,6 +385,8 @@ describe('console query defaults', () => {
     const refused = new APIError('your account is not allowed to perform this action', 'forbidden', { permission: 'route' }, 403)
     expect(retryQuery(0, refused)).toBe(false)
     expect(retryQuery(0, new APIError('authentication required', 'unauthorized', undefined, 401))).toBe(false)
+    // A request the server refuses as invalid fails the same way again.
+    expect(retryQuery(0, new APIError('action prefix must be at most 64 characters', 'validation_failed', { action: 'action prefix must be at most 64 characters' }, 400))).toBe(false)
     for (const error of [new APIError('the store is unavailable', 'store', undefined, 500), new APIError('fixture failure', 'validation_failed'), new Error('offline')]) {
       expect(retryQuery(0, error)).toBe(true)
       expect(retryQuery(2, error)).toBe(true)

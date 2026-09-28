@@ -45,6 +45,37 @@ export function getDisplayTimeZone(): string | undefined {
   return displayTimeZone
 }
 
+const DAY_MS = 24 * 60 * 60 * 1000
+
+let offsetFormat: { zone: string; format: Intl.DateTimeFormat } | undefined
+
+/** The offset of the timezone from UTC at the instant, in milliseconds. */
+function zoneOffset(instant: number, zone: string) {
+  if (offsetFormat?.zone !== zone) offsetFormat = { zone, format: new Intl.DateTimeFormat('en-US', { timeZone: zone, hourCycle: 'h23', year: 'numeric', month: 'numeric', day: 'numeric', hour: 'numeric', minute: 'numeric', second: 'numeric' }) }
+  const parts = offsetFormat.format.formatToParts(instant)
+  const part = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find(item => item.type === type)?.value)
+  const wallClock = Date.UTC(part('year'), part('month') - 1, part('day'), part('hour'), part('minute'), part('second'))
+  return wallClock - Math.floor(instant / 1000) * 1000
+}
+
+/**
+ * The first instant of a calendar day in the deployment timezone (or the
+ * browser's own), so a day that a filter names is the day the console shows.
+ * The month is 1-based, and a day past the end of the month rolls over.
+ */
+export function startOfDay(year: number, month: number, day: number): Date {
+  const zone = displayTimeZone
+  if (!zone) return new Date(year, month - 1, day)
+  const midnight = Date.UTC(year, month - 1, day)
+  // The zone's offsets a day before and a day after bracket a clock change
+  // on the day. The day starts at the earlier candidate that has the offset
+  // it assumes. When neither has it, the change skips midnight, and the day
+  // starts where the skipped hour ends.
+  const candidates = [zoneOffset(midnight - DAY_MS, zone), zoneOffset(midnight + DAY_MS, zone)].map(offset => ({ time: midnight - offset, offset }))
+  const valid = candidates.filter(candidate => zoneOffset(candidate.time, zone) === candidate.offset).map(candidate => candidate.time)
+  return new Date(valid.length ? Math.min(...valid) : Math.max(...candidates.map(candidate => candidate.time)))
+}
+
 /** Date and time in the deployment timezone (or the browser's own). */
 export function formatDateTime(value: DateInput, options: Intl.DateTimeFormatOptions = {}): string {
   return new Date(value).toLocaleString(undefined, { ...options, timeZone: displayTimeZone })

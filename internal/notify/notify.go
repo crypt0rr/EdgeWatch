@@ -58,6 +58,9 @@ const (
 // bound without waiting for the production timeout.
 var notificationProviderTimeout = 15 * time.Second
 
+// DestinationView is a destination's redacted metadata. A deployment
+// destination from config.yaml has no stored times, so its JSON leaves
+// created_at and updated_at out.
 type DestinationView struct {
 	ID                   string    `json:"id"`
 	Name                 string    `json:"name"`
@@ -67,8 +70,8 @@ type DestinationView struct {
 	Locked               bool      `json:"locked"`
 	ReadOnly             bool      `json:"read_only"`
 	Revision             int64     `json:"revision,omitempty"`
-	CreatedAt            time.Time `json:"created_at,omitempty"`
-	UpdatedAt            time.Time `json:"updated_at,omitempty"`
+	CreatedAt            time.Time `json:"created_at,omitzero"`
+	UpdatedAt            time.Time `json:"updated_at,omitzero"`
 	ErrorCode            string    `json:"error_code,omitempty"`
 	Pending              int       `json:"pending,omitempty"`
 	Retrying             int       `json:"retrying,omitempty"`

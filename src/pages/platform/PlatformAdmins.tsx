@@ -4,9 +4,8 @@ import { ShieldCheck, UserPlus, UsersRound } from 'lucide-react'
 import { getSession, invitePlatformAdmin, listPlatformAdmins, setPlatformAdminEnabled } from '../../api'
 import type { UserSummary } from '../../api'
 import { ActionDialog } from '../../components/ActionDialog'
-import { formatDateTime } from '../../format'
 import { usernameProblem } from '../Users'
-import { errorMessage, Loading, OneTimeLink } from './common'
+import { errorMessage, isConflict, lastSignIn, Loading, OneTimeLink } from './common'
 
 /**
  * The platform administrators: accounts without a unit that manage the units
@@ -56,7 +55,22 @@ export function PlatformAdmins() {
       await client.invalidateQueries({ queryKey: ['platform-admins'] })
       setToggle(null)
     } catch (err) {
-      setToggleError(errorMessage(err, 'The platform administrator could not be changed.'))
+      if (!isConflict(err)) {
+        setToggleError(errorMessage(err, 'The platform administrator could not be changed.'))
+        return
+      }
+      // The account changed elsewhere, so its revision is stale: reload the
+      // list, and confirm again with the current row while the change still
+      // applies.
+      await client.invalidateQueries({ queryKey: ['platform-admins'] })
+      const current = client.getQueryData<{ admins: UserSummary[] }>(['platform-admins'])?.admins.find(admin => admin.id === toggle.id)
+      if (current && !current.pending && current.enabled === toggle.enabled) {
+        setToggle(current)
+        setToggleError(`${toggle.username} changed elsewhere. The latest state is loaded; confirm again to ${toggle.enabled ? 'disable' : 'enable'} it.`)
+        return
+      }
+      setToggle(null)
+      setMessage(`${toggle.username} changed elsewhere. The latest state is loaded.`)
     }
   }
   return <section className="page">
@@ -77,7 +91,7 @@ export function PlatformAdmins() {
         {admins.isLoading ? <Loading label="Loading platform administrators…" /> : !admins.data ? <div className="error-card" role="alert">Could not load the platform administrators.</div> : <div className="user-list">{admins.data.admins.map(admin => {
           const self = admin.id === session.data?.user_id
           return <div className="user-row account-row" key={admin.id} data-testid={`admin-${admin.username}`}>
-            <div><strong>{admin.display_name}{self ? ' (you)' : ''}</strong><span>{admin.username}{admin.last_login_at ? ` · last sign-in ${formatDateTime(admin.last_login_at)}` : ''}</span></div>
+            <div><strong>{admin.display_name}{self ? ' (you)' : ''}</strong><span>{admin.username}{lastSignIn(admin.last_login_at)}</span></div>
             <span className="account-badges"><span className={admin.pending ? 'pill amber' : admin.enabled ? 'pill green' : 'pill gray'}>{admin.pending ? 'Pending activation' : admin.enabled ? 'Enabled' : 'Disabled'}</span><span className={admin.totp_enabled ? 'pill green' : 'pill amber'}>{admin.totp_enabled ? 'TOTP on' : 'No TOTP'}</span></span>
             {!self && !admin.pending && <div className="user-row-actions"><button type="button" className="button ghost" onClick={() => { setMessage(''); setToggleError(''); setToggle(admin) }}>{admin.enabled ? 'Disable' : 'Enable'}</button></div>}
           </div>

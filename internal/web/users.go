@@ -56,6 +56,19 @@ func (s *Server) confirmUserMutation(w http.ResponseWriter, r *http.Request, act
 	return true
 }
 
+// writeAdministratorRefused answers, as the gate does, a unit account write
+// that the store refused because, since the gate authorized the request,
+// the acting account stopped being an enabled administrator of its unit or
+// the unit stopped being active. It reports whether err was such a refusal.
+// ErrNoTenantScope wraps ErrNotFound, so callers check this first.
+func writeAdministratorRefused(w http.ResponseWriter, err error) bool {
+	if errors.Is(err, store.ErrAccountNotPermitted) || errors.Is(err, store.ErrTenantNotActive) || errors.Is(err, store.ErrNoTenantScope) {
+		forbiddenRoute(w)
+		return true
+	}
+	return false
+}
+
 func decodeUserPassword(w http.ResponseWriter, r *http.Request) (string, bool) {
 	var input userPasswordPayload
 	if !decodeJSON(w, r, &input) {
@@ -109,7 +122,10 @@ func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session stor
 			writeError(w, http.StatusInternalServerError, "store", "user could not be loaded", nil)
 			return
 		}
-		if err := ts.DeleteUserSessionsWithAudit(r.Context(), id, store.AuditEntry{Action: "user.sessions_revoked", Detail: "user sessions revoked", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+		if err := ts.DeleteUserSessionsByAdministrator(r.Context(), id, store.AuditEntry{Action: "user.sessions_revoked", Detail: "user sessions revoked", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+			if writeAdministratorRefused(w, err) {
+				return
+			}
 			if s.writeAuditUnavailable(w, err, "user.sessions_revoked") {
 				s.revokeSSEUser(id)
 				return
@@ -203,6 +219,9 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request, session stor
 	createdAt := time.Now().UTC()
 	created, err := ts.CreateUserWithInvite(r.Context(), user, digest, createdAt, createdAt.Add(30*time.Minute), store.AuditEntry{Action: "user.created", Detail: fmt.Sprintf("user %s created by %s", input.Username, session.Username), ActorUserID: session.UserID, ActorUsername: session.Username})
 	if err != nil {
+		if writeAdministratorRefused(w, err) {
+			return
+		}
 		// Usernames are unique across tenants. The conflict does not say
 		// which tenant, if any other, holds the name.
 		if errors.Is(err, store.ErrUsernameUnavailable) || isUnique(err) {
@@ -289,7 +308,10 @@ func (s *Server) updateUser(w http.ResponseWriter, r *http.Request, actor store.
 	if previousRole != user.Role || previousEnabled != user.Enabled {
 		detail = fmt.Sprintf("user %s updated by %s role=%s->%s enabled=%t->%t", user.Username, actor.Username, previousRole, user.Role, previousEnabled, user.Enabled)
 	}
-	if err := ts.UpdateUser(r.Context(), user, revokeSessions, store.AuditEntry{Action: "user.updated", Detail: detail, ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
+	if err := ts.UpdateUserByAdministrator(r.Context(), user, revokeSessions, store.AuditEntry{Action: "user.updated", Detail: detail, ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
+		if writeAdministratorRefused(w, err) {
+			return
+		}
 		if s.writeAuditUnavailable(w, err, "user.updated") {
 			return
 		}
@@ -357,6 +379,9 @@ func (s *Server) issueActivation(w http.ResponseWriter, r *http.Request, actor s
 		action = "user.activation_issued"
 	}
 	if err := ts.CreateUserInviteWithAudit(r.Context(), digest, user.ID, createdAt, createdAt.Add(30*time.Minute), store.AuditEntry{Action: action, Detail: fmt.Sprintf("activation issued for %s", user.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username}); err != nil {
+		if writeAdministratorRefused(w, err) {
+			return
+		}
 		if errors.Is(err, store.ErrAuditUnavailable) {
 			s.writeAuditUnavailable(w, err, action)
 			return
@@ -384,6 +409,9 @@ func (s *Server) revokeActivation(w http.ResponseWriter, r *http.Request, actor 
 	}
 	affected, err := ts.RevokeUserInvitesWithAudit(r.Context(), user.ID, time.Now().UTC(), store.AuditEntry{Action: "user.activation_revoked", Detail: fmt.Sprintf("activation links revoked for %s", user.Username), ActorUserID: actor.UserID, ActorUsername: actor.Username})
 	if err != nil {
+		if writeAdministratorRefused(w, err) {
+			return
+		}
 		if s.writeAuditUnavailable(w, err, "user.activation_revoked") {
 			return
 		}

@@ -95,7 +95,11 @@ func TestActivateRequestConsumesInviteOnceAndEnforcesPasswordLength(t *testing.T
 		t.Fatal(err)
 	}
 	created := time.Now().UTC()
-	user, err := db.Tenant(store.DefaultTenantScope()).CreateUserWithInvite(ctx, store.User{Username: "invitee", DisplayName: "Invitee", Role: store.RoleViewer, PasswordHash: "!pending", Enabled: false}, hash, created, created.Add(time.Hour), store.AuditEntry{})
+	admin, err := db.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "admin", Role: store.RoleAdministrator, PasswordHash: "unused-hash", Enabled: true}, store.AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.Tenant(store.DefaultTenantScope()).CreateUserWithInvite(ctx, store.User{Username: "invitee", DisplayName: "Invitee", Role: store.RoleViewer, PasswordHash: "!pending", Enabled: false}, hash, created, created.Add(time.Hour), store.AuditEntry{ActorUserID: admin.ID})
 	if err != nil {
 		t.Fatal(err)
 	}

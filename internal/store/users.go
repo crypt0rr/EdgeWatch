@@ -242,7 +242,10 @@ type userInviteRecord struct {
 
 // CreateUserWithInvite commits the pending account, one-time activation
 // invite, and audit entry together. This avoids leaving an unusable account
-// behind when invite persistence or the required audit write fails.
+// behind when invite persistence or the required audit write fails. The
+// actor, audit.ActorUserID, must still be an enabled administrator of the
+// tenant, and the tenant must still be active (see
+// requireAdministratorActorTx).
 func (ts *TenantStore) CreateUserWithInvite(ctx context.Context, u User, idHash string, created, expires time.Time, audit AuditEntry) (User, error) {
 	if err := ts.ready(); err != nil {
 		return User{}, err
@@ -253,12 +256,42 @@ func (ts *TenantStore) CreateUserWithInvite(ctx context.Context, u User, idHash 
 	if !expires.After(created) {
 		return User{}, errors.New("activation token expiry must be after creation")
 	}
-	return ts.createUser(ctx, u, &userInviteRecord{idHash: idHash, created: created, expires: expires}, audit, nil)
+	return ts.createUser(ctx, u, &userInviteRecord{idHash: idHash, created: created, expires: expires}, audit, ts.administratorActor(audit.ActorUserID))
 }
 
 // userWriteCheck is a policy check that an account write runs first in its
 // own transaction, so the policy holds for the state the write changes.
 type userWriteCheck func(ctx context.Context, tx *sql.Tx) error
+
+// administratorActor is the write check of an account write that a
+// tenant's administrator makes: see requireAdministratorActorTx.
+func (ts *TenantStore) administratorActor(actorID string) userWriteCheck {
+	return func(ctx context.Context, tx *sql.Tx) error {
+		return ts.requireAdministratorActorTx(ctx, tx, actorID)
+	}
+}
+
+// requireAdministratorActorTx fails unless the actor is an enabled
+// administrator of the tenant and the tenant is active. The web console
+// authorizes an administrator's account write when the request arrives, and
+// the write commits later; checking again in the write's own transaction
+// means that a demotion, a disable, or a paused tenant that committed in
+// between stops the write, as requirePlatformActorTx and
+// requireActiveTenantTx do for the platform's writes. Any other actor,
+// including another tenant's administrator, a platform administrator, and
+// an empty ID, is ErrAccountNotPermitted; a tenant that is not active is
+// ErrTenantNotActive, and a missing or deleted one ErrNoTenantScope.
+func (ts *TenantStore) requireAdministratorActorTx(ctx context.Context, tx *sql.Tx, actorID string) error {
+	var present int
+	err := tx.QueryRowContext(ctx, `SELECT 1 FROM users WHERE id=? AND tenant_id=? AND role=? AND enabled=1`, actorID, ts.scope.id, RoleAdministrator).Scan(&present)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("%w: the actor is not an enabled administrator of the unit", ErrAccountNotPermitted)
+	}
+	if err != nil {
+		return err
+	}
+	return requireActiveTenantTx(ctx, tx, ts.scope.id)
+}
 
 // createUser creates the account in the store's tenant. Only the roles of a
 // tenant's account are accepted, so a platform administrator is never
@@ -347,11 +380,30 @@ func usernameConflict(err error) error {
 
 // UpdateUser updates the tenant's account, at its revision when the value
 // names one. Another tenant's account is ErrNotFound, as an unknown ID is,
-// and nothing is written.
+// and nothing is written. It writes an account's changes to itself and the
+// host CLI's; a change that one of the tenant's administrators makes to an
+// account goes through UpdateUserByAdministrator.
 func (ts *TenantStore) UpdateUser(ctx context.Context, u User, revokeSessions bool, audit AuditEntry) error {
 	if err := ts.ready(); err != nil {
 		return err
 	}
+	return ts.updateUser(ctx, u, revokeSessions, audit, nil)
+}
+
+// UpdateUserByAdministrator is UpdateUser for a change that one of the
+// tenant's administrators makes to an account: the actor,
+// audit.ActorUserID, must still be an enabled administrator of the tenant,
+// and the tenant must still be active (see requireAdministratorActorTx).
+func (ts *TenantStore) UpdateUserByAdministrator(ctx context.Context, u User, revokeSessions bool, audit AuditEntry) error {
+	if err := ts.ready(); err != nil {
+		return err
+	}
+	return ts.updateUser(ctx, u, revokeSessions, audit, ts.administratorActor(audit.ActorUserID))
+}
+
+// updateUser is UpdateUser with a policy check that runs first in the
+// transaction; its error stops the write.
+func (ts *TenantStore) updateUser(ctx context.Context, u User, revokeSessions bool, audit AuditEntry, check userWriteCheck) error {
 	if _, err := uuid.Parse(u.ID); err != nil {
 		return errors.New("user id must be a UUID")
 	}
@@ -378,6 +430,11 @@ func (ts *TenantStore) UpdateUser(ctx context.Context, u User, revokeSessions bo
 		return err
 	}
 	defer tx.Rollback()
+	if check != nil {
+		if err := check(ctx, tx); err != nil {
+			return err
+		}
+	}
 	var currentUsername, currentDisplayName, currentRole, currentPasswordHash string
 	var currentEnabled, currentTOTPEnabled int
 	var currentRevision int64
@@ -643,16 +700,41 @@ func (ts *TenantStore) requireTenantUserTx(ctx context.Context, tx *sql.Tx, user
 // with its audit record. Another tenant's account is ErrNotFound, as an
 // unknown ID is, and nothing is revoked or recorded. Revocation is
 // security-critical, so when only the audit write fails the sessions are
-// still revoked and the audit error is returned.
+// still revoked and the audit error is returned. It is the write of an
+// account that signs itself out everywhere; an administrator's revocation
+// of an account's sessions goes through DeleteUserSessionsByAdministrator.
 func (ts *TenantStore) DeleteUserSessionsWithAudit(ctx context.Context, userID string, audit AuditEntry) error {
 	if err := ts.ready(); err != nil {
 		return err
 	}
+	return ts.deleteUserSessionsWithAudit(ctx, userID, audit, nil)
+}
+
+// DeleteUserSessionsByAdministrator is DeleteUserSessionsWithAudit for one
+// of the tenant's administrators: the actor, audit.ActorUserID, must still
+// be an enabled administrator of the tenant, and the tenant must still be
+// active (see requireAdministratorActorTx). A refused revocation revokes
+// and records nothing.
+func (ts *TenantStore) DeleteUserSessionsByAdministrator(ctx context.Context, userID string, audit AuditEntry) error {
+	if err := ts.ready(); err != nil {
+		return err
+	}
+	return ts.deleteUserSessionsWithAudit(ctx, userID, audit, ts.administratorActor(audit.ActorUserID))
+}
+
+// deleteUserSessionsWithAudit is DeleteUserSessionsWithAudit with a policy
+// check that runs first in the transaction; its error stops the write.
+func (ts *TenantStore) deleteUserSessionsWithAudit(ctx context.Context, userID string, audit AuditEntry, check userWriteCheck) error {
 	tx, err := ts.store.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if check != nil {
+		if err := check(ctx, tx); err != nil {
+			return err
+		}
+	}
 	if err := ts.requireTenantUserTx(ctx, tx, userID); err != nil {
 		return err
 	}
@@ -696,12 +778,14 @@ func (ts *TenantStore) CreateUserInvite(ctx context.Context, idHash, userID stri
 // CreateUserInviteWithAudit stores a replacement activation/password-reset
 // token and its audit record atomically. The clear token never reaches this
 // method; only its SHA-256 digest is persisted. Another tenant's account is
-// ErrNotFound, and its links stay as they are.
+// ErrNotFound, and its links stay as they are. The actor,
+// audit.ActorUserID, must still be an enabled administrator of the tenant,
+// and the tenant must still be active (see requireAdministratorActorTx).
 func (ts *TenantStore) CreateUserInviteWithAudit(ctx context.Context, idHash, userID string, created, expires time.Time, audit AuditEntry) error {
 	if err := ts.ready(); err != nil {
 		return err
 	}
-	return ts.createUserInviteWithAudit(ctx, idHash, userID, created, expires, audit, nil)
+	return ts.createUserInviteWithAudit(ctx, idHash, userID, created, expires, audit, ts.administratorActor(audit.ActorUserID))
 }
 
 // createUserInviteWithAudit is CreateUserInviteWithAudit with a policy check
@@ -747,7 +831,10 @@ func (ts *TenantStore) createUserInviteWithAudit(ctx context.Context, idHash, us
 // RevokeUserInvitesWithAudit invalidates every outstanding activation or
 // password-reset link for one of the tenant's accounts. Only the token hash
 // is stored, and the operation is audited atomically with the revocation.
-// Another tenant's account is ErrNotFound, and its links stay usable.
+// Another tenant's account is ErrNotFound, and its links stay usable. The
+// actor, audit.ActorUserID, must still be an enabled administrator of the
+// tenant, and the tenant must still be active (see
+// requireAdministratorActorTx).
 func (ts *TenantStore) RevokeUserInvitesWithAudit(ctx context.Context, userID string, now time.Time, audit AuditEntry) (int, error) {
 	if err := ts.ready(); err != nil {
 		return 0, err
@@ -760,6 +847,9 @@ func (ts *TenantStore) RevokeUserInvitesWithAudit(ctx context.Context, userID st
 		return 0, err
 	}
 	defer tx.Rollback()
+	if err := ts.requireAdministratorActorTx(ctx, tx, audit.ActorUserID); err != nil {
+		return 0, err
+	}
 	if err := ts.requireTenantUserTx(ctx, tx, userID); err != nil {
 		return 0, err
 	}

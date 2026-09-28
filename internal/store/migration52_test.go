@@ -796,7 +796,7 @@ func TestRootTableWritersNameTheDefaultTenant(t *testing.T) {
 	if _, err := defaultTenant(s).CreateUser(ctx, User{Username: "operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := defaultTenant(s).CreateUserWithInvite(ctx, User{Username: "invited", Role: RoleViewer, PasswordHash: "!pending"}, "invite-hash", now, now.Add(time.Hour), AuditEntry{}); err != nil {
+	if _, err := defaultTenant(s).CreateUserWithInvite(ctx, User{Username: "invited", Role: RoleViewer, PasswordHash: "!pending"}, "invite-hash", now, now.Add(time.Hour), AuditEntry{ActorUserID: LegacyAdminUserID}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := defaultTenant(s).CreateJob(ctx, testJob("edge")); err != nil {

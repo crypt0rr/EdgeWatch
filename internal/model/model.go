@@ -311,6 +311,13 @@ type JobState struct {
 	// one-scan suppression expires, without requiring confirmations again.
 	SuppressedChanges     map[string]Change     `json:"suppressed_changes,omitempty"`
 	FingerprintCandidates map[string]ValueCount `json:"fingerprint_candidates,omitempty"`
+	// ServiceDecisionRequired holds the service keys of baseline ports that an
+	// administrator accepted without their service. Such a fingerprint was
+	// reported rather than unstable while the baseline was established, so it
+	// stays under normal comparison and is never learned. Accepting a service
+	// or the port's removal for the key, or establishing a new baseline, ends
+	// it. A state written before this field existed has no entries.
+	ServiceDecisionRequired map[string]bool `json:"service_decision_required,omitempty"`
 	// TotalLossCandidateHash and TotalLossCandidateCount track a complete
 	// successful scan that returned no positive ports while the baseline still
 	// contains positive ports. The engine requires a second matching scan

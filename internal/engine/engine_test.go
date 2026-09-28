@@ -1405,3 +1405,181 @@ func TestNewPortServiceIncidentsAcceptInEitherOrder(t *testing.T) {
 		})
 	}
 }
+
+// Accepting a new port alone leaves its service for a separate decision.
+// Suppressing the service incident, or one scan that recovers it because
+// service detection returned no fingerprint, must not let fingerprint
+// learning write that service into the baseline: it was reported, not
+// unstable while the baseline was established.
+func TestAcceptedPortServiceIsNotLearnedAfterSuppressionOrRecovery(t *testing.T) {
+	for _, path := range []string{"suppress", "recover"} {
+		for _, samples := range []int{1, 2} {
+			t.Run(fmt.Sprintf("%s-samples-%d", path, samples), func(t *testing.T) {
+				ctx := context.Background()
+				db, err := store.Open(storetest.FreshPath(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				tenant := defaultTenant(db)
+				record, err := tenant.CreateJob(ctx, config.NormalizeJob(config.Job{
+					Name: fmt.Sprintf("accepted-port-%s-%d", path, samples), Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
+					TCP: &config.Protocol{Ports: "22,8080", Mode: "connect", ServiceDetection: true}, Timeout: config.Duration(time.Minute),
+					Baseline: config.Baseline{Samples: samples}, Change: config.Change{Confirmations: 1},
+				}))
+				if err != nil {
+					t.Fatal(err)
+				}
+				e := Engine{Store: db}
+				sequence := 0
+				run := func(ports ...model.PortState) []string {
+					t.Helper()
+					sequence++
+					snapshot := model.Snapshot{Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "22,8080", ServiceDetection: true}}, Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: ports}}}
+					snapshot.Normalize()
+					current := model.Scan{ID: fmt.Sprint("scan-", sequence), JobID: record.ID, JobRevision: record.Revision, Job: record.Job.Name, Status: "success", ConfigHash: record.Job.SecurityHash(), Snapshot: snapshot, FinishedAt: time.Now().UTC()}
+					events, err := e.FinalizeManagedScan(ctx, record.ID, record.Job, &current, nil)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var changes []string
+					for _, event := range events {
+						if len(event.Changes) == 0 {
+							changes = append(changes, event.Type)
+						}
+						for _, change := range event.Changes {
+							changes = append(changes, event.Type+" "+change.Key+" "+change.Old+"->"+change.New)
+						}
+					}
+					return changes
+				}
+				baseline8080 := func() string {
+					t.Helper()
+					state, err := tenant.RuntimeState(ctx, record.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return baselineService(*state.Baseline, "192.0.2.1", "tcp", 8080)
+				}
+				expect := func(label string, got []string, want ...string) {
+					t.Helper()
+					if strings.Join(got, "\n") != strings.Join(want, "\n") {
+						t.Fatalf("%s: changes = %q, want %q", label, got, want)
+					}
+				}
+				audit := store.AuditEntry{Action: "incident.action", Detail: "accepted port"}
+				ssh := model.PortState{Port: 22, State: "open", Service: "ssh | OpenSSH | 8.0"}
+				http := model.PortState{Port: 8080, State: "open", Service: "http"}
+				serviceKey := "service|192.0.2.1|tcp|8080"
+				reported := "changes-detected " + serviceKey + " not-open->http"
+
+				for i := 1; i < samples; i++ {
+					expect("baseline sample", run(ssh))
+				}
+				expect("baseline", run(ssh), "baseline-complete")
+				expect("new port", run(ssh, http), "changes-detected port|192.0.2.1|tcp|8080 not-open->open", reported)
+				if _, err := tenant.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, "port|192.0.2.1|tcp|8080", audit); err != nil {
+					t.Fatal(err)
+				}
+				switch path {
+				case "suppress":
+					if _, err := tenant.SuppressIncidentWithAudit(ctx, record.ID, record.Job.Name, serviceKey, audit); err != nil {
+						t.Fatal(err)
+					}
+					expect("suppressed scan", run(ssh, http))
+				case "recover":
+					expect("scan without fingerprint", run(ssh, model.PortState{Port: 8080, State: "open"}), "changes-recovered "+serviceKey+" http->not-open")
+				}
+				if got := baseline8080(); got != "" {
+					t.Fatalf("service of the accepted port entered the baseline without a decision: %q", got)
+				}
+				expect("fingerprint reported again", run(ssh, http), reported)
+				for i := 0; i < 2; i++ {
+					expect("unchanged observation", run(ssh, http))
+				}
+				if got := baseline8080(); got != "" {
+					t.Fatalf("service of the accepted port entered the baseline without a decision: %q", got)
+				}
+				if _, err := tenant.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, serviceKey, audit); err != nil {
+					t.Fatal(err)
+				}
+				if got := baseline8080(); got != "http" {
+					t.Fatalf("accepted service = %q, want http", got)
+				}
+				expect("accepted service", run(ssh, http))
+			})
+		}
+	}
+}
+
+// Suppressing a service change on a port whose baseline has a fingerprint
+// defers it for one scan and then reports it again.
+func TestSuppressedServiceChangeOnFingerprintedPortReopens(t *testing.T) {
+	scopes := []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "22", ServiceDetection: true}}
+	base := model.Snapshot{Scopes: scopes, Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 22, State: "open", Service: "ssh | OpenSSH | 8.0"}}}}}
+	current := model.Snapshot{Scopes: scopes, Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 22, State: "open", Service: "ssh | OpenSSH | 9.0"}}}}}
+	state := model.JobState{Baseline: &base, BaselineConfigHash: "hash", Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{}, Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{}, FingerprintCandidates: map[string]model.ValueCount{}}
+	job := config.Job{Name: "test", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	key := fingerprintKey("192.0.2.1", "tcp", 22)
+	events, _, err := processSuccessWithChanges(&state, job, scan("scan-1", current))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" {
+		t.Fatalf("service change = %#v, %v", events, err)
+	}
+	// Suppress 1 scan, as the incident action does.
+	state.Suppressed[key] = 1
+	state.SuppressedChanges[key] = state.Incidents[key].Change
+	delete(state.Incidents, key)
+	if events, _, err = processSuccessWithChanges(&state, job, scan("scan-2", current)); err != nil || len(events) != 0 {
+		t.Fatalf("suppressed scan = %#v, %v", events, err)
+	}
+	events, _, err = processSuccessWithChanges(&state, job, scan("scan-3", current))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != key {
+		t.Fatalf("change was not reported again after the suppression: %#v, %v", events, err)
+	}
+	if got := baselineService(*state.Baseline, "192.0.2.1", "tcp", 22); got != "ssh | OpenSSH | 8.0" {
+		t.Fatalf("baseline service = %q", got)
+	}
+}
+
+// A new baseline records what the scans observed, so no service decision on
+// the previous baseline survives it, whether it replaces that baseline or is
+// merged into it for a changed scope.
+func TestEstablishedBaselineEndsServiceDecisions(t *testing.T) {
+	scopes := []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "8080", ServiceDetection: true}}
+	key := fingerprintKey("192.0.2.1", "tcp", 8080)
+	observed := model.Snapshot{Scopes: scopes, Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 8080, State: "open", Service: "http"}}}}}
+	for _, merge := range []bool{false, true} {
+		old := model.Snapshot{Scopes: scopes, Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 8080, State: "open"}}}}}
+		state := model.JobState{Baseline: &old, FingerprintCandidates: map[string]model.ValueCount{}, ServiceDecisionRequired: map[string]bool{key: true}}
+		events := advanceCandidate(&state, scan("established", observed), 1, merge)
+		if len(events) != 1 || state.ServiceDecisionRequired != nil {
+			t.Fatalf("merge=%t: new baseline kept service decisions: events=%#v decisions=%#v", merge, events, state.ServiceDecisionRequired)
+		}
+		if got := baselineService(*state.Baseline, "192.0.2.1", "tcp", 8080); got != "http" {
+			t.Fatalf("merge=%t: established service = %q, want http", merge, got)
+		}
+	}
+}
+
+// A runtime state written before accepted ports were recorded has no record
+// of the port that was accepted alone. A suppressed service change on such a
+// port still stays under normal comparison instead of being learned.
+func TestSuppressedServiceChangeIsNotLearnedWithoutAcceptedPortRecord(t *testing.T) {
+	scopes := []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "8080", ServiceDetection: true}}
+	base := model.Snapshot{Scopes: scopes, Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 8080, State: "open"}}}}}
+	current := model.Snapshot{Scopes: scopes, Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: []model.PortState{{Port: 8080, State: "open", Service: "http"}}}}}
+	key := fingerprintKey("192.0.2.1", "tcp", 8080)
+	change := model.Change{Key: key, Kind: "service", Severity: "warning", Target: "192.0.2.1", Protocol: "tcp", Port: 8080, Old: "not-open", New: "http"}
+	state := model.JobState{Baseline: &base, BaselineConfigHash: "hash", Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{}, Suppressed: map[string]int{key: 1}, SuppressedChanges: map[string]model.Change{key: change}, FingerprintCandidates: map[string]model.ValueCount{}}
+	job := config.Job{Name: "test", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	if events, _, err := processSuccessWithChanges(&state, job, scan("scan-1", current)); err != nil || len(events) != 0 {
+		t.Fatalf("suppressed scan = %#v, %v", events, err)
+	}
+	if got := baselineService(*state.Baseline, "192.0.2.1", "tcp", 8080); got != "" {
+		t.Fatalf("suppressed service was learned into the baseline: %q", got)
+	}
+	events, _, err := processSuccessWithChanges(&state, job, scan("scan-2", current))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != key {
+		t.Fatalf("change was not reported again after the suppression: %#v, %v", events, err)
+	}
+}

@@ -793,6 +793,7 @@ func (ss *SystemStore) Approve(ctx context.Context, job string, scan model.Scan)
 		state.Suppressed = map[string]int{}
 		state.SuppressedChanges = map[string]model.Change{}
 		state.FingerprintCandidates = map[string]model.ValueCount{}
+		state.ServiceDecisionRequired = nil
 		return []model.Event{{Type: "baseline-approved", Job: job, ScanID: scan.ID, Message: "Baseline manually approved", CreatedAt: time.Now().UTC()}}, nil
 	})
 }
@@ -815,6 +816,7 @@ func (ss *SystemStore) ResetBaseline(ctx context.Context, job string) ([]model.E
 		state.Suppressed = map[string]int{}
 		state.SuppressedChanges = map[string]model.Change{}
 		state.FingerprintCandidates = map[string]model.ValueCount{}
+		state.ServiceDecisionRequired = nil
 		return []model.Event{{Type: "baseline-reset", Job: job, Message: "Baseline collection reset", CreatedAt: time.Now().UTC()}}, nil
 	})
 }

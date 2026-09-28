@@ -681,6 +681,109 @@ func TestReconcileNaabuDiscoveryIncludesTrackedChangePorts(t *testing.T) {
 	}
 }
 
+// A baseline unit of a DNS target stores the addresses the name resolved to
+// when the baseline was scanned, or none in a legacy state. Its ports belong
+// to the logical target, so Nmap must confirm them on every address the cycle
+// plan pinned for that target after the name moves.
+func TestReconcileNaabuDiscoveryMapsBaselinePortsToPlannedDNSAddresses(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		addresses []string
+	}{
+		{name: "moved address", addresses: []string{"192.0.2.7"}},
+		{name: "no stored address"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			s := openTestStore(t)
+			defer s.Close()
+			jobValue := config.NormalizeJob(config.Job{
+				Name: "naabu-dns-baseline", Schedule: "0 * * * *", Timezone: "UTC",
+				Targets: []string{"edge.example"}, MaxExpandedHosts: 1,
+				TCP: &config.Protocol{Engine: config.EngineNaabuNmap, Ports: "1-65535", Naabu: &config.NaabuOptions{AddressBatchSize: 16}},
+			})
+			job, err := defaultTenant(s).CreateJob(ctx, jobValue)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scopes := []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "1-65535"}}
+			baseline := model.Snapshot{
+				Scopes: scopes,
+				DNS:    map[string][]string{"edge.example": {"192.0.2.9"}},
+				Units: []model.Unit{{Target: "edge.example", Protocol: "tcp", Addresses: test.addresses, Ports: []model.PortState{
+					{Port: 22, State: "open"}, {Port: 443, State: "open"}, {Port: 8443, State: "closed"},
+				}}},
+			}
+			if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
+				state.Baseline = &baseline
+				state.BaselineScanID = "baseline"
+				state.BaselineConfigHash = job.Job.SecurityHash()
+				return nil, nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			target := scanner.ResolvedTarget{Name: "edge.example", ConfiguredTarget: "edge.example", Addresses: []string{"192.0.2.9"}, Aggregate: true, Hostname: true}
+			plan := scanner.WorkPlan{
+				Job: job.Job, Targets: []scanner.ResolvedTarget{target}, DNS: map[string][]string{"edge.example": {"192.0.2.9"}},
+				Scopes:     scopes,
+				Units:      []scanner.WorkUnit{{Sequence: 0, Engine: config.EngineNaabuNmap, Phase: "discovery", Protocol: "tcp", Family: 4, Targets: []scanner.ResolvedTarget{target}, Addresses: []string{"192.0.2.9"}, Ports: "1-65535", PortCount: 65535, Probes: 65535}},
+				TotalUnits: 1, TotalProbes: 65535,
+			}
+			cycle, err := s.System().CreateScanCycle(ctx, ScanCycleRecord{JobID: job.ID, Job: job.Job.Name, JobRevision: job.Revision, ConfigHash: job.Job.SecurityHash(), ExecutionHash: job.Job.ExecutionHash(), Plan: plan})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.System().StartScanCycleAttempt(ctx, cycle.ID); err != nil {
+				t.Fatal(err)
+			}
+			unit, err := s.System().NextScanCycleUnit(ctx, cycle.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.System().ClaimScanCycleUnit(ctx, cycle.ID, unit.Sequence); err != nil {
+				t.Fatal(err)
+			}
+			// Naabu misses the baseline port 443 on the address the name
+			// resolves to now.
+			fragment := model.Snapshot{Hosts: []model.HostObservation{{Address: "192.0.2.9", Protocols: []model.ProtocolObservation{{Protocol: "tcp", DiscoveryEngine: "naabu", DiscoveredPorts: []model.PortObservation{{Port: 22, State: "open", Verification: "discovered"}}}}}}}
+			if err := s.System().CompleteScanCycleUnit(ctx, cycle.ID, unit.Sequence, fragment); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.System().ReconcileScanCycleEnrichment(ctx, cycle.ID); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := s.DB.QueryContext(ctx, `SELECT work_unit_json FROM scan_cycle_units WHERE cycle_id=? AND phase='enrichment' ORDER BY sequence`, cycle.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rows.Close()
+			var enrichment []scanner.WorkUnit
+			for rows.Next() {
+				var raw []byte
+				if err := rows.Scan(&raw); err != nil {
+					t.Fatal(err)
+				}
+				var unit scanner.WorkUnit
+				if err := json.Unmarshal(raw, &unit); err != nil {
+					t.Fatal(err)
+				}
+				enrichment = append(enrichment, unit)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatal(err)
+			}
+			// The closed baseline port 8443 needs no confirmation, and the old
+			// address is outside this cycle, so it gets no work.
+			if len(enrichment) != 1 || enrichment[0].Ports != "22,443" || strings.Join(enrichment[0].Addresses, ",") != "192.0.2.9" {
+				t.Fatalf("enrichment units = %#v, want 22,443 on 192.0.2.9", enrichment)
+			}
+			if len(enrichment[0].Targets) != 1 || enrichment[0].Targets[0].Name != "edge.example" {
+				t.Fatalf("enrichment targets = %#v, want edge.example", enrichment[0].Targets)
+			}
+		})
+	}
+}
+
 func TestReconcileNaabuDiscoveryChunksLargePortSets(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

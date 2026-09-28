@@ -177,12 +177,17 @@ Disabling a unit ends its sessions and revokes its open invitations in the
 same transaction; from then on its accounts cannot sign in or redeem a link,
 and a sign-in gets the answer of a wrong password. Deleting a unit erases its
 rows in bounded batches with SQLite's `secure_delete` on, then compacts the
-search indexes and truncates the write-ahead log. Deleting a destination
-removes its delivery health; the purge also erases the delivery health that
-earlier releases kept for deleted destinations, which names no owner and
-counts in no unit's totals. Backups taken before the deletion still hold the
-unit's data, and the records of platform administrators' actions on it stay
-in the platform audit.
+search indexes and truncates the write-ahead log, both of which may still
+hold copies of the erased rows. The unit stays in the deleting state until
+the compaction has finished and a checkpoint has truncated the log: each
+purge pass continues the compaction within a bounded time, and a reader that
+holds an older snapshot of the database, such as a running backup, keeps the
+log from being truncated until it ends, which the daemon logs as a warning.
+Deleting a destination removes its delivery health; the purge also erases
+the delivery health that earlier releases kept for deleted destinations,
+which names no owner and counts in no unit's totals. Backups taken before
+the deletion still hold the unit's data, and the records of platform
+administrators' actions on it stay in the platform audit.
 
 ### Signals between units
 

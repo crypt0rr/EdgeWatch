@@ -697,12 +697,14 @@ but never deleted.
 
 Deleting a unit needs a disabled unit, its exact name typed, and the platform
 administrator's password. Its jobs are archived at once, and the daemon then
-erases its data in small batches. The deletion continues in the background,
-resumes after a restart, and waits for a running scan to finish; the unit's
-page shows its progress. The records of platform administrators' actions and
-of the deletion stay in the platform audit; the unit's other audit records
-are erased. Afterwards the unit's name and slug can be used again. Backups
-taken before the deletion still contain the unit.
+erases its data in small batches, compacts the search indexes, and truncates
+the database's write-ahead log, so neither keeps copies of the erased data.
+The deletion continues in the background, resumes after a restart, and waits
+for a running scan to finish; a running backup delays its last step until
+the backup ends. The unit's page shows its progress. The records of platform
+administrators' actions and of the deletion stay in the platform audit; the
+unit's other audit records are erased. Afterwards the unit's name and slug
+can be used again. Backups taken before the deletion still contain the unit.
 
 ### Limits
 

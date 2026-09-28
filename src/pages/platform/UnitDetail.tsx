@@ -265,9 +265,19 @@ function UnitDangerZone({ unit }: { unit: BusinessUnit }) {
   </div>
 }
 
+// purgeActivity describes the phase a deletion reached: a table it erases,
+// or one of the phases after the last table, which the store names.
+function purgeActivity(phase = '') {
+  if (!phase) return 'Waiting to start'
+  if (phase === 'verify') return 'Checking that nothing is left'
+  if (phase.startsWith('compact:')) return 'Compacting the search indexes'
+  if (phase === 'checkpoint') return 'Truncating the database log'
+  return `Erasing ${phase.replace(/_/g, ' ')}`
+}
+
 function DeleteProgress({ unit }: { unit: BusinessUnit }) {
   const purge = unit.purge
-  return <div className="panel delete-progress" role="status" aria-live="polite"><h2>Deleting {unit.name}…</h2><p>{purge?.phase ? `Erasing ${purge.phase.replace(/_/g, ' ')}` : 'Waiting to start'} · {plural(purge?.rows ?? 0, 'row')} erased so far.</p><p className="muted">EdgeWatch erases the unit in small batches. You can leave this page: the deletion continues in the background and resumes after a restart.</p></div>
+  return <div className="panel delete-progress" role="status" aria-live="polite"><h2>Deleting {unit.name}…</h2><p>{purgeActivity(purge?.phase)} · {plural(purge?.rows ?? 0, 'row')} erased so far.</p><p className="muted">EdgeWatch erases the unit in small batches, then compacts the search indexes and truncates the database log, which a running backup can delay. You can leave this page: the deletion continues in the background and resumes after a restart.</p></div>
 }
 
 function DeletedNotice({ unit }: { unit: BusinessUnit }) {

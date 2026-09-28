@@ -221,12 +221,14 @@ func run(args []string) error {
 	}
 	// scan, status, history, baseline, and notify test act on the jobs,
 	// scans, baselines, and destinations of the business unit that --tenant
-	// names, or of the default unit without it. The daemon, backup, verify,
-	// and health work on the whole database, and admin recovery above works
-	// in the unit of the account it changes.
-	tenant := s.Tenant(store.DefaultTenantScope())
-	if tenantSlug != "" {
-		if tenant, err = hostUnitStore(context.Background(), s, tenantSlug, cmd, action); err != nil {
+	// names, or of the default unit without it, and the unit's state limits
+	// them alike either way. The daemon, backup, verify, and health work on
+	// the whole database, and admin recovery above works in the unit of the
+	// account it changes.
+	var unit store.Tenant
+	var tenant *store.TenantStore
+	if acceptsTenant(cmd, action) {
+		if unit, tenant, err = hostUnitStore(context.Background(), s, tenantSlug, cmd, action); err != nil {
 			return err
 		}
 	}
@@ -262,7 +264,7 @@ func run(args []string) error {
 		}
 		return err
 	case "status":
-		return status(ctx, tenant, cfg, *jobName, *output)
+		return status(ctx, tenant, unit.State, cfg, *jobName, *output)
 	case "history":
 		scans, err := tenant.ListScans(ctx, *jobName, *limit)
 		if err != nil {
@@ -620,13 +622,15 @@ func normalizedConfig(cfg *config.Config) map[string]any {
 	return map[string]any{"valid": true, "version": cfg.Version, "database": cfg.Database, "timezone": cfg.Timezone, "web_listen": cfg.Web.Listen, "log_level": cfg.LogLevel(), "max_probe_count": cfg.Scheduler.MaxProbeCount, "max_naabu_probe_count": cfg.Scheduler.MaxNaabuProbeCount, "target_exclusions": append([]string(nil), cfg.Scanner.TargetExclusions...), "rdap_enabled": cfg.RDAPEnabled(), "updates_enabled": cfg.UpdatesEnabled(), "jobs": jobs, "legacy_jobs_inactive": len(jobs) > 0, "notification_destinations": len(cfg.Notifications.URLs)}
 }
 
-// status reports the managed jobs of the tenant of ts, followed by the
-// inactive legacy YAML jobs that no managed job of that tenant replaces.
-func status(ctx context.Context, ts *store.TenantStore, cfg *config.Config, filter, output string) error {
+// status reports the managed jobs of the tenant of ts, whose state is
+// unitState, followed by the inactive legacy YAML jobs that no managed job
+// of that tenant replaces.
+func status(ctx context.Context, ts *store.TenantStore, unitState string, cfg *config.Config, filter, output string) error {
 	type row struct {
 		Name string `json:"name"`
-		// State is scheduled, paused, archived, or legacy (an inactive YAML
-		// job). Only scheduled jobs run on their schedule and have a NextRun.
+		// State is scheduled, paused, archived, unit_disabled (an enabled job
+		// of a disabled business unit), or legacy (an inactive YAML job).
+		// Only scheduled jobs run on their schedule and have a NextRun.
 		State               string `json:"state"`
 		Schedule            string `json:"schedule"`
 		Timezone            string `json:"timezone"`
@@ -666,14 +670,15 @@ func status(ctx context.Context, ts *store.TenantStore, cfg *config.Config, filt
 		} else if state.BaselineConfigHash != record.Job.SecurityHash() {
 			progress = fmt.Sprintf("updating %d/%d", state.CandidateCount, record.Job.Baseline.Samples)
 		}
-		entry := row{Name: record.Job.Name, State: managedJobState(record), Schedule: record.Job.Schedule, Timezone: record.Job.Timezone, BaselineScanID: state.BaselineScanID, BaselineProgress: progress, ActiveIncidents: len(state.Incidents), ConsecutiveFailures: state.ConsecutiveFailures, FailedDeliveries: failedDeliveries}
+		entry := row{Name: record.Job.Name, State: managedJobState(record, unitState), Schedule: record.Job.Schedule, Timezone: record.Job.Timezone, BaselineScanID: state.BaselineScanID, BaselineProgress: progress, ActiveIncidents: len(state.Incidents), ConsecutiveFailures: state.ConsecutiveFailures, FailedDeliveries: failedDeliveries}
 		if scans, listErr := ts.ListJobScans(ctx, record.ID, 1); listErr != nil {
 			return listErr
 		} else if len(scans) == 1 {
 			entry.LastScanID, entry.LastScanStatus = scans[0].ID, scans[0].Status
 			entry.LastScanFinished = statusTime(scans[0].FinishedAt, display)
 		}
-		// The daemon schedules only enabled, non-archived managed jobs.
+		// The daemon schedules only the enabled, non-archived managed jobs of
+		// an active unit.
 		if entry.State == jobStateScheduled {
 			location := statusLocation(record.Job.Timezone)
 			parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
@@ -725,22 +730,27 @@ func status(ctx context.Context, ts *store.TenantStore, cfg *config.Config, filt
 }
 
 // Job states reported by the status command. They match the console's job
-// labels, plus legacy for inactive YAML definitions.
+// labels, plus unit_disabled for the enabled jobs of a disabled business
+// unit and legacy for inactive YAML definitions.
 const (
-	jobStateScheduled = "scheduled"
-	jobStatePaused    = "paused"
-	jobStateArchived  = "archived"
-	jobStateLegacy    = "legacy"
+	jobStateScheduled    = "scheduled"
+	jobStatePaused       = "paused"
+	jobStateArchived     = "archived"
+	jobStateUnitDisabled = "unit_disabled"
+	jobStateLegacy       = "legacy"
 )
 
-// managedJobState mirrors the scheduler: archived jobs never run, and paused
-// (disabled) jobs run only on demand.
-func managedJobState(record store.JobRecord) string {
+// managedJobState mirrors the scheduler: archived jobs never run, paused
+// (disabled) jobs run only on demand, and the other jobs of a unit whose
+// state is unitState run on their schedule only while the unit is active.
+func managedJobState(record store.JobRecord, unitState string) string {
 	switch {
 	case record.Archived:
 		return jobStateArchived
 	case !record.Enabled:
 		return jobStatePaused
+	case unitState != store.TenantStateActive:
+		return jobStateUnitDisabled
 	default:
 		return jobStateScheduled
 	}

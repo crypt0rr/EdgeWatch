@@ -227,8 +227,8 @@ func TestRunUpdateCheckCoversPersistenceFailureBranches(t *testing.T) {
 	}
 	a.Logger = nil
 	a.runUpdateCheck(ctx)
-	if got := routedDestinations(a.updateAlertRoutes(ctx)); got != nil {
-		t.Fatal("closed store returned update destinations")
+	if routes, err := a.updateAlertRoutes(ctx); err == nil || routes != nil {
+		t.Fatalf("closed store returned update alert routes %+v, %v; want an error", routes, err)
 	}
 
 	// Readable update routing with destinations that cannot be read
@@ -240,8 +240,8 @@ func TestRunUpdateCheckCoversPersistenceFailureBranches(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Logger = nil
-	if got := routedDestinations(a.updateAlertRoutes(ctx)); got != nil {
-		t.Fatal("unavailable notifier returned update destinations")
+	if routes, err := a.updateAlertRoutes(ctx); err != nil || routedDestinations(routes) != nil {
+		t.Fatalf("unavailable notifier returned update alert routes %+v, %v; want routes without destinations", routes, err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatal(err)

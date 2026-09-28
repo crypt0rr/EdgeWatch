@@ -632,7 +632,8 @@ account then enrols again.
   business units: until its administrators save a selection, it sends update
   alerts to all of its enabled destinations. The platform's copy goes only to
   the platform destinations selected there; none are selected until a
-  platform administrator chooses them.
+  platform administrator chooses them. When an update check cannot read the
+  list of units, it records no copy, and a later check records every copy.
 - **Scanner profiles:** the built-in profiles are shared and read-only. Custom
   profiles belong to the unit that created them.
 - **Public status:** each unit's administrators publish its page at
@@ -868,7 +869,9 @@ act on the default business unit. `--tenant UNIT_SLUG` makes them act on that
 unit's jobs, scans, baselines, and destinations instead, and record their
 audit entries in that unit. A disabled unit can still be read with `status`,
 `history`, and `baseline export`; the other commands refuse it until it is
-enabled, and every command refuses a unit that is being deleted.
+enabled, and every command refuses a unit that is being deleted. These rules
+apply to the default unit with or without `--tenant`, even after it is
+renamed.
 `admin reset-password` and `admin disable-totp` find the account by
 `--username` in any unit; they print the account's unit and role before they
 act, and `--tenant UNIT_SLUG` makes them stop without a change unless the
@@ -884,8 +887,10 @@ when a send fails or when an enabled web-managed destination is locked because
 its notification key is missing, replaced, or unreadable, so it can confirm a
 restored key. Paused destinations are not tested.
 
-Each `status` row has a `state`: `scheduled`, `paused`, `archived`, or `legacy`
-for an inactive YAML job. Only scheduled jobs have a `next_run`. Commands print
+Each `status` row has a `state`: `scheduled`, `paused`, `archived`,
+`unit_disabled` for an enabled job of a disabled unit, which is off the
+schedule until the unit is enabled, or `legacy` for an inactive YAML job.
+Only scheduled jobs have a `next_run`. Commands print
 their result on stdout and write log lines to stderr, so `--output json` output
 can be piped straight into a JSON parser. Only the daemon logs to stdout.
 

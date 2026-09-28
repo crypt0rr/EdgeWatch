@@ -59,21 +59,33 @@ func checkTenantFlag(fs *flag.FlagSet, cmd, action, slug string) (string, error)
 // hostUnit returns the business unit whose slug is slug, and its scope. A
 // deleted unit has no slug.
 func hostUnit(ctx context.Context, s *store.Store, slug string) (store.Tenant, store.TenantScope, error) {
+	return findHostUnit(ctx, s, func(unit store.Tenant) bool { return unit.Slug == slug }, fmt.Errorf("unknown business unit %q", slug))
+}
+
+// defaultHostUnit returns the default business unit and its scope. It finds
+// the unit by its fixed ID, because the unit can be renamed.
+func defaultHostUnit(ctx context.Context, s *store.Store) (store.Tenant, store.TenantScope, error) {
+	return findHostUnit(ctx, s, func(unit store.Tenant) bool { return unit.ID == store.DefaultTenantID }, errors.New("the default business unit is missing"))
+}
+
+// findHostUnit returns the business unit that match selects among those
+// that are not deleted, and its scope, or notFound when there is none.
+func findHostUnit(ctx context.Context, s *store.Store, match func(store.Tenant) bool, notFound error) (store.Tenant, store.TenantScope, error) {
 	units, err := s.Platform().Tenants(ctx)
 	if err != nil {
 		return store.Tenant{}, store.TenantScope{}, err
 	}
 	for _, unit := range units {
-		if unit.Slug != slug {
+		if !match(unit) {
 			continue
 		}
 		scope, err := s.TenantScopeByID(ctx, unit.ID)
 		if err != nil {
-			return store.Tenant{}, store.TenantScope{}, fmt.Errorf("business unit %q: %w", slug, err)
+			return store.Tenant{}, store.TenantScope{}, fmt.Errorf("business unit %q: %w", unit.Slug, err)
 		}
 		return unit, scope, nil
 	}
-	return store.Tenant{}, store.TenantScope{}, fmt.Errorf("unknown business unit %q", slug)
+	return store.Tenant{}, store.TenantScope{}, notFound
 }
 
 // tenantCommandReads reports whether a host command that takes --tenant
@@ -82,27 +94,36 @@ func tenantCommandReads(cmd, action string) bool {
 	return cmd == "status" || cmd == "history" || (cmd == "baseline" && action == "export")
 }
 
-// hostUnitStore returns the store of the business unit that a host command
-// named with --tenant. A unit that is being deleted is refused, because its
+// hostUnitStore returns the business unit that a host command acts on, the
+// one that --tenant named by its slug or the default unit when slug is "",
+// and the unit's store. A unit that is being deleted is refused, because its
 // data is being erased. A disabled unit is paused: its data can be read, but
 // a command that scans, changes a baseline or sends a notification is
-// refused until the unit is enabled again.
-func hostUnitStore(ctx context.Context, s *store.Store, slug, cmd, action string) (*store.TenantStore, error) {
-	unit, scope, err := hostUnit(ctx, s, slug)
+// refused until the unit is enabled again. The default unit follows these
+// rules with or without --tenant.
+func hostUnitStore(ctx context.Context, s *store.Store, slug, cmd, action string) (store.Tenant, *store.TenantStore, error) {
+	var unit store.Tenant
+	var scope store.TenantScope
+	var err error
+	if slug == "" {
+		unit, scope, err = defaultHostUnit(ctx, s)
+	} else {
+		unit, scope, err = hostUnit(ctx, s, slug)
+	}
 	if err != nil {
-		return nil, err
+		return store.Tenant{}, nil, err
 	}
 	name := strings.TrimSpace(cmd + " " + action)
 	switch unit.State {
 	case store.TenantStateActive:
 	case store.TenantStateDisabled:
 		if !tenantCommandReads(cmd, action) {
-			return nil, fmt.Errorf("business unit %q is disabled; enable it before running %s", slug, name)
+			return store.Tenant{}, nil, fmt.Errorf("business unit %q is disabled; enable it before running %s", unit.Slug, name)
 		}
 	default:
-		return nil, fmt.Errorf("business unit %q is being deleted; %s cannot use it", slug, name)
+		return store.Tenant{}, nil, fmt.Errorf("business unit %q is being deleted; %s cannot use it", unit.Slug, name)
 	}
-	return s.Tenant(scope), nil
+	return unit, s.Tenant(scope), nil
 }
 
 // confirmAccountUnit runs before a recovery command changes the account.

@@ -1360,10 +1360,14 @@ func (a *App) Daemon(ctx context.Context) error {
 // tenant's copy follows that tenant's update routing to its own
 // destinations. A tenant whose routing cannot be resolved still gets its
 // copy, without destinations, as the platform's copy does when the platform
-// routing cannot be read. The platform's route comes first.
-func (a *App) updateAlertRoutes(ctx context.Context) []store.UpdateAlertRoute {
+// routing cannot be read. The platform's route comes first. When the active
+// tenants cannot be listed, it returns an error instead: the caller then
+// leaves the alert unannounced, so that the next update check records every
+// copy, because an alert announced with the platform's copy alone would
+// never reach the tenants.
+func (a *App) updateAlertRoutes(ctx context.Context) ([]store.UpdateAlertRoute, error) {
 	if a.Store == nil {
-		return nil
+		return nil, nil
 	}
 	logger := a.Logger
 	if logger == nil {
@@ -1377,18 +1381,17 @@ func (a *App) updateAlertRoutes(ctx context.Context) []store.UpdateAlertRoute {
 			logger.Warn("platform update notification destinations unavailable", "error", err)
 		}
 	}
-	routes := []store.UpdateAlertRoute{platform}
 	scopes, err := a.Store.System().ActiveTenantScopes(ctx)
 	if err != nil {
-		logger.Warn("business units unavailable for the update alert", "error", err)
-		return routes
+		return nil, fmt.Errorf("business units unavailable for the update alert: %w", err)
 	}
+	routes := []store.UpdateAlertRoute{platform}
 	for _, scope := range scopes {
 		route := store.UpdateAlertRoute{TenantID: scope.ID()}
 		route.Destinations = a.tenantUpdateDestinations(ctx, logger, a.Store.Tenant(scope))
 		routes = append(routes, route)
 	}
-	return routes
+	return routes, nil
 }
 
 // tenantUpdateDestinations resolves a tenant's update routing to the queue
@@ -1458,11 +1461,15 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 				releaseURL = updatecheck.ReleasePageURL(current)
 			}
 			var routes []store.UpdateAlertRoute
+			var routesErr error
 			if notifyUpgrade {
-				routes = a.updateAlertRoutes(ctx)
+				routes, routesErr = a.updateAlertRoutes(ctx)
 			}
-			events, recordErr := a.Store.Platform().RecordInstalledVersion(ctx, current, releaseURL, notifyUpgrade, routes)
-			if recordErr != nil {
+			if routesErr != nil {
+				// Keep the previous installed version, so the next check
+				// still sees the upgrade and records every copy of its alert.
+				logger.Warn("application upgrade alert postponed to the next update check", "error", routesErr)
+			} else if events, recordErr := a.Store.Platform().RecordInstalledVersion(ctx, current, releaseURL, notifyUpgrade, routes); recordErr != nil {
 				logger.Warn("application version state update failed", "error", recordErr)
 			} else if len(events) > 0 {
 				a.emitUpdateAlert(events)
@@ -1503,10 +1510,18 @@ func (a *App) runUpdateCheck(ctx context.Context) {
 		release.URL = updatecheck.ReleasePageURL(release.Version)
 	}
 	var routes []store.UpdateAlertRoute
+	announce, etag := newer, result.ETag
 	if newer {
-		routes = a.updateAlertRoutes(ctx)
+		var routesErr error
+		if routes, routesErr = a.updateAlertRoutes(ctx); routesErr != nil {
+			// Store the release unannounced and without its ETag, so the next
+			// check gets the release again instead of NotModified and records
+			// every copy of its alert.
+			logger.Warn("application update alert postponed to the next update check", "error", routesErr)
+			announce, etag = false, ""
+		}
 	}
-	events, recordErr := a.Store.Platform().RecordReleaseCheck(ctx, current, release.Version, release.URL, release.Name, release.PublishedAt, result.ETag, newer, routes)
+	events, recordErr := a.Store.Platform().RecordReleaseCheck(ctx, current, release.Version, release.URL, release.Name, release.PublishedAt, etag, announce, routes)
 	if recordErr != nil {
 		logger.Warn("application release state update failed", "error", recordErr)
 		return

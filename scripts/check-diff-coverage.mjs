@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process'
+import { realpathSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
+import { posix, relative, sep } from 'node:path'
 
 const args = process.argv.slice(2)
 const valueFor = (name, fallback) => {
@@ -83,10 +85,47 @@ function isProductionFile(file) {
   return file.endsWith('.go') && !file.endsWith('_test.go')
 }
 
+// The Go cover tool instruments function bodies only, so a file that holds
+// only package-level declarations never appears in the profile even when its
+// package ran. `go list` maps each repository file to the package that
+// compiles it on this platform, so such a file can be judged by whether its
+// package took part in the coverage run. Any failure leaves the inventory
+// empty, which keeps those files failing.
+function goFileInventory() {
+  const files = new Map()
+  try {
+    const root = realpathSync(execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim())
+    const output = execFileSync('go', ['list', '-e', '-json=ImportPath,Dir,GoFiles,CgoFiles,IgnoredGoFiles', './...'], {
+      cwd: root,
+      encoding: 'utf8',
+      maxBuffer: 256 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim()
+    // `go list -json` prints one top-level object per package; nested values
+    // are indented, so only package boundaries start a line with `}` or `{`.
+    const packages = output ? JSON.parse(`[${output.replace(/^\}\n\{$/gm, '},{')}]`) : []
+    for (const pkg of packages) {
+      if (!pkg.Dir || !pkg.ImportPath) continue
+      const directory = relative(root, realpathSync(pkg.Dir)).split(sep).join('/')
+      for (const name of [...(pkg.GoFiles ?? []), ...(pkg.CgoFiles ?? [])]) {
+        files.set(posix.join(directory, name), { importPath: pkg.ImportPath, compiled: true })
+      }
+      for (const name of pkg.IgnoredGoFiles ?? []) {
+        files.set(posix.join(directory, name), { importPath: pkg.ImportPath, compiled: false })
+      }
+    }
+  } catch (error) {
+    const detail = `${error.stderr ?? ''}`.trim().split('\n')[0] || error.message.split('\n')[0]
+    return { files: new Map(), error: detail }
+  }
+  return { files, error: '' }
+}
+
 const productionChanges = [...changed.entries()].filter(([file]) => isProductionFile(file))
 let executable = 0
 let covered = 0
 const missingCoverage = []
+const statementFree = []
 
 // A documentation-only change should be an explicit no-op, not an accidental
 // 100% result caused by comparing a push to itself. Keeping the skipped file
@@ -126,10 +165,28 @@ if (language === 'frontend') {
     const match = line.match(/^(.+\.go):(\d+)\.\d+,(\d+)\.\d+\s+\d+\s+(\d+)$/)
     if (match) entries.push({ file: match[1], start: Number(match[2]), end: Number(match[3]), count: Number(match[4]) })
   }
+  // Profile entries name files by import path, so a package took part in the
+  // run exactly when some entry's directory equals its import path.
+  const profiledPackages = new Set(entries.map((entry) => entry.file.slice(0, entry.file.lastIndexOf('/'))))
+  let inventory
   for (const [file, lines] of productionChanges) {
     const ranges = entries.filter((entry) => entry.file === file || entry.file.endsWith(`/${file}`))
     if (!ranges.length) {
-      missingCoverage.push(`${file}: no Go coverage entry`)
+      inventory ??= goFileInventory()
+      const owner = inventory.files.get(file)
+      if (inventory.error) {
+        missingCoverage.push(`${file}: no Go coverage entry; go list failed: ${inventory.error}`)
+      } else if (!owner) {
+        missingCoverage.push(`${file}: no Go coverage entry; no package in the module compiles it`)
+      } else if (!owner.compiled) {
+        missingCoverage.push(`${file}: no Go coverage entry; build constraints exclude it from ${owner.importPath} on this platform`)
+      } else if (!profiledPackages.has(owner.importPath)) {
+        missingCoverage.push(`${file}: no Go coverage entry; package ${owner.importPath} is missing from the coverage run`)
+      } else {
+        // The package ran, yet the cover tool found no statement in this
+        // file: it holds only declarations, so none of its lines execute.
+        statementFree.push(`${file}: no executable statements in ${owner.importPath}`)
+      }
       continue
     }
     for (const line of lines) {
@@ -145,6 +202,7 @@ if (language === 'frontend') {
 
 const percent = executable ? (covered / executable) * 100 : 100
 console.log(`diff coverage (${language}): ${covered}/${executable} executable changed lines (${percent.toFixed(2)}%)`)
+for (const note of statementFree) console.log(`diff coverage (${language}): ${note}`)
 if (missingCoverage.length) {
   console.error('diff coverage gate failed:')
   for (const failure of missingCoverage) console.error(`- ${failure}`)

@@ -300,7 +300,13 @@ Important defaults:
   Configure the proxy network and forwarding header when you need per-client
   rate limits and audit identities. EdgeWatch logs a startup warning when
   approved proxy hosts lack trusted client-IP forwarding.
-- Loopback, link-local, and cloud metadata addresses are excluded by default.
+- By default, scanner.target_exclusions covers the loopback and link-local
+  ranges 127.0.0.0/8, ::1/128, 169.254.0.0/16, and fe80::/10. The IPv4
+  link-local range includes the 169.254.169.254 cloud metadata endpoint. Other
+  metadata endpoints are not excluded by default; add the ones your provider
+  uses, such as fd00:ec2::254/128 on AWS with the IPv6 instance metadata
+  endpoint enabled or 100.100.100.200/32 on Alibaba Cloud. An explicit list
+  replaces the defaults, so keep the default ranges when you add entries.
   Change scanner.target_exclusions only when you understand the host-network
   exposure.
 - RDAP is enabled by default and is requested only when an authenticated user

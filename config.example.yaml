@@ -43,8 +43,12 @@ scheduler:
 log:
   level: info
 
-# EdgeWatch uses host networking for scanner reachability. By default it
-# refuses loopback and link-local targets, including cloud metadata addresses.
+# EdgeWatch uses host networking for scanner reachability. The list below is
+# the default: it refuses loopback and link-local targets, and the IPv4
+# link-local range includes the 169.254.169.254 cloud metadata endpoint. Other
+# metadata endpoints are not excluded by default. Add the ones your provider
+# uses, such as fd00:ec2::254/128 (AWS IPv6 instance metadata) or
+# 100.100.100.200/32 (Alibaba Cloud). An explicit list replaces the defaults.
 # Set target_exclusions: [] only when an administrator has deliberately
 # accepted the risk and needs to monitor the host's own local surface.
 scanner:

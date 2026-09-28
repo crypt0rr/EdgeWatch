@@ -214,7 +214,7 @@ func (ps *PlatformStore) CreateTenant(ctx context.Context, name, slug string, li
 		return TenantRecord{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := tenantNameAndSlugFreeTx(ctx, tx, "", name, slug); err != nil {
+	if err := tenantNameAndSlugFreeTx(ctx, tx, "", "", name, slug); err != nil {
 		return TenantRecord{}, err
 	}
 	now := time.Now().UTC()
@@ -259,7 +259,7 @@ func (ps *PlatformStore) RenameTenant(ctx context.Context, id string, expectedRe
 	if current.Name == name && current.Slug == slug {
 		return current, nil
 	}
-	if err := tenantNameAndSlugFreeTx(ctx, tx, id, name, slug); err != nil {
+	if err := tenantNameAndSlugFreeTx(ctx, tx, id, current.Name, name, slug); err != nil {
 		return TenantRecord{}, err
 	}
 	now := time.Now().UTC()
@@ -426,19 +426,52 @@ func updateTenantTx(ctx context.Context, tx *sql.Tx, current TenantRecord, assig
 
 // tenantNameAndSlugFreeTx refuses a name or a slug that a tenant other than
 // id, and not deleted, already uses. The name is compared without regard to
-// case, by the column's collation.
-func tenantNameAndSlugFreeTx(ctx context.Context, tx *sql.Tx, id, name, slug string) error {
-	var nameUsed, slugUsed int
-	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tenants WHERE name=?1 AND state<>'deleted' AND id<>?3),EXISTS(SELECT 1 FROM tenants WHERE slug=?2 AND state<>'deleted' AND id<>?3)`, name, slug, id).Scan(&nameUsed, &slugUsed); err != nil {
+// case by tenantNameUsedTx; currentName is the tenant's own name, which it
+// keeps, or "" for a new tenant.
+func tenantNameAndSlugFreeTx(ctx context.Context, tx *sql.Tx, id, currentName, name, slug string) error {
+	if name != currentName {
+		used, err := tenantNameUsedTx(ctx, tx, id, name)
+		if err != nil {
+			return err
+		}
+		if used {
+			return NewValidationError(ErrTenantNameInUse)
+		}
+	}
+	var slugUsed int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tenants WHERE slug=? AND state<>'deleted' AND id<>?)`, slug, id).Scan(&slugUsed); err != nil {
 		return err
 	}
-	switch {
-	case nameUsed != 0:
-		return NewValidationError(ErrTenantNameInUse)
-	case slugUsed != 0:
+	if slugUsed != 0 {
 		return NewValidationError(ErrTenantSlugInUse)
 	}
 	return nil
+}
+
+// tenantNameUsedTx reports whether a tenant other than id, and not deleted,
+// has the name without regard to case. The names are compared with
+// strings.EqualFold, which folds the case of every letter, such as Ä and ä,
+// letter by letter, so ß and ss stay different. The NOCASE collation of the
+// name column, and so the unique index on live names, folds only A-Z; the
+// index stays the backstop for a write that the check does not see. The
+// store's single writer connection runs the check and the write in one
+// transaction, so no write of the daemon races it.
+func tenantNameUsedTx(ctx context.Context, tx *sql.Tx, id, name string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT name FROM tenants WHERE state<>'deleted' AND id<>?`, id)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var other string
+		if err := rows.Scan(&other); err != nil {
+			return false, err
+		}
+		if strings.EqualFold(other, name) {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // tenantUniqueError maps a violation of the unique indexes on live tenant

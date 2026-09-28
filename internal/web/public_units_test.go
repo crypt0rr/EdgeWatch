@@ -315,3 +315,110 @@ func TestPublicPageSaveKeepsOtherUnitsCache(t *testing.T) {
 		t.Fatalf("default page built during tenant B's save = %d (builds %d): %s", rec.Code, builds, rec.Body.String())
 	}
 }
+
+// setUnitPaused disables the unit with the ID, or enables it again, through
+// the application, as the platform console does.
+func (f publicTenantFixture) setUnitPaused(t *testing.T, id string, paused bool) {
+	t.Helper()
+	ctx := context.Background()
+	record, err := f.db.Platform().GetTenant(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change := f.server.App.EnableUnit
+	if paused {
+		change = f.server.App.DisableUnit
+	}
+	if _, err := change(ctx, id, record.Revision, store.AuditEntry{}); err != nil {
+		t.Fatalf("pause %s = %v: %v", id, paused, err)
+	}
+}
+
+// Disabling a unit drops its public page from the cache at once. The legacy
+// URL and the slug URL of the default unit, and the slug URL of another
+// unit, answer as a page that is not enabled on the next request, although
+// each page was cached just before. Enabling the unit serves its page again.
+func TestDisabledUnitPublicPageIsNotServedFromCache(t *testing.T) {
+	ctx := context.Background()
+	f := newPublicTenantFixture(t)
+	scopeB, err := f.db.PublicScopeBySlug(ctx, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pages := []struct{ path, want string }{
+		{"/api/public/v1/dashboard", publicTenantAPage},
+		{"/api/public/v1/dashboard/default", publicTenantAPage},
+		{"/api/public/v1/dashboard/other", publicTenantBPage},
+	}
+	client := 0
+	check := func(label string, published bool) {
+		t.Helper()
+		for _, page := range pages {
+			client++
+			rec := f.getPublicPath(page.path, fmt.Sprintf("198.51.100.90:%d", 1000+client))
+			switch {
+			case published && (rec.Code != http.StatusOK || rec.Body.String() != page.want):
+				t.Fatalf("%s: %s = %d: %s", label, page.path, rec.Code, rec.Body.String())
+			case !published && (rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), `"public_disabled"`)):
+				t.Fatalf("%s: %s = %d: %s", label, page.path, rec.Code, rec.Body.String())
+			}
+		}
+	}
+	check("before the pause", true)
+	for _, scope := range []store.PublicScope{store.DefaultPublicScope(), scopeB} {
+		if _, ok := f.server.cachedPublicPageResponse(scope); !ok {
+			t.Fatalf("page of %s was not cached", scope.TenantID())
+		}
+	}
+
+	f.setUnitPaused(t, store.DefaultTenantID, true)
+	f.setUnitPaused(t, publicTenantB, true)
+	check("after the pause", false)
+	// Neither page is kept for the time the unit is paused.
+	for _, scope := range []store.PublicScope{store.DefaultPublicScope(), scopeB} {
+		if payload, ok := f.server.cachedPublicPageResponse(scope); ok {
+			t.Fatalf("page of %s stayed cached after the pause: %s", scope.TenantID(), payload)
+		}
+	}
+
+	f.setUnitPaused(t, store.DefaultTenantID, false)
+	f.setUnitPaused(t, publicTenantB, false)
+	check("after enabling", true)
+}
+
+// A build of the default unit's page that is in flight when the unit is
+// disabled neither returns the page nor caches it: the request that started
+// the build and every later request, on either URL, answer as a page that is
+// not enabled. Enabling the unit serves its page again.
+func TestPublicBuildInFlightWhenTheUnitIsDisabledIsDiscarded(t *testing.T) {
+	f := newPublicTenantFixture(t)
+	started, release, calls := blockFirstPublicBuild(f.server)
+	inFlight := make(chan *httptest.ResponseRecorder, 1)
+	go func() { inFlight <- f.getPublicPath("/api/public/v1/dashboard", "198.51.100.91:1000") }()
+	<-started
+
+	f.setUnitPaused(t, store.DefaultTenantID, true)
+	close(release)
+	disabled := func(label string, rec *httptest.ResponseRecorder) {
+		t.Helper()
+		if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), `"public_disabled"`) || strings.Contains(rec.Body.String(), "Tenant A status") {
+			t.Fatalf("%s = %d: %s", label, rec.Code, rec.Body.String())
+		}
+	}
+	disabled("request whose build was in flight at the pause", awaitPublicResponse(t, inFlight))
+	if payload, ok := f.server.cachedPublicPageResponse(store.DefaultPublicScope()); ok {
+		t.Fatalf("the build in flight at the pause cached the page: %s", payload)
+	}
+	for i, path := range []string{"/api/public/v1/dashboard", "/api/public/v1/dashboard/default", "/api/public/v1/dashboard"} {
+		disabled(fmt.Sprintf("request %d after the pause, %s", i+1, path), f.getPublicPath(path, fmt.Sprintf("198.51.100.92:%d", 1000+i)))
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("builds while the unit was disabled = %d, want only the one in flight at the pause", got)
+	}
+
+	f.setUnitPaused(t, store.DefaultTenantID, false)
+	rec := f.getPublicPath("/api/public/v1/dashboard", "198.51.100.93:1000")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"title":"Tenant A status"`) {
+		t.Fatalf("page after enabling the unit = %d: %s", rec.Code, rec.Body.String())
+	}
+}

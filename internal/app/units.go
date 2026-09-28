@@ -135,9 +135,9 @@ func (a *App) pauseUnit(id string) {
 // SetUnitPausedHandler registers an optional sink that is told the ID of
 // each business unit that DisableUnit or RequestUnitDeletion pauses in this
 // process, after the store has committed the pause. The web console uses it
-// to end the unit's live-update streams at once, whichever caller paused
-// the unit. Like SetEventHandler it is a callback, so the application stays
-// independent of HTTP.
+// to end the unit's live-update streams and drop its cached public page at
+// once, whichever caller paused the unit. Like SetEventHandler it is a
+// callback, so the application stays independent of HTTP.
 func (a *App) SetUnitPausedHandler(handler func(tenantID string)) {
 	a.eventMu.Lock()
 	a.unitPausedHandler = handler

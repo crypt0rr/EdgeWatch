@@ -167,11 +167,14 @@ unit's capacity, is recorded in that unit's security audit with the
 `platform` actor kind, so the unit's administrators see it. The unit's
 lifecycle changes, the platform administrator's other actions, sign-in
 attempts on its account, and sign-in attempts with a username that no
-account has are recorded in platform scope, outside every unit's audit. A
-unit's administrators read their unit's audit, which hides the source address
-of a platform administrator's actions; the platform audit shows the records
-in platform scope and every unit's account and platform records, never a
-unit's data records. Both views are read-only.
+account has are recorded in platform scope, outside every unit's audit. The
+record that a sign-in, password confirmation, or TOTP confirmation became
+rate limited follows the same rule: it belongs to the unit of the account it
+names, or to platform scope for a platform administrator or an unknown
+username. A unit's administrators read their unit's audit, which hides the
+source address of a platform administrator's actions; the platform audit
+shows the records in platform scope and every unit's account and platform
+records, never a unit's data records. Both views are read-only.
 
 Disabling a unit ends its sessions and revokes its open invitations in the
 same transaction; from then on its accounts cannot sign in or redeem a link,

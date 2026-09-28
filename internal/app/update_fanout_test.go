@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"database/sql"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"sync"
@@ -170,6 +172,108 @@ func TestNewBusinessUnitGetsNoUpdateAlertsUntilItSelectsDestinations(t *testing.
 	}
 }
 
+// conditionalReleaseChecker answers as the release API does: a request
+// that sends the ETag of its release gets NotModified, and any other gets
+// the release with that ETag.
+type conditionalReleaseChecker struct {
+	release updatecheck.Release
+	etag    string
+}
+
+func (c *conditionalReleaseChecker) Check(_ context.Context, etag string) (updatecheck.Result, error) {
+	if etag != "" && etag == c.etag {
+		return updatecheck.Result{NotModified: true, ETag: c.etag}, nil
+	}
+	return updatecheck.Result{Release: c.release, ETag: c.etag}, nil
+}
+
+// withoutUnitList points the store's read pool at a copy of the database
+// that has no tenants table, until the returned function restores the pool.
+// The update state and the platform routing can still be read, and writes
+// still go to the database, but the business units cannot be listed.
+func withoutUnitList(t *testing.T, db *store.Store) func() {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "without-units.db")
+	if _, err := db.DB.Exec(`VACUUM INTO ?`, path); err != nil {
+		t.Fatal(err)
+	}
+	copied, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := copied.Exec(`DROP TABLE tenants`); err != nil {
+		_ = copied.Close()
+		t.Fatal(err)
+	}
+	readDB := db.ReadDB
+	db.ReadDB = copied
+	restore := func() {
+		if db.ReadDB == copied {
+			db.ReadDB = readDB
+			_ = copied.Close()
+		}
+	}
+	t.Cleanup(restore)
+	return restore
+}
+
+// When the business units cannot be listed, an update alert is not
+// announced with the platform's copy alone, which would keep every unit
+// from ever getting its copy. The check stores the release without
+// announcing it, and the next check, although the release is unchanged,
+// records the platform's copy and each active unit's copy once. An upgrade
+// of the installed build waits for the next check the same way.
+func TestUpdateAlertWaitsUntilTheBusinessUnitsCanBeListed(t *testing.T) {
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	copies := func(eventType string) []string {
+		t.Helper()
+		return queryColumn(t, f.db, `SELECT COALESCE(tenant_id,'platform') FROM events WHERE type='`+eventType+`' ORDER BY 1`)
+	}
+	everyCopy := []string{store.DefaultTenantID, secondTenantID, "platform"}
+	a.Version = "v1.0.0"
+	a.ReleaseChecker = &fakeReleaseChecker{result: updatecheck.Result{NotModified: true}}
+	a.runUpdateCheck(ctx)
+
+	a.ReleaseChecker = &conditionalReleaseChecker{release: updatecheck.Release{Version: "v1.1.0"}, etag: `"v1.1.0"`}
+	restore := withoutUnitList(t, f.db)
+	a.runUpdateCheck(ctx)
+	restore()
+	if got := copies("application-update-available"); len(got) != 0 {
+		t.Fatalf("update alert copies while the units could not be listed = %v, want none", got)
+	}
+	if state, err := f.db.Platform().GetApplicationUpdateState(ctx); err != nil || state.LatestVersion != "v1.1.0" || state.AnnouncedAvailableVersion != "" {
+		t.Fatalf("release state while the units could not be listed = %+v, %v; want v1.1.0 stored and not announced", state, err)
+	}
+	for range 2 {
+		a.runUpdateCheck(ctx)
+		if got := copies("application-update-available"); !slices.Equal(got, everyCopy) {
+			t.Fatalf("update alert copies after a healthy check = %v, want %v", got, everyCopy)
+		}
+	}
+
+	a.Version = "v1.1.0"
+	restore = withoutUnitList(t, f.db)
+	a.runUpdateCheck(ctx)
+	restore()
+	if got := copies("application-updated"); len(got) != 0 {
+		t.Fatalf("upgrade alert copies while the units could not be listed = %v, want none", got)
+	}
+	if state, err := f.db.Platform().GetApplicationUpdateState(ctx); err != nil || state.InstalledVersion != "v1.0.0" || state.AnnouncedUpgradeVersion != "" {
+		t.Fatalf("installed version state while the units could not be listed = %+v, %v; want the upgrade still pending", state, err)
+	}
+	for range 2 {
+		a.runUpdateCheck(ctx)
+		if got := copies("application-updated"); !slices.Equal(got, everyCopy) {
+			t.Fatalf("upgrade alert copies after a healthy check = %v, want %v", got, everyCopy)
+		}
+	}
+	if state, err := f.db.Platform().GetApplicationUpdateState(ctx); err != nil || state.InstalledVersion != "v1.1.0" || state.AnnouncedUpgradeVersion != "v1.1.0" {
+		t.Fatalf("installed version state after a healthy check = %+v, %v", state, err)
+	}
+}
+
 // addPlatformUpdateRouting adds the platform destination and a platform
 // update routing that selects the given destinations. No product API sets
 // either yet.
@@ -224,7 +328,15 @@ func TestUpdateAlertRoutesWithoutDestinations(t *testing.T) {
 	}
 	addPlatformUpdateRouting(t, f.db, time.Now().UTC().Format(time.RFC3339Nano), platformDestinationID)
 	owners := []string{"", store.DefaultTenantID, secondTenantID}
-	routes := f.app.updateAlertRoutes(ctx)
+	resolve := func() []store.UpdateAlertRoute {
+		t.Helper()
+		routes, err := f.app.updateAlertRoutes(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return routes
+	}
+	routes := resolve()
 	if got := routedOwners(routes); !slices.Equal(got, owners) {
 		t.Fatalf("update alert routes of %v, want the platform and each unit", got)
 	}
@@ -243,13 +355,13 @@ func TestUpdateAlertRoutesWithoutDestinations(t *testing.T) {
 	if _, err := f.db.DB.ExecContext(ctx, `ALTER TABLE managed_notifications RENAME TO managed_notifications_unavailable`); err != nil {
 		t.Fatal(err)
 	}
-	routes = f.app.updateAlertRoutes(ctx)
+	routes = resolve()
 	if got := routedOwners(routes); !slices.Equal(got, owners) || routedDestinations(routes) != nil {
 		t.Fatalf("update alert routes with unreadable destinations = %+v", routes)
 	}
 
 	f.app.Notifier = nil
-	routes = f.app.updateAlertRoutes(ctx)
+	routes = resolve()
 	if got := routedOwners(routes); !slices.Equal(got, owners) || routedDestinations(routes) != nil {
 		t.Fatalf("update alert routes without a notifier = %+v", routes)
 	}

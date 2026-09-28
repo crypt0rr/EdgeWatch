@@ -632,7 +632,8 @@ account then enrols again.
   business units: until its administrators save a selection, it sends update
   alerts to all of its enabled destinations. The platform's copy goes only to
   the platform destinations selected there; none are selected until a
-  platform administrator chooses them.
+  platform administrator chooses them. When an update check cannot read the
+  list of units, it records no copy, and a later check records every copy.
 - **Scanner profiles:** the built-in profiles are shared and read-only. Custom
   profiles belong to the unit that created them.
 - **Public status:** each unit's administrators publish its page at

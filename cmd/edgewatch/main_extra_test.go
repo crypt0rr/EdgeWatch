@@ -256,7 +256,7 @@ func TestStatusFallsBackToUTCForInvalidTimezone(t *testing.T) {
 	}
 	defer s.Close()
 	cfg := &config.Config{Jobs: []config.Job{{Name: "invalid-zone", Schedule: "0 * * * *", Timezone: "Not/AZone"}}}
-	if err := status(context.Background(), s.Tenant(store.DefaultTenantScope()), cfg, "", "json"); err != nil {
+	if err := status(context.Background(), s.Tenant(store.DefaultTenantScope()), store.TenantStateActive, cfg, "", "json"); err != nil {
 		t.Fatalf("status returned an error for an invalid timezone: %v", err)
 	}
 	// Only scheduled managed jobs compute a next run, and those zones are

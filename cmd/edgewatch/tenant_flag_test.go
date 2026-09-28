@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/notify"
 	"github.com/crypt0rr/edgewatch/internal/store"
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
@@ -60,12 +62,18 @@ func (f tenantFlagFixture) cli(t *testing.T, configPath string, args ...string) 
 
 func (f tenantFlagFixture) setUnitState(t *testing.T, state string) {
 	t.Helper()
+	f.exec(t, `UPDATE tenants SET state=? WHERE id=?`, state, otherTenantID)
+}
+
+// exec runs one statement on the fixture's database.
+func (f tenantFlagFixture) exec(t *testing.T, query string, args ...any) {
+	t.Helper()
 	s, err := store.OpenExisting(f.database)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	if _, err := s.DB.Exec(`UPDATE tenants SET state=? WHERE id=?`, state, otherTenantID); err != nil {
+	if _, err := s.DB.Exec(query, args...); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -73,6 +81,7 @@ func (f tenantFlagFixture) setUnitState(t *testing.T, state string) {
 type statusRow struct {
 	Name             string `json:"name"`
 	State            string `json:"state"`
+	NextRun          string `json:"next_run"`
 	BaselineScanID   string `json:"baseline_scan_id"`
 	ActiveIncidents  int    `json:"active_incidents"`
 	LastScanID       string `json:"last_scan_id"`
@@ -360,6 +369,137 @@ func TestTenantFlagRefusals(t *testing.T) {
 	if after != before {
 		t.Fatalf("refused commands changed data:\nbefore\n%s\nafter\n%s", before, after)
 	}
+}
+
+// Without --tenant, the host commands act on the default unit under the
+// same state rules as with it. A disabled default unit can still be read,
+// but scan, baseline approve, baseline reset and notify test refuse it with
+// the message that --tenant with its slug gives: nothing is written and no
+// message is sent. The default unit is found by its ID, so the rules hold
+// after it is renamed, and once it is enabled again the commands act on it
+// as before.
+func TestHostCommandsWithoutTenantCheckTheDefaultUnitState(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFlagFixture(t)
+	rawURL, calls := importStartupWebhook(t)
+	s, err := store.Open(f.database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	notifier, err := notify.New(s, nil)
+	if err == nil {
+		_, err = notifier.Tenant(s.Tenant(store.DefaultTenantScope())).CreateManagedWithAudit(ctx, "Default operations", rawURL, true, store.AuditEntry{})
+	}
+	if closeErr := s.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Every command that starts the application first freezes the default
+	// unit's legacy notification selections, once. Let that happen before
+	// the snapshot of the units' data.
+	if _, err := f.cli(t, f.config, "notify", "test"); err != nil {
+		t.Fatal(err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("the default unit's destination received %d test messages, want 1", got)
+	}
+	nmap := writeFakeNmap(t, f.dir, false)
+	exportPath := filepath.Join(f.dir, "default-export.json")
+	writes := []struct {
+		name string
+		args []string
+	}{
+		{"scan", []string{"scan", "--job", "edge", "--nmap", nmap}},
+		{"baseline approve", []string{"baseline", "approve", "--job", "edge", "--scan-id", "scan-default"}},
+		{"baseline reset", []string{"baseline", "reset", "--job", "edge"}},
+		{"notify test", []string{"notify", "test"}},
+	}
+	refused := func(slug string) {
+		t.Helper()
+		before := otherTenantRows(t, f.database, store.DefaultTenantID) + "\n" + otherTenantRows(t, f.database, otherTenantID)
+		for _, write := range writes {
+			want := `business unit "` + slug + `" is disabled; enable it before running ` + write.name
+			if _, err := f.cli(t, f.config, write.args...); err == nil || err.Error() != want {
+				t.Errorf("%s without --tenant of the disabled default unit = %v, want %q", write.name, err, want)
+			}
+			if _, err := f.cli(t, f.config, append(write.args, "--tenant", slug)...); err == nil || err.Error() != want {
+				t.Errorf("%s --tenant %s of the disabled default unit = %v, want %q", write.name, slug, err, want)
+			}
+		}
+		for _, args := range [][]string{{"status"}, {"history", "--job", "edge"}, {"baseline", "export", "--out", exportPath}} {
+			if out, err := f.cli(t, f.config, args...); err != nil || (args[0] != "baseline" && !strings.Contains(out, "edge")) {
+				t.Errorf("%v of the disabled default unit = %s, %v", args, out, err)
+			}
+		}
+		if err := os.Remove(exportPath); err != nil {
+			t.Fatal(err)
+		}
+		if after := otherTenantRows(t, f.database, store.DefaultTenantID) + "\n" + otherTenantRows(t, f.database, otherTenantID); after != before {
+			t.Fatalf("refused commands changed data:\nbefore\n%s\nafter\n%s", before, after)
+		}
+		if got := calls.Load(); got != 1 {
+			t.Fatalf("the disabled default unit's destination received %d test messages, want 1", got)
+		}
+	}
+
+	f.exec(t, `UPDATE tenants SET state=? WHERE id=?`, store.TenantStateDisabled, store.DefaultTenantID)
+	refused("default")
+	f.exec(t, `UPDATE tenants SET name='Headquarters', slug='hq' WHERE id=?`, store.DefaultTenantID)
+	refused("hq")
+
+	f.exec(t, `UPDATE tenants SET state=? WHERE id=?`, store.TenantStateActive, store.DefaultTenantID)
+	if _, err := f.cli(t, f.config, "baseline", "reset", "--job", "edge"); err != nil {
+		t.Fatalf("baseline reset of the enabled default unit: %v", err)
+	}
+	if _, err := f.cli(t, f.config, "notify", "test"); err != nil || calls.Load() != 2 {
+		t.Fatalf("notify test of the enabled default unit = %v after %d test messages, want 2", err, calls.Load())
+	}
+}
+
+// The daemon schedules only the jobs of active units, so status reports
+// the enabled jobs of a disabled unit as unit_disabled, without a next run:
+// for a unit named with --tenant, and for the default unit with or without
+// it. A paused job stays paused, an inactive YAML job stays legacy, and the
+// jobs of an active unit stay scheduled.
+func TestStatusOfADisabledUnitSchedulesNothing(t *testing.T) {
+	f := newTenantFlagFixture(t)
+	f.exec(t, `UPDATE jobs SET enabled=0 WHERE tenant_id=? AND name='only-other'`, otherTenantID)
+	check := func(want map[string]string, args ...string) {
+		t.Helper()
+		out, err := f.cli(t, f.config, append([]string{"status"}, args...)...)
+		if err != nil {
+			t.Fatalf("status %v: %v", args, err)
+		}
+		var rows []statusRow
+		if err := json.Unmarshal([]byte(out), &rows); err != nil {
+			t.Fatalf("status %v output %q: %v", args, out, err)
+		}
+		got := map[string]string{}
+		for _, row := range rows {
+			got[row.Name] = row.State
+			if row.NextRun != "" {
+				got[row.Name] += " with next_run"
+			}
+		}
+		if !maps.Equal(got, want) {
+			t.Fatalf("status %v = %v, want %v", args, got, want)
+		}
+	}
+	defaultScheduled := map[string]string{"edge": "scheduled with next_run", "legacy-yaml": "legacy"}
+	check(defaultScheduled)
+	check(map[string]string{"edge": "scheduled with next_run", "only-other": "paused"}, "--tenant", "other")
+
+	f.setUnitState(t, store.TenantStateDisabled)
+	check(map[string]string{"edge": "unit_disabled", "only-other": "paused"}, "--tenant", "other")
+	check(defaultScheduled)
+
+	f.exec(t, `UPDATE tenants SET state=? WHERE id=?`, store.TenantStateDisabled, store.DefaultTenantID)
+	defaultDisabled := map[string]string{"edge": "unit_disabled", "legacy-yaml": "legacy"}
+	check(defaultDisabled)
+	check(defaultDisabled, "--tenant", "default")
+	check(map[string]string{"edge": "unit_disabled"}, "--job", "edge")
 }
 
 // The admin recovery commands find the account by its username across every

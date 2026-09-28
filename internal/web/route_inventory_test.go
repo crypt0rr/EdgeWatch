@@ -94,6 +94,9 @@ func TestRouteInventoryEntriesAreWellFormed(t *testing.T) {
 		if route.Mutates != isMutation(route.Method) {
 			t.Errorf("%s Mutates = %t, but isMutation(%s) = %t", name, route.Mutates, route.Method, isMutation(route.Method))
 		}
+		if isPlatformPermission(route.Permission) && !strings.HasPrefix(route.Template, "/platform/") {
+			t.Errorf("%s grants platform permission %s outside /platform/", name, route.Permission)
+		}
 		switch route.Access {
 		case routeSession:
 			if route.Permission == "" || route.Permission == auth.PermissionDenied {
@@ -255,7 +258,10 @@ func routeMatrixTarget(route apiRoute) string {
 // handler as each role and without a session. Session routes must answer 401
 // without a session, require CSRF for mutations, and admit exactly the roles
 // that auth.HasPermission grants the inventory's capability. Unauthenticated
-// and public routes must be served before, or outside, the session gate.
+// and public routes must be served before, or outside, the session gate. The
+// routes of the business units pass the same gate as every other route: the
+// unit audit admits a unit's administrators, and the platform routes admit
+// only platform administrators.
 func TestRouteInventoryGateMatrix(t *testing.T) {
 	server, accounts := newRouteMatrixSessions(t)
 	for _, route := range apiRoutes {
@@ -371,6 +377,8 @@ func TestRequiredPermissionFailsClosedOutsideInventory(t *testing.T) {
 		{http.MethodPost, "/auth/session"},
 		{http.MethodDelete, "/setup"},
 		{http.MethodPost, "/setup/status"},
+		{http.MethodGet, "/setup/platform"},
+		{http.MethodPost, "/setup/platform/"},
 		{http.MethodPost, "/incidents"},
 		{http.MethodGet, "/notifications/update-routing"},
 		{http.MethodGet, "/notifications/destinations/"},
@@ -390,6 +398,19 @@ func TestRequiredPermissionFailsClosedOutsideInventory(t *testing.T) {
 		{http.MethodDelete, "/jobs/id/not-a-route"},
 		{http.MethodGet, "/jobs/id/scans/scan/not-a-route"},
 		{http.MethodDelete, "/jobs/id/scan-cycle"},
+		{http.MethodGet, "/audit/"},
+		{http.MethodPost, "/audit"},
+		{http.MethodGet, "/platform"},
+		{http.MethodGet, "/platform/"},
+		{http.MethodGet, "/platform/unknown"},
+		{http.MethodGet, "/platform/units//accounts"},
+		{http.MethodGet, "/platform/units/id/accounts/uid"},
+		{http.MethodPost, "/platform/units/id/accounts/uid/sessions"},
+		{http.MethodDelete, "/platform/units/id/accounts/uid/password-reset"},
+		{http.MethodPut, "/platform/units/id/capacity"},
+		{http.MethodGet, "/platform/admins/id"},
+		{http.MethodPut, "/platform/notifications/id"},
+		{http.MethodPost, "/platform/status"},
 	}
 	for _, test := range unknown {
 		if matches := inventoryRoutesFor(apiRoutes, test.method, test.path); len(matches) > 0 {

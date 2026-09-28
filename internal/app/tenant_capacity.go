@@ -9,12 +9,6 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
-// ErrCapacityRequiresBusinessUnits is returned when a tenant's capacity is
-// changed while experimental.business_units is off. It wraps
-// ErrBusinessUnitsDisabled, which every business unit operation returns
-// then.
-var ErrCapacityRequiresBusinessUnits = fmt.Errorf("business unit capacity cannot be changed: %w", ErrBusinessUnitsDisabled)
-
 // ErrProbeBudgetUnavailable wraps a failure to read a tenant's probe budget.
 // The run or request stops, because a budget that cannot be read must not
 // fall back to a larger one.
@@ -26,14 +20,7 @@ var ErrProbeBudgetUnavailable = errors.New("the probe budget could not be read")
 // change as a platform action in the tenant's audit. The new slot cap
 // applies to the next grant at once; the budgets apply to the next check,
 // because each check reads them.
-//
-// It is refused with ErrCapacityRequiresBusinessUnits while
-// experimental.business_units is off. Capacity already stored keeps
-// applying when the flag is turned off, so turning it off never lifts a cap.
 func (a *App) SetTenantCapacity(ctx context.Context, tenantID string, capacity store.TenantCapacity, audit store.AuditEntry) error {
-	if a.Config == nil || !a.Config.BusinessUnitsEnabled() {
-		return ErrCapacityRequiresBusinessUnits
-	}
 	if err := a.Store.Platform().SetTenantCapacity(ctx, tenantID, capacity, a.capacityLimits(), audit); err != nil {
 		return err
 	}
@@ -136,6 +123,25 @@ func (budget probeBudget) limits(job config.Job) (nmap, naabu int64) {
 		return max(budget.nmap, budget.highCost), max(budget.naabu, budget.highCost)
 	}
 	return budget.nmap, budget.naabu
+}
+
+// TenantCapacityLimits returns the scan capacity that applies to the jobs of
+// the tenant of ts, as the scheduler enforces it: the deployment's scan
+// slots and probe budgets, each lowered to the tenant's own setting where
+// that is lower. A tenant without settings gets the deployment's. The
+// high-cost ceiling is not among them. No limits are returned with an
+// error.
+func (a *App) TenantCapacityLimits(ctx context.Context, ts *store.TenantStore) (store.CapacityLimits, error) {
+	capacity, err := ts.Capacity(ctx)
+	if err != nil {
+		return store.CapacityLimits{}, err
+	}
+	budget := a.deploymentProbeBudget().forTenant(capacity)
+	limits := store.CapacityLimits{MaxConcurrentScans: a.Config.Scheduler.MaxConcurrent, MaxProbeCount: budget.nmap, MaxNaabuProbeCount: budget.naabu}
+	if capacity.MaxConcurrentScans != nil {
+		limits.MaxConcurrentScans = slotLimit(limits.MaxConcurrentScans, *capacity.MaxConcurrentScans)
+	}
+	return limits, nil
 }
 
 // tenantProbeBudget reads the probe budget of the tenant of ts: the

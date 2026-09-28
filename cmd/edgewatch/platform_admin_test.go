@@ -15,9 +15,9 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store/storetest"
 )
 
-// The host issues the platform setup token only with business units on.
-// The printed token creates a platform administrator, after which no token
-// is issued; an unused token is replaced only with --force. The host CLI
+// The host issues the platform setup token once the first administrator
+// exists. The printed token creates a platform administrator, after which no
+// token is issued; an unused token is replaced only with --force. The host CLI
 // stays the break-glass path for a platform administrator, whose password
 // and TOTP it resets in platform scope.
 func TestAdminPlatformSetupToken(t *testing.T) {
@@ -36,25 +36,15 @@ func TestAdminPlatformSetupToken(t *testing.T) {
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
 	}
-	writeConfig := func(name, extra string) string {
-		t.Helper()
-		path := filepath.Join(dir, name)
-		if err := os.WriteFile(path, []byte("database: "+database+"\n"+extra), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return path
+	configPath := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("database: "+database+"\n"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	off := writeConfig("off.yaml", "")
-	on := writeConfig("on.yaml", "experimental:\n  business_units: true\n")
-
-	if err := run([]string{"admin", "platform-setup-token", "--config", off}); !errors.Is(err, auth.ErrBusinessUnitsDisabled) {
-		t.Fatalf("token with business units off = %v, want ErrBusinessUnitsDisabled", err)
+	if err := run([]string{"admin", "platform-setup-token", "--config", configPath}); err != nil {
+		t.Fatalf("platform setup token: %v", err)
 	}
-	if got := countCLIRows(t, database, "setup_tokens"); got != 0 {
-		t.Fatalf("a refused token wrote %d setup token rows", got)
-	}
-	if err := run([]string{"admin", "platform-setup-token", "--config", on}); err != nil {
-		t.Fatalf("token with business units on: %v", err)
+	if got := countCLIRows(t, database, "setup_tokens"); got != 1 {
+		t.Fatalf("the platform setup token wrote %d setup token rows, want 1", got)
 	}
 
 	s, err = store.OpenExisting(database)
@@ -67,10 +57,10 @@ func TestAdminPlatformSetupToken(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := platformSetupToken(ctx, s, true, false, &out); err == nil || !strings.Contains(err.Error(), "--force") {
+	if err := platformSetupToken(ctx, s, false, &out); err == nil || !strings.Contains(err.Error(), "--force") {
 		t.Fatalf("unconfirmed replacement = %v, want a --force hint", err)
 	}
-	if err := platformSetupToken(ctx, s, true, true, &out); err != nil {
+	if err := platformSetupToken(ctx, s, true, &out); err != nil {
 		t.Fatal(err)
 	}
 	printed := strings.TrimSpace(out.String())
@@ -79,13 +69,12 @@ func TestAdminPlatformSetupToken(t *testing.T) {
 		t.Fatalf("printed token = %q", printed)
 	}
 	manager := auth.NewManager(s)
-	manager.SetBusinessUnitsEnabled(true)
 	const password = "platform administrator password"
 	root, err := manager.CompletePlatformSetup(ctx, strings.TrimPrefix(printed, prefix), "root", password)
 	if err != nil {
 		t.Fatalf("redeem the printed token: %v", err)
 	}
-	if err := run([]string{"admin", "platform-setup-token", "--force", "--config", on}); !errors.Is(err, store.ErrPlatformAdminConfigured) {
+	if err := run([]string{"admin", "platform-setup-token", "--force", "--config", configPath}); !errors.Is(err, store.ErrPlatformAdminConfigured) {
 		t.Fatalf("token with a platform administrator = %v, want ErrPlatformAdminConfigured", err)
 	}
 
@@ -98,10 +87,10 @@ func TestAdminPlatformSetupToken(t *testing.T) {
 	if err := os.WriteFile(passwordPath, []byte("replacement platform password\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run([]string{"admin", "reset-password", "--config", off, "--username", "root", "--password-file", passwordPath}); err != nil {
+	if err := run([]string{"admin", "reset-password", "--config", configPath, "--username", "root", "--password-file", passwordPath}); err != nil {
 		t.Fatalf("reset-password for the platform administrator: %v", err)
 	}
-	if err := run([]string{"admin", "disable-totp", "--config", off, "--username", "root"}); err != nil {
+	if err := run([]string{"admin", "disable-totp", "--config", configPath, "--username", "root"}); err != nil {
 		t.Fatalf("disable-totp for the platform administrator: %v", err)
 	}
 	recovered, err := s.GetAccount(ctx, root.ID)

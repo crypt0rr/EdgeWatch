@@ -59,6 +59,7 @@ type App struct {
 	scheduleWake        chan struct{}
 	eventMu             sync.RWMutex
 	eventHandler        func(model.Event)
+	unitPausedHandler   func(tenantID string) // see SetUnitPausedHandler; eventMu guards it
 	deliveryWake        chan struct{}
 	heartbeatInterval   time.Duration
 	ReleaseChecker      ReleaseChecker
@@ -389,6 +390,9 @@ func newApp(cfg *config.Config, s *store.Store, nmapPath, naabuPath string, logg
 			legacyNames = append(legacyNames, job.Name)
 		}
 		logger.Warn("legacy YAML jobs are inactive; recreate them in the web console", "jobs", legacyNames)
+	}
+	if obsolete := cfg.ObsoleteSettings(); len(obsolete) > 0 {
+		logger.Warn("config.yaml sets obsolete settings that are ignored; business units are always on, so remove the experimental section", "settings", obsolete)
 	}
 	sc := scanner.NewWithNaabu(nmapPath, naabuPath)
 	if err := sc.SetTargetExclusions(cfg.Scanner.TargetExclusions); err != nil {
@@ -803,7 +807,7 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	// Publish lifecycle updates to the web console without persisting them as
 	// alert events. This keeps SSE subscribers responsive even when a scan has
 	// no baseline or incident event to emit.
-	a.emitEvents([]model.Event{{Type: "scan.started", JobID: jobID, Job: job.Name, ScanID: scan.ID, Message: "Scan started", CreatedAt: started}})
+	a.emitTenantEvents(scope, []model.Event{{Type: "scan.started", JobID: jobID, Job: job.Name, ScanID: scan.ID, Message: "Scan started", CreatedAt: started}})
 	defer func() {
 		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer releaseCancel()
@@ -961,11 +965,11 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 		events, finalizeErr = nil, nil
 	}
 	if finalizeErr != nil {
-		a.emitEvents([]model.Event{completionEvent})
+		a.emitTenantEvents(scope, []model.Event{completionEvent})
 		return scan, nil, finalizeErr
 	}
-	a.emitEvents(events)
-	a.emitEvents([]model.Event{completionEvent})
+	a.emitTenantEvents(scope, events)
+	a.emitTenantEvents(scope, []model.Event{completionEvent})
 	if !managed {
 		if err := a.Notifier.Queue(persistCtx, events); err != nil {
 			return scan, events, err
@@ -1401,7 +1405,8 @@ func (a *App) tenantUpdateDestinations(ctx context.Context, logger *slog.Logger,
 	// Routing that was never configured has nil destinations, which keeps the
 	// original behavior of sending update events to every enabled destination
 	// of the tenant until an administrator saves a selection. A saved empty
-	// selection silences them.
+	// selection silences them, and a new business unit starts with one, so
+	// it gets no update alerts until its administrators select destinations.
 	destinations, err := a.Notifier.Tenant(ts).QueueDestinationsForSelection(ctx, routing.Destinations)
 	if err != nil {
 		logger.Warn("application update notification destinations unavailable", "error", err)
@@ -1410,18 +1415,12 @@ func (a *App) tenantUpdateDestinations(ctx context.Context, logger *slog.Logger,
 	return destinations
 }
 
-// emitUpdateAlert publishes an update alert that the store recorded as a
-// live update. Every live-update stream receives it, so only the platform's
-// copy is published, once per alert, as before the alert had a copy for
-// each tenant.
+// emitUpdateAlert publishes every copy of an update alert that the store
+// recorded as a live update. The platform's copy has no tenant and reaches
+// the platform's streams; each business unit's copy names its unit and
+// reaches only that unit's streams, so each console sees its own copy once.
 func (a *App) emitUpdateAlert(events []model.Event) {
-	var platform []model.Event
-	for _, event := range events {
-		if event.TenantID == "" {
-			platform = append(platform, event)
-		}
-	}
-	a.emitEvents(platform)
+	a.emitEvents(events)
 	a.wakeDelivery()
 }
 
@@ -1593,6 +1592,19 @@ func (a *App) SetEventHandler(handler func(model.Event)) {
 	a.eventMu.Lock()
 	a.eventHandler = handler
 	a.eventMu.Unlock()
+}
+
+// emitTenantEvents publishes the events of a tenant's work, such as a scan
+// of one of its jobs, as live updates for that tenant only. Each event is
+// tagged with the tenant, because a job's event always belongs to the job's
+// tenant. The caller's events are not changed.
+func (a *App) emitTenantEvents(scope store.TenantScope, events []model.Event) {
+	tagged := make([]model.Event, len(events))
+	for i, event := range events {
+		event.TenantID = scope.ID()
+		tagged[i] = event
+	}
+	a.emitEvents(tagged)
 }
 
 func (a *App) emitEvents(events []model.Event) {

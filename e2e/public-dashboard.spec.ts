@@ -65,3 +65,37 @@ test('public status controls remain interactive and navigation leaves the page',
   await expect(page).toHaveURL(/\/jobs$/)
   await expect(page.getByRole('heading', { name: 'Jobs', exact: true })).toBeVisible()
 })
+
+test('a business unit public page loads by its slug without signing in', async ({ page }) => {
+  const consoleRequests: string[] = []
+  const publicRequests: string[] = []
+  await page.route('**/api/v1/**', async route => {
+    consoleRequests.push(new URL(route.request().url()).pathname)
+    return route.fulfill({ status: 401, contentType: 'application/json', body: JSON.stringify({ error: { code: 'unauthorized', message: 'authentication required' } }) })
+  })
+  await page.route('**/api/public/v1/**', async route => {
+    const path = new URL(route.request().url()).pathname
+    publicRequests.push(path)
+    const json = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+    if (path === '/api/public/v1/dashboard/other') {
+      return json({ title: 'Other unit status', introduction: 'Services of the other unit', updated_at: '2026-01-01T00:00:00Z', hosts: [{ job: 'edge', address: '198.51.100.10', public: false, private: true, open_ports: [{ protocol: 'tcp', port: 22, service: 'ssh' }] }] })
+    }
+    if (path === '/api/public/v1/dashboard') return json({ title: 'Default unit status', updated_at: '2026-01-01T00:00:00Z', hosts: [] })
+    return json({ error: { code: 'public_disabled', message: 'public status is not enabled' } }, 404)
+  })
+
+  await page.goto('/public/other')
+  await expect(page.getByRole('heading', { name: 'Other unit status' })).toBeVisible()
+  await expect(page.getByText('Services of the other unit')).toBeVisible()
+  await expect(page.getByText('198.51.100.10')).toBeVisible()
+
+  await page.goto('/public/nobody')
+  await expect(page.getByRole('heading', { name: 'Public status unavailable' })).toBeVisible()
+  await expect(page.getByText('This status page is not enabled by the administrator.')).toBeVisible()
+
+  await page.goto('/public')
+  await expect(page.getByRole('heading', { name: 'Default unit status' })).toBeVisible()
+
+  expect(publicRequests).toEqual(['/api/public/v1/dashboard/other', '/api/public/v1/dashboard/nobody', '/api/public/v1/dashboard'])
+  expect(consoleRequests).toEqual([])
+})

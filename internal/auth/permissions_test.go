@@ -9,8 +9,11 @@ import (
 
 func TestPermissionsForRoleIsDeterministicAndComplete(t *testing.T) {
 	admin := PermissionsForRole(store.RoleAdministrator)
-	if len(admin) != 19 || !sortStrings(admin) {
+	if len(admin) != 20 || !sortStrings(admin) {
 		t.Fatalf("administrator permissions = %#v", admin)
+	}
+	if !HasPermission(store.Session{Role: store.RoleAdministrator}, PermissionAuditRead) {
+		t.Fatal("administrator cannot read the unit audit")
 	}
 	operator := PermissionsForRole(store.RoleOperator)
 	if len(operator) != 14 || !sortStrings(operator) {
@@ -24,7 +27,7 @@ func TestPermissionsForRoleIsDeterministicAndComplete(t *testing.T) {
 	if got := PermissionsForRole("unknown"); len(got) != 0 {
 		t.Fatalf("unknown role permissions = %#v", got)
 	}
-	for _, permission := range []string{PermissionNotificationsRead, PermissionAuditRead} {
+	for _, permission := range []string{PermissionNotificationsRead} {
 		if HasPermission(store.Session{Role: store.RoleAdministrator}, permission) {
 			t.Fatalf("administrator unexpectedly has unenforced capability %s", permission)
 		}

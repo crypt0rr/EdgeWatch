@@ -14,7 +14,6 @@ import (
 
 	"github.com/crypt0rr/edgewatch/internal/app"
 	"github.com/crypt0rr/edgewatch/internal/auth"
-	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/rdap"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
@@ -64,13 +63,13 @@ type Server struct {
 	// publicPageCache caches the default tenant's page, which the legacy
 	// public URLs serve, and publicPages the page of any other tenant, by
 	// tenant ID. A request reads and fills only the cache of its public
-	// scope, so one tenant's page is never served for another's.
+	// scope, so one tenant's page is never served for another's, and a save
+	// invalidates only the cache of the page it saved.
 	publicPageCache
 	publicPages map[string]*publicPageCache
 	// publicDashboardBuildFunc is used by deterministic tests to control the
 	// cache-fill workload. Production requests use publicPageResponse.
 	publicDashboardBuildFunc func(context.Context, store.PublicDashboard) (publicDashboardResponse, error)
-	publicGen                uint64
 	telemetryMu              sync.Mutex
 	// telemetry caches each tenant's status telemetry by tenant ID.
 	telemetry map[string]*tenantTelemetryCache
@@ -87,6 +86,7 @@ type Server struct {
 	// production uses the bounded defaults below.
 	sseMaxSubscribers        int
 	sseMaxSubscribersPerUser int
+	sseMaxSubscribersPerUnit int
 }
 
 type sseMessage struct {
@@ -129,6 +129,7 @@ const defaultSSEWriteTimeout = 30 * time.Second
 const (
 	defaultMaxSSESubscribers        = 256
 	defaultMaxSSESubscribersPerUser = 4
+	defaultMaxSSESubscribersPerUnit = 64
 	defaultSSEAuthCacheTTL          = 2 * time.Second
 	sseEventIDBlockSize             = uint64(1 << 20)
 	defaultSSEReservationRetry      = time.Second
@@ -193,7 +194,6 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 		if err := v.Auth.SetForwardedHeader(a.Config.Web.ForwardedHeader); err != nil {
 			logger.Error("trusted proxy forwarding header configuration rejected", "error", err)
 		}
-		v.Auth.SetBusinessUnitsEnabled(a.Config.BusinessUnitsEnabled())
 		if len(a.Config.Web.AllowedHosts) > 0 && (len(a.Config.Web.TrustedProxies) == 0 || strings.EqualFold(strings.TrimSpace(a.Config.Web.ForwardedHeader), "none")) {
 			logger.Warn("approved proxy hosts have no trusted client-IP forwarding; remote clients share the loopback login cooldown and audit identity", "hint", "configure web.trusted_proxies and the sanitized web.forwarded_header")
 		}
@@ -206,22 +206,10 @@ func NewServer(a *app.App, s *store.Store, logger *slog.Logger) *Server {
 		}
 	}
 	if a != nil {
-		a.SetEventHandler(func(event model.Event) {
-			payload := map[string]any{"type": event.Type, "job_id": event.JobID, "job": event.Job, "scan_id": event.ScanID, "message": event.Message}
-			if event.PreviousVersion != "" {
-				payload["previous_version"] = event.PreviousVersion
-			}
-			if event.CurrentVersion != "" {
-				payload["current_version"] = event.CurrentVersion
-			}
-			if event.LatestVersion != "" {
-				payload["latest_version"] = event.LatestVersion
-			}
-			if event.ReleaseURL != "" {
-				payload["release_url"] = event.ReleaseURL
-			}
-			v.broadcastTo(context.Background(), audienceEveryone(), payload)
-		})
+		a.SetEventHandler(v.publishAppEvent)
+		// A business unit that is disabled or deleted loses its live
+		// updates at once, whichever caller paused it.
+		a.SetUnitPausedHandler(v.revokeSSETenant)
 	}
 	return v
 }
@@ -422,6 +410,14 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.setup(w, r)
 		return
 	}
+	if path == "/setup/platform" && r.Method == http.MethodPost {
+		if !validateBrowserOrigin(r) {
+			writeError(w, http.StatusForbidden, "origin", "request origin is not allowed", nil)
+			return
+		}
+		s.platformSetup(w, r)
+		return
+	}
 	if path == "/auth/login" && r.Method == http.MethodPost {
 		if !validateBrowserOrigin(r) {
 			writeError(w, http.StatusForbidden, "origin", "request origin is not allowed", nil)
@@ -483,6 +479,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case path == "/auth/activity" || path == "/auth/logout":
 	case session.Role == store.RolePlatformAdmin && permission == auth.PermissionAccountSelf:
 		account = s.Store.Platform().Account(session.UserID)
+	case session.Role == store.RolePlatformAdmin && isPlatformPermission(permission):
+		// The platform routes read and change the platform's own data and
+		// the business units by ID, through the platform's store. They
+		// never take a tenant's store.
 	default:
 		if ts, ok = s.requestTenant(w, r, session); !ok {
 			return
@@ -591,6 +591,10 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.listIncidents(w, r, ts)
 	case path == "/events" && r.Method == http.MethodGet:
 		s.listEvents(w, r, ts, r.URL.Query().Get("job"))
+	case path == "/audit" && r.Method == http.MethodGet:
+		s.unitAudit(w, r, ts)
+	case strings.HasPrefix(path, "/platform/"):
+		s.platformRoute(w, r, session, strings.TrimPrefix(path, "/platform/"))
 	case strings.HasPrefix(path, "/jobs/"):
 		s.jobRoute(w, r, session, ts, strings.TrimPrefix(path, "/jobs/"))
 	default:

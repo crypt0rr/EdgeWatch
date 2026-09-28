@@ -10,6 +10,7 @@ import {
   updateNotificationRouting,
 } from '../api'
 import { Notifications } from './Notifications'
+import { defaultUnitScope } from '../test/test-utils'
 
 vi.mock('../api', () => ({
   APIError: class APIError extends Error {
@@ -57,7 +58,7 @@ describe('notification update-alert routing', () => {
     document.body.appendChild(container)
     root = createRoot(container)
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(listNotificationDestinations).mockResolvedValue(response(false, []))
     vi.mocked(updateNotificationRouting).mockResolvedValue({ configured: true, destinations: [] })
   })
@@ -77,6 +78,9 @@ describe('notification update-alert routing', () => {
       await Promise.resolve()
     })
     await vi.waitFor(() => expect(container.querySelectorAll('.notification-row')).toHaveLength(2), { timeout: 1000 })
+    // The update-alert toggles follow the session's permissions, which can
+    // resolve after the destinations on a slow runner.
+    await vi.waitFor(() => expect(container.querySelectorAll('.notification-update-toggle input')).toHaveLength(2), { timeout: 1000 })
   }
 
   it('uses globally enabled destinations when update routing has never been configured', async () => {
@@ -153,6 +157,7 @@ describe('notification update-alert routing', () => {
         await Promise.resolve()
       })
       await vi.waitFor(() => expect(container.querySelectorAll('.notification-row')).toHaveLength(3), { timeout: 1000 })
+      await vi.waitFor(() => expect(container.querySelectorAll('.notification-update-toggle input')).toHaveLength(3), { timeout: 1000 })
     }
 
     async function confirm(password: string) {
@@ -205,7 +210,7 @@ describe('notification URLs imported from config.yaml', () => {
     document.body.appendChild(container)
     root = createRoot(container)
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+    vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
   })
 
   afterEach(() => {

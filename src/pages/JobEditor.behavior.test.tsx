@@ -5,7 +5,7 @@ import { act } from 'react'
 import { Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, createJob, getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
-import { renderWithProviders } from '../test/test-utils'
+import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
 import { setDisplayTimeZone } from '../format'
 import { JobEditor } from './JobEditor'
 
@@ -19,7 +19,7 @@ const destinationResponse = {
   status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' },
 }
 const capabilities = { engines: ['nmap', 'naabu_nmap'], nmap: { available: true, path: '/usr/bin/nmap', version: '7.99' }, naabu: { available: true, path: '/usr/local/bin/naabu', version: '2.6.1', syn_supported: false } }
-const administrator = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.delete', 'users.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } }
+const administrator = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.delete', 'users.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope }
 const operator = { ...administrator, role: 'operator' as const, user_id: 'operator', username: 'operator', permissions: ['jobs.write'] }
 const approvedJob = { id: 'job-1', revision: 4, enabled: true, archived: false, security_hash: 'old', job: { name: 'Broad edge', schedule: '0 */6 * * *', timezone: 'UTC', targets: ['198.51.100.0/16'], max_expanded_hosts: 65536, tcp: { ports: '1-65535', mode: 'connect', service_detection: false, engine: 'nmap' }, timing: 'balanced', timeout: '1h', resume_window: '8d', baseline_samples: 1, change_confirmations: 1, allow_high_cost: true }, baseline: { status: 'complete', samples: 1, attempts: 1 } }
 const profile = { id: 'profile-1', name: 'Naabu default', description: '', built_in: true, archived: false, revision: 1, definition: { engine: 'naabu_nmap', naabu: { scan_type: 'connect', rate: 1000, workers: 25, retries: 3, timeout_ms: 1000, warm_up_seconds: 2, verify: true, address_batch_size: 16 }, nmap_args: [], naabu_args: [], enrichment_args: [] } }

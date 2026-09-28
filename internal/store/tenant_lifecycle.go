@@ -82,8 +82,8 @@ var reservedTenantSlugs = map[string]bool{
 }
 
 // TenantRecord is a tenant as the platform manages it, with counts of its
-// accounts and jobs. The platform sees counts only, never the tenant's
-// accounts, jobs or results themselves.
+// accounts, jobs and stored scans. The platform sees counts only, never the
+// tenant's accounts, jobs or results themselves.
 type TenantRecord struct {
 	Tenant
 	Revision       int64
@@ -104,6 +104,10 @@ type TenantRecord struct {
 	Accounts       int
 	Administrators int
 	Jobs           int
+	// StoredScans counts the scans the tenant's history holds, whatever
+	// their status, including the scans of archived jobs. Retention, and
+	// the purge of a tenant being deleted, lower it as they erase scans.
+	StoredScans int64
 }
 
 // ValidateTenantName returns the trimmed name, or a validation error when it
@@ -142,13 +146,14 @@ func ValidateTenantSlug(slug string) (string, error) {
 const tenantRecordColumns = `t.id,t.name,t.slug,t.state,t.is_default,t.revision,t.created_at,t.updated_at,t.state_changed_at,t.state_changed_by,t.purge_phase,t.purge_rows,` +
 	`(SELECT COUNT(*) FROM users AS u WHERE u.tenant_id=t.id),` +
 	`(SELECT COUNT(*) FROM users AS u WHERE u.tenant_id=t.id AND u.role='` + RoleAdministrator + `' AND u.enabled=1),` +
-	`(SELECT COUNT(*) FROM jobs AS j WHERE j.tenant_id=t.id AND j.archived=0)`
+	`(SELECT COUNT(*) FROM jobs AS j WHERE j.tenant_id=t.id AND j.archived=0),` +
+	`(SELECT COUNT(*) FROM scans AS s WHERE s.tenant_id=t.id)`
 
 func scanTenantRecord(row interface{ Scan(...any) error }) (TenantRecord, error) {
 	var record TenantRecord
 	var isDefault int
 	var created, updated, changed string
-	if err := row.Scan(&record.ID, &record.Name, &record.Slug, &record.State, &isDefault, &record.Revision, &created, &updated, &changed, &record.StateChangedBy, &record.PurgePhase, &record.PurgeRows, &record.Accounts, &record.Administrators, &record.Jobs); err != nil {
+	if err := row.Scan(&record.ID, &record.Name, &record.Slug, &record.State, &isDefault, &record.Revision, &created, &updated, &changed, &record.StateChangedBy, &record.PurgePhase, &record.PurgeRows, &record.Accounts, &record.Administrators, &record.Jobs, &record.StoredScans); err != nil {
 		return TenantRecord{}, err
 	}
 	record.IsDefault = isDefault != 0
@@ -192,8 +197,10 @@ func getTenantRecord(ctx context.Context, queryer rowQueryer, id string) (Tenant
 // CreateTenant creates an active tenant with the name and slug, and with
 // InitialTenantCapacity of the deployment's limits: it inherits the
 // deployment's slots and probe budgets, and high-cost work stays off until
-// a platform administrator raises its ceiling. The name and the slug must
-// be unique among the tenants that are not deleted.
+// a platform administrator raises its ceiling. Its update routing, stored
+// in the same row, is configured and selects nothing, so it gets no update
+// alerts until its administrators select destinations. The name and the
+// slug must be unique among the tenants that are not deleted.
 func (ps *PlatformStore) CreateTenant(ctx context.Context, name, slug string, limits CapacityLimits, audit AuditEntry) (TenantRecord, error) {
 	name, err := ValidateTenantName(name)
 	if err != nil {
@@ -214,7 +221,7 @@ func (ps *PlatformStore) CreateTenant(ctx context.Context, name, slug string, li
 	stamp := sqliteTimestamp(now)
 	id := uuid.NewString()
 	capacity := InitialTenantCapacity(limits)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,state,is_default,revision,created_at,updated_at,state_changed_at,state_changed_by,`+tenantCapacityColumns+`) VALUES(?,?,?,?,0,1,?,?,?,?,?,?,?,?)`, id, name, slug, TenantStateActive, stamp, stamp, stamp, tenantStateActor(audit),
+	if _, err := tx.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,state,is_default,update_destinations_json,revision,created_at,updated_at,state_changed_at,state_changed_by,`+tenantCapacityColumns+`) VALUES(?,?,?,?,0,?,1,?,?,?,?,?,?,?,?)`, id, name, slug, TenantStateActive, noUpdateDestinations, stamp, stamp, stamp, tenantStateActor(audit),
 		nullableInt(capacity.MaxConcurrentScans), nullableInt64(capacity.MaxProbeCount), nullableInt64(capacity.MaxNaabuProbeCount), nullableInt64(capacity.HighCostCeiling)); err != nil {
 		return TenantRecord{}, tenantUniqueError(err)
 	}

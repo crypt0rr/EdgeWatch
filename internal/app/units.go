@@ -13,13 +13,7 @@ import (
 
 // Business units are the console's name for tenants. The methods here are
 // the application's entry points for their lifecycle, which the web console
-// and the host CLI call. Each one refuses with ErrBusinessUnitsDisabled while
-// experimental.business_units is off, so an installation keeps its single
-// default unit. The store methods behind them do not check the flag.
-
-// ErrBusinessUnitsDisabled reports a business unit operation while the
-// experimental feature is switched off.
-var ErrBusinessUnitsDisabled = errors.New("business units are an experimental feature that is switched off; set experimental.business_units: true in config.yaml to manage them")
+// and the host CLI call.
 
 // unitPurgeInterval is how often the daemon looks for deleted business units
 // whose data it has not erased yet. A deletion request wakes it at once.
@@ -46,31 +40,18 @@ func (u *unitLifecycle) purgeWakeChannel() chan struct{} {
 	return u.purgeWake
 }
 
-// requireBusinessUnits refuses a business unit operation while the
-// experimental feature is off.
-func (a *App) requireBusinessUnits() error {
-	if a.Config == nil || !a.Config.BusinessUnitsEnabled() {
-		return ErrBusinessUnitsDisabled
-	}
-	return nil
-}
-
 // CreateUnit creates an active business unit. It inherits the deployment's
 // scan slots and probe budgets, and may not run high-cost work until a
 // platform administrator raises its high-cost ceiling (SetTenantCapacity).
+// Its update alerts are off: its copy of an update alert goes to none of its
+// destinations until its administrators select some.
 func (a *App) CreateUnit(ctx context.Context, name, slug string, audit store.AuditEntry) (store.TenantRecord, error) {
-	if err := a.requireBusinessUnits(); err != nil {
-		return store.TenantRecord{}, err
-	}
 	return a.Store.Platform().CreateTenant(ctx, name, slug, a.capacityLimits(), audit)
 }
 
 // RenameUnit changes a business unit's name and slug. A new slug changes the
 // address of the unit's public status page.
 func (a *App) RenameUnit(ctx context.Context, id string, expectedRevision int64, name, slug string, audit store.AuditEntry) (store.TenantRecord, error) {
-	if err := a.requireBusinessUnits(); err != nil {
-		return store.TenantRecord{}, err
-	}
 	return a.Store.Platform().RenameTenant(ctx, id, expectedRevision, name, slug, audit)
 }
 
@@ -81,9 +62,6 @@ func (a *App) RenameUnit(ctx context.Context, id string, expectedRevision int64,
 // record a canceled scan and leave the baselines as they are, and removes
 // the unit's jobs from the schedule.
 func (a *App) DisableUnit(ctx context.Context, id string, expectedRevision int64, audit store.AuditEntry) (store.TenantRecord, error) {
-	if err := a.requireBusinessUnits(); err != nil {
-		return store.TenantRecord{}, err
-	}
 	record, err := a.Store.Platform().DisableTenant(ctx, id, expectedRevision, audit)
 	if err != nil {
 		return store.TenantRecord{}, err
@@ -98,9 +76,6 @@ func (a *App) DisableUnit(ctx context.Context, id string, expectedRevision int64
 // its jobs to the schedule and its slot cap to the scan slot pool. The silence watchdog judges its jobs from now on, so the pause
 // does not count as silence.
 func (a *App) EnableUnit(ctx context.Context, id string, expectedRevision int64, audit store.AuditEntry) (store.TenantRecord, error) {
-	if err := a.requireBusinessUnits(); err != nil {
-		return store.TenantRecord{}, err
-	}
 	record, err := a.Store.Platform().EnableTenant(ctx, id, expectedRevision, audit)
 	if err != nil {
 		return store.TenantRecord{}, err
@@ -118,9 +93,6 @@ func (a *App) EnableUnit(ctx context.Context, id string, expectedRevision int64,
 // archived at once, and the daemon's purge worker then erases its data and
 // keeps the unit as a tombstone.
 func (a *App) RequestUnitDeletion(ctx context.Context, id, typedName string, audit store.AuditEntry) (store.TenantRecord, error) {
-	if err := a.requireBusinessUnits(); err != nil {
-		return store.TenantRecord{}, err
-	}
 	record, err := a.Store.Platform().RequestTenantDeletion(ctx, id, typedName, audit)
 	if err != nil {
 		return store.TenantRecord{}, err
@@ -141,7 +113,6 @@ func (a *App) pauseUnit(id string) {
 		a.slots.FailWaiters(id, fmt.Errorf("%w: the business unit was paused", store.ErrTenantNotActive))
 	}
 	a.units.mu.Lock()
-	defer a.units.mu.Unlock()
 	if a.units.paused == nil {
 		a.units.paused = map[string]bool{}
 	}
@@ -152,6 +123,25 @@ func (a *App) pauseUnit(id string) {
 		}
 		return true
 	})
+	a.units.mu.Unlock()
+	a.eventMu.RLock()
+	handler := a.unitPausedHandler
+	a.eventMu.RUnlock()
+	if handler != nil {
+		handler(id)
+	}
+}
+
+// SetUnitPausedHandler registers an optional sink that is told the ID of
+// each business unit that DisableUnit or RequestUnitDeletion pauses in this
+// process, after the store has committed the pause. The web console uses it
+// to end the unit's live-update streams at once, whichever caller paused
+// the unit. Like SetEventHandler it is a callback, so the application stays
+// independent of HTTP.
+func (a *App) SetUnitPausedHandler(handler func(tenantID string)) {
+	a.eventMu.Lock()
+	a.unitPausedHandler = handler
+	a.eventMu.Unlock()
 }
 
 // registerRun makes a run of the tenant visible to ActiveScans and
@@ -188,9 +178,8 @@ func (a *App) wakeUnitPurge() {
 
 // startUnitPurgeWorker erases the data of deleted business units from the
 // daemon, at startup, when a deletion is requested, and every
-// unitPurgeInterval. It runs whatever the experimental flag says, so a
-// deletion requested while the feature was on still completes. The purge
-// takes SQLite's writer for one bounded batch at a time.
+// unitPurgeInterval. The purge takes SQLite's writer for one bounded batch
+// at a time.
 func (a *App) startUnitPurgeWorker(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
 	wake := a.units.purgeWakeChannel()

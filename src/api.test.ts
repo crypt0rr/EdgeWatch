@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setup, setupStatus, suppressIncident, updateNotificationDestination, updateUser } from './api'
+import { APIError, acceptIncident, activate, api, baselineHost, baselineHosts, createNotificationDestination, createUser, getPublicDashboard, getScan, getScanSummary, historicalScanHost, issueUserActivation, listHosts, listScans, listUsers, login, recordActivity, revokeUserSessions, scheduleSuggestion, setCSRF, setForbiddenHandler, setup, setupStatus, suppressIncident, updateNotificationDestination, updateUser } from './api'
 import * as apiRoutes from './api'
 import { getDisplayTimeZone, setDisplayTimeZone } from './format'
 
@@ -57,6 +57,54 @@ describe('API pagination contract', () => {
 
     await expect(api('/notifications/destinations/dest-1', { method: 'PUT', body: '{}' })).rejects.toMatchObject({ code: 'invalid_password' })
     expect(dispatchEvent).not.toHaveBeenCalled()
+  })
+
+  it('re-reads the session before it reports a refused request, except for the session read itself', async () => {
+    const forbidden = () => new Response(JSON.stringify({ error: { code: 'forbidden', message: 'your account is not allowed to perform this action', details: { permission: 'route' } } }), { status: 403, headers: { 'Content-Type': 'application/json' } })
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL) => forbidden())
+    vi.stubGlobal('fetch', fetchMock)
+    let finishRead = () => {}
+    const handler = vi.fn(() => new Promise<void>(resolve => { finishRead = resolve }))
+    const remove = setForbiddenHandler(handler)
+    try {
+      let settled = false
+      const request = api('/platform/units').finally(() => { settled = true })
+      await vi.waitFor(() => expect(handler).toHaveBeenCalledTimes(1))
+      // The refusal waits for the session read, so a page the new session
+      // no longer offers is replaced before it can show the refusal.
+      await Promise.resolve()
+      expect(settled).toBe(false)
+      finishRead()
+      await expect(request).rejects.toMatchObject({ name: 'APIError', status: 403, code: 'forbidden', details: { permission: 'route' } })
+
+      // A refused session read never waits for another session read.
+      await expect(api('/auth/session')).rejects.toMatchObject({ status: 403 })
+      expect(handler).toHaveBeenCalledTimes(1)
+
+      // Other failures report their status without a session read.
+      fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'not_found', message: 'business unit not found' } }), { status: 404, headers: { 'Content-Type': 'application/json' } }))
+      await expect(api('/platform/units/unknown')).rejects.toMatchObject({ status: 404, code: 'not_found' })
+      expect(handler).toHaveBeenCalledTimes(1)
+
+      // A failed session read does not hide the refusal.
+      handler.mockRejectedValueOnce(new Error('offline'))
+      await expect(api('/jobs')).rejects.toMatchObject({ status: 403, code: 'forbidden' })
+      expect(handler).toHaveBeenCalledTimes(2)
+    } finally {
+      remove()
+    }
+
+    // Removing a handler that was replaced keeps its replacement, and a
+    // console without a handler reports the refusal at once.
+    const replacement = vi.fn(async () => {})
+    const removeReplacement = setForbiddenHandler(replacement)
+    remove()
+    await expect(api('/jobs')).rejects.toMatchObject({ status: 403 })
+    expect(replacement).toHaveBeenCalledTimes(1)
+    removeReplacement()
+    await expect(api('/jobs')).rejects.toMatchObject({ status: 403 })
+    expect(replacement).toHaveBeenCalledTimes(1)
+    expect(handler).toHaveBeenCalledTimes(2)
   })
 
   it('keeps the session when step-up TOTP confirmation is rejected', async () => {
@@ -234,6 +282,19 @@ describe('authentication and public API contracts', () => {
     })
     vi.stubGlobal('fetch', successFetch)
     await expect(getPublicDashboard()).resolves.toMatchObject({ title: 'Status', hosts: [] })
+    expect(String(successFetch.mock.calls[0][0])).toBe('/api/public/v1/dashboard')
+  })
+
+  it('requests a business unit public page by its encoded slug', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.credentials).toBe('omit')
+      return new Response(JSON.stringify({ title: 'Unit status', hosts: [] }), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(getPublicDashboard('other')).resolves.toMatchObject({ title: 'Unit status' })
+    await getPublicDashboard('a/b?c')
+    await getPublicDashboard('')
+    expect(fetchMock.mock.calls.map(call => String(call[0]))).toEqual(['/api/public/v1/dashboard/other', '/api/public/v1/dashboard/a%2Fb%3Fc', '/api/public/v1/dashboard'])
   })
 
   it('uses safe fallback messages and omits optional event filters', async () => {

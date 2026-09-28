@@ -17,6 +17,7 @@ func requiredPermission(path, method string) string {
 	// silently become an authorization exemption.
 	if (path == "/setup/status" && method == http.MethodGet) ||
 		(path == "/setup" && method == http.MethodPost) ||
+		(path == "/setup/platform" && method == http.MethodPost) ||
 		(path == "/auth/login" && method == http.MethodPost) ||
 		(path == "/auth/activate" && method == http.MethodPost) ||
 		(path == "/auth/session" && method == http.MethodGet) {
@@ -94,6 +95,12 @@ func requiredPermission(path, method string) string {
 		if method == http.MethodGet {
 			return auth.PermissionScansRead
 		}
+	case path == "/audit":
+		if method == http.MethodGet {
+			return auth.PermissionAuditRead
+		}
+	case strings.HasPrefix(path, "/platform/"):
+		return requiredPlatformPermission(path, method)
 	case path == "/jobs":
 		switch method {
 		case http.MethodGet:
@@ -446,6 +453,8 @@ var apiRoutes = []apiRoute{
 	// Entry points dispatched before the session gate.
 	{Method: http.MethodGet, Template: "/setup/status", Example: "/setup/status", Access: routeUnauthenticated},
 	{Method: http.MethodPost, Template: "/setup", Mutates: true, Example: "/setup", Access: routeUnauthenticated},
+	// The platform setup redeems the host's platform setup token.
+	{Method: http.MethodPost, Template: "/setup/platform", Mutates: true, Example: "/setup/platform", Access: routeUnauthenticated},
 	{Method: http.MethodPost, Template: "/auth/login", Mutates: true, Example: "/auth/login", Access: routeUnauthenticated},
 	{Method: http.MethodPost, Template: "/auth/activate", Mutates: true, Example: "/auth/activate", Access: routeUnauthenticated},
 	// The session probe authenticates itself but needs no capability.
@@ -566,7 +575,40 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodPost, Template: "/jobs/{id}/incidents/suppress", Permission: auth.PermissionIncidentsManage, Mutates: true, Example: "/jobs/job-1/incidents/suppress"},
 	{Method: http.MethodGet, Template: "/jobs/{id}/events", Permission: auth.PermissionScansRead, Example: "/jobs/job-1/events"},
 
-	// Unauthenticated public status projection, relative to publicAPIBase.
+	// The unit's security audit, for its administrators.
+	{Method: http.MethodGet, Template: "/audit", Permission: auth.PermissionAuditRead, Example: "/audit"},
+
+	// The platform console, for platform administrators: the business
+	// units, their administrators and capacity, the platform
+	// administrators, the platform audit, the platform's notification
+	// destinations and update routing, and the deployment status.
+	{Method: http.MethodGet, Template: "/platform/units", Permission: auth.PermissionUnitsManage, Example: "/platform/units"},
+	{Method: http.MethodPost, Template: "/platform/units", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units"},
+	{Method: http.MethodGet, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1"},
+	{Method: http.MethodPatch, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1"},
+	{Method: http.MethodDelete, Template: "/platform/units/{id}", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1"},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/disable", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/disable"},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/enable", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/enable"},
+	{Method: http.MethodGet, Template: "/platform/units/{id}/capacity", Permission: auth.PermissionUnitsManage, Example: "/platform/units/unit-1/capacity"},
+	{Method: http.MethodPatch, Template: "/platform/units/{id}/capacity", Permission: auth.PermissionUnitsManage, Mutates: true, Example: "/platform/units/unit-1/capacity"},
+	{Method: http.MethodGet, Template: "/platform/units/{id}/accounts", Permission: auth.PermissionUnitAccountsManage, Example: "/platform/units/unit-1/accounts"},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/accounts", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts"},
+	{Method: http.MethodPost, Template: "/platform/units/{id}/accounts/{uid}/password-reset", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts/user-1/password-reset"},
+	{Method: http.MethodDelete, Template: "/platform/units/{id}/accounts/{uid}/sessions", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/units/unit-1/accounts/user-1/sessions"},
+	{Method: http.MethodGet, Template: "/platform/admins", Permission: auth.PermissionUnitAccountsManage, Example: "/platform/admins"},
+	{Method: http.MethodPost, Template: "/platform/admins", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins"},
+	{Method: http.MethodPatch, Template: "/platform/admins/{id}", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1"},
+	{Method: http.MethodGet, Template: "/platform/audit", Permission: auth.PermissionPlatformAuditRead, Example: "/platform/audit"},
+	{Method: http.MethodGet, Template: "/platform/notifications", Permission: auth.PermissionPlatformNotificationsManage, Example: "/platform/notifications"},
+	{Method: http.MethodPost, Template: "/platform/notifications", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications"},
+	{Method: http.MethodPut, Template: "/platform/notifications/update-routing", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/update-routing"},
+	{Method: http.MethodPatch, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1"},
+	{Method: http.MethodDelete, Template: "/platform/notifications/{id}", Permission: auth.PermissionPlatformNotificationsManage, Mutates: true, Example: "/platform/notifications/destination-1"},
+	{Method: http.MethodGet, Template: "/platform/status", Permission: auth.PermissionPlatformStatusRead, Example: "/platform/status"},
+
+	// Unauthenticated public status projection, relative to publicAPIBase:
+	// the default business unit's page, and a unit's page by its slug.
 	// Server.publicAPI also accepts one trailing slash.
 	{Method: http.MethodGet, Template: "/dashboard", Example: "/dashboard", Access: routePublic},
+	{Method: http.MethodGet, Template: "/dashboard/{slug}", Example: "/dashboard/default", Access: routePublic},
 }

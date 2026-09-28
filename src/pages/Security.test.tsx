@@ -5,14 +5,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { api, APIError, getSession, logout, logoutAllSessions, setCSRF, updateDisplayName } from '../api'
 import { Security } from './Security'
-import { renderWithProviders } from '../test/test-utils'
+import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
 
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
   return { ...actual, api: vi.fn(), getSession: vi.fn(), logout: vi.fn(), logoutAllSessions: vi.fn(), setCSRF: vi.fn(), updateDisplayName: vi.fn() }
 })
 
-const administrator = { role: 'administrator' as const, user_id: 'user-1', username: 'admin', display_name: 'Admin', permissions: [], csrf_token: 'csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } }
+const administrator = { role: 'administrator' as const, user_id: 'user-1', username: 'admin', display_name: 'Admin', permissions: [], csrf_token: 'csrf', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope }
 
 describe('security settings', () => {
   beforeEach(() => {

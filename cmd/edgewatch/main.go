@@ -78,11 +78,16 @@ func run(args []string) error {
 	passwordFile := fs.String("password-file", "", "file containing a new administrator password")
 	username := fs.String("username", "admin", "username for administrator recovery actions")
 	force := fs.Bool("force", false, "confirm replacement of the current setup token")
+	tenantFlag := fs.String("tenant", "", "slug of the business unit a host command acts on")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
 		return fmt.Errorf("unexpected argument %q; flags must precede operands", fs.Arg(0))
+	}
+	tenantSlug, err := checkTenantFlag(fs, cmd, action, *tenantFlag)
+	if err != nil {
+		return err
 	}
 	if cmd == "help" {
 		return usage()
@@ -202,16 +207,29 @@ func run(args []string) error {
 	}
 	if cmd == "admin" {
 		if action == "platform-setup-token" {
-			return platformSetupToken(context.Background(), s, cfg.BusinessUnitsEnabled(), *force, os.Stdout)
+			return platformSetupToken(context.Background(), s, *force, os.Stdout)
 		}
-		return adminActionForUser(context.Background(), action, s, *passwordFile, *username, *force)
+		options := adminRecoveryOptions{force: *force, out: os.Stdout}
+		if tenantSlug != "" {
+			unit, _, err := hostUnit(context.Background(), s, tenantSlug)
+			if err != nil {
+				return err
+			}
+			options.unit = &unit
+		}
+		return adminRecovery(context.Background(), action, s, *passwordFile, *username, options)
 	}
-	// scan, status, history, baseline, and notify test act on the default
-	// tenant's jobs, scans, baselines, and destinations until the CLI can
-	// name a tenant. The daemon, backup, verify, and health work on the whole
-	// database, and admin recovery above works in the tenant of the account
-	// it changes.
+	// scan, status, history, baseline, and notify test act on the jobs,
+	// scans, baselines, and destinations of the business unit that --tenant
+	// names, or of the default unit without it. The daemon, backup, verify,
+	// and health work on the whole database, and admin recovery above works
+	// in the unit of the account it changes.
 	tenant := s.Tenant(store.DefaultTenantScope())
+	if tenantSlug != "" {
+		if tenant, err = hostUnitStore(context.Background(), s, tenantSlug, cmd, action); err != nil {
+			return err
+		}
+	}
 	var application *app.App
 	needApplication := cmd == "daemon" || cmd == "scan" || cmd == "notify" || (cmd == "baseline" && action != "export")
 	if needApplication {
@@ -298,7 +316,8 @@ func run(args []string) error {
 func usage() error {
 	fmt.Fprintln(os.Stderr, `Usage: edgewatch <command> [options]
 	Commands: daemon, config validate, scan, status, history, baseline approve|reset|export, backup, restore, verify, notify test, admin setup-token|platform-setup-token|reset-password|disable-totp, health, version
-	Admin recovery actions accept --username (default admin) and require host access.`)
+	Admin recovery actions accept --username (default admin) and require host access.
+	scan, status, history, baseline, and notify test accept --tenant SLUG to act on that business unit instead of the default one, and admin reset-password and disable-totp accept it to stop unless the account belongs to that unit.`)
 	return errors.New("invalid or missing command")
 }
 
@@ -365,14 +384,11 @@ type accountRecovery interface {
 }
 
 // platformSetupToken prints a one-time token, valid for 15 minutes, that
-// creates a platform administrator. It is refused while
-// experimental.business_units is off, once an enabled platform
-// administrator exists, and before the first administrator setup. An unused
+// creates a platform administrator. It is refused once an enabled platform
+// administrator exists and before the first administrator setup. An unused
 // token that is still valid is replaced only with --force.
-func platformSetupToken(ctx context.Context, s *store.Store, businessUnits, force bool, out io.Writer) error {
-	manager := auth.NewManager(s)
-	manager.SetBusinessUnitsEnabled(businessUnits)
-	token, err := manager.IssuePlatformSetupToken(ctx, force)
+func platformSetupToken(ctx context.Context, s *store.Store, force bool, out io.Writer) error {
+	token, err := auth.NewManager(s).IssuePlatformSetupToken(ctx, force)
 	if errors.Is(err, store.ErrSetupTokenOutstanding) {
 		return fmt.Errorf("%w; a new platform setup token replaces it, pass --force to confirm", err)
 	}
@@ -389,6 +405,26 @@ func adminAction(ctx context.Context, action string, s *store.Store, passwordFil
 
 func adminActionForUser(ctx context.Context, action string, s *store.Store, passwordFile, username string, confirmations ...bool) error {
 	force := len(confirmations) > 0 && confirmations[0]
+	return adminRecovery(ctx, action, s, passwordFile, username, adminRecoveryOptions{force: force})
+}
+
+// adminRecoveryOptions are the options of a host recovery command.
+type adminRecoveryOptions struct {
+	// force confirms the replacement of the current setup token.
+	force bool
+	// unit, when set, is the business unit that --tenant named, which the
+	// account must belong to: the command changes nothing for an account of
+	// another unit or of the platform.
+	unit *store.Tenant
+	// out, when set, receives the account, its unit (or the platform) and
+	// its role before the command acts.
+	out io.Writer
+}
+
+// adminRecovery runs a host recovery command on the account with the
+// username, which is unique across every business unit and the platform.
+func adminRecovery(ctx context.Context, action string, s *store.Store, passwordFile, username string, options adminRecoveryOptions) error {
+	force := options.force
 	if action == "setup-token" || action == "reissue-setup-token" {
 		if !force {
 			return errors.New("reissuing the setup token replaces the current token; pass --force to confirm")
@@ -437,6 +473,9 @@ func adminActionForUser(ctx context.Context, action string, s *store.Store, pass
 		if err != nil {
 			return err
 		}
+		if err := confirmAccountUnit(ctx, s, user, options); err != nil {
+			return err
+		}
 		user.PasswordHash, user.UpdatedAt = hash, time.Now().UTC()
 		if user.ID == store.LegacyAdminUserID {
 			admin, adminErr := s.GetAdmin(ctx)
@@ -448,6 +487,9 @@ func adminActionForUser(ctx context.Context, action string, s *store.Store, pass
 		}
 		return accounts.SaveUserSecurity(ctx, user, nil, false, true, store.AuditEntry{Action: "user.password_reset", Detail: "password reset from host CLI", ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
 	case "disable-totp":
+		if err := confirmAccountUnit(ctx, s, user, options); err != nil {
+			return err
+		}
 		user.TOTPEnabled, user.TOTPSecret, user.UpdatedAt = false, "", time.Now().UTC()
 		if user.ID == store.LegacyAdminUserID {
 			admin, adminErr := s.GetAdmin(ctx)
@@ -641,7 +683,13 @@ func status(ctx context.Context, ts *store.TenantStore, cfg *config.Config, filt
 		}
 		rows = append(rows, entry)
 	}
-	for _, j := range cfg.Jobs {
+	// Inactive YAML jobs predate business units and belong to the default
+	// unit, so another unit's status lists none.
+	legacyJobs := cfg.Jobs
+	if scope, err := ts.Scope(); err != nil || scope != store.DefaultTenantScope() {
+		legacyJobs = nil
+	}
+	for _, j := range legacyJobs {
 		if managedNames[j.Name] {
 			continue
 		}
@@ -744,7 +792,7 @@ func baseline(ctx context.Context, action string, ts *store.TenantStore, a *app.
 			events, err = ts.ApproveRuntimeWithOutboxAndAudit(ctx, record.ID, record.Job.Name, scan, destinations, store.AuditEntry{
 				Action:        "baseline.approved",
 				Detail:        record.ID + ":" + scan.ID,
-				ActorUserID:   store.LegacyAdminUserID,
+				ActorUserID:   hostActorUserID(ts),
 				ActorUsername: "host-cli",
 				ActorKind:     store.AuditActorHost,
 			})
@@ -752,7 +800,7 @@ func baseline(ctx context.Context, action string, ts *store.TenantStore, a *app.
 			events, err = ts.ResetRuntimeWithOutboxAndAudit(ctx, record.ID, record.Job.Name, destinations, store.AuditEntry{
 				Action:        "baseline.reset",
 				Detail:        record.ID,
-				ActorUserID:   store.LegacyAdminUserID,
+				ActorUserID:   hostActorUserID(ts),
 				ActorUsername: "host-cli",
 				ActorKind:     store.AuditActorHost,
 			})

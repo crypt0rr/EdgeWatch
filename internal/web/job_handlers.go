@@ -404,7 +404,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request, session store
 	}
 	s.App.RefreshSchedules()
 	state, _ := ts.RuntimeState(r.Context(), record.ID)
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "job.created", "job_id": record.ID})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "job.created", "job_id": record.ID})
 	writeJSON(w, http.StatusCreated, s.jobJSONWithCycle(r.Context(), ts, record, state))
 }
 

@@ -26,9 +26,10 @@ var knownAuditActions = map[string][]string{
 		"admin.totp_enabled", "admin.totp_recovery_codes_rotated",
 		"auth.activation_failed", "auth.legacy_recovery_codes_retired",
 		"auth.login_failed", "auth.password_confirmation_failed",
-		"auth.rate_limited", "auth.recovery_code_used", "auth.setup_failed",
+		"auth.platform_setup_failed", "auth.rate_limited", "auth.recovery_code_used", "auth.setup_failed",
 		"auth.totp_confirmation_failed", "auth.totp_failed",
 		"platform_admin.setup", "platform_admin.setup_token_issued",
+		"platform_admin.invited", "platform_admin.updated",
 		"user.activated", "user.activation_issued", "user.activation_revoked",
 		"user.created", "user.display_name_changed", "user.login", "user.logout",
 		"user.password_changed", "user.password_reset", "user.password_reset_issued",
@@ -41,6 +42,8 @@ var knownAuditActions = map[string][]string{
 		"tenant.capacity_changed",
 		"tenant.created", "tenant.deletion_requested", "tenant.disabled",
 		"tenant.enabled", "tenant.purged", "tenant.renamed",
+		"platform_notifications.created", "platform_notifications.deleted",
+		"platform_notifications.update_routing", "platform_notifications.updated",
 	},
 	auditCategoryData: {
 		"baseline.approved", "baseline.reset",
@@ -127,8 +130,9 @@ var dottedActionPattern = regexp.MustCompile(`^[a-z][a-z0-9_]*(\.[a-z0-9_]+)+$`)
 var sqlAuditActionPattern = regexp.MustCompile(`'([a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+)'`)
 
 // notAuditActions are the dotted string literals in the sources that are not
-// audit actions: live-update message types, file and host names. Permission
-// names are declared in internal/auth/permissions.go, which is not scanned.
+// audit actions: live-update message types, file and host names, and the
+// path of an obsolete config.yaml setting. Permission names are declared in
+// internal/auth/permissions.go, which is not scanned.
 var notAuditActions = map[string]bool{
 	"application.update_status":   true,
 	"notification.changed":        true,
@@ -140,6 +144,7 @@ var notAuditActions = map[string]bool{
 	"edgewatch.db":                true,
 	"github.com":                  true,
 	"localhost.localdomain":       true,
+	"experimental.business_units": true,
 }
 
 // Every string in the non-test sources that looks like an audit action is

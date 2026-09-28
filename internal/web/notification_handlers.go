@@ -81,23 +81,22 @@ func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	// The routing may select only the tenant's own destinations; another
-	// tenant's destination is refused as an unknown one.
+	// tenant's destination is refused as an unknown one. The store checks
+	// the selection again when it writes it.
 	if err := s.App.Notifier.Tenant(ts).ValidateDestinationSelection(r.Context(), input.Destinations); err != nil {
-		if errors.Is(err, notify.ErrInvalidDestinationSelection) {
-			writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]string{"destinations": err.Error()})
-		} else {
+		if !writeDestinationSelectionError(w, err) {
 			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
 		}
 		return
 	}
 	if err := ts.SetApplicationUpdateDestinations(r.Context(), input.Destinations, store.AuditEntry{Action: "notifications.update_routing", Detail: "application update notification routing changed", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
-		if s.writeAuditUnavailable(w, err, "notifications.update_routing") {
+		if writeDestinationSelectionError(w, err) || s.writeAuditUnavailable(w, err, "notifications.update_routing") {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "notification", "application update notification routing could not be saved", nil)
 		return
 	}
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "notification.changed"})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed"})
 	// Return the normalized, deterministic selector order persisted by the
 	// store so the client and any other administrator sessions converge on the
 	// same representation.
@@ -106,6 +105,20 @@ func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Reques
 		destinations = current.Destinations
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "destinations": destinations})
+}
+
+// writeDestinationSelectionError answers a routing selection that names a
+// destination outside the caller's own with a 400 that repeats the
+// selector, and reports whether err was one. The notifier's check and the
+// store's check in the routing write refuse with the same error, so both
+// get the same answer, and another owner's destination gets the answer of
+// an unknown one.
+func writeDestinationSelectionError(w http.ResponseWriter, err error) bool {
+	if !errors.Is(err, notify.ErrInvalidDestinationSelection) {
+		return false
+	}
+	writeError(w, http.StatusBadRequest, "validation_failed", err.Error(), map[string]string{"destinations": err.Error()})
+	return true
 }
 
 func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
@@ -138,7 +151,7 @@ func (s *Server) createNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationError(w, err)
 		return
 	}
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "notification.changed", "notification_id": view.ID})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed", "notification_id": view.ID})
 	writeJSON(w, http.StatusCreated, view)
 }
 
@@ -215,7 +228,7 @@ func (s *Server) updateNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationError(w, err)
 		return
 	}
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "notification.changed", "notification_id": id})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed", "notification_id": id})
 	writeJSON(w, http.StatusOK, view)
 }
 
@@ -245,11 +258,11 @@ func (s *Server) deleteNotificationDestination(w http.ResponseWriter, r *http.Re
 		s.writeNotificationError(w, err)
 		return
 	}
-	s.broadcastTo(context.WithoutCancel(r.Context()), audienceEveryone(), map[string]any{"type": "notification.changed", "notification_id": id})
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed", "notification_id": id})
 	// The delete also removed the destination from these jobs' routing and
 	// gave each a new revision. Let open editors reload before they save.
 	for _, jobID := range changedJobs {
-		s.broadcastTo(r.Context(), audienceEveryone(), map[string]any{"type": "job.updated", "job_id": jobID})
+		s.broadcastTo(r.Context(), audienceTenant(ts), map[string]any{"type": "job.updated", "job_id": jobID})
 	}
 	writeJSON(w, http.StatusNoContent, nil)
 }

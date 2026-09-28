@@ -9,6 +9,7 @@ import { activeScans, adminStatus, cancelScan, getSession, listIncidents, listJo
 import type { AdminStatus, SessionUser } from '../api'
 import type { ActiveScan, Job, ScanSummary } from '../types'
 import { Dashboard } from './Dashboard'
+import { defaultUnitScope } from '../test/test-utils'
 
 vi.mock('../api', () => ({
   activeScans: vi.fn(),
@@ -98,6 +99,7 @@ const session = (role: SessionUser['role']): SessionUser => ({
   csrf_token: 'csrf',
   totp_enabled: false,
   password_requirements: { minimum_length: 12 },
+  ...defaultUnitScope,
 })
 
 const pagination = { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null }

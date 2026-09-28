@@ -46,48 +46,173 @@ verification codes. A mistyped code can be retried against the same secret;
 after the fifth incorrect code, or once the ten minutes pass, the pending secret
 is discarded and setup must start again.
 
-## Business units and the platform administrator (experimental)
+## Business units and the platform administrator
 
-Business units are under development and stay off unless
-`experimental.business_units` is `true`. While the flag is off, EdgeWatch
-refuses to issue a platform setup token or to create a platform
-administrator, and a single unit behaves as before.
+Every installation has at least one business unit, the default unit, which
+holds everything that existed before business units. A single unit behaves
+as before, apart from the unit audit, the `/public/default` alias of the
+public page, the `--tenant` option of the host commands, and the platform
+setup token that the host can issue.
+
+### Trust boundary
+
+Business units separate teams that trust the deployment's operators. The
+application enforces the separation in the console, the API, the live-update
+stream, and the public pages. Units share one process, one SQLite database,
+and the notification and authentication keys (`notification.key` and
+`auth.key`, or the configured key files). Anyone with access to the Docker
+host, the container, the host commands, the database file, or a backup can
+read and change every unit's data: host commands reach any unit with
+`--tenant`, and a backup or restore covers every unit together. Run separate
+deployments for parties that must not trust each other or the operators.
+
+Every API request passes its route's permission check before the handler
+runs, and the handler reads and writes through a store bound to the
+session's unit; the platform console's handlers use the platform's store and
+never a unit's. An ID of another unit's job, scan, host, account, scanner
+profile, or notification destination gets a response byte-identical to an
+unknown ID's. That is a 404, except where both get another answer:
+cancelling a scan answers any scan that is not running in the unit with 409
+`scan_not_active`, and validating or previewing a scanner profile checks only
+the submitted definition.
+
+### The platform administrator
 
 A platform administrator is a separate account without a unit. It manages
 the units and their administrators and holds no permission on any unit's
 jobs, scans, baselines, incidents, notifications, or public status: every
 route of a unit's console refuses it except its own account's password,
-TOTP, session, and sign-out routes. Only the host creates one: `edgewatch
-admin platform-setup-token` prints a one-time token, valid for 15 minutes,
-once the first administrator exists and while no enabled platform
-administrator does, at most once a minute, and replaces an unused token only
-with `--force`. The token cannot complete the first setup, and the first
-setup token cannot create a platform administrator. Usernames stay unique
-across every unit and the platform.
+TOTP, session, and sign-out routes. Only a platform administrator reaches
+the platform console's API, under `/api/v1/platform/`, and it never returns
+a unit's data: a unit appears with its name, slug, state, and counts of its
+accounts, administrators, jobs, stored scans, and scan slots in use; its
+accounts as summaries without credentials; and its
+capacity as numbers. The stored scan count is a number of rows, never a
+scan's content. The platform's own notification destinations are
+write-only like a unit's, and the platform cannot read, select, or change a
+unit's destinations. Usernames stay unique across every unit and the
+platform.
+
+Only the host creates the first platform administrator: `edgewatch admin
+platform-setup-token` prints a one-time token, valid for 15 minutes, once the
+first administrator exists and while no enabled platform administrator does,
+at most once a minute, and replaces an unused token only with `--force`. The
+token cannot complete the first setup, and the first setup token cannot
+create a platform administrator. The console's setup page redeems it through
+`POST /api/v1/setup/platform`, which checks the browser origin and applies
+the first setup's per-client failure budget; a wrong, used, or expired token
+gets one generic answer, and each failure is recorded in platform scope.
+While the token is valid, `/api/v1/setup/status` reports
+`platform_setup_available`, which the sign-in page uses to offer the setup.
+An enabled platform
+administrator can then invite another after confirming its password; the
+invited account stays pending and disabled until it redeems its one-time
+link, which expires after 30 minutes. A platform administrator can disable
+or enable another, never its own account, and disabling one ends its
+sessions and revokes the links it issued or received.
 
 A platform administrator invites only unit administrators, and resets only
 unit administrators' passwords; a unit's administrators invite and reset the
 accounts of their own unit, including its operators and viewers, and cannot
 reach another unit's accounts or a platform administrator. The rule follows
-the target account's role and unit, not the request. No platform administrator can reset another through
-the product; the host commands `admin reset-password` and `admin
-disable-totp` remain the break-glass path for every account. Each unit keeps
-at least one enabled administrator, and the platform at least one enabled
-platform administrator, whose role never changes.
+the target account's role and unit, not the request. No platform
+administrator can reset another through the product; the host commands
+`admin reset-password` and `admin disable-totp` remain the break-glass path
+for every account. Each unit keeps at least one enabled administrator, and
+the platform at least one enabled platform administrator, whose role never
+changes. Creating and renaming a unit and changing its capacity need only a
+platform administrator's session. Disabling, enabling, and deleting a unit,
+inviting a unit or platform administrator, issuing a password reset, ending
+an account's sessions, enabling or disabling a platform administrator, and
+every change to the platform's notification destinations and routing also
+require its password, and deleting also the unit's typed name.
+
+The platform administrator is trusted with the units' accounts, not their
+data, and the product makes its reach visible rather than impossible.
+Inviting a unit administrator and issuing a password reset return the
+one-time link to the platform administrator, who could redeem it and sign in
+to the unit. Both are recorded in the unit's audit as platform actions, and
+an invited account appears among the unit's users. A password reset keeps
+the account's TOTP secret and recovery codes, so it lets nobody sign in to an
+administrator who has enrolled TOTP without that authenticator; the reset
+response reports `totp_enrolled`. It does not protect an administrator who
+has not enrolled yet, because the new password is enough to enrol a new
+authenticator. Keep unit administrators on TOTP and have them review the
+platform actions in their audit. The platform administrator also sees each
+unit's account list, with usernames, display names, roles, TOTP state, and
+last sign-in, and every unit's account records in the platform audit,
+including the source addresses of sign-in attempts.
 
 Once more than one unit exists, every unit administrator and platform
 administrator must use TOTP. Until one without TOTP enrols, its sessions
 report `totp_enrollment_required` and may only use its own account's
 settings (password, TOTP enrolment, display name, and sessions) and sign
-out; everything else is refused.
-If the units cannot be counted, the restriction applies. With a single unit
-nothing changes.
+out; everything else is refused. Units that are disabled or being deleted
+count. If the units cannot be counted, the restriction applies. With a
+single unit nothing changes.
 
-A platform administrator's action on a unit's account is recorded in that
-unit's security audit with the `platform` actor kind, so the unit's
-administrators see it. The platform administrator's own actions, sign-in
-attempts on its account, and sign-in attempts with a username that no account
-has are recorded in platform scope, outside every unit's audit.
+### Public pages, audit, and deletion
+
+Each unit's public status page is served at `/public/<slug>` and
+`/api/public/v1/dashboard/<slug>`, from that unit's published hosts only;
+`/public` keeps serving the default unit's page. An unknown slug, a unit's
+page that is not enabled, a paused unit, and a unit being deleted get the
+same 404 `public_disabled` answer as a disabled page, so the address does not
+reveal whether a unit has that slug. Each page
+has its own per-client rate limit and its own cache: a busy page does not
+throttle another, and saving one page does not drop another page's cache.
+
+A platform administrator's action on a unit's account, and a change of the
+unit's capacity, is recorded in that unit's security audit with the
+`platform` actor kind, so the unit's administrators see it. The unit's
+lifecycle changes, the platform administrator's other actions, sign-in
+attempts on its account, and sign-in attempts with a username that no
+account has are recorded in platform scope, outside every unit's audit. A
+unit's administrators read their unit's audit, which hides the source address
+of a platform administrator's actions; the platform audit shows the records
+in platform scope and every unit's account and platform records, never a
+unit's data records. Both views are read-only.
+
+Disabling a unit ends its sessions and revokes its open invitations in the
+same transaction; from then on its accounts cannot sign in or redeem a link,
+and a sign-in gets the answer of a wrong password. Deleting a unit erases its
+rows in bounded batches with SQLite's `secure_delete` on, then compacts the
+search indexes and truncates the write-ahead log. Backups taken before the
+deletion still hold the unit's data, and the records of platform
+administrators' actions on it stay in the platform audit.
+
+### Signals between units
+
+Some signals cross units by design:
+
+- Usernames are unique across the deployment, so inviting a name that another
+  unit or the platform uses fails with `username is not available`, which
+  tells the inviting administrator that the name exists elsewhere.
+- The RDAP cache is shared. It holds only public registry data, never which
+  unit observed an address, but a lookup can come back as `cached`, with its
+  original fetch time, because another unit opened the same public address
+  first.
+- The scan slots and the scanning host are shared: a unit's scans can wait
+  while other units' scans hold the slots, and every unit's probes leave from
+  the same host. A slot cap limits a unit but reserves nothing for it.
+- Live-update event IDs, the replay window, and the deployment-wide stream
+  limit are shared; see
+  [Live-update streams and session revocation](#live-update-streams-and-session-revocation).
+- The default unit's status reports the size of the whole database, which
+  grows with every unit's data.
+- Anonymous callers of `/api/v1/setup/status` can tell from
+  `platform_setup_available` whether a platform setup token is waiting to be
+  used.
+- Behind a proxy that is not listed in `web.trusted_proxies`, the shared
+  sign-in cooldown applies to the accounts of every unit.
+
+Other signals are closed. Once more than one unit exists, a unit's status
+leaves out the deployment-wide live-update counters, and it leaves them out
+too when the units cannot be counted. A
+unit's status counts, notification totals, and telemetry cover its own rows
+only, its scan slots and probe budgets are its own limits, the Hosts view
+keeps each unit's newest observation of an address apart, and a public slug
+does not reveal whether a unit has it.
 
 ## Live-update streams and session revocation
 
@@ -113,6 +238,29 @@ session's stream connected. Revocations performed by another process (such as
 host recovery tooling) use the bounded revalidation fallback. Server shutdown
 closes all live streams. These bounds are a security property, not a
 replacement for revoking a compromised account or session.
+
+Each live update has one audience, and replay after a reconnect is filtered
+the same way. A business unit's streams receive only that unit's updates: its
+jobs, scans, incidents, baselines, scan cycles, scanner profiles and
+notification destinations, and the unit's own copy of an update alert. The
+notice that the application update status changed carries no unit's data and
+reaches every stream. Platform administrators hold no stream permission and
+receive no live updates; the platform's copy of an update alert is addressed
+to platform streams only, and a platform stream would never receive a unit's
+update. Disabling or deleting a unit through the running daemon ends the
+unit's open streams at once; the change also ends the unit's sessions, so a
+disable from another process takes effect through the revalidation fallback.
+Once more than one unit exists, each unit (and the platform) may hold at most
+64 of the 256 streams that the deployment allows, so one unit cannot lock the
+others out; a stream over either limit receives the in-band `stream_limit`
+backoff. With a single unit only the deployment-wide limit applies. Event IDs
+and the in-memory replay window are shared by every unit: a unit can tell
+from gaps in its event IDs that other units received updates, but not what
+they were, and a burst in another unit can shorten its replay window, after
+which a reconnecting browser receives a full-refresh marker instead. The
+deployment-wide replay counters (`live_updates` in `/api/v1/status`) are
+left out of a unit's status once more than one unit exists, and when the
+units cannot be counted.
 
 Other authenticated API reads, including the status and page-polling requests,
 also validate sessions without refreshing their idle timestamp. Actual browser

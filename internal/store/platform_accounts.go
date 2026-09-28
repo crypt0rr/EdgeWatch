@@ -15,8 +15,9 @@ import (
 // account without a tenant that manages the tenants and their
 // administrators, and never a tenant's data:
 //
-//   - it is created only by redeeming a platform setup token, which the
-//     host issues;
+//   - the first one is created by redeeming a platform setup token, which
+//     the host issues, and any other by redeeming the invitation of an
+//     enabled platform administrator (InvitePlatformAdmin);
 //   - it invites only a tenant's administrators, and a tenant's
 //     administrators invite their own operators and viewers;
 //   - it resets only a tenant's administrators, never another platform
@@ -117,6 +118,22 @@ func (ps *PlatformStore) IssuePlatformSetupToken(ctx context.Context, hash strin
 		return err
 	}
 	return tx.Commit()
+}
+
+// GetPlatformSetupToken returns the state of the platform setup token, or
+// ErrNotFound when the setup token row holds none. An initial setup token is
+// not reported.
+func (ps *PlatformStore) GetPlatformSetupToken(ctx context.Context) (SetupToken, error) {
+	var expires, issued string
+	var used sql.NullString
+	err := ps.store.reader().QueryRowContext(ctx, `SELECT expires_at,used_at,issued_at FROM setup_tokens WHERE id=1 AND purpose=?`, SetupTokenPurposePlatform).Scan(&expires, &used, &issued)
+	if errors.Is(err, sql.ErrNoRows) {
+		return SetupToken{}, ErrNotFound
+	}
+	if err != nil {
+		return SetupToken{}, err
+	}
+	return SetupToken{ExpiresAt: scanTime(expires), IssuedAt: scanTime(issued), Used: used.Valid}, nil
 }
 
 // PlatformSetupTokenUsable reports whether the platform setup token with the

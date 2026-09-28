@@ -146,9 +146,6 @@ func scanTenantCapacity(scan func(...any) error, leading ...any) (TenantCapacity
 // tenant's purge. The entry supplies the actor and request; the action,
 // detail, tenant, and actor kind are set here. A tenant that is missing,
 // deleted, or being deleted is not found, and nothing changes.
-//
-// The setter does not check experimental.business_units; the application
-// refuses the change while the flag is off.
 func (ps *PlatformStore) SetTenantCapacity(ctx context.Context, tenantID string, capacity TenantCapacity, limits CapacityLimits, audit AuditEntry) error {
 	if err := capacity.Validate(limits); err != nil {
 		return err

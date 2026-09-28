@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"sync"
 	"testing"
@@ -27,7 +28,9 @@ const platformDestinationID = "00000000-0000-0000-0000-0000000000f1"
 // its own routing to its own destinations: the default unit's configured
 // selection, and the other unit's routing that was never configured, which
 // takes its every destination. A paused unit gets no copy. Each unit lists
-// its own copy, and the live update carries the platform's copy, once.
+// its own copy, and each copy is published as a live update once, naming
+// its owner, so the web console sends each unit only its own copy and the
+// platform only the platform's.
 func TestUpdateAlertsFanOutToEachBusinessUnit(t *testing.T) {
 	ctx := context.Background()
 	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
@@ -98,8 +101,72 @@ func TestUpdateAlertsFanOutToEachBusinessUnit(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(live) != 1 || live[0].TenantID != "" {
-		t.Fatalf("live updates = %+v, want the platform's copy once", live)
+	var owners []string
+	for _, event := range live {
+		owners = append(owners, event.TenantID)
+	}
+	if want := []string{"", store.DefaultTenantID, secondTenantID}; !slices.Equal(owners, want) {
+		t.Fatalf("live update owners = %q, want the platform's copy and each active unit's copy once: %q", owners, want)
+	}
+}
+
+// A business unit that CreateUnit creates starts with update alerts off. Its
+// copy of an update alert is recorded, so its console shows the alert, but
+// it goes to none of the unit's destinations, while the default unit's
+// routing that was never configured still takes each of its enabled
+// destinations, and so does the routing of the unit that existed before.
+// Once the new unit's administrators select a destination, its copy of the
+// next update alert goes there.
+func TestNewBusinessUnitGetsNoUpdateAlertsUntilItSelectsDestinations(t *testing.T) {
+	ctx := context.Background()
+	f := newTwoTenants(t, schedulerFake{}, lifecycleJob)
+	a := f.app
+	unit, err := a.CreateUnit(ctx, "Charlie", "charlie", store.AuditEntry{ActorKind: store.AuditActorHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := f.db.TenantScopeByID(ctx, unit.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := f.db.Tenant(scope)
+	operations, err := a.Notifier.Tenant(ts).CreateManagedWithAudit(ctx, "Operations", "generic://127.0.0.1:9/charlie?disabletls=yes&template=json", true, store.AuditEntry{Action: "notifications.created"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if routing, err := ts.ApplicationUpdateRouting(ctx); err != nil || !reflect.DeepEqual(routing, store.ApplicationUpdateRouting{Configured: true, Destinations: []string{}}) {
+		t.Fatalf("the new unit's update routing = %#v, %v; want configured and empty", routing, err)
+	}
+	deliveries := func(tenantID string) []string {
+		t.Helper()
+		return queryColumn(t, f.db, `SELECT destination FROM outbox WHERE tenant_id='`+tenantID+`' AND CAST(payload_json AS TEXT) LIKE '%application-update-available%' ORDER BY 1`)
+	}
+
+	a.Version = "v1.0.0"
+	a.ReleaseChecker = &fakeReleaseChecker{result: updatecheck.Result{Release: updatecheck.Release{Version: "v1.1.0"}}}
+	a.runUpdateCheck(ctx)
+	if got := deliveries(unit.ID); len(got) != 0 {
+		t.Fatalf("the new unit's update alert went to %v, want none of its destinations", got)
+	}
+	if events, err := ts.ListEvents(ctx, "", 20); err != nil || len(events) != 1 || events[0].Type != "application-update-available" {
+		t.Fatalf("the new unit lists %+v, %v; want its copy of the update alert", events, err)
+	}
+	// The default unit's web-managed destination and the deployment
+	// destination from config.yaml.
+	if got := deliveries(store.DefaultTenantID); len(got) != 2 {
+		t.Fatalf("the default unit's update alert went to %v, want its two enabled destinations", got)
+	}
+	if got, want := deliveries(secondTenantID), []string{"managed:" + f.destinationB + ":1"}; !slices.Equal(got, want) {
+		t.Fatalf("the existing unit's update alert went to %v, want %v", got, want)
+	}
+
+	if err := ts.SetApplicationUpdateDestinations(ctx, []string{operations.ID}, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	a.ReleaseChecker = &fakeReleaseChecker{result: updatecheck.Result{Release: updatecheck.Release{Version: "v1.2.0"}}}
+	a.runUpdateCheck(ctx)
+	if got, want := deliveries(unit.ID), []string{"managed:" + operations.ID + ":1"}; !slices.Equal(got, want) {
+		t.Fatalf("the new unit's update alert after it selected a destination went to %v, want %v", got, want)
 	}
 }
 

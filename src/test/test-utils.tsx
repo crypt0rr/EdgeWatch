@@ -13,3 +13,9 @@ export function renderWithProviders(ui: ReactNode, options: RenderOptions & { ro
   }
   return { client, ...render(ui, { wrapper: Wrapper, ...renderOptions }) }
 }
+
+/**
+ * The session keys that name a single-unit installation's console: every
+ * account of the default business unit has them.
+ */
+export const defaultUnitScope = { scope: 'unit', unit: { id: '00000000-0000-0000-0000-000000000100', name: 'Default', slug: 'default' }, multi_unit: false } as const

@@ -1,6 +1,8 @@
 import type { Page } from '@playwright/test'
 
-export type ConsoleRole = 'administrator' | 'operator' | 'viewer'
+export type UnitConsoleRole = 'administrator' | 'operator' | 'viewer'
+/** platform_admin is the business units' platform administrator. */
+export type ConsoleRole = UnitConsoleRole | 'platform_admin'
 
 export const rolePermissions: Record<ConsoleRole, string[]> = {
   administrator: [
@@ -9,7 +11,7 @@ export const rolePermissions: Record<ConsoleRole, string[]> = {
     'incidents.read', 'incidents.manage', 'notification_options.read',
     'notifications.manage', 'users.manage', 'public_dashboard.manage',
     'stream.read', 'scanner_profiles.read', 'scanner_profiles.manage',
-    'account.self',
+    'audit.read', 'account.self',
   ],
   operator: [
     'overview.read', 'jobs.read', 'jobs.write', 'jobs.run',
@@ -18,6 +20,10 @@ export const rolePermissions: Record<ConsoleRole, string[]> = {
     'stream.read', 'scanner_profiles.read', 'account.self',
   ],
   viewer: ['jobs.read', 'baselines.read', 'account.self'],
+  platform_admin: [
+    'account.self', 'platform_audit.read', 'platform_notifications.manage',
+    'platform_status.read', 'unit_accounts.manage', 'units.manage',
+  ],
 }
 
 export type ConsoleMockControls = {
@@ -112,13 +118,29 @@ function pagination(total: number, limit = 50) {
   return { limit, offset: 0, total, has_more: false, next_offset: null }
 }
 
+const deploymentLimits = { max_concurrent_scans: 4, max_probe_count: 5_000_000, max_naabu_probe_count: 20_000_000, max_probe_count_limit: 100_000_000 }
+
+function platformUnit(overrides: Record<string, unknown>) {
+  return { status: 'active', is_default: false, revision: 1, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', state_changed_at: '2026-01-01T00:00:00Z', accounts: 0, administrators: 0, jobs: 0, stored_scans: 0, slots: { in_use: 0, queued: 0 }, ...overrides }
+}
+
+function platformAccount(overrides: Record<string, unknown>) {
+  return { enabled: true, pending: false, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 1, ...overrides }
+}
+
 /**
  * Install a deterministic API surface for browser acceptance tests. The
  * fixture intentionally models the same role/permission contract as the Go
  * authorization table and exposes mutation failures on demand so every
- * high-risk console flow has a browser-level error path.
+ * high-risk console flow has a browser-level error path. A unit role's
+ * session belongs to the default unit of a single-unit installation. With
+ * platformTOTP false, the platform administrator has no TOTP and the
+ * deployment starts
+ * with the default unit only; once a second unit exists, its session must
+ * enrol TOTP and holds only account.self, and the platform routes are
+ * refused, as the server's permission gate does.
  */
-export async function mockConsole(page: Page, role: ConsoleRole = 'administrator'): Promise<ConsoleMockControls> {
+export async function mockConsole(page: Page, role: ConsoleRole = 'administrator', { platformTOTP = true }: { platformTOTP?: boolean } = {}): Promise<ConsoleMockControls> {
   let incidents: any[] = [{
     job_id: 'job-1',
     job: 'fixture-job',
@@ -136,6 +158,23 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     hosts: [],
   }
   let updateRouting = { configured: true, destinations: ['dest-1'] }
+  // The platform console's state, used when the role is platform_admin.
+  const units: any[] = [
+    platformUnit({ id: 'unit-default', name: 'Default', slug: 'default', is_default: true, accounts: 3, administrators: 1, jobs: 1, stored_scans: 12 }),
+    platformUnit({ id: 'unit-retail', name: 'Retail', slug: 'retail', accounts: 3, administrators: 1, jobs: 2, stored_scans: 1480, slots: { in_use: 1, queued: 0 } }),
+  ].slice(0, platformTOTP ? 2 : 1)
+  const multipleUnits = () => units.filter(unit => unit.status !== 'deleted').length > 1
+  const mustEnrol = () => role === 'platform_admin' && !platformTOTP && multipleUnits()
+  const unitAccounts: Record<string, any[]> = {
+    'unit-default': [platformAccount({ id: 'acct-admin', username: 'admin', display_name: 'Administrator', role: 'administrator', totp_enabled: true })],
+    'unit-retail': [
+      platformAccount({ id: 'acct-riley', username: 'riley', display_name: 'Riley Novak', role: 'administrator' }),
+      platformAccount({ id: 'acct-casey', username: 'casey', display_name: 'Casey Lindqvist', role: 'operator' }),
+      platformAccount({ id: 'acct-taylor', username: 'taylor', display_name: 'Taylor Brandt', role: 'viewer' }),
+    ],
+  }
+  const platformAdmins: any[] = [platformAccount({ id: 'user-platform_admin', username: 'platform', display_name: 'platform_admin', role: 'platform_admin', totp_enabled: true })]
+  let platformRouting = { configured: false, destinations: [] as string[] }
   const failures = new Set<string>()
   const calls: Record<string, number> = {}
   const payloads: Record<string, unknown[]> = {}
@@ -171,14 +210,107 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     }
 
     if (path === '/stream') { await route.abort(); return }
-    if (path === '/setup/status') { await json({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 } }); return }
+    if (path === '/setup/status') { await json({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 }, platform_setup_available: false }); return }
     if (path === '/auth/session') {
-      await json({ user_id: `user-${role}`, username: role === 'administrator' ? 'admin' : role, display_name: role, role, permissions: rolePermissions[role], csrf_token: 'fixture-csrf', totp_enabled: false, password_requirements: { minimum_length: 12 } })
+      // A platform administrator's session names the platform console, and
+      // a unit role's names the default unit.
+      const scope = role === 'platform_admin' ? { scope: 'platform', unit: null, multi_unit: multipleUnits() } : { scope: 'unit', unit: { id: 'unit-default', name: 'Default', slug: 'default' }, multi_unit: false }
+      const permissions = mustEnrol() ? ['account.self'] : rolePermissions[role]
+      const enrolment = mustEnrol() ? { totp_enrollment_required: true } : {}
+      await json({ user_id: `user-${role}`, username: role === 'administrator' ? 'admin' : role === 'platform_admin' ? 'platform' : role, display_name: role, role, permissions, csrf_token: 'fixture-csrf', totp_enabled: role === 'platform_admin' && platformTOTP, password_requirements: { minimum_length: 12 }, ...scope, ...enrolment })
       return
+    }
+    if (mustEnrol() && path.startsWith('/platform/')) {
+      // A session that must enrol TOTP holds only its own account.
+      record('platform-refused', `${method} ${path}`)
+      await json({ error: { code: 'forbidden', message: 'your account is not allowed to perform this action', details: { permission: 'route' } } }, 403)
+      return
+    }
+    if (role === 'platform_admin' && !path.startsWith('/platform/') && !path.startsWith('/auth/')) {
+      // A platform administrator holds no permission on a unit's data.
+      record('unit-data', `${method} ${path}`)
+      await json({ error: { code: 'forbidden', message: 'your account is not allowed to perform this action', details: { permission: 'route' } } }, 403)
+      return
+    }
+    if (role === 'platform_admin' && path.startsWith('/platform/')) {
+      const parts = path.split('/').filter(Boolean).slice(1)
+      const unit = parts[0] === 'units' && parts[1] ? units.find(item => item.id === parts[1]) : undefined
+      if (parts[0] === 'units' && parts[1] && !unit) { await json({ error: { code: 'not_found', message: 'business unit not found' } }, 404); return }
+      if (parts.length === 1 && parts[0] === 'units' && method === 'GET') { await json({ units, limits: deploymentLimits }); return }
+      if (parts.length === 1 && parts[0] === 'units' && method === 'POST') {
+        const value = body() as { name?: string; slug?: string }
+        record('unit-create', value)
+        if (failures.delete('unit-create')) { await json(jsonError('unit-create'), 422); return }
+        const created = platformUnit({ id: `unit-${units.length + 1}`, name: value.name, slug: value.slug || String(value.name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-') })
+        units.push(created)
+        unitAccounts[created.id] = []
+        await json(created, 201); return
+      }
+      if (parts.length === 2 && method === 'GET') { await json(unit); return }
+      if (parts.length === 2 && method === 'PATCH') {
+        const value = body() as { name?: string; slug?: string }
+        record('unit-rename', value)
+        Object.assign(unit, { ...value, revision: unit.revision + 1 })
+        await json(unit); return
+      }
+      if (parts.length === 2 && method === 'DELETE') {
+        record('unit-delete', body())
+        Object.assign(unit, { status: 'deleting', purge: { phase: 'jobs', rows: 12 }, revision: unit.revision + 1 })
+        await json(unit); return
+      }
+      if (parts.length === 3 && (parts[2] === 'disable' || parts[2] === 'enable') && method === 'POST') {
+        record(`unit-${parts[2]}`, body())
+        Object.assign(unit, { status: parts[2] === 'disable' ? 'disabled' : 'active', revision: unit.revision + 1 })
+        await json(unit); return
+      }
+      if (parts.length === 3 && parts[2] === 'capacity') {
+        if (method === 'PATCH') record('unit-capacity', body())
+        await json({ unit_id: unit.id, capacity: { max_concurrent_scans: 2, max_probe_count: null, max_naabu_probe_count: null, high_cost_ceiling: 5_000_000 }, limits: deploymentLimits, slots: { ...unit.slots, limit: 2 } }); return
+      }
+      if (parts.length === 3 && parts[2] === 'accounts' && method === 'GET') { await json({ accounts: unitAccounts[unit.id] ?? [] }); return }
+      if (parts.length === 3 && parts[2] === 'accounts' && method === 'POST') {
+        const value = body() as { username?: string; display_name?: string; role?: string }
+        record('unit-admin-invite', value)
+        if (failures.delete('unit-admin-invite')) { await json(jsonError('unit-admin-invite'), 422); return }
+        const invited = platformAccount({ id: `acct-${value.username}`, username: value.username, display_name: value.display_name || value.username, role: 'administrator', enabled: false, pending: true })
+        unitAccounts[unit.id] = [...(unitAccounts[unit.id] ?? []), invited]
+        await json({ user: invited, activation_token: 'FIXTURE-INVITE', activation_path: '/activate#token=FIXTURE-INVITE' }, 201); return
+      }
+      if (parts.length === 5 && parts[2] === 'accounts' && parts[4] === 'password-reset' && method === 'POST') {
+        const account = (unitAccounts[unit.id] ?? []).find(item => item.id === parts[3])
+        record('unit-admin-reset', { account: parts[3], ...(body() as object) })
+        await json({ activation_token: 'FIXTURE-RESET', activation_path: '/activate#token=FIXTURE-RESET', expires_at: '2026-01-01T00:30:00Z', totp_enrolled: !!account?.totp_enabled }); return
+      }
+      if (parts.length === 5 && parts[2] === 'accounts' && parts[4] === 'sessions' && method === 'DELETE') { record('unit-account-sessions', { account: parts[3] }); await route.fulfill({ status: 204 }); return }
+      if (parts.length === 1 && parts[0] === 'admins' && method === 'GET') { await json({ admins: platformAdmins }); return }
+      if (parts.length === 1 && parts[0] === 'admins' && method === 'POST') {
+        const value = body() as { username?: string; display_name?: string }
+        record('platform-admin-invite', value)
+        const invited = platformAccount({ id: `user-${value.username}`, username: value.username, display_name: value.display_name || value.username, role: 'platform_admin', enabled: false, pending: true })
+        platformAdmins.push(invited)
+        await json({ user: invited, activation_token: 'FIXTURE-ADMIN', activation_path: '/activate#token=FIXTURE-ADMIN' }, 201); return
+      }
+      if (parts.length === 1 && parts[0] === 'audit' && method === 'GET') {
+        await json({ entries: [{ id: 2, created_at: '2026-01-01T00:00:02Z', action: 'tenant.created', category: 'platform', actor: { kind: 'platform', username: 'platform' }, detail: 'business unit Retail created', unit: { id: 'unit-retail', name: 'Retail', slug: 'retail' } }], next_before: null }); return
+      }
+      if (parts.length === 1 && parts[0] === 'notifications' && method === 'GET') { await json({ destinations: [{ ...destination, id: 'platform-1', name: 'Platform pager' }], status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' }, update_routing: platformRouting }); return }
+      if (parts.length === 2 && parts[0] === 'notifications' && parts[1] === 'update-routing' && method === 'PUT') {
+        const value = body() as { destinations?: string[] }
+        record('platform-update-routing', value)
+        platformRouting = { configured: true, destinations: value.destinations ?? [] }
+        await json(platformRouting); return
+      }
+      if (parts.length === 1 && parts[0] === 'status' && method === 'GET') {
+        await json({ version: 'v0.18.65', units: { total: units.length, active: units.filter(item => item.status === 'active').length, disabled: units.filter(item => item.status === 'disabled').length, deleting: units.filter(item => item.status === 'deleting').length }, accounts: 6, jobs: 3, stored_scans: 1492, platform_admins: { total: platformAdmins.length, enabled: 1 }, capacity: { limits: deploymentLimits, slots: { capacity: 4, in_use: 1, queued: 0 } }, updates: { enabled: true, status: 'up_to_date', current_version: 'v0.18.65' } }); return
+      }
+      await json({ error: { code: 'not_found', message: `${method} ${path}` } }, 404); return
     }
     if (path === '/status') {
       await json({ configured: true, username: role, display_name: role, role, version: 'v0.18.65', notification_destinations: 1, notifications: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' }, retention: '90d', max_concurrent_scans: 1, updates: { enabled: true, status: 'up_to_date', current_version: 'v0.18.65' } })
       return
+    }
+    if (path === '/audit' && method === 'GET') {
+      await json({ entries: [{ id: 1, created_at: '2026-01-01T00:00:01Z', action: 'user.login', category: 'account', actor: { kind: 'user', user_id: 'user-administrator', username: 'admin' }, detail: 'signed in', source_ip: '127.0.0.1' }], next_before: null }); return
     }
     if (path === '/incidents' && method === 'GET') { await json({ incidents, pagination: pagination(incidents.length) }); return }
     if (path === '/hosts' && method === 'GET') {

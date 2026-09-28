@@ -21,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -131,9 +130,6 @@ type Manager struct {
 	trustedProxies       []*net.IPNet
 	forwardedHeader      string
 	argon2Sem            chan struct{}
-	// businessUnits mirrors experimental.business_units. While it is off,
-	// no platform setup token is issued or redeemed.
-	businessUnits atomic.Bool
 }
 
 func NewManager(s *store.Store) *Manager {
@@ -934,6 +930,13 @@ func (m *Manager) recordAuthEvent(ctx context.Context, action, subject, tenantID
 // blocked client can send an unbounded number of rejected requests; writing an
 // audit row for each one would turn the protection itself into a storage DoS.
 func (m *Manager) auditRateLimit(ctx context.Context, subject string, request *http.Request) {
+	m.auditRateLimitIn(ctx, subject, request, false)
+}
+
+// auditRateLimitIn is auditRateLimit that records the transition in
+// platform scope when platform is true, for an operation that belongs to no
+// tenant, such as the platform setup.
+func (m *Manager) auditRateLimitIn(ctx context.Context, subject string, request *http.Request, platform bool) {
 	// A blocked episode belongs to the resolved source and endpoint, not to
 	// attacker-controlled account text. In particular, unknown-login subjects
 	// include the supplied username; using that value here would let a caller
@@ -959,7 +962,7 @@ func (m *Manager) auditRateLimit(ctx context.Context, subject string, request *h
 		}
 	}
 	m.mu.Unlock()
-	m.auditAuthFailure(ctx, "auth.rate_limited", subject, request)
+	m.recordAuthEvent(ctx, "auth.rate_limited", subject, "", platform, request)
 }
 
 func rateAuditEndpoint(subject string) string {

@@ -30,8 +30,8 @@ const (
 	PermissionNotificationsRead   = "notifications.read"
 	PermissionNotificationsManage = "notifications.manage"
 	PermissionUsersManage         = "users.manage"
-	// PermissionAuditRead remains source-compatible until an audit read
-	// endpoint exists, but is intentionally not granted to any role.
+	// PermissionAuditRead reads the unit's security audit. Only
+	// administrators hold it.
 	PermissionAuditRead             = "audit.read"
 	PermissionPublicManage          = "public_dashboard.manage"
 	PermissionStreamRead            = "stream.read"
@@ -46,7 +46,8 @@ const (
 	// The platform permissions belong to the platform administrator, who
 	// manages the business units and their administrators, reads the
 	// platform audit and status, and routes platform notifications. They
-	// grant nothing on a unit's data, and no route grants them yet.
+	// grant nothing on a unit's data. The platform console's routes, under
+	// /api/v1/platform/, require them.
 	PermissionUnitsManage                 = "units.manage"
 	PermissionUnitAccountsManage          = "unit_accounts.manage"
 	PermissionPlatformAuditRead           = "platform_audit.read"
@@ -64,6 +65,7 @@ var rolePermissions = map[string]map[string]bool{
 		PermissionNotificationsManage: true, PermissionUsersManage: true,
 		PermissionPublicManage: true, PermissionStreamRead: true,
 		PermissionScannerProfilesRead: true, PermissionScannerProfilesManage: true,
+		PermissionAuditRead:   true,
 		PermissionAccountSelf: true,
 	},
 	store.RoleOperator: {

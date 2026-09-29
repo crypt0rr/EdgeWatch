@@ -55,7 +55,10 @@ the current authenticator or a recovery code when TOTP is already enabled. The
 new secret then stays pending for ten minutes and accepts at most five incorrect
 verification codes. A mistyped code can be retried against the same secret;
 after the fifth incorrect code, or once the ten minutes pass, the pending secret
-is discarded and setup must start again.
+is discarded and setup must start again. The code that confirms the new secret
+counts as used for its time step, as a code accepted at sign-in or for a TOTP
+confirmation does, so neither accepts it again; the first sign-in after
+enrolment takes the authenticator's next code.
 
 ## Business units and the platform administrator
 
@@ -198,7 +201,10 @@ records, never a unit's data records. Both views are read-only.
 
 Disabling a unit ends its sessions and revokes its open invitations in the
 same transaction; from then on its accounts cannot sign in or redeem a link,
-and a sign-in gets the answer of a wrong password. A unit administrator's
+and a sign-in gets the answer of a wrong password, whatever one-time code or
+recovery code comes with it. The sign-in is refused before it uses up that
+code, so a recovery code presented while the unit is disabled still works
+once the unit is enabled again. A unit administrator's
 account changes, including new invitations and password-reset links, check
 again when they are written that the administrator is still an enabled
 administrator of an active unit. A request that is still in progress when
@@ -421,8 +427,10 @@ passes the emergency `--allow-active-daemon` override.
 Host CLI commands that change state (`scan`, `baseline approve` and `reset`,
 `notify test`, `backup`, `restore`, and administrator recovery) record a
 security audit entry with the actor `host-cli`. The details are bounded to job
-IDs, file base names, and outcomes; they never include scan targets,
-notification URLs, or full paths. A CLI scan uses the same
+IDs, file base names, and outcomes, and for `admin reset-password` and
+`admin disable-totp` the username and ID of the account changed with its unit,
+or the platform; they never include scan targets, notification URLs, full
+paths, passwords, or TOTP secrets. A CLI scan uses the same
 `scan.run_requested` action as a run started from the console. Read-only
 commands, including `restore --dry-run`, write no audit entries.
 

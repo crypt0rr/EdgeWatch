@@ -288,9 +288,19 @@ var accountLeakCases = map[string]tenantLeakCase{
 	"SaveUserSecurityPreservingSession": {writes: true, run: func(t *testing.T, f tenantFixture) {
 		checkTenantSecurityWrite(t, f, func(ts *TenantStore, user User, codes []string) error {
 			// Name the session of the account written, so a write that
-			// reached A's account could keep A's session.
-			return ts.SaveUserSecurityPreservingSession(context.Background(), user, codes, true, true, accountAudit("user.totp_disabled"), "session-"+user.Username)
+			// reached A's account could keep A's session, and record a TOTP
+			// time step, so a write that reached A's account would record
+			// A's.
+			return ts.SaveUserSecurityPreservingSession(context.Background(), user, codes, true, true, accountAudit("user.totp_disabled"), "session-"+user.Username, 7)
 		}, "session-admin-b", 1)
+		for query, want := range map[string]int{
+			`SELECT COUNT(*) FROM totp_replay WHERE user_id='` + accountAdminB + `' AND last_step=7`: 1,
+			`SELECT COUNT(*) FROM totp_replay WHERE user_id<>'` + accountAdminB + `'`:                0,
+		} {
+			if got := countRows(t, f.store.DB, query); got != want {
+				t.Errorf("%s = %d, want %d", query, got, want)
+			}
+		}
 	}},
 	"DeleteUserSessionsWithAudit": {writes: true, run: func(t *testing.T, f tenantFixture) {
 		assertTenantWritesOnlyItsAccounts(t, f, func(ts *TenantStore, id string) error {
@@ -542,6 +552,10 @@ func TestAccountGlobalPathsCarryTheTenant(t *testing.T) {
 		setTenantState(t, f.store, secondTenantID, state)
 		admin := fixtureAccount(t, f, accountAdminB)
 		for label, create := range map[string]func() error{
+			// Sign-in checks the tenant before it spends a one-time factor.
+			"the check before a one-time factor": func() error {
+				return f.store.RequireActiveAccountTenant(ctx, accountAdminB)
+			},
 			"sign-in": func() error {
 				return f.store.CreateSessionForUserIfCurrent(ctx, accountAdminB, admin.PasswordHash, admin.Revision, false, "paused-login", "csrf", now, now.Add(time.Hour), login)
 			},
@@ -577,6 +591,9 @@ func TestAccountGlobalPathsCarryTheTenant(t *testing.T) {
 			t.Errorf("%s tenant: the refused sign-in changed the account: %+v, %v", state, user, err)
 		}
 		adminA := fixtureAccount(t, f, accountAdminA)
+		if err := f.store.RequireActiveAccountTenant(ctx, accountAdminA); err != nil {
+			t.Errorf("%s tenant B: tenant A's check before a one-time factor = %v", state, err)
+		}
 		if err := f.store.CreateSessionForUserIfCurrent(ctx, accountAdminA, adminA.PasswordHash, adminA.Revision, false, "login-a-"+state, "csrf", now, now.Add(time.Hour), AuditEntry{}); err != nil {
 			t.Errorf("%s tenant B: tenant A's sign-in = %v", state, err)
 		}
@@ -584,6 +601,13 @@ func TestAccountGlobalPathsCarryTheTenant(t *testing.T) {
 	setTenantState(t, f.store, secondTenantID, TenantStateActive)
 	if usable, err := f.store.ActivationTokenUsable(ctx, "paused-b", now); err != nil || !usable {
 		t.Fatalf("active tenant again: link usable = %v, %v", usable, err)
+	}
+	// An account of an active tenant passes the check, and so does an ID
+	// that no account has, which the sign-in refuses on its own.
+	for _, id := range []string{accountAdminB, accountUnknown} {
+		if err := f.store.RequireActiveAccountTenant(ctx, id); err != nil {
+			t.Errorf("active tenant again: the check before a one-time factor for %s = %v", id, err)
+		}
 	}
 }
 

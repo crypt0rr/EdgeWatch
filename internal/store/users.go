@@ -536,15 +536,18 @@ func (ts *TenantStore) SetUserPassword(ctx context.Context, id, hash string, rev
 // SaveUserSecurity saves the security state of the tenant's account and
 // revokes all of its sessions when asked.
 func (ts *TenantStore) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry) error {
-	return ts.SaveUserSecurityPreservingSession(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, "")
+	return ts.SaveUserSecurityPreservingSession(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, "", NoTOTPStep)
 }
 
 // SaveUserSecurityPreservingSession is the actor-aware security mutation used
 // by TOTP enrollment. It revokes every other session while optionally keeping
 // the browser that is receiving the one-time recovery-code response alive.
-// Passing an empty hash preserves the original revoke-all behavior. Another
+// Passing an empty hash preserves the original revoke-all behavior. A TOTP
+// enrolment passes the time step of the code that confirmed the new secret
+// as totpStep, which is recorded as used in the same transaction, so that
+// code is not accepted again; any other save passes NoTOTPStep. Another
 // tenant's account is ErrNotFound, and nothing is written.
-func (ts *TenantStore) SaveUserSecurityPreservingSession(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string) error {
+func (ts *TenantStore) SaveUserSecurityPreservingSession(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string, totpStep int64) error {
 	if err := ts.ready(); err != nil {
 		return err
 	}
@@ -595,6 +598,10 @@ func (ts *TenantStore) SaveUserSecurityPreservingSession(ctx context.Context, u 
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrConflict
+	}
+	// The update above found the account in the tenant.
+	if err := recordEnrolledTOTPStepTx(ctx, tx, u.ID, totpStep, u.UpdatedAt); err != nil {
+		return err
 	}
 	if replaceRecoveryCodes {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id=`+tenantUserSQL, u.ID, ts.scope.id); err != nil {

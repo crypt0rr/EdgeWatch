@@ -595,3 +595,146 @@ func TestAdminRecoveryWithTenant(t *testing.T) {
 		t.Fatalf("disable-totp admin --tenant default = %q, %v", out, err)
 	}
 }
+
+// The audit record of a host recovery command names the account it
+// changed, by username and ID, with its unit or the platform, as the
+// console's account records name theirs. The record stays a host-cli
+// record in the account's unit, or in platform scope for a platform
+// administrator, and holds no password or TOTP secret.
+func TestHostRecoveryRecordsNameTheAccount(t *testing.T) {
+	ctx := context.Background()
+	s := storetest.OpenFresh(t)
+	now := time.Now().UTC()
+	stamp := now.Format(time.RFC3339Nano)
+	if err := s.SaveAdmin(ctx, store.Admin{Username: "admin", PasswordHash: "hash", CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,created_at,updated_at) VALUES(?,'Other','other',?,?)`, otherTenantID, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	otherScope, err := s.TenantScopeByID(ctx, otherTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const secret = "JBSWY3DPEHPK3PXP"
+	accounts := map[string]store.User{}
+	for _, account := range []struct {
+		username, role string
+		unit           store.TenantScope
+		totp           bool
+	}{
+		{"alice", store.RoleOperator, store.DefaultTenantScope(), false},
+		{"bob", store.RoleOperator, store.DefaultTenantScope(), true},
+		{"carol", store.RoleAdministrator, otherScope, true},
+	} {
+		created, err := s.Tenant(account.unit).CreateUser(ctx, store.User{Username: account.username, Role: account.role, PasswordHash: "hash", Enabled: true}, store.AuditEntry{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if account.totp {
+			created.TOTPEnabled, created.TOTPSecret = true, secret
+			if err := s.Tenant(account.unit).SaveUserSecurity(ctx, created, []string{"v2$code-" + account.username}, true, false, store.AuditEntry{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		accounts[account.username] = created
+	}
+	manager := auth.NewManager(s)
+	token, err := manager.IssuePlatformSetupToken(ctx, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accounts["root"], err = manager.CompletePlatformSetup(ctx, token, "root", "platform administrator password"); err != nil {
+		t.Fatal(err)
+	}
+	if accounts["admin"], err = s.GetUserByUsername(ctx, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	const replacement = "replacement recovery password"
+	passwordPath := filepath.Join(t.TempDir(), "password")
+	if err := os.WriteFile(passwordPath, []byte(replacement+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	other, _, err := hostUnit(ctx, s, "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	type record struct{ action, detail, actorUserID, actorUsername, kind, tenant string }
+	hostRecord := func(action, detail, tenant string) record {
+		return record{action, detail, "", hostCLIActor, store.AuditActorHost, tenant}
+	}
+	// recordsAfter returns the audit records written after the one with the
+	// ID.
+	recordsAfter := func(last int64) []record {
+		t.Helper()
+		rows, err := s.DB.QueryContext(ctx, `SELECT action,detail,actor_user_id,actor_username,actor_kind,COALESCE(tenant_id,'') FROM security_audit WHERE id>? ORDER BY id`, last)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var got []record
+		for rows.Next() {
+			var r record
+			if err := rows.Scan(&r.action, &r.detail, &r.actorUserID, &r.actorUsername, &r.kind, &r.tenant); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, r)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	for _, check := range []struct {
+		action, username string
+		options          adminRecoveryOptions
+		want             record
+	}{
+		{"reset-password", "alice", adminRecoveryOptions{}, hostRecord("user.password_reset", "password of alice (ID "+accounts["alice"].ID+", unit default) reset from host CLI", store.DefaultTenantID)},
+		{"disable-totp", "bob", adminRecoveryOptions{}, hostRecord("user.totp_disabled", "TOTP of bob (ID "+accounts["bob"].ID+", unit default) disabled from host CLI", store.DefaultTenantID)},
+		{"reset-password", "root", adminRecoveryOptions{}, hostRecord("user.password_reset", "password of root (ID "+accounts["root"].ID+", platform) reset from host CLI", "")},
+		{"disable-totp", "root", adminRecoveryOptions{}, hostRecord("user.totp_disabled", "TOTP of root (ID "+accounts["root"].ID+", platform) disabled from host CLI", "")},
+		// --tenant names the unit that the account must belong to.
+		{"reset-password", "carol", adminRecoveryOptions{unit: &other}, hostRecord("user.password_reset", "password of carol (ID "+accounts["carol"].ID+", unit other) reset from host CLI", otherTenantID)},
+		{"disable-totp", "carol", adminRecoveryOptions{unit: &other}, hostRecord("user.totp_disabled", "TOTP of carol (ID "+accounts["carol"].ID+", unit other) disabled from host CLI", otherTenantID)},
+		// The original administrator keeps its own actions, with the same
+		// wording.
+		{"reset-password", "admin", adminRecoveryOptions{}, hostRecord("admin.password_reset", "password of admin (ID "+store.LegacyAdminUserID+", unit default) reset from host CLI", store.DefaultTenantID)},
+		{"disable-totp", "admin", adminRecoveryOptions{}, hostRecord("admin.totp_disabled", "TOTP of admin (ID "+store.LegacyAdminUserID+", unit default) disabled from host CLI", store.DefaultTenantID)},
+	} {
+		var last int64
+		if err := s.DB.QueryRowContext(ctx, `SELECT COALESCE(MAX(id),0) FROM security_audit`).Scan(&last); err != nil {
+			t.Fatal(err)
+		}
+		path := ""
+		if check.action == "reset-password" {
+			path = passwordPath
+		}
+		if err := adminRecovery(ctx, check.action, s, path, check.username, check.options); err != nil {
+			t.Fatalf("%s %s: %v", check.action, check.username, err)
+		}
+		got := recordsAfter(last)
+		if len(got) != 1 || got[0] != check.want {
+			t.Errorf("%s %s recorded %+v, want %+v", check.action, check.username, got, check.want)
+			continue
+		}
+		for _, private := range []string{replacement, secret, "hash", "v2$code"} {
+			if strings.Contains(got[0].detail, private) {
+				t.Errorf("%s %s recorded %q, which holds %q", check.action, check.username, got[0].detail, private)
+			}
+		}
+	}
+	// Each command did what it names.
+	for username, account := range accounts {
+		recovered, err := s.GetAccount(ctx, account.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if recovered.TOTPEnabled {
+			t.Errorf("%s still has TOTP after disable-totp", username)
+		}
+		if username != "bob" && !auth.VerifyPassword(recovered.PasswordHash, replacement) {
+			t.Errorf("%s's password was not reset", username)
+		}
+	}
+}

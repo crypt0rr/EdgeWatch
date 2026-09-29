@@ -673,6 +673,22 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		m.auditAccountFailure(ctx, "auth.login_failed", identity, user, request)
 		return "", user, errors.New("invalid credentials")
 	}
+	// A tenant that is disabled or being deleted stops sign-in, and the
+	// session insert below refuses it. The sign-in is refused here already,
+	// before it spends a TOTP time step or a recovery code, so a refused
+	// sign-in uses up no one-time factor and records no recovery code as
+	// used. The answer is the one a wrong password gets, whatever code came
+	// with it, so it does not tell the caller that the password was right.
+	// The session insert checks again in its transaction, for a tenant that
+	// is disabled in between.
+	if err := m.Store.RequireActiveAccountTenant(ctx, user.ID); err != nil {
+		if !errors.Is(err, store.ErrTenantNotActive) {
+			return "", user, err
+		}
+		m.failedScoped(source, account, loginClient)
+		m.auditAccountFailure(ctx, "auth.login_failed", identity, user, request)
+		return "", user, errors.New("invalid credentials")
+	}
 	totpAccepted := false
 	acceptedTOTPStep := int64(-1)
 	acceptedTOTPSecret := ""
@@ -1663,9 +1679,11 @@ func VerifyTOTPAt(secret, code string, at time.Time) bool {
 }
 
 // VerifyTOTPAtStep validates a code and returns the exact accepted time step.
-// Callers that authenticate a user must persist that step with the store's
-// atomic replay guard; the pure VerifyTOTPAt helper remains suitable for
-// validating a pending enrollment secret.
+// Every caller that accepts a code must record that step with the store's
+// replay guard, so the code is accepted once: sign-in and TOTP confirmations
+// consume it with ConsumeTOTPStep, and a TOTP enrolment records the step of
+// the code that confirmed the pending secret when it saves the secret. The
+// pure VerifyTOTP and VerifyTOTPAt helpers record nothing.
 func VerifyTOTPAtStep(secret, code string, at time.Time) (int64, bool) {
 	code = strings.TrimSpace(code)
 	if len(code) != 6 {

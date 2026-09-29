@@ -562,8 +562,12 @@ func TestPlatformAccountStoreAndLastPlatformAdmin(t *testing.T) {
 		}
 	}
 	user.TOTPEnabled, user.TOTPSecret = true, "JBSWY3DPEHPK3PXP"
-	if err := root.SaveUserSecurityPreservingSession(ctx, user, []string{"v2$root-code"}, true, true, platformAudit("user.totp_enabled"), "session-a"); err != nil {
+	if err := root.SaveUserSecurityPreservingSession(ctx, user, []string{"v2$root-code"}, true, true, platformAudit("user.totp_enabled"), "session-a", 9); err != nil {
 		t.Fatal(err)
+	}
+	// The enrolment recorded the time step of the code that confirmed it.
+	if accepted, err := f.store.ConsumeTOTPStep(ctx, platformRoot, 9, time.Now()); err != nil || accepted {
+		t.Fatalf("the enrolment's time step after the enrolment = %v, %v; want refused", accepted, err)
 	}
 	if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM sessions WHERE user_id=?`, platformRoot); got != 1 {
 		t.Fatalf("TOTP enrolment kept %d sessions, want the preserved one", got)

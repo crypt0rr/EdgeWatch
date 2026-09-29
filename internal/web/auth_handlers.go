@@ -23,7 +23,7 @@ type accountStore interface {
 	GetUser(ctx context.Context, id string) (store.User, error)
 	UpdateUser(ctx context.Context, u store.User, revokeSessions bool, audit store.AuditEntry) error
 	SaveUserSecurity(ctx context.Context, u store.User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit store.AuditEntry) error
-	SaveUserSecurityPreservingSession(ctx context.Context, u store.User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit store.AuditEntry, preserveSessionHash string) error
+	SaveUserSecurityPreservingSession(ctx context.Context, u store.User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit store.AuditEntry, preserveSessionHash string, totpStep int64) error
 	DeleteUserSessionsWithAudit(ctx context.Context, userID string, audit store.AuditEntry) error
 }
 
@@ -694,9 +694,9 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 	if user.ID == store.LegacyAdminUserID {
 		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Revision: user.Revision}
 		auditAction = "admin.totp_enabled"
-		saveErr = s.Store.SaveAdminSecurityWithAuditPreservingSession(r.Context(), admin, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username}, preserveSessionHash)
+		saveErr = s.Store.SaveAdminSecurityWithAuditPreservingSession(r.Context(), admin, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username}, preserveSessionHash, pending.Step)
 	} else {
-		saveErr = account.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username}, preserveSessionHash)
+		saveErr = account.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, store.AuditEntry{Action: auditAction, Detail: "TOTP enabled", ActorUserID: session.UserID, ActorUsername: session.Username}, preserveSessionHash, pending.Step)
 	}
 	if err := saveErr; err != nil {
 		if s.writeAuditUnavailable(w, err, auditAction) {
@@ -713,8 +713,11 @@ func (s *Server) totpEnable(w http.ResponseWriter, r *http.Request, session stor
 	writeJSON(w, http.StatusOK, map[string]any{"recovery_codes": plain})
 }
 
-// verifyPendingTOTP checks code against the enrolment pending for key. A
-// correct code consumes the enrolment and returns it. A wrong code keeps the
+// verifyPendingTOTP checks code against the enrolment pending for key, at
+// now. A correct code consumes the enrolment and returns it, with the time
+// step of the code in Step: saving the secret records that step as used, as
+// a code accepted at sign-in or for a TOTP confirmation is, so the code
+// that confirmed the enrolment is not accepted again. A wrong code keeps the
 // enrolment for a retry and returns how many attempts remain; the last
 // permitted failure discards it. remaining is zero when no enrolment is
 // pending, it expired, or its attempts are spent, so the user must start
@@ -729,8 +732,9 @@ func (s *Server) verifyPendingTOTP(key, code string, now time.Time) (pendingTOTP
 		delete(s.pendingTOTP, key)
 		return pendingTOTP{}, 0, false
 	}
-	if auth.VerifyTOTP(pending.Secret, code) {
+	if step, ok := auth.VerifyTOTPAtStep(pending.Secret, code, now); ok {
 		delete(s.pendingTOTP, key)
+		pending.Step = step
 		return pending, 0, true
 	}
 	pending.Failures++
@@ -838,9 +842,9 @@ func (s *Server) totpRecoveryCodes(w http.ResponseWriter, r *http.Request, sessi
 	if user.ID == store.LegacyAdminUserID {
 		auditAction = "admin.totp_recovery_codes_rotated"
 		admin := store.Admin{Username: user.Username, DisplayName: user.DisplayName, PasswordHash: user.PasswordHash, TOTPSecret: user.TOTPSecret, TOTPSecretStored: user.TOTPSecretStored, TOTPEnabled: user.TOTPEnabled, CreatedAt: user.CreatedAt, UpdatedAt: user.UpdatedAt, Revision: user.Revision}
-		saveErr = s.Store.SaveAdminSecurityWithAuditPreservingSession(r.Context(), admin, hashes, true, true, actorAudit(session, auditAction, "TOTP recovery codes rotated"), preserve)
+		saveErr = s.Store.SaveAdminSecurityWithAuditPreservingSession(r.Context(), admin, hashes, true, true, actorAudit(session, auditAction, "TOTP recovery codes rotated"), preserve, store.NoTOTPStep)
 	} else {
-		saveErr = account.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, actorAudit(session, auditAction, "TOTP recovery codes rotated"), preserve)
+		saveErr = account.SaveUserSecurityPreservingSession(r.Context(), user, hashes, true, true, actorAudit(session, auditAction, "TOTP recovery codes rotated"), preserve, store.NoTOTPStep)
 	}
 	if saveErr != nil {
 		if s.writeAuditUnavailable(w, saveErr, auditAction) {

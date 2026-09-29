@@ -260,15 +260,18 @@ func (s *Store) SaveAdminSecurity(ctx context.Context, a Admin, recoveryCodes []
 // SaveAdminSecurityWithAudit is the actor-aware form used by the web console.
 // The legacy string-argument wrapper above remains for CLI and older callers.
 func (s *Store) SaveAdminSecurityWithAudit(ctx context.Context, a Admin, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry) error {
-	return s.SaveAdminSecurityWithAuditPreservingSession(ctx, a, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, "")
+	return s.SaveAdminSecurityWithAuditPreservingSession(ctx, a, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, "", NoTOTPStep)
 }
 
 // SaveAdminSecurityWithAuditPreservingSession applies an administrator security
 // mutation while revoking every other session for that account. The optional
 // preserved hash is used by TOTP enrollment so the browser can keep displaying
 // the one-time recovery codes returned by the same request. An empty hash keeps
-// the historical behavior and revokes all administrator sessions.
-func (s *Store) SaveAdminSecurityWithAuditPreservingSession(ctx context.Context, a Admin, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string) error {
+// the historical behavior and revokes all administrator sessions. A TOTP
+// enrolment passes the time step of the code that confirmed the new secret
+// as totpStep, which is recorded as used in the same transaction, so that
+// code is not accepted again; any other save passes NoTOTPStep.
+func (s *Store) SaveAdminSecurityWithAuditPreservingSession(ctx context.Context, a Admin, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string, totpStep int64) error {
 	stored, err := s.adminTOTPForSave(a)
 	if err != nil {
 		return err
@@ -279,6 +282,9 @@ func (s *Store) SaveAdminSecurityWithAuditPreservingSession(ctx context.Context,
 	}
 	defer tx.Rollback()
 	if err := saveAdminExec(ctx, tx, a, stored); err != nil {
+		return err
+	}
+	if err := recordEnrolledTOTPStepTx(ctx, tx, LegacyAdminUserID, totpStep, time.Now().UTC()); err != nil {
 		return err
 	}
 	if replaceRecoveryCodes {
@@ -518,14 +524,25 @@ func (s *Store) CreateSessionForUserWithAudit(ctx context.Context, userID, idHas
 // scans.
 var ErrTenantNotActive = errors.New("the tenant is not active")
 
+// RequireActiveAccountTenant fails with ErrTenantNotActive when the account
+// belongs to a tenant that is not active, as the session insert does. Sign-in
+// checks it before it spends a one-time factor, so a sign-in that the
+// session insert would refuse uses up no recovery code or TOTP time step.
+// The session insert checks again in its own transaction, which stays the
+// authoritative check.
+func (s *Store) RequireActiveAccountTenant(ctx context.Context, userID string) error {
+	return requireActiveAccountTenantTx(ctx, s.reader(), userID)
+}
+
 // requireActiveAccountTenantTx fails with ErrTenantNotActive when the
 // account belongs to a tenant that is not active. It reads the tenant from
 // users, as TenantScopeForSession does. An account without a tenant, a
 // platform administrator, has no tenant to check, and neither has an
-// unknown account; the caller's own checks refuse those.
-func requireActiveAccountTenantTx(ctx context.Context, tx *sql.Tx, userID string) error {
+// unknown account; the caller's own checks refuse those. queryer is the
+// caller's transaction, or the store's reader for the check before one.
+func requireActiveAccountTenantTx(ctx context.Context, queryer rowQueryer, userID string) error {
 	var state string
-	err := tx.QueryRowContext(ctx, `SELECT t.state FROM users AS u JOIN tenants AS t ON t.id=u.tenant_id WHERE u.id=?`, userID).Scan(&state)
+	err := queryer.QueryRowContext(ctx, `SELECT t.state FROM users AS u JOIN tenants AS t ON t.id=u.tenant_id WHERE u.id=?`, userID).Scan(&state)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}

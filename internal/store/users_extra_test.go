@@ -125,7 +125,7 @@ func TestSecuritySaveCanPreserveActingSessionWhileRevokingOthers(t *testing.T) {
 	}
 	user.TOTPEnabled = false
 	user.UpdatedAt = now.Add(time.Minute)
-	if err := defaultTenant(s).SaveUserSecurityPreservingSession(ctx, user, []string{"recovery"}, true, true, AuditEntry{}, "current-session"); err != nil {
+	if err := defaultTenant(s).SaveUserSecurityPreservingSession(ctx, user, []string{"recovery"}, true, true, AuditEntry{}, "current-session", NoTOTPStep); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.GetSession(ctx, "current-session"); err != nil {

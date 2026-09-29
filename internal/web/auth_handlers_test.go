@@ -556,3 +556,137 @@ func TestPasswordConfirmationIsRateLimited(t *testing.T) {
 		t.Fatalf("sixth wrong password attempt returned %d: %s", response.Code, response.Body.String())
 	}
 }
+
+// totpReplayAccount is an account that enrols TOTP in the replay tests
+// below. The original administrator, a unit's account and a platform
+// administrator each save their enrolment through their own store.
+type totpReplayAccount struct{ name, role, username, password string }
+
+var totpReplayAccounts = []totpReplayAccount{
+	{"original administrator", store.RoleAdministrator, "admin", "administrator password"},
+	{"unit operator", store.RoleOperator, "unit-operator", "unit operator password"},
+	{"platform administrator", store.RolePlatformAdmin, "root", "platform administrator password"},
+}
+
+// totpReplayFixture is a server with the account signed in, on a frozen
+// clock that the console and sign-in share, so each code belongs to a
+// known time step: step, which the test advances.
+type totpReplayFixture struct {
+	t       *testing.T
+	server  *Server
+	db      *store.Store
+	account totpReplayAccount
+	session routeMatrixSession
+	step    int64
+	clients int
+}
+
+func newTOTPReplayFixture(t *testing.T, account totpReplayAccount) *totpReplayFixture {
+	t.Helper()
+	server, db, _ := newUsersTestServer(t)
+	switch account.role {
+	case store.RoleOperator:
+		hash, err := auth.PasswordHash(account.password)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := defaultTenant(db).CreateUser(context.Background(), store.User{Username: account.username, Role: account.role, PasswordHash: hash, Enabled: true}, store.AuditEntry{}); err != nil {
+			t.Fatal(err)
+		}
+	case store.RolePlatformAdmin:
+		createWebPlatformAdmin(t, server, account.username, account.password)
+	}
+	f := &totpReplayFixture{t: t, server: server, db: db, account: account, step: time.Now().Unix() / 30}
+	clock := func() time.Time { return time.Unix(f.step*30+1, 0).UTC() }
+	server.now, server.Auth.Now = clock, clock
+	f.session = signIn(t, server, account.role, account.username, account.password, "")
+	return f
+}
+
+// enrol sets TOTP up and confirms it with the code of the current time
+// step, which it returns with the new secret. current is the code of the
+// account's factor, when it has one.
+func (f *totpReplayFixture) enrol(current string) (string, string) {
+	f.t.Helper()
+	setup := callAPI(f.t, f.server, f.session, http.MethodPost, "/auth/totp/setup", `{"password":"`+f.account.password+`","code":"`+current+`"}`)
+	var payload struct {
+		Secret string `json:"secret"`
+	}
+	if setup.Code != http.StatusOK || json.Unmarshal(setup.Body.Bytes(), &payload) != nil || payload.Secret == "" {
+		f.t.Fatalf("TOTP setup = %d: %s", setup.Code, setup.Body.String())
+	}
+	code := coverageTOTPCode(payload.Secret, f.step)
+	if enable := callAPI(f.t, f.server, f.session, http.MethodPost, "/auth/totp/enable", `{"code":"`+code+`"}`); enable.Code != http.StatusOK {
+		f.t.Fatalf("TOTP enable = %d: %s", enable.Code, enable.Body.String())
+	}
+	return payload.Secret, code
+}
+
+// login signs in with the password and the one-time code. Each sign-in
+// comes from its own client, so a refused one does not throttle the next.
+func (f *totpReplayFixture) login(otp string) error {
+	f.clients++
+	request := httptest.NewRequest(http.MethodPost, consoleAPIBase+"/auth/login", nil)
+	request.RemoteAddr = fmt.Sprintf("198.51.100.%d:1234", f.clients)
+	_, _, err := f.server.Auth.LoginAs(context.Background(), request, f.account.username, f.account.password, otp, "")
+	return err
+}
+
+// A TOTP confirmation refuses the code that confirmed the TOTP enrolment:
+// the code is recorded as used for its time step, as a code accepted at
+// sign-in or for a TOTP confirmation is. The code of the next time step is
+// accepted.
+func TestTOTPConfirmationRefusesTheEnrolmentCode(t *testing.T) {
+	for _, account := range totpReplayAccounts {
+		t.Run(account.name, func(t *testing.T) {
+			f := newTOTPReplayFixture(t, account)
+			disable := func(code string) *httptest.ResponseRecorder {
+				return callAPI(t, f.server, f.session, http.MethodDelete, "/auth/totp", `{"password":"`+account.password+`","code":"`+code+`"}`)
+			}
+			secret, code := f.enrol("")
+			if response := disable(code); response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), "totp_required") {
+				t.Errorf("DELETE /auth/totp with the enrolment code = %d: %s; want 401 totp_required", response.Code, response.Body.String())
+			}
+			if user, err := f.db.GetUserByUsername(context.Background(), account.username); err != nil || !user.TOTPEnabled {
+				t.Fatalf("TOTP after the refused confirmation = %+v, %v; want enabled", user, err)
+			}
+			f.step++
+			if response := disable(coverageTOTPCode(secret, f.step)); response.Code != http.StatusNoContent {
+				t.Fatalf("DELETE /auth/totp with the next time step's code = %d: %s", response.Code, response.Body.String())
+			}
+		})
+	}
+}
+
+// A sign-in refuses the code that confirmed the TOTP enrolment, and
+// accepts the code of the next time step. Replacing an authenticator
+// confirms the old factor and enrols the new one in the same time step,
+// which still succeeds; the replacement's enrolment code is refused in turn.
+func TestSignInRefusesTheEnrolmentCode(t *testing.T) {
+	for _, account := range totpReplayAccounts {
+		t.Run(account.name, func(t *testing.T) {
+			f := newTOTPReplayFixture(t, account)
+			secret, code := f.enrol("")
+			if err := f.login(code); err == nil || err.Error() != "one-time code is required" {
+				t.Errorf("sign-in with the enrolment code = %v; want one-time code is required", err)
+			}
+			f.step++
+			if err := f.login(coverageTOTPCode(secret, f.step)); err != nil {
+				t.Fatalf("sign-in with the next time step's code = %v", err)
+			}
+
+			f.step++
+			replaced, code := f.enrol(coverageTOTPCode(secret, f.step))
+			if err := f.login(code); err == nil || err.Error() != "one-time code is required" {
+				t.Errorf("sign-in with the replacement's enrolment code = %v; want one-time code is required", err)
+			}
+			if err := f.login(coverageTOTPCode(secret, f.step+1)); err == nil {
+				t.Error("sign-in with the replaced authenticator's code succeeded")
+			}
+			f.step++
+			if err := f.login(coverageTOTPCode(replaced, f.step)); err != nil {
+				t.Errorf("sign-in with the replacement's next time step code = %v", err)
+			}
+		})
+	}
+}

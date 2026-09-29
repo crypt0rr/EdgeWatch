@@ -369,26 +369,30 @@ func (pa *PlatformAccountStore) GetUser(ctx context.Context, id string) (User, e
 // password, TOTP, and enabled state, at its revision when the value names
 // one. A change that alters nothing records no audit entry.
 func (pa *PlatformAccountStore) UpdateUser(ctx context.Context, u User, revokeSessions bool, audit AuditEntry) error {
-	return pa.save(ctx, u, nil, false, revokeSessions, audit, "", true)
+	return pa.save(ctx, u, nil, false, revokeSessions, audit, "", NoTOTPStep, true)
 }
 
 // SaveUserSecurity saves the platform administrator's security state and
 // revokes all of its sessions when asked.
 func (pa *PlatformAccountStore) SaveUserSecurity(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry) error {
-	return pa.save(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, "", false)
+	return pa.save(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, "", NoTOTPStep, false)
 }
 
 // SaveUserSecurityPreservingSession is SaveUserSecurity that keeps the
-// session with the given hash, as TOTP enrolment needs.
-func (pa *PlatformAccountStore) SaveUserSecurityPreservingSession(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string) error {
-	return pa.save(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, preserveSessionHash, false)
+// session with the given hash, as TOTP enrolment needs. A TOTP enrolment
+// passes the time step of the code that confirmed the new secret as
+// totpStep, which is recorded as used in the same transaction; any other
+// save passes NoTOTPStep.
+func (pa *PlatformAccountStore) SaveUserSecurityPreservingSession(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string, totpStep int64) error {
+	return pa.save(ctx, u, recoveryCodes, replaceRecoveryCodes, revokeSessions, audit, preserveSessionHash, totpStep, false)
 }
 
 // save writes the platform administrator's account in one transaction with
-// its recovery codes, session revocation, and audit record. rename writes
-// the username too, and drops the audit entry of a change that alters
-// nothing, as TenantStore.UpdateUser does.
-func (pa *PlatformAccountStore) save(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string, rename bool) error {
+// its recovery codes, session revocation, the TOTP time step of an
+// enrolment, and audit record. rename writes the username too, and drops
+// the audit entry of a change that alters nothing, as TenantStore.UpdateUser
+// does.
+func (pa *PlatformAccountStore) save(ctx context.Context, u User, recoveryCodes []string, replaceRecoveryCodes, revokeSessions bool, audit AuditEntry, preserveSessionHash string, totpStep int64, rename bool) error {
 	if err := pa.bound(u.ID); err != nil {
 		return err
 	}
@@ -449,6 +453,10 @@ func (pa *PlatformAccountStore) save(ctx context.Context, u User, recoveryCodes 
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrConflict
+	}
+	// The update above found the platform administrator.
+	if err := recordEnrolledTOTPStepTx(ctx, tx, u.ID, totpStep, u.UpdatedAt); err != nil {
+		return err
 	}
 	if replaceRecoveryCodes {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM recovery_codes WHERE user_id=`+platformAdminSQL, u.ID, RolePlatformAdmin); err != nil {

@@ -182,6 +182,7 @@ var globalStoreMethods = map[string]string{
 	"ConsumeRecoveryCodeForUser":     globalAccount,
 	"ConsumeRecoveryCodeTextForUser": globalAccount,
 	"RecoveryCodeCount":              globalAccount,
+	"RequireActiveAccountTenant":     globalAccount,
 	"Audit":                          globalAccount,
 	"AuditEntry":                     globalAccount,
 	"sealTOTPSecret":                 globalAccount,

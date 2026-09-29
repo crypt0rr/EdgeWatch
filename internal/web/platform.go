@@ -713,7 +713,14 @@ func (s *Server) revokePlatformUnitAccountSessions(w http.ResponseWriter, r *htt
 	if _, ok := s.platformUnit(w, r, id, false); !ok {
 		return
 	}
-	audit := platformActorAudit(session, "user.sessions_revoked", fmt.Sprintf("sessions of account %s revoked by platform administrator %s", userID, session.Username))
+	// The record names the account by its username, as the platform's other
+	// records of its actions on a unit's accounts do.
+	account, err := s.Store.Platform().UnitAccount(r.Context(), id, userID)
+	if err != nil {
+		s.writePlatformError(w, r, err, "", "account not found")
+		return
+	}
+	audit := platformActorAudit(session, "user.sessions_revoked", fmt.Sprintf("sessions of %s revoked by platform administrator %s", account.Username, session.Username))
 	if err := s.Store.Platform().RevokeUnitAccountSessions(r.Context(), id, userID, audit); err != nil {
 		if errors.Is(err, store.ErrAuditUnavailable) {
 			// The sessions were revoked; only the record is missing.

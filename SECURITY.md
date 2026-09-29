@@ -34,6 +34,11 @@ The shared response avoids both a long lockout and revealing account existence,
 but cannot provide per-client attribution. For per-client rate limits and audit
 identities, configure only the actual proxy addresses in `web.trusted_proxies`
 and the sanitized `web.forwarded_header`.
+A client identified by its own address also has a budget of five failed
+sign-ins in five minutes with usernames that no account has. Once it is used,
+every sign-in from that client is refused with the same `429 rate_limited`
+answer for five minutes, whether or not the username exists, so the answer
+does not reveal which accounts exist. Other clients are not affected.
 EdgeWatch logs a startup warning when proxy hostnames are approved without
 trusted client-IP forwarding. Failed login and TOTP attempts, along with
 rate-limit events, are written to the security audit log; they do not currently
@@ -171,7 +176,9 @@ account has are recorded in platform scope, outside every unit's audit. The
 record that a sign-in, password confirmation, or TOTP confirmation became
 rate limited follows the same rule: it belongs to the unit of the account it
 names, or to platform scope for a platform administrator or an unknown
-username. A unit's administrators read their unit's audit, which hides the
+username. Such records are coalesced per client, operation and scope for five
+minutes, so a client throttled on accounts of several units gets a record in
+each of them. A unit's administrators read their unit's audit, which hides the
 source address of a platform administrator's actions; the platform audit
 shows the records in platform scope and every unit's account and platform
 records, never a unit's data records. Both views are read-only.

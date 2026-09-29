@@ -238,6 +238,88 @@ func TestRotatingUnknownUsernamesRemainThrottledForRemotePeers(t *testing.T) {
 	}
 }
 
+// Once a client identified by its own address has used its budget for
+// usernames that no account has, every sign-in from it gets the same
+// rate-limit error until the block ends: an unknown name, an enabled or a
+// disabled account of the default unit, an account of another unit, and a
+// platform administrator alike, with a wrong or a right password. No
+// password is checked and no failed sign-in is recorded, so neither the
+// answer nor its cost tells which names exist. Another client still gets
+// the ordinary answer, and the client signs in again once the block ends.
+func TestThrottledSignInAnswerDoesNotDependOnTheUsername(t *testing.T) {
+	ctx := context.Background()
+	s, admin, _ := platformTestStore(t)
+	addSecondUnit(t, s)
+	if _, err := s.Tenant(store.DefaultTenantScope()).CreateUser(ctx, store.User{Username: "unit-disabled", Role: store.RoleViewer, PasswordHash: cheapHash("disabled viewer password"), Enabled: false}, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	scope, err := s.TenantScopeByID(ctx, platformTestTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Tenant(scope).CreateUser(ctx, store.User{Username: "bravo-viewer", Role: store.RoleViewer, PasswordHash: cheapHash("unit b viewer password"), Enabled: true}, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := s.DB.Exec(`INSERT INTO users(id,tenant_id,username,display_name,role,password_hash,enabled,created_at,updated_at) VALUES('00000000-0000-0000-0000-00000000fa02',NULL,'platform-root','platform-root',?,?,1,?,?)`, store.RolePlatformAdmin, cheapHash("platform administrator password"), stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(s)
+	now := time.Now().UTC()
+	m.Now = func() time.Time { return now }
+	from := func(address string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+		r.RemoteAddr = address + ":4000"
+		return r
+	}
+	failedSignIns := func() int {
+		t.Helper()
+		var count int
+		if err := s.DB.QueryRow(`SELECT COUNT(*) FROM security_audit WHERE action='auth.login_failed'`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	const client, other = "203.0.113.50", "203.0.113.51"
+	for attempt := 0; attempt < authFailureThreshold; attempt++ {
+		if _, _, err := m.LoginAs(ctx, from(client), "guess-"+strconv.Itoa(attempt), "wrong password", "", ""); err == nil || errors.Is(err, ErrRateLimited) {
+			t.Fatalf("unknown username %d = %v, want invalid credentials", attempt, err)
+		}
+	}
+	failures := failedSignIns()
+	for _, attempt := range []struct{ username, password string }{
+		{"guess-x", "wrong password"},
+		{admin.Username, "wrong password"},
+		{"unit-disabled", "wrong password"},
+		{"bravo-viewer", "wrong password"},
+		{"platform-root", "wrong password"},
+		{"nobody-here", "wrong password"},
+		{admin.Username, "unit administrator password"},
+	} {
+		raw, _, err := m.LoginAs(ctx, from(client), attempt.username, attempt.password, "", "")
+		if raw != "" || !errors.Is(err, ErrRateLimited) || err.Error() != ErrRateLimited.Error() || RetryAfterHeaderValue(err) != RetryAfterHeaderValue(ErrRateLimited) {
+			t.Errorf("throttled sign-in as %s = %q, %v (Retry-After %s), want the rate-limit error every name gets", attempt.username, raw, err, RetryAfterHeaderValue(err))
+		}
+	}
+	if got := failedSignIns(); got != failures {
+		t.Errorf("throttled sign-ins recorded %d failed sign-ins, want none", got-failures)
+	}
+
+	// Another client gets the ordinary answers.
+	if _, _, err := m.LoginAs(ctx, from(other), admin.Username, "wrong password", "", ""); err == nil || errors.Is(err, ErrRateLimited) || err.Error() != "invalid credentials" {
+		t.Fatalf("wrong password from another client = %v, want invalid credentials", err)
+	}
+	if raw, _, err := m.LoginAs(ctx, from(other), admin.Username, "unit administrator password", "", ""); err != nil || raw == "" {
+		t.Fatalf("sign-in from another client = %q, %v", raw, err)
+	}
+
+	// The block ends after its five minutes.
+	now = now.Add(authBlockDuration)
+	if raw, _, err := m.LoginAs(ctx, from(client), admin.Username, "unit administrator password", "", ""); err != nil || raw == "" {
+		t.Fatalf("sign-in after the block = %q, %v", raw, err)
+	}
+}
+
 func TestSharedLoopbackTOTPFailuresAreCooledDown(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))

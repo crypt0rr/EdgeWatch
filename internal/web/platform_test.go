@@ -302,6 +302,45 @@ func TestPlatformUnitAccounts(t *testing.T) {
 	}
 }
 
+// The record of a session revocation names both the account whose sessions
+// ended, by username, and the acting administrator, as the other account
+// records do: a unit administrator's revocation in the unit's audit, and a
+// platform administrator's in the account's unit, with the platform actor
+// kind. Neither holds the confirming password.
+func TestSessionRevocationRecordsNameTheAccount(t *testing.T) {
+	f := newPlatformFixture(t)
+	type record struct{ kind, actorID, actorName, detail string }
+	last := func(tenantID string) record {
+		t.Helper()
+		var got record
+		if err := f.db.DB.QueryRow(`SELECT actor_kind,actor_user_id,actor_username,detail FROM security_audit WHERE action='user.sessions_revoked' AND tenant_id=? ORDER BY id DESC LIMIT 1`, tenantID).Scan(&got.kind, &got.actorID, &got.actorName, &got.detail); err != nil {
+			t.Fatalf("session revocation record in %s: %v", tenantID, err)
+		}
+		return got
+	}
+	operatorA, adminA, adminB, platform := f.users[actorOperatorA], f.users[actorAdminA], f.users[actorAdminB], f.users[actorPlatform]
+	expectResponse(t, f.call(t, actorAdminA, http.MethodDelete, "/users/"+operatorA.ID+"/sessions", confirmBody("")), http.StatusNoContent, "unit administrator revokes the operator's sessions", nil)
+	expectResponse(t, f.call(t, actorPlatform, http.MethodDelete, "/platform/units/"+f.unitB+"/accounts/"+adminB.ID+"/sessions", confirmBody("")), http.StatusNoContent, "platform administrator revokes unit B's administrator's sessions", nil)
+	for _, check := range []struct {
+		name, tenantID, kind string
+		actor, target        store.User
+	}{
+		{"the unit administrator's revocation", store.DefaultTenantID, store.AuditActorUnit, adminA, operatorA},
+		{"the platform administrator's revocation", f.unitB, store.AuditActorPlatform, platform, adminB},
+	} {
+		got := last(check.tenantID)
+		if got.kind != check.kind || got.actorID != check.actor.ID || got.actorName != check.actor.Username {
+			t.Errorf("%s: record = %+v, want actor %s %s of kind %s", check.name, got, check.actor.ID, check.actor.Username, check.kind)
+		}
+		if !strings.Contains(got.detail, check.target.Username) || !strings.Contains(got.detail, check.actor.Username) {
+			t.Errorf("%s: detail %q does not name the account %s and the administrator %s", check.name, got.detail, check.target.Username, check.actor.Username)
+		}
+		if strings.Contains(got.detail, platformFixturePassword) {
+			t.Errorf("%s: detail %q holds the confirming password", check.name, got.detail)
+		}
+	}
+}
+
 // The platform administrator reads and changes a unit's capacity: an
 // absent setting keeps its value, null inherits the deployment's, and a
 // value outside the deployment's limits is refused.

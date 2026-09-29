@@ -300,6 +300,11 @@ Important defaults:
   Configure the proxy network and forwarding header when you need per-client
   rate limits and audit identities. EdgeWatch logs a startup warning when
   approved proxy hosts lack trusted client-IP forwarding.
+- A client identified by its own address may fail five sign-ins within five
+  minutes with usernames that no account has. After that, every sign-in from
+  that client, including one with an existing username, receives the same
+  429 rate_limited answer for five minutes, so the answer does not reveal
+  which accounts exist.
 - By default, scanner.target_exclusions covers the loopback and link-local
   ranges 127.0.0.0/8, ::1/128, 169.254.0.0/16, and fe80::/10. The IPv4
   link-local range includes the 169.254.169.254 cloud metadata endpoint. Other

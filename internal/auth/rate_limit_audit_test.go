@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -143,6 +144,104 @@ func TestRateLimitRecordsBelongToTheAccountsScope(t *testing.T) {
 	}
 	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM security_audit WHERE action='auth.rate_limited' AND tenant_id=? AND source_ip NOT IN ('203.0.113.79','198.51.100.204','198.51.100.205')`, store.DefaultTenantID).Scan(&foreignInDefault); err != nil || foreignInDefault != 0 {
 		t.Fatalf("the default unit shows %d rate-limit records of other scopes, %v", foreignInDefault, err)
+	}
+}
+
+// One client that is throttled on accounts of several scopes gets one
+// rate-limit record per scope and operation: the record written for one
+// unit's account does not suppress the record for another unit's account,
+// or for a platform administrator, for the rest of the window. Unknown
+// usernames all belong to platform scope, so a client that rotates through
+// them still gets one platform record for sign-in.
+func TestRateLimitRecordsFromOneClientReachEveryScope(t *testing.T) {
+	ctx := context.Background()
+	s, defaultAdmin, _ := platformTestStore(t)
+	addSecondUnit(t, s)
+	scope, err := s.TenantScopeByID(ctx, platformTestTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminB, err := s.Tenant(scope).CreateUser(ctx, store.User{Username: "bravo-admin", Role: store.RoleAdministrator, PasswordHash: cheapHash("unit b administrator password"), Enabled: true}, store.AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	const rootID = "00000000-0000-0000-0000-00000000fa03"
+	if _, err := s.DB.Exec(`INSERT INTO users(id,tenant_id,username,display_name,role,password_hash,enabled,created_at,updated_at) VALUES(?,NULL,'platform-root','platform-root',?,?,1,?,?)`, rootID, store.RolePlatformAdmin, cheapHash("platform administrator password"), stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManager(s)
+	const client = "203.0.113.60"
+	from := func() *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+		r.RemoteAddr = client + ":4000"
+		return r
+	}
+	signIn := func(username string) func() error {
+		return func() error {
+			_, _, err := m.LoginAs(ctx, from(), username, "wrong password", "", "")
+			return err
+		}
+	}
+	confirmPassword := func(userID string) func() error {
+		return func() error { return m.ConfirmPasswordForUser(ctx, from(), userID, "wrong password") }
+	}
+	confirmTOTP := func(userID string) func() error {
+		return func() error { return m.ConfirmTOTPForUser(ctx, from(), userID, "000000", "") }
+	}
+	for _, check := range []struct {
+		name    string
+		attempt func() error
+	}{
+		{"sign-in to the default unit's administrator", signIn(defaultAdmin.Username)},
+		{"sign-in to unit B's administrator", signIn("bravo-admin")},
+		{"sign-in to the platform administrator", signIn("platform-root")},
+		{"sign-in with an unknown username", signIn("nobody-anywhere")},
+		{"password confirmation by the default unit's administrator", confirmPassword(defaultAdmin.ID)},
+		{"password confirmation by unit B's administrator", confirmPassword(adminB.ID)},
+		{"password confirmation by the platform administrator", confirmPassword(rootID)},
+		{"TOTP confirmation by the default unit's administrator", confirmTOTP(defaultAdmin.ID)},
+		{"TOTP confirmation by unit B's administrator", confirmTOTP(adminB.ID)},
+		{"TOTP confirmation by the platform administrator", confirmTOTP(rootID)},
+	} {
+		for attempt := 0; attempt < authFailureThreshold; attempt++ {
+			if err := check.attempt(); err == nil || errors.Is(err, ErrRateLimited) {
+				t.Fatalf("%s: attempt %d = %v, want a failure", check.name, attempt, err)
+			}
+		}
+		if err := check.attempt(); !errors.Is(err, ErrRateLimited) {
+			t.Fatalf("%s: attempt over the budget = %v, want ErrRateLimited", check.name, err)
+		}
+	}
+	for i := 0; i < 100; i++ {
+		if err := signIn("rotating-" + strconv.Itoa(i))(); !errors.Is(err, ErrRateLimited) {
+			t.Fatalf("rotating unknown username %d = %v, want ErrRateLimited", i, err)
+		}
+	}
+	rows, err := s.DB.Query(`SELECT COALESCE(tenant_id,'<null>'),actor_username FROM security_audit WHERE action='auth.rate_limited' AND source_ip=?`, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := map[string]int{}
+	for rows.Next() {
+		var tenant, subject string
+		if err := rows.Scan(&tenant, &subject); err != nil {
+			t.Fatal(err)
+		}
+		got[tenant+" "+rateAuditEndpoint(subject)]++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{}
+	for _, tenant := range []string{store.DefaultTenantID, platformTestTenantID, "<null>"} {
+		for _, endpoint := range []string{"login", "password-confirmation", "totp-confirmation"} {
+			want[tenant+" "+endpoint] = 1
+		}
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("rate-limit records per scope and operation = %v, want %v", got, want)
 	}
 }
 

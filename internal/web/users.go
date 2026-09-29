@@ -115,14 +115,16 @@ func (s *Server) usersRoute(w http.ResponseWriter, r *http.Request, session stor
 		if !ok || !s.confirmUserMutation(w, r, session, password) {
 			return
 		}
-		if _, err := ts.GetUser(r.Context(), id); errors.Is(err, store.ErrNotFound) {
+		target, err := ts.GetUser(r.Context(), id)
+		if errors.Is(err, store.ErrNotFound) {
 			writeError(w, http.StatusNotFound, "not_found", "user not found", nil)
 			return
 		} else if err != nil {
 			writeError(w, http.StatusInternalServerError, "store", "user could not be loaded", nil)
 			return
 		}
-		if err := ts.DeleteUserSessionsByAdministrator(r.Context(), id, store.AuditEntry{Action: "user.sessions_revoked", Detail: "user sessions revoked", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+		audit := store.AuditEntry{Action: "user.sessions_revoked", Detail: fmt.Sprintf("sessions of %s revoked by %s", target.Username, session.Username), ActorUserID: session.UserID, ActorUsername: session.Username}
+		if err := ts.DeleteUserSessionsByAdministrator(r.Context(), id, audit); err != nil {
 			if writeAdministratorRefused(w, err) {
 				return
 			}

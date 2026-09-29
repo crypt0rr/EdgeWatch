@@ -476,6 +476,7 @@ func passwordHashNeedsRehash(encoded string) bool {
 }
 
 func (m *Manager) Setup(ctx context.Context, token, password string) error {
+	token = strings.TrimSpace(token)
 	if token == "" {
 		return errors.New("setup token is required")
 	}
@@ -491,14 +492,17 @@ func (m *Manager) Setup(ctx context.Context, token, password string) error {
 // login. The non-HTTP Setup method remains available to trusted callers and
 // tests, while the web endpoint should use this wrapper.
 func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token, password string) error {
+	// The token is normalized once, so the check and the redemption below
+	// use the same token.
+	token = strings.TrimSpace(token)
 	source := m.sourceScopeFor(request, "setup")
-	account := "setup:" + digest(strings.TrimSpace(token))
+	account := "setup:" + digest(token)
 	if !m.allowScoped(source, account) {
 		m.auditRateLimit(ctx, "setup", request)
 		return ErrRateLimited
 	}
 	defer m.releaseScoped(source, account)
-	usable, checkErr := m.Store.Platform().SetupTokenUsable(ctx, digest(strings.TrimSpace(token)), m.now())
+	usable, checkErr := m.Store.Platform().SetupTokenUsable(ctx, digest(token), m.now())
 	if checkErr != nil {
 		m.auditAuthFailure(ctx, "auth.setup_failed", "setup", request)
 		return errors.New("administrator setup could not be completed")
@@ -537,14 +541,17 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 // the caller can close live-update streams opened with the sessions that the
 // activation revoked.
 func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, token, password string) (string, error) {
+	// The token is normalized once, so the check and the redemption below
+	// use the same token.
+	token = strings.TrimSpace(token)
 	source := m.sourceScopeFor(request, "activation")
-	account := "activation:" + digest(strings.TrimSpace(token))
+	account := "activation:" + digest(token)
 	if !m.allowScoped(source, account) {
 		m.auditRateLimit(ctx, "activation", request)
 		return "", ErrRateLimited
 	}
 	defer m.releaseScoped(source, account)
-	usable, checkErr := m.Store.ActivationTokenUsable(ctx, digest(strings.TrimSpace(token)), m.now())
+	usable, checkErr := m.Store.ActivationTokenUsable(ctx, digest(token), m.now())
 	if checkErr != nil {
 		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
 		return "", errors.New("activation could not be completed")
@@ -590,17 +597,34 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		return "", store.User{}, m.rateLimitError(source, account)
 	}
 	defer m.releaseScoped(source, account)
+	// A client with its own address also has a budget for usernames that no
+	// account has, so it cannot bypass the account buckets by rotating
+	// names. Admission to that budget is decided, and reserved, before the
+	// username is looked up: once the client has used it, every sign-in from
+	// the client is refused until the block ends, whether or not the name
+	// exists, and the refusal checks no password. The answer and its cost
+	// therefore do not tell which names exist. A shared loopback peer uses
+	// the source-wide cooldown instead.
+	unknownReserved := false
+	if !sharedLoopbackLoginSource(source, account) {
+		if !m.allowUnknownSource(unknownSource) {
+			m.auditLoginRateLimit(ctx, identity, request)
+			return "", store.User{}, ErrRateLimited
+		}
+		unknownReserved = true
+	}
 	// Only a users row can sign in. Schema 52 retired the legacy admins row,
 	// so the original administrator is the users row with LegacyAdminUserID.
 	user, err := m.Store.GetUserByUsername(ctx, identity)
-	if err != nil {
-		if !sharedLoopbackLoginSource(source, account) {
-			if !m.allowUnknownSource(unknownSource) {
-				m.auditRateLimitIn(ctx, "unknown-login:"+identity, request, true)
-				return "", store.User{}, ErrRateLimited
-			}
+	if unknownReserved {
+		if err == nil {
+			// An existing name costs nothing from the unknown-name budget.
+			m.releaseUnknownSource(unknownSource)
+		} else {
 			defer m.releaseUnknownSource(unknownSource)
 		}
+	}
+	if err != nil {
 		// Unknown usernames consume the same failure budget as known accounts.
 		// Shared loopback peers use the source-wide cooldown so the response does
 		// not expose account existence; other peers retain the unknown-name
@@ -826,7 +850,7 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 	}
 	if err != nil || !user.Enabled || !passwordValid {
 		m.failedScoped(source, account, "", false)
-		m.auditAccountFailure(ctx, "auth.password_confirmation_failed", userID, user, request)
+		m.auditConfirmationFailure(ctx, "auth.password_confirmation_failed", "password confirmation", userID, user, request)
 		return errors.New("password confirmation failed")
 	}
 	m.clearScoped(source, account, "")
@@ -864,7 +888,7 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 	}
 	if !valid {
 		m.failedScoped(source, account, "", false)
-		m.auditAccountFailure(ctx, "auth.totp_confirmation_failed", userID, user, request)
+		m.auditConfirmationFailure(ctx, "auth.totp_confirmation_failed", "TOTP confirmation", userID, user, request)
 		return errors.New("current one-time code is required")
 	}
 	m.clearScoped(source, account, "")
@@ -895,6 +919,36 @@ func (m *Manager) auditUnknownAccountFailure(ctx context.Context, action, subjec
 // record belongs to the default tenant.
 func (m *Manager) auditAccountFailure(ctx context.Context, action, subject string, account store.User, request *http.Request) {
 	m.recordAuthEvent(ctx, action, subject, account.TenantID, account.Role == store.RolePlatformAdmin, request)
+}
+
+// auditConfirmationFailure records a failed password or TOTP confirmation
+// by the signed-in account with the ID. The confirmation is the account's
+// own action, so, as in the other account records, the account is the
+// record's actor, by ID and username, with the actor kind of its role, and
+// the detail names it. The record belongs to the account's tenant, or to
+// platform scope for a platform administrator. An account that could not
+// be read is named by its ID. The record never holds the submitted
+// password, code, or recovery code.
+func (m *Manager) auditConfirmationFailure(ctx context.Context, action, operation, userID string, account store.User, request *http.Request) {
+	userID = strings.TrimSpace(userID)
+	name := userID
+	if account.ID != "" && account.Username != "" {
+		name = account.Username
+	}
+	write := m.Store.AuditEntry
+	if account.Role == store.RolePlatformAdmin {
+		write = m.Store.Platform().AuditEntry
+	}
+	if err := write(ctx, store.AuditEntry{
+		Action:        action,
+		Detail:        operation + " failed for " + name,
+		ActorUserID:   userID,
+		ActorUsername: name,
+		SourceIP:      m.ClientIP(request),
+		TenantID:      account.TenantID,
+	}); err != nil {
+		slog.Default().Warn("security audit write failed", "action", action, "error", err)
+	}
 }
 
 // recordAuthEvent writes the record of an authentication event in the
@@ -942,7 +996,7 @@ func (m *Manager) auditRateLimit(ctx context.Context, subject string, request *h
 // tenant, such as the platform setup, or a sign-in with a username that no
 // account has.
 func (m *Manager) auditRateLimitIn(ctx context.Context, subject string, request *http.Request, platform bool) {
-	if m.claimRateAudit(subject, request) {
+	if m.claimRateAudit(subject, "", platform, request) {
 		m.recordAuthEvent(ctx, "auth.rate_limited", subject, "", platform, request)
 	}
 }
@@ -971,32 +1025,45 @@ func (m *Manager) auditAccountRateLimit(ctx context.Context, subject, userID str
 // account that lookup returns. An account without a tenant, a platform
 // administrator's, and an account that lookup cannot find name no tenant,
 // so their record belongs to platform scope and no tenant's audit shows
-// it. The account is looked up only once the transition is to be recorded,
-// so a throttled client costs at most one lookup per window.
+// it. Each scope has its own suppression window, so the account is looked
+// up before the transition is claimed: one indexed read for each refused
+// request, cheap next to the password hashing that the limiter protects.
 func (m *Manager) auditAccountRateLimitWith(ctx context.Context, subject string, request *http.Request, lookup func() (store.User, error)) {
-	if !m.claimRateAudit(subject, request) {
-		return
+	tenantID, platform := "", true
+	if account, err := lookup(); err == nil && account.TenantID != "" {
+		tenantID, platform = account.TenantID, false
 	}
-	account, err := lookup()
-	if err != nil || account.TenantID == "" {
-		m.recordAuthEvent(ctx, "auth.rate_limited", subject, "", true, request)
-		return
+	if m.claimRateAudit(subject, tenantID, platform, request) {
+		m.recordAuthEvent(ctx, "auth.rate_limited", subject, tenantID, platform, request)
 	}
-	m.recordAuthEvent(ctx, "auth.rate_limited", subject, account.TenantID, false, request)
 }
 
 // claimRateAudit reports whether the rate-limit transition of the subject's
-// endpoint from the request's source is to be recorded now, and if so
-// starts its suppression window.
-func (m *Manager) claimRateAudit(subject string, request *http.Request) bool {
-	// A blocked episode belongs to the resolved source and endpoint, not to
-	// attacker-controlled account text. In particular, unknown-login subjects
-	// include the supplied username; using that value here would let a caller
-	// rotate usernames and force one durable audit row per attempt. Keep the
-	// account/identity in the audit detail for diagnostics, but coalesce the
-	// suppression key to the endpoint bucket so one source produces at most one
-	// rate-limit transition per window for that operation.
-	key := rateAuditEndpoint(subject) + "\x00" + m.sourceScopeFor(request, "rate")
+// endpoint from the request's source is to be recorded now in the scope of
+// the record, the tenant, or platform scope when platform is true, and if
+// so starts the suppression window of that scope. An empty tenant outside
+// platform scope is the default tenant, where such a record belongs.
+func (m *Manager) claimRateAudit(subject, tenantID string, platform bool, request *http.Request) bool {
+	// A blocked episode belongs to the resolved source, endpoint, and the
+	// scope that the record is written in, not to attacker-controlled account
+	// text. In particular, unknown-login subjects include the supplied
+	// username; using that value here would let a caller rotate usernames and
+	// force one durable audit row per attempt. Keep the account/identity in the
+	// audit detail for diagnostics, but coalesce the suppression key to the
+	// endpoint bucket so one source produces at most one rate-limit transition
+	// per window for that operation in each scope. The scope comes from the
+	// stored account, and every unknown username has platform scope, so
+	// rotating names still coalesce, while one scope's record does not
+	// suppress another's.
+	scope := "platform"
+	if !platform {
+		tenantID = strings.TrimSpace(tenantID)
+		if tenantID == "" {
+			tenantID = store.DefaultTenantID
+		}
+		scope = "tenant:" + tenantID
+	}
+	key := rateAuditEndpoint(subject) + "\x00" + m.sourceScopeFor(request, "rate") + "\x00" + scope
 	now := m.now()
 	m.mu.Lock()
 	m.ensureScopedLimiterMapsLocked()

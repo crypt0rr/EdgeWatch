@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -280,6 +281,63 @@ func TestTOTPEnrollmentRequiredOnceUnitsMultiply(t *testing.T) {
 	}
 }
 
+// A failed password or TOTP confirmation is the signed-in account's own
+// action, so its record names the account as its actor, by ID and
+// username, and its detail names the account, as the other account records
+// do. It holds neither the submitted password nor the code. A unit
+// account's record belongs to its unit with the unit actor kind, and a
+// platform administrator's to the platform with the platform actor kind.
+func TestConfirmationFailureRecordsNameTheAccount(t *testing.T) {
+	ctx := context.Background()
+	s, admin, _ := platformTestStore(t)
+	m := NewManager(s)
+	root := createPlatformAdmin(t, m, "root", "platform administrator password")
+	request := func() *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/users", nil)
+		r.RemoteAddr = "198.51.100.90:4000"
+		return r
+	}
+	type record struct{ tenant, kind, actorID, actorName, detail string }
+	last := func(action string) record {
+		t.Helper()
+		var got record
+		if err := s.DB.QueryRow(`SELECT COALESCE(tenant_id,'<null>'),actor_kind,actor_user_id,actor_username,detail FROM security_audit WHERE action=? ORDER BY id DESC LIMIT 1`, action).Scan(&got.tenant, &got.kind, &got.actorID, &got.actorName, &got.detail); err != nil {
+			t.Fatalf("audit record %s: %v", action, err)
+		}
+		return got
+	}
+	const wrongPassword, wrongCode, wrongRecovery = "not the confirmation password", "000000", "NOTARECOVERYCODE"
+	for _, check := range []struct {
+		name         string
+		account      store.User
+		tenant, kind string
+	}{
+		{"a unit administrator", admin, store.DefaultTenantID, store.AuditActorUnit},
+		{"the platform administrator", root, "<null>", store.AuditActorPlatform},
+	} {
+		if err := m.ConfirmPasswordForUser(ctx, request(), check.account.ID, wrongPassword); err == nil {
+			t.Fatalf("%s: a wrong password was confirmed", check.name)
+		}
+		if err := m.ConfirmTOTPForUser(ctx, request(), check.account.ID, wrongCode, wrongRecovery); err == nil {
+			t.Fatalf("%s: a wrong code was confirmed", check.name)
+		}
+		for _, action := range []string{"auth.password_confirmation_failed", "auth.totp_confirmation_failed"} {
+			got := last(action)
+			if got.tenant != check.tenant || got.kind != check.kind || got.actorID != check.account.ID || got.actorName != check.account.Username {
+				t.Errorf("%s: %s record = %+v, want tenant %s, kind %s, actor %s %s", check.name, action, got, check.tenant, check.kind, check.account.ID, check.account.Username)
+			}
+			if !strings.Contains(got.detail, check.account.Username) {
+				t.Errorf("%s: %s detail %q does not name %s", check.name, action, got.detail, check.account.Username)
+			}
+			for _, secret := range []string{wrongPassword, wrongCode, wrongRecovery} {
+				if strings.Contains(got.detail+got.actorName, secret) {
+					t.Errorf("%s: %s record holds the submitted %q: %+v", check.name, action, secret, got)
+				}
+			}
+		}
+	}
+}
+
 // Failed sign-ins of a platform administrator, and those with a username
 // that no account has, are recorded in platform scope instead of the
 // default unit, while a unit account's stay in its unit.
@@ -317,7 +375,7 @@ func TestPlatformAndUnknownSignInFailuresBelongToThePlatform(t *testing.T) {
 	if err := m.ConfirmPasswordForUser(ctx, request(), root.ID, "wrong password"); err == nil {
 		t.Fatal("a wrong password was confirmed")
 	}
-	if got := lastFailure("auth.password_confirmation_failed", root.ID); got != "<null>" {
+	if got := lastFailure("auth.password_confirmation_failed", root.Username); got != "<null>" {
 		t.Errorf("failed confirmation recorded in %s, want the platform", got)
 	}
 	raw, user, err := m.LoginAs(ctx, request(), "root", "platform administrator password", "", "")

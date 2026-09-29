@@ -55,6 +55,8 @@ var auditActionCategories = map[string]string{
 	auditPlatformAdminInvited:           auditCategoryAccount,
 	auditPlatformAdminUpdated:           auditCategoryAccount,
 	auditPlatformAdminActivationRevoked: auditCategoryAccount,
+	auditPlatformAdminActivationIssued:  auditCategoryAccount,
+	auditPlatformAdminDeleted:           auditCategoryAccount,
 	"admin.display_name_changed":        auditCategoryAccount,
 	"admin.password_changed":            auditCategoryAccount,
 	"admin.password_reset":              auditCategoryAccount,

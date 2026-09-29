@@ -315,6 +315,270 @@ func TestPlatformConsoleRevokesAPendingAdminInvitation(t *testing.T) {
 	}
 }
 
+// A pending platform administrator whose invitation expired or was revoked
+// has no usable link left. Renewing its invitation stores a new link, marks
+// every older unused link used, so only the newest activates the account,
+// and records the renewal in platform scope, in one transaction. Only an
+// enabled platform administrator renews, and only a pending account's
+// invitation: an account that redeemed its link, the actor's own included,
+// is refused, and a unit's account is not found, as an unknown ID is. A
+// renewal without its record stores no link.
+func TestPlatformConsoleRenewsAPendingAdminInvitation(t *testing.T) {
+	for _, stranded := range []string{"expired", "revoked"} {
+		t.Run(stranded, func(t *testing.T) {
+			ctx := context.Background()
+			f := newTenantFixture(t)
+			insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
+			insertTenantUser(t, f.store, platformOther, nil, RolePlatformAdmin)
+			const platformDisabled = "00000000-0000-0000-0000-00000000fa03"
+			insertTenantUser(t, f.store, platformDisabled, nil, RolePlatformAdmin)
+			if _, err := f.store.DB.Exec(`UPDATE users SET enabled=0 WHERE id=?`, platformDisabled); err != nil {
+				t.Fatal(err)
+			}
+			ps := f.store.Platform()
+			now := time.Now().UTC()
+			created, expires := now, now.Add(time.Hour)
+			if stranded == "expired" {
+				created, expires = now.Add(-time.Hour), now.Add(-30*time.Minute)
+			}
+			invited, err := ps.InvitePlatformAdmin(ctx, User{Username: "platform-two"}, "invite-two", created, expires, platformAudit(""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stranded == "revoked" {
+				if revoked, err := ps.RevokePlatformAdminInvitation(ctx, invited.ID, now, platformAudit("")); err != nil || revoked != 1 {
+					t.Fatalf("revoke the invitation = %d, %v", revoked, err)
+				}
+			}
+			links := func() string {
+				t.Helper()
+				var state string
+				if err := f.store.DB.QueryRow(`SELECT COALESCE(group_concat(id_hash||':'||user_id||':'||issuer_user_id||':'||COALESCE(used_at,''),','),'') FROM (SELECT * FROM user_invites ORDER BY id_hash)`).Scan(&state); err != nil {
+					t.Fatal(err)
+				}
+				return state
+			}
+			renewals := func() int {
+				return countRows(t, f.store.DB, `SELECT COUNT(*) FROM security_audit WHERE action=? AND tenant_id IS NULL AND actor_kind=?`, auditPlatformAdminActivationIssued, AuditActorPlatform)
+			}
+			activate := func(hash string) error {
+				_, err := f.store.ActivateUser(ctx, hash, "activated-hash", now, AuditEntry{Action: "user.activated"})
+				return err
+			}
+			if activate("invite-two") == nil {
+				t.Fatalf("the %s invitation activated the account", stranded)
+			}
+
+			before := links()
+			for _, refused := range []struct {
+				name, id, hash string
+				expires        time.Time
+				audit          AuditEntry
+				want           error
+			}{
+				{"by a unit's administrator", invited.ID, "renewed", now.Add(time.Hour), accountAudit(""), ErrAccountNotPermitted},
+				{"by nobody", invited.ID, "renewed", now.Add(time.Hour), AuditEntry{}, ErrAccountNotPermitted},
+				{"by a disabled platform administrator", invited.ID, "renewed", now.Add(time.Hour), AuditEntry{ActorUserID: platformDisabled, ActorUsername: platformDisabled}, ErrAccountNotPermitted},
+				{"of an enabled platform administrator", platformOther, "renewed", now.Add(time.Hour), platformAudit(""), ErrAccountNotPermitted},
+				{"of the actor's own account", platformRoot, "renewed", now.Add(time.Hour), platformAudit(""), ErrAccountNotPermitted},
+				{"of a unit's account", accountAdminB, "renewed", now.Add(time.Hour), platformAudit(""), ErrNotFound},
+				{"of an unknown account", accountUnknown, "renewed", now.Add(time.Hour), platformAudit(""), ErrNotFound},
+				{"without a token", invited.ID, " ", now.Add(time.Hour), platformAudit(""), nil},
+				{"with a link that expires at once", invited.ID, "renewed", now, platformAudit(""), nil},
+			} {
+				if _, err := ps.RenewPlatformAdminInvitation(ctx, refused.id, refused.hash, now, refused.expires, refused.audit); err == nil || (refused.want != nil && !errors.Is(err, refused.want)) {
+					t.Errorf("renew %s = %v, want %v", refused.name, err, refused.want)
+				}
+			}
+			// A token hash that is already stored, and a request that ended,
+			// write nothing either.
+			if _, err := ps.RenewPlatformAdminInvitation(ctx, invited.ID, "invite-two", now, now.Add(time.Hour), platformAudit("")); err == nil {
+				t.Error("renew with a token hash that is already stored succeeded")
+			}
+			ended, cancel := context.WithCancel(ctx)
+			cancel()
+			if _, err := ps.RenewPlatformAdminInvitation(ended, invited.ID, "renewed", now, now.Add(time.Hour), platformAudit("")); !errors.Is(err, context.Canceled) {
+				t.Errorf("renew in an ended request = %v, want context.Canceled", err)
+			}
+			if after := links(); after != before || renewals() != 0 {
+				t.Fatalf("a refused renewal changed the links or recorded a renewal:\nbefore %s\nafter  %s", before, after)
+			}
+
+			// The renewal is written with its record, or not at all.
+			if _, err := f.store.DB.Exec(`CREATE TRIGGER refuse_renewal_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT,'audit unavailable'); END`); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ps.RenewPlatformAdminInvitation(ctx, invited.ID, "renewed", now, now.Add(time.Hour), platformAudit("")); !errors.Is(err, ErrAuditUnavailable) {
+				t.Fatalf("renew without an audit record = %v, want ErrAuditUnavailable", err)
+			}
+			if after := links(); after != before {
+				t.Fatalf("an unrecorded renewal changed the links:\nbefore %s\nafter  %s", before, after)
+			}
+			if _, err := f.store.DB.Exec(`DROP TRIGGER refuse_renewal_audit`); err != nil {
+				t.Fatal(err)
+			}
+
+			renewed, err := ps.RenewPlatformAdminInvitation(ctx, invited.ID, "renewed-one", now, now.Add(time.Hour), AuditEntry{ActorUserID: platformRoot, ActorUsername: platformRoot})
+			if err != nil || renewed.ID != invited.ID || !renewed.Pending || renewed.Enabled {
+				t.Fatalf("renewed platform administrator = %+v, %v", renewed, err)
+			}
+			var detail string
+			if err := f.store.DB.QueryRow(`SELECT detail FROM security_audit WHERE action=? ORDER BY id DESC LIMIT 1`, auditPlatformAdminActivationIssued).Scan(&detail); err != nil || detail != "invitation of platform administrator platform-two renewed" {
+				t.Fatalf("renewal record detail = %q, %v", detail, err)
+			}
+			if _, err := ps.RenewPlatformAdminInvitation(ctx, invited.ID, "renewed-two", now, now.Add(time.Hour), platformAudit("")); err != nil {
+				t.Fatal(err)
+			}
+			if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM user_invites WHERE user_id=? AND used_at IS NULL`, invited.ID); got != 1 {
+				t.Fatalf("usable links after two renewals = %d, want 1", got)
+			}
+			if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM user_invites WHERE id_hash='renewed-two' AND issuer_user_id=?`, platformRoot); got != 1 {
+				t.Fatal("the renewed link does not name its issuer")
+			}
+			if got := renewals(); got != 2 {
+				t.Fatalf("renewal records = %d, want 2", got)
+			}
+			for _, superseded := range []string{"invite-two", "renewed-one"} {
+				if activate(superseded) == nil {
+					t.Fatalf("the superseded link %s activated the account", superseded)
+				}
+			}
+			if err := activate("renewed-two"); err != nil {
+				t.Fatalf("activate with the renewed link = %v", err)
+			}
+			admins, err := ps.PlatformAdmins(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, admin := range admins {
+				if admin.ID == invited.ID && (admin.Pending || !admin.Enabled) {
+					t.Fatalf("the account after the renewed link = %+v, want it active", admin)
+				}
+			}
+			if _, err := ps.RenewPlatformAdminInvitation(ctx, invited.ID, "renewed-three", now, now.Add(time.Hour), platformAudit("")); !errors.Is(err, ErrAccountNotPermitted) {
+				t.Fatalf("renew a redeemed invitation = %v, want ErrAccountNotPermitted", err)
+			}
+		})
+	}
+}
+
+// A pending platform administrator that never redeemed its invitation can
+// be removed, which frees its username: the account and its links are
+// deleted, so its link activates nothing, and the removal is recorded in
+// platform scope, in one transaction. Only an enabled platform
+// administrator removes one, and only a pending account: one that redeemed
+// its link, whether enabled or disabled since, and the actor's own are
+// refused, so an active platform administrator is never removed; a unit's
+// account is not found, as an unknown ID is. A removal without its record
+// removes nothing.
+func TestPlatformConsoleDeletesAPendingAdmin(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
+	insertTenantUser(t, f.store, platformOther, nil, RolePlatformAdmin)
+	ps := f.store.Platform()
+	now := time.Now().UTC()
+	// The link of platform-two expired unused.
+	stranded, err := ps.InvitePlatformAdmin(ctx, User{Username: "platform-two"}, "invite-two", now.Add(-time.Hour), now.Add(-30*time.Minute), platformAudit(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The link of platform-three is still usable.
+	pending, err := ps.InvitePlatformAdmin(ctx, User{Username: "platform-three"}, "invite-three", now, now.Add(time.Hour), platformAudit(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// platform-former redeemed its link and was disabled since.
+	former, err := ps.InvitePlatformAdmin(ctx, User{Username: "platform-former"}, "invite-former", now, now.Add(time.Hour), platformAudit(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.ActivateUser(ctx, "invite-former", "activated-hash", now, AuditEntry{Action: "user.activated"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ps.SetPlatformAdminEnabled(ctx, former.ID, 0, false, platformAudit("")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ps.InvitePlatformAdmin(ctx, User{Username: "platform-two"}, "invite-again", now, now.Add(time.Hour), platformAudit("")); !errors.Is(err, ErrUsernameUnavailable) {
+		t.Fatalf("invite the stranded account's username = %v, want ErrUsernameUnavailable", err)
+	}
+	accounts := func() int { return countRows(t, f.store.DB, `SELECT COUNT(*) FROM users`) }
+	removals := func() int {
+		return countRows(t, f.store.DB, `SELECT COUNT(*) FROM security_audit WHERE action=? AND tenant_id IS NULL AND actor_kind=?`, auditPlatformAdminDeleted, AuditActorPlatform)
+	}
+
+	before := accounts()
+	for _, refused := range []struct {
+		name, id string
+		audit    AuditEntry
+		want     error
+	}{
+		{"by a unit's administrator", stranded.ID, accountAudit(""), ErrAccountNotPermitted},
+		{"by nobody", stranded.ID, AuditEntry{}, ErrAccountNotPermitted},
+		{"by a disabled platform administrator", stranded.ID, AuditEntry{ActorUserID: former.ID, ActorUsername: former.Username}, ErrAccountNotPermitted},
+		{"an enabled platform administrator", platformOther, platformAudit(""), ErrAccountNotPermitted},
+		{"a disabled platform administrator that redeemed its link", former.ID, platformAudit(""), ErrAccountNotPermitted},
+		{"the actor's own account", platformRoot, platformAudit(""), ErrAccountNotPermitted},
+		{"a unit's account", accountAdminB, platformAudit(""), ErrNotFound},
+		{"an unknown account", accountUnknown, platformAudit(""), ErrNotFound},
+	} {
+		if err := ps.DeletePendingPlatformAdmin(ctx, refused.id, refused.audit); !errors.Is(err, refused.want) {
+			t.Errorf("remove %s = %v, want %v", refused.name, err, refused.want)
+		}
+	}
+	ended, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := ps.DeletePendingPlatformAdmin(ended, stranded.ID, platformAudit("")); !errors.Is(err, context.Canceled) {
+		t.Errorf("remove in an ended request = %v, want context.Canceled", err)
+	}
+	if accounts() != before || removals() != 0 {
+		t.Fatal("a refused removal deleted an account or recorded a removal")
+	}
+
+	// The removal is written with its record, or not at all.
+	if _, err := f.store.DB.Exec(`CREATE TRIGGER refuse_removal_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT,'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.DeletePendingPlatformAdmin(ctx, stranded.ID, platformAudit("")); !errors.Is(err, ErrAuditUnavailable) {
+		t.Fatalf("remove without an audit record = %v, want ErrAuditUnavailable", err)
+	}
+	if accounts() != before || countRows(t, f.store.DB, `SELECT COUNT(*) FROM user_invites WHERE user_id=?`, stranded.ID) != 1 {
+		t.Fatal("an unrecorded removal deleted the account or its link")
+	}
+	if _, err := f.store.DB.Exec(`DROP TRIGGER refuse_removal_audit`); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, removed := range []UserSummary{stranded, pending} {
+		if err := ps.DeletePendingPlatformAdmin(ctx, removed.ID, AuditEntry{ActorUserID: platformRoot, ActorUsername: platformRoot}); err != nil {
+			t.Fatalf("remove %s = %v", removed.Username, err)
+		}
+		var detail string
+		if err := f.store.DB.QueryRow(`SELECT detail FROM security_audit WHERE action=? ORDER BY id DESC LIMIT 1`, auditPlatformAdminDeleted).Scan(&detail); err != nil || detail != "pending platform administrator "+removed.Username+" removed" {
+			t.Fatalf("removal record detail = %q, %v", detail, err)
+		}
+		if countRows(t, f.store.DB, `SELECT COUNT(*) FROM users WHERE id=?`, removed.ID) != 0 || countRows(t, f.store.DB, `SELECT COUNT(*) FROM user_invites WHERE user_id=?`, removed.ID) != 0 {
+			t.Fatalf("%s or its links remain after the removal", removed.Username)
+		}
+		if err := ps.DeletePendingPlatformAdmin(ctx, removed.ID, platformAudit("")); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("remove %s again = %v, want ErrNotFound", removed.Username, err)
+		}
+	}
+	if got := removals(); got != 2 {
+		t.Fatalf("removal records = %d, want 2", got)
+	}
+	if _, err := f.store.ActivateUser(ctx, "invite-three", "activated-hash", now, AuditEntry{Action: "user.activated"}); err == nil {
+		t.Fatal("the link of a removed account activated it")
+	}
+	again, err := ps.InvitePlatformAdmin(ctx, User{Username: "platform-two"}, "invite-again", now, now.Add(time.Hour), platformAudit(""))
+	if err != nil || again.ID == stranded.ID || !again.Pending {
+		t.Fatalf("invite the removed account's username = %+v, %v", again, err)
+	}
+	if got := accounts(); got != before-1 {
+		t.Fatalf("accounts after two removals and one invitation = %d, want %d", got, before-1)
+	}
+}
+
 // The platform's destinations are the web-managed destinations without a
 // tenant. The platform creates, updates and deletes only those: a unit's
 // destination is not found, and its pending deliveries are never touched.

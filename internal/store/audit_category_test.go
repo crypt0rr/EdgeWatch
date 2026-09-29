@@ -30,6 +30,7 @@ var knownAuditActions = map[string][]string{
 		"auth.totp_confirmation_failed", "auth.totp_failed",
 		"platform_admin.setup", "platform_admin.setup_token_issued",
 		"platform_admin.invited", "platform_admin.updated", "platform_admin.activation_revoked",
+		"platform_admin.activation_issued", "platform_admin.deleted",
 		"user.activated", "user.activation_issued", "user.activation_revoked",
 		"user.created", "user.display_name_changed", "user.login", "user.logout",
 		"user.password_changed", "user.password_reset", "user.password_reset_issued",

@@ -611,6 +611,134 @@ func TestPlatformAdminInvitationIsRevoked(t *testing.T) {
 	expectError(t, f.call(t, actorPlatform, http.MethodDelete, invited+"/activation", confirmBody("")), http.StatusNotFound, "no_active_activation", "revoke again")
 }
 
+// A pending platform administrator whose invitation expired or was revoked
+// has no usable link. POST /platform/admins/{id}/activation renews its
+// invitation: the new one-time link is returned once, every older link stops
+// working, and redeeming the new one activates the account. DELETE
+// /platform/admins/{id} removes a pending account instead, which frees its
+// username for a new invitation. Both confirm the caller's password and are
+// recorded in platform scope. Only a pending account is renewed or removed:
+// an enabled platform administrator and the caller's own account are
+// refused, and a unit's account is not found, like an unknown ID.
+func TestPendingPlatformAdminIsRenewedOrRemoved(t *testing.T) {
+	for _, stranded := range []string{"expired", "revoked"} {
+		t.Run(stranded, func(t *testing.T) {
+			f := newPlatformFixture(t)
+			invite := func(username string) (store.UserSummary, string) {
+				t.Helper()
+				var invitation struct {
+					User            store.UserSummary `json:"user"`
+					ActivationToken string            `json:"activation_token"`
+				}
+				expectResponse(t, f.call(t, actorPlatform, http.MethodPost, "/platform/admins", confirmBody(`"username":"`+username+`"`)), http.StatusCreated, "invite "+username, &invitation)
+				switch stranded {
+				case "expired":
+					if _, err := f.db.DB.Exec(`UPDATE user_invites SET expires_at=? WHERE user_id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), invitation.User.ID); err != nil {
+						t.Fatal(err)
+					}
+				case "revoked":
+					expectResponse(t, f.call(t, actorPlatform, http.MethodDelete, "/platform/admins/"+invitation.User.ID+"/activation", confirmBody("")), http.StatusNoContent, "revoke the invitation of "+username, nil)
+				}
+				return invitation.User, invitation.ActivationToken
+			}
+			activate := func(token string) *httptest.ResponseRecorder {
+				t.Helper()
+				request := httptest.NewRequest(http.MethodPost, consoleAPIBase+"/auth/activate", strings.NewReader(`{"token":"`+token+`","password":"third platform password"}`))
+				request.RemoteAddr = "127.0.0.1:9000"
+				request.Header.Set("Content-Type", "application/json")
+				recorder := httptest.NewRecorder()
+				f.server.api(recorder, request)
+				return recorder
+			}
+			records := func(action string) int {
+				return countWhere(t, f.db, `SELECT COUNT(*) FROM security_audit WHERE action=? AND tenant_id IS NULL AND actor_kind=?`, action, store.AuditActorPlatform)
+			}
+
+			invited, first := invite("platform-third")
+			path := "/platform/admins/" + invited.ID
+			expectError(t, activate(first), http.StatusBadRequest, "activation_failed", "activate the "+stranded+" invitation")
+			expectError(t, f.call(t, actorPlatform, http.MethodPost, "/platform/admins", confirmBody(`"username":"platform-third"`)), http.StatusConflict, "conflict", "invite the pending username again")
+
+			expectError(t, f.call(t, actorPlatform, http.MethodPost, path+"/activation", `{}`), http.StatusBadRequest, "password_required", "renew without a password")
+			expectError(t, f.call(t, actorPlatform, http.MethodPost, path+"/activation", `{"password":"wrong password"}`), http.StatusUnauthorized, "invalid_password", "renew with a wrong password")
+			expectError(t, f.call(t, actorPlatform, http.MethodDelete, path, `{"password":"wrong password"}`), http.StatusUnauthorized, "invalid_password", "remove with a wrong password")
+			for label, id := range map[string]string{"an enabled platform administrator": f.secondPlatformAdmin, "its own account": f.users[actorPlatform].ID} {
+				expectError(t, f.call(t, actorPlatform, http.MethodPost, "/platform/admins/"+id+"/activation", confirmBody("")), http.StatusForbidden, "not_permitted", "renew the invitation of "+label)
+				expectError(t, f.call(t, actorPlatform, http.MethodDelete, "/platform/admins/"+id, confirmBody("")), http.StatusForbidden, "not_permitted", "remove "+label)
+			}
+			for _, route := range []struct{ method, suffix string }{{http.MethodPost, "/activation"}, {http.MethodDelete, ""}} {
+				unknown := f.call(t, actorPlatform, route.method, "/platform/admins/00000000-0000-0000-0000-00000000dead"+route.suffix, confirmBody(""))
+				expectError(t, unknown, http.StatusNotFound, "not_found", route.method+" an unknown platform administrator")
+				for _, unitAccount := range []string{f.users[actorAdminA].ID, f.users[actorAdminB].ID} {
+					if response := f.call(t, actorPlatform, route.method, "/platform/admins/"+unitAccount+route.suffix, confirmBody("")); response.Code != unknown.Code || response.Body.String() != unknown.Body.String() {
+						t.Errorf("%s unit account %s as a platform admin = %d %s, want %s", route.method, unitAccount, response.Code, response.Body.String(), unknown.Body.String())
+					}
+				}
+			}
+			if records("platform_admin.activation_issued") != 0 || records("platform_admin.deleted") != 0 || countWhere(t, f.db, `SELECT COUNT(*) FROM user_invites WHERE used_at IS NULL AND expires_at>?`, time.Now().UTC().Format(time.RFC3339Nano)) != 0 {
+				t.Fatal("a refused request issued a link or recorded a renewal or removal")
+			}
+
+			type renewal struct {
+				User            store.UserSummary `json:"user"`
+				ActivationToken string            `json:"activation_token"`
+				ActivationPath  string            `json:"activation_path"`
+				ExpiresAt       time.Time         `json:"expires_at"`
+			}
+			var renewed, again renewal
+			response := f.call(t, actorPlatform, http.MethodPost, path+"/activation", confirmBody(""))
+			expectResponse(t, response, http.StatusOK, "renew", &renewed)
+			if renewed.User.ID != invited.ID || !renewed.User.Pending || renewed.User.Enabled || renewed.ActivationToken == "" || renewed.ActivationPath != activationPath(renewed.ActivationToken) || !renewed.ExpiresAt.After(time.Now()) {
+				t.Fatalf("renewal = %+v", renewed)
+			}
+			if got := response.Header().Get("Cache-Control"); got != "no-store" {
+				t.Fatalf("renewal Cache-Control = %q, want no-store", got)
+			}
+			expectResponse(t, f.call(t, actorPlatform, http.MethodPost, path+"/activation", confirmBody("")), http.StatusOK, "renew again", &again)
+			if again.ActivationToken == renewed.ActivationToken {
+				t.Fatal("the second renewal returned the same link")
+			}
+			if got := records("platform_admin.activation_issued"); got != 2 {
+				t.Fatalf("renewal records = %d, want 2", got)
+			}
+			for step, token := range map[string]string{"the " + stranded + " invitation": first, "the superseded renewal": renewed.ActivationToken} {
+				expectError(t, activate(token), http.StatusBadRequest, "activation_failed", "activate "+step)
+			}
+			expectResponse(t, activate(again.ActivationToken), http.StatusOK, "activate the renewed invitation", nil)
+			login := httptest.NewRequest(http.MethodPost, consoleAPIBase+"/auth/login", nil)
+			login.RemoteAddr = "127.0.0.1:9000"
+			if _, user, err := f.server.Auth.LoginAs(context.Background(), login, "platform-third", "third platform password", "", ""); err != nil || user.Role != store.RolePlatformAdmin || user.ID != invited.ID {
+				t.Fatalf("sign-in with the renewed invitation = %+v, %v", user, err)
+			}
+			expectError(t, f.call(t, actorPlatform, http.MethodPost, path+"/activation", confirmBody("")), http.StatusForbidden, "not_permitted", "renew a redeemed invitation")
+			expectError(t, f.call(t, actorPlatform, http.MethodDelete, path, confirmBody("")), http.StatusForbidden, "not_permitted", "remove an activated platform administrator")
+
+			removed, _ := invite("platform-fourth")
+			expectResponse(t, f.call(t, actorPlatform, http.MethodDelete, "/platform/admins/"+removed.ID, confirmBody("")), http.StatusNoContent, "remove", nil)
+			if got := records("platform_admin.deleted"); got != 1 {
+				t.Fatalf("removal records = %d, want 1", got)
+			}
+			var list struct {
+				Admins []store.UserSummary `json:"admins"`
+			}
+			expectResponse(t, f.call(t, actorPlatform, http.MethodGet, "/platform/admins", ""), http.StatusOK, "list admins", &list)
+			for _, admin := range list.Admins {
+				if admin.ID == removed.ID || admin.Username == "platform-fourth" {
+					t.Fatalf("the removed platform administrator is still listed: %+v", admin)
+				}
+			}
+			expectError(t, f.call(t, actorPlatform, http.MethodDelete, "/platform/admins/"+removed.ID, confirmBody("")), http.StatusNotFound, "not_found", "remove again")
+			var reinvited struct {
+				User store.UserSummary `json:"user"`
+			}
+			expectResponse(t, f.call(t, actorPlatform, http.MethodPost, "/platform/admins", confirmBody(`"username":"platform-fourth"`)), http.StatusCreated, "invite the removed username again", &reinvited)
+			if reinvited.User.ID == removed.ID || !reinvited.User.Pending {
+				t.Fatalf("the new invitation of the removed username = %+v", reinvited.User)
+			}
+		})
+	}
+}
+
 // An account that never signed in has no last sign-in: the platform's
 // account lists, an invitation, and a unit's own user list leave
 // last_login_at out instead of sending the zero time, and an account that

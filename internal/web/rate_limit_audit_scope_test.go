@@ -12,12 +12,12 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
-// Once a client with its own address has used its budget for usernames that
-// no account has, the sign-in answer is the same for every username, with
-// the same status, body and Retry-After, whether the name belongs to an
-// account of the default unit, a disabled account, another unit's account,
-// the platform administrator, or no account. Another client still gets the
-// ordinary answer for an existing name.
+// Once a client with its own address has used its sign-in budget, here with
+// usernames that no account has, the sign-in answer is the same for every
+// username, with the same status, body and Retry-After, whether the name
+// belongs to an account of the default unit, a disabled account, another
+// unit's account, the platform administrator, or no account. Another client
+// still gets the ordinary answer for an existing name.
 func TestThrottledSignInAnswerIsTheSameForEveryUsername(t *testing.T) {
 	f := newPlatformFixture(t)
 	if _, err := f.a.CreateUser(context.Background(), store.User{Username: "alpha-disabled", Role: store.RoleViewer, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: false}, store.AuditEntry{}); err != nil {
@@ -53,6 +53,60 @@ func TestThrottledSignInAnswerIsTheSameForEveryUsername(t *testing.T) {
 	}
 	if got := login("198.51.100.24:40000", "alpha-viewer"); got.status != http.StatusUnauthorized || !strings.Contains(got.body, `"login_failed"`) {
 		t.Errorf("wrong password from another client = %+v, want 401 login_failed", got)
+	}
+}
+
+// A client's sign-in budget counts every failed sign-in alike. A client
+// that fails with existing usernames, a wrong password for an enabled
+// account or any password for a disabled one, is refused after as many
+// failures as a client that fails with unknown usernames, and from then on
+// both get the same answer for every username, including a right password.
+func TestSignInBudgetDoesNotDependOnWhichUsernamesExist(t *testing.T) {
+	f := newPlatformFixture(t)
+	if _, err := f.a.CreateUser(context.Background(), store.User{Username: "alpha-disabled", Role: store.RoleViewer, PasswordHash: cheapPasswordHash(platformFixturePassword), Enabled: false}, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	type answer struct {
+		status           int
+		body, retryAfter string
+	}
+	login := func(remote, username, password string) answer {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodPost, consoleAPIBase+"/auth/login", strings.NewReader(fmt.Sprintf(`{"username":%q,"password":%q}`, username, password)))
+		request.RemoteAddr = remote
+		request.Header.Set("Content-Type", "application/json")
+		recorder := httptest.NewRecorder()
+		f.server.api(recorder, request)
+		return answer{recorder.Code, strings.TrimSpace(recorder.Body.String()), recorder.Header().Get("Retry-After")}
+	}
+	const unknownClient, existingClient = "198.51.100.30:40000", "198.51.100.31:40000"
+	existing := []string{"alpha-viewer", "alpha-disabled", "bravo-admin", "platform-root", "alpha-admin"}
+	for i := 0; i < 5; i++ {
+		if got := login(unknownClient, fmt.Sprintf("guess-%d", i), "not the password"); got.status != http.StatusUnauthorized || !strings.Contains(got.body, `"login_failed"`) {
+			t.Fatalf("unknown username %d = %+v, want 401 login_failed", i, got)
+		}
+		if got := login(existingClient, existing[i], "not the password"); got.status != http.StatusUnauthorized || !strings.Contains(got.body, `"login_failed"`) {
+			t.Fatalf("wrong password for %s = %+v, want 401 login_failed", existing[i], got)
+		}
+	}
+	want := login(unknownClient, "guess-x", "not the password")
+	if want.status != http.StatusTooManyRequests || !strings.Contains(want.body, `"rate_limited"`) || want.retryAfter != "300" {
+		t.Fatalf("unknown username over the budget = %+v, want 429 rate_limited", want)
+	}
+	for _, attempt := range []struct{ username, password string }{
+		{"guess-y", "not the password"},
+		{"alpha-viewer", "not the password"},
+		{"alpha-operator", platformFixturePassword},
+		{"bravo-viewer", platformFixturePassword},
+	} {
+		for _, client := range []string{unknownClient, existingClient} {
+			if got := login(client, attempt.username, attempt.password); got != want {
+				t.Errorf("sign-in as %s from %s after five failures = %+v, want %+v", attempt.username, client, got, want)
+			}
+		}
+	}
+	if got := login("198.51.100.32:40000", "alpha-operator", platformFixturePassword); got.status != http.StatusOK {
+		t.Errorf("sign-in from another client = %+v, want 200", got)
 	}
 }
 

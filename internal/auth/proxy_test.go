@@ -238,9 +238,9 @@ func TestRotatingUnknownUsernamesRemainThrottledForRemotePeers(t *testing.T) {
 	}
 }
 
-// Once a client identified by its own address has used its budget for
-// usernames that no account has, every sign-in from it gets the same
-// rate-limit error until the block ends: an unknown name, an enabled or a
+// Once a client identified by its own address has used its sign-in budget,
+// here with usernames that no account has, every sign-in from it gets the
+// same rate-limit error until the block ends: an unknown name, an enabled or a
 // disabled account of the default unit, an account of another unit, and a
 // platform administrator alike, with a wrong or a right password. No
 // password is checked and no failed sign-in is recorded, so neither the
@@ -317,6 +317,289 @@ func TestThrottledSignInAnswerDoesNotDependOnTheUsername(t *testing.T) {
 	now = now.Add(authBlockDuration)
 	if raw, _, err := m.LoginAs(ctx, from(client), admin.Username, "unit administrator password", "", ""); err != nil || raw == "" {
 		t.Fatalf("sign-in after the block = %q, %v", raw, err)
+	}
+}
+
+// clientBudgetStore returns a store with accounts for each kind of failed
+// sign-in: the default unit's enabled administrator and operator, a
+// disabled account, an account with TOTP, an account of a second unit, an
+// account of a disabled unit, and a platform administrator. Every
+// password is "<username> password".
+func clientBudgetStore(t *testing.T, now time.Time) (*store.Store, string) {
+	t.Helper()
+	ctx := context.Background()
+	s, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	stamp := now.Format(time.RFC3339Nano)
+	const pausedTenantID = "00000000-0000-0000-0000-000000000300"
+	for _, unit := range []struct{ id, name, slug string }{{platformTestTenantID, "Other", "other"}, {pausedTenantID, "Paused", "paused"}} {
+		if _, err := s.DB.Exec(`INSERT INTO tenants(id,name,slug,created_at,updated_at) VALUES(?,?,?,?,?)`, unit.id, unit.name, unit.slug, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	create := func(tenantID, username, role string, enabled bool) store.User {
+		t.Helper()
+		scope, err := s.TenantScopeByID(ctx, tenantID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		user, err := s.Tenant(scope).CreateUser(ctx, store.User{Username: username, Role: role, PasswordHash: cheapHash(username + " password"), Enabled: enabled}, store.AuditEntry{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return user
+	}
+	create(store.DefaultTenantID, "unit-admin", store.RoleAdministrator, true)
+	create(store.DefaultTenantID, "unit-operator", store.RoleOperator, true)
+	create(store.DefaultTenantID, "unit-disabled", store.RoleViewer, false)
+	totp := create(store.DefaultTenantID, "unit-totp", store.RoleViewer, true)
+	totp.TOTPEnabled, totp.TOTPSecret = true, "JBSWY3DPEHPK3PXP"
+	if err := s.Tenant(store.DefaultTenantScope()).SaveUserSecurity(ctx, totp, nil, false, false, store.AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	create(platformTestTenantID, "bravo-viewer", store.RoleViewer, true)
+	create(pausedTenantID, "paused-viewer", store.RoleViewer, true)
+	if _, err := s.DB.Exec(`UPDATE tenants SET state='disabled' WHERE id=?`, pausedTenantID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.Exec(`INSERT INTO users(id,tenant_id,username,display_name,role,password_hash,enabled,created_at,updated_at) VALUES('00000000-0000-0000-0000-00000000fa04',NULL,'platform-root','platform-root',?,?,1,?,?)`, store.RolePlatformAdmin, cheapHash("platform-root password"), stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	// A one-time code that none of the accepted time steps has.
+	wrongCode := "000000"
+	for step := now.Unix()/30 - 1; step <= now.Unix()/30+1; step++ {
+		if totpCode(totp.TOTPSecret, step) == wrongCode {
+			wrongCode = "111111"
+		}
+	}
+	return s, wrongCode
+}
+
+// A client identified by its own address has one budget of failed
+// sign-ins, and every kind of failure costs it the same: a username that
+// no account has, a wrong password for one account or for several, a
+// disabled account, a wrong one-time or recovery code, and an account whose
+// unit is disabled. After the same number of failures, whichever names they
+// used, every sign-in from the client is refused with the same answer, even
+// one with another account's right password. So the attempts a client has
+// left do not tell which names exist. Another client is not affected, the
+// client signs in again once the block ends, and the client's own bucket
+// for an account still records that account's failures.
+func TestEveryFailedSignInCountsAgainstTheClientBudget(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+	s, wrongCode := clientBudgetStore(t, now)
+	m := NewManager(s)
+	m.Now = func() time.Time { return now }
+	from := func(address string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+		r.RemoteAddr = address + ":4000"
+		return r
+	}
+	type attempt struct{ username, password, otp, recovery string }
+	unknown := func(name string) attempt { return attempt{name, "wrong password", "", ""} }
+	wrongPassword := func(username string) attempt { return attempt{username, "wrong password", "", ""} }
+	rightPassword := func(username string) attempt { return attempt{username, username + " password", "", ""} }
+	wrongOTP := attempt{"unit-totp", "unit-totp password", wrongCode, ""}
+	wrongRecovery := attempt{"unit-totp", "unit-totp password", "", "not-a-recovery-code"}
+	repeat := func(a attempt) []attempt {
+		attempts := make([]attempt, authFailureThreshold)
+		for i := range attempts {
+			attempts[i] = a
+		}
+		return attempts
+	}
+	checks := []struct {
+		name, client string
+		attempts     []attempt
+	}{
+		{"usernames that no account has", "203.0.113.20", []attempt{unknown("guess-0"), unknown("guess-1"), unknown("guess-2"), unknown("guess-3"), unknown("guess-4")}},
+		{"wrong passwords for one account", "203.0.113.21", repeat(wrongPassword("unit-admin"))},
+		{"wrong passwords for several accounts", "203.0.113.22", []attempt{wrongPassword("unit-admin"), wrongPassword("unit-operator"), wrongPassword("bravo-viewer"), wrongPassword("platform-root"), wrongPassword("unit-totp")}},
+		{"a disabled account", "203.0.113.23", repeat(rightPassword("unit-disabled"))},
+		{"wrong one-time codes", "203.0.113.24", repeat(wrongOTP)},
+		{"wrong recovery codes", "203.0.113.25", repeat(wrongRecovery)},
+		{"an account whose unit is disabled", "203.0.113.26", repeat(rightPassword("paused-viewer"))},
+		{"every kind of failure", "203.0.113.27", []attempt{unknown("guess-5"), wrongPassword("unit-admin"), rightPassword("unit-disabled"), wrongOTP, rightPassword("paused-viewer")}},
+	}
+	for _, check := range checks {
+		if len(check.attempts) != authFailureThreshold {
+			t.Fatalf("%s: %d attempts, want %d", check.name, len(check.attempts), authFailureThreshold)
+		}
+		for i, a := range check.attempts {
+			if raw, _, err := m.LoginAs(ctx, from(check.client), a.username, a.password, a.otp, a.recovery); raw != "" || err == nil || errors.Is(err, ErrRateLimited) {
+				t.Fatalf("%s: attempt %d as %s = %q, %v; want a failed sign-in", check.name, i+1, a.username, raw, err)
+			}
+		}
+		for _, a := range []attempt{rightPassword("unit-operator"), unknown("guess-x"), wrongPassword("unit-admin")} {
+			raw, _, err := m.LoginAs(ctx, from(check.client), a.username, a.password, a.otp, a.recovery)
+			if raw != "" || !errors.Is(err, ErrRateLimited) || err.Error() != ErrRateLimited.Error() || RetryAfterHeaderValue(err) != RetryAfterHeaderValue(ErrRateLimited) {
+				t.Errorf("%s: sign-in as %s after %d failures = %q, %v (Retry-After %s); want the rate-limit error", check.name, a.username, authFailureThreshold, raw, err, RetryAfterHeaderValue(err))
+			}
+		}
+	}
+
+	// The client's bucket for one account still records that account's
+	// failures and blocks the account for the client.
+	accountKey := scopedAccountKey(m.sourceScopeFor(from("203.0.113.21"), "login"), "login:unit-admin")
+	m.mu.Lock()
+	accountFailures, accountBlockedUntil := len(m.accountFails[accountKey]), m.accountBlocked[accountKey]
+	m.mu.Unlock()
+	if accountFailures != authFailureThreshold || !accountBlockedUntil.After(now) {
+		t.Errorf("the client's bucket for unit-admin = %d failures, blocked until %s; want %d and a block", accountFailures, accountBlockedUntil, authFailureThreshold)
+	}
+
+	// Another client is not affected.
+	if raw, _, err := m.LoginAs(ctx, from("203.0.113.28"), "unit-operator", "unit-operator password", "", ""); err != nil || raw == "" {
+		t.Fatalf("sign-in from another client = %q, %v", raw, err)
+	}
+
+	// Each client signs in again once the block ends.
+	now = now.Add(authBlockDuration)
+	for _, check := range checks {
+		if raw, _, err := m.LoginAs(ctx, from(check.client), "unit-operator", "unit-operator password", "", ""); err != nil || raw == "" {
+			t.Errorf("%s: sign-in after the block = %q, %v", check.name, raw, err)
+		}
+	}
+}
+
+// A successful sign-in leaves the client's budget as it is: the client's
+// failures stay counted until the block or the window ends. A client that
+// holds one valid account therefore cannot sign in between failed attempts
+// on other names to get more attempts. The success clears the failures in
+// the client's bucket for the account it signed in to.
+func TestSuccessfulSignInsDoNotExtendTheClientBudget(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+	s, _ := clientBudgetStore(t, now)
+	m := NewManager(s)
+	m.Now = func() time.Time { return now }
+	const client = "198.51.100.60"
+	from := func(address string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+		r.RemoteAddr = address + ":4000"
+		return r
+	}
+	signIn := func(username, password string) (string, error) {
+		now = now.Add(time.Second)
+		raw, _, err := m.LoginAs(ctx, from(client), username, password, "", "")
+		return raw, err
+	}
+	operatorKey := scopedAccountKey(m.sourceScopeFor(from(client), "login"), "login:unit-operator")
+	for i, failure := range []struct{ username, password string }{
+		{"unit-operator", "wrong password"},
+		{"guess-0", "wrong password"},
+		{"unit-admin", "wrong password"},
+		{"unit-disabled", "unit-disabled password"},
+		{"guess-1", "wrong password"},
+	} {
+		if raw, err := signIn(failure.username, failure.password); raw != "" || err == nil || errors.Is(err, ErrRateLimited) {
+			t.Fatalf("failure %d as %s = %q, %v; want a failed sign-in", i+1, failure.username, raw, err)
+		}
+		if i == authFailureThreshold-1 {
+			break
+		}
+		if raw, err := signIn("unit-operator", "unit-operator password"); err != nil || raw == "" {
+			t.Fatalf("sign-in after failure %d = %q, %v", i+1, raw, err)
+		}
+		m.mu.Lock()
+		operatorFailures := len(m.accountFails[operatorKey])
+		m.mu.Unlock()
+		if operatorFailures != 0 {
+			t.Fatalf("after the operator signed in, the client's bucket for the operator holds %d failures, want none", operatorFailures)
+		}
+	}
+	if raw, err := signIn("unit-operator", "unit-operator password"); raw != "" || !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("sign-in after %d failures with sign-ins between them = %q, %v; want ErrRateLimited", authFailureThreshold, raw, err)
+	}
+	if raw, err := signIn("guess-2", "wrong password"); raw != "" || !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("unknown username after %d failures with sign-ins between them = %q, %v; want ErrRateLimited", authFailureThreshold, raw, err)
+	}
+
+	// Another client signs in, and the client does once the block ends.
+	if raw, _, err := m.LoginAs(ctx, from("198.51.100.61"), "unit-operator", "unit-operator password", "", ""); err != nil || raw == "" {
+		t.Fatalf("sign-in from another client = %q, %v", raw, err)
+	}
+	now = now.Add(authBlockDuration)
+	if raw, err := signIn("unit-operator", "unit-operator password"); err != nil || raw == "" {
+		t.Fatalf("sign-in after the block = %q, %v", raw, err)
+	}
+}
+
+// A sign-in that the password-check queue refuses checks no password, so
+// it costs the client's budget nothing, whether or not the username
+// exists: afterwards each client still has its whole budget.
+func TestSignInRefusedByThePasswordCheckQueueCostsNoBudget(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+	s, _ := clientBudgetStore(t, now)
+	m := NewManager(s)
+	m.Now = func() time.Time { return now }
+	from := func(address string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+		r.RemoteAddr = address + ":4000"
+		return r
+	}
+	clients := []struct{ address, username string }{
+		{"192.0.2.70", "nobody-here"},
+		{"192.0.2.71", "unit-admin"},
+		{"192.0.2.72", "unit-disabled"},
+	}
+	for i := 0; i < authArgon2MaxConcurrent; i++ {
+		m.argon2Sem <- struct{}{}
+	}
+	for _, client := range clients {
+		if raw, _, err := m.LoginAs(ctx, from(client.address), client.username, "wrong password", "", ""); raw != "" || !errors.Is(err, ErrRateLimited) {
+			t.Fatalf("sign-in as %s with every password check busy = %q, %v; want ErrRateLimited", client.username, raw, err)
+		}
+	}
+	for i := 0; i < authArgon2MaxConcurrent; i++ {
+		<-m.argon2Sem
+	}
+	for _, client := range clients {
+		for attempt := 0; attempt < authFailureThreshold; attempt++ {
+			if _, _, err := m.LoginAs(ctx, from(client.address), "guess-"+strconv.Itoa(attempt), "wrong password", "", ""); err == nil || errors.Is(err, ErrRateLimited) {
+				t.Fatalf("client that tried %s: failure %d = %v, want a failed sign-in", client.username, attempt+1, err)
+			}
+		}
+		if _, _, err := m.LoginAs(ctx, from(client.address), "guess-x", "wrong password", "", ""); !errors.Is(err, ErrRateLimited) {
+			t.Fatalf("client that tried %s: sign-in over the budget = %v, want ErrRateLimited", client.username, err)
+		}
+	}
+}
+
+// A shared loopback peer keeps its short cooldown for every kind of failed
+// sign-in, and has no five-minute block from the per-client budget.
+func TestSharedLoopbackPeerKeepsItsCooldownForEveryFailure(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+	s, wrongCode := clientBudgetStore(t, now)
+	m := NewManager(s)
+	m.Now = func() time.Time { return now }
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+	request.RemoteAddr = "127.0.0.1:443"
+	for i, failure := range []struct{ username, password, otp string }{
+		{"guess-0", "wrong password", ""},
+		{"unit-admin", "wrong password", ""},
+		{"unit-disabled", "unit-disabled password", ""},
+		{"unit-totp", "unit-totp password", wrongCode},
+		{"paused-viewer", "paused-viewer password", ""},
+	} {
+		if _, _, err := m.LoginAs(ctx, request, failure.username, failure.password, failure.otp, ""); err == nil || errors.Is(err, ErrRateLimited) {
+			t.Fatalf("failure %d as %s = %v, want a failed sign-in", i+1, failure.username, err)
+		}
+	}
+	for _, username := range []string{"unit-operator", "guess-1"} {
+		if _, _, err := m.LoginAs(ctx, request, username, username+" password", "", ""); !errors.Is(err, ErrRateLimited) || RetryAfterHeaderValue(err) != "2" {
+			t.Fatalf("sign-in as %s during the cooldown = %v (Retry-After %s), want the 2-second cooldown", username, err, RetryAfterHeaderValue(err))
+		}
+	}
+	now = now.Add(authSharedLoopbackRetryDelay)
+	if raw, _, err := m.LoginAs(ctx, request, "unit-operator", "unit-operator password", "", ""); err != nil || raw == "" {
+		t.Fatalf("sign-in after the cooldown = %q, %v", raw, err)
 	}
 }
 

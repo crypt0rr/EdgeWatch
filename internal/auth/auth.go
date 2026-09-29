@@ -115,21 +115,22 @@ type Manager struct {
 
 	mu sync.Mutex
 	// fails and blocked are the source-address backstop. Scoped authentication
-	// paths use the account and unknown-source maps below so different
-	// operations and accounts do not share a lockout bucket.
-	fails                map[string][]time.Time
-	blocked              map[string]time.Time
-	accountFails         map[string][]time.Time
-	accountBlocked       map[string]time.Time
-	unknownSourceFails   map[string][]time.Time
-	unknownSourceBlocked map[string]time.Time
-	sourceInFlight       map[string]int
-	accountInFlight      map[string]int
-	unknownInFlight      map[string]int
-	rateAudit            map[string]time.Time
-	trustedProxies       []*net.IPNet
-	forwardedHeader      string
-	argon2Sem            chan struct{}
+	// paths use the account maps below so different operations and accounts
+	// do not share a lockout bucket. The login-client maps hold the sign-in
+	// budget of each client that has its own address.
+	fails               map[string][]time.Time
+	blocked             map[string]time.Time
+	accountFails        map[string][]time.Time
+	accountBlocked      map[string]time.Time
+	loginClientFails    map[string][]time.Time
+	loginClientBlocked  map[string]time.Time
+	sourceInFlight      map[string]int
+	accountInFlight     map[string]int
+	loginClientInFlight map[string]int
+	rateAudit           map[string]time.Time
+	trustedProxies      []*net.IPNet
+	forwardedHeader     string
+	argon2Sem           chan struct{}
 }
 
 func NewManager(s *store.Store) *Manager {
@@ -138,8 +139,8 @@ func NewManager(s *store.Store) *Manager {
 		forwardedHeader: forwardedHeaderXForwardedFor,
 		fails:           map[string][]time.Time{}, blocked: map[string]time.Time{},
 		accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{},
-		unknownSourceFails: map[string][]time.Time{}, unknownSourceBlocked: map[string]time.Time{},
-		sourceInFlight: map[string]int{}, accountInFlight: map[string]int{}, unknownInFlight: map[string]int{},
+		loginClientFails: map[string][]time.Time{}, loginClientBlocked: map[string]time.Time{},
+		sourceInFlight: map[string]int{}, accountInFlight: map[string]int{}, loginClientInFlight: map[string]int{},
 		rateAudit: map[string]time.Time{}, argon2Sem: make(chan struct{}, authArgon2MaxConcurrent),
 	}
 }
@@ -508,7 +509,7 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 		return errors.New("administrator setup could not be completed")
 	}
 	if !usable {
-		m.failedScoped(source, account, "", false)
+		m.failedScoped(source, account, "")
 		m.auditAuthFailure(ctx, "auth.setup_failed", "setup", request)
 		return errors.New("administrator setup could not be completed")
 	}
@@ -526,11 +527,11 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 		setupErr = err
 	}
 	if setupErr != nil {
-		m.failedScoped(source, account, "", false)
+		m.failedScoped(source, account, "")
 		m.auditAuthFailure(ctx, "auth.setup_failed", "setup", request)
 		return setupErr
 	}
-	m.clearScoped(source, account, "")
+	m.clearScoped(source, account)
 	return nil
 }
 
@@ -557,7 +558,7 @@ func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, to
 		return "", errors.New("activation could not be completed")
 	}
 	if !usable {
-		m.failedScoped(source, account, "", false)
+		m.failedScoped(source, account, "")
 		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
 		return "", errors.New("activation could not be completed")
 	}
@@ -571,18 +572,18 @@ func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, to
 			m.auditRateLimit(ctx, "activation", request)
 			return "", err
 		}
-		m.failedScoped(source, account, "", false)
+		m.failedScoped(source, account, "")
 		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
 		return "", err
 	}
 	now := m.now()
 	activated, err := m.Store.ActivateUser(ctx, digest(token), hash, now, store.AuditEntry{Action: "user.activated", Detail: "user account activated"})
 	if err != nil {
-		m.failedScoped(source, account, "", false)
+		m.failedScoped(source, account, "")
 		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
 		return "", err
 	}
-	m.clearScoped(source, account, "")
+	m.clearScoped(source, account)
 	return activated.ID, nil
 }
 
@@ -591,45 +592,42 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	identity := normalizeLoginIdentity(username)
 	source := m.sourceScopeFor(request, "login")
 	account := "login:" + identity
-	unknownSource := "unknown-login:" + strings.TrimPrefix(source, "source:")
 	if !m.allowScoped(source, account) {
 		m.auditLoginRateLimit(ctx, identity, request)
 		return "", store.User{}, m.rateLimitError(source, account)
 	}
 	defer m.releaseScoped(source, account)
-	// A client with its own address also has a budget for usernames that no
-	// account has, so it cannot bypass the account buckets by rotating
-	// names. Admission to that budget is decided, and reserved, before the
-	// username is looked up: once the client has used it, every sign-in from
-	// the client is refused until the block ends, whether or not the name
-	// exists, and the refusal checks no password. The answer and its cost
-	// therefore do not tell which names exist. A shared loopback peer uses
+	// A client with its own address has one sign-in budget for every
+	// username. Each failed sign-in costs it the same, whether no account
+	// has the username, the account is disabled or its unit is not active,
+	// or the password, one-time code or recovery code is wrong. The attempts
+	// the client has left, and the moment it is throttled, therefore do not
+	// depend on which names exist, and rotating names gains nothing.
+	// Admission to the budget is decided, and reserved, before the username
+	// is looked up, and the reservation is held until the answer is known,
+	// for every name alike. Once the client has used the budget, every
+	// sign-in from it is refused until the block ends, and the refusal checks
+	// no password. The per-account buckets, which are kept per client too,
+	// still count each account's own failures. A shared loopback peer uses
 	// the source-wide cooldown instead.
-	unknownReserved := false
+	loginClient := ""
 	if !sharedLoopbackLoginSource(source, account) {
-		if !m.allowUnknownSource(unknownSource) {
+		loginClient = "login-client:" + strings.TrimPrefix(source, "source:")
+		if !m.allowLoginClient(loginClient) {
 			m.auditLoginRateLimit(ctx, identity, request)
 			return "", store.User{}, ErrRateLimited
 		}
-		unknownReserved = true
+		defer m.releaseLoginClient(loginClient)
 	}
 	// Only a users row can sign in. Schema 52 retired the legacy admins row,
 	// so the original administrator is the users row with LegacyAdminUserID.
+	// A failed sign-in is recorded after its password check, for every kind
+	// of failure alike, so a sign-in that the password-check queue refuses
+	// checked no password and costs no budget, whatever the name.
 	user, err := m.Store.GetUserByUsername(ctx, identity)
-	if unknownReserved {
-		if err == nil {
-			// An existing name costs nothing from the unknown-name budget.
-			m.releaseUnknownSource(unknownSource)
-		} else {
-			defer m.releaseUnknownSource(unknownSource)
-		}
-	}
 	if err != nil {
-		// Unknown usernames consume the same failure budget as known accounts.
-		// Shared loopback peers use the source-wide cooldown so the response does
-		// not expose account existence; other peers retain the unknown-name
-		// source bucket to prevent bypass by rotating account names.
-		m.failedScoped(source, account, unknownSource, true)
+		// A username that no account has gets the same password check as a
+		// disabled account, so the answer costs the same.
 		if err := m.withArgon2(ctx, func() error {
 			_ = VerifyPassword(dummyPasswordHash, password)
 			return nil
@@ -639,11 +637,11 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			}
 			return "", store.User{}, err
 		}
+		m.failedScoped(source, account, loginClient)
 		m.auditUnknownAccountFailure(ctx, "auth.login_failed", identity, request)
 		return "", store.User{}, errors.New("invalid credentials")
 	}
 	if !user.Enabled {
-		m.failedScoped(source, account, "", false)
 		// Keep disabled accounts indistinguishable from unknown usernames. This
 		// prevents the login endpoint from becoming an account-enumeration oracle
 		// while the administration UI can still show the disabled state.
@@ -656,6 +654,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			}
 			return "", user, err
 		}
+		m.failedScoped(source, account, loginClient)
 		m.auditAccountFailure(ctx, "auth.login_failed", identity, user, request)
 		return "", user, errors.New("invalid credentials")
 	}
@@ -670,7 +669,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		return "", user, err
 	}
 	if !passwordValid {
-		m.failedScoped(source, account, "", false)
+		m.failedScoped(source, account, loginClient)
 		m.auditAccountFailure(ctx, "auth.login_failed", identity, user, request)
 		return "", user, errors.New("invalid credentials")
 	}
@@ -699,7 +698,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			}
 		}
 		if !valid {
-			m.failedScoped(source, account, "", false)
+			m.failedScoped(source, account, loginClient)
 			m.auditAccountFailure(ctx, "auth.totp_failed", identity, user, request)
 			return "", user, errors.New("one-time code is required")
 		}
@@ -748,7 +747,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			// A tenant that is disabled or being deleted stops sign-in. The
 			// answer is the one a wrong password gets, so it does not tell
 			// the caller that the password was right.
-			m.failedScoped(source, account, "", false)
+			m.failedScoped(source, account, loginClient)
 			m.auditAccountFailure(ctx, "auth.login_failed", identity, user, request)
 			return "", user, errors.New("invalid credentials")
 		}
@@ -809,7 +808,15 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	if upgradedHash == "" {
 		_ = m.Store.SetUserLastLogin(ctx, user.ID, now)
 	}
-	m.clearScoped(source, account, "")
+	// A successful sign-in clears the client's bucket for the account it
+	// signed in to, and the source backstop, which holds a shared loopback
+	// peer's cooldown. It leaves the client's sign-in budget as it is: the
+	// client's failures, the account's own included, stay counted until they
+	// leave the window or the block ends. The success proves only this
+	// account's credentials. Clearing or reducing the budget would let a
+	// client that holds one valid account sign in between failed attempts on
+	// other names and never be throttled.
+	m.clearScoped(source, account)
 	return session, user, nil
 }
 
@@ -849,11 +856,11 @@ func (m *Manager) ConfirmPasswordForUser(ctx context.Context, request *http.Requ
 		}
 	}
 	if err != nil || !user.Enabled || !passwordValid {
-		m.failedScoped(source, account, "", false)
+		m.failedScoped(source, account, "")
 		m.auditConfirmationFailure(ctx, "auth.password_confirmation_failed", "password confirmation", userID, user, request)
 		return errors.New("password confirmation failed")
 	}
-	m.clearScoped(source, account, "")
+	m.clearScoped(source, account)
 	return nil
 }
 
@@ -887,11 +894,11 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 		valid = false
 	}
 	if !valid {
-		m.failedScoped(source, account, "", false)
+		m.failedScoped(source, account, "")
 		m.auditConfirmationFailure(ctx, "auth.totp_confirmation_failed", "TOTP confirmation", userID, user, request)
 		return errors.New("current one-time code is required")
 	}
-	m.clearScoped(source, account, "")
+	m.clearScoped(source, account)
 	return nil
 }
 
@@ -1134,10 +1141,11 @@ func normalizeLoginIdentity(username string) string {
 // allowScoped checks the source backstop for an authentication operation.
 // Account and token failure state is scoped to the operation, account, and
 // resolved source. A single client behind a trusted proxy can be throttled
-// without blocking the same account from another client. Unknown-login probing
-// has a separate source bucket for trustworthy client identities. Shared
-// loopback login sources instead use the same brief source-wide cooldown for
-// existing and unknown usernames to prevent account enumeration.
+// without blocking the same account from another client. Sign-ins from a
+// trustworthy client identity also have one budget for the client, see
+// LoginAs and allowLoginClient. Shared loopback login sources instead use the
+// same brief source-wide cooldown for existing and unknown usernames to
+// prevent account enumeration.
 func (m *Manager) allowScoped(source, account string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1217,20 +1225,24 @@ func (m *Manager) rateLimitError(source, account string) error {
 	return &retryAfterRateLimit{delay: authSharedLoopbackRetryDelay}
 }
 
-func (m *Manager) allowUnknownSource(scope string) bool {
+// allowLoginClient admits a sign-in to the client's sign-in budget and
+// reserves its place until releaseLoginClient: the client's recent failed
+// sign-ins and its sign-ins in flight together stay below the threshold.
+// It refuses the sign-in while the client is blocked.
+func (m *Manager) allowLoginClient(client string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
 	m.ensureScopedLimiterMapsLocked()
 	m.sweepLimiterLocked(now)
-	until, ok := m.unknownSourceBlocked[scope]
+	until, ok := m.loginClientBlocked[client]
 	if ok && now.Before(until) {
 		return false
 	}
-	if len(m.unknownSourceFails[scope])+m.unknownInFlight[scope] >= authFailureThreshold {
+	if len(m.loginClientFails[client])+m.loginClientInFlight[client] >= authFailureThreshold {
 		return false
 	}
-	m.unknownInFlight[scope]++
+	m.loginClientInFlight[client]++
 	return true
 }
 
@@ -1257,18 +1269,25 @@ func (m *Manager) releaseScoped(source, account string) {
 	}
 }
 
-func (m *Manager) releaseUnknownSource(scope string) {
+// releaseLoginClient drops the reservation of allowLoginClient. A failed
+// sign-in is recorded by failedScoped before the release, so the
+// reservation of a success costs the budget nothing.
+func (m *Manager) releaseLoginClient(client string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureScopedLimiterMapsLocked()
-	if m.unknownInFlight[scope] > 1 {
-		m.unknownInFlight[scope]--
+	if m.loginClientInFlight[client] > 1 {
+		m.loginClientInFlight[client]--
 	} else {
-		delete(m.unknownInFlight, scope)
+		delete(m.loginClientInFlight, client)
 	}
 }
 
-func (m *Manager) failedScoped(source, account, unknownSource string, unknown bool) {
+// failedScoped records a failed authentication in the source backstop and in
+// the source's bucket for the account. For a sign-in from a client with its
+// own address, loginClient names the client's sign-in budget, and the
+// failure is recorded there too; every other operation passes "".
+func (m *Manager) failedScoped(source, account, loginClient string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
@@ -1284,8 +1303,8 @@ func (m *Manager) failedScoped(source, account, unknownSource string, unknown bo
 		accountKey := scopedAccountKey(source, account)
 		recordFailureLocked(now, accountKey, authFailureThreshold, m.accountFails, m.accountBlocked)
 	}
-	if unknown && unknownSource != "" && !sharedLoopbackLoginSource(source, account) {
-		recordFailureLocked(now, unknownSource, authFailureThreshold, m.unknownSourceFails, m.unknownSourceBlocked)
+	if loginClient != "" && !sharedLoopbackLoginSource(source, account) {
+		recordFailureLocked(now, loginClient, authFailureThreshold, m.loginClientFails, m.loginClientBlocked)
 	}
 	if sharedLoopbackLoginSource(source, account) && len(m.fails[source]) >= authFailureThreshold {
 		// The normal source backstop is five minutes at a much higher threshold.
@@ -1295,15 +1314,16 @@ func (m *Manager) failedScoped(source, account, unknownSource string, unknown bo
 	}
 }
 
-func (m *Manager) clearScoped(source, account, unknownSource string) {
+// clearScoped clears the source's bucket for the account and the source
+// backstop after a successful operation. It never clears a client's sign-in
+// budget; LoginAs explains why.
+func (m *Manager) clearScoped(source, account string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.ensureScopedLimiterMapsLocked()
 	accountKey := scopedAccountKey(source, account)
 	delete(m.accountFails, accountKey)
 	delete(m.accountBlocked, accountKey)
-	delete(m.unknownSourceFails, unknownSource)
-	delete(m.unknownSourceBlocked, unknownSource)
 	delete(m.fails, source)
 	delete(m.blocked, source)
 	// Clear a legacy bucket as well when a compatibility caller and a normal
@@ -1375,11 +1395,11 @@ func (m *Manager) ensureScopedLimiterMapsLocked() {
 	if m.accountBlocked == nil {
 		m.accountBlocked = map[string]time.Time{}
 	}
-	if m.unknownSourceFails == nil {
-		m.unknownSourceFails = map[string][]time.Time{}
+	if m.loginClientFails == nil {
+		m.loginClientFails = map[string][]time.Time{}
 	}
-	if m.unknownSourceBlocked == nil {
-		m.unknownSourceBlocked = map[string]time.Time{}
+	if m.loginClientBlocked == nil {
+		m.loginClientBlocked = map[string]time.Time{}
 	}
 	if m.sourceInFlight == nil {
 		m.sourceInFlight = map[string]int{}
@@ -1387,8 +1407,8 @@ func (m *Manager) ensureScopedLimiterMapsLocked() {
 	if m.accountInFlight == nil {
 		m.accountInFlight = map[string]int{}
 	}
-	if m.unknownInFlight == nil {
-		m.unknownInFlight = map[string]int{}
+	if m.loginClientInFlight == nil {
+		m.loginClientInFlight = map[string]int{}
 	}
 	if m.rateAudit == nil {
 		m.rateAudit = map[string]time.Time{}
@@ -1457,8 +1477,8 @@ func (m *Manager) sweepLimiterLocked(now time.Time) {
 	if m.accountFails != nil {
 		sweepFailureBucketLocked(now, m.accountFails, m.accountBlocked, authFailureThreshold)
 	}
-	if m.unknownSourceFails != nil {
-		sweepFailureBucketLocked(now, m.unknownSourceFails, m.unknownSourceBlocked, authFailureThreshold)
+	if m.loginClientFails != nil {
+		sweepFailureBucketLocked(now, m.loginClientFails, m.loginClientBlocked, authFailureThreshold)
 	}
 }
 

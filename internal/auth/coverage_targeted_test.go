@@ -96,19 +96,19 @@ func TestScopedAdmissionReservationsAndTOTPLogin(t *testing.T) {
 	if m.allowScoped("source:198.51.100.4", "account") {
 		t.Fatal("account failure threshold was ignored")
 	}
-	firstUnknown := m.allowUnknownSource("unknown-login:198.51.100.5")
-	secondUnknown := m.allowUnknownSource("unknown-login:198.51.100.5")
-	if !firstUnknown || !secondUnknown {
-		t.Fatal("unknown-source admission was unexpectedly denied")
+	firstClient := m.allowLoginClient("login-client:login:198.51.100.5")
+	secondClient := m.allowLoginClient("login-client:login:198.51.100.5")
+	if !firstClient || !secondClient {
+		t.Fatal("login-client admission was unexpectedly denied")
 	}
-	m.releaseUnknownSource("unknown-login:198.51.100.5")
-	m.releaseUnknownSource("unknown-login:198.51.100.5")
-	m.unknownSourceFails["unknown-login:198.51.100.6"] = make([]time.Time, authFailureThreshold)
-	for i := range m.unknownSourceFails["unknown-login:198.51.100.6"] {
-		m.unknownSourceFails["unknown-login:198.51.100.6"][i] = now
+	m.releaseLoginClient("login-client:login:198.51.100.5")
+	m.releaseLoginClient("login-client:login:198.51.100.5")
+	m.loginClientFails["login-client:login:198.51.100.6"] = make([]time.Time, authFailureThreshold)
+	for i := range m.loginClientFails["login-client:login:198.51.100.6"] {
+		m.loginClientFails["login-client:login:198.51.100.6"][i] = now
 	}
-	if m.allowUnknownSource("unknown-login:198.51.100.6") {
-		t.Fatal("unknown-source failure threshold was ignored")
+	if m.allowLoginClient("login-client:login:198.51.100.6") {
+		t.Fatal("login-client failure threshold was ignored")
 	}
 
 	db, err := store.Open(storetest.FreshPath(t))
@@ -322,7 +322,7 @@ func TestLimiterMapInitializationEvictionAndCleanup(t *testing.T) {
 	m := &Manager{}
 	m.mu.Lock()
 	m.ensureScopedLimiterMapsLocked()
-	if m.fails == nil || m.blocked == nil || m.accountFails == nil || m.accountBlocked == nil || m.unknownSourceFails == nil || m.unknownSourceBlocked == nil || m.rateAudit == nil {
+	if m.fails == nil || m.blocked == nil || m.accountFails == nil || m.accountBlocked == nil || m.loginClientFails == nil || m.loginClientBlocked == nil || m.loginClientInFlight == nil || m.rateAudit == nil {
 		t.Fatal("scoped limiter maps were not initialized")
 	}
 	m.mu.Unlock()
@@ -370,16 +370,20 @@ func TestLimiterMapInitializationEvictionAndCleanup(t *testing.T) {
 		t.Fatal("expired blocked entry was not swept")
 	}
 
-	// clearScoped removes account, source, unknown, and legacy-compatible keys.
-	m = &Manager{fails: map[string][]time.Time{"203.0.113.4": {now}}, blocked: map[string]time.Time{"203.0.113.4": now}, accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{}, unknownSourceFails: map[string][]time.Time{}, unknownSourceBlocked: map[string]time.Time{}}
+	// clearScoped removes account, source, and legacy-compatible keys, and
+	// keeps the client's sign-in budget.
+	m = &Manager{fails: map[string][]time.Time{"203.0.113.4": {now}}, blocked: map[string]time.Time{"203.0.113.4": now}, accountFails: map[string][]time.Time{}, accountBlocked: map[string]time.Time{}, loginClientFails: map[string][]time.Time{"login-client:proxy:203.0.113.4": {now}}, loginClientBlocked: map[string]time.Time{"login-client:proxy:203.0.113.4": now}}
 	key := scopedAccountKey("source:proxy:203.0.113.4", "admin")
 	m.accountFails[key] = []time.Time{now}
 	m.accountBlocked[key] = now
 	m.fails["source:proxy:203.0.113.4"] = []time.Time{now}
 	m.blocked["source:proxy:203.0.113.4"] = now
-	m.clearScoped("source:proxy:203.0.113.4", "admin", "unknown")
+	m.clearScoped("source:proxy:203.0.113.4", "admin")
 	if len(m.accountFails) != 0 || len(m.accountBlocked) != 0 || len(m.fails) != 0 || len(m.blocked) != 0 {
 		t.Fatalf("clearScoped left entries: %#v %#v %#v %#v", m.accountFails, m.accountBlocked, m.fails, m.blocked)
+	}
+	if len(m.loginClientFails) != 1 || len(m.loginClientBlocked) != 1 {
+		t.Fatalf("clearScoped cleared the sign-in budget: %#v %#v", m.loginClientFails, m.loginClientBlocked)
 	}
 
 	if got := scopedAccountKey("source", " "); got != "" {

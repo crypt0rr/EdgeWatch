@@ -230,7 +230,7 @@ func TestSetupAndLoginRateLimitsReturnTypedError(t *testing.T) {
 	setupSource := m.sourceScopeFor(request, "setup")
 	setupAccount := "setup:" + digest("invalid")
 	for i := 0; i < authFailureThreshold; i++ {
-		m.failedScoped(setupSource, setupAccount, "", false)
+		m.failedScoped(setupSource, setupAccount, "")
 	}
 	if err := m.SetupRequest(context.Background(), request, "invalid", "long enough password"); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("setup rate-limit error = %v", err)
@@ -240,7 +240,7 @@ func TestSetupAndLoginRateLimitsReturnTypedError(t *testing.T) {
 	loginSource := m.sourceScopeFor(request, "login")
 	loginAccount := "login:" + normalizeLoginIdentity("admin")
 	for i := 0; i < authFailureThreshold; i++ {
-		m.failedScoped(loginSource, loginAccount, "", false)
+		m.failedScoped(loginSource, loginAccount, "")
 	}
 	if _, _, err := m.LoginAs(context.Background(), request, "admin", "long enough password", "", ""); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("login rate-limit error = %v", err)
@@ -316,7 +316,7 @@ func TestAuthLimiterBoundsRotatingSourcesAndExpiresEntries(t *testing.T) {
 	m.Now = func() time.Time { return now }
 	for i := 0; i < authLimiterMaxEntries+500; i++ {
 		source := "source:auth:" + limiterKey(fmt.Sprintf("rotating-source-%d", i))
-		m.failedScoped(source, "", "", false)
+		m.failedScoped(source, "", "")
 	}
 	m.mu.Lock()
 	count := len(m.fails)
@@ -559,7 +559,10 @@ func TestLoginAsUserAndPasswordConfirmationAreScoped(t *testing.T) {
 	}
 }
 
-func TestLoginFailuresDoNotLockOutAnotherAccountBehindSameSource(t *testing.T) {
+// A client's failed sign-ins throttle every sign-in from that client, with
+// any account, but not another client that reaches EdgeWatch through the
+// same trusted proxy.
+func TestLoginFailuresDoNotLockOutAnotherClientBehindTheSameProxy(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -567,6 +570,9 @@ func TestLoginFailuresDoNotLockOutAnotherAccountBehindSameSource(t *testing.T) {
 	}
 	defer s.Close()
 	m := NewManager(s)
+	if err := m.SetTrustedProxies([]string{"10.0.0.5/32"}); err != nil {
+		t.Fatal(err)
+	}
 	token, err := m.EnsureSetupToken(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -582,19 +588,30 @@ func TestLoginFailuresDoNotLockOutAnotherAccountBehindSameSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
-	request.RemoteAddr = "10.0.0.10:443"
+	through := func(client string) *http.Request {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+		request.RemoteAddr = "10.0.0.5:443"
+		request.Header.Set("X-Forwarded-For", client)
+		return request
+	}
 	for i := 0; i < authFailureThreshold; i++ {
-		if _, _, err := m.LoginAs(ctx, request, "admin", "wrong administrator password", "", ""); err == nil {
-			t.Fatal("wrong administrator password was accepted")
+		if _, _, err := m.LoginAs(ctx, through("203.0.113.10"), "admin", "wrong administrator password", "", ""); err == nil || errors.Is(err, ErrRateLimited) {
+			t.Fatalf("wrong administrator password %d = %v, want invalid credentials", i+1, err)
 		}
 	}
-	if _, _, err := m.LoginAs(ctx, request, "admin", "administrator password", "", ""); !errors.Is(err, ErrRateLimited) {
+	if _, _, err := m.LoginAs(ctx, through("203.0.113.10"), "admin", "administrator password", "", ""); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("locked administrator login error = %v", err)
 	}
-	raw, loggedIn, err := m.LoginAs(ctx, request, operator.Username, "operator account password", "", "")
+	if raw, _, err := m.LoginAs(ctx, through("203.0.113.10"), operator.Username, "operator account password", "", ""); raw != "" || !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("operator sign-in from the throttled client = %q, %v; want ErrRateLimited", raw, err)
+	}
+	raw, loggedIn, err := m.LoginAs(ctx, through("203.0.113.11"), operator.Username, "operator account password", "", "")
 	if err != nil || raw == "" || loggedIn.ID != operator.ID {
-		t.Fatalf("operator behind same source was blocked: session=%q user=%#v err=%v", raw, loggedIn, err)
+		t.Fatalf("operator behind the same proxy was blocked: session=%q user=%#v err=%v", raw, loggedIn, err)
+	}
+	raw, loggedIn, err = m.LoginAs(ctx, through("203.0.113.11"), "admin", "administrator password", "", "")
+	if err != nil || raw == "" || loggedIn.Username != "admin" {
+		t.Fatalf("administrator behind the same proxy was blocked: session=%q user=%#v err=%v", raw, loggedIn, err)
 	}
 }
 

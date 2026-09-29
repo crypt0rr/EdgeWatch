@@ -190,6 +190,131 @@ func TestPlatformConsoleAdmins(t *testing.T) {
 	}
 }
 
+// A pending platform administrator has not redeemed its invitation, so it is
+// neither enabled nor disabled: a request to disable it is refused with
+// ErrAccountNotPermitted, like one to enable it, and changes nothing. Its
+// invitation link stays usable until it is revoked, which is the way to stop
+// it.
+func TestPlatformConsoleRefusesToDisableAPendingAdmin(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
+	ps := f.store.Platform()
+	now := time.Now().UTC()
+	invited, err := ps.InvitePlatformAdmin(ctx, User{Username: "platform-two"}, "invite-two", now, now.Add(time.Hour), platformAudit(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	audits := countRows(t, f.store.DB, `SELECT COUNT(*) FROM security_audit`)
+	for _, revision := range []int64{0, invited.Revision} {
+		if admin, err := ps.SetPlatformAdminEnabled(ctx, invited.ID, revision, false, platformAudit("")); !errors.Is(err, ErrAccountNotPermitted) {
+			t.Errorf("disable a pending platform administrator at revision %d = %+v, %v; want ErrAccountNotPermitted", revision, admin, err)
+		}
+	}
+	admins, err := ps.PlatformAdmins(ctx)
+	if err != nil || len(admins) != 2 || admins[1].ID != invited.ID || !admins[1].Pending || admins[1].Enabled || admins[1].Revision != invited.Revision {
+		t.Fatalf("platform administrators after the refused disable = %+v, %v", admins, err)
+	}
+	if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM security_audit`); got != audits {
+		t.Fatalf("the refused disable wrote %d audit records", got-audits)
+	}
+	if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM user_invites WHERE id_hash='invite-two' AND used_at IS NULL`); got != 1 {
+		t.Fatal("the refused disable used the invitation")
+	}
+}
+
+// Revoking a pending platform administrator's invitation marks its unused
+// links used, so none can activate the account, which stays pending and
+// disabled, and records the revocation in platform scope. Only an enabled
+// platform administrator revokes, and only a pending account's invitation:
+// an account that redeemed its link, the actor's own included, is refused,
+// and a unit's account is not found. A second revocation finds no link and
+// records nothing.
+func TestPlatformConsoleRevokesAPendingAdminInvitation(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
+	insertTenantUser(t, f.store, platformOther, nil, RolePlatformAdmin)
+	ps := f.store.Platform()
+	now := time.Now().UTC()
+	invited, err := ps.InvitePlatformAdmin(ctx, User{Username: "platform-two"}, "invite-two", now, now.Add(time.Hour), platformAudit(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	usable := func() int {
+		return countRows(t, f.store.DB, `SELECT COUNT(*) FROM user_invites WHERE user_id=? AND used_at IS NULL`, invited.ID)
+	}
+	revocations := func() int {
+		return countRows(t, f.store.DB, `SELECT COUNT(*) FROM security_audit WHERE action=? AND tenant_id IS NULL AND actor_kind=?`, auditPlatformAdminActivationRevoked, AuditActorPlatform)
+	}
+
+	for _, refused := range []struct {
+		name, id string
+		audit    AuditEntry
+		want     error
+	}{
+		{"by a unit's administrator", invited.ID, accountAudit(""), ErrAccountNotPermitted},
+		{"by nobody", invited.ID, AuditEntry{}, ErrAccountNotPermitted},
+		{"of an enabled platform administrator", platformOther, platformAudit(""), ErrAccountNotPermitted},
+		{"of the actor's own account", platformRoot, platformAudit(""), ErrAccountNotPermitted},
+		{"of a unit's account", accountAdminB, platformAudit(""), ErrNotFound},
+		{"of an unknown account", accountUnknown, platformAudit(""), ErrNotFound},
+	} {
+		if revoked, err := ps.RevokePlatformAdminInvitation(ctx, refused.id, now, refused.audit); !errors.Is(err, refused.want) || revoked != 0 {
+			t.Errorf("revoke %s = %d, %v; want %v", refused.name, revoked, err, refused.want)
+		}
+	}
+	if usable() != 1 || revocations() != 0 || countRows(t, f.store.DB, `SELECT COUNT(*) FROM user_invites WHERE used_at IS NULL AND user_id=?`, accountAdminB) != 0 {
+		t.Fatal("a refused revocation changed a link or recorded a revocation")
+	}
+
+	if revoked, err := ps.RevokePlatformAdminInvitation(ctx, invited.ID, now, platformAudit("")); err != nil || revoked != 1 {
+		t.Fatalf("revoke the invitation = %d, %v; want 1", revoked, err)
+	}
+	if usable() != 0 || revocations() != 1 {
+		t.Fatalf("after the revocation the account has %d usable links and the platform audit %d revocations", usable(), revocations())
+	}
+	if _, err := f.store.ActivateUser(ctx, "invite-two", "activated-hash", now, AuditEntry{Action: "user.activated"}); err == nil {
+		t.Fatal("the revoked invitation activated the account")
+	}
+	admins, err := ps.PlatformAdmins(ctx)
+	if err != nil || len(admins) != 3 {
+		t.Fatalf("platform administrators = %+v, %v", admins, err)
+	}
+	for _, admin := range admins {
+		if admin.ID == invited.ID && (!admin.Pending || admin.Enabled) {
+			t.Fatalf("the account of the revoked invitation = %+v, want it pending and disabled", admin)
+		}
+	}
+	if revoked, err := ps.RevokePlatformAdminInvitation(ctx, invited.ID, now, platformAudit("")); err != nil || revoked != 0 || revocations() != 1 {
+		t.Fatalf("revoke again = %d, %v, with %d revocations recorded; want 0 and 1", revoked, err, revocations())
+	}
+
+	// A link that expired is already unusable: revoking it finds nothing.
+	expiring, err := ps.InvitePlatformAdmin(ctx, User{Username: "platform-three"}, "invite-three", now, now.Add(time.Minute), platformAudit(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if revoked, err := ps.RevokePlatformAdminInvitation(ctx, expiring.ID, now.Add(2*time.Minute), platformAudit("")); err != nil || revoked != 0 || revocations() != 1 {
+		t.Fatalf("revoke an expired invitation = %d, %v, with %d revocations recorded", revoked, err, revocations())
+	}
+
+	// The revocation is written with its record, or not at all.
+	fresh, err := ps.InvitePlatformAdmin(ctx, User{Username: "platform-four"}, "invite-four", now, now.Add(time.Hour), platformAudit(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.DB.Exec(`CREATE TRIGGER refuse_revocation_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT,'audit unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if revoked, err := ps.RevokePlatformAdminInvitation(ctx, fresh.ID, now, platformAudit("")); !errors.Is(err, ErrAuditUnavailable) || revoked != 0 {
+		t.Fatalf("revoke without an audit record = %d, %v; want ErrAuditUnavailable", revoked, err)
+	}
+	if got := countRows(t, f.store.DB, `SELECT COUNT(*) FROM user_invites WHERE id_hash='invite-four' AND used_at IS NULL`); got != 1 {
+		t.Fatal("an unrecorded revocation used the invitation")
+	}
+}
+
 // The platform's destinations are the web-managed destinations without a
 // tenant. The platform creates, updates and deletes only those: a unit's
 // destination is not found, and its pending deliveries are never touched.

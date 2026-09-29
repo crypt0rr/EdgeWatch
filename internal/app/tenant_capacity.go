@@ -16,10 +16,11 @@ var ErrProbeBudgetUnavailable = errors.New("the probe budget could not be read")
 
 // SetTenantCapacity changes a tenant's scan capacity for a platform
 // administrator: its slot cap, its probe budgets, and its high-cost ceiling.
-// The store checks each setting against the deployment's and records the
-// change as a platform action in the tenant's audit. The new slot cap
-// applies to the next grant at once; the budgets apply to the next check,
-// because each check reads them.
+// The store checks each setting against the deployment's, checks in the
+// write that the actor, audit.ActorUserID, is still an enabled platform
+// administrator, and records the change as a platform action in the
+// tenant's audit. The new slot cap applies to the next grant at once; the
+// budgets apply to the next check, because each check reads them.
 func (a *App) SetTenantCapacity(ctx context.Context, tenantID string, capacity store.TenantCapacity, audit store.AuditEntry) error {
 	if err := a.Store.Platform().SetTenantCapacity(ctx, tenantID, capacity, a.capacityLimits(), audit); err != nil {
 		return err

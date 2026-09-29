@@ -28,6 +28,7 @@ describe('business units API contract', () => {
     await apiRoutes.listPlatformAdmins()
     await apiRoutes.invitePlatformAdmin({ username: 'sam', display_name: 'Sam', password: 'pw' })
     await apiRoutes.setPlatformAdminEnabled('user/3', false, 4, 'pw')
+    await apiRoutes.revokePlatformAdminInvitation('user/3', 'pw')
     await apiRoutes.listPlatformNotifications()
     await apiRoutes.createPlatformNotification('Ops', 'generic://example.test/hook', 'pw')
     await apiRoutes.updatePlatformNotification('dest/1', 5, 'Ops', 'pw', { enabled: false })
@@ -53,6 +54,7 @@ describe('business units API contract', () => {
       'GET /api/v1/platform/admins',
       'POST /api/v1/platform/admins',
       'PATCH /api/v1/platform/admins/user%2F3',
+      'DELETE /api/v1/platform/admins/user%2F3/activation',
       'GET /api/v1/platform/notifications',
       'POST /api/v1/platform/notifications',
       'PATCH /api/v1/platform/notifications/dest%2F1',
@@ -70,9 +72,10 @@ describe('business units API contract', () => {
     expect(body(11)).toEqual({ username: 'riley', display_name: 'Riley', password: 'pw', role: 'administrator' })
     expect(body(12)).toEqual({ password: 'pw' })
     expect(body(16)).toEqual({ enabled: false, revision: 4, password: 'pw' })
-    expect(body(18)).toEqual({ name: 'Ops', url: 'generic://example.test/hook', password: 'pw', enabled: true })
-    expect(body(19)).toEqual({ name: 'Ops', revision: 5, password: 'pw', enabled: false })
-    expect(body(21)).toEqual({ destinations: ['dest-1'], password: 'pw' })
+    expect(body(17)).toEqual({ password: 'pw' })
+    expect(body(19)).toEqual({ name: 'Ops', url: 'generic://example.test/hook', password: 'pw', enabled: true })
+    expect(body(20)).toEqual({ name: 'Ops', revision: 5, password: 'pw', enabled: false })
+    expect(body(22)).toEqual({ destinations: ['dest-1'], password: 'pw' })
     expect(new Headers(fetchMock.mock.calls[7][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
   })
 

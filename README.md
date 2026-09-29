@@ -598,7 +598,8 @@ The token is valid for 15 minutes. While it is valid, the sign-in page links
 to the setup page, where the token, a username, and a password create the
 account. The command is refused once an enabled platform administrator
 exists, and it replaces an unused token only with `--force`. An
-existing platform administrator invites the others from **Platform admins**.
+existing platform administrator invites the others from **Platform admins**,
+where it can also revoke an invitation that has not been redeemed yet.
 
 ### Units and their accounts
 

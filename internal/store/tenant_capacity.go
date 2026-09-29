@@ -141,11 +141,14 @@ func scanTenantCapacity(scan func(...any) error, leading ...any) (TenantCapacity
 
 // SetTenantCapacity replaces the capacity of an active or disabled tenant
 // after checking it against the deployment's limits, and records the change
-// in the same transaction. The audit record belongs to the tenant, so its
-// administrators see it, and names a platform actor, so it outlives the
-// tenant's purge. The entry supplies the actor and request; the action,
-// detail, tenant, and actor kind are set here. A tenant that is missing,
-// deleted, or being deleted is not found, and nothing changes.
+// in the same transaction. The actor, audit.ActorUserID, must be an enabled
+// platform administrator, which the transaction checks first, as the other
+// platform writes do; any other actor, or none, is ErrAccountNotPermitted.
+// The audit record belongs to the tenant, so its administrators see it, and
+// names a platform actor, so it outlives the tenant's purge. The entry
+// supplies the actor and request; the action, detail, tenant, and actor
+// kind are set here. A tenant that is missing, deleted, or being deleted is
+// not found, and nothing changes.
 func (ps *PlatformStore) SetTenantCapacity(ctx context.Context, tenantID string, capacity TenantCapacity, limits CapacityLimits, audit AuditEntry) error {
 	if err := capacity.Validate(limits); err != nil {
 		return err
@@ -156,6 +159,9 @@ func (ps *PlatformStore) SetTenantCapacity(ctx context.Context, tenantID string,
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := requirePlatformActorTx(ctx, tx, audit.ActorUserID); err != nil {
+		return err
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE tenants SET `+
 		`max_concurrent_scans=?,max_probe_count=?,max_naabu_probe_count=?,high_cost_ceiling=?,revision=revision+1,updated_at=? `+
 		`WHERE id=? AND state IN (?,?)`,

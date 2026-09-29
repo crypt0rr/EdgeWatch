@@ -30,9 +30,25 @@ func newCapacityTenants(t *testing.T, sc Scanner, slots int) twoTenants {
 
 func (f twoTenants) setCapacity(t *testing.T, scope store.TenantScope, capacity store.TenantCapacity) {
 	t.Helper()
-	if err := f.app.SetTenantCapacity(context.Background(), scope.ID(), capacity, store.AuditEntry{}); err != nil {
+	if err := f.app.SetTenantCapacity(context.Background(), scope.ID(), capacity, capacityActor(t, f.db)); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// capacityActorID is the platform administrator that changes the tenants'
+// capacity in the tests.
+const capacityActorID = "00000000-0000-0000-0000-00000000fa01"
+
+// capacityActor adds the enabled platform administrator capacityActorID,
+// unless it exists, and returns the audit entry of its actions: the store
+// writes a capacity change only for an enabled platform administrator.
+func capacityActor(t *testing.T, db *store.Store) store.AuditEntry {
+	t.Helper()
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.DB.Exec(`INSERT OR IGNORE INTO users(id,tenant_id,username,display_name,role,password_hash,enabled,created_at,updated_at) VALUES(?,NULL,'capacity-admin','capacity-admin',?,'hash',1,?,?)`, capacityActorID, store.RolePlatformAdmin, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	return store.AuditEntry{ActorUserID: capacityActorID, ActorUsername: "capacity-admin"}
 }
 
 // probeJob is a job of one address whose TCP scan sends one Nmap probe per

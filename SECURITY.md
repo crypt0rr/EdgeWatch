@@ -112,9 +112,11 @@ While the token is valid, `/api/v1/setup/status` reports
 An enabled platform
 administrator can then invite another after confirming its password; the
 invited account stays pending and disabled until it redeems its one-time
-link, which expires after 30 minutes. A platform administrator can disable
-or enable another, never its own account, and disabling one ends its
-sessions and revokes the links it issued or received.
+link, which expires after 30 minutes. Until then, a platform administrator
+can revoke the invitation, which stops the link; a pending account is neither
+enabled nor disabled. A platform administrator can disable or enable another,
+never its own account, and disabling one ends its sessions and revokes the
+links it issued or received.
 
 A platform administrator invites only unit administrators, and resets only
 unit administrators' passwords; a unit's administrators invite and reset the
@@ -125,12 +127,17 @@ administrator can reset another through the product; the host commands
 `admin reset-password` and `admin disable-totp` remain the break-glass path
 for every account. Each unit keeps at least one enabled administrator, and
 the platform at least one enabled platform administrator, whose role never
-changes. Creating and renaming a unit and changing its capacity need only a
-platform administrator's session. Disabling, enabling, and deleting a unit,
-inviting a unit or platform administrator, issuing a password reset, ending
-an account's sessions, enabling or disabling a platform administrator, and
-every change to the platform's notification destinations and routing also
-require its password, and deleting also the unit's typed name.
+changes. The platform console's changes to units, their capacity and
+accounts, the platform administrators, and the platform's notifications each
+check in their own transaction that the acting account is still an enabled
+platform administrator. Creating and renaming a unit and changing its
+capacity need only a platform administrator's session.
+Disabling, enabling, and deleting a unit, inviting a unit or platform
+administrator, revoking a platform administrator's invitation, issuing a
+password reset, ending an account's sessions, enabling or disabling a
+platform administrator, and every change to the platform's notification
+destinations and routing also require its password, and deleting also the
+unit's typed name.
 
 The platform administrator is trusted with the units' accounts, not their
 data, and the product makes its reach visible rather than impossible.

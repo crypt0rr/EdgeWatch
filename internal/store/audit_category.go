@@ -54,6 +54,7 @@ var auditActionCategories = map[string]string{
 	"platform_admin.setup_token_issued": auditCategoryAccount,
 	auditPlatformAdminInvited:           auditCategoryAccount,
 	auditPlatformAdminUpdated:           auditCategoryAccount,
+	auditPlatformAdminActivationRevoked: auditCategoryAccount,
 	"admin.display_name_changed":        auditCategoryAccount,
 	"admin.password_changed":            auditCategoryAccount,
 	"admin.password_reset":              auditCategoryAccount,

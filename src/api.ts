@@ -336,6 +336,8 @@ export const revokeUnitAccountSessions = (id: string, accountID: string, passwor
 export const listPlatformAdmins = () => api<{ admins: UserSummary[] }>('/platform/admins')
 export const invitePlatformAdmin = (value: { username: string; display_name: string; password: string }) => api<AccountInvitation<UserSummary>>('/platform/admins', { method: 'POST', body: JSON.stringify(value) })
 export const setPlatformAdminEnabled = (id: string, enabled: boolean, revision: number, password: string) => api<UserSummary>(`/platform/admins/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ enabled, revision, password }) })
+// A pending platform administrator is neither enabled nor disabled: revoking its invitation stops its activation link.
+export const revokePlatformAdminInvitation = (id: string, password: string) => api<void>(`/platform/admins/${encodeURIComponent(id)}/activation`, { method: 'DELETE', body: JSON.stringify({ password }) })
 // The platform's own notification destinations. Like a unit's, their URLs are write-only.
 export const listPlatformNotifications = () => api<NotificationDestinationsResponse>('/platform/notifications')
 export const createPlatformNotification = (name: string, url: string, password: string, enabled = true) => api<NotificationDestination>('/platform/notifications', { method: 'POST', body: JSON.stringify({ name, url, password, enabled }) })

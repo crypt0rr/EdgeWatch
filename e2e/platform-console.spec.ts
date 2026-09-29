@@ -129,10 +129,10 @@ test('a platform administrator revokes the invitation of another that has not re
   await expect(page.getByLabel('Activation link for avery')).toContainText('/activate#token=FIXTURE-ADMIN')
 
   // A pending administrator is neither enabled nor disabled: its row offers
-  // only to revoke the invitation.
+  // to renew or revoke the invitation, or to remove the account.
   const avery = page.getByTestId('admin-avery')
   await expect(avery.getByText('Pending activation')).toBeVisible()
-  await expect(avery.getByRole('button')).toHaveText(['Revoke invitation'])
+  await expect(avery.getByRole('button')).toHaveText(['Renew invitation', 'Revoke invitation', 'Remove'])
   await avery.getByRole('button', { name: 'Revoke invitation' }).click()
   const revoke = page.getByRole('dialog', { name: 'Revoke the invitation of avery?' })
   await revoke.getByLabel('Your password').fill('fixture-password')
@@ -140,6 +140,44 @@ test('a platform administrator revokes the invitation of another that has not re
   await expect(page.getByRole('status').filter({ hasText: 'The invitation of avery was revoked; its activation link no longer works.' })).toBeVisible()
   await expect(page.getByLabel('Activation link for avery')).toHaveCount(0)
   expect(controls.payloads['platform-admin-revoke']).toEqual([{ account: 'user-avery', password: 'fixture-password' }])
+})
+
+test('a platform administrator renews a lapsed invitation, or removes the pending account to free its username', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The platform journey runs once on desktop; phone widths are covered separately.')
+  const controls = await mockConsole(page, 'platform_admin')
+  await page.goto('/platform/admins')
+  await page.getByLabel('Username').fill('avery')
+  await page.getByLabel('Your password').fill('fixture-password')
+  await page.getByRole('button', { name: 'Create activation link' }).click()
+  await expect(page.getByLabel('Activation link for avery')).toContainText('/activate#token=FIXTURE-ADMIN')
+  await page.getByRole('button', { name: 'Done' }).click()
+  await expect(page.getByLabel('Activation link for avery')).toHaveCount(0)
+
+  // The link was not redeemed in time: a new one is shown once.
+  const avery = page.getByTestId('admin-avery')
+  await avery.getByRole('button', { name: 'Renew invitation' }).click()
+  const renew = page.getByRole('dialog', { name: 'Renew the invitation of avery?' })
+  await renew.getByLabel('Your password').fill('fixture-password')
+  await renew.getByRole('button', { name: 'Renew invitation' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'A new activation link for avery was created; any earlier link no longer works.' })).toBeVisible()
+  await expect(page.getByLabel('Activation link for avery')).toContainText('/activate#token=FIXTURE-RENEWED')
+  await expect(avery.getByText('Pending activation')).toBeVisible()
+
+  // Removing the pending account stops its link and frees its username.
+  await avery.getByRole('button', { name: 'Remove' }).click()
+  const remove = page.getByRole('dialog', { name: 'Remove avery?' })
+  await remove.getByLabel('Your password').fill('fixture-password')
+  await remove.getByRole('button', { name: 'Remove' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'avery was removed; its username can be invited again.' })).toBeVisible()
+  await expect(page.getByTestId('admin-avery')).toHaveCount(0)
+  await expect(page.getByLabel('Activation link for avery')).toHaveCount(0)
+  await page.getByLabel('Username').fill('avery')
+  await page.getByLabel('Your password').fill('fixture-password')
+  await page.getByRole('button', { name: 'Create activation link' }).click()
+  await expect(page.getByTestId('admin-avery').getByText('Pending activation')).toBeVisible()
+  expect(controls.payloads['platform-admin-renew']).toEqual([{ account: 'user-avery', password: 'fixture-password' }])
+  expect(controls.payloads['platform-admin-remove']).toEqual([{ account: 'user-avery', password: 'fixture-password' }])
+  expect(controls.payloads['platform-admin-invite']).toHaveLength(2)
 })
 
 test('the platform console fits a phone', async ({ page }, testInfo) => {

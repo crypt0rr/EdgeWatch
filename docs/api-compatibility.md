@@ -64,7 +64,8 @@ that is not the unit's, and a destination that is not the platform's get
 tombstone. `DELETE /api/v1/platform/admins/{id}/activation` was added after
 v0.20.3, when `PATCH /api/v1/platform/admins/{id}` began to answer a request
 to disable a pending platform administrator with `403 not_permitted` instead
-of `200`.
+of `200`. `POST /api/v1/platform/admins/{id}/activation` and
+`DELETE /api/v1/platform/admins/{id}` were added after v0.20.5.
 
 | Endpoint | Permission | Request and response |
 | --- | --- | --- |
@@ -84,6 +85,8 @@ of `200`.
 | `GET /api/v1/platform/admins` | `unit_accounts.manage` | The platform administrators. |
 | `POST /api/v1/platform/admins` | `unit_accounts.manage` | `{username, display_name, password}`. `201` with the one-time link. |
 | `PATCH /api/v1/platform/admins/{id}` | `unit_accounts.manage` | `{enabled, revision, password}`; never the caller's own account or the last enabled platform administrator. A pending platform administrator, which has not redeemed its invitation, is neither enabled nor disabled: both get `403 not_permitted`. |
+| `DELETE /api/v1/platform/admins/{id}` | `unit_accounts.manage` | `{password}`, for a pending platform administrator: the account and its activation links are removed, so its username can be invited again. `204`. Any other platform administrator, enabled or disabled, the caller's own account included, gets `403 not_permitted`. |
+| `POST /api/v1/platform/admins/{id}/activation` | `unit_accounts.manage` | `{password}`, for a pending platform administrator, including one whose link expired or was revoked: a new one-time link, and every older link stops working. `200` with `user`, `activation_token`, `activation_path`, and `expires_at`. Any other platform administrator, the caller's own account included, gets `403 not_permitted`. |
 | `DELETE /api/v1/platform/admins/{id}/activation` | `unit_accounts.manage` | `{password}`, for a pending platform administrator: its unused activation link stops working, and the account stays pending. `204`, or `404 no_active_activation` when no usable link is left. Any other platform administrator, the caller's own account included, gets `403 not_permitted`. |
 | `GET /api/v1/platform/notifications` | `platform_notifications.manage` | The platform's destinations without URLs, their `status`, and the platform's `update_routing`. |
 | `POST /api/v1/platform/notifications` | `platform_notifications.manage` | `{name, url, enabled, password}`. `201` with the destination. |

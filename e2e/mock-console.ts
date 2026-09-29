@@ -246,14 +246,14 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
         unitAccounts[created.id] = []
         await json(created, 201); return
       }
-      if (parts.length === 2 && method === 'GET') { await json(unit); return }
-      if (parts.length === 2 && method === 'PATCH') {
+      if (unit && parts.length === 2 && method === 'GET') { await json(unit); return }
+      if (unit && parts.length === 2 && method === 'PATCH') {
         const value = body() as { name?: string; slug?: string }
         record('unit-rename', value)
         Object.assign(unit, { ...value, revision: unit.revision + 1 })
         await json(unit); return
       }
-      if (parts.length === 2 && method === 'DELETE') {
+      if (unit && parts.length === 2 && method === 'DELETE') {
         record('unit-delete', body())
         Object.assign(unit, { status: 'deleting', purge: { phase: 'jobs', rows: 12 }, revision: unit.revision + 1 })
         await json(unit); return
@@ -294,6 +294,21 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
         record('platform-admin-revoke', { account: parts[1], ...(body() as object) })
         // Only a pending platform administrator's invitation is revoked.
         if (!platformAdmins.find(item => item.id === parts[1])?.pending) { await json({ error: { code: 'not_permitted', message: 'only a pending platform administrator\'s invitation can be revoked' } }, 403); return }
+        await route.fulfill({ status: 204 }); return
+      }
+      if (parts.length === 3 && parts[0] === 'admins' && parts[2] === 'activation' && method === 'POST') {
+        record('platform-admin-renew', { account: parts[1], ...(body() as object) })
+        // Only a pending platform administrator's invitation is renewed.
+        const pending = platformAdmins.find(item => item.id === parts[1])
+        if (!pending?.pending) { await json({ error: { code: 'not_permitted', message: 'only a pending platform administrator\'s invitation can be renewed' } }, 403); return }
+        await json({ user: pending, activation_token: 'FIXTURE-RENEWED', activation_path: '/activate#token=FIXTURE-RENEWED', expires_at: '2026-01-01T00:30:00Z' }); return
+      }
+      if (parts.length === 2 && parts[0] === 'admins' && method === 'DELETE') {
+        record('platform-admin-remove', { account: parts[1], ...(body() as object) })
+        // Only a pending platform administrator is removed, which frees its username.
+        const index = platformAdmins.findIndex(item => item.id === parts[1])
+        if (index < 0 || !platformAdmins[index].pending) { await json({ error: { code: 'not_permitted', message: 'only a pending platform administrator, which has not redeemed its invitation, can be removed' } }, 403); return }
+        platformAdmins.splice(index, 1)
         await route.fulfill({ status: 204 }); return
       }
       if (parts.length === 1 && parts[0] === 'audit' && method === 'GET') {

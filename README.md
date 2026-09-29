@@ -603,8 +603,13 @@ The token is valid for 15 minutes. While it is valid, the sign-in page links
 to the setup page, where the token, a username, and a password create the
 account. The command is refused once an enabled platform administrator
 exists, and it replaces an unused token only with `--force`. An
-existing platform administrator invites the others from **Platform admins**,
-where it can also revoke an invitation that has not been redeemed yet.
+existing platform administrator invites the others from **Platform admins**.
+An invited account stays pending until its one-time link is redeemed, and
+the link expires after 30 minutes. For a pending account, **Renew
+invitation** shows a new link once and stops every earlier one, which
+recovers an invitation that expired or was revoked. **Revoke invitation**
+stops the link, and **Remove** deletes the pending account so its username
+can be invited again. Each needs your password.
 
 ### Units and their accounts
 

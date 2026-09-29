@@ -82,7 +82,10 @@ func requiredPlatformPermission(path, method string) string {
 	case "units":
 		return requiredPlatformUnitPermission(parts[1:], method)
 	case "admins":
-		if (len(parts) == 1 && (method == http.MethodGet || method == http.MethodPost)) || (len(parts) == 2 && method == http.MethodPatch) || (len(parts) == 3 && parts[2] == "activation" && method == http.MethodDelete) {
+		switch {
+		case len(parts) == 1 && (method == http.MethodGet || method == http.MethodPost),
+			len(parts) == 2 && (method == http.MethodPatch || method == http.MethodDelete),
+			len(parts) == 3 && parts[2] == "activation" && (method == http.MethodPost || method == http.MethodDelete):
 			return auth.PermissionUnitAccountsManage
 		}
 	case "audit":
@@ -173,6 +176,10 @@ func (s *Server) platformRoute(w http.ResponseWriter, r *http.Request, session s
 		s.invitePlatformAdmin(w, r, session)
 	case len(parts) == 2 && parts[0] == "admins" && r.Method == http.MethodPatch:
 		s.updatePlatformAdmin(w, r, session, parts[1])
+	case len(parts) == 2 && parts[0] == "admins" && r.Method == http.MethodDelete:
+		s.deletePendingPlatformAdmin(w, r, session, parts[1])
+	case len(parts) == 3 && parts[0] == "admins" && parts[2] == "activation" && r.Method == http.MethodPost:
+		s.renewPlatformAdminInvitation(w, r, session, parts[1])
 	case len(parts) == 3 && parts[0] == "admins" && parts[2] == "activation" && r.Method == http.MethodDelete:
 		s.revokePlatformAdminInvitation(w, r, session, parts[1])
 	case len(parts) == 1 && parts[0] == "audit" && r.Method == http.MethodGet:
@@ -778,7 +785,9 @@ func (s *Server) invitePlatformAdmin(w http.ResponseWriter, r *http.Request, ses
 // updatePlatformAdmin enables or disables another platform administrator.
 // The last enabled one stays enabled, and an administrator changes its own
 // account through the account routes instead. A pending one is neither
-// enabled nor disabled: revokePlatformAdminInvitation stops its link.
+// enabled nor disabled: revokePlatformAdminInvitation stops its link,
+// renewPlatformAdminInvitation issues a new one, and
+// deletePendingPlatformAdmin removes the account.
 func (s *Server) updatePlatformAdmin(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	var input struct {
 		Enabled  *bool  `json:"enabled"`
@@ -831,6 +840,47 @@ func (s *Server) revokePlatformAdminInvitation(w http.ResponseWriter, r *http.Re
 	}
 	if revoked == 0 {
 		writeError(w, http.StatusNotFound, "no_active_activation", "no active activation link exists for this platform administrator", nil)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// renewPlatformAdminInvitation issues a new one-time activation link for a
+// pending platform administrator, as a unit's administrators renew a
+// pending account's link: it is the way back for an invitation that expired
+// or was revoked. The link is returned once, and every older link of the
+// account stops working. An account that redeemed its link is refused.
+func (s *Server) renewPlatformAdminInvitation(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
+	password, ok := decodeUserPassword(w, r)
+	if !ok || !s.confirmUserMutation(w, r, session, password) {
+		return
+	}
+	plain, digest, err := auth.NewOpaqueToken()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "invite_failed", "activation token could not be generated", nil)
+		return
+	}
+	created := time.Now().UTC()
+	expires := created.Add(30 * time.Minute)
+	admin, err := s.Store.Platform().RenewPlatformAdminInvitation(r.Context(), id, digest, created, expires, platformActorAudit(session, "", ""))
+	if err != nil {
+		s.writePlatformError(w, r, err, "platform_admin.activation_issued", "platform administrator not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": admin, "activation_token": plain, "activation_path": activationPath(plain), "expires_at": expires})
+}
+
+// deletePendingPlatformAdmin removes a pending platform administrator, which
+// never redeemed its invitation, so its username can be invited again. Its
+// links stop working with it. An account that redeemed its link, enabled or
+// disabled, is refused: updatePlatformAdmin disables it instead.
+func (s *Server) deletePendingPlatformAdmin(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
+	password, ok := decodeUserPassword(w, r)
+	if !ok || !s.confirmUserMutation(w, r, session, password) {
+		return
+	}
+	if err := s.Store.Platform().DeletePendingPlatformAdmin(r.Context(), id, platformActorAudit(session, "", "")); err != nil {
+		s.writePlatformError(w, r, err, "platform_admin.deleted", "platform administrator not found")
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

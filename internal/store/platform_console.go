@@ -19,8 +19,9 @@ import (
 //   - the accounts of a tenant, as summaries without credentials, and the
 //     revocation of one account's sessions;
 //   - the platform administrators, an invitation for another one, the
-//     revocation of a pending one's invitation, and enabling or disabling
-//     one, with the last-platform-administrator guard;
+//     revocation, renewal, or removal of a pending one's invitation, and
+//     enabling or disabling one, with the last-platform-administrator
+//     guard;
 //   - a tenant's capacity, as numbers;
 //   - the platform's own notification destinations, the web-managed
 //     destinations without a tenant, and the platform's update routing.
@@ -39,6 +40,8 @@ const (
 	auditPlatformAdminInvited               = "platform_admin.invited"
 	auditPlatformAdminUpdated               = "platform_admin.updated"
 	auditPlatformAdminActivationRevoked     = "platform_admin.activation_revoked"
+	auditPlatformAdminActivationIssued      = "platform_admin.activation_issued"
+	auditPlatformAdminDeleted               = "platform_admin.deleted"
 	auditPlatformNotificationsCreated       = "platform_notifications.created"
 	auditPlatformNotificationsUpdated       = "platform_notifications.updated"
 	auditPlatformNotificationsDeleted       = "platform_notifications.deleted"
@@ -234,7 +237,9 @@ func (ps *PlatformStore) InvitePlatformAdmin(ctx context.Context, u User, idHash
 // its own account through PlatformAccountStore instead: its own ID is
 // ErrAccountNotPermitted. A pending account, which has not redeemed its
 // link, can be neither enabled nor disabled (ErrAccountNotPermitted);
-// RevokePlatformAdminInvitation stops its link instead. The last enabled
+// RevokePlatformAdminInvitation stops its link instead,
+// RenewPlatformAdminInvitation issues a new one, and
+// DeletePendingPlatformAdmin removes the account. The last enabled
 // platform administrator cannot be disabled (ErrLastPlatformAdmin).
 // Disabling ends the account's sessions and revokes the links it issued and
 // those issued for it, in the same transaction. A change that alters nothing
@@ -354,6 +359,113 @@ func (ps *PlatformStore) RevokePlatformAdminInvitation(ctx context.Context, id s
 		return 0, err
 	}
 	return int(revoked), nil
+}
+
+// RenewPlatformAdminInvitation issues a new one-time activation link for a
+// pending platform administrator, which has not redeemed its link, as
+// TenantStore.CreateUserInviteWithAudit does for a tenant's pending account.
+// It is the way back for an invitation that expired or was revoked. In one
+// transaction, every link issued for the account that is still unused is
+// marked used at created, so only the new link can activate the account;
+// the new link is stored by the hash of its token; and the renewal is
+// recorded in platform scope. The account stays pending and disabled. The
+// actor, audit.ActorUserID, must be an enabled platform administrator. Only
+// a pending account's invitation is renewed here: an account that redeemed
+// its link, the actor's own included, is ErrAccountNotPermitted, because no
+// platform administrator resets another, and a tenant's account is
+// ErrNotFound, as an unknown ID is. The record belongs to the platform.
+func (ps *PlatformStore) RenewPlatformAdminInvitation(ctx context.Context, id, idHash string, created, expires time.Time, audit AuditEntry) (UserSummary, error) {
+	if strings.TrimSpace(idHash) == "" {
+		return UserSummary{}, errors.New("activation token hash is required")
+	}
+	if !expires.After(created) {
+		return UserSummary{}, errors.New("activation token expiry must be after creation")
+	}
+	tx, err := ps.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return UserSummary{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := requirePlatformActorTx(ctx, tx, audit.ActorUserID); err != nil {
+		return UserSummary{}, err
+	}
+	current, err := platformAdminSummary(ctx, tx, id)
+	if err != nil {
+		return UserSummary{}, err
+	}
+	if !current.Pending {
+		return UserSummary{}, fmt.Errorf("%w: only a pending platform administrator's invitation can be renewed", ErrAccountNotPermitted)
+	}
+	stamp := created.UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `UPDATE user_invites SET used_at=? WHERE user_id=`+platformAdminSQL+` AND used_at IS NULL`, stamp, id, RolePlatformAdmin); err != nil {
+		return UserSummary{}, err
+	}
+	inserted, err := execCount(ctx, tx, `INSERT INTO user_invites(id_hash,user_id,issuer_user_id,created_at,expires_at,used_at) SELECT ?,id,?,?,?,NULL FROM users WHERE id=? AND role=? AND tenant_id IS NULL`, idHash, audit.ActorUserID, stamp, expires.UTC().Format(time.RFC3339Nano), id, RolePlatformAdmin)
+	if err != nil {
+		return UserSummary{}, err
+	}
+	if inserted != 1 {
+		return UserSummary{}, ErrConflict
+	}
+	audit.Action, audit.ActorKind = auditPlatformAdminActivationIssued, AuditActorPlatform
+	if strings.TrimSpace(audit.Detail) == "" {
+		audit.Detail = "invitation of platform administrator " + current.Username + " renewed"
+	}
+	if err := insertPlatformAuditEntry(ctx, tx, audit, time.Now().UTC()); err != nil {
+		return UserSummary{}, err
+	}
+	return current, tx.Commit()
+}
+
+// DeletePendingPlatformAdmin removes a pending platform administrator, which
+// never redeemed its invitation, so its username can be invited again. In
+// one transaction, the account is deleted with its links, and the removal is
+// recorded in platform scope. The actor, audit.ActorUserID, must be an
+// enabled platform administrator. Only a pending, disabled account is
+// removed: an account that redeemed its link, whether enabled or disabled
+// since, and the actor's own are ErrAccountNotPermitted, so no platform
+// administrator that can sign in is removed and the last enabled one stays.
+// A tenant's account is ErrNotFound, as an unknown ID is. The record
+// belongs to the platform.
+func (ps *PlatformStore) DeletePendingPlatformAdmin(ctx context.Context, id string, audit AuditEntry) error {
+	tx, err := ps.store.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := requirePlatformActorTx(ctx, tx, audit.ActorUserID); err != nil {
+		return err
+	}
+	current, err := platformAdminSummary(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if !current.Pending || current.Enabled {
+		return fmt.Errorf("%w: only a pending platform administrator, which has not redeemed its invitation, can be removed", ErrAccountNotPermitted)
+	}
+	// The account's links go with it, and so would any credential row, as a
+	// unit's purge removes its accounts' rows; a pending account never
+	// signed in, so it has issued no links.
+	for _, table := range []string{"user_invites", "sessions", "recovery_codes", "totp_replay"} {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE user_id=`+platformAdminSQL, id, RolePlatformAdmin); err != nil {
+			return err
+		}
+	}
+	deleted, err := execCount(ctx, tx, `DELETE FROM users WHERE id=? AND role=? AND tenant_id IS NULL AND enabled=0 AND substr(password_hash,1,8)='!pending'`, id, RolePlatformAdmin)
+	if err != nil {
+		return err
+	}
+	if deleted != 1 {
+		return ErrConflict
+	}
+	audit.Action, audit.ActorKind = auditPlatformAdminDeleted, AuditActorPlatform
+	if strings.TrimSpace(audit.Detail) == "" {
+		audit.Detail = "pending platform administrator " + current.Username + " removed"
+	}
+	if err := insertPlatformAuditEntry(ctx, tx, audit, time.Now().UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // platformDestinationSQL limits a statement on the outbox to the pending

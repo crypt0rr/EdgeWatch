@@ -29,6 +29,8 @@ describe('business units API contract', () => {
     await apiRoutes.invitePlatformAdmin({ username: 'sam', display_name: 'Sam', password: 'pw' })
     await apiRoutes.setPlatformAdminEnabled('user/3', false, 4, 'pw')
     await apiRoutes.revokePlatformAdminInvitation('user/3', 'pw')
+    await apiRoutes.renewPlatformAdminInvitation('user/3', 'pw')
+    await apiRoutes.deletePendingPlatformAdmin('user/3', 'pw')
     await apiRoutes.listPlatformNotifications()
     await apiRoutes.createPlatformNotification('Ops', 'generic://example.test/hook', 'pw')
     await apiRoutes.updatePlatformNotification('dest/1', 5, 'Ops', 'pw', { enabled: false })
@@ -55,6 +57,8 @@ describe('business units API contract', () => {
       'POST /api/v1/platform/admins',
       'PATCH /api/v1/platform/admins/user%2F3',
       'DELETE /api/v1/platform/admins/user%2F3/activation',
+      'POST /api/v1/platform/admins/user%2F3/activation',
+      'DELETE /api/v1/platform/admins/user%2F3',
       'GET /api/v1/platform/notifications',
       'POST /api/v1/platform/notifications',
       'PATCH /api/v1/platform/notifications/dest%2F1',
@@ -73,9 +77,11 @@ describe('business units API contract', () => {
     expect(body(12)).toEqual({ password: 'pw' })
     expect(body(16)).toEqual({ enabled: false, revision: 4, password: 'pw' })
     expect(body(17)).toEqual({ password: 'pw' })
-    expect(body(19)).toEqual({ name: 'Ops', url: 'generic://example.test/hook', password: 'pw', enabled: true })
-    expect(body(20)).toEqual({ name: 'Ops', revision: 5, password: 'pw', enabled: false })
-    expect(body(22)).toEqual({ destinations: ['dest-1'], password: 'pw' })
+    expect(body(18)).toEqual({ password: 'pw' })
+    expect(body(19)).toEqual({ password: 'pw' })
+    expect(body(21)).toEqual({ name: 'Ops', url: 'generic://example.test/hook', password: 'pw', enabled: true })
+    expect(body(22)).toEqual({ name: 'Ops', revision: 5, password: 'pw', enabled: false })
+    expect(body(24)).toEqual({ destinations: ['dest-1'], password: 'pw' })
     expect(new Headers(fetchMock.mock.calls[7][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
   })
 

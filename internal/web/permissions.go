@@ -598,6 +598,8 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodGet, Template: "/platform/admins", Permission: auth.PermissionUnitAccountsManage, Example: "/platform/admins"},
 	{Method: http.MethodPost, Template: "/platform/admins", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins"},
 	{Method: http.MethodPatch, Template: "/platform/admins/{id}", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1"},
+	{Method: http.MethodDelete, Template: "/platform/admins/{id}", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1"},
+	{Method: http.MethodPost, Template: "/platform/admins/{id}/activation", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1/activation"},
 	{Method: http.MethodDelete, Template: "/platform/admins/{id}/activation", Permission: auth.PermissionUnitAccountsManage, Mutates: true, Example: "/platform/admins/user-1/activation"},
 	{Method: http.MethodGet, Template: "/platform/audit", Permission: auth.PermissionPlatformAuditRead, Example: "/platform/audit"},
 	{Method: http.MethodGet, Template: "/platform/notifications", Permission: auth.PermissionPlatformNotificationsManage, Example: "/platform/notifications"},

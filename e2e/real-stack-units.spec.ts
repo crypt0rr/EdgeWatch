@@ -43,15 +43,18 @@ function totpAt(secret: string, step: number): string {
 
 /**
  * The authenticator app of one account. EdgeWatch accepts the code of the
- * current step or a neighbouring one, and each step only once per account, so
- * every sign-in takes the current or the next step that the account has not
- * used, and waits for a new step when both are used. It never takes the
- * previous step, which a step boundary between here and the server could
- * move out of the accepted window.
+ * current step or a neighbouring one, and each step only once per account,
+ * the step of the code that confirmed the enrolment included, so every
+ * sign-in takes the current or the next step that the account has not used,
+ * and waits for a new step when both are used. It never takes the previous
+ * step, which a step boundary between here and the server could move out of
+ * the accepted window.
  */
 class Authenticator {
-  private lastStep = -1
-  constructor(private readonly secret: string) {}
+  constructor(
+    private readonly secret: string,
+    private lastStep: number,
+  ) {}
   async nextCode(): Promise<string> {
     for (;;) {
       const now = Math.floor(Date.now() / totpStepMs)
@@ -105,8 +108,10 @@ async function enrolAuthenticator(page: Page, accountPassword: string, { forced 
   }
   await page.getByRole('button', { name: 'Set up authenticator' }).click()
   const secret = (await page.locator('code.secret').innerText()).trim()
-  // Enabling checks the code without spending its step; only a sign-in does.
-  await page.getByLabel('Verification code').fill(totpAt(secret, Math.floor(Date.now() / totpStepMs)))
+  // Enabling spends the step of its code, as a sign-in does, so the first
+  // sign-in takes a later step.
+  const enrolmentStep = Math.floor(Date.now() / totpStepMs)
+  await page.getByLabel('Verification code').fill(totpAt(secret, enrolmentStep))
   await page.getByRole('button', { name: 'Enable TOTP' }).click()
   await expect(page.getByRole('heading', { name: 'Save your recovery codes' })).toBeVisible()
   const recoveryCodes = await page.locator('.code-grid code').allInnerTexts()
@@ -114,7 +119,7 @@ async function enrolAuthenticator(page: Page, accountPassword: string, { forced 
   await page.getByLabel('I saved these recovery codes in a secure place.').check()
   await page.getByRole('button', { name: 'Continue to sign in' }).click()
   await expect(page.getByRole('heading', { name: 'Sign in to EdgeWatch' })).toBeVisible()
-  return { authenticator: new Authenticator(secret), recoveryCodes }
+  return { authenticator: new Authenticator(secret, enrolmentStep), recoveryCodes }
 }
 
 /**

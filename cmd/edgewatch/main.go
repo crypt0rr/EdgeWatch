@@ -480,9 +480,11 @@ func adminRecovery(ctx context.Context, action string, s *store.Store, passwordF
 		if err != nil {
 			return err
 		}
-		if err := confirmAccountUnit(ctx, s, user, options); err != nil {
+		where, err := confirmAccountUnit(ctx, s, user, options)
+		if err != nil {
 			return err
 		}
+		detail := recoveryAuditDetail("password", "reset", user, where)
 		user.PasswordHash, user.UpdatedAt = hash, time.Now().UTC()
 		if user.ID == store.LegacyAdminUserID {
 			admin, adminErr := s.GetAdmin(ctx)
@@ -490,13 +492,15 @@ func adminRecovery(ctx context.Context, action string, s *store.Store, passwordF
 				return adminErr
 			}
 			admin.PasswordHash, admin.UpdatedAt = hash, user.UpdatedAt
-			return s.SaveAdminSecurityWithAudit(ctx, admin, nil, false, true, store.AuditEntry{Action: "admin.password_reset", Detail: "password reset from host CLI", ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
+			return s.SaveAdminSecurityWithAudit(ctx, admin, nil, false, true, store.AuditEntry{Action: "admin.password_reset", Detail: detail, ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
 		}
-		return accounts.SaveUserSecurity(ctx, user, nil, false, true, store.AuditEntry{Action: "user.password_reset", Detail: "password reset from host CLI", ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
+		return accounts.SaveUserSecurity(ctx, user, nil, false, true, store.AuditEntry{Action: "user.password_reset", Detail: detail, ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
 	case "disable-totp":
-		if err := confirmAccountUnit(ctx, s, user, options); err != nil {
+		where, err := confirmAccountUnit(ctx, s, user, options)
+		if err != nil {
 			return err
 		}
+		detail := recoveryAuditDetail("TOTP", "disabled", user, where)
 		user.TOTPEnabled, user.TOTPSecret, user.UpdatedAt = false, "", time.Now().UTC()
 		if user.ID == store.LegacyAdminUserID {
 			admin, adminErr := s.GetAdmin(ctx)
@@ -504,9 +508,9 @@ func adminRecovery(ctx context.Context, action string, s *store.Store, passwordF
 				return adminErr
 			}
 			admin.TOTPEnabled, admin.TOTPSecret, admin.UpdatedAt = false, "", user.UpdatedAt
-			return s.SaveAdminSecurityWithAudit(ctx, admin, []string{}, true, true, store.AuditEntry{Action: "admin.totp_disabled", Detail: "TOTP disabled from host CLI", ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
+			return s.SaveAdminSecurityWithAudit(ctx, admin, []string{}, true, true, store.AuditEntry{Action: "admin.totp_disabled", Detail: detail, ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
 		}
-		return accounts.SaveUserSecurity(ctx, user, []string{}, true, true, store.AuditEntry{Action: "user.totp_disabled", Detail: "TOTP disabled from host CLI", ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
+		return accounts.SaveUserSecurity(ctx, user, []string{}, true, true, store.AuditEntry{Action: "user.totp_disabled", Detail: detail, ActorUsername: hostCLIActor, ActorKind: store.AuditActorHost})
 	default:
 		return errors.New("expected: admin reset-password|disable-totp")
 	}

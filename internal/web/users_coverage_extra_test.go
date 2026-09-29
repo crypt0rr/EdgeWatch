@@ -228,7 +228,8 @@ func TestUserSecurityHandlersCoverOperatorAndTOTPSuccess(t *testing.T) {
 		t.Fatalf("operator TOTP setup payload = %s (%v)", setup.Body.String(), err)
 	}
 
-	enableRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/enable", strings.NewReader(`{"code":"`+coverageTOTPCode(setupValue.Secret, time.Now().Unix()/30)+`"}`))
+	enrolmentStep := time.Now().Unix() / 30
+	enableRequest := httptest.NewRequest(http.MethodPost, "/api/v1/auth/totp/enable", strings.NewReader(`{"code":"`+coverageTOTPCode(setupValue.Secret, enrolmentStep)+`"}`))
 	enableRequest.Header.Set("Content-Type", "application/json")
 	enableRequest.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookieValue})
 	enable := httptest.NewRecorder()
@@ -246,7 +247,8 @@ func TestUserSecurityHandlersCoverOperatorAndTOTPSuccess(t *testing.T) {
 	if err != nil || configured.TOTPSecret == "" {
 		t.Fatalf("configured TOTP secret = %q, %v", configured.TOTPSecret, err)
 	}
-	disableRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/auth/totp", strings.NewReader(`{"password":"replacement operator password","code":"`+coverageTOTPCode(configured.TOTPSecret, time.Now().Unix()/30)+`"}`))
+	// The enrolment code is used; the next time step's code confirms.
+	disableRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/auth/totp", strings.NewReader(`{"password":"replacement operator password","code":"`+coverageTOTPCode(configured.TOTPSecret, enrolmentStep+1)+`"}`))
 	disableRequest.Header.Set("Content-Type", "application/json")
 	disable := httptest.NewRecorder()
 	server.totpDisable(disable, disableRequest, session, defaultTenantStore(server))

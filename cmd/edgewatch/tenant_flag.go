@@ -129,24 +129,37 @@ func hostUnitStore(ctx context.Context, s *store.Store, slug, cmd, action string
 // confirmAccountUnit runs before a recovery command changes the account.
 // When --tenant named a business unit, it stops the command unless the
 // account belongs to that unit. It then prints the account, its unit (or
-// the platform) and its role.
-func confirmAccountUnit(ctx context.Context, s *store.Store, user store.User, options adminRecoveryOptions) error {
+// the platform) and its role, and returns where the account belongs, as
+// "unit SLUG" or "platform", for the command's audit record.
+func confirmAccountUnit(ctx context.Context, s *store.Store, user store.User, options adminRecoveryOptions) (string, error) {
 	where := "platform"
 	if user.Role != store.RolePlatformAdmin {
 		unit, err := s.Platform().GetTenant(ctx, user.TenantID)
 		if err != nil {
-			return err
+			return "", err
 		}
 		where = "unit " + unit.Slug
 	}
 	if named := options.unit; named != nil && (user.Role == store.RolePlatformAdmin || user.TenantID != named.ID) {
-		return fmt.Errorf("user %q belongs to the %s, not to business unit %q; nothing was changed", user.Username, where, named.Slug)
+		return "", fmt.Errorf("user %q belongs to the %s, not to business unit %q; nothing was changed", user.Username, where, named.Slug)
 	}
 	if options.out == nil {
-		return nil
+		return where, nil
 	}
-	_, err := fmt.Fprintf(options.out, "user %q (%s, %s)\n", user.Username, where, user.Role)
-	return err
+	if _, err := fmt.Fprintf(options.out, "user %q (%s, %s)\n", user.Username, where, user.Role); err != nil {
+		return "", err
+	}
+	return where, nil
+}
+
+// recoveryAuditDetail is the detail of a host recovery command's audit
+// record. It names the account that the command changed by username and
+// ID, and where the account belongs, as the console's account records name
+// theirs, so a unit's administrators, and the platform's, can tell which
+// of their accounts the host recovered. It holds no password, code or
+// secret.
+func recoveryAuditDetail(factor, change string, user store.User, where string) string {
+	return fmt.Sprintf("%s of %s (ID %s, %s) %s from host CLI", factor, user.Username, user.ID, where, change)
 }
 
 // hostActorUserID is the account that a host command's audit record names

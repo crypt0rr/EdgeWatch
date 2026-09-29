@@ -121,6 +121,9 @@ type pendingTOTP struct {
 	Expires time.Time
 	// Failures counts wrong verification codes; see pendingTOTPMaxAttempts.
 	Failures int
+	// Step is the time step of the code that confirmed the enrolment. It is
+	// set only on the enrolment that verifyPendingTOTP returns.
+	Step int64
 }
 
 const defaultHTTPWriteTimeout = 60 * time.Second

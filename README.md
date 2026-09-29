@@ -632,7 +632,8 @@ manage only its own account. A console that is already open switches to that
 screen as soon as the server refuses one of its requests, and the platform
 administrator's console does so right after it creates the second unit.
 After enabling TOTP and saving the recovery codes, sign out and sign in
-again. Enrol the existing administrators before you create the second unit.
+again with the authenticator's next code; the code that enabled TOTP counts
+as used. Enrol the existing administrators before you create the second unit.
 The host command `admin disable-totp` stays the recovery path, and the
 account then enrols again.
 
@@ -694,7 +695,8 @@ Disabling a unit, from its **Danger zone** tab with the platform
 administrator's password, pauses it and keeps its data:
 
 - its sessions end, its open invitations are revoked, and sign-in fails as it
-  does with a wrong password;
+  does with a wrong password, without using up the one-time or recovery code
+  it presents;
 - its running scans are cancelled without changing baselines, its queued runs
   fail, and its jobs leave the schedule;
 - its undelivered alerts are held, including one that a delivery pass has
@@ -931,7 +933,9 @@ renamed.
 `admin reset-password` and `admin disable-totp` find the account by
 `--username` in any unit; they print the account's unit and role before they
 act, and `--tenant UNIT_SLUG` makes them stop without a change unless the
-account belongs to that unit. Every other command refuses `--tenant`.
+account belongs to that unit. Their security audit record names the account
+by username and ID, with its unit or the platform. Every other command
+refuses `--tenant`.
 
 `health` exits non-zero when migrations or the daemon heartbeat are unhealthy.
 Its `warnings` list actions that do not stop EdgeWatch, such as removing

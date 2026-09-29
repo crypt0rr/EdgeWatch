@@ -336,8 +336,127 @@ func TestPurgeDeletedUnitsLogsEachPass(t *testing.T) {
 	logs.Reset()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	(&App{Store: closed}).purgeDeletedUnits(ctx)
-	if !strings.Contains(logs.String(), "business unit purge stopped") {
+	if !strings.Contains(logs.String(), "business unit purge stopped") || !strings.Contains(logs.String(), "cleanup after business units deleted by earlier releases stopped") {
 		t.Fatalf("a failed pass logged %q", logs.String())
+	}
+}
+
+// storeWithLegacyDeletion returns a store upgraded from schema 54 with a
+// unit that an earlier release deleted, so the cleanup after it is pending,
+// and an active second unit.
+func storeWithLegacyDeletion(t *testing.T) *store.Store {
+	t.Helper()
+	ctx := context.Background()
+	path := storetest.FreshPath(t)
+	s, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, statement := range []string{
+		`INSERT INTO tenants(id,name,slug,state,purge_phase,created_at,updated_at) VALUES('earlier','Earlier','earlier','deleted','complete',?1,?1)`,
+		`INSERT INTO tenants(id,name,slug,created_at,updated_at) VALUES('` + secondTenantID + `','Second','second',?1,?1)`,
+		`PRAGMA user_version=54`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, statement, stamp); err != nil {
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = upgraded.Close() })
+	return upgraded
+}
+
+// holdSnapshot opens a read transaction that holds a snapshot, as a running
+// backup does, after shortening the busy timeout of the one writer
+// connection, so a checkpoint that the reader keeps busy gives up soon.
+func holdSnapshot(t *testing.T, s *store.Store) *sql.Tx {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := s.DB.ExecContext(ctx, `PRAGMA busy_timeout=200`); err != nil {
+		t.Fatal(err)
+	}
+	reader, err := s.ReadDB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = reader.Rollback() })
+	var units int
+	if err := reader.QueryRowContext(ctx, `SELECT COUNT(*) FROM tenants`).Scan(&units); err != nil {
+		t.Fatal(err)
+	}
+	return reader
+}
+
+// After an upgrade over a unit that an earlier release deleted, the purge
+// worker logs the start of the cleanup after it and each pass, warns while
+// a reader keeps its checkpoint from truncating the log, logs when it has
+// finished, and then leaves it alone.
+func TestPurgeDeletedUnitsCleansUpAfterUnitsDeletedByEarlierReleases(t *testing.T) {
+	ctx := context.Background()
+	s := storeWithLegacyDeletion(t)
+	var logs bytes.Buffer
+	a := &App{Store: s, Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	reader := holdSnapshot(t, s)
+
+	a.purgeDeletedUnits(ctx)
+	for _, want := range []string{"cleanup after business units deleted by earlier releases started", "business unit cleanup pass", "phase=checkpoint", "complete=false", "deferred=false", "kept the cleanup after business units deleted by earlier releases from truncating the write-ahead log"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("a pass whose checkpoint a reader kept busy logged %q, want %q", logs.String(), want)
+		}
+	}
+	if strings.Contains(logs.String(), legacyUnitCleanupFinished) {
+		t.Fatalf("a pass whose checkpoint a reader kept busy logged the cleanup finished: %q", logs.String())
+	}
+	if err := reader.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+
+	logs.Reset()
+	a.purgeDeletedUnits(ctx)
+	if !strings.Contains(logs.String(), legacyUnitCleanupFinished) || !strings.Contains(logs.String(), "complete=true") || strings.Contains(logs.String(), "started") || strings.Contains(logs.String(), "kept the cleanup") {
+		t.Fatalf("the next pass logged %q", logs.String())
+	}
+	logs.Reset()
+	a.purgeDeletedUnits(ctx)
+	if strings.Contains(logs.String(), "cleanup") {
+		t.Fatalf("a pass after the cleanup logged %q", logs.String())
+	}
+}
+
+// While a unit is being deleted, the cleanup waits for its purge, and the
+// purge that finishes the unit finishes the cleanup too.
+func TestPurgeDeletedUnitsLetsAUnitPurgeFinishTheCleanup(t *testing.T) {
+	ctx := context.Background()
+	s := storeWithLegacyDeletion(t)
+	var logs bytes.Buffer
+	a := &App{Store: s, Logger: slog.New(slog.NewTextHandler(&logs, nil))}
+	disabled, err := s.Platform().DisableTenant(ctx, secondTenantID, tenantRecord(t, s, secondTenantID).Revision, store.AuditEntry{ActorKind: store.AuditActorHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Platform().RequestTenantDeletion(ctx, secondTenantID, disabled.Name, store.AuditEntry{ActorKind: store.AuditActorHost}); err != nil {
+		t.Fatal(err)
+	}
+	reader := holdSnapshot(t, s)
+
+	a.purgeDeletedUnits(ctx)
+	if !strings.Contains(logs.String(), "maintenance_pending=true") || !strings.Contains(logs.String(), "business unit cleanup pass") || !strings.Contains(logs.String(), "deferred=true") || strings.Contains(logs.String(), "started") {
+		t.Fatalf("a pass while the unit's purge is pending logged %q", logs.String())
+	}
+	if err := reader.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	logs.Reset()
+	a.purgeDeletedUnits(ctx)
+	if !strings.Contains(logs.String(), "tenant_id="+secondTenantID) || !strings.Contains(logs.String(), legacyUnitCleanupFinished) || !strings.Contains(logs.String(), "completed_by_tenant_id="+secondTenantID) || strings.Contains(logs.String(), "business unit cleanup pass") || tenantRecord(t, s, secondTenantID).State != store.TenantStateDeleted {
+		t.Fatalf("the pass that finished the unit's purge logged %q", logs.String())
 	}
 }
 

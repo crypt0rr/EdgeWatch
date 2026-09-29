@@ -22,10 +22,12 @@ type DatabaseVerification struct {
 }
 
 // FTSBackfillProgress is the durable, read-only diagnostic state for one
-// host-search projection, or for the schema 54 copy of the latest host
-// projection (latest_scan_hosts_tenant_rekey). A non-complete row is expected
-// while a cancelled migration is waiting to resume; it is not itself an
-// integrity failure.
+// host-search projection, for the schema 54 copy of the latest host
+// projection (latest_scan_hosts_tenant_rekey), or for the schema 55 cleanup
+// after deleted tenants (legacy_tenant_purge_maintenance, see
+// migration55.go). A non-complete row is expected while a cancelled
+// migration is waiting to resume, or while the daemon runs that cleanup; it
+// is not itself an integrity failure.
 type FTSBackfillProgress struct {
 	TableName     string `json:"table_name"`
 	LastRowID     int64  `json:"last_rowid"`

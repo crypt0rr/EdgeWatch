@@ -41,6 +41,11 @@ type HealthStatus struct {
 	// Warnings are operator actions that do not make the daemon unhealthy,
 	// such as removing imported notification URLs from config.yaml.
 	Warnings []string `json:"warnings,omitempty"`
+	// Maintenance is the database maintenance that the daemon runs in the
+	// background once it is ready, while it is pending: the cleanup after
+	// the business units that earlier releases deleted (schema 55). It does
+	// not make the daemon unhealthy.
+	Maintenance *MaintenanceStatus `json:"maintenance,omitempty"`
 }
 
 func migrationOwner() string {
@@ -179,6 +184,10 @@ func (ss *SystemStore) HealthStatus(ctx context.Context) (HealthStatus, error) {
 	// config.yaml, so it is reported without failing the health check.
 	if state, stateErr := notificationConfigImportState(ctx, reader); stateErr == nil {
 		status.Warnings = state.Warnings()
+	}
+	// The background maintenance is reported the same way.
+	if maintenance, maintenanceErr := legacyPurgeMaintenanceStatus(ctx, reader); maintenanceErr == nil {
+		status.Maintenance = maintenance
 	}
 	return status, nil
 }

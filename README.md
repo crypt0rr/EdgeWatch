@@ -705,6 +705,9 @@ the backup ends. The unit's page shows its progress. The records of platform
 administrators' actions and of the deletion stay in the platform audit; the
 unit's other audit records are erased. Afterwards the unit's name and slug
 can be used again. Backups taken before the deletion still contain the unit.
+Releases before schema 55 could finish a deletion before the compaction and
+the log truncation had; the upgrade to schema 55 runs them once more, as
+described in [Data, backup, and recovery](#data-backup-and-recovery).
 
 ### Limits
 
@@ -792,7 +795,7 @@ The service therefore starts at once after a restore, and a repeated restore
 onto the stopped service is not refused. The active-daemon check reads only
 the lease in the database that is being replaced.
 
-The current schema is version 54. Database migrations are forward-only. An
+The current schema is version 55. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,
@@ -849,6 +852,29 @@ resumes after the last committed batch. Until the copy completes, a host
 command that saves a successful scan is refused; start the daemon to finish
 the upgrade. The console, API, CLI, public status page, and notifications
 behave as before.
+
+Schema 55 finishes the deletion of business units that earlier releases
+deleted. Those releases marked a unit deleted once its rows were erased and
+only then tried to compact the search indexes and truncate the write-ahead
+log, so the index files, and after an unclean shutdown the log, may still
+hold copies of its erased rows, which backups then copy. When the database
+holds a deleted unit, the migration records a one-time cleanup; a database
+without one gets none. The daemon runs it in the background with the unit
+deletion's steps and limits: each pass, at startup and every minute,
+compacts the search indexes for at most 30 seconds and resumes where the
+previous pass or a restart stopped, and the cleanup ends with a checkpoint
+that truncates the log. A running backup delays that checkpoint until the
+backup ends, which the daemon logs as a warning. While a unit is being
+deleted, the cleanup waits, and that unit's deletion completes it; a
+deletion that was already compacting the indexes at the upgrade starts its
+compaction over, so that it covers the earlier units too. While the cleanup
+is pending, `edgewatch health` reports it under `maintenance` with its
+`legacy-tenant-purge` phase and progress, and `edgewatch verify` lists its
+`legacy_tenant_purge_maintenance` checkpoint, which is complete once it has
+finished; the daemon logs its start and its end. It never runs again.
+Backups taken before it has finished may still hold the erased rows of
+those units. An older release refuses the upgraded database, so a rollback
+means restoring the pre-upgrade ./data backup.
 
 ## Useful commands
 

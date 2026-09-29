@@ -78,12 +78,12 @@ func (m *Manager) PlatformSetupRequest(ctx context.Context, request *http.Reques
 	user, err := m.CompletePlatformSetup(ctx, token, username, password)
 	if err != nil {
 		if !errors.Is(err, ErrRateLimited) {
-			m.failedScoped(source, account, "", false)
+			m.failedScoped(source, account, "")
 		}
 		m.recordAuthEvent(ctx, "auth.platform_setup_failed", "platform-setup", "", true, request)
 		return store.User{}, err
 	}
-	m.clearScoped(source, account, "")
+	m.clearScoped(source, account)
 	return user, nil
 }
 

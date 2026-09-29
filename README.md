@@ -301,10 +301,15 @@ Important defaults:
   rate limits and audit identities. EdgeWatch logs a startup warning when
   approved proxy hosts lack trusted client-IP forwarding.
 - A client identified by its own address may fail five sign-ins within five
-  minutes with usernames that no account has. After that, every sign-in from
-  that client, including one with an existing username, receives the same
-  429 rate_limited answer for five minutes, so the answer does not reveal
-  which accounts exist.
+  minutes. Every failed sign-in counts the same: an unknown username, a
+  disabled account, an account whose unit is not active, and a wrong
+  password, one-time code, or recovery code. After that, every sign-in from
+  that client, with any username, receives the same 429 rate_limited answer
+  for five minutes, so neither the answer nor the number of attempts left
+  reveals which accounts exist. A successful sign-in does not reset the
+  count; each failure expires five minutes after it happened. Clients that
+  share one address, such as the clients of an untrusted proxy on another
+  host, share this budget.
 - By default, scanner.target_exclusions covers the loopback and link-local
   ranges 127.0.0.0/8, ::1/128, 169.254.0.0/16, and fe80::/10. The IPv4
   link-local range includes the 169.254.169.254 cloud metadata endpoint. Other

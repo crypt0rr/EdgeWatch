@@ -189,14 +189,23 @@ func TestRateLimitRecordsFromOneClientReachEveryScope(t *testing.T) {
 	confirmTOTP := func(userID string) func() error {
 		return func() error { return m.ConfirmTOTPForUser(ctx, from(), userID, "000000", "") }
 	}
+	// The client has one sign-in budget for every username. Once it is used,
+	// the sign-in with each username is refused, and recorded in the
+	// username's scope.
+	for attempt := 0; attempt < authFailureThreshold; attempt++ {
+		if err := signIn(defaultAdmin.Username)(); err == nil || errors.Is(err, ErrRateLimited) {
+			t.Fatalf("sign-in to the default unit's administrator: attempt %d = %v, want a failure", attempt, err)
+		}
+	}
+	for _, username := range []string{defaultAdmin.Username, "bravo-admin", "platform-root", "nobody-anywhere"} {
+		if err := signIn(username)(); !errors.Is(err, ErrRateLimited) {
+			t.Fatalf("sign-in as %s over the budget = %v, want ErrRateLimited", username, err)
+		}
+	}
 	for _, check := range []struct {
 		name    string
 		attempt func() error
 	}{
-		{"sign-in to the default unit's administrator", signIn(defaultAdmin.Username)},
-		{"sign-in to unit B's administrator", signIn("bravo-admin")},
-		{"sign-in to the platform administrator", signIn("platform-root")},
-		{"sign-in with an unknown username", signIn("nobody-anywhere")},
 		{"password confirmation by the default unit's administrator", confirmPassword(defaultAdmin.ID)},
 		{"password confirmation by unit B's administrator", confirmPassword(adminB.ID)},
 		{"password confirmation by the platform administrator", confirmPassword(rootID)},

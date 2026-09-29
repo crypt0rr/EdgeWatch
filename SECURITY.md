@@ -34,11 +34,17 @@ The shared response avoids both a long lockout and revealing account existence,
 but cannot provide per-client attribution. For per-client rate limits and audit
 identities, configure only the actual proxy addresses in `web.trusted_proxies`
 and the sanitized `web.forwarded_header`.
-A client identified by its own address also has a budget of five failed
-sign-ins in five minutes with usernames that no account has. Once it is used,
-every sign-in from that client is refused with the same `429 rate_limited`
-answer for five minutes, whether or not the username exists, so the answer
-does not reveal which accounts exist. Other clients are not affected.
+A client identified by its own address has a budget of five failed sign-ins
+in five minutes. Every failed sign-in costs it the same, whether the username
+is unknown, the account is disabled or its unit is not active, or the
+password, one-time code, or recovery code is wrong. Once it is used, every
+sign-in from that client is refused with the same `429 rate_limited` answer
+for five minutes, whether or not the username exists, so neither the answer
+nor the number of attempts left reveals which accounts exist. A successful
+sign-in does not reset the budget, so a client that holds one valid account
+cannot sign in between failed attempts to gain more. Other clients are not
+affected; clients that share one address, such as the clients of an
+untrusted proxy on another host, share the budget.
 EdgeWatch logs a startup warning when proxy hostnames are approved without
 trusted client-IP forwarding. Failed login and TOTP attempts, along with
 rate-limit events, are written to the security audit log; they do not currently

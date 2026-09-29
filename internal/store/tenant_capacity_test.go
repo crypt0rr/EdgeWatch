@@ -84,6 +84,7 @@ var testCapacityLimits = CapacityLimits{MaxConcurrentScans: 4, MaxProbeCount: 1_
 func TestSetTenantCapacityValidatesBounds(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
+	insertTenantUser(t, s, platformRoot, nil, RolePlatformAdmin)
 	platform := s.Platform()
 	before, revision := tenantCapacityRow(t, s, DefaultTenantID)
 	for _, invalid := range []struct {
@@ -119,7 +120,7 @@ func TestSetTenantCapacityValidatesBounds(t *testing.T) {
 		{MaxConcurrentScans: ptrTo(4), MaxProbeCount: ptrTo[int64](1_000), MaxNaabuProbeCount: ptrTo[int64](2_000), HighCostCeiling: ptrTo(config.MaxProbeCountLimit)},
 		{},
 	} {
-		if err := platform.SetTenantCapacity(ctx, DefaultTenantID, valid, testCapacityLimits, AuditEntry{}); err != nil {
+		if err := platform.SetTenantCapacity(ctx, DefaultTenantID, valid, testCapacityLimits, platformAudit("")); err != nil {
 			t.Fatalf("%s: %v", describeCapacity(valid), err)
 		}
 		if got, _ := tenantCapacityRow(t, s, DefaultTenantID); !reflect.DeepEqual(got, valid) {
@@ -166,11 +167,12 @@ func TestSetTenantCapacityRecordsAPlatformActionInTheTenantsAudit(t *testing.T) 
 	if count := capacityAuditCount(t, f.store); count != 1 {
 		t.Fatalf("capacity audit records = %d, want 1", count)
 	}
+	byAdmin := AuditEntry{ActorUserID: admin, ActorUsername: "platform-admin"}
 
 	// A paused tenant's capacity can change. A tenant that is gone or being
 	// deleted is not found, and nothing is written for it.
 	setTenantState(t, f.store, secondTenantID, TenantStateDisabled)
-	if err := f.store.Platform().SetTenantCapacity(ctx, secondTenantID, TenantCapacity{}, testCapacityLimits, AuditEntry{}); err != nil {
+	if err := f.store.Platform().SetTenantCapacity(ctx, secondTenantID, TenantCapacity{}, testCapacityLimits, byAdmin); err != nil {
 		t.Fatalf("paused tenant: %v", err)
 	}
 	if got, _ := tenantCapacityRow(t, f.store, secondTenantID); !reflect.DeepEqual(got, TenantCapacity{}) {
@@ -178,11 +180,11 @@ func TestSetTenantCapacityRecordsAPlatformActionInTheTenantsAudit(t *testing.T) 
 	}
 	for _, state := range []string{TenantStateDeleting, TenantStateDeleted} {
 		setTenantState(t, f.store, secondTenantID, state)
-		if err := f.store.Platform().SetTenantCapacity(ctx, secondTenantID, capacity, testCapacityLimits, AuditEntry{}); !errors.Is(err, ErrNoTenantScope) || !errors.Is(err, ErrNotFound) {
+		if err := f.store.Platform().SetTenantCapacity(ctx, secondTenantID, capacity, testCapacityLimits, byAdmin); !errors.Is(err, ErrNoTenantScope) || !errors.Is(err, ErrNotFound) {
 			t.Errorf("%s tenant: error = %v, want ErrNoTenantScope", state, err)
 		}
 	}
-	if err := f.store.Platform().SetTenantCapacity(ctx, "00000000-0000-0000-0000-00000000dead", capacity, testCapacityLimits, AuditEntry{}); !errors.Is(err, ErrNotFound) {
+	if err := f.store.Platform().SetTenantCapacity(ctx, "00000000-0000-0000-0000-00000000dead", capacity, testCapacityLimits, byAdmin); !errors.Is(err, ErrNotFound) {
 		t.Errorf("unknown tenant: error = %v, want ErrNotFound", err)
 	}
 	if got, _ := tenantCapacityRow(t, f.store, secondTenantID); !reflect.DeepEqual(got, TenantCapacity{}) {
@@ -197,15 +199,63 @@ func TestSetTenantCapacityRecordsAPlatformActionInTheTenantsAudit(t *testing.T) 
 	if _, err := f.store.DB.Exec(`CREATE TRIGGER refuse_capacity_audit BEFORE INSERT ON security_audit BEGIN SELECT RAISE(ABORT,'audit unavailable'); END`); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.store.Platform().SetTenantCapacity(ctx, secondTenantID, capacity, testCapacityLimits, AuditEntry{}); !errors.Is(err, ErrAuditUnavailable) {
+	if err := f.store.Platform().SetTenantCapacity(ctx, secondTenantID, capacity, testCapacityLimits, byAdmin); !errors.Is(err, ErrAuditUnavailable) {
 		t.Fatalf("change without an audit record: error = %v, want ErrAuditUnavailable", err)
 	}
 	if got, _ := tenantCapacityRow(t, f.store, secondTenantID); !reflect.DeepEqual(got, TenantCapacity{}) {
 		t.Fatalf("an unaudited change was saved: %s", describeCapacity(got))
 	}
 	_ = f.store.Close()
-	if err := f.store.Platform().SetTenantCapacity(ctx, secondTenantID, capacity, testCapacityLimits, AuditEntry{}); err == nil {
+	if err := f.store.Platform().SetTenantCapacity(ctx, secondTenantID, capacity, testCapacityLimits, byAdmin); err == nil {
 		t.Fatal("a closed store saved a capacity")
+	}
+}
+
+// A capacity change is written only for an enabled platform administrator,
+// which the write checks in its own transaction, as the other platform
+// writes do: a platform administrator that was disabled after it was
+// authorized, a unit's administrator, an unknown account, and a change that
+// names no actor are refused with ErrAccountNotPermitted, and no capacity,
+// revision, or audit record is written. An enabled platform administrator's
+// change is saved.
+func TestSetTenantCapacityRequiresAnEnabledPlatformAdministrator(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
+	insertTenantUser(t, f.store, platformOther, nil, RolePlatformAdmin)
+	if _, err := f.store.DB.Exec(`UPDATE users SET enabled=0 WHERE id=?`, platformOther); err != nil {
+		t.Fatal(err)
+	}
+	capacity := TenantCapacity{MaxConcurrentScans: ptrTo(2), HighCostCeiling: ptrTo[int64](700)}
+	before, revision := tenantCapacityRow(t, f.store, secondTenantID)
+	for _, refused := range []struct {
+		name  string
+		audit AuditEntry
+	}{
+		{"a disabled platform administrator", AuditEntry{ActorUserID: platformOther, ActorUsername: platformOther}},
+		{"a unit's administrator", accountAudit("")},
+		{"an unknown account", AuditEntry{ActorUserID: accountUnknown, ActorUsername: "unknown"}},
+		{"no actor", AuditEntry{}},
+	} {
+		if err := f.store.Platform().SetTenantCapacity(ctx, secondTenantID, capacity, testCapacityLimits, refused.audit); !errors.Is(err, ErrAccountNotPermitted) {
+			t.Errorf("change by %s = %v, want ErrAccountNotPermitted", refused.name, err)
+		}
+	}
+	if got, gotRevision := tenantCapacityRow(t, f.store, secondTenantID); !reflect.DeepEqual(got, before) || gotRevision != revision {
+		t.Fatalf("refused changes wrote %s at revision %d, want %s at %d", describeCapacity(got), gotRevision, describeCapacity(before), revision)
+	}
+	if count := capacityAuditCount(t, f.store); count != 0 {
+		t.Fatalf("refused changes wrote %d audit records", count)
+	}
+
+	if err := f.store.Platform().SetTenantCapacity(ctx, secondTenantID, capacity, testCapacityLimits, platformAudit("")); err != nil {
+		t.Fatalf("change by an enabled platform administrator: %v", err)
+	}
+	if got, gotRevision := tenantCapacityRow(t, f.store, secondTenantID); !reflect.DeepEqual(got, capacity) || gotRevision != revision+1 {
+		t.Fatalf("capacity = %s at revision %d, want %s at %d", describeCapacity(got), gotRevision, describeCapacity(capacity), revision+1)
+	}
+	if count := capacityAuditCount(t, f.store); count != 1 {
+		t.Fatalf("capacity audit records = %d, want 1", count)
 	}
 }
 

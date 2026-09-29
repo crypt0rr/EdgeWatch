@@ -376,6 +376,48 @@ func TestPlatformUnitCapacity(t *testing.T) {
 	}
 }
 
+// A capacity change is authorized when its request passes the gate, and
+// checked again when it is written, as the other platform writes are. When
+// another platform administrator disables the actor while the request's
+// body is still being read, the change is refused with 403 not_permitted,
+// and neither the unit's capacity nor its audit changes. Without the
+// disable the same request succeeds.
+func TestCapacityChangeStopsWhenThePlatformAdministratorIsDisabled(t *testing.T) {
+	for _, disable := range []bool{true, false} {
+		name := "after the actor is disabled"
+		if !disable {
+			name = "by an enabled platform administrator"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			f := newPlatformFixture(t)
+			before, err := f.db.Platform().TenantCapacity(ctx, f.unitB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			records := auditRecords(t, f.db, f.unitB)
+			finish := f.startGated(t, actorPlatform, http.MethodPatch, "/platform/units/"+f.unitB+"/capacity", `{"max_concurrent_scans":1}`)
+			if !disable {
+				expectResponse(t, finish(), http.StatusOK, "capacity change", nil)
+				if after, err := f.db.Platform().TenantCapacity(ctx, f.unitB); err != nil || after.MaxConcurrentScans == nil || *after.MaxConcurrentScans != 1 {
+					t.Fatalf("capacity after the change = %+v, %v", after, err)
+				}
+				return
+			}
+			if _, err := f.db.Platform().SetPlatformAdminEnabled(ctx, f.users[actorPlatform].ID, 0, false, store.AuditEntry{ActorUserID: f.secondPlatformAdmin, ActorUsername: "platform-second"}); err != nil {
+				t.Fatal(err)
+			}
+			expectError(t, finish(), http.StatusForbidden, "not_permitted", "capacity change by a disabled platform administrator")
+			if after, err := f.db.Platform().TenantCapacity(ctx, f.unitB); err != nil || !reflect.DeepEqual(after, before) {
+				t.Fatalf("capacity after the refused change = %+v, %v; want %+v", after, err, before)
+			}
+			if after := auditRecords(t, f.db, f.unitB); !reflect.DeepEqual(after, records) {
+				t.Fatalf("the refused change wrote unit B audit records: before %v, after %v", records, after)
+			}
+		})
+	}
+}
+
 // A unit's status reports the scan capacity that the scheduler enforces for
 // the unit: its own caps where it has them, the deployment's settings
 // otherwise. A unit without caps reports exactly the deployment's settings,
@@ -500,6 +542,73 @@ func TestPlatformAdmins(t *testing.T) {
 	if !containsRecord(auditRecords(t, f.db, ""), "platform_admin.updated/"+store.AuditActorPlatform+"/") {
 		t.Fatalf("platform audit has no update: %v", auditRecords(t, f.db, ""))
 	}
+}
+
+// A pending platform administrator's invitation is revoked with
+// DELETE /platform/admins/{id}/activation: its link stops working, the
+// account stays pending, and the revocation is recorded in platform scope. A
+// pending account is neither enabled nor disabled, so a request to disable
+// it is refused rather than answered as if it had stopped the invitation.
+// Only a pending account's invitation is revoked there: an enabled platform
+// administrator and the caller's own account are refused, a unit's account
+// is not found like an unknown ID, and a second revocation finds no link.
+func TestPlatformAdminInvitationIsRevoked(t *testing.T) {
+	f := newPlatformFixture(t)
+	var invitation struct {
+		User            store.UserSummary `json:"user"`
+		ActivationToken string            `json:"activation_token"`
+	}
+	expectResponse(t, f.call(t, actorPlatform, http.MethodPost, "/platform/admins", confirmBody(`"username":"platform-third"`)), http.StatusCreated, "invite", &invitation)
+	invited := "/platform/admins/" + invitation.User.ID
+	usableLinks := func() int {
+		return countWhere(t, f.db, `SELECT COUNT(*) FROM user_invites WHERE user_id=? AND used_at IS NULL`, invitation.User.ID)
+	}
+
+	if details := expectError(t, f.call(t, actorPlatform, http.MethodPatch, invited, confirmBody(`"enabled":false`)), http.StatusForbidden, "not_permitted", "disable a pending admin"); details != nil {
+		t.Fatalf("pending details = %v", details)
+	}
+	if usableLinks() != 1 {
+		t.Fatal("the refused disable used the invitation")
+	}
+
+	expectError(t, f.call(t, actorPlatform, http.MethodDelete, invited+"/activation", `{"password":"wrong password"}`), http.StatusUnauthorized, "invalid_password", "revoke with a wrong password")
+	for label, id := range map[string]string{"an enabled platform administrator": f.secondPlatformAdmin, "its own account": f.users[actorPlatform].ID} {
+		expectError(t, f.call(t, actorPlatform, http.MethodDelete, "/platform/admins/"+id+"/activation", confirmBody("")), http.StatusForbidden, "not_permitted", "revoke the invitation of "+label)
+	}
+	unknown := f.call(t, actorPlatform, http.MethodDelete, "/platform/admins/00000000-0000-0000-0000-00000000dead/activation", confirmBody(""))
+	expectError(t, unknown, http.StatusNotFound, "not_found", "revoke the invitation of an unknown admin")
+	for _, unitAccount := range []string{f.users[actorAdminA].ID, f.users[actorAdminB].ID} {
+		if response := f.call(t, actorPlatform, http.MethodDelete, "/platform/admins/"+unitAccount+"/activation", confirmBody("")); response.Code != unknown.Code || response.Body.String() != unknown.Body.String() {
+			t.Errorf("unit account %s as a platform admin = %d %s, want %s", unitAccount, response.Code, response.Body.String(), unknown.Body.String())
+		}
+	}
+	if usableLinks() != 1 || containsRecord(auditRecords(t, f.db, ""), "platform_admin.activation_revoked/") {
+		t.Fatal("a refused revocation changed the invitation or recorded a revocation")
+	}
+
+	expectResponse(t, f.call(t, actorPlatform, http.MethodDelete, invited+"/activation", confirmBody("")), http.StatusNoContent, "revoke", nil)
+	if usableLinks() != 0 {
+		t.Fatal("the revoked invitation is still usable")
+	}
+	if !containsRecord(auditRecords(t, f.db, ""), "platform_admin.activation_revoked/"+store.AuditActorPlatform+"/") {
+		t.Fatalf("platform audit has no revocation: %v", auditRecords(t, f.db, ""))
+	}
+	activate := httptest.NewRequest(http.MethodPost, consoleAPIBase+"/auth/activate", strings.NewReader(`{"token":"`+invitation.ActivationToken+`","password":"third platform password"}`))
+	activate.RemoteAddr = "127.0.0.1:9000"
+	activate.Header.Set("Content-Type", "application/json")
+	activated := httptest.NewRecorder()
+	f.server.api(activated, activate)
+	expectError(t, activated, http.StatusBadRequest, "activation_failed", "activate a revoked invitation")
+	var list struct {
+		Admins []store.UserSummary `json:"admins"`
+	}
+	expectResponse(t, f.call(t, actorPlatform, http.MethodGet, "/platform/admins", ""), http.StatusOK, "list admins", &list)
+	for _, admin := range list.Admins {
+		if admin.ID == invitation.User.ID && (!admin.Pending || admin.Enabled) {
+			t.Fatalf("the revoked invitation's account = %+v, want it pending and disabled", admin)
+		}
+	}
+	expectError(t, f.call(t, actorPlatform, http.MethodDelete, invited+"/activation", confirmBody("")), http.StatusNotFound, "no_active_activation", "revoke again")
 }
 
 // An account that never signed in has no last sign-in: the platform's

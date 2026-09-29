@@ -61,7 +61,10 @@ role gets `403`. A body `password` is the caller's password, which the route
 confirms before it changes anything. An unknown or deleted unit, an account
 that is not the unit's, and a destination that is not the platform's get
 `404`, except that `GET /api/v1/platform/units/{id}` returns a deleted unit's
-tombstone.
+tombstone. `DELETE /api/v1/platform/admins/{id}/activation` was added after
+v0.20.3, when `PATCH /api/v1/platform/admins/{id}` began to answer a request
+to disable a pending platform administrator with `403 not_permitted` instead
+of `200`.
 
 | Endpoint | Permission | Request and response |
 | --- | --- | --- |
@@ -80,7 +83,8 @@ tombstone.
 | `DELETE /api/v1/platform/units/{id}/accounts/{uid}/sessions` | `unit_accounts.manage` | `{password}`, for any account of the unit. `204`. |
 | `GET /api/v1/platform/admins` | `unit_accounts.manage` | The platform administrators. |
 | `POST /api/v1/platform/admins` | `unit_accounts.manage` | `{username, display_name, password}`. `201` with the one-time link. |
-| `PATCH /api/v1/platform/admins/{id}` | `unit_accounts.manage` | `{enabled, revision, password}`; never the caller's own account or the last enabled platform administrator. |
+| `PATCH /api/v1/platform/admins/{id}` | `unit_accounts.manage` | `{enabled, revision, password}`; never the caller's own account or the last enabled platform administrator. A pending platform administrator, which has not redeemed its invitation, is neither enabled nor disabled: both get `403 not_permitted`. |
+| `DELETE /api/v1/platform/admins/{id}/activation` | `unit_accounts.manage` | `{password}`, for a pending platform administrator: its unused activation link stops working, and the account stays pending. `204`, or `404 no_active_activation` when no usable link is left. Any other platform administrator, the caller's own account included, gets `403 not_permitted`. |
 | `GET /api/v1/platform/notifications` | `platform_notifications.manage` | The platform's destinations without URLs, their `status`, and the platform's `update_routing`. |
 | `POST /api/v1/platform/notifications` | `platform_notifications.manage` | `{name, url, enabled, password}`. `201` with the destination. |
 | `PATCH /api/v1/platform/notifications/{id}` | `platform_notifications.manage` | `{revision, name, url, enabled, password}`; an absent `url` or `enabled`, or an empty `name`, keeps its value. |

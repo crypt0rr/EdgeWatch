@@ -2,20 +2,36 @@
 
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { APIError, createUser, issueUserActivation, listUsers, revokeUserActivation, updateUser } from '../api'
-import { renderWithProviders } from '../test/test-utils'
+import { APIError, createUser, getSession, issueUserActivation, listUsers, revokeUserActivation, updateUser } from '../api'
+import type { SessionUser } from '../api'
+import { defaultUnitScope, renderWithProviders } from '../test/test-utils'
 import { Users } from './Users'
 
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
-  return { ...actual, createUser: vi.fn(), issueUserActivation: vi.fn(), listUsers: vi.fn(), revokeUserActivation: vi.fn(), updateUser: vi.fn() }
+  return { ...actual, createUser: vi.fn(), getSession: vi.fn(), issueUserActivation: vi.fn(), listUsers: vi.fn(), revokeUserActivation: vi.fn(), updateUser: vi.fn() }
 })
 
 const user = { id: 'user-2', username: 'operator', display_name: 'Operator', role: 'operator' as const, enabled: true, pending: false, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 4 }
 const pending = { ...user, id: 'user-3', username: 'new-user', display_name: 'New User', pending: true, enabled: false, revision: 1 }
+// The signed-in administrator, and an account an administrator disabled.
+const self = { ...user, id: 'user-1', username: 'site-admin', display_name: 'Site Admin', role: 'administrator' as const, revision: 2 }
+const disabled = { ...user, id: 'user-4', username: 'former', display_name: 'Former Viewer', role: 'viewer' as const, enabled: false, revision: 6 }
+const session: SessionUser = { user_id: self.id, username: self.username, display_name: self.display_name, role: 'administrator', permissions: ['users.manage'], csrf_token: 'csrf', totp_enabled: true, password_requirements: { minimum_length: 12 }, ...defaultUnitScope }
+
+/** The account row that shows the display name. */
+function row(displayName: string) {
+  return screen.getByText(displayName).closest('.user-row') as HTMLElement
+}
+
+/** The names of the actions that the account row offers. */
+function actions(displayName: string) {
+  return within(row(displayName)).queryAllByRole('button').map(button => button.textContent?.trim())
+}
 
 describe('user administration', () => {
   beforeEach(() => {
+    vi.mocked(getSession).mockResolvedValue(session)
     vi.mocked(listUsers).mockResolvedValue({ users: [user, pending] })
     vi.mocked(createUser).mockResolvedValue({ user, activation_token: 'token-123', activation_path: '/activate#token=token-123' })
     vi.mocked(issueUserActivation).mockResolvedValue({ activation_token: 'renewed-token', activation_path: '/activate#token=renewed-token', expires_at: '2026-01-01T01:00:00Z' })
@@ -97,10 +113,48 @@ describe('user administration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => expect(issueUserActivation).toHaveBeenCalledWith('user-3', 'administrator-password'))
     expect(screen.getByText('renewed-token')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Revoke link' }))
+    fireEvent.click(within(row('New User')).getByRole('button', { name: 'Revoke link' }))
     fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => expect(revokeUserActivation).toHaveBeenCalledWith('user-3', 'administrator-password'))
+    expect(screen.getByText('The outstanding activation link was revoked.')).toBeInTheDocument()
+  })
+
+  it('offers each account only the actions the server allows', async () => {
+    vi.mocked(listUsers).mockResolvedValue({ users: [self, user, disabled, pending] })
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Former Viewer')).toBeInTheDocument())
+    // An administrator cannot disable its own account, and a disabled
+    // account receives no link until it is enabled again, so it has none to
+    // revoke either.
+    await waitFor(() => expect(actions('Site Admin')).toEqual(['Reset activation', 'Revoke link']))
+    expect(actions('Operator')).toEqual(['Disable', 'Reset activation', 'Revoke link'])
+    expect(actions('Former Viewer')).toEqual(['Enable'])
+    expect(actions('New User')).toEqual(['Renew activation', 'Revoke link'])
+  })
+
+  it('does not offer to disable an account before it knows which account is signed in', async () => {
+    vi.mocked(getSession).mockReturnValue(new Promise(() => {}))
+    vi.mocked(listUsers).mockResolvedValue({ users: [self, disabled] })
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Former Viewer')).toBeInTheDocument())
+    expect(actions('Site Admin')).toEqual(['Reset activation', 'Revoke link'])
+    expect(actions('Former Viewer')).toEqual(['Enable'])
+  })
+
+  it('revokes a password-reset link from the account row that the notice points to', async () => {
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Reset activation' }))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(issueUserActivation).toHaveBeenCalledWith('user-2', 'administrator-password'))
+    expect(screen.getByLabelText('Activation token for operator')).toHaveTextContent('renewed-token')
+    expect(screen.getByText(/can be revoked from the account row/)).toBeInTheDocument()
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Revoke link' }))
+    fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+    await waitFor(() => expect(revokeUserActivation).toHaveBeenCalledWith('user-2', 'administrator-password'))
     expect(screen.getByText('The outstanding activation link was revoked.')).toBeInTheDocument()
   })
 

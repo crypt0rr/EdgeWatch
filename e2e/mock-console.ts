@@ -290,6 +290,12 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
         platformAdmins.push(invited)
         await json({ user: invited, activation_token: 'FIXTURE-ADMIN', activation_path: '/activate#token=FIXTURE-ADMIN' }, 201); return
       }
+      if (parts.length === 3 && parts[0] === 'admins' && parts[2] === 'activation' && method === 'DELETE') {
+        record('platform-admin-revoke', { account: parts[1], ...(body() as object) })
+        // Only a pending platform administrator's invitation is revoked.
+        if (!platformAdmins.find(item => item.id === parts[1])?.pending) { await json({ error: { code: 'not_permitted', message: 'only a pending platform administrator\'s invitation can be revoked' } }, 403); return }
+        await route.fulfill({ status: 204 }); return
+      }
       if (parts.length === 1 && parts[0] === 'audit' && method === 'GET') {
         await json({ entries: [{ id: 2, created_at: '2026-01-01T00:00:02Z', action: 'tenant.created', category: 'platform', actor: { kind: 'platform', username: 'platform' }, detail: 'business unit Retail created', unit: { id: 'unit-retail', name: 'Retail', slug: 'retail' } }], next_before: null }); return
       }

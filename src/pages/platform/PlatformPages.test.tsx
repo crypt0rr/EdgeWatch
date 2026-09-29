@@ -2,7 +2,7 @@
 
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { APIError, createPlatformNotification, deletePlatformNotification, getSession, invitePlatformAdmin, listPlatformAdmins, listPlatformNotifications, listUnits, platformAudit, platformStatus, setPlatformAdminEnabled, updatePlatformNotification, updatePlatformNotificationRouting } from '../../api'
+import { APIError, createPlatformNotification, deletePlatformNotification, getSession, invitePlatformAdmin, listPlatformAdmins, listPlatformNotifications, listUnits, platformAudit, platformStatus, revokePlatformAdminInvitation, setPlatformAdminEnabled, updatePlatformNotification, updatePlatformNotificationRouting } from '../../api'
 import type { AuditEntry, NotificationDestination, UserSummary } from '../../api'
 import { formatDateTime, setDisplayTimeZone } from '../../format'
 import { businessUnit, deploymentLimits as limits, platformSession } from '../../test/platform-fixtures'
@@ -14,7 +14,7 @@ import { PlatformStatusPage, updateSummary } from './PlatformStatus'
 
 vi.mock('../../api', async () => {
   const actual = await vi.importActual<typeof import('../../api')>('../../api')
-  return { ...actual, createPlatformNotification: vi.fn(), deletePlatformNotification: vi.fn(), getSession: vi.fn(), invitePlatformAdmin: vi.fn(), listPlatformAdmins: vi.fn(), listPlatformNotifications: vi.fn(), listUnits: vi.fn(), platformAudit: vi.fn(), platformStatus: vi.fn(), setPlatformAdminEnabled: vi.fn(), updatePlatformNotification: vi.fn(), updatePlatformNotificationRouting: vi.fn() }
+  return { ...actual, createPlatformNotification: vi.fn(), deletePlatformNotification: vi.fn(), getSession: vi.fn(), invitePlatformAdmin: vi.fn(), listPlatformAdmins: vi.fn(), listPlatformNotifications: vi.fn(), listUnits: vi.fn(), platformAudit: vi.fn(), platformStatus: vi.fn(), revokePlatformAdminInvitation: vi.fn(), setPlatformAdminEnabled: vi.fn(), updatePlatformNotification: vi.fn(), updatePlatformNotificationRouting: vi.fn() }
 })
 
 function admin(overrides: Partial<UserSummary> & Pick<UserSummary, 'id' | 'username'>): UserSummary {
@@ -52,6 +52,7 @@ describe('platform administrators', () => {
     ] })
     vi.mocked(invitePlatformAdmin).mockResolvedValue({ user: admin({ id: 'acct-new', username: 'avery', pending: true, enabled: false }), activation_token: 'token', activation_path: '/activate#token=token' })
     vi.mocked(setPlatformAdminEnabled).mockResolvedValue(admin({ id: 'acct-sam', username: 'sam', enabled: false }))
+    vi.mocked(revokePlatformAdminInvitation).mockResolvedValue(undefined)
   })
 
   it('lists them and enables or disables another, never itself or a pending one', async () => {
@@ -59,7 +60,9 @@ describe('platform administrators', () => {
     const self = await screen.findByTestId('admin-morgan')
     await waitFor(() => expect(within(self).getByText('Morgan Reyes (you)')).toBeInTheDocument())
     expect(within(self).queryByRole('button')).not.toBeInTheDocument()
-    expect(within(screen.getByTestId('admin-lee')).queryByRole('button')).not.toBeInTheDocument()
+    // A pending administrator has not redeemed its invitation, which is
+    // revoked instead of disabled.
+    expect(within(screen.getByTestId('admin-lee')).getAllByRole('button').map(button => button.textContent)).toEqual(['Revoke invitation'])
     expect(within(screen.getByTestId('admin-lee')).getByText('Pending activation')).toBeInTheDocument()
     expect(within(screen.getByTestId('admin-sam')).getByText('No TOTP')).toBeInTheDocument()
     expect(within(screen.getByTestId('admin-kim')).getByRole('button', { name: 'Enable' })).toBeInTheDocument()
@@ -114,6 +117,29 @@ describe('platform administrators', () => {
     expect(screen.getByRole('status')).toHaveTextContent('sam changed elsewhere. The latest state is loaded.')
     expect(within(screen.getByTestId('admin-sam')).getByRole('button', { name: 'Enable' })).toBeInTheDocument()
     expect(setPlatformAdminEnabled).toHaveBeenCalledTimes(1)
+  })
+
+  it('revokes a pending administrator’s invitation, and reports a link that is already gone', async () => {
+    renderWithProviders(<PlatformAdmins />)
+    const lee = await screen.findByTestId('admin-lee')
+    fireEvent.click(within(lee).getByRole('button', { name: 'Revoke invitation' }))
+    expect(await screen.findByRole('dialog', { name: 'Revoke the invitation of lee?' })).toBeInTheDocument()
+    vi.mocked(revokePlatformAdminInvitation).mockRejectedValueOnce(new APIError('no active activation link exists for this platform administrator', 'no_active_activation'))
+    const dialog = await confirmWithPassword()
+    expect(await within(dialog).findByText('no active activation link exists for this platform administrator')).toBeInTheDocument()
+    expect(revokePlatformAdminInvitation).toHaveBeenLastCalledWith('acct-lee', 'my-password')
+    await act(async () => {
+      fireEvent.submit(within(dialog).getByLabelText('Your password').closest('form')!)
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(screen.getByRole('status')).toHaveTextContent('The invitation of lee was revoked; its activation link no longer works.')
+    expect(revokePlatformAdminInvitation).toHaveBeenCalledTimes(2)
+    expect(setPlatformAdminEnabled).not.toHaveBeenCalled()
+    expect(listPlatformAdmins).toHaveBeenCalledTimes(2)
+    fireEvent.click(within(screen.getByTestId('admin-lee')).getByRole('button', { name: 'Revoke invitation' }))
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
   })
 
   it('shows a last sign-in only for an administrator that signed in', async () => {

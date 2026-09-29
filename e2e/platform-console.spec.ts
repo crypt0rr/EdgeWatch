@@ -118,6 +118,30 @@ test('a platform administrator without TOTP gets the forced enrolment as soon as
   expect(controls.calls['unit-data'] ?? 0).toBe(0)
 })
 
+test('a platform administrator revokes the invitation of another that has not redeemed it', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The platform journey runs once on desktop; phone widths are covered separately.')
+  const controls = await mockConsole(page, 'platform_admin')
+  await page.goto('/platform/admins')
+  await expect(page.getByTestId('admin-platform').getByRole('button')).toHaveCount(0)
+  await page.getByLabel('Username').fill('avery')
+  await page.getByLabel('Your password').fill('fixture-password')
+  await page.getByRole('button', { name: 'Create activation link' }).click()
+  await expect(page.getByLabel('Activation link for avery')).toContainText('/activate#token=FIXTURE-ADMIN')
+
+  // A pending administrator is neither enabled nor disabled: its row offers
+  // only to revoke the invitation.
+  const avery = page.getByTestId('admin-avery')
+  await expect(avery.getByText('Pending activation')).toBeVisible()
+  await expect(avery.getByRole('button')).toHaveText(['Revoke invitation'])
+  await avery.getByRole('button', { name: 'Revoke invitation' }).click()
+  const revoke = page.getByRole('dialog', { name: 'Revoke the invitation of avery?' })
+  await revoke.getByLabel('Your password').fill('fixture-password')
+  await revoke.getByRole('button', { name: 'Revoke invitation' }).click()
+  await expect(page.getByRole('status').filter({ hasText: 'The invitation of avery was revoked; its activation link no longer works.' })).toBeVisible()
+  await expect(page.getByLabel('Activation link for avery')).toHaveCount(0)
+  expect(controls.payloads['platform-admin-revoke']).toEqual([{ account: 'user-avery', password: 'fixture-password' }])
+})
+
 test('the platform console fits a phone', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === 'desktop', 'The responsive smoke runs in the mobile projects.')
   await page.emulateMedia({ reducedMotion: 'reduce' })

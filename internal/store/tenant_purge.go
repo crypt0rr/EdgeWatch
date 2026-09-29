@@ -35,7 +35,10 @@ import (
 //     purge like its steps: a pass that runs out of its maintenance budget,
 //     or whose checkpoint a reader keeps from truncating the log, leaves the
 //     tenant in the deleting state, and the next pass continues. Backups
-//     taken before the purge still hold the tenant's data.
+//     taken before the purge still hold the tenant's data. Releases before
+//     schema 55 made the tombstone first and could leave this maintenance
+//     unfinished; RunLegacyPurgeMaintenance runs it once after the upgrade
+//     (see migration55.go).
 //   - While a job of the tenant holds a live scan lease, the tenant is left
 //     for the next pass.
 //   - The tenant's audit records are erased, except those of platform
@@ -160,6 +163,11 @@ type TenantPurgeResult struct {
 	// an older snapshot of the database, so the pass's checkpoint could not
 	// truncate the write-ahead log.
 	CheckpointBusy bool
+	// LegacyMaintenanceCompleted reports that the purge's compaction and
+	// checkpoint also completed the pending cleanup after the tenants that
+	// earlier releases deleted (see RunLegacyPurgeMaintenance), which the
+	// tombstone's transaction marked finished.
+	LegacyMaintenanceCompleted bool
 }
 
 // tenantPurgeOptions tune a purge pass for tests.
@@ -423,6 +431,12 @@ func tenantRowsRemaining(ctx context.Context, db *sql.DB, id string) (string, er
 // ID, name and slug, so the platform audit records that name it stay
 // meaningful, but a new tenant may take the name and the slug. It drops the
 // update routing, which named destinations that no longer exist.
+//
+// The purge's compaction of every search index began after the tenants that
+// earlier releases deleted were erased (schema 55 sends a purge that was
+// already compacting at the upgrade back to its verify phase), and its
+// checkpoint truncated the log, so the same transaction also marks the
+// cleanup after those tenants finished when it is pending.
 func finishTenantPurge(ctx context.Context, db *sql.DB, id, name, slug string, result *TenantPurgeResult) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -446,10 +460,14 @@ func finishTenantPurge(ctx context.Context, db *sql.DB, id, name, slug string, r
 	if err := insertPlatformAuditEntry(ctx, tx, entry, now); err != nil {
 		return err
 	}
+	legacyCompleted, err := completeLegacyPurgeMaintenance(ctx, tx)
+	if err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	result.Phase, result.Complete = tenantPurgePhaseComplete, true
+	result.Phase, result.Complete, result.LegacyMaintenanceCompleted = tenantPurgePhaseComplete, true, legacyCompleted
 	return nil
 }
 
@@ -459,39 +477,59 @@ func finishTenantPurge(ctx context.Context, db *sql.DB, id, name, slug string, r
 var tenantPurgeSearchIndexes = []string{"scan_host_search", "latest_host_search", "baseline_host_search"}
 
 // purgeTenantMaintenance runs the phases after the tenant's rows are erased,
-// from the phase in result, and reports whether they finished, so the tenant
-// may become a tombstone. Within the maintenance budget it compacts the
-// search indexes and returns free pages to the file system. It then runs a
-// checkpoint that truncates the write-ahead log, even when the budget ran
-// out, so the log does not keep old copies of the erased pages longer than
-// it must. The maintenance has finished only when the compaction and the
-// vacuum have, and the checkpoint was not busy. A spent budget and a busy
-// checkpoint leave the tenant in its phase for the next pass; cancellation
-// and database errors are returned.
+// from the phase in result, recording each phase it enters in
+// tenants.purge_phase, and reports whether they finished, so the tenant may
+// become a tombstone. See runSearchMaintenance.
 func purgeTenantMaintenance(ctx context.Context, db *sql.DB, id string, options tenantPurgeOptions, result *TenantPurgeResult) (bool, error) {
-	budgetCtx, cancel := options.budget(ctx)
-	defer cancel()
-	compacted, err := compactAfterTenantPurge(budgetCtx, db, id, options, result)
-	if err != nil && (ctx.Err() != nil || budgetCtx.Err() == nil) {
-		return false, err
+	record := func(ctx context.Context, execer contextExecer, phase string) error {
+		return setTenantPurgePhase(ctx, execer, id, phase)
 	}
-	busy, err := checkpointTruncate(ctx, db)
-	if err != nil {
-		return false, fmt.Errorf("checkpoint: %w", err)
-	}
+	finished, busy, err := runSearchMaintenance(ctx, db, record, options, &result.Phase)
 	result.CheckpointBusy = busy
-	return compacted && !busy, nil
+	return finished, err
 }
 
-// compactAfterTenantPurge compacts each search index in turn, from the one
-// that result.Phase names, and then returns free pages to the file system
-// when the database uses incremental auto-vacuum. It records each phase it
-// enters in tenants.purge_phase, and reports whether it finished.
-func compactAfterTenantPurge(ctx context.Context, db *sql.DB, id string, options tenantPurgeOptions, result *TenantPurgeResult) (bool, error) {
+// recordMaintenancePhase records a phase that runSearchMaintenance enters:
+// in tenants.purge_phase for the purge of a tenant, or in the checkpoint of
+// the cleanup after the tenants that earlier releases purged (see
+// migration55.go). execer is the transaction that starts the merge of an
+// index, or the database.
+type recordMaintenancePhase func(ctx context.Context, execer contextExecer, phase string) error
+
+// runSearchMaintenance runs the maintenance after erased rows from *phase,
+// which is a compaction phase, the checkpoint phase, or any other value to
+// start at the first index, and advances *phase as it goes. Within the
+// maintenance budget it compacts the search indexes and returns free pages
+// to the file system. It then runs a checkpoint that truncates the
+// write-ahead log, even when the budget ran out, so the log does not keep
+// old copies of the erased pages longer than it must, and reports whether
+// that checkpoint was busy. The maintenance has finished only when the
+// compaction and the vacuum have, and the checkpoint was not busy. A spent
+// budget and a busy checkpoint leave *phase for the next pass; cancellation
+// and database errors are returned.
+func runSearchMaintenance(ctx context.Context, db *sql.DB, record recordMaintenancePhase, options tenantPurgeOptions, phase *string) (finished, busy bool, err error) {
+	budgetCtx, cancel := options.budget(ctx)
+	defer cancel()
+	compacted, err := compactSearchIndexes(budgetCtx, db, record, options, phase)
+	if err != nil && (ctx.Err() != nil || budgetCtx.Err() == nil) {
+		return false, false, err
+	}
+	busy, err = checkpointTruncate(ctx, db)
+	if err != nil {
+		return false, false, fmt.Errorf("checkpoint: %w", err)
+	}
+	return compacted && !busy, busy, nil
+}
+
+// compactSearchIndexes compacts each search index in turn, from the one that
+// *phase names, and then returns free pages to the file system when the
+// database uses incremental auto-vacuum. It records each phase it enters
+// with record, and reports whether it finished.
+func compactSearchIndexes(ctx context.Context, db *sql.DB, record recordMaintenancePhase, options tenantPurgeOptions, phase *string) (bool, error) {
 	first, started := 0, false
-	if result.Phase == tenantPurgePhaseCheckpoint {
+	if *phase == tenantPurgePhaseCheckpoint {
 		first = len(tenantPurgeSearchIndexes)
-	} else if index, ok := strings.CutPrefix(result.Phase, tenantPurgePhaseCompact); ok {
+	} else if index, ok := strings.CutPrefix(*phase, tenantPurgePhaseCompact); ok {
 		// A phase that names no index, such as one that a later release
 		// removed, starts the compaction over.
 		if i := slices.Index(tenantPurgeSearchIndexes, index); i >= 0 {
@@ -500,10 +538,10 @@ func compactAfterTenantPurge(ctx context.Context, db *sql.DB, id string, options
 	}
 	for _, index := range tenantPurgeSearchIndexes[first:] {
 		if !started {
-			if err := startSearchIndexCompaction(ctx, db, id, index); err != nil {
+			if err := startSearchIndexCompaction(ctx, db, record, index); err != nil {
 				return false, fmt.Errorf("%s merge: %w", index, err)
 			}
-			result.Phase = tenantPurgePhaseCompact + index
+			*phase = tenantPurgePhaseCompact + index
 			if err := options.merged(ctx, index, -ftsMergePageLimit); err != nil {
 				return false, err
 			}
@@ -513,11 +551,11 @@ func compactAfterTenantPurge(ctx context.Context, db *sql.DB, id string, options
 			return false, fmt.Errorf("%s merge: %w", index, err)
 		}
 	}
-	if result.Phase != tenantPurgePhaseCheckpoint {
-		if err := setTenantPurgePhase(ctx, db, id, tenantPurgePhaseCheckpoint); err != nil {
+	if *phase != tenantPurgePhaseCheckpoint {
+		if err := record(ctx, db, tenantPurgePhaseCheckpoint); err != nil {
 			return false, err
 		}
-		result.Phase = tenantPurgePhaseCheckpoint
+		*phase = tenantPurgePhaseCheckpoint
 	}
 	if err := incrementalVacuum(ctx, db); err != nil {
 		return false, err
@@ -554,12 +592,12 @@ func setTenantPurgePhase(ctx context.Context, execer contextExecer, id, phase st
 }
 
 // startSearchIndexCompaction starts a merge of every segment of the index
-// into one and records the index's compaction phase, in one transaction, so
-// a later pass continues that merge rather than starting another. The merge
-// takes as its input every segment, those that hold the terms of the erased
-// rows and those that hold the markers of their deletion; once it has
-// finished, no segment holds those terms.
-func startSearchIndexCompaction(ctx context.Context, db *sql.DB, id, index string) error {
+// into one and records the index's compaction phase with record, in one
+// transaction, so a later pass continues that merge rather than starting
+// another. The merge takes as its input every segment, those that hold the
+// terms of the erased rows and those that hold the markers of their
+// deletion; once it has finished, no segment holds those terms.
+func startSearchIndexCompaction(ctx context.Context, db *sql.DB, record recordMaintenancePhase, index string) error {
 	return withSecureDelete(ctx, db, func(conn *sql.Conn) error {
 		// As in purgeTenantStep, the transaction is not bound to ctx.
 		tx, err := conn.BeginTx(context.WithoutCancel(ctx), nil)
@@ -571,7 +609,7 @@ func startSearchIndexCompaction(ctx context.Context, db *sql.DB, id, index strin
 		if _, err := tx.ExecContext(ctx, searchIndexMergeSQL(index), -ftsMergePageLimit); err != nil {
 			return err
 		}
-		if err := setTenantPurgePhase(ctx, tx, id, tenantPurgePhaseCompact+index); err != nil {
+		if err := record(ctx, tx, tenantPurgePhaseCompact+index); err != nil {
 			return err
 		}
 		return tx.Commit()

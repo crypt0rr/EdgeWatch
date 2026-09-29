@@ -179,7 +179,8 @@ func (a *App) wakeUnitPurge() {
 // startUnitPurgeWorker erases the data of deleted business units from the
 // daemon, at startup, when a deletion is requested, and every
 // unitPurgeInterval. The purge takes SQLite's writer for one bounded batch
-// at a time.
+// at a time. Each pass then continues the cleanup after the units that
+// earlier releases deleted, while it is pending.
 func (a *App) startUnitPurgeWorker(ctx context.Context) <-chan struct{} {
 	done := make(chan struct{})
 	wake := a.units.purgeWakeChannel()
@@ -219,8 +220,41 @@ func (a *App) purgeDeletedUnits(ctx context.Context) {
 		if result.CheckpointBusy {
 			logger.Warn("a reader of the database, such as a running backup, kept the business unit purge from truncating the write-ahead log, which may still hold the erased rows; the next pass retries it", "tenant_id", result.TenantID)
 		}
+		if result.LegacyMaintenanceCompleted {
+			logger.Info(legacyUnitCleanupFinished, "completed_by_tenant_id", result.TenantID)
+		}
 	}
 	if err != nil && !errors.Is(err, context.Canceled) {
 		logger.Warn("business unit purge stopped; the next pass resumes it", "error", err)
+	}
+	a.cleanUpAfterLegacyDeletions(ctx, logger)
+}
+
+// legacyUnitCleanupFinished is the log message of the finished cleanup after
+// the business units that earlier releases deleted.
+const legacyUnitCleanupFinished = "cleanup after business units deleted by earlier releases finished: the search indexes are compacted and the write-ahead log is truncated"
+
+// cleanUpAfterLegacyDeletions runs one pass of the cleanup after the
+// business units that earlier releases deleted, while it is pending, and
+// logs its outcome. Those releases could leave the search indexes and the
+// write-ahead log holding the units' erased rows. While a unit is being
+// deleted, the pass waits: that unit's purge compacts the indexes and
+// truncates the log, which completes the cleanup too.
+func (a *App) cleanUpAfterLegacyDeletions(ctx context.Context, logger *slog.Logger) {
+	result, err := a.Store.System().RunLegacyPurgeMaintenance(ctx)
+	if result.Started {
+		logger.Info("cleanup after business units deleted by earlier releases started: compacting the search indexes and truncating the write-ahead log, which may still hold their erased rows")
+	}
+	if result.Pending {
+		logger.Info("business unit cleanup pass", "phase", result.Phase, "complete", result.Complete, "deferred", result.Deferred)
+	}
+	if result.CheckpointBusy {
+		logger.Warn("a reader of the database, such as a running backup, kept the cleanup after business units deleted by earlier releases from truncating the write-ahead log, which may still hold their erased rows; the next pass retries it")
+	}
+	if result.Complete {
+		logger.Info(legacyUnitCleanupFinished)
+	}
+	if err != nil && !errors.Is(err, context.Canceled) {
+		logger.Warn("cleanup after business units deleted by earlier releases stopped; the next pass resumes it", "error", err)
 	}
 }

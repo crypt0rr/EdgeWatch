@@ -517,6 +517,77 @@ func TestRunVerifyPreservesResultWhenAuditStoreIsReadOnly(t *testing.T) {
 	}
 }
 
+// After an upgrade over a business unit that an earlier release deleted,
+// edgewatch health reports the pending cleanup after it with its phase and
+// progress, and edgewatch verify lists its checkpoint; neither fails.
+func TestHealthAndVerifyReportThePendingCleanupAfterDeletedUnits(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.FreshPath(t)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte("database: "+database+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, statement := range []string{
+		`INSERT INTO tenants(id,name,slug,state,purge_phase,created_at,updated_at) VALUES('earlier','Earlier','earlier','deleted','complete',?1,?1)`,
+		`PRAGMA user_version=54`,
+	} {
+		if _, err := s.DB.ExecContext(ctx, statement, stamp); err != nil {
+			s.Close()
+			t.Fatalf("%s: %v", statement, err)
+		}
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = store.Open(database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.System().AcquireDaemonLease(ctx, "running-daemon"); err != nil {
+		s.Close()
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	healthOut, _, err := captureCLIOutput(t, func() error {
+		return run([]string{"health", "--config", configPath, "--output", "json"})
+	})
+	if err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	var health store.HealthStatus
+	if err := json.Unmarshal([]byte(healthOut), &health); err != nil {
+		t.Fatalf("health output %q: %v", healthOut, err)
+	}
+	if health.Status != "ready" || health.Maintenance == nil || health.Maintenance.Phase != "legacy-tenant-purge" || health.Maintenance.Progress != 0 || health.Maintenance.Total != 4 {
+		t.Fatalf("health with the cleanup pending = %s", healthOut)
+	}
+	verifyOut, _, err := captureCLIOutput(t, func() error {
+		return run([]string{"verify", "--config", configPath, "--output", "json"})
+	})
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	var verification store.DatabaseVerification
+	if err := json.Unmarshal([]byte(verifyOut), &verification); err != nil {
+		t.Fatalf("verify output %q: %v", verifyOut, err)
+	}
+	listed := false
+	for _, progress := range verification.FTSBackfill {
+		listed = listed || (progress.TableName == "legacy_tenant_purge_maintenance" && !progress.Complete)
+	}
+	if !listed {
+		t.Fatalf("verify with the cleanup pending = %s", verifyOut)
+	}
+}
+
 func TestRunRestoreDryRunAndReplacement(t *testing.T) {
 	dir := t.TempDir()
 	database := filepath.Join(dir, "edgewatch.db")

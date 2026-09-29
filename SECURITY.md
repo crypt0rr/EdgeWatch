@@ -196,7 +196,18 @@ its delivery health; the purge also erases the delivery health that earlier
 releases kept for deleted destinations, which names no owner and counts in
 no unit's totals. Backups taken before the deletion still hold the unit's
 data, and the records of platform administrators' actions on it stay in the
-platform audit.
+platform audit. Releases before schema 55 marked a unit deleted before the
+compaction and the truncation had finished, so after such a deletion the
+search index segments, which backups copy, and the log may still hold
+copies of the erased rows. When the database holds a deleted unit, the
+upgrade to schema 55 records a one-time cleanup that the daemon runs in the
+background with the same bounded, resumable passes: it compacts every search
+index and then truncates the log, again waiting for a reader that holds an
+older snapshot, and while a unit is being deleted it leaves the work to that
+unit's deletion. `edgewatch health` reports the cleanup as `maintenance`
+until it has finished, and `edgewatch verify` lists its
+`legacy_tenant_purge_maintenance` checkpoint. Backups taken before it has
+finished may still hold the erased rows of those units.
 
 ### Signals between units
 
@@ -340,7 +351,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 54 must not be opened by an older EdgeWatch
+database upgraded to schema 55 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -364,7 +375,11 @@ tenant; each copy and its deliveries belong to their owner, reach only the
 owner's destinations, and appear only in the owner's history. Schema 54
 keeps the newest observation of an address per tenant, and a database
 trigger refuses a latest-host row in another tenant than its scan or for a
-tenant that is being deleted. Back up the complete `./data` directory before
+tenant that is being deleted. Schema 55 changes no table: when a tenant has
+been deleted, it records the one-time cleanup after deleted tenants
+described under [Public pages, audit, and deletion](#public-pages-audit-and-deletion),
+and sends a deletion that was already compacting the search indexes back to
+the start of its compaction. Back up the complete `./data` directory before
 the upgrade.
 
 Recovery codes are stored in the salted `v2` representation. Schema 38 removes

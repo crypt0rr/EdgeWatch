@@ -429,6 +429,13 @@ func MergeWorkSnapshots(plan WorkPlan, fragments []model.Snapshot) model.Snapsho
 	// 4096-port fragments; a linear search per incoming port would make the
 	// merge quadratic in the number of port records.
 	portIndexes := map[string]map[int]int{}
+	// services collects the fingerprints of a port that fragments report
+	// with different services. A DNS target's addresses can be scanned in
+	// different units (each address family is planned separately), and the
+	// single-invocation aggregate() reports the sorted union of every
+	// address's fingerprint. Keeping only the first value would hide a change
+	// on any later address and make the result depend on fragment order.
+	services := map[mergedPort]map[string]struct{}{}
 	hosts := map[string]model.HostObservation{}
 	result := model.Snapshot{Scopes: append([]model.Scope(nil), plan.Scopes...), DNS: map[string][]string{}}
 	for name, addresses := range plan.DNS {
@@ -459,15 +466,32 @@ func MergeWorkSnapshots(plan WorkPlan, fragments []model.Snapshot) model.Snapsho
 					existing.State = port.State
 				}
 				existing.Evidence = append(existing.Evidence, port.Evidence...)
+				if port.Service == "" || port.Service == existing.Service {
+					continue
+				}
 				if existing.Service == "" {
 					existing.Service = port.Service
+					continue
 				}
+				// existing.Service keeps the first value until the merge ends, so
+				// it is added once, when a second value first appears.
+				ref := mergedPort{unit: key, index: found}
+				fingerprints := services[ref]
+				if fingerprints == nil {
+					fingerprints = map[string]struct{}{}
+					addServiceFingerprints(fingerprints, existing.Service)
+					services[ref] = fingerprints
+				}
+				addServiceFingerprints(fingerprints, port.Service)
 			}
 			units[key] = current
 		}
 		for _, host := range fragment.Hosts {
 			mergeHostObservationMap(hosts, host.Address, host)
 		}
+	}
+	for ref, fingerprints := range services {
+		units[ref.unit].Ports[ref.index].Service = joinServiceFingerprints(fingerprints)
 	}
 	for _, unit := range units {
 		unit.Addresses = uniqueSorted(unit.Addresses)
@@ -514,6 +538,35 @@ func MergeWorkSnapshots(plan WorkPlan, fragments []model.Snapshot) model.Snapsho
 	}
 	result.Normalize()
 	return result
+}
+
+// mergedPort names one port record of a unit that MergeWorkSnapshots is
+// assembling: the unit key and the port's position in that unit.
+type mergedPort struct {
+	unit  string
+	index int
+}
+
+// addServiceFingerprints adds each fingerprint of a service value to the set.
+// A fragment that scanned several addresses of a DNS target already joined
+// their fingerprints, so the value is split to count each one once.
+func addServiceFingerprints(fingerprints map[string]struct{}, service string) {
+	for _, fingerprint := range strings.Split(service, serviceFingerprintSeparator) {
+		if fingerprint != "" {
+			fingerprints[fingerprint] = struct{}{}
+		}
+	}
+}
+
+// joinServiceFingerprints formats a set of fingerprints the way aggregate()
+// does: sorted and joined with the separator.
+func joinServiceFingerprints(fingerprints map[string]struct{}) string {
+	sorted := make([]string, 0, len(fingerprints))
+	for fingerprint := range fingerprints {
+		sorted = append(sorted, fingerprint)
+	}
+	sort.Strings(sorted)
+	return strings.Join(sorted, serviceFingerprintSeparator)
 }
 
 func markMergedNaabuDisagreements(host *model.HostObservation) {

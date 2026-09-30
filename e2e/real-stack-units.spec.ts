@@ -104,10 +104,14 @@ async function enrolAuthenticator(page: Page, accountPassword: string, { forced 
     await page.getByLabel('Account password').fill(accountPassword)
   } else {
     await expect(page.getByRole('heading', { name: 'Security', exact: true })).toBeVisible()
-    await page.getByLabel('Current password').fill(accountPassword)
   }
   await page.getByRole('button', { name: 'Set up authenticator' }).click()
-  const secret = (await page.locator('code.secret').innerText()).trim()
+  if (!forced) {
+    const setupDialog = page.getByRole('dialog', { name: 'Set up authenticator?' })
+    await setupDialog.getByLabel('Account password').fill(accountPassword)
+    await setupDialog.getByRole('button', { name: 'Start setup' }).click()
+  }
+  const secret = (await page.locator('code.secret').innerText()).replaceAll(/\s/g, '')
   // Enabling spends the step of its code, as a sign-in does, so the first
   // sign-in takes a later step.
   const enrolmentStep = Math.floor(Date.now() / totpStepMs)

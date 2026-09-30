@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { api, APIError, getSession, logout, logoutAllSessions, setCSRF, updateDisplayName } from '../api'
@@ -13,6 +13,7 @@ vi.mock('../api', async () => {
 })
 
 const administrator = { role: 'administrator' as const, user_id: 'user-1', username: 'admin', display_name: 'Admin', permissions: [], csrf_token: 'csrf', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope }
+const originalClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
 
 describe('security settings', () => {
   beforeEach(() => {
@@ -22,10 +23,22 @@ describe('security settings', () => {
     vi.mocked(logout).mockResolvedValue(undefined)
     vi.mocked(logoutAllSessions).mockResolvedValue(undefined)
   })
-  afterEach(() => vi.clearAllMocks())
+  afterEach(() => {
+    vi.clearAllMocks()
+    if (originalClipboard) Object.defineProperty(navigator, 'clipboard', originalClipboard)
+    else Reflect.deleteProperty(navigator, 'clipboard')
+  })
 
   function renderPage() {
     return renderWithProviders(<Routes><Route path="*" element={<><Security /><p data-testid="route"><span /></p></>} /></Routes>, { route: ['/security'] })
+  }
+
+  async function startAuthenticatorSetup(password = 'correct-password') {
+    fireEvent.click(screen.getByRole('button', { name: 'Set up authenticator' }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Account password'), { target: { value: password } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Start setup' }))
+    await waitFor(() => expect(screen.getByLabelText('Authenticator secret')).toBeInTheDocument())
   }
 
   it('saves a display name and refreshes session/status queries', async () => {
@@ -56,15 +69,49 @@ describe('security settings', () => {
     vi.mocked(api).mockImplementation(async (path: string) => path === '/auth/totp/setup' ? { secret: 'BASE32SECRET', otpauth: 'otpauth://totp/EdgeWatch' } as never : { recovery_codes: ['one', 'two'] } as never)
     renderPage()
     await waitFor(() => expect(screen.getByRole('button', { name: 'Set up authenticator' })).toBeInTheDocument())
-    fireEvent.change(screen.getByLabelText('Current password'), { target: { value: 'correct-password' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Set up authenticator' }))
-    await waitFor(() => expect(screen.getByText('BASE32SECRET')).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Current password'), { target: { value: 'password-from-another-form' } })
+    await startAuthenticatorSetup()
+    expect(api).toHaveBeenCalledWith('/auth/totp/setup', expect.objectContaining({ body: JSON.stringify({ password: 'correct-password' }) }))
+    expect(screen.getByLabelText('Current password')).toHaveValue('')
+    expect(screen.getByLabelText('Authenticator secret')).toHaveTextContent('BASE 32SE CRET')
+    expect(screen.getByRole('link', { name: 'Open authenticator app' })).toHaveAttribute('href', 'otpauth://totp/EdgeWatch')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '123456' } })
     fireEvent.click(screen.getByRole('button', { name: 'Enable TOTP' }))
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Save your recovery codes' })).toBeInTheDocument())
-    fireEvent.click(screen.getByRole('checkbox', { name: /I saved these recovery codes/ }))
+    const acknowledgement = screen.getByRole('checkbox', { name: /I saved these recovery codes/ })
+    expect(acknowledgement.closest('label')).toHaveClass('checkbox-label', 'recovery-ack')
+    expect(acknowledgement.closest('label')?.querySelector('span')).toHaveTextContent('I saved these recovery codes in a secure place.')
+    fireEvent.click(acknowledgement)
     fireEvent.click(screen.getByRole('button', { name: 'Continue to sign in' }))
     await waitFor(() => expect(logout).toHaveBeenCalledOnce())
+  })
+
+  it('shows authenticator setup errors inside the password confirmation dialog', async () => {
+    vi.mocked(api).mockRejectedValueOnce(new Error('Password confirmation failed'))
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Set up authenticator' })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Set up authenticator' }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Account password'), { target: { value: 'incorrect-password' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Start setup' }))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('Password confirmation failed')
+    expect(screen.queryByLabelText('Authenticator secret')).not.toBeInTheDocument()
+  })
+
+  it('copies the ungrouped authenticator secret and announces the result', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    vi.mocked(api).mockImplementation(async (path: string) => path === '/auth/totp/setup' ? { secret: 'BASE32SECRET', otpauth: 'otpauth://totp/EdgeWatch' } as never : {} as never)
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Set up authenticator' })).toBeInTheDocument())
+    await startAuthenticatorSetup()
+    fireEvent.click(screen.getByRole('button', { name: 'Copy secret' }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Authenticator secret copied.'))
+    expect(writeText).toHaveBeenCalledWith('BASE32SECRET')
+    writeText.mockRejectedValueOnce(new Error('clipboard denied'))
+    fireEvent.click(screen.getByRole('button', { name: 'Copy secret' }))
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('The secret could not be copied. Select and copy it manually.'))
   })
 
   it('keeps the enrolment open after a mistyped code and restarts it once the setup expired', async () => {
@@ -77,21 +124,19 @@ describe('security settings', () => {
     })
     renderPage()
     await waitFor(() => expect(screen.getByRole('button', { name: 'Set up authenticator' })).toBeInTheDocument())
-    fireEvent.change(screen.getByLabelText('Current password'), { target: { value: 'correct-password' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Set up authenticator' }))
-    await waitFor(() => expect(screen.getByText('BASE32SECRET')).toBeInTheDocument())
+    await startAuthenticatorSetup()
 
     fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '000000' } })
     fireEvent.click(screen.getByRole('button', { name: 'Enable TOTP' }))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('4 attempts remain'))
-    expect(screen.getByText('BASE32SECRET')).toBeInTheDocument()
+    expect(screen.getByLabelText('Authenticator secret')).toHaveTextContent('BASE 32SE CRET')
     expect(screen.getByLabelText('Verification code')).toHaveValue('')
     expect(screen.queryByRole('button', { name: 'Set up authenticator' })).not.toBeInTheDocument()
 
     fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '111111' } })
     fireEvent.click(screen.getByRole('button', { name: 'Enable TOTP' }))
     await waitFor(() => expect(screen.getByRole('button', { name: 'Set up authenticator' })).toBeInTheDocument())
-    expect(screen.queryByText('BASE32SECRET')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Authenticator secret')).not.toBeInTheDocument()
     expect(screen.getByRole('alert')).toHaveTextContent('Start setup again')
   })
 
@@ -108,11 +153,11 @@ describe('security settings', () => {
     fireEvent.change(screen.getByLabelText('Account password'), { target: { value: 'correct-password' } })
     fireEvent.change(screen.getByLabelText('Current authenticator code or recovery code'), { target: { value: '123456' } })
     fireEvent.click(dialog.querySelector('button[type="submit"]')!)
-    await waitFor(() => expect(screen.getByText('REPLACEMENTSECRET')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByLabelText('Authenticator secret').textContent?.replaceAll(' ', '')).toBe('REPLACEMENTSECRET'))
 
     fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '654321' } })
     fireEvent.click(screen.getByRole('button', { name: 'Replace authenticator' }))
-    await waitFor(() => expect(screen.queryByText('REPLACEMENTSECRET')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryByLabelText('Authenticator secret')).not.toBeInTheDocument())
     expect(screen.getByRole('button', { name: 'Replace authenticator' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Disable TOTP' })).toBeInTheDocument()
   })
@@ -151,7 +196,7 @@ describe('security settings', () => {
     fireEvent.change(screen.getByLabelText('Account password'), { target: { value: 'correct-password' } })
     fireEvent.change(screen.getByLabelText('Current authenticator code or recovery code'), { target: { value: '123456' } })
     fireEvent.click(dialog.querySelector('button[type="submit"]')!)
-    await waitFor(() => expect(screen.getByText('REPLACEMENTSECRET')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByLabelText('Authenticator secret').textContent?.replaceAll(' ', '')).toBe('REPLACEMENTSECRET'))
     expect(api).toHaveBeenCalledWith('/auth/totp/setup', expect.objectContaining({ body: JSON.stringify({ password: 'correct-password', code: '123456', recovery_code: '' }) }))
 
     fireEvent.change(screen.getByLabelText('Verification code'), { target: { value: '654321' } })

@@ -1927,3 +1927,29 @@ label small,
   .platform-breadcrumb-prefix { display: none; }
   .enrollment-account .button { flex: 0 0 auto; white-space: nowrap; }
 }
+
+.totp-secret-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.totp-secret-row .secret {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  letter-spacing: .12em;
+}
+
+.recovery-ack {
+  margin: 4px 0 14px;
+}
+
+@media (max-width: 480px) {
+  .totp-secret-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}

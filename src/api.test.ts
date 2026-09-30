@@ -34,6 +34,21 @@ describe('API pagination contract', () => {
     expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('X-CSRF-Token')).toBe('csrf-token')
   })
 
+  it('preserves Retry-After as seconds on structured API errors', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'too many attempts' } }), {
+      status: 429,
+      headers: { 'Content-Type': 'application/json', 'Retry-After': '60' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(api('/auth/login', { method: 'POST', body: '{}' })).rejects.toMatchObject({
+      name: 'APIError',
+      status: 429,
+      code: 'rate_limited',
+      retryAfterSeconds: 60,
+    })
+  })
+
   it('signals session expiry for authenticated requests without redirecting login failures', async () => {
     const dispatchEvent = vi.fn()
     vi.stubGlobal('window', { dispatchEvent })

@@ -5,16 +5,13 @@ import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { BrowserRouter, MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { activate, login, setCSRF, setup, setupStatus } from '../api'
+import { APIError, activate, login, setCSRF, setup, setupStatus } from '../api'
 import { Activate, Login, Setup } from './Auth'
 
-vi.mock('../api', () => ({
-  activate: vi.fn(),
-  login: vi.fn(),
-  setCSRF: vi.fn(),
-  setup: vi.fn(),
-  setupStatus: vi.fn(),
-}))
+vi.mock('../api', async () => {
+  const actual = await vi.importActual<typeof import('../api')>('../api')
+  return { ...actual, activate: vi.fn(), login: vi.fn(), setCSRF: vi.fn(), setup: vi.fn(), setupStatus: vi.fn() }
+})
 
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
 
@@ -128,7 +125,7 @@ describe('authentication pages', () => {
   })
 
   it('supports recovery-code login and displays authentication failures', async () => {
-    vi.mocked(login).mockRejectedValue(new Error('invalid credentials'))
+    vi.mocked(login).mockRejectedValue(new APIError('invalid credentials', 'login_failed', undefined, 401))
     await renderPage(<Login />, '/login')
     const recoveryToggle = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('recovery code')) as HTMLButtonElement
     act(() => recoveryToggle.click())
@@ -145,8 +142,25 @@ describe('authentication pages', () => {
     })
 
     expect(login).toHaveBeenCalledWith('wrong password', '', 'AB12CD34EF', 'admin')
-    expect(container.querySelector('.form-error')?.textContent).toContain('invalid credentials')
+    expect(container.querySelector('.form-error')?.textContent).toBe('The username, password, or authenticator code is incorrect.')
     expect(container.querySelector('[data-testid="location"]')?.textContent).toBe('/login')
+  })
+
+  it('shows the Retry-After wait in a sentence and clears it when switching sign-in factors', async () => {
+    vi.mocked(login).mockRejectedValueOnce(new APIError('too many login attempts; try again later', 'rate_limited', undefined, 429, 60))
+    await renderPage(<Login />, '/login')
+    const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
+    setInputValue(inputs[1], 'password')
+    await act(async () => {
+      submitForm(container.querySelector('form') as HTMLFormElement)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe('Too many sign-in attempts. Try again in about 1 minute.')
+    const recoveryToggle = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('recovery code')) as HTMLButtonElement
+    act(() => recoveryToggle.click())
+    expect(container.querySelector('[role="alert"]')).toBeNull()
   })
 
   it('validates setup locally, toggles password visibility, and creates the administrator', async () => {
@@ -169,6 +183,8 @@ describe('authentication pages', () => {
     expect(inputs[1].type).toBe('text')
     act(() => (container.querySelector('button[aria-label="Hide password"]') as HTMLButtonElement).click())
     expect(inputs[1].type).toBe('password')
+    act(() => (container.querySelector('button[aria-label="Show confirmation password"]') as HTMLButtonElement).click())
+    expect(inputs[2].type).toBe('text')
 
     setInputValue(inputs[2], 'correct horse battery staple')
     await act(async () => {
@@ -193,6 +209,11 @@ describe('authentication pages', () => {
     await act(async () => submitForm(container.querySelector('form') as HTMLFormElement))
     expect(container.querySelector('.form-error')?.textContent).toContain('Passwords do not match')
     expect(activate).not.toHaveBeenCalled()
+
+    act(() => (container.querySelector('button[aria-label="Show password"]') as HTMLButtonElement).click())
+    act(() => (container.querySelector('button[aria-label="Show confirmation password"]') as HTMLButtonElement).click())
+    expect(inputs[1].type).toBe('text')
+    expect(inputs[2].type).toBe('text')
 
     setInputValue(inputs[2], 'correct horse battery staple')
     await act(async () => {

@@ -81,13 +81,28 @@ export class APIError extends Error {
   details?: Record<string, unknown>
   /** The HTTP status of the failed request. */
   status?: number
-  constructor(message: string, code?: string, details?: Record<string, unknown>, status?: number) {
+  /** Retry-After response header, normalized to seconds when available. */
+  retryAfterSeconds?: number
+  constructor(message: string, code?: string, details?: Record<string, unknown>, status?: number, retryAfterSeconds?: number) {
     super(message)
     this.name = 'APIError'
     this.code = code
     this.details = details
     this.status = status
+    this.retryAfterSeconds = retryAfterSeconds
   }
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value) return undefined
+  const header = value.trim()
+  if (/^\d+$/.test(header)) {
+    const seconds = Number(header)
+    return Number.isFinite(seconds) ? seconds : undefined
+  }
+  const retryAt = Date.parse(header)
+  if (!Number.isFinite(retryAt)) return undefined
+  return Math.max(0, Math.ceil((retryAt - Date.now()) / 1000))
 }
 let forbiddenHandler: (() => Promise<unknown>) | null = null
 /**
@@ -126,7 +141,7 @@ export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   // The session read is exempt: it is the read the handler waits for, so a
   // refused session read must not wait for itself.
   if (response.status === 403 && path !== '/auth/session' && forbiddenHandler) await forbiddenHandler().catch(() => undefined)
-  if (!response.ok) throw new APIError(body?.error?.message || 'Request failed', body?.error?.code, body?.error?.details, response.status)
+  if (!response.ok) throw new APIError(body?.error?.message || 'Request failed', body?.error?.code, body?.error?.details, response.status, parseRetryAfter(response.headers.get('Retry-After')))
   return body as T
 }
 /** `platform_admin` is the platform administrator, who belongs to no business unit. */

@@ -75,15 +75,15 @@ func TestCreateRenameAndListTenants(t *testing.T) {
 	platform := f.store.Platform()
 	insertTenantUser(t, f.store, platformAdminID, nil, RolePlatformAdmin)
 
-	third, err := platform.CreateTenant(ctx, "  Third  ", "third", testCapacityLimits, AuditEntry{ActorKind: AuditActorHost})
+	third, err := platform.CreateTenant(ctx, "  Third  ", "third", AuditEntry{ActorKind: AuditActorHost})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if third.ID == "" || third.Name != "Third" || third.Slug != "third" || third.State != TenantStateActive || third.IsDefault || third.Revision != 1 || third.StateChangedBy != AuditActorHost || third.CreatedAt.IsZero() {
 		t.Fatalf("created tenant = %+v", third)
 	}
-	// The new tenant inherits the deployment's slots and budgets, and its
-	// high-cost ceiling is the lower budget, so high-cost work stays off.
+	// The new tenant inherits the deployment's slots and budgets, and has no
+	// high-cost grant, so high-cost work stays off.
 	scope, err := f.store.TenantScopeByID(ctx, third.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -92,13 +92,18 @@ func TestCreateRenameAndListTenants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(capacity, InitialTenantCapacity(testCapacityLimits)) || capacity.HighCostCeiling == nil || *capacity.HighCostCeiling != testCapacityLimits.MaxProbeCount {
-		t.Fatalf("a new tenant's capacity = %+v, want %+v", capacity, InitialTenantCapacity(testCapacityLimits))
+	if !reflect.DeepEqual(capacity, InitialTenantCapacity()) || capacity.HighCostCeiling == nil || *capacity.HighCostCeiling != HighCostNotGranted {
+		t.Fatalf("a new tenant's capacity = %s, want %s", describeCapacity(capacity), describeCapacity(InitialTenantCapacity()))
+	}
+	var ceiling any
+	var granted int
+	if err := f.store.DB.QueryRow(`SELECT high_cost_ceiling,high_cost_granted FROM tenants WHERE id=?`, third.ID).Scan(&ceiling, &granted); err != nil || ceiling != nil || granted != 0 {
+		t.Fatalf("a new tenant's stored ceiling = %v, granted %d, %v; want none and not granted", ceiling, granted, err)
 	}
 	if got := lastPlatformAudit(t, f.store, "tenant.created"); got.tenant != "<null>" || got.kind != AuditActorHost || got.category != auditCategoryPlatform || !strings.Contains(got.detail, third.ID) {
 		t.Fatalf("creation audit = %+v", got)
 	}
-	fourth, err := platform.CreateTenant(ctx, "Fourth", "fourth", testCapacityLimits, AuditEntry{ActorUserID: platformAdminID, ActorUsername: "root"})
+	fourth, err := platform.CreateTenant(ctx, "Fourth", "fourth", AuditEntry{ActorUserID: platformAdminID, ActorUsername: "root"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +122,7 @@ func TestCreateRenameAndListTenants(t *testing.T) {
 		"unit kind":                {ActorKind: AuditActorUnit},
 		"host with an account":     {ActorUserID: platformAdminID, ActorKind: AuditActorHost},
 	} {
-		if _, err := platform.CreateTenant(ctx, "Refused", "refused", testCapacityLimits, audit); !errors.Is(err, ErrAccountNotPermitted) {
+		if _, err := platform.CreateTenant(ctx, "Refused", "refused", audit); !errors.Is(err, ErrAccountNotPermitted) {
 			t.Errorf("%s: creation = %v, want %v", label, err, ErrAccountNotPermitted)
 		}
 	}
@@ -138,14 +143,14 @@ func TestCreateRenameAndListTenants(t *testing.T) {
 		{"default name", "DEFAULT", "fifth"},
 		{"default slug", "Fifth", "default"},
 	} {
-		if _, err := platform.CreateTenant(ctx, check.name, check.slug, testCapacityLimits, AuditEntry{}); !errors.Is(err, ErrValidation) {
+		if _, err := platform.CreateTenant(ctx, check.name, check.slug, AuditEntry{}); !errors.Is(err, ErrValidation) {
 			t.Errorf("%s: creation = %v, want a validation error", check.label, err)
 		}
 	}
-	if _, err := platform.CreateTenant(ctx, "SECOND", "fifth", testCapacityLimits, AuditEntry{}); !errors.Is(err, ErrTenantNameInUse) {
+	if _, err := platform.CreateTenant(ctx, "SECOND", "fifth", AuditEntry{}); !errors.Is(err, ErrTenantNameInUse) {
 		t.Errorf("a name in use in another case = %v, want %v", err, ErrTenantNameInUse)
 	}
-	if _, err := platform.CreateTenant(ctx, "Fifth", "second", testCapacityLimits, AuditEntry{}); !errors.Is(err, ErrTenantSlugInUse) {
+	if _, err := platform.CreateTenant(ctx, "Fifth", "second", AuditEntry{}); !errors.Is(err, ErrTenantSlugInUse) {
 		t.Errorf("a slug in use = %v, want %v", err, ErrTenantSlugInUse)
 	}
 
@@ -213,11 +218,11 @@ func TestCreateRenameAndListTenants(t *testing.T) {
 	}
 	// The old slug is free again, and so is the name and slug of a deleted
 	// tenant.
-	if _, err := platform.CreateTenant(ctx, "Delta", "third", testCapacityLimits, AuditEntry{}); err != nil {
+	if _, err := platform.CreateTenant(ctx, "Delta", "third", AuditEntry{}); err != nil {
 		t.Fatalf("reuse a released slug: %v", err)
 	}
 	setTenantState(t, f.store, fourth.ID, TenantStateDeleted)
-	if _, err := platform.CreateTenant(ctx, "Fourth", "fourth", testCapacityLimits, AuditEntry{}); err != nil {
+	if _, err := platform.CreateTenant(ctx, "Fourth", "fourth", AuditEntry{}); err != nil {
 		t.Fatalf("reuse the name and slug of a deleted tenant: %v", err)
 	}
 	if _, err := platform.RenameTenant(ctx, fourth.ID, fourth.Revision, "Fifth", "fifth", AuditEntry{}); !errors.Is(err, ErrNotFound) {
@@ -242,16 +247,16 @@ func TestTenantNamesAreUniqueWithoutRegardToCaseBeyondASCII(t *testing.T) {
 	s := openTestStore(t)
 	platform := s.Platform()
 	for i, names := range [][]string{{"Ärzte", "ärzte", "ÄRZTE"}, {"Œuvre", "œuvre", "ŒUVRE"}, {"Δέλτα", "δέλτα", "ΔΈΛΤΑ"}} {
-		taken, err := platform.CreateTenant(ctx, names[0], fmt.Sprintf("taken-%d", i), testCapacityLimits, AuditEntry{})
+		taken, err := platform.CreateTenant(ctx, names[0], fmt.Sprintf("taken-%d", i), AuditEntry{})
 		if err != nil {
 			t.Fatal(err)
 		}
-		other, err := platform.CreateTenant(ctx, fmt.Sprintf("Other %d", i), fmt.Sprintf("other-%d", i), testCapacityLimits, AuditEntry{})
+		other, err := platform.CreateTenant(ctx, fmt.Sprintf("Other %d", i), fmt.Sprintf("other-%d", i), AuditEntry{})
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, name := range names[1:] {
-			if _, err := platform.CreateTenant(ctx, name, fmt.Sprintf("created-%d", i), testCapacityLimits, AuditEntry{}); !errors.Is(err, ErrTenantNameInUse) || !errors.Is(err, ErrValidation) {
+			if _, err := platform.CreateTenant(ctx, name, fmt.Sprintf("created-%d", i), AuditEntry{}); !errors.Is(err, ErrTenantNameInUse) || !errors.Is(err, ErrValidation) {
 				t.Errorf("create %q beside %q = %v, want %v", name, names[0], err, ErrTenantNameInUse)
 			}
 			if _, err := platform.RenameTenant(ctx, other.ID, other.Revision, name, other.Slug, AuditEntry{}); !errors.Is(err, ErrTenantNameInUse) || !errors.Is(err, ErrValidation) {
@@ -331,7 +336,7 @@ func TestCreateTenantStartsWithUpdateAlertsOff(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := map[string]string{DefaultTenantID: storedRouting(DefaultTenantID), secondTenantID: storedRouting(secondTenantID)}
-	third, err := f.store.Platform().CreateTenant(ctx, "Third", "third", testCapacityLimits, AuditEntry{ActorKind: AuditActorHost})
+	third, err := f.store.Platform().CreateTenant(ctx, "Third", "third", AuditEntry{ActorKind: AuditActorHost})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +409,7 @@ func TestTenantRecordsCountStoredScans(t *testing.T) {
 	if archived, err := f.store.Tenant(f.b).GetJob(ctx, f.archivedB); err != nil || !archived.Archived {
 		t.Fatalf("tenant B's job %s = %+v, %v; want it archived", f.archivedB, archived, err)
 	}
-	third, err := platform.CreateTenant(ctx, "Third", "third", testCapacityLimits, AuditEntry{})
+	third, err := platform.CreateTenant(ctx, "Third", "third", AuditEntry{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,7 +453,7 @@ func TestTenantLifecycleReportsDatabaseErrors(t *testing.T) {
 		"list": func() error { _, err := platform.ListTenants(ctx); return err },
 		"get":  func() error { _, err := platform.GetTenant(ctx, DefaultTenantID); return err },
 		"create": func() error {
-			_, err := platform.CreateTenant(ctx, "Third", "third", testCapacityLimits, AuditEntry{})
+			_, err := platform.CreateTenant(ctx, "Third", "third", AuditEntry{})
 			return err
 		},
 		"rename": func() error {

@@ -763,6 +763,7 @@
   cursor: pointer;
 }
 .checkbox-label input[type="checkbox"],
+.checkbox-label input[type="radio"],
 .public-picker-row input[type="checkbox"] {
   width: 16px;
   min-width: 16px;

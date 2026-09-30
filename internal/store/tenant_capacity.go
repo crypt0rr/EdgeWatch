@@ -34,11 +34,19 @@ type TenantCapacity struct {
 	// allow_high_cost may send. It never lowers the tenant's budgets, and
 	// config.MaxProbeCountLimit applies above it. Nil keeps the behavior
 	// from before tenants: a high-cost job may send up to
-	// config.MaxProbeCountLimit. A tenant other than the default one starts
-	// with InitialTenantCapacity, whose ceiling equals its budget, so
-	// high-cost work stays off until a platform administrator grants it.
+	// config.MaxProbeCountLimit. HighCostNotGranted means that no ceiling
+	// was granted, so allow_high_cost raises neither budget, whatever
+	// config.yaml sets. A tenant other than the default one starts with
+	// InitialTenantCapacity, which grants no ceiling, so high-cost work
+	// stays off until a platform administrator grants a ceiling.
 	HighCostCeiling *int64
 }
+
+// HighCostNotGranted is the HighCostCeiling of a tenant without a high-cost
+// grant: a job with allow_high_cost keeps the tenant's budgets. The row
+// stores it as high_cost_granted=0 with a NULL high_cost_ceiling, so no
+// number is left that a later config.yaml could turn into a raise.
+const HighCostNotGranted int64 = 0
 
 // CapacityLimits are the deployment's scan settings from config.yaml, which
 // bound every tenant's capacity. A probe budget here is the resolved one:
@@ -50,39 +58,36 @@ type CapacityLimits struct {
 }
 
 // InitialTenantCapacity returns the capacity a new tenant starts with. It
-// inherits the deployment's slots and probe budgets, and its high-cost
-// ceiling equals the lower of the two budgets, so allow_high_cost raises
-// neither budget until a platform administrator raises the ceiling. The
+// inherits the deployment's slots and probe budgets, and has no high-cost
+// grant, so allow_high_cost raises neither budget, whatever config.yaml sets
+// now or later, until a platform administrator grants a ceiling. The
 // default tenant keeps a nil ceiling instead, and with it the behavior from
 // before tenants.
-func InitialTenantCapacity(limits CapacityLimits) TenantCapacity {
-	ceiling := limits.MaxProbeCount
-	if limits.MaxNaabuProbeCount < ceiling {
-		ceiling = limits.MaxNaabuProbeCount
-	}
+func InitialTenantCapacity() TenantCapacity {
+	ceiling := HighCostNotGranted
 	return TenantCapacity{HighCostCeiling: &ceiling}
 }
 
 // Validate checks each setting against the deployment's limits. The slot
 // cap and the probe budgets must lie between 1 and the deployment's own
-// setting; the high-cost ceiling between 1 and config.MaxProbeCountLimit. A
-// nil setting is always valid. The error is a ValidationError that names the
-// setting.
+// setting; the high-cost ceiling between 1 and config.MaxProbeCountLimit,
+// unless it is HighCostNotGranted. A nil setting is always valid. The error
+// is a ValidationError that names the setting.
 func (capacity TenantCapacity) Validate(limits CapacityLimits) error {
 	if value := capacity.MaxConcurrentScans; value != nil && (*value < 1 || *value > limits.MaxConcurrentScans) {
 		return NewValidationError(fmt.Errorf("max_concurrent_scans must be between 1 and %d", limits.MaxConcurrentScans))
 	}
 	for _, check := range []struct {
-		name  string
-		value *int64
-		limit int64
+		name         string
+		value        *int64
+		lower, limit int64
 	}{
-		{"max_probe_count", capacity.MaxProbeCount, limits.MaxProbeCount},
-		{"max_naabu_probe_count", capacity.MaxNaabuProbeCount, limits.MaxNaabuProbeCount},
-		{"high_cost_ceiling", capacity.HighCostCeiling, config.MaxProbeCountLimit},
+		{"max_probe_count", capacity.MaxProbeCount, 1, limits.MaxProbeCount},
+		{"max_naabu_probe_count", capacity.MaxNaabuProbeCount, 1, limits.MaxNaabuProbeCount},
+		{"high_cost_ceiling", capacity.HighCostCeiling, HighCostNotGranted, config.MaxProbeCountLimit},
 	} {
-		if check.value != nil && (*check.value < 1 || *check.value > check.limit) {
-			return NewValidationError(fmt.Errorf("%s must be between 1 and %d", check.name, check.limit))
+		if check.value != nil && (*check.value < check.lower || *check.value > check.limit) {
+			return NewValidationError(fmt.Errorf("%s must be between %d and %d", check.name, check.lower, check.limit))
 		}
 	}
 	return nil
@@ -101,21 +106,41 @@ func (capacity TenantCapacity) auditDetail() string {
 		value := int64(*capacity.MaxConcurrentScans)
 		slots = &value
 	}
+	ceiling := setting(capacity.HighCostCeiling)
+	if capacity.highCostNotGranted() {
+		ceiling = "not_granted"
+	}
 	return "max_concurrent_scans=" + setting(slots) +
 		" max_probe_count=" + setting(capacity.MaxProbeCount) +
 		" max_naabu_probe_count=" + setting(capacity.MaxNaabuProbeCount) +
-		" high_cost_ceiling=" + setting(capacity.HighCostCeiling)
+		" high_cost_ceiling=" + ceiling
+}
+
+// highCostNotGranted reports whether the capacity has no high-cost grant.
+func (capacity TenantCapacity) highCostNotGranted() bool {
+	return capacity.HighCostCeiling != nil && *capacity.HighCostCeiling == HighCostNotGranted
+}
+
+// highCostColumns returns the high_cost_ceiling and high_cost_granted
+// values that store the capacity's high-cost ceiling.
+func (capacity TenantCapacity) highCostColumns() (ceiling any, granted int) {
+	if capacity.highCostNotGranted() {
+		return nil, 0
+	}
+	return nullableInt64(capacity.HighCostCeiling), 1
 }
 
 // tenantCapacityColumns are the capacity columns in the order that
 // scanTenantCapacity reads them.
-const tenantCapacityColumns = `max_concurrent_scans,max_probe_count,max_naabu_probe_count,high_cost_ceiling`
+const tenantCapacityColumns = `max_concurrent_scans,max_probe_count,max_naabu_probe_count,high_cost_ceiling,high_cost_granted`
 
 // scanTenantCapacity reads the capacity columns that follow the given
-// leading destinations.
+// leading destinations. A row with high_cost_granted=0 has the ceiling
+// HighCostNotGranted.
 func scanTenantCapacity(scan func(...any) error, leading ...any) (TenantCapacity, error) {
 	var slots, probes, naabuProbes, ceiling sql.NullInt64
-	if err := scan(append(leading, &slots, &probes, &naabuProbes, &ceiling)...); err != nil {
+	var granted int64
+	if err := scan(append(leading, &slots, &probes, &naabuProbes, &ceiling, &granted)...); err != nil {
 		return TenantCapacity{}, err
 	}
 	var capacity TenantCapacity
@@ -135,6 +160,10 @@ func scanTenantCapacity(scan func(...any) error, leading ...any) (TenantCapacity
 			value := column.value.Int64
 			*column.field = &value
 		}
+	}
+	if granted == 0 {
+		notGranted := HighCostNotGranted
+		capacity.HighCostCeiling = &notGranted
 	}
 	return capacity, nil
 }
@@ -162,10 +191,11 @@ func (ps *PlatformStore) SetTenantCapacity(ctx context.Context, tenantID string,
 	if err := requirePlatformActorTx(ctx, tx, audit.ActorUserID); err != nil {
 		return err
 	}
+	ceiling, granted := capacity.highCostColumns()
 	result, err := tx.ExecContext(ctx, `UPDATE tenants SET `+
-		`max_concurrent_scans=?,max_probe_count=?,max_naabu_probe_count=?,high_cost_ceiling=?,revision=revision+1,updated_at=? `+
+		`max_concurrent_scans=?,max_probe_count=?,max_naabu_probe_count=?,high_cost_ceiling=?,high_cost_granted=?,revision=revision+1,updated_at=? `+
 		`WHERE id=? AND state IN (?,?)`,
-		nullableInt(capacity.MaxConcurrentScans), nullableInt64(capacity.MaxProbeCount), nullableInt64(capacity.MaxNaabuProbeCount), nullableInt64(capacity.HighCostCeiling),
+		nullableInt(capacity.MaxConcurrentScans), nullableInt64(capacity.MaxProbeCount), nullableInt64(capacity.MaxNaabuProbeCount), ceiling, granted,
 		sqliteTimestamp(now), tenantID, TenantStateActive, TenantStateDisabled)
 	if err != nil {
 		return err

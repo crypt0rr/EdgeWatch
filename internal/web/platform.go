@@ -503,7 +503,9 @@ func (s *Server) deletePlatformUnit(w http.ResponseWriter, r *http.Request, sess
 }
 
 // platformCapacityView is a unit's capacity: its own settings, where null
-// inherits the deployment's, the deployment's limits, and its slot use.
+// inherits the deployment's and a high_cost_ceiling of 0
+// (store.HighCostNotGranted) is no high-cost grant, the deployment's
+// limits, and its slot use.
 type platformCapacityView struct {
 	UnitID   string                   `json:"unit_id"`
 	Capacity platformCapacitySettings `json:"capacity"`
@@ -541,7 +543,8 @@ func (s *Server) getPlatformUnitCapacity(w http.ResponseWriter, r *http.Request,
 }
 
 // optionalLimit is a capacity setting in a PATCH body: absent keeps the
-// setting, null inherits the deployment's, and a number sets it.
+// setting, null inherits the deployment's, and a number sets it. A
+// high_cost_ceiling of 0 grants no ceiling; the store validates each number.
 type optionalLimit struct {
 	set   bool
 	value *int64

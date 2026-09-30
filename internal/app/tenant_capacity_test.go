@@ -448,6 +448,68 @@ func TestTighterDeploymentBudgetWinsOverTheTenants(t *testing.T) {
 	}
 }
 
+// A new unit starts without a high-cost grant, whatever budgets config.yaml
+// set when it was created. Once config.yaml lowers them, a high-cost
+// approval still raises neither budget: not at the estimate, the resolved
+// plan, or a resumable attempt. A ceiling that a platform administrator
+// then grants applies above the lowered budgets, and the default unit keeps
+// the behavior from before business units.
+func TestInitialCeilingAfterTightenedConfig(t *testing.T) {
+	ctx := context.Background()
+	f := newCapacityTenants(t, schedulerFake{}, 1)
+	unit, err := f.app.CreateUnit(ctx, "Early", "early", store.AuditEntry{ActorKind: store.AuditActorHost})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope, err := f.db.TenantScopeByID(ctx, unit.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := f.db.Tenant(scope)
+	f.app.Config.Scheduler.MaxProbeCount = 1_000_000
+	f.app.Config.Scheduler.MaxNaabuProbeCount = 2_000_000
+	job := probeJob("job", 4_000, true)
+	job.Targets = []string{"198.18.0.0/22"} // 1,024 addresses x 4,000 ports = 4,096,000 Nmap probes
+	assertBudget := func(label string, err error, budget int64) {
+		t.Helper()
+		var workErr *ScanWorkBudgetError
+		if !errors.As(err, &workErr) || workErr.Budget != budget {
+			t.Errorf("%s: %v, want a budget error at %d", label, err, budget)
+		}
+	}
+	_, err = f.app.CheckScanWorkBudget(ctx, ts, job)
+	assertBudget("high-cost work without a platform grant", err, 1_000_000)
+	budget, err := f.app.tenantProbeBudget(ctx, ts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertBudget("resolved high-cost Nmap work without a platform grant", checkResolvedProbeBudget(budget, job, 0, 4_500_000), 1_000_000)
+	assertBudget("resolved high-cost Naabu discovery without a platform grant", checkResolvedProbeBudget(budget, job, 4_500_000, 0), 2_000_000)
+	record, err := ts.CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scan model.Scan
+	plan := scanner.WorkPlan{Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Addresses: []string{"198.18.0.1"}, Ports: "1-4000", Probes: 4_500_000}}}
+	handled, _, err := f.app.runResumableAttempt(ctx, ctx, ts, record.Job, record.ID, &scan, nil, coverageResumableScanner{plan: plan}, false)
+	assertBudget("a resumable attempt without a platform grant", err, 1_000_000)
+	if !handled || scan.Status != "failed" {
+		t.Fatalf("a resumable attempt without a platform grant: handled %v, status %q", handled, scan.Status)
+	}
+
+	// The default unit's high-cost work reaches MaxProbeCountLimit, as
+	// before business units.
+	if _, err := f.app.CheckScanWorkBudget(ctx, f.db.Tenant(f.a), job); err != nil {
+		t.Fatalf("the default unit's high-cost work: %v", err)
+	}
+	// A ceiling that a platform administrator grants survives the tightened
+	// config.yaml.
+	f.setCapacity(t, scope, store.TenantCapacity{HighCostCeiling: ptrTo[int64](5_000_000)})
+	if _, err := f.app.CheckScanWorkBudget(ctx, ts, job); err != nil {
+		t.Fatalf("high-cost work within a granted ceiling: %v", err)
+	}
+}
+
 // A tenant's capacity limits are what the scheduler enforces for its runs:
 // the deployment's slots and probe budgets where the tenant has no setting,
 // the tenant's where they are lower, and the deployment's again once

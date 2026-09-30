@@ -736,10 +736,14 @@ account then enrols again.
   one and the deployment's setting otherwise, as "N scans at a time", and
   the API's status reports the unit's own slots and probe budgets the same
   way. The high-cost ceiling is the most probes that a job approved
-  for high-cost work may send. A new unit's ceiling starts at the lower of
-  the deployment's two probe budgets, so such an approval raises nothing
-  until a platform administrator raises the ceiling. The default unit keeps
-  the high-cost behavior from before business units.
+  for high-cost work may send. A new unit has none: its **Capacity** tab
+  shows the ceiling as **Not granted**, and such an approval raises neither
+  probe budget, whatever config.yaml sets now or later, until a platform
+  administrator chooses **Grant a ceiling** and enters one. A granted
+  ceiling stays in force when config.yaml later lowers the deployment's
+  budgets below it; choose **Not granted** to take it away. Saving the tab
+  keeps a ceiling that was not granted as it is. The default unit keeps the
+  high-cost behavior from before business units.
 - **Audit:** a unit's administrators read its security audit on **Audit**,
   including a platform administrator's actions on the unit's accounts and
   capacity, without the platform administrator's source address. The platform
@@ -903,7 +907,7 @@ needs one. Print a new platform setup token with `edgewatch admin
 platform-setup-token`; while no administrator exists, the daemon prints a new
 setup token when it starts.
 
-The current schema is version 56. Database migrations are forward-only. An
+The current schema is version 57. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,
@@ -1000,6 +1004,23 @@ to the overwrite. A database with `auto_vacuum` mode `incremental` is not
 changed. Raw copies of ./data made before the cleanup has finished may still
 hold those rows. An older release refuses the upgraded database, so a
 rollback means restoring the pre-upgrade ./data backup.
+
+Schema 57 records whether a business unit has a high-cost grant. Earlier
+releases gave each new unit a high-cost ceiling equal to the lower of the
+deployment's two probe budgets when it was created. Once config.yaml lowered
+those budgets, that ceiling let an approval of high-cost work raise the
+unit's budgets up to it, although no platform administrator had granted it.
+The upgrade marks the ceiling of every unit other than the default one as
+**Not granted** when no platform administrator has ever saved that unit's
+capacity. A unit whose capacity a platform administrator saved keeps its
+ceiling as a grant, because the earlier **Capacity** tab sent the initial
+ceiling back with every save, so the database cannot tell it from a ceiling
+that was typed. After the upgrade, review the high-cost ceiling on the
+**Capacity** tab of each such unit and choose **Not granted** where no
+grant was intended. The default unit keeps its ceiling. It is a quick
+in-place change with no background phase. An older release refuses the
+upgraded database, so a rollback means restoring the pre-upgrade ./data
+backup.
 
 ## Useful commands
 

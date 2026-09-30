@@ -340,7 +340,7 @@ func TestTenantPurgeErasesOnlyTheDeletedTenant(t *testing.T) {
 	if records, err := f.store.Platform().ListTenants(ctx); err != nil || len(records) != 1 || records[0].ID != DefaultTenantID {
 		t.Fatalf("tenants after the purge = %+v, %v", records, err)
 	}
-	if _, err := f.store.Platform().CreateTenant(ctx, "Second", "second", testCapacityLimits, AuditEntry{}); err != nil {
+	if _, err := f.store.Platform().CreateTenant(ctx, "Second", "second", AuditEntry{}); err != nil {
 		t.Fatalf("reuse the purged tenant's name and slug: %v", err)
 	}
 	// Nothing is left to purge.

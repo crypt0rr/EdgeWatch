@@ -499,7 +499,8 @@ CREATE TABLE IF NOT EXISTS restore_epochs (
 // and is also created by the next normal schema migration; creating it here
 // keeps older backup schemas safe without running application migrations in a
 // host recovery command. The same transaction also clears the copied sessions
-// and lease rows, so Restore and DryRunRestore sanitize the copy identically.
+// and lease rows and revokes the copied activation links and setup token, so
+// Restore and DryRunRestore sanitize the copy identically.
 func applyRestoreDeliveryPolicy(ctx context.Context, path string, policy PendingDeliveryPolicy, epoch string, restoredAt time.Time) (int, error) {
 	staged, err := OpenExistingContext(ctx, path)
 	if err != nil {
@@ -585,6 +586,9 @@ SELECT ?,destination,payload_json,attempts,` + deferrals + `,next_at,last_error,
 			return 0, fmt.Errorf("invalidate restored sessions: %w", err)
 		}
 	}
+	if err := revokeRestoredLinksTx(ctx, tx, restoredAt); err != nil {
+		return 0, err
+	}
 	if err := clearRestoredLeasesTx(ctx, tx); err != nil {
 		return 0, err
 	}
@@ -609,6 +613,36 @@ SELECT ?,destination,payload_json,attempts,` + deferrals + `,next_at,last_error,
 		return 0, fmt.Errorf("sync staged restore database: %w", err)
 	}
 	return pending, nil
+}
+
+// revokeRestoredLinksTx marks every activation and password-reset link and
+// the setup token copied from the backup used at restoredAt, as sessions are
+// cleared. They are one-time credentials: a link or token that was used or
+// revoked after the backup was taken is unused in the backup, so keeping
+// them would let it be redeemed again after the restore. Administrators
+// issue new links from the console, and the host issues a new setup token;
+// the daemon prints a new initial setup token at startup when no
+// administrator exists. Both tables have had used_at since they were
+// created, and a backup from before either table existed has nothing to
+// revoke.
+func revokeRestoredLinksTx(ctx context.Context, tx *sql.Tx, restoredAt time.Time) error {
+	stamp := restoredAt.UTC().Format(time.RFC3339Nano)
+	for _, credential := range []struct{ table, query string }{
+		{table: "user_invites", query: `UPDATE user_invites SET used_at=? WHERE used_at IS NULL`},
+		{table: "setup_tokens", query: `UPDATE setup_tokens SET used_at=? WHERE used_at IS NULL`},
+	} {
+		exists, err := tableExistsTx(ctx, tx, credential.table)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, credential.query, stamp); err != nil {
+			return fmt.Errorf("revoke restored %s: %w", credential.table, err)
+		}
+	}
+	return nil
 }
 
 // clearRestoredLeasesTx removes the daemon lease and the scan leases copied

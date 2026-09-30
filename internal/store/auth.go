@@ -281,6 +281,12 @@ func (s *Store) SaveAdminSecurityWithAuditPreservingSession(ctx context.Context,
 		return err
 	}
 	defer tx.Rollback()
+	// The current password hash tells whether the save changes the
+	// password; a missing account, which the save creates, has no links.
+	var currentPasswordHash string
+	if err := tx.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id=? AND tenant_id=?`, LegacyAdminUserID, DefaultTenantID).Scan(&currentPasswordHash); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	if err := saveAdminExec(ctx, tx, a, stored); err != nil {
 		return err
 	}
@@ -310,10 +316,22 @@ func (s *Store) SaveAdminSecurityWithAuditPreservingSession(ctx context.Context,
 			return err
 		}
 	}
-	if audit.Action != "" {
-		// The record belongs to the account's tenant, the default tenant.
-		audit.TenantID = DefaultTenantID
-		if err := insertAuditEntryExec(ctx, tx, audit, time.Now().UTC()); err != nil {
+	// The records belong to the account's tenant, the default tenant.
+	audit.TenantID = DefaultTenantID
+	records := []AuditEntry{audit}
+	// A new password ends every unused link for the account, as it does
+	// for any other account.
+	if currentPasswordHash != a.PasswordHash {
+		revoked, err := revokeAccountLinksTx(ctx, tx, time.Now().UTC(), tenantUserSQL, LegacyAdminUserID, DefaultTenantID)
+		if err != nil {
+			return err
+		}
+		if revoked > 0 {
+			records = append(records, linksRevokedAudit(audit, "user.activation_revoked", a.Username, linksRevokedPasswordChanged))
+		}
+	}
+	for _, record := range records {
+		if err := insertAuditEntryExec(ctx, tx, record, time.Now().UTC()); err != nil {
 			return err
 		}
 	}

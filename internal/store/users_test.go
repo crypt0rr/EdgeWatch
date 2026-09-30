@@ -84,7 +84,10 @@ func TestRevokeUserInviteAndDisablePreventActivation(t *testing.T) {
 	}
 }
 
-func TestUpdatePendingUserKeepsActivationInvite(t *testing.T) {
+// A pending account keeps its activation link when its display name is
+// edited, but a change of its role revokes the link, as for any account:
+// the invitee then needs a new link, which works.
+func TestUpdatePendingUserKeepsActivationInviteUntilItsRoleChanges(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	now := time.Now().UTC()
@@ -98,13 +101,30 @@ func TestUpdatePendingUserKeepsActivationInvite(t *testing.T) {
 		t.Fatal(err)
 	}
 	loaded.DisplayName = "Corrected name"
-	loaded.Role = RoleOperator
 	loaded.UpdatedAt = now.Add(time.Minute)
 	if err := defaultTenant(s).UpdateUser(ctx, loaded, false, AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.ActivateUser(ctx, "pending-edit-invite", "activated-hash", now.Add(2*time.Minute), AuditEntry{}); err != nil {
-		t.Fatalf("editing pending user revoked activation invite: %v", err)
+	if usable, err := s.ActivationTokenUsable(ctx, "pending-edit-invite", now.Add(2*time.Minute)); err != nil || !usable {
+		t.Fatalf("editing the pending account's display name revoked its activation link: %v, %v", usable, err)
+	}
+	loaded, err = defaultTenant(s).GetUser(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.Role = RoleOperator
+	loaded.UpdatedAt = now.Add(2 * time.Minute)
+	if err := defaultTenant(s).UpdateUserByAdministrator(ctx, loaded, false, defaultAdministratorAudit("user.updated")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ActivateUser(ctx, "pending-edit-invite", "activated-hash", now.Add(3*time.Minute), AuditEntry{}); err == nil {
+		t.Fatal("the activation link issued before the role change activated the account")
+	}
+	if err := defaultTenant(s).CreateUserInviteWithAudit(ctx, "pending-edit-renewed", user.ID, now.Add(3*time.Minute), now.Add(time.Hour), defaultAdministratorAudit("user.activation_issued")); err != nil {
+		t.Fatal(err)
+	}
+	if activated, err := s.ActivateUser(ctx, "pending-edit-renewed", "activated-hash", now.Add(4*time.Minute), AuditEntry{}); err != nil || activated.Role != RoleOperator || !activated.Enabled {
+		t.Fatalf("new activation link after the role change = %+v, %v", activated, err)
 	}
 }
 

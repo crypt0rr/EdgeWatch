@@ -1739,6 +1739,142 @@ button[aria-disabled="true"] {
   }
 }
 
+/* Keep product UI text readable on the dark surfaces, including at phone sizes. */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-weight: 650;
+}
+
+.button.primary {
+  background: #2266c2;
+}
+
+.job-card.archived {
+  opacity: 1;
+  background: #0b1624;
+  border-style: dashed;
+}
+
+.eyebrow,
+.pill,
+.stat-detail,
+.activity-row time,
+.revision,
+.job-card-bottom,
+th,
+.target-kind,
+.input-suffix em,
+.summary-label,
+.scan-row span,
+.scan-row code,
+.notification-meta span,
+.notification-update-toggle strong,
+.notification-update-toggle small,
+.notification-health,
+.result-row .muted,
+.active-scan-output,
+.coverage-chip,
+.host-open-count small,
+.button-count,
+.state-summary-item span,
+.state-summary-item small,
+.port-table th,
+.table-sub,
+.service-cell small,
+.service-cell code,
+.rdap-status .muted,
+.fact-grid dt,
+.rdap-events span,
+.global-host-row .host-source small,
+.user-chip .app-version,
+.schedule-suggestion-copy span,
+.schedule-suggestion-copy small,
+.schedule-suggestion > .button,
+.nav-count,
+.incident-facts dt,
+.mobile-port-facts dt,
+.active-scan-details dt,
+.mobile-port-sort,
+.scope-details summary,
+.scope-expression,
+.job-notification-option small,
+.job-notification-option .pill,
+.evidence-port-row,
+.scanner-run-summary strong,
+.telemetry-metric span,
+.telemetry-updated,
+.stat-retry,
+.surface-unit-addresses,
+.surface-port,
+.surface-port code,
+.surface-port small,
+.surface-no-positive,
+.unit-chip small,
+.unit-facts dt,
+.surface-unit-address-details {
+  font-size: 11px;
+}
+
+.label small,
+label small,
+.helper,
+.field-help,
+.notice,
+.baseline-box .muted,
+.notification-lock,
+.nonopen-note,
+.scanner-provenance .muted,
+.evidence-heading .muted,
+.latest-scan-meta .muted {
+  font-size: 12px;
+}
+
+.label small,
+label small,
+.helper,
+.field-help,
+.revision,
+.job-card-bottom,
+.activity-row time,
+.stat-detail {
+  color: var(--muted);
+}
+
+.notice,
+.job-notification-panel .helper {
+  font-size: 12px;
+}
+
+.page-heading h1,
+.panel h2,
+.panel-heading h2,
+.action-dialog h2,
+.empty h3 {
+  font-weight: 650;
+}
+
+.delete-progress > p:first-of-type,
+.settings-form > p {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+@media (max-width: 760px) {
+  .eyebrow,
+  .pill,
+  .summary-label,
+  .fact-grid dt,
+  .unit-facts dt,
+  .incident-facts dt,
+  .mobile-port-facts dt {
+    font-size: 12px;
+  }
+}
+
 .totp-secret-row {
   display: flex;
   align-items: center;

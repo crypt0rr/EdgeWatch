@@ -60,6 +60,22 @@ counts as used for its time step, as a code accepted at sign-in or for a TOTP
 confirmation does, so neither accepts it again; the first sign-in after
 enrolment takes the authenticator's next code.
 
+Activation and password-reset links are single-use, expire after 30 minutes,
+and are stored only as the SHA-256 digest of their token. An account has one
+usable link at a time: issuing a new link stops the older ones. A link also
+stops working, whoever issued it, when the account's password changes in any
+other way (its own change, the host's `admin reset-password`, or the
+redemption of another link), when its role changes, and when the account is
+disabled; the links an administrator issued stop when that administrator is
+demoted or disabled. A role change stops a pending account's activation link
+too, so a link issued for one role, such as a platform administrator's reset
+link for a unit administrator, never sets the password of the account in
+another role; the account then needs a new link. Each stopped link that could
+still have been used is recorded, in the same transaction as the change and
+with its actor, as `user.activation_revoked`, or
+`platform_admin.activation_revoked` for a platform administrator, naming the
+account.
+
 ## Business units and the platform administrator
 
 Every installation has at least one business unit, the default unit, which
@@ -428,6 +444,15 @@ worker. A restore also clears the daemon and scan leases copied from the
 backup, because no process runs on the restored copy. It still refuses to
 replace a database whose own daemon heartbeat is recent, unless the operator
 passes the emergency `--allow-active-daemon` override.
+
+A backup can hold sessions, activation and password-reset links, and a setup
+or platform setup token that were revoked, redeemed, or replaced after it was
+taken. In the same transaction that clears the leases, a restore therefore
+deletes the copied sessions and marks every unused link and setup token in
+the copy as used, so none of them works again; the dry run does the same to
+its private copy. Administrators issue new links after the restore, the host
+prints a new platform setup token with `admin platform-setup-token`, and
+while no administrator exists the daemon prints a new setup token at startup.
 
 Host CLI commands that change state (`scan`, `baseline approve` and `reset`,
 `notify test`, `backup`, `restore`, and administrator recovery) record a

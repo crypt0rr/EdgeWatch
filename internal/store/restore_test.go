@@ -317,6 +317,151 @@ func TestRestoreInvalidatesSessionsCopiedFromBackup(t *testing.T) {
 	}
 }
 
+// Activation and password-reset links and the setup token are one-time
+// credentials. A link or token that was used or revoked after the backup
+// was taken is unused in the backup, so a restore marks every unused one
+// used, in the step that clears sessions. A link used before the backup
+// keeps its time. The dry run leaves the source alone. The restored
+// database verifies and opens as the daemon opens it, the platform setup
+// token can be issued again without replacing an outstanding one, and a
+// new link for a pending account works.
+func TestRestoreRevokesLinksAndSetupTokenCopiedFromBackup(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.db")
+	destination := filepath.Join(dir, "destination.db")
+	createRestoreFixture(t, source, "source")
+	createRestoreFixture(t, destination, "destination")
+	sourceStore, err := Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	seedDefaultAdministrator(t, sourceStore)
+	invitee, err := defaultTenant(sourceStore).CreateUserWithInvite(ctx, User{Username: "invitee", Role: RoleViewer, PasswordHash: "!pending"}, "backup-invite", now, now.Add(30*time.Minute), defaultAdministratorAudit("user.created"))
+	if err != nil {
+		sourceStore.Close()
+		t.Fatal(err)
+	}
+	operator, err := defaultTenant(sourceStore).CreateUser(ctx, User{Username: "operator", Role: RoleOperator, PasswordHash: "hash", Enabled: true}, AuditEntry{})
+	if err != nil {
+		sourceStore.Close()
+		t.Fatal(err)
+	}
+	if err := defaultTenant(sourceStore).CreateUserInvite(ctx, "backup-used-reset", operator.ID, now.Add(-time.Hour), now.Add(time.Hour)); err != nil {
+		sourceStore.Close()
+		t.Fatal(err)
+	}
+	if _, err := sourceStore.ActivateUser(ctx, "backup-used-reset", "hash-reset", now.Add(-time.Minute), AuditEntry{}); err != nil {
+		sourceStore.Close()
+		t.Fatal(err)
+	}
+	if err := sourceStore.Platform().IssuePlatformSetupToken(ctx, "backup-platform-token", now.Add(15*time.Minute), now, false); err != nil {
+		sourceStore.Close()
+		t.Fatal(err)
+	}
+	if err := sourceStore.Close(); err != nil {
+		t.Fatal(err)
+	}
+	usedAt := func(s *Store, hash string) string {
+		t.Helper()
+		var used sql.NullString
+		if err := s.DB.QueryRow(`SELECT used_at FROM user_invites WHERE id_hash=?`, hash).Scan(&used); err != nil {
+			t.Fatal(err)
+		}
+		return used.String
+	}
+
+	if dryRun, err := DryRunRestore(ctx, source, destination, RestoreOptions{}); err != nil || !dryRun.Safe {
+		t.Fatalf("dry run = %#v, %v", dryRun, err)
+	}
+	backup, err := OpenReadOnlyExisting(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !linkUnused(t, backup, "backup-invite") {
+		backup.Close()
+		t.Fatal("the dry run revoked a link in the backup")
+	}
+	usedBefore := usedAt(backup, "backup-used-reset")
+	if err := backup.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Restore(ctx, source, destination, RestoreOptions{}); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	restored, err := Open(destination)
+	if err != nil {
+		t.Fatalf("open the restored database as the daemon does: %v", err)
+	}
+	defer restored.Close()
+	if _, err := restored.Verify(ctx); err != nil {
+		t.Fatalf("verify the restored database: %v", err)
+	}
+	if usable, err := restored.ActivationTokenUsable(ctx, "backup-invite", now.Add(time.Minute)); err != nil || usable {
+		t.Fatalf("restored activation link usable = %v, %v; want false", usable, err)
+	}
+	if linkUnused(t, restored, "backup-invite") {
+		t.Fatal("the restore kept the backup's activation link unused")
+	}
+	if _, err := restored.ActivateUser(ctx, "backup-invite", "hash-invitee", now.Add(time.Minute), AuditEntry{Action: "user.activated"}); err == nil {
+		t.Fatal("the backup's activation link activated the account after the restore")
+	}
+	if got := usedAt(restored, "backup-used-reset"); got != usedBefore {
+		t.Fatalf("used link time = %q, want %q kept", got, usedBefore)
+	}
+	if token, err := restored.Platform().GetPlatformSetupToken(ctx); err != nil || !token.Used {
+		t.Fatalf("restored platform setup token = %+v, %v; want used", token, err)
+	}
+	if usable, err := restored.Platform().PlatformSetupTokenUsable(ctx, "backup-platform-token", now.Add(time.Minute)); err != nil || usable {
+		t.Fatalf("restored platform setup token usable = %v, %v; want false", usable, err)
+	}
+
+	// The host issues a new platform setup token without --force, and an
+	// administrator a new activation link, which works.
+	later := now.Add(2 * time.Minute)
+	if err := restored.Platform().IssuePlatformSetupToken(ctx, "new-platform-token", later.Add(15*time.Minute), later, false); err != nil {
+		t.Fatalf("issue a platform setup token after the restore: %v", err)
+	}
+	if err := defaultTenant(restored).CreateUserInviteWithAudit(ctx, "new-invite", invitee.ID, later, later.Add(30*time.Minute), defaultAdministratorAudit("user.activation_issued")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restored.ActivateUser(ctx, "new-invite", "hash-invitee", later.Add(time.Minute), AuditEntry{Action: "user.activated"}); err != nil {
+		t.Fatalf("a link issued after the restore: %v", err)
+	}
+}
+
+// A restore of a backup without the link and setup token tables revokes
+// nothing, and a failed revocation stops the restore.
+func TestRevokeRestoredLinksSkipsMissingTablesAndReportsErrors(t *testing.T) {
+	ctx := context.Background()
+	raw, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "no-links.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	tx, err := raw.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := revokeRestoredLinksTx(ctx, tx, time.Now().UTC()); err != nil {
+		t.Fatalf("revoke links without link tables: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE user_invites (id_hash TEXT PRIMARY KEY, used_at TEXT); CREATE TRIGGER keep_links BEFORE UPDATE ON user_invites BEGIN SELECT RAISE(ABORT, 'links are protected'); END; INSERT INTO user_invites(id_hash) VALUES('link')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := revokeRestoredLinksTx(ctx, tx, time.Now().UTC()); err == nil || !strings.Contains(err.Error(), "revoke restored user_invites") {
+		t.Fatalf("revoke protected links = %v, want the failure", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if err := revokeRestoredLinksTx(ctx, tx, time.Now().UTC()); err == nil {
+		t.Fatal("revoking links in a finished transaction succeeded")
+	}
+}
+
 func TestRestorePendingDeliveryPoliciesAreExplicit(t *testing.T) {
 	for _, test := range []struct {
 		name   string

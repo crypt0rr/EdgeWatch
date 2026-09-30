@@ -486,8 +486,20 @@ func (pa *PlatformAccountStore) save(ctx context.Context, u User, recoveryCodes 
 			return err
 		}
 	}
-	if audit.Action != "" {
-		if err := insertPlatformAuditEntry(ctx, tx, audit, time.Now().UTC()); err != nil {
+	// A new password ends every unused link for the account, as it does
+	// for a tenant's account.
+	records := []AuditEntry{audit}
+	if currentPasswordHash != u.PasswordHash {
+		revoked, err := revokeAccountLinksTx(ctx, tx, u.UpdatedAt, platformAdminSQL, u.ID, RolePlatformAdmin)
+		if err != nil {
+			return err
+		}
+		if revoked > 0 {
+			records = append(records, linksRevokedAudit(audit, auditPlatformAdminActivationRevoked, u.Username, linksRevokedPasswordChanged))
+		}
+	}
+	for _, record := range records {
+		if err := insertPlatformAuditEntry(ctx, tx, record, time.Now().UTC()); err != nil {
 			return err
 		}
 	}

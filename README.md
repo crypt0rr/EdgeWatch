@@ -526,6 +526,15 @@ EdgeWatch removes it from the browser address bar as soon as the activation page
 opens. Previously issued query-string links remain usable only until their
 existing 30-minute expiry and are also removed from browser history on arrival.
 
+An account has one usable link at a time: a new link stops the older ones. A
+link also stops working when the account's password changes in any other way
+(the account's own change, `edgewatch admin reset-password` on the host, or
+redeeming another link), when the account's role changes, and when the account
+is disabled. A role change stops a pending account's activation link too, so
+issue a new link after changing the role of an account that has not activated
+yet. Each stopped link that could still have been used is recorded in the
+security audit as `user.activation_revoked`, with the account's name.
+
 | Role | Access |
 | --- | --- |
 | Administrator | Full administration, users, destinations, profiles, jobs, baselines, incidents, and public status. |
@@ -812,6 +821,16 @@ clears these copied leases, and the dry run does the same in its private copy.
 The service therefore starts at once after a restore, and a repeated restore
 onto the stopped service is not refused. The active-daemon check reads only
 the lease in the database that is being replaced.
+
+A backup can also hold sign-in sessions, activation and password-reset links,
+and a setup token that were ended, redeemed, or replaced after it was taken.
+Restore therefore clears the copied sessions and marks every unused link and
+setup token in the copy as used, and the dry run does the same in its private
+copy. After a restore everyone signs in again, and administrators issue a new
+link from **Users**, or the platform console, for each account that still
+needs one. Print a new platform setup token with `edgewatch admin
+platform-setup-token`; while no administrator exists, the daemon prints a new
+setup token when it starts.
 
 The current schema is version 55. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer

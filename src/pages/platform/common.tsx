@@ -1,8 +1,7 @@
-import { useState } from 'react'
-import { AlertTriangle, Check, Copy } from 'lucide-react'
 import { APIError } from '../../api'
 import type { BusinessUnitStatus, UnitRole } from '../../api'
 import { formatDateTime } from '../../format'
+export { OneTimeLink } from '../../components/OneTimeLink'
 
 const statusPresentation: Record<BusinessUnitStatus, { label: string; tone: string }> = {
   active: { label: 'Active', tone: 'green' },
@@ -84,31 +83,4 @@ export function isChangedElsewhere(error: unknown) {
 
 export function Loading({ label }: { label: string }) {
   return <div className="loading"><span className="spinner" />{label}</div>
-}
-
-/**
- * A one-time activation or password-reset link. The server returns it once,
- * so the console shows it until it is dismissed and never fetches it again.
- * It says "Copied" only after the clipboard took this link, so a page renders
- * each new link with its path as the key, which starts it as not copied.
- */
-export function OneTimeLink({ title, path, note, warning, onDismiss }: { title: string; path: string; note: string; warning?: string; onDismiss: () => void }) {
-  const [copied, setCopied] = useState(false)
-  const url = `${window.location.origin}${path}`
-  async function copy() {
-    // Without a clipboard, as on a page that is not served over HTTPS,
-    // nothing is copied.
-    if (!navigator.clipboard) return
-    try {
-      await navigator.clipboard.writeText(url)
-      setCopied(true)
-    } catch {
-      setCopied(false)
-    }
-  }
-  return <div className="panel activation-token one-time-link">
-    <div><strong>{title}</strong><p className="muted">{note}</p>{warning && <div className="notice warning one-time-warning" role="alert"><AlertTriangle size={14} /><span><strong>{warning}</strong></span></div>}</div>
-    <code aria-label={title}>{url}</code>
-    <div className="heading-actions"><button type="button" className="button secondary" onClick={() => void copy()}>{copied ? <Check size={16} /> : <Copy size={16} />} {copied ? 'Copied' : 'Copy link'}</button><button type="button" className="button ghost" onClick={onDismiss}>Done</button></div>
-  </div>
 }

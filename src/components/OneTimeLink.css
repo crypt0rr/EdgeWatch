@@ -1,0 +1,45 @@
+.panel.activation-token.one-time-link {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.one-time-link-copy,
+.one-time-link code {
+  min-width: 0;
+}
+
+.one-time-link code {
+  width: 100%;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+}
+
+.one-time-link .muted {
+  margin-top: 5px;
+}
+
+.one-time-link-actions {
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.one-time-link-actions .button {
+  min-height: 44px;
+  white-space: nowrap;
+}
+
+.one-time-link-error {
+  margin: 0;
+  color: #ff9ba0;
+  font-size: 12px;
+}
+
+.one-time-warning {
+  margin-top: 10px;
+  font-size: 12px;
+}

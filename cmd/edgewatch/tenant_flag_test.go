@@ -738,3 +738,125 @@ func TestHostRecoveryRecordsNameTheAccount(t *testing.T) {
 		}
 	}
 }
+
+// writeGatedFakeNmap writes a stand-in scanner like writeFakeNmap's that
+// creates the file started when a scan begins and prints its result only
+// once the file release exists, so a test can change the unit while the
+// scan runs. It gives up after about 30 seconds.
+func writeGatedFakeNmap(t *testing.T, dir string) (nmap, started, release string) {
+	t.Helper()
+	nmap, started, release = filepath.Join(dir, "gated-nmap"), filepath.Join(dir, "gated-nmap.started"), filepath.Join(dir, "gated-nmap.release")
+	for _, path := range []string{started, release} {
+		if strings.ContainsRune(path, '\'') {
+			t.Fatalf("path %q cannot be quoted for the stand-in scanner", path)
+		}
+	}
+	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'Nmap version 7.95'; exit 0; fi\n" +
+		": > '" + started + "'\n" +
+		"i=0\nwhile [ ! -f '" + release + "' ]; do i=$((i+1)); if [ \"$i\" -gt 600 ]; then exit 1; fi; sleep 0.05; done\n" +
+		`printf '%s' '<?xml version="1.0"?><nmaprun><host><status state="up" reason="syn-ack"/><address addr="192.0.2.10" addrtype="ipv4"/><ports><port protocol="tcp" portid="1"><state state="open" reason="syn-ack"/></port></ports></host><runstats><finished exit="success"/></runstats></nmaprun>'` + "\n"
+	if err := os.WriteFile(nmap, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return nmap, started, release
+}
+
+// pausedUnitRows renders the unit's runtime state, incidents, events and
+// queued alerts, which a scan that its unit's pause stopped leaves alone.
+func pausedUnitRows(t *testing.T, database, tenantID string) string {
+	t.Helper()
+	rows := strings.Split(otherTenantRows(t, database, tenantID), "\n")
+	return strings.Join(rows[2:6], "\n")
+}
+
+// A host scan whose unit is disabled while it runs, by the daemon or by
+// another host command, cannot be cancelled from there. It exits non-zero
+// and says that the unit was disabled; its scan is recorded as canceled,
+// and the unit's runtime state, incidents, events and alerts are as they
+// were.
+func TestHostScanReportsAUnitDisabledWhileItRan(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFlagFixture(t)
+	nmap, started, release := writeGatedFakeNmap(t, f.dir)
+	before := pausedUnitRows(t, f.database, otherTenantID)
+	type result struct {
+		out string
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		stdout, _, err := captureCLIOutput(t, func() error {
+			return run([]string{"scan", "--tenant", "other", "--job", "only-other", "--nmap", nmap, "--config", f.config, "--output", "json"})
+		})
+		done <- result{stdout, err}
+	}()
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the host scan did not start its scanner")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	// The disable commits on another connection, as the daemon's does.
+	s, err := store.OpenExisting(f.database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unit, err := s.Platform().GetTenant(ctx, otherTenantID)
+	if err == nil {
+		_, err = s.Platform().DisableTenant(ctx, otherTenantID, unit.Revision, store.AuditEntry{ActorKind: store.AuditActorHost})
+	}
+	if closeErr := s.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var got result
+	select {
+	case got = <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("the host scan did not finish")
+	}
+	if !errors.Is(got.err, store.ErrTenantNotActive) || !strings.Contains(got.err.Error(), `business unit "other" was disabled while the scan ran`) || !strings.Contains(got.err.Error(), "canceled and changed no baseline, incident or alert") {
+		t.Fatalf("scan of a unit disabled while it ran = %v", got.err)
+	}
+	var printed struct {
+		Scan   model.Scan    `json:"scan"`
+		Events []model.Event `json:"events"`
+	}
+	if err := json.Unmarshal([]byte(got.out), &printed); err != nil || printed.Scan.Job != "only-other" || printed.Scan.Status != "canceled" || len(printed.Events) != 0 {
+		t.Fatalf("scan output = %s, %v; want the canceled scan and no events", got.out, err)
+	}
+	reader, err := store.OpenReadOnlyExisting(f.database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var status string
+	if err := reader.DB.QueryRowContext(ctx, `SELECT status FROM scans WHERE id=? AND tenant_id=?`, printed.Scan.ID, otherTenantID).Scan(&status); err != nil || status != "canceled" {
+		t.Fatalf("the stored scan is %q, %v; want canceled", status, err)
+	}
+	if after := pausedUnitRows(t, f.database, otherTenantID); after != before {
+		t.Fatalf("the scan changed the disabled unit:\nbefore\n%s\nafter\n%s", before, after)
+	}
+}
+
+// A host scan that its unit's pause stopped names the unit, and says
+// whether the scan had started.
+func TestHostScanPausedError(t *testing.T) {
+	unit := store.Tenant{Slug: "other"}
+	cause := store.ErrTenantNotActive
+	if err := hostScanPausedError(unit, model.Scan{}, cause); !errors.Is(err, cause) || err.Error() != `business unit "other" was disabled before the scan started: the tenant is not active` {
+		t.Fatalf("a scan refused before it started = %v", err)
+	}
+	if err := hostScanPausedError(unit, model.Scan{ID: "scan-1"}, cause); !errors.Is(err, cause) || err.Error() != `business unit "other" was disabled while the scan ran; scan scan-1 was canceled and changed no baseline, incident or alert: the tenant is not active` {
+		t.Fatalf("a scan stopped while it ran = %v", err)
+	}
+}

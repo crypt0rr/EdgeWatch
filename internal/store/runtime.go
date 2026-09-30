@@ -604,6 +604,13 @@ func migrateLegacyScopeHashTx(ctx context.Context, tx *sql.Tx, jobID, legacyHash
 // changed while the scanner was running, the scan is retained as immutable
 // history but the runtime state is left untouched. It is the daemon's writer
 // and reaches a job of any tenant; the scan takes the job's tenant.
+//
+// The job's tenant must still be active. A scan that finishes after its
+// tenant was disabled, in the daemon or in a host command, is recorded as the
+// pause cancelled it (see recordScanOfPausedTenantTx), fn does not run, and
+// the error wraps ErrTenantNotActive. The tenant's state is read in this
+// transaction, so a disable either commits first and is seen here, or
+// commits after this scan.
 func (ss *SystemStore) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID, securityHash string, destinations []string, fn func(*model.JobState, *model.Scan) ([]model.Event, error)) ([]model.Event, error) {
 	if scan == nil {
 		return nil, errors.New("scan is required")
@@ -621,11 +628,21 @@ func (ss *SystemStore) FinalizeManagedScan(ctx context.Context, scan *model.Scan
 	defer func() { _ = tx.Rollback() }()
 
 	var raw []byte
-	if err := tx.QueryRowContext(ctx, `SELECT definition_json FROM jobs WHERE id=?`, jobID).Scan(&raw); err != nil {
+	var tenantState string
+	if err := tx.QueryRowContext(ctx, `SELECT j.definition_json,t.state FROM jobs AS j JOIN tenants AS t ON t.id=j.tenant_id WHERE j.id=?`, jobID).Scan(&raw, &tenantState); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: job %s", ErrNotFound, jobID)
 		}
 		return nil, err
+	}
+	if tenantState != TenantStateActive {
+		if err := recordScanOfPausedTenantTx(ctx, tx, scan, tenantState); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: job %s", ErrTenantNotActive, jobID)
 	}
 	job, err := unmarshalJob(raw)
 	if err != nil {
@@ -722,6 +739,47 @@ func (ss *SystemStore) FinalizeManagedScan(ctx context.Context, scan *model.Scan
 		return nil, err
 	}
 	return events, nil
+}
+
+// ScanCanceledByPauseMessage is the error of a scan whose result arrived
+// after its business unit was paused, which records it as canceled.
+const ScanCanceledByPauseMessage = "scan canceled: the business unit was paused before the result was saved"
+
+// recordScanOfPausedTenantTx records a scan that finished after its job's
+// tenant stopped being active, as a scan that the pause cancelled. It
+// changes no runtime state, baseline, incident, silence state, event or
+// alert. A result, successful or incomplete, becomes a canceled scan, so it
+// is kept as evidence but never becomes the job's latest successful scan or
+// a scan to approve as the baseline, and a resumable cycle that it completed
+// is discarded, so the first run after the tenant is enabled again does not
+// promote it. A scan that failed, timed out or was cancelled keeps its
+// outcome, and a cycle that it paused keeps its checkpoints, as a cycle
+// paused by the cancel of a running scan does. A tenant that is being
+// deleted records nothing: its data is being erased, and the scans trigger
+// refuses its rows. scan is updated to the outcome of the pause.
+func recordScanOfPausedTenantTx(ctx context.Context, tx *sql.Tx, scan *model.Scan, tenantState string) error {
+	discardCycle := false
+	if scan.Status == "success" || scan.Status == "incomplete" {
+		scan.Status = "canceled"
+		scan.Error = ScanCanceledByPauseMessage
+		if scan.CycleID != "" && scan.CycleStatus == "completed" {
+			scan.CycleStatus = "discarded"
+			discardCycle = true
+		}
+	}
+	if tenantState != TenantStateDisabled {
+		return nil
+	}
+	if discardCycle {
+		stamp := sqliteTimestamp(time.Now())
+		if _, err := tx.ExecContext(ctx, `UPDATE scan_cycles SET status='discarded',updated_at=?,finished_at=?,last_error='discarded because the business unit was paused' WHERE id=? AND status='completed'`, stamp, stamp, scan.CycleID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM scan_cycle_units WHERE cycle_id=? AND EXISTS (SELECT 1 FROM scan_cycles WHERE id=? AND status='discarded')`, scan.CycleID, scan.CycleID); err != nil {
+			return err
+		}
+	}
+	return saveScanExec(ctx, tx, *scan)
 }
 
 func updateRuntimeTxWithOutbox(ctx context.Context, tx *sql.Tx, jobID string, destinations []string, fn func(*model.JobState) ([]model.Event, error)) ([]model.Event, error) {

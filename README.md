@@ -765,6 +765,10 @@ administrator's password, pauses it and keeps its data:
   it presents;
 - its running scans are cancelled without changing baselines, its queued runs
   fail, and its jobs leave the schedule;
+- a scan that finishes after the disable, including a host `edgewatch scan`
+  that the daemon cannot cancel, is recorded as canceled and changes no
+  baseline, incident, or alert; a resumable cycle that such a scan completed
+  is discarded, so enabling the unit again does not apply it;
 - its undelivered alerts are held, including one that a delivery pass has
   picked up but not yet sent, and it gets no copy of new update alerts;
 - its public page answers as a page that is not enabled;
@@ -1037,7 +1041,10 @@ unit and the platform. A disabled unit can still be read with `status`,
 `history`, and `baseline export`; the other commands refuse it until it is
 enabled, and every command refuses a unit that is being deleted. These rules
 apply to the default unit with or without `--tenant`, even after it is
-renamed.
+renamed. A `scan` that is still running when its unit is disabled records its
+scan as canceled when it finishes, without changing the unit's baseline,
+incidents, or alerts, and exits non-zero with a message that the unit was
+disabled.
 `admin reset-password` and `admin disable-totp` find the account by
 `--username` in any unit; they print the account's unit and role before they
 act, and `--tenant UNIT_SLUG` makes them stop without a change unless the

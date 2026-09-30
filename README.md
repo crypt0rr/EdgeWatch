@@ -539,6 +539,18 @@ fragment, which is not sent in the HTTP request to EdgeWatch or a reverse proxy.
 EdgeWatch removes it from the browser address bar as soon as the activation page
 opens. Previously issued query-string links remain usable only until their
 existing 30-minute expiry and are also removed from browser history on arrival.
+A browser that is already signed in never uses a link with its session: the
+console names the signed-in account and offers to sign out, and then opens the
+activation page with the link's token, which stays in the address bar until
+then. **Return to the console** keeps the session and leaves the link unused.
+
+The console shows the data of one account at a time. When its session ends, or
+when a session read finds that the browser is now signed in as another account,
+for example after a sign-in in another tab, the console drops the data that it
+loaded before it shows the sign-in page or the other account. A request that
+fails without ending the session, as while EdgeWatch restarts, keeps the open
+console and what was typed in it: the console says that it is reconnecting and
+reads its session again every few seconds until EdgeWatch answers.
 
 An account has one usable link at a time: a new link stops the older ones. A
 link also stops working when the account's password changes in any other way
@@ -624,8 +636,12 @@ docker compose exec edgewatch edgewatch admin platform-setup-token \
 
 The token is valid for 15 minutes. While it is valid, the sign-in page links
 to the setup page, where the token, a username, and a password create the
-account. The command is refused once an enabled platform administrator
-exists, and it replaces an unused token only with `--force`. An
+account. Without a valid token, the setup page says that EdgeWatch is already
+set up and links to sign-in; print a token and reload the page. When the token
+expires, or someone else uses it, while the page is open, the page says so and
+keeps what was typed; print a new token and paste it. The command is refused
+once an enabled platform administrator exists, and it replaces an unused token
+only with `--force`. An
 existing platform administrator invites the others from **Platform admins**.
 An invited account stays pending until its one-time link is redeemed, and
 the link expires after 30 minutes. For a pending account, **Renew

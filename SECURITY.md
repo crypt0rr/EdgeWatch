@@ -91,7 +91,8 @@ another role; the account then needs a new link. Each stopped link that could
 still have been used is recorded, in the same transaction as the change and
 with its actor, as `user.activation_revoked`, or
 `platform_admin.activation_revoked` for a platform administrator, naming the
-account.
+account. A browser that holds a session never redeems a link with it: the
+console asks the visitor to sign out first and keeps the link until then.
 
 ## Business units and the platform administrator
 
@@ -151,6 +152,8 @@ the first setup's per-client failure budget; a wrong, used, or expired token
 gets one generic answer, and each failure is recorded in platform scope.
 While the token is valid, `/api/v1/setup/status` reports
 `platform_setup_available`, which the sign-in page uses to offer the setup.
+Once the first administrator exists, the setup page never shows the first-run
+form.
 An enabled platform
 administrator can then invite another after confirming its password; the
 invited account stays pending and disabled until it redeems its one-time

@@ -38,6 +38,25 @@ func (s *Store) ConsumeTOTPStep(ctx context.Context, userID string, step int64, 
 	return advanced, nil
 }
 
+// TOTPStepAvailable reports whether a code of step may still be accepted
+// for the account: whether step is newer than every step accepted before. It
+// records nothing; sign-in records the step with CreateSignInSession, in the
+// transaction that creates the session, which checks it again.
+func (s *Store) TOTPStepAvailable(ctx context.Context, userID string, step int64) (bool, error) {
+	if userID == "" || step < 0 {
+		return false, nil
+	}
+	var last int64
+	err := s.reader().QueryRowContext(ctx, `SELECT last_step FROM totp_replay WHERE user_id=?`, userID).Scan(&last)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return step > last, nil
+}
+
 // advanceTOTPStepTx raises the account's replay guard to step, and reports
 // whether step was newer than every step accepted before, that is, whether
 // a code of step may be accepted now. A step that is not newer leaves the

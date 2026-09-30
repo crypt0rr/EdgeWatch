@@ -238,6 +238,7 @@ func (s *Server) Handler() http.Handler {
 	// authentication. Direct handler calls used by package tests intentionally
 	// bypass this network-boundary middleware.
 	hostGuard := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.noteUntrustedProxy(r)
 		if strings.HasPrefix(r.URL.Path, "/api/v1") && !s.validateRequestHost(r) {
 			writeError(w, http.StatusMisdirectedRequest, "host", "request host is not allowed", nil)
 			return
@@ -245,6 +246,21 @@ func (s *Server) Handler() http.Handler {
 		mux.ServeHTTP(w, r)
 	})
 	return s.requestLogging(securityHeaders(hostGuard))
+}
+
+// noteUntrustedProxy logs a warning, at most once an hour, when requests
+// come from a proxy that is not in web.trusted_proxies but send a forwarding
+// header: EdgeWatch then sees every client behind the proxy as the proxy's
+// address, which the clients share for the sign-in budget, the setup and
+// activation backstop, and the audit. The console's status shows the proxy
+// to administrators, see adminStatus and platformStatus.
+func (s *Server) noteUntrustedProxy(r *http.Request) {
+	if s == nil || s.Auth == nil || s.Log == nil {
+		return
+	}
+	if proxy, logNow := s.Auth.NoteForwarding(r); logNow {
+		s.Log.Warn("requests from a proxy that is not in web.trusted_proxies carry forwarding headers; every client behind it shares the proxy's sign-in budget, setup and activation backstop, and audit address", "peer", proxy.Peer, "header", proxy.Header, "hint", "add the proxy address to web.trusted_proxies and set web.forwarded_header to the header that the proxy sanitizes")
+	}
 }
 
 func (s *Server) ListenAndServe(ctx context.Context, address string) error {
@@ -304,6 +320,11 @@ func (s *Server) serveListener(ctx context.Context, listener net.Listener, addre
 			s.waitForSSEShutdown(shutdownCtx)
 			_ = server.Shutdown(shutdownCtx)
 			s.waitForHandlers(shutdownCtx)
+			// A refused sign-in writes its rate-limit record in the
+			// background; let it finish before the database closes.
+			if s.Auth != nil {
+				_ = s.Auth.WaitForRateLimitRecords(shutdownCtx)
+			}
 			close(shutdownDone)
 		})
 	}

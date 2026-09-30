@@ -185,6 +185,20 @@ describe('dashboard', () => {
     expect(container.textContent).toContain('1 destination tested')
   })
 
+  it('warns about a proxy that web.trusted_proxies does not list, only when the status reports one', async () => {
+    await renderDashboard()
+    expect(container.textContent).not.toContain('web.trusted_proxies')
+    act(() => root.unmount())
+    queryClient.clear()
+    root = createRoot(container)
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, untrusted_proxy: { peer: '10.0.0.5', header: 'X-Forwarded-For', last_seen_at: '2026-09-30T08:00:00Z' } })
+    await renderDashboard()
+    await vi.waitFor(() => expect(container.textContent).toContain('Requests arrive through a proxy that EdgeWatch does not trust.'), { timeout: 1000 })
+    const banner = container.querySelector('[role="status"].legacy-banner')
+    expect(banner?.textContent).toContain('10.0.0.5 sends X-Forwarded-For, but web.trusted_proxies does not list it')
+    expect(banner?.textContent).toContain('Add 10.0.0.5 to web.trusted_proxies in config.yaml')
+  })
+
   it('hides operational controls and incident metrics for viewers', async () => {
     vi.mocked(getSession).mockResolvedValue(session('viewer'))
     await act(async () => {

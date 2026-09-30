@@ -131,6 +131,10 @@ func TestRateLimitRecordsBelongToTheAccountsScope(t *testing.T) {
 		if err := check.attempt(from(check.address)); !errors.Is(err, ErrRateLimited) {
 			t.Fatalf("%s: attempt over the budget = %v, want ErrRateLimited", check.name, err)
 		}
+		// A refused sign-in writes its record in the background.
+		if err := m.WaitForRateLimitRecords(ctx); err != nil {
+			t.Fatal(err)
+		}
 		records := rateLimitRecords(t, s, check.address)
 		if want := []string{check.want + " " + check.subject + " " + store.AuditActorUnit}; !slices.Equal(records, want) {
 			t.Errorf("%s: rate-limit records = %q, want %q", check.name, records, want)
@@ -226,6 +230,10 @@ func TestRateLimitRecordsFromOneClientReachEveryScope(t *testing.T) {
 		if err := signIn("rotating-" + strconv.Itoa(i))(); !errors.Is(err, ErrRateLimited) {
 			t.Fatalf("rotating unknown username %d = %v, want ErrRateLimited", i, err)
 		}
+	}
+	// A refused sign-in writes its record in the background.
+	if err := m.WaitForRateLimitRecords(ctx); err != nil {
+		t.Fatal(err)
 	}
 	rows, err := s.DB.Query(`SELECT COALESCE(tenant_id,'<null>'),actor_username FROM security_audit WHERE action='auth.rate_limited' AND source_ip=?`, client)
 	if err != nil {

@@ -32,7 +32,7 @@ const (
 	SessionCookie = "edgewatch_session"
 	PasswordMin   = 12
 	SessionTTL    = 30 * 24 * time.Hour
-	IdleTTL       = 24 * time.Hour
+	IdleTTL       = store.SessionIdleTimeout
 	// Session activity writes are coalesced across tabs so a user can keep a
 	// session alive without turning every keypress or click into a SQLite write.
 	sessionActivityTouchInterval = 5 * time.Minute
@@ -69,6 +69,11 @@ const (
 	// work while still allowing normal bursts to drain.
 	authArgon2MaxConcurrent = 4
 	authArgon2QueueTimeout  = 250 * time.Millisecond
+	// A refused sign-in hands its rate-limit record to a background write, so
+	// the refusal never waits for the audit writer. Each scope's record is
+	// written at most once per window, and this bounds the records waiting
+	// for the writer at once; one that finds no room is not written.
+	rateLimitRecordsPending = 64
 )
 
 var ErrRateLimited = errors.New("too many authentication attempts; try again later")
@@ -131,6 +136,92 @@ type Manager struct {
 	trustedProxies      []*net.IPNet
 	forwardedHeader     string
 	argon2Sem           chan struct{}
+	// rateRecordSlots holds a slot for each rate-limit record of a refused
+	// sign-in that is being written. rateRecordsPending counts them for
+	// WaitForRateLimitRecords, and rateRecordsIdle is closed once the count
+	// returns to zero.
+	rateRecordSlots    chan struct{}
+	rateRecordsPending int
+	rateRecordsIdle    chan struct{}
+	// untrustedProxy is the latest request from an untrusted proxy that
+	// NoteForwarding saw, and untrustedProxyLogged when it last asked for
+	// the warning to be logged.
+	untrustedProxy       UntrustedProxy
+	untrustedProxyLogged time.Time
+}
+
+const (
+	// untrustedProxyLogInterval is how often NoteForwarding asks for the
+	// warning about an untrusted proxy to be logged while its requests keep
+	// arriving.
+	untrustedProxyLogInterval = time.Hour
+	// untrustedProxyNoticeTTL is how long UntrustedProxy reports the latest
+	// untrusted proxy after its last request.
+	untrustedProxyNoticeTTL = 24 * time.Hour
+)
+
+// UntrustedProxy describes the latest request whose directly connected peer
+// was neither a loopback address nor in web.trusted_proxies but carried a
+// client-address forwarding header: the request of a proxy that EdgeWatch
+// does not trust. Every client behind such a proxy has the proxy's address,
+// so they share its sign-in budget, the source backstop of the setups and
+// activation, and its audit address.
+type UntrustedProxy struct {
+	Peer       string    `json:"peer"`
+	Header     string    `json:"header"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+}
+
+// NoteForwarding records the request when it comes from an untrusted proxy,
+// as UntrustedProxy describes it. It returns the proxy, and whether the
+// warning about it is to be logged now, at most once per
+// untrustedProxyLogInterval. A loopback peer, which the shared loopback
+// cooldown covers, a trusted proxy, and a request without a forwarding header
+// are not recorded.
+func (m *Manager) NoteForwarding(request *http.Request) (UntrustedProxy, bool) {
+	if m == nil || request == nil {
+		return UntrustedProxy{}, false
+	}
+	header := ""
+	switch {
+	case strings.TrimSpace(request.Header.Get("X-Forwarded-For")) != "":
+		header = "X-Forwarded-For"
+	case strings.TrimSpace(request.Header.Get("Forwarded")) != "":
+		header = "Forwarded"
+	default:
+		return UntrustedProxy{}, false
+	}
+	peer := net.ParseIP(strings.TrimSpace(limiterKey(requestRemote(request))))
+	if peer == nil || peer.IsLoopback() {
+		return UntrustedProxy{}, false
+	}
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ipInNetworks(peer, m.trustedProxies) {
+		return UntrustedProxy{}, false
+	}
+	m.untrustedProxy = UntrustedProxy{Peer: peer.String(), Header: header, LastSeenAt: now}
+	if !m.untrustedProxyLogged.IsZero() && now.Sub(m.untrustedProxyLogged) < untrustedProxyLogInterval {
+		return m.untrustedProxy, false
+	}
+	m.untrustedProxyLogged = now
+	return m.untrustedProxy, true
+}
+
+// UntrustedProxy returns the latest untrusted proxy that NoteForwarding
+// recorded, when its last request is less than untrustedProxyNoticeTTL old.
+func (m *Manager) UntrustedProxy() (UntrustedProxy, bool) {
+	if m == nil {
+		return UntrustedProxy{}, false
+	}
+	now := m.now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.untrustedProxy.Peer == "" || now.Sub(m.untrustedProxy.LastSeenAt) >= untrustedProxyNoticeTTL {
+		return UntrustedProxy{}, false
+	}
+	return m.untrustedProxy, true
 }
 
 func NewManager(s *store.Store) *Manager {
@@ -142,6 +233,7 @@ func NewManager(s *store.Store) *Manager {
 		loginClientFails: map[string][]time.Time{}, loginClientBlocked: map[string]time.Time{},
 		sourceInFlight: map[string]int{}, accountInFlight: map[string]int{}, loginClientInFlight: map[string]int{},
 		rateAudit: map[string]time.Time{}, argon2Sem: make(chan struct{}, authArgon2MaxConcurrent),
+		rateRecordSlots: make(chan struct{}, rateLimitRecordsPending),
 	}
 }
 
@@ -500,7 +592,7 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 	account := "setup:" + digest(token)
 	if !m.allowScoped(source, account) {
 		m.auditRateLimit(ctx, "setup", request)
-		return ErrRateLimited
+		return m.rateLimitError(source, account)
 	}
 	defer m.releaseScoped(source, account)
 	usable, checkErr := m.Store.Platform().SetupTokenUsable(ctx, digest(token), m.now())
@@ -549,7 +641,7 @@ func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, to
 	account := "activation:" + digest(token)
 	if !m.allowScoped(source, account) {
 		m.auditRateLimit(ctx, "activation", request)
-		return "", ErrRateLimited
+		return "", m.rateLimitError(source, account)
 	}
 	defer m.releaseScoped(source, account)
 	usable, checkErr := m.Store.ActivationTokenUsable(ctx, digest(token), m.now())
@@ -611,7 +703,7 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 	// still count each account's own failures. A shared loopback peer uses
 	// the source-wide cooldown instead.
 	loginClient := ""
-	if !sharedLoopbackLoginSource(source, account) {
+	if !sharedLoopbackSource(source, account) {
 		loginClient = "login-client:" + strings.TrimPrefix(source, "source:")
 		if !m.allowLoginClient(loginClient) {
 			m.auditLoginRateLimit(ctx, identity, request)
@@ -689,28 +781,31 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		m.auditAccountFailure(ctx, "auth.login_failed", identity, user, request)
 		return "", user, errors.New("invalid credentials")
 	}
-	totpAccepted := false
-	acceptedTOTPStep := int64(-1)
+	// The one-time factor is checked here, and spent only in the transaction
+	// that creates the session: a sign-in that fails after this point, for
+	// whatever reason, leaves the TOTP time step and the recovery code as
+	// they were.
+	factor := store.NoSignInFactor
 	acceptedTOTPSecret := ""
 	if user.TOTPEnabled {
 		valid := false
 		if user.TOTPSecretError == nil {
 			if step, stepValid := VerifyTOTPAtStep(user.TOTPSecret, otp, m.now()); stepValid {
-				consumed, consumeErr := m.Store.ConsumeTOTPStep(ctx, user.ID, step, m.now())
-				if consumeErr != nil {
-					return "", user, consumeErr
+				available, availableErr := m.Store.TOTPStepAvailable(ctx, user.ID, step)
+				if availableErr != nil {
+					return "", user, availableErr
 				}
-				valid, totpAccepted = consumed, consumed
-				if consumed {
-					acceptedTOTPStep = step
+				if available {
+					valid = true
+					factor.TOTPStep = step
 					acceptedTOTPSecret = user.TOTPSecret
 				}
 			}
 		}
 		if !valid && recovery != "" {
-			valid, err = m.Store.ConsumeRecoveryCodeTextForUser(ctx, user.ID, recovery, m.now())
-			if valid {
-				m.auditAccountFailure(ctx, "auth.recovery_code_used", identity, user, request)
+			if match, matchErr := m.Store.MatchRecoveryCodeForUser(ctx, user.ID, recovery); matchErr == nil && match != "" {
+				valid = true
+				factor.RecoveryCodeHash = match
 			}
 		}
 		if !valid {
@@ -718,6 +813,13 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			m.auditAccountFailure(ctx, "auth.totp_failed", identity, user, request)
 			return "", user, errors.New("one-time code is required")
 		}
+	}
+	// factorSpent answers a sign-in whose one-time factor another sign-in
+	// spent after it was checked here, as a wrong code is answered.
+	factorSpent := func() (string, store.User, error) {
+		m.failedScoped(source, account, loginClient)
+		m.auditAccountFailure(ctx, "auth.totp_failed", identity, user, request)
+		return "", user, errors.New("one-time code is required")
 	}
 	// Successful logins are an opportunity to move hashes created with an
 	// older, weaker Argon2id policy to the current parameters. Keep the login
@@ -752,13 +854,16 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		action = "admin.login"
 	}
 	audit := store.AuditEntry{Action: action, Detail: "successful login", ActorUserID: user.ID, ActorUsername: user.Username, SourceIP: m.ClientIP(request)}
-	createSession := func(candidate store.User, hash string, revision int64, totpEnabled bool) error {
-		if hash != "" {
-			return m.Store.CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx, candidate.ID, candidate.PasswordHash, hash, revision, totpEnabled, digest(session), csrf, now, now.Add(SessionTTL), audit)
-		}
-		return m.Store.CreateSessionForUserIfCurrent(ctx, candidate.ID, candidate.PasswordHash, revision, totpEnabled, digest(session), csrf, now, now.Add(SessionTTL), audit)
+	// The session is created in one transaction with the one-time factor's
+	// record and the upgraded password hash, so a sign-in that creates no
+	// session spends no factor.
+	createSession := func(candidate store.User, hash string, revision int64, totpEnabled bool, factor store.SignInFactor) error {
+		return m.Store.CreateSignInSession(ctx, store.SignInSession{UserID: candidate.ID, PasswordHash: candidate.PasswordHash, UpgradedPasswordHash: hash, Revision: revision, TOTPEnabled: totpEnabled, Factor: factor, IDHash: digest(session), CSRF: csrf, Created: now, Expires: now.Add(SessionTTL), Audit: audit})
 	}
-	if err := createSession(user, upgradedHash, user.Revision, user.TOTPEnabled); err != nil {
+	spent := func(err error) bool {
+		return errors.Is(err, store.ErrTOTPReplay) || errors.Is(err, store.ErrRecoveryCodeUsed)
+	}
+	if err := createSession(user, upgradedHash, user.Revision, user.TOTPEnabled, factor); err != nil {
 		if errors.Is(err, store.ErrTenantNotActive) {
 			// A tenant that is disabled or being deleted stops sign-in. The
 			// answer is the one a wrong password gets, so it does not tell
@@ -766,6 +871,9 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 			m.failedScoped(source, account, loginClient)
 			m.auditAccountFailure(ctx, "auth.login_failed", identity, user, request)
 			return "", user, errors.New("invalid credentials")
+		}
+		if spent(err) {
+			return factorSpent()
 		}
 		if !errors.Is(err, store.ErrSessionCredentialsChanged) && !errors.Is(err, store.ErrPasswordChangedDuringLogin) {
 			return "", user, err
@@ -793,19 +901,29 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		if verifyErr != nil || !fallbackValid {
 			return "", user, errors.New("credentials changed during login")
 		}
+		retryFactor := store.NoSignInFactor
 		if current.TOTPEnabled {
 			// A password change or display-name edit may legitimately race the
 			// session insert, but a TOTP re-enrolment must invalidate the factor
-			// that was verified before the retry. Only reuse the already-consumed
-			// step when the authoritative encrypted secret is unchanged; otherwise
-			// validate and consume the code against the new secret.
-			otpValid := totpAccepted && acceptedTOTPStep >= 0 && current.TOTPSecret == acceptedTOTPSecret
-			if !otpValid && current.TOTPSecretError == nil {
+			// that was verified before the retry. Only reuse the accepted step
+			// when the authoritative encrypted secret is unchanged; otherwise
+			// validate the code against the new secret. A recovery code is
+			// reused only while it is still one of the account's unused codes,
+			// which the session transaction checks.
+			otpValid := false
+			switch {
+			case factor.TOTPStep >= 0 && current.TOTPSecret == acceptedTOTPSecret:
+				retryFactor.TOTPStep, otpValid = factor.TOTPStep, true
+			case factor.RecoveryCodeHash != "":
+				retryFactor.RecoveryCodeHash, otpValid = factor.RecoveryCodeHash, true
+			case current.TOTPSecretError == nil:
 				if step, stepValid := VerifyTOTPAtStep(current.TOTPSecret, otp, m.now()); stepValid {
-					var consumeErr error
-					otpValid, consumeErr = m.Store.ConsumeTOTPStep(ctx, current.ID, step, m.now())
-					if consumeErr != nil {
-						return "", user, consumeErr
+					available, availableErr := m.Store.TOTPStepAvailable(ctx, current.ID, step)
+					if availableErr != nil {
+						return "", user, availableErr
+					}
+					if available {
+						retryFactor.TOTPStep, otpValid = step, true
 					}
 				}
 			}
@@ -813,16 +931,23 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 				return "", user, errors.New("credentials changed during login")
 			}
 		}
-		if retryErr := createSession(current, "", current.Revision, current.TOTPEnabled); retryErr != nil {
+		if retryErr := createSession(current, "", current.Revision, current.TOTPEnabled, retryFactor); retryErr != nil {
+			if spent(retryErr) {
+				return factorSpent()
+			}
 			return "", user, retryErr
 		}
-		user = current
+		user, factor = current, retryFactor
 	} else if upgradedHash != "" {
 		user.PasswordHash = upgradedHash
 		user.Revision++
 	}
 	if upgradedHash == "" {
 		_ = m.Store.SetUserLastLogin(ctx, user.ID, now)
+	}
+	if factor.RecoveryCodeHash != "" {
+		// The recovery code was marked used with the session.
+		m.auditAccountFailure(ctx, "auth.recovery_code_used", identity, user, request)
 	}
 	// A successful sign-in clears the client's bucket for the account it
 	// signed in to, and the source backstop, which holds a shared loopback
@@ -979,6 +1104,19 @@ func (m *Manager) auditConfirmationFailure(ctx context.Context, action, operatio
 // session, so the actor is a unit actor, the kind of an anonymous console
 // request.
 func (m *Manager) recordAuthEvent(ctx context.Context, action, subject, tenantID string, platform bool, request *http.Request) {
+	entry, write := m.authEvent(action, subject, tenantID, platform, request)
+	if err := write(ctx, entry); err != nil {
+		// Authentication failure records are deliberately best-effort so they do
+		// not change the generic response contract, but a storage failure must
+		// remain observable for operators. Store.AuditEntry persists through a
+		// bounded context detached from request cancellation.
+		slog.Default().Warn("security audit write failed", "action", action, "error", err)
+	}
+}
+
+// authEvent returns the record of an authentication event, as
+// recordAuthEvent writes it, and the write of its scope.
+func (m *Manager) authEvent(action, subject, tenantID string, platform bool, request *http.Request) (store.AuditEntry, func(context.Context, store.AuditEntry) error) {
 	subject = strings.TrimSpace(subject)
 	if len(subject) > 80 {
 		subject = subject[:80]
@@ -987,19 +1125,80 @@ func (m *Manager) recordAuthEvent(ctx context.Context, action, subject, tenantID
 	if platform {
 		write = m.Store.Platform().AuditEntry
 	}
-	if err := write(ctx, store.AuditEntry{
+	return store.AuditEntry{
 		Action:        action,
 		Detail:        "authentication event for " + subject,
 		ActorUsername: subject,
 		SourceIP:      m.ClientIP(request),
 		TenantID:      tenantID,
 		ActorKind:     store.AuditActorUnit,
-	}); err != nil {
-		// Authentication failure records are deliberately best-effort so they do
-		// not change the generic response contract, but a storage failure must
-		// remain observable for operators. Store.AuditEntry persists through a
-		// bounded context detached from request cancellation.
-		slog.Default().Warn("security audit write failed", "action", action, "error", err)
+	}, write
+}
+
+// recordRateLimitInBackground writes the rate-limit record of a refused
+// sign-in, which claimRateAudit has claimed, without holding up the refusal.
+// Whether a refusal is the first of its scope in the window, and so has a
+// record to write, depends on the account with the username; answering
+// before the record is written keeps the refusal as fast for every username.
+// The record is built from the request now and written by a background
+// write, of which at most rateLimitRecordsPending wait for the writer at
+// once. When none is free, the record is not written and the claim is
+// dropped, so a later refusal in the scope writes it.
+func (m *Manager) recordRateLimitInBackground(ctx context.Context, subject, tenantID string, platform bool, request *http.Request) {
+	entry, write := m.authEvent("auth.rate_limited", subject, tenantID, platform, request)
+	m.mu.Lock()
+	if m.rateRecordSlots == nil {
+		m.rateRecordSlots = make(chan struct{}, rateLimitRecordsPending)
+	}
+	slots := m.rateRecordSlots
+	m.mu.Unlock()
+	select {
+	case slots <- struct{}{}:
+	default:
+		m.unclaimRateAudit(subject, tenantID, platform, request)
+		slog.Default().Warn("security audit write skipped", "action", entry.Action, "reason", "too many rate-limit records are waiting for the audit writer")
+		return
+	}
+	m.mu.Lock()
+	if m.rateRecordsPending == 0 {
+		m.rateRecordsIdle = make(chan struct{})
+	}
+	m.rateRecordsPending++
+	m.mu.Unlock()
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		defer func() {
+			<-slots
+			m.mu.Lock()
+			m.rateRecordsPending--
+			if m.rateRecordsPending == 0 {
+				close(m.rateRecordsIdle)
+			}
+			m.mu.Unlock()
+		}()
+		if err := write(detached, entry); err != nil {
+			slog.Default().Warn("security audit write failed", "action", entry.Action, "error", err)
+		}
+	}()
+}
+
+// WaitForRateLimitRecords waits until the rate-limit records of refused
+// sign-ins that are being written in the background are written, or ctx
+// ends. The web server calls it when it stops, after its requests have
+// finished and before the database closes.
+func (m *Manager) WaitForRateLimitRecords(ctx context.Context) error {
+	m.mu.Lock()
+	if m.rateRecordsPending == 0 {
+		m.mu.Unlock()
+		return nil
+	}
+	idle := m.rateRecordsIdle
+	m.mu.Unlock()
+	select {
+	case <-idle:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -1027,11 +1226,17 @@ func (m *Manager) auditRateLimitIn(ctx context.Context, subject string, request 
 // auditLoginRateLimit is auditRateLimit for a sign-in with the identity.
 // The record belongs where the sign-in's failures do: the tenant of the
 // account with the username, or platform scope for a platform
-// administrator or a username that no account has.
+// administrator or a username that no account has. The account is looked
+// up for every name alike, and the record is written in the background, so
+// the refusal takes as long whatever the name.
 func (m *Manager) auditLoginRateLimit(ctx context.Context, identity string, request *http.Request) {
-	m.auditAccountRateLimitWith(ctx, "login:"+identity, request, func() (store.User, error) {
+	subject := "login:" + identity
+	tenantID, platform := rateLimitScope(func() (store.User, error) {
 		return m.Store.GetUserByUsername(ctx, identity)
 	})
+	if m.claimRateAudit(subject, tenantID, platform, request) {
+		m.recordRateLimitInBackground(ctx, subject, tenantID, platform, request)
+	}
 }
 
 // auditAccountRateLimit is auditRateLimit for the confirmation of a
@@ -1052,13 +1257,20 @@ func (m *Manager) auditAccountRateLimit(ctx context.Context, subject, userID str
 // up before the transition is claimed: one indexed read for each refused
 // request, cheap next to the password hashing that the limiter protects.
 func (m *Manager) auditAccountRateLimitWith(ctx context.Context, subject string, request *http.Request, lookup func() (store.User, error)) {
-	tenantID, platform := "", true
-	if account, err := lookup(); err == nil && account.TenantID != "" {
-		tenantID, platform = account.TenantID, false
-	}
+	tenantID, platform := rateLimitScope(lookup)
 	if m.claimRateAudit(subject, tenantID, platform, request) {
 		m.recordAuthEvent(ctx, "auth.rate_limited", subject, tenantID, platform, request)
 	}
+}
+
+// rateLimitScope returns the scope of a rate-limit record about the account
+// that lookup returns: the account's tenant, or platform scope for an
+// account without one or an account that lookup cannot find.
+func rateLimitScope(lookup func() (store.User, error)) (string, bool) {
+	if account, err := lookup(); err == nil && account.TenantID != "" {
+		return account.TenantID, false
+	}
+	return "", true
 }
 
 // claimRateAudit reports whether the rate-limit transition of the subject's
@@ -1067,6 +1279,40 @@ func (m *Manager) auditAccountRateLimitWith(ctx context.Context, subject string,
 // so starts the suppression window of that scope. An empty tenant outside
 // platform scope is the default tenant, where such a record belongs.
 func (m *Manager) claimRateAudit(subject, tenantID string, platform bool, request *http.Request) bool {
+	key := m.rateAuditKey(subject, tenantID, platform, request)
+	now := m.now()
+	m.mu.Lock()
+	m.ensureScopedLimiterMapsLocked()
+	last, exists := m.rateAudit[key]
+	if exists && now.Sub(last) < authFailureWindow {
+		m.mu.Unlock()
+		return false
+	}
+	m.rateAudit[key] = now
+	if len(m.rateAudit) > authLimiterMaxEntries {
+		for candidate, timestamp := range m.rateAudit {
+			if now.Sub(timestamp) >= authFailureWindow {
+				delete(m.rateAudit, candidate)
+			}
+		}
+	}
+	m.mu.Unlock()
+	return true
+}
+
+// unclaimRateAudit ends the suppression window that claimRateAudit started
+// for a record that could not be handed to the writer, so the next refusal
+// in the scope claims it again.
+func (m *Manager) unclaimRateAudit(subject, tenantID string, platform bool, request *http.Request) {
+	key := m.rateAuditKey(subject, tenantID, platform, request)
+	m.mu.Lock()
+	delete(m.rateAudit, key)
+	m.mu.Unlock()
+}
+
+// rateAuditKey returns the key of the suppression window of the subject's
+// endpoint from the request's source in the scope of the record.
+func (m *Manager) rateAuditKey(subject, tenantID string, platform bool, request *http.Request) string {
 	// A blocked episode belongs to the resolved source, endpoint, and the
 	// scope that the record is written in, not to attacker-controlled account
 	// text. In particular, unknown-login subjects include the supplied
@@ -1086,25 +1332,7 @@ func (m *Manager) claimRateAudit(subject, tenantID string, platform bool, reques
 		}
 		scope = "tenant:" + tenantID
 	}
-	key := rateAuditEndpoint(subject) + "\x00" + m.sourceScopeFor(request, "rate") + "\x00" + scope
-	now := m.now()
-	m.mu.Lock()
-	m.ensureScopedLimiterMapsLocked()
-	last, exists := m.rateAudit[key]
-	if exists && now.Sub(last) < authFailureWindow {
-		m.mu.Unlock()
-		return false
-	}
-	m.rateAudit[key] = now
-	if len(m.rateAudit) > authLimiterMaxEntries {
-		for candidate, timestamp := range m.rateAudit {
-			if now.Sub(timestamp) >= authFailureWindow {
-				delete(m.rateAudit, candidate)
-			}
-		}
-	}
-	m.mu.Unlock()
-	return true
+	return rateAuditEndpoint(subject) + "\x00" + m.sourceScopeFor(request, "rate") + "\x00" + scope
 }
 
 func rateAuditEndpoint(subject string) string {
@@ -1161,7 +1389,9 @@ func normalizeLoginIdentity(username string) string {
 // trustworthy client identity also have one budget for the client, see
 // LoginAs and allowLoginClient. Shared loopback login sources instead use the
 // same brief source-wide cooldown for existing and unknown usernames to
-// prevent account enumeration.
+// prevent account enumeration, and the setups and activation through a
+// shared loopback peer use it too, so wrong tokens from one client cannot
+// block every client of the peer for five minutes.
 func (m *Manager) allowScoped(source, account string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1177,9 +1407,9 @@ func (m *Manager) allowScoped(source, account string) bool {
 	// bound concurrent work. Once a proxy is explicitly trusted, ClientIP
 	// resolves the forwarded address and this exception no longer applies, so
 	// normal hard source/account limits remain for trustworthy client identities.
-	sharedLoopbackLogin := sharedLoopbackLoginSource(source, account)
+	sharedLoopback := sharedLoopbackSource(source, account)
 	accountKey := scopedAccountKey(source, account)
-	if !sharedLoopbackLogin {
+	if !sharedLoopback {
 		if legacy := legacySourceScope(source); legacy != "" {
 			if until, ok := m.blocked[legacy]; ok && now.Before(until) {
 				return false
@@ -1200,7 +1430,7 @@ func (m *Manager) allowScoped(source, account string) bool {
 	// storage lookup. Without this compare-and-reserve step a burst of
 	// concurrent requests could all pass the check before any failure was
 	// recorded, defeating the account/source thresholds.
-	if sharedLoopbackLogin {
+	if sharedLoopback {
 		// Keep a small per-peer admission ceiling for an untrusted shared
 		// identity. Sequential attempts remain subject to the Argon2 work factor,
 		// while a burst cannot consume every authentication worker.
@@ -1226,7 +1456,7 @@ func (m *Manager) allowScoped(source, account string) bool {
 }
 
 func (m *Manager) rateLimitError(source, account string) error {
-	if !sharedLoopbackLoginSource(source, account) {
+	if !sharedLoopbackSource(source, account) {
 		return ErrRateLimited
 	}
 	m.mu.Lock()
@@ -1312,20 +1542,21 @@ func (m *Manager) failedScoped(source, account, loginClient string) {
 	if source != "" {
 		recordFailureLocked(now, source, authSourceFailureThreshold, m.fails, m.blocked)
 	}
-	if account != "" && !sharedLoopbackLoginSource(source, account) {
+	if account != "" && !sharedLoopbackSource(source, account) {
 		// Keep normal failure buckets source-scoped. Shared loopback logins use
 		// one short source-wide cooldown instead of account-specific blocks, so
 		// rate-limit responses do not disclose whether the account exists.
 		accountKey := scopedAccountKey(source, account)
 		recordFailureLocked(now, accountKey, authFailureThreshold, m.accountFails, m.accountBlocked)
 	}
-	if loginClient != "" && !sharedLoopbackLoginSource(source, account) {
+	if loginClient != "" && !sharedLoopbackSource(source, account) {
 		recordFailureLocked(now, loginClient, authFailureThreshold, m.loginClientFails, m.loginClientBlocked)
 	}
-	if sharedLoopbackLoginSource(source, account) && len(m.fails[source]) >= authFailureThreshold {
+	if sharedLoopbackSource(source, account) && len(m.fails[source]) >= authFailureThreshold {
 		// The normal source backstop is five minutes at a much higher threshold.
-		// Replace it for a shared loopback login with the same brief cooldown for
-		// known-account and unknown-account failures.
+		// Replace it for a shared loopback sign-in, setup, or activation with
+		// the same brief cooldown for known-account and unknown-account
+		// failures, and for every token.
 		m.blocked[source] = now.Add(authSharedLoopbackRetryDelay)
 	}
 }
@@ -1357,8 +1588,19 @@ func scopedAccountKey(source, account string) string {
 	return strings.TrimSpace(source) + "\x00" + strings.TrimSpace(account)
 }
 
-func sharedLoopbackLoginSource(source, account string) bool {
-	if !strings.HasPrefix(strings.TrimSpace(account), "login:") {
+// sharedLoopbackSource reports whether the operation comes from a loopback
+// peer that is not a trusted proxy, which every client of an unconfigured
+// tunnel or reverse proxy on the host may share, and is one of the anonymous
+// operations that get the short source-wide cooldown there instead of the
+// hard limits: sign-in, and the redemption of a setup, platform setup, or
+// activation token.
+func sharedLoopbackSource(source, account string) bool {
+	account = strings.TrimSpace(account)
+	shared := false
+	for _, prefix := range []string{"login:", "setup:", "platform-setup:", "activation:"} {
+		shared = shared || strings.HasPrefix(account, prefix)
+	}
+	if !shared {
 		return false
 	}
 	address := legacySourceScope(source)

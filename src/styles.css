@@ -1896,7 +1896,7 @@ label small,
   outline-offset: 2px;
 }
 
-.main:focus { outline: none; }
+.main:focus { outline: 2px solid #65a9ff; outline-offset: -2px; }
 .status-dot.connecting i { background: var(--amber); box-shadow: 0 0 0 4px #f1bd6a1c; }
 .status-dot.live i { background: var(--green); box-shadow: 0 0 0 4px #5bd4a01c; }
 .status-dot.reconnecting i { background: var(--red); box-shadow: 0 0 0 4px #f37d831c; }

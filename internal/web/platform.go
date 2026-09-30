@@ -1062,6 +1062,9 @@ func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 			"slots":  map[string]int{"capacity": usage.Capacity, "in_use": usage.InUse, "queued": usage.Queued},
 		},
 	}
+	if proxy, seen := s.Auth.UntrustedProxy(); seen {
+		status["untrusted_proxy"] = proxy
+	}
 	s.addVersionReleaseURL(status)
 	writeJSON(w, http.StatusOK, status)
 }

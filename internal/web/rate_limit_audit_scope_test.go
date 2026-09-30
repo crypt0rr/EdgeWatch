@@ -155,6 +155,10 @@ func TestRateLimitRecordsFollowTheAccount(t *testing.T) {
 			}
 		}
 	}
+	// A refused sign-in writes its record in the background.
+	if err := f.server.Auth.WaitForRateLimitRecords(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	unitAudit := func(actor string) string {
 		t.Helper()
 		response := f.call(t, actor, http.MethodGet, "/audit?action=auth.rate_limited", "")

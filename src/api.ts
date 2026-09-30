@@ -141,7 +141,15 @@ export type UnitRef = { id: string; name: string; slug: string }
 // unit is the account's business unit (null for the platform), and
 // multi_unit reports whether more than one unit exists.
 export type SessionUser = { user_id: string; username: string; display_name?: string; role: Role; permissions: string[]; csrf_token: string; totp_enabled: boolean; totp_enrollment_required?: boolean; password_requirements: { minimum_length: number }; timezone?: string; scope: 'unit' | 'platform'; unit: UnitRef | null; multi_unit: boolean }
-export type AdminStatus = { configured?: boolean; username?: string; display_name?: string; role?: Role; permissions?: string[]; version: string; version_release_url?: string; legacy_yaml_jobs?: string[]; notification_destinations?: number; notifications?: NotificationStatus; retention?: string; max_concurrent_scans?: number; max_probe_count?: number; max_naabu_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number }; updates?: ApplicationUpdateStatus; telemetry?: DeploymentTelemetry }
+/**
+ * The latest request from a proxy that web.trusted_proxies does not list but
+ * that sent a client-address forwarding header. Every client behind it shares
+ * the proxy's address for the sign-in limits and the audit.
+ */
+export type UntrustedProxy = { peer: string; header: string; last_seen_at: string }
+// untrusted_proxy is present for the administrators of a deployment with one
+// unit; with more, only the platform status has it.
+export type AdminStatus = { configured?: boolean; username?: string; display_name?: string; role?: Role; permissions?: string[]; version: string; version_release_url?: string; legacy_yaml_jobs?: string[]; notification_destinations?: number; notifications?: NotificationStatus; retention?: string; max_concurrent_scans?: number; max_probe_count?: number; max_naabu_probe_count?: number; rdap_enabled?: boolean; public_dashboard_enabled?: boolean; live_updates?: { history_size: number; dropped_events: number }; updates?: ApplicationUpdateStatus; telemetry?: DeploymentTelemetry; untrusted_proxy?: UntrustedProxy }
 // platform_setup_available is present once the first administrator exists,
 // and true while the host's platform setup token can create the first
 // platform administrator.
@@ -303,7 +311,7 @@ export type UnitAccount = Omit<UserSummary, 'role'> & { role: UnitRole }
 export type AccountInvitation<T> = { user: T; activation_token: string; activation_path: string }
 /** totp_enrolled tells whether the account keeps its authenticator after the reset. */
 export type PasswordResetLink = { activation_token: string; activation_path: string; expires_at: string; totp_enrolled: boolean }
-export type PlatformStatus = { version: string; version_release_url?: string; updates?: ApplicationUpdateStatus; units: { total: number; active: number; disabled: number; deleting: number }; accounts: number; jobs: number; stored_scans: number; platform_admins: { total: number; enabled: number }; capacity: { limits: DeploymentLimits; slots: { capacity: number; in_use: number; queued: number } } }
+export type PlatformStatus = { version: string; version_release_url?: string; updates?: ApplicationUpdateStatus; units: { total: number; active: number; disabled: number; deleting: number }; accounts: number; jobs: number; stored_scans: number; platform_admins: { total: number; enabled: number }; capacity: { limits: DeploymentLimits; slots: { capacity: number; in_use: number; queued: number } }; untrusted_proxy?: UntrustedProxy }
 /** Who acted: a unit's account, a platform administrator, the host command line, or EdgeWatch itself. Records from before business units have no kind. */
 export type AuditActorKind = 'unit' | 'platform' | 'host' | 'system' | ''
 export type AuditEntry = { id: number; created_at: string; action: string; category: string; actor: { kind: AuditActorKind; user_id?: string; username?: string; display_name?: string }; detail: string; request_id?: string; source_ip?: string; unit?: UnitRef }

@@ -438,6 +438,14 @@ describe('platform status', () => {
     expect(screen.getByText('Version v0.20.0 is available.')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'EdgeWatch v0.19.0' })).toHaveAttribute('href', 'https://example.test/v0.19.0')
     expect(screen.getByRole('link', { name: 'v0.20.0' })).toHaveAttribute('href', 'https://example.test/v0.20.0')
+    expect(screen.queryByText(/web\.trusted_proxies/)).not.toBeInTheDocument()
+  })
+
+  it('warns about a proxy that web.trusted_proxies does not list', async () => {
+    vi.mocked(platformStatus).mockResolvedValue({ version: 'v0.19.0', units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 4, jobs: 1, stored_scans: 0, platform_admins: { total: 1, enabled: 1 }, capacity: { limits, slots: { capacity: 2, in_use: 0, queued: 0 } }, untrusted_proxy: { peer: '192.168.10.4', header: 'Forwarded', last_seen_at: '2026-09-30T08:00:00Z' } })
+    renderWithProviders(<PlatformStatusPage />)
+    expect(await screen.findByText('Requests arrive through a proxy that EdgeWatch does not trust.')).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('192.168.10.4 sends Forwarded, but web.trusted_proxies does not list it')
   })
 
   it('reports a status that cannot be loaded and describes each release state', async () => {

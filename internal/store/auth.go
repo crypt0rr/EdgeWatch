@@ -573,6 +573,28 @@ func requireActiveAccountTenantTx(ctx context.Context, queryer rowQueryer, userI
 	return nil
 }
 
+// SessionIdleTimeout is how long a session stays valid without activity.
+// Authentication refuses a session idle for longer, and the expired-session
+// cleanup removes it.
+const SessionIdleTimeout = 24 * time.Hour
+
+// MaxSessionsPerAccount is the number of sessions one account keeps. A new
+// session removes the account's least recently used sessions beyond it, so
+// repeated sign-ins cannot grow the sessions table without bound.
+const MaxSessionsPerAccount = 20
+
+// insertSessionTx inserts a session of the account in tx, and removes the
+// account's least recently used sessions beyond MaxSessionsPerAccount. The
+// new session is the most recently used one, so it always stays.
+func insertSessionTx(ctx context.Context, tx *sql.Tx, idHash, userID, csrf string, created, expires time.Time) error {
+	stamp := created.UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, stamp, stamp, expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id=? AND id_hash IN (SELECT id_hash FROM sessions WHERE user_id=? AND id_hash<>? ORDER BY julianday(last_seen_at) DESC, julianday(created_at) DESC, id_hash DESC LIMIT -1 OFFSET ?)`, userID, userID, idHash, MaxSessionsPerAccount-1)
+	return err
+}
+
 // CreateSessionForUserWithAuditEntry is the actor-aware login primitive. The
 // session and its authentication audit record are committed together so a
 // successful login cannot be returned without evidence.
@@ -585,7 +607,7 @@ func (s *Store) CreateSessionForUserWithAuditEntry(ctx context.Context, userID, 
 	if err := requireActiveAccountTenantTx(ctx, tx, userID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, created.UTC().Format(time.RFC3339Nano), created.UTC().Format(time.RFC3339Nano), expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
+	if err := insertSessionTx(ctx, tx, idHash, userID, csrf, created, expires); err != nil {
 		return err
 	}
 	if audit.Action != "" {
@@ -596,50 +618,62 @@ func (s *Store) CreateSessionForUserWithAuditEntry(ctx context.Context, userID, 
 	return tx.Commit()
 }
 
-// CreateSessionForUserIfCurrent creates a session only when the credential
-// material that was verified by the authentication layer is still current.
-// The comparison and insert share one transaction so a password, TOTP, or
-// enabled-state change cannot race a successful login and leave a stale
-// session behind.
-func (s *Store) CreateSessionForUserIfCurrent(ctx context.Context, userID, expectedPasswordHash string, expectedRevision int64, expectedTOTPEnabled bool, idHash, csrf string, created, expires time.Time, audit AuditEntry) error {
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = tx.Rollback() }()
-	var passwordHash string
-	var totpEnabled, enabled int
-	var revision int64
-	err = tx.QueryRowContext(ctx, `SELECT password_hash,totp_enabled,enabled,revision FROM users WHERE id=?`, userID).Scan(&passwordHash, &totpEnabled, &enabled, &revision)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrSessionCredentialsChanged
-	}
-	if err != nil {
-		return err
-	}
-	if enabled == 0 || revision != expectedRevision || passwordHash != expectedPasswordHash || (totpEnabled != 0) != expectedTOTPEnabled {
-		return ErrSessionCredentialsChanged
-	}
-	if err := requireActiveAccountTenantTx(ctx, tx, userID); err != nil {
-		return err
-	}
-	stamp := created.UTC().Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, stamp, stamp, expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
-		return err
-	}
-	if audit.Action != "" {
-		if err := insertAuditEntryExec(ctx, tx, audit, created.UTC()); err != nil {
-			return err
-		}
-	}
-	return tx.Commit()
+// ErrRecoveryCodeUsed reports that the recovery code a sign-in presented was
+// used, or replaced, before the sign-in could record it.
+var ErrRecoveryCodeUsed = errors.New("recovery code was already used")
+
+// SignInFactor is the one-time factor that a sign-in verified with the
+// password: the time step of an accepted TOTP code, or the stored hash of a
+// matched recovery code. CreateSignInSession records it in the transaction
+// that creates the session, so a sign-in that creates no session spends no
+// factor.
+type SignInFactor struct {
+	// TOTPStep is the time step of the accepted TOTP code, or NoTOTPStep.
+	TOTPStep int64
+	// RecoveryCodeHash is the stored hash of the matched recovery code, or
+	// empty.
+	RecoveryCodeHash string
 }
 
-// CreateSessionForUserWithPasswordUpgradeIfCurrent atomically upgrades a
-// verified legacy password and creates its session only when every credential
-// revision still matches the values read before Argon2id verification.
-func (s *Store) CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx context.Context, userID, previousHash, upgradedHash string, expectedRevision int64, expectedTOTPEnabled bool, idHash, csrf string, created, expires time.Time, audit AuditEntry) error {
-	if strings.TrimSpace(upgradedHash) == "" {
+// NoSignInFactor is the factor of a sign-in without a one-time code.
+var NoSignInFactor = SignInFactor{TOTPStep: NoTOTPStep}
+
+// SignInSession is the session that a sign-in creates, with the account's
+// credential state that the sign-in verified and the one-time factor that it
+// presented.
+type SignInSession struct {
+	UserID string
+	// PasswordHash is the password hash that the sign-in verified.
+	PasswordHash string
+	// UpgradedPasswordHash, when set, replaces PasswordHash in the
+	// transaction: the same password hashed with the current work factor.
+	UpgradedPasswordHash string
+	// Revision and TOTPEnabled are the account's state that the sign-in read.
+	Revision    int64
+	TOTPEnabled bool
+	Factor      SignInFactor
+	IDHash      string
+	CSRF        string
+	Created     time.Time
+	Expires     time.Time
+	Audit       AuditEntry
+}
+
+// CreateSignInSession creates the session of a sign-in in one transaction
+// with its checks and records: the account's password, revision, TOTP state,
+// and enabled state must still be those the sign-in verified, or it fails with
+// ErrSessionCredentialsChanged; its tenant must be active, or it fails with
+// ErrTenantNotActive; and the sign-in's one-time factor must still be unused.
+// It records the factor, the TOTP time step in the account's replay guard or
+// the recovery code as used, failing with ErrTOTPReplay or
+// ErrRecoveryCodeUsed when another sign-in recorded it first. It then
+// upgrades the password hash when the sign-in asks for it, inserts the
+// session, removing the account's least recently used sessions beyond
+// MaxSessionsPerAccount, and writes the audit record. When any step fails,
+// nothing is kept: the factor stays unused.
+func (s *Store) CreateSignInSession(ctx context.Context, session SignInSession) error {
+	upgrade := session.UpgradedPasswordHash != ""
+	if upgrade && strings.TrimSpace(session.UpgradedPasswordHash) == "" {
 		return errors.New("upgraded password hash is required")
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
@@ -647,26 +681,97 @@ func (s *Store) CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx context.Con
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := requireActiveAccountTenantTx(ctx, tx, userID); err != nil {
+	stamp := session.Created.UTC().Format(time.RFC3339Nano)
+	if upgrade {
+		if err := requireActiveAccountTenantTx(ctx, tx, session.UserID); err != nil {
+			return err
+		}
+		result, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,last_login_at=?,updated_at=?,revision=revision+1 WHERE id=? AND password_hash=? AND revision=? AND totp_enabled=? AND enabled=1`, session.UpgradedPasswordHash, stamp, stamp, session.UserID, session.PasswordHash, session.Revision, boolInt(session.TOTPEnabled))
+		if err != nil {
+			return err
+		}
+		if affected, _ := result.RowsAffected(); affected != 1 {
+			return ErrSessionCredentialsChanged
+		}
+	} else {
+		var passwordHash string
+		var totpEnabled, enabled int
+		var revision int64
+		err = tx.QueryRowContext(ctx, `SELECT password_hash,totp_enabled,enabled,revision FROM users WHERE id=?`, session.UserID).Scan(&passwordHash, &totpEnabled, &enabled, &revision)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrSessionCredentialsChanged
+		}
+		if err != nil {
+			return err
+		}
+		if enabled == 0 || revision != session.Revision || passwordHash != session.PasswordHash || (totpEnabled != 0) != session.TOTPEnabled {
+			return ErrSessionCredentialsChanged
+		}
+		if err := requireActiveAccountTenantTx(ctx, tx, session.UserID); err != nil {
+			return err
+		}
+	}
+	if err := recordSignInFactorTx(ctx, tx, session.UserID, session.Factor, session.Created); err != nil {
 		return err
 	}
-	stamp := created.UTC().Format(time.RFC3339Nano)
-	result, err := tx.ExecContext(ctx, `UPDATE users SET password_hash=?,last_login_at=?,updated_at=?,revision=revision+1 WHERE id=? AND password_hash=? AND revision=? AND totp_enabled=? AND enabled=1`, upgradedHash, stamp, stamp, userID, previousHash, expectedRevision, boolInt(expectedTOTPEnabled))
-	if err != nil {
+	if err := insertSessionTx(ctx, tx, session.IDHash, session.UserID, session.CSRF, session.Created, session.Expires); err != nil {
 		return err
 	}
-	if affected, _ := result.RowsAffected(); affected != 1 {
-		return ErrSessionCredentialsChanged
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, stamp, stamp, expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
-		return err
-	}
-	if audit.Action != "" {
-		if err := insertAuditEntryExec(ctx, tx, audit, created.UTC()); err != nil {
+	if session.Audit.Action != "" {
+		if err := insertAuditEntryExec(ctx, tx, session.Audit, session.Created.UTC()); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// recordSignInFactorTx records the sign-in's one-time factor as spent in tx:
+// it raises the account's TOTP replay guard to the accepted step, and marks
+// the recovery code used. A factor that another sign-in recorded first fails
+// with ErrTOTPReplay or ErrRecoveryCodeUsed. The caller has checked in tx
+// that the account may sign in.
+func recordSignInFactorTx(ctx context.Context, tx *sql.Tx, userID string, factor SignInFactor, now time.Time) error {
+	if factor.TOTPStep >= 0 {
+		advanced, err := advanceTOTPStepTx(ctx, tx, userID, factor.TOTPStep, now)
+		if err != nil {
+			return err
+		}
+		if !advanced {
+			return ErrTOTPReplay
+		}
+	}
+	if factor.RecoveryCodeHash != "" {
+		result, err := tx.ExecContext(ctx, `UPDATE recovery_codes SET used_at=? WHERE user_id=? AND id_hash=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), userID, factor.RecoveryCodeHash)
+		if err != nil {
+			return err
+		}
+		if affected, err := result.RowsAffected(); err != nil {
+			return err
+		} else if affected != 1 {
+			return ErrRecoveryCodeUsed
+		}
+	}
+	return nil
+}
+
+// CreateSessionForUserIfCurrent creates a session only when the credential
+// material that was verified by the authentication layer is still current.
+// The comparison and insert share one transaction so a password, TOTP, or
+// enabled-state change cannot race a successful login and leave a stale
+// session behind. It is CreateSignInSession without a one-time factor.
+func (s *Store) CreateSessionForUserIfCurrent(ctx context.Context, userID, expectedPasswordHash string, expectedRevision int64, expectedTOTPEnabled bool, idHash, csrf string, created, expires time.Time, audit AuditEntry) error {
+	return s.CreateSignInSession(ctx, SignInSession{UserID: userID, PasswordHash: expectedPasswordHash, Revision: expectedRevision, TOTPEnabled: expectedTOTPEnabled, Factor: NoSignInFactor, IDHash: idHash, CSRF: csrf, Created: created, Expires: expires, Audit: audit})
+}
+
+// CreateSessionForUserWithPasswordUpgradeIfCurrent atomically upgrades a
+// verified legacy password and creates its session only when every credential
+// revision still matches the values read before Argon2id verification. It is
+// CreateSignInSession with an upgraded hash and without a one-time factor.
+func (s *Store) CreateSessionForUserWithPasswordUpgradeIfCurrent(ctx context.Context, userID, previousHash, upgradedHash string, expectedRevision int64, expectedTOTPEnabled bool, idHash, csrf string, created, expires time.Time, audit AuditEntry) error {
+	if strings.TrimSpace(upgradedHash) == "" {
+		return errors.New("upgraded password hash is required")
+	}
+	return s.CreateSignInSession(ctx, SignInSession{UserID: userID, PasswordHash: previousHash, UpgradedPasswordHash: upgradedHash, Revision: expectedRevision, TOTPEnabled: expectedTOTPEnabled, Factor: NoSignInFactor, IDHash: idHash, CSRF: csrf, Created: created, Expires: expires, Audit: audit})
 }
 
 // CreateSessionForUserWithPasswordUpgrade atomically upgrades a verified
@@ -694,7 +799,7 @@ func (s *Store) CreateSessionForUserWithPasswordUpgrade(ctx context.Context, use
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrPasswordChangedDuringLogin
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id_hash,user_id,created_at,last_seen_at,expires_at,csrf_token) VALUES(?,?,?,?,?,?)`, idHash, userID, stamp, stamp, expires.UTC().Format(time.RFC3339Nano), csrf); err != nil {
+	if err := insertSessionTx(ctx, tx, idHash, userID, csrf, created, expires); err != nil {
 		return err
 	}
 	if audit.Action != "" {
@@ -812,11 +917,13 @@ func (s *Store) DeleteAllSessionsWithAudit(ctx context.Context, action, detail s
 	return tx.Commit()
 }
 
-// DeleteExpiredSessions removes sessions past their absolute expiry. It is
-// safe to run during maintenance because the predicate cannot match a newly
-// touched active session.
+// DeleteExpiredSessions removes sessions past their absolute expiry and
+// sessions idle for longer than SessionIdleTimeout, which authentication
+// already refuses. It is safe to run during maintenance because the
+// predicate cannot match a newly touched active session.
 func (s *Store) DeleteExpiredSessions(ctx context.Context, now time.Time) (int64, error) {
-	result, err := s.DB.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ?`, now.UTC().Format(time.RFC3339Nano))
+	idleBefore := now.Add(-SessionIdleTimeout)
+	result, err := s.DB.ExecContext(ctx, `DELETE FROM sessions WHERE expires_at <= ? OR julianday(last_seen_at) < julianday(?)`, now.UTC().Format(time.RFC3339Nano), idleBefore.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}
@@ -862,33 +969,9 @@ func (s *Store) ConsumeRecoveryCodeForUser(ctx context.Context, userID, hash str
 // Unsalted legacy SHA-256 digests are retired by schema migration 38 and are
 // never accepted on the authentication path.
 func (s *Store) ConsumeRecoveryCodeTextForUser(ctx context.Context, userID, code string, now time.Time) (bool, error) {
-	code = strings.ToUpper(strings.TrimSpace(code))
-	if code == "" {
-		return false, nil
-	}
-	rows, err := s.reader().QueryContext(ctx, `SELECT id_hash FROM recovery_codes WHERE user_id=? AND used_at IS NULL`, userID)
-	if err != nil {
+	match, err := s.MatchRecoveryCodeForUser(ctx, userID, code)
+	if err != nil || match == "" {
 		return false, err
-	}
-	var match string
-	for rows.Next() {
-		var stored string
-		if err := rows.Scan(&stored); err != nil {
-			_ = rows.Close()
-			return false, err
-		}
-		if recoveryCodeMatches(stored, code) {
-			match = stored
-			break
-		}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return false, err
-	}
-	_ = rows.Close()
-	if match == "" {
-		return false, nil
 	}
 	result, err := s.DB.ExecContext(ctx, `UPDATE recovery_codes SET used_at=? WHERE user_id=? AND id_hash=? AND used_at IS NULL`, now.UTC().Format(time.RFC3339Nano), userID, match)
 	if err != nil {
@@ -896,6 +979,32 @@ func (s *Store) ConsumeRecoveryCodeTextForUser(ctx context.Context, userID, code
 	}
 	count, err := result.RowsAffected()
 	return count == 1, err
+}
+
+// MatchRecoveryCodeForUser returns the stored hash of the user's unused v2
+// recovery code that matches the presented code, or "" when none does. It
+// records nothing: sign-in passes the hash to CreateSignInSession, which
+// marks the code used in the transaction that creates the session.
+func (s *Store) MatchRecoveryCodeForUser(ctx context.Context, userID, code string) (string, error) {
+	code = strings.ToUpper(strings.TrimSpace(code))
+	if code == "" {
+		return "", nil
+	}
+	rows, err := s.reader().QueryContext(ctx, `SELECT id_hash FROM recovery_codes WHERE user_id=? AND used_at IS NULL`, userID)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var stored string
+		if err := rows.Scan(&stored); err != nil {
+			return "", err
+		}
+		if recoveryCodeMatches(stored, code) {
+			return stored, nil
+		}
+	}
+	return "", rows.Err()
 }
 
 func recoveryCodeMatches(stored, code string) bool {

@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Activity } from 'lucide-react'
 import { platformStatus } from '../../api'
 import type { ApplicationUpdateStatus } from '../../api'
+import { UntrustedProxyBanner } from '../../components/UntrustedProxyBanner'
 import { formatCount, Loading, plural } from './common'
 
 /** How the release check describes the running version. */
@@ -29,6 +30,7 @@ export function PlatformStatusPage() {
   const releaseURL = value.updates?.release_url
   return <section className="page">
     <div className="page-heading"><div><p className="eyebrow">Platform</p><h1>Status</h1><p className="muted">The deployment at a glance. Which jobs run is visible only inside each unit.</p></div><Activity className="muted-icon" size={24} /></div>
+    <UntrustedProxyBanner proxy={value.untrusted_proxy} />
     <div className="detail-summary platform-status">
       <div className="summary-card"><span className="summary-label">Business units</span><strong>{value.units.total}</strong><span className="muted">{value.units.active} active · {value.units.disabled} disabled · {value.units.deleting} deleting</span></div>
       <div className="summary-card"><span className="summary-label">Accounts in units</span><strong>{formatCount(value.accounts)}</strong><span className="muted">{plural(value.jobs, 'job')} across all units</span></div>

@@ -145,6 +145,12 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		s.mu.Lock()
 		status["live_updates"] = map[string]any{"history_size": len(s.history), "dropped_events": s.dropped}
 		s.mu.Unlock()
+		// An untrusted proxy in front of the deployment is the host
+		// operator's to fix. With one unit, its administrators see it; with
+		// more, only the platform status reports it.
+		if proxy, seen := s.Auth.UntrustedProxy(); seen && session.Role == store.RoleAdministrator {
+			status["untrusted_proxy"] = proxy
+		}
 	}
 	status["updates"] = s.applicationUpdateStatus(r.Context())
 	if telemetry, telemetryErr := s.cachedTenantTelemetry(r.Context(), ts); telemetryErr != nil {
@@ -321,7 +327,7 @@ func (s *Server) setup(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.Auth.SetupRequest(r.Context(), r, input.Token, input.Password); err != nil {
 		if errors.Is(err, auth.ErrRateLimited) {
-			w.Header().Set("Retry-After", "300")
+			w.Header().Set("Retry-After", auth.RetryAfterHeaderValue(err))
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many setup attempts; try again later", nil)
 			return
 		}
@@ -367,7 +373,7 @@ func (s *Server) platformSetup(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case errors.Is(err, auth.ErrRateLimited):
-			w.Header().Set("Retry-After", "300")
+			w.Header().Set("Retry-After", auth.RetryAfterHeaderValue(err))
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many setup attempts; try again later", nil)
 		case errors.Is(err, store.ErrAuditUnavailable):
 			s.auditFailure(err, "platform_admin.setup")

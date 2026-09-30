@@ -72,7 +72,7 @@ func (m *Manager) PlatformSetupRequest(ctx context.Context, request *http.Reques
 	account := "platform-setup:" + digest(strings.TrimSpace(token))
 	if !m.allowScoped(source, account) {
 		m.auditRateLimitIn(ctx, "platform-setup", request, true)
-		return store.User{}, ErrRateLimited
+		return store.User{}, m.rateLimitError(source, account)
 	}
 	defer m.releaseScoped(source, account)
 	user, err := m.CompletePlatformSetup(ctx, token, username, password)

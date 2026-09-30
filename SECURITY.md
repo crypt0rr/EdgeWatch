@@ -31,24 +31,36 @@ When an untrusted tunnel or reverse proxy makes every remote client appear as
 the same loopback peer, all login attempts are throttled after five failed
 password or TOTP attempts in five minutes with a short two-second retry delay.
 The shared response avoids both a long lockout and revealing account existence,
-but cannot provide per-client attribution. For per-client rate limits and audit
-identities, configure only the actual proxy addresses in `web.trusted_proxies`
-and the sanitized `web.forwarded_header`.
+but cannot provide per-client attribution. The first-run setup, the platform
+setup, and account activation through such a shared loopback peer get the
+same two-second cooldown after five wrong tokens, instead of the five-minute
+block that a hundred failures from one address otherwise cause. For
+per-client rate limits and audit identities, configure only the actual proxy
+addresses in `web.trusted_proxies` and the sanitized `web.forwarded_header`.
 A client identified by its own address has a budget of five failed sign-ins
 in five minutes. Every failed sign-in costs it the same, whether the username
 is unknown, the account is disabled or its unit is not active, or the
 password, one-time code, or recovery code is wrong. Once it is used, every
 sign-in from that client is refused with the same `429 rate_limited` answer
 for five minutes, whether or not the username exists, so neither the answer
-nor the number of attempts left reveals which accounts exist. A successful
-sign-in does not reset the budget, so a client that holds one valid account
-cannot sign in between failed attempts to gain more. Other clients are not
-affected; clients that share one address, such as the clients of an
-untrusted proxy on another host, share the budget.
-EdgeWatch logs a startup warning when proxy hostnames are approved without
-trusted client-IP forwarding. Failed login and TOTP attempts, along with
-rate-limit events, are written to the security audit log; they do not currently
-send notification-channel alerts.
+nor the number of attempts left reveals which accounts exist. A refused
+sign-in answers without waiting for its `auth.rate_limited` record, which is
+written in the background, so the refusal takes as long for every username.
+A successful sign-in does not reset the budget, so a client that holds one
+valid account cannot sign in between failed attempts to gain more. Other
+clients are not affected; clients that share one address, such as the clients
+of an untrusted proxy on another host, share the budget, and they share the
+backstop of the setups and activation, which blocks the address for five
+minutes after a hundred wrong tokens. EdgeWatch keeps these limits for an
+address that is not loopback. When a peer that is neither loopback nor listed
+in `web.trusted_proxies` sends `X-Forwarded-For` or `Forwarded`, it logs a
+warning that recommends `web.trusted_proxies`, at most once an hour, and the
+console shows the proxy's address to the administrators of a deployment with
+one unit and on the platform status page, until a day after its last request.
+EdgeWatch also logs a startup warning when proxy hostnames are approved
+without trusted client-IP forwarding. Failed login and TOTP attempts, along
+with rate-limit events, are written to the security audit log; they do not
+currently send notification-channel alerts.
 
 Setting up or replacing an authenticator requires the account password, plus
 the current authenticator or a recovery code when TOTP is already enabled. The
@@ -58,7 +70,12 @@ after the fifth incorrect code, or once the ten minutes pass, the pending secret
 is discarded and setup must start again. The code that confirms the new secret
 counts as used for its time step, as a code accepted at sign-in or for a TOTP
 confirmation does, so neither accepts it again; the first sign-in after
-enrolment takes the authenticator's next code.
+enrolment takes the authenticator's next code. A sign-in records its TOTP time
+step, or marks its recovery code used, in the transaction that creates its
+session. A sign-in that creates no session, because the security audit or the
+session cannot be written, the password-check queue is full, or the
+account's credentials change at the same moment, leaves the code unused, and
+of two sign-ins with the same code only one gets a session.
 
 Activation and password-reset links are single-use, expire after 30 minutes,
 and are stored only as the SHA-256 digest of their token. An account has one
@@ -346,7 +363,10 @@ Refreshes are coalesced to at most one database write per session every five
 minutes. The activity write has a short timeout so SQLite writer contention
 cannot delay normal read-only requests. A session with no real activity expires
 after 24 hours; polling in an unattended tab does not keep it alive. The
-absolute session lifetime remains 30 days.
+absolute session lifetime remains 30 days. The daemon removes sessions past
+either limit when it starts and once a day. An account keeps at most 20
+sessions: a sign-in beyond that ends the account's least recently used
+session, whose live-update stream stops at its next authorization check.
 
 Web-managed Shoutrrr destinations are write-only through the API. Their URLs
 are encrypted at rest with AES-256-GCM; the key is stored in

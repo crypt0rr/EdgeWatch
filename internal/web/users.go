@@ -443,7 +443,7 @@ func (s *Server) activateUser(w http.ResponseWriter, r *http.Request) {
 	userID, err := s.Auth.ActivateRequest(r.Context(), r, input.Token, input.Password)
 	if err != nil {
 		if errors.Is(err, auth.ErrRateLimited) {
-			w.Header().Set("Retry-After", "300")
+			w.Header().Set("Retry-After", auth.RetryAfterHeaderValue(err))
 			writeError(w, http.StatusTooManyRequests, "rate_limited", "too many activation attempts; try again later", nil)
 			return
 		}

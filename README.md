@@ -297,9 +297,12 @@ Important defaults:
   attempts within five minutes, all logins through that shared peer receive a
   short two-second cooldown instead of a five-minute lockout. Applying the same
   cooldown to known and unknown usernames avoids revealing account existence.
-  Configure the proxy network and forwarding header when you need per-client
-  rate limits and audit identities. EdgeWatch logs a startup warning when
-  approved proxy hosts lack trusted client-IP forwarding.
+  The first-run setup, the platform setup, and account activation through that
+  peer get the same cooldown after five wrong tokens, so wrong tokens cannot
+  block them for five minutes. Configure the proxy network and forwarding
+  header when you need per-client rate limits and audit identities. EdgeWatch
+  logs a startup warning when approved proxy hosts lack trusted client-IP
+  forwarding.
 - A client identified by its own address may fail five sign-ins within five
   minutes. Every failed sign-in counts the same: an unknown username, a
   disabled account, an account whose unit is not active, and a wrong
@@ -309,7 +312,18 @@ Important defaults:
   reveals which accounts exist. A successful sign-in does not reset the
   count; each failure expires five minutes after it happened. Clients that
   share one address, such as the clients of an untrusted proxy on another
-  host, share this budget.
+  host, share this budget, and a hundred wrong setup or activation tokens from
+  that address block setup and activation for all of them for five minutes.
+  When a peer that is neither loopback nor listed in web.trusted_proxies sends
+  X-Forwarded-For or Forwarded, EdgeWatch logs a warning at most once an hour
+  and shows the proxy's address on the dashboard of a single unit's
+  administrators and on the platform status page; add that address to
+  web.trusted_proxies.
+- Sessions end after 24 hours without activity and 30 days after sign-in; the
+  daemon removes ended sessions at startup and once a day. An account keeps
+  at most 20 sessions: a new sign-in beyond that ends the account's least
+  recently used session. A TOTP code or recovery code counts as used only
+  when its sign-in creates a session.
 - By default, scanner.target_exclusions covers the loopback and link-local
   ranges 127.0.0.0/8, ::1/128, 169.254.0.0/16, and fe80::/10. The IPv4
   link-local range includes the 169.254.169.254 cloud metadata endpoint. Other

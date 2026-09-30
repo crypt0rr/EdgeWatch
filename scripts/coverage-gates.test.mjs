@@ -30,6 +30,7 @@ const frontendReport = (overrides = {}) => {
     'src/components/Pagination.tsx',
     'src/components/PortScopeDetails.tsx',
     'src/components/SurfaceUnitList.tsx',
+    'src/components/UntrustedProxyBanner.tsx',
     'src/format.ts',
     'src/main.tsx',
     'src/pages/Audit.tsx',

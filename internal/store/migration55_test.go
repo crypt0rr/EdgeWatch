@@ -392,7 +392,7 @@ func TestLegacyPurgeMaintenanceWaitsForAUnitPurgeThatCompletesIt(t *testing.T) {
 	if err := reader.Rollback(); err != nil {
 		t.Fatal(err)
 	}
-	third, err := f.store.Platform().CreateTenant(ctx, "Third", "third", testCapacityLimits, AuditEntry{ActorUserID: platformAdminID})
+	third, err := f.store.Platform().CreateTenant(ctx, "Third", "third", AuditEntry{ActorUserID: platformAdminID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -424,7 +424,7 @@ func TestLegacyPurgeMaintenanceWaitsForAUnitPurgeThatCompletesIt(t *testing.T) {
 	assertNothingOfTheMarkerLeft(t, f.store)
 
 	// A purge without a pending cleanup completes none.
-	fourth, err := f.store.Platform().CreateTenant(ctx, "Fourth", "fourth", testCapacityLimits, AuditEntry{ActorUserID: platformAdminID})
+	fourth, err := f.store.Platform().CreateTenant(ctx, "Fourth", "fourth", AuditEntry{ActorUserID: platformAdminID})
 	if err != nil {
 		t.Fatal(err)
 	}

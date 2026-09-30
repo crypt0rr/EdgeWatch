@@ -99,7 +99,11 @@ func (a *App) deploymentProbeBudget() probeBudget {
 // forTenant lowers the budget to the tenant's own settings where they are
 // lower. A tenant setting never raises the deployment's, so tightening
 // config.yaml wins over a higher tenant value, and the high-cost ceiling
-// stays at or below MaxProbeCountLimit.
+// stays at or below MaxProbeCountLimit. A tenant without a high-cost grant
+// has the ceiling store.HighCostNotGranted, 0, which raises neither budget
+// in limits whatever config.yaml sets. A ceiling that a platform
+// administrator granted is kept when config.yaml lowers the budgets below
+// it.
 func (budget probeBudget) forTenant(capacity store.TenantCapacity) probeBudget {
 	for _, setting := range []struct {
 		value *int64

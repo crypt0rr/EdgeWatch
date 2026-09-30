@@ -180,6 +180,19 @@ test('a platform administrator renews a lapsed invitation, or removes the pendin
   expect(controls.payloads['platform-admin-invite']).toHaveLength(2)
 })
 
+test('a unit without a high-cost grant stays without one when its capacity is saved', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The capacity form runs once on desktop; phone widths are covered separately.')
+  const controls = await mockConsole(page, 'platform_admin')
+  await page.goto('/platform/units/unit-retail/capacity')
+  await expect(page.getByLabel('Not granted')).toBeChecked()
+  await expect(page.getByLabel('High-cost ceiling', { exact: true })).toHaveCount(0)
+  await page.getByLabel('Scan slot cap', { exact: true }).fill('1')
+  await page.getByRole('button', { name: 'Save capacity' }).click()
+  await expect(page.getByText('Capacity saved. It applies to the next scan this unit queues.')).toBeVisible()
+  expect(controls.payloads['unit-capacity']).toEqual([{ max_concurrent_scans: 1, max_probe_count: null, max_naabu_probe_count: null, high_cost_ceiling: 0 }])
+  await expect(page.getByLabel('Not granted')).toBeChecked()
+})
+
 test('the platform console fits a phone', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === 'desktop', 'The responsive smoke runs in the mobile projects.')
   await page.emulateMedia({ reducedMotion: 'reduce' })

@@ -265,7 +265,8 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       }
       if (parts.length === 3 && parts[2] === 'capacity') {
         if (method === 'PATCH') record('unit-capacity', body())
-        await json({ unit_id: unit.id, capacity: { max_concurrent_scans: 2, max_probe_count: null, max_naabu_probe_count: null, high_cost_ceiling: 5_000_000 }, limits: deploymentLimits, slots: { ...unit.slots, limit: 2 } }); return
+        // A unit without a high-cost grant, as every new unit starts.
+        await json({ unit_id: unit.id, capacity: { max_concurrent_scans: 2, max_probe_count: null, max_naabu_probe_count: null, high_cost_ceiling: 0 }, limits: deploymentLimits, slots: { ...unit.slots, limit: 2 } }); return
       }
       if (parts.length === 3 && parts[2] === 'accounts' && method === 'GET') { await json({ accounts: unitAccounts[unit.id] ?? [] }); return }
       if (parts.length === 3 && parts[2] === 'accounts' && method === 'POST') {

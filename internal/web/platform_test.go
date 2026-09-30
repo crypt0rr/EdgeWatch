@@ -343,27 +343,46 @@ func TestSessionRevocationRecordsNameTheAccount(t *testing.T) {
 
 // The platform administrator reads and changes a unit's capacity: an
 // absent setting keeps its value, null inherits the deployment's, and a
-// value outside the deployment's limits is refused.
+// value outside the deployment's limits is refused. A new unit's
+// high-cost ceiling is 0, not granted, which a change that leaves the
+// ceiling out keeps, and which 0 restores after a grant.
 func TestPlatformUnitCapacity(t *testing.T) {
 	f := newPlatformFixture(t)
 	capacityPath := "/platform/units/" + f.unitB + "/capacity"
 	var view platformCapacityView
-	expectResponse(t, f.call(t, actorPlatform, http.MethodGet, capacityPath, ""), http.StatusOK, "capacity", &view)
-	if view.UnitID != f.unitB || view.Capacity.MaxConcurrentScans != nil || view.Capacity.HighCostCeiling == nil || view.Limits.MaxConcurrentScans != 2 || view.Slots.Limit != 2 {
+	response := f.call(t, actorPlatform, http.MethodGet, capacityPath, "")
+	if !strings.Contains(response.Body.String(), `"high_cost_ceiling":0`) {
+		t.Fatalf("a new unit's capacity %s does not report its ceiling as 0, not granted", response.Body.String())
+	}
+	expectResponse(t, response, http.StatusOK, "capacity", &view)
+	if view.UnitID != f.unitB || view.Capacity.MaxConcurrentScans != nil || view.Capacity.HighCostCeiling == nil || *view.Capacity.HighCostCeiling != store.HighCostNotGranted || view.Limits.MaxConcurrentScans != 2 || view.Slots.Limit != 2 {
 		t.Fatalf("initial capacity = %+v", view)
 	}
-	ceiling := *view.Capacity.HighCostCeiling
 	view = platformCapacityView{}
 	expectResponse(t, f.call(t, actorPlatform, http.MethodPatch, capacityPath, `{"max_concurrent_scans":1,"max_probe_count":1000}`), http.StatusOK, "cap the unit", &view)
-	if view.Capacity.MaxConcurrentScans == nil || *view.Capacity.MaxConcurrentScans != 1 || view.Capacity.MaxProbeCount == nil || *view.Capacity.MaxProbeCount != 1000 || view.Capacity.HighCostCeiling == nil || *view.Capacity.HighCostCeiling != ceiling || view.Slots.Limit != 1 {
+	if view.Capacity.MaxConcurrentScans == nil || *view.Capacity.MaxConcurrentScans != 1 || view.Capacity.MaxProbeCount == nil || *view.Capacity.MaxProbeCount != 1000 || view.Capacity.HighCostCeiling == nil || *view.Capacity.HighCostCeiling != store.HighCostNotGranted || view.Slots.Limit != 1 {
 		t.Fatalf("capped capacity = %+v", view)
+	}
+	var detail string
+	if err := f.db.DB.QueryRow(`SELECT detail FROM security_audit WHERE tenant_id=? AND action='tenant.capacity_changed' ORDER BY id DESC LIMIT 1`, f.unitB).Scan(&detail); err != nil || !strings.HasSuffix(detail, "high_cost_ceiling=not_granted") {
+		t.Fatalf("the capacity change's audit detail %q, %v does not name the ceiling as not granted", detail, err)
+	}
+	view = platformCapacityView{}
+	expectResponse(t, f.call(t, actorPlatform, http.MethodPatch, capacityPath, `{"high_cost_ceiling":2000000}`), http.StatusOK, "grant a ceiling", &view)
+	if view.Capacity.HighCostCeiling == nil || *view.Capacity.HighCostCeiling != 2_000_000 {
+		t.Fatalf("granted capacity = %+v", view)
+	}
+	view = platformCapacityView{}
+	expectResponse(t, f.call(t, actorPlatform, http.MethodPatch, capacityPath, `{"high_cost_ceiling":0}`), http.StatusOK, "withdraw the grant", &view)
+	if view.Capacity.HighCostCeiling == nil || *view.Capacity.HighCostCeiling != store.HighCostNotGranted {
+		t.Fatalf("capacity after the grant is withdrawn = %+v", view)
 	}
 	view = platformCapacityView{}
 	expectResponse(t, f.call(t, actorPlatform, http.MethodPatch, capacityPath, `{"high_cost_ceiling":null,"max_probe_count":null}`), http.StatusOK, "inherit", &view)
 	if view.Capacity.HighCostCeiling != nil || view.Capacity.MaxProbeCount != nil || view.Capacity.MaxConcurrentScans == nil {
 		t.Fatalf("inherited capacity = %+v", view)
 	}
-	for body, field := range map[string]string{`{"max_concurrent_scans":5}`: "max_concurrent_scans", `{"max_concurrent_scans":0}`: "max_concurrent_scans", `{"max_naabu_probe_count":0}`: "max_naabu_probe_count", `{"high_cost_ceiling":0}`: "high_cost_ceiling"} {
+	for body, field := range map[string]string{`{"max_concurrent_scans":5}`: "max_concurrent_scans", `{"max_concurrent_scans":0}`: "max_concurrent_scans", `{"max_naabu_probe_count":0}`: "max_naabu_probe_count", `{"high_cost_ceiling":-1}`: "high_cost_ceiling", `{"high_cost_ceiling":100000001}`: "high_cost_ceiling"} {
 		if details := expectError(t, f.call(t, actorPlatform, http.MethodPatch, capacityPath, body), http.StatusBadRequest, "validation_failed", "capacity "+body); details[field] == nil {
 			t.Errorf("capacity %s details = %v, want %s", body, details, field)
 		}

@@ -65,8 +65,8 @@ func TestCreateAndRenameUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if capacity, err := f.db.Tenant(scope).Capacity(ctx); err != nil || !reflect.DeepEqual(capacity, store.InitialTenantCapacity(f.app.capacityLimits())) {
-		t.Fatalf("a new unit's capacity = %+v, %v; want %+v", capacity, err, store.InitialTenantCapacity(f.app.capacityLimits()))
+	if capacity, err := f.db.Tenant(scope).Capacity(ctx); err != nil || !reflect.DeepEqual(capacity, store.InitialTenantCapacity()) {
+		t.Fatalf("a new unit's capacity = %+v, %v; want %+v", capacity, err, store.InitialTenantCapacity())
 	}
 	if renamed, err := f.app.RenameUnit(ctx, third.ID, third.Revision, "Gamma", "gamma", store.AuditEntry{ActorKind: store.AuditActorHost}); err != nil || renamed.Slug != "gamma" {
 		t.Fatalf("rename = %+v, %v", renamed, err)

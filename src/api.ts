@@ -304,8 +304,15 @@ export type UnitSlots = { in_use: number; queued: number; limit?: number }
 export type DeploymentLimits = { max_concurrent_scans: number; max_probe_count: number; max_naabu_probe_count: number; max_probe_count_limit: number }
 /** jobs counts the jobs that are not archived; stored_scans counts every scan the unit's history holds, those of archived jobs included. */
 export type BusinessUnit = UnitRef & { status: BusinessUnitStatus; is_default: boolean; revision: number; created_at: string; updated_at: string; state_changed_at: string; accounts: number; administrators: number; jobs: number; stored_scans: number; slots: UnitSlots; purge?: { phase: string; rows: number } }
-/** A unit's own capacity settings; null inherits the deployment's setting. */
+/**
+ * A unit's own capacity settings; null inherits the deployment's setting. A
+ * high_cost_ceiling of highCostNotGranted means that no platform
+ * administrator granted the unit a ceiling, so a high-cost approval raises
+ * neither probe budget.
+ */
 export type UnitCapacitySettings = { max_concurrent_scans: number | null; max_probe_count: number | null; max_naabu_probe_count: number | null; high_cost_ceiling: number | null }
+/** The high_cost_ceiling of a unit without a high-cost grant, which a new unit starts with. */
+export const highCostNotGranted = 0
 export type UnitCapacity = { unit_id: string; capacity: UnitCapacitySettings; limits: DeploymentLimits; slots: UnitSlots }
 export type UnitAccount = Omit<UserSummary, 'role'> & { role: UnitRole }
 export type AccountInvitation<T> = { user: T; activation_token: string; activation_path: string }
@@ -333,7 +340,8 @@ export const enableUnit = (id: string, revision: number, password: string) => ap
 // background; getUnit reports the purge's progress.
 export const deleteUnit = (id: string, confirmName: string, password: string) => api<BusinessUnit>(unitPath(id), { method: 'DELETE', body: JSON.stringify({ confirm_name: confirmName, password }) })
 export const getUnitCapacity = (id: string) => api<UnitCapacity>(`${unitPath(id)}/capacity`)
-// A key that is absent keeps the setting, null inherits the deployment's, and a number sets it.
+// A key that is absent keeps the setting, null inherits the deployment's, and
+// a number sets it; a high_cost_ceiling of highCostNotGranted grants none.
 export const updateUnitCapacity = (id: string, value: Partial<UnitCapacitySettings>) => api<UnitCapacity>(`${unitPath(id)}/capacity`, { method: 'PATCH', body: JSON.stringify(value) })
 export const listUnitAccounts = (id: string) => api<{ accounts: UnitAccount[] }>(`${unitPath(id)}/accounts`)
 // The platform invites only a unit's administrators; they invite the unit's operators and viewers.

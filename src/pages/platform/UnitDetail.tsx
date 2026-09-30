@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 import { AlertTriangle, Gauge, Globe2, Trash2 } from 'lucide-react'
-import { APIError, deleteUnit, disableUnit, enableUnit, getUnit, getUnitCapacity, renameUnit, updateUnitCapacity } from '../../api'
+import { APIError, deleteUnit, disableUnit, enableUnit, getUnit, getUnitCapacity, highCostNotGranted, renameUnit, updateUnitCapacity } from '../../api'
 import type { BusinessUnit, DeploymentLimits, UnitCapacity, UnitCapacitySettings } from '../../api'
 import { ActionDialog } from '../../components/ActionDialog'
 import { formatDateTime } from '../../format'
@@ -113,12 +113,41 @@ const capacityFields: { key: CapacityField; label: string; help: (limits: Deploy
   { key: 'high_cost_ceiling', label: 'High-cost ceiling', help: limits => `The most probes a job with high-cost scanning may send, at most ${formatCount(limits.max_probe_count_limit)}. It never lowers the budgets above.`, maximum: limits => limits.max_probe_count_limit },
 ]
 
-type CapacityDraft = Record<CapacityField, { inherit: boolean; value: string }>
+/**
+ * How a setting is drafted: inherited from the deployment, set to the drafted
+ * number, or, for the high-cost ceiling only, not granted.
+ */
+type CapacityMode = 'inherit' | 'set' | 'not_granted'
+type CapacityDraft = Record<CapacityField, { mode: CapacityMode; value: string }>
+
+// The high-cost ceiling's choices. Not granted is a state of its own, never
+// a number, so saving the form cannot turn it into a grant. A granted
+// ceiling is described by its field's help.
+const ceilingModes: { mode: CapacityMode; label: string; help?: (limits: DeploymentLimits) => string }[] = [
+  { mode: 'not_granted', label: 'Not granted', help: () => 'A job approved for high-cost scanning keeps this unit’s probe budgets, whatever config.yaml sets.' },
+  { mode: 'set', label: 'Grant a ceiling' },
+  { mode: 'inherit', label: 'Use the deployment’s setting', help: limits => `A job approved for high-cost scanning may send up to ${formatCount(limits.max_probe_count_limit)} probes, the absolute probe ceiling.` },
+]
 
 function capacityDraft(capacity: UnitCapacitySettings): CapacityDraft {
   const draft = {} as CapacityDraft
-  for (const { key } of capacityFields) draft[key] = { inherit: capacity[key] === null, value: capacity[key] === null ? '' : String(capacity[key]) }
+  for (const { key } of capacityFields) {
+    const value = capacity[key]
+    draft[key] = value === null ? { mode: 'inherit', value: '' }
+      : key === 'high_cost_ceiling' && value === highCostNotGranted ? { mode: 'not_granted', value: '' }
+        : { mode: 'set', value: String(value) }
+  }
   return draft
+}
+
+/** The settings a draft saves: null inherits, and a ceiling that is not granted is highCostNotGranted. */
+function capacitySettings(draft: CapacityDraft): UnitCapacitySettings {
+  const value = {} as UnitCapacitySettings
+  for (const { key } of capacityFields) {
+    const entry = draft[key]
+    value[key] = entry.mode === 'inherit' ? null : entry.mode === 'not_granted' ? highCostNotGranted : Number(entry.value)
+  }
+  return value
 }
 
 /** Validate a unit's capacity against the deployment's limits, as the server does. */
@@ -126,7 +155,7 @@ export function capacityProblems(draft: CapacityDraft, limits: DeploymentLimits)
   const problems: Partial<Record<CapacityField, string>> = {}
   for (const field of capacityFields) {
     const entry = draft[field.key]
-    if (entry.inherit) continue
+    if (entry.mode !== 'set') continue
     const number = Number(entry.value)
     const maximum = field.maximum(limits)
     if (entry.value.trim() === '' || !Number.isInteger(number) || number < 1 || number > maximum) problems[field.key] = `Use a whole number from 1 to ${formatCount(maximum)}.`
@@ -150,7 +179,7 @@ function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: Un
   const [busy, setBusy] = useState(false)
   const problems = capacityProblems(draft, limits)
   const invalid = Object.keys(problems).length > 0
-  function change(key: CapacityField, next: Partial<{ inherit: boolean; value: string }>) {
+  function change(key: CapacityField, next: Partial<{ mode: CapacityMode; value: string }>) {
     setMessage('')
     setDraft(current => ({ ...current, [key]: { ...current[key], ...next } }))
   }
@@ -159,11 +188,9 @@ function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: Un
     setMessage('')
     setError('')
     if (invalid) return
-    const value = {} as UnitCapacitySettings
-    for (const { key } of capacityFields) value[key] = draft[key].inherit ? null : Number(draft[key].value)
     setBusy(true)
     try {
-      const saved = await updateUnitCapacity(unit.id, value)
+      const saved = await updateUnitCapacity(unit.id, capacitySettings(draft))
       client.setQueryData(['platform-unit-capacity', unit.id], saved)
       setDraft(capacityDraft(saved.capacity))
       // Saving the capacity moves the unit to a new revision, so the page
@@ -185,11 +212,18 @@ function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: Un
           const entry = draft[field.key]
           const problem = problems[field.key]
           const inputID = `capacity-${field.key}`
+          // The ceiling offers its three states as choices. Grant a ceiling
+          // proposes no number of its own, so a grant is always one that a
+          // platform administrator typed or saved.
+          const ceiling = field.key === 'high_cost_ceiling'
+          const help = (ceiling && ceilingModes.find(option => option.mode === entry.mode)?.help) || field.help
           return <fieldset className="capacity-field" key={field.key}>
             <legend>{field.label}</legend>
-            <label className="checkbox-label" htmlFor={`${inputID}-inherit`}><input id={`${inputID}-inherit`} type="checkbox" checked={entry.inherit} onChange={event => change(field.key, { inherit: event.target.checked, value: entry.value || String(field.maximum(limits)) })} /><span>Use the deployment’s setting</span></label>
-            {!entry.inherit && <label htmlFor={inputID}><span className="sr-only">{field.label}</span><input id={inputID} type="number" inputMode="numeric" min={1} max={field.maximum(limits)} step={1} value={entry.value} onChange={event => change(field.key, { value: event.target.value })} aria-invalid={!!problem} aria-describedby={`${inputID}-help`} /></label>}
-            <small id={`${inputID}-help`} className={problem ? 'field-error' : undefined}>{problem ?? field.help(limits)}</small>
+            {ceiling
+              ? ceilingModes.map(option => <label className="checkbox-label" key={option.mode} htmlFor={`${inputID}-${option.mode}`}><input id={`${inputID}-${option.mode}`} type="radio" name={`${inputID}-mode`} checked={entry.mode === option.mode} onChange={() => change(field.key, { mode: option.mode })} /><span>{option.label}</span></label>)
+              : <label className="checkbox-label" htmlFor={`${inputID}-inherit`}><input id={`${inputID}-inherit`} type="checkbox" checked={entry.mode === 'inherit'} onChange={event => change(field.key, { mode: event.target.checked ? 'inherit' : 'set', value: entry.value || String(field.maximum(limits)) })} /><span>Use the deployment’s setting</span></label>}
+            {entry.mode === 'set' && <label htmlFor={inputID}><span className="sr-only">{field.label}</span><input id={inputID} type="number" inputMode="numeric" min={1} max={field.maximum(limits)} step={1} value={entry.value} onChange={event => change(field.key, { value: event.target.value })} aria-invalid={!!problem} aria-describedby={`${inputID}-help`} /></label>}
+            <small id={`${inputID}-help`} className={problem ? 'field-error' : undefined}>{problem ?? help(limits)}</small>
           </fieldset>
         })}
         <p className="notice">A cap is a limit, not a reservation. When units wait for slots, free slots go round-robin to the waiting units, up to each unit’s cap.</p>

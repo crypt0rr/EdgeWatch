@@ -293,6 +293,46 @@ describe('business unit detail', () => {
       expect(await screen.findByText('Capacity saved. It applies to the next scan this unit queues.')).toBeInTheDocument()
     })
 
+    it('shows a unit without a high-cost grant as not granted, and saving other settings keeps it so', async () => {
+      vi.mocked(getUnitCapacity).mockResolvedValue(unitCapacity({ capacity: { ...unitCapacity().capacity, high_cost_ceiling: 0 } }))
+      renderUnit('capacity')
+      const slots = await screen.findByLabelText('Scan slot cap', { selector: 'input[type="number"]' })
+      expect(screen.getByLabelText('Not granted')).toBeChecked()
+      expect(screen.getByLabelText('Grant a ceiling')).not.toBeChecked()
+      expect(screen.queryByLabelText('High-cost ceiling', { selector: 'input[type="number"]' })).not.toBeInTheDocument()
+      expect(screen.getByText('A job approved for high-cost scanning keeps this unit’s probe budgets, whatever config.yaml sets.')).toBeInTheDocument()
+      fireEvent.change(slots, { target: { value: '3' } })
+      fireEvent.submit(slots.closest('form')!)
+      await waitFor(() => expect(updateUnitCapacity).toHaveBeenCalledWith('unit-retail', { max_concurrent_scans: 3, max_probe_count: null, max_naabu_probe_count: 1_000_000, high_cost_ceiling: 0 }))
+      expect(await screen.findByText('Capacity saved. It applies to the next scan this unit queues.')).toBeInTheDocument()
+      expect(screen.getByLabelText('Not granted')).toBeChecked()
+    })
+
+    it('grants a typed high-cost ceiling, and takes it away again', async () => {
+      vi.mocked(getUnitCapacity).mockResolvedValue(unitCapacity({ capacity: { ...unitCapacity().capacity, high_cost_ceiling: 0 } }))
+      renderUnit('capacity')
+      const slots = await screen.findByLabelText('Scan slot cap', { selector: 'input[type="number"]' })
+      fireEvent.click(screen.getByLabelText('Grant a ceiling'))
+      // A grant starts empty, so it is always a number the administrator typed.
+      const ceiling = screen.getByLabelText('High-cost ceiling', { selector: 'input[type="number"]' })
+      expect(ceiling).toHaveValue(null)
+      expect(screen.getByText('Use a whole number from 1 to 100,000,000.')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Save capacity' })).toBeDisabled()
+      fireEvent.change(ceiling, { target: { value: '7000000' } })
+      fireEvent.submit(slots.closest('form')!)
+      await waitFor(() => expect(updateUnitCapacity).toHaveBeenLastCalledWith('unit-retail', { max_concurrent_scans: 2, max_probe_count: null, max_naabu_probe_count: 1_000_000, high_cost_ceiling: 7_000_000 }))
+      expect(await screen.findByText('Capacity saved. It applies to the next scan this unit queues.')).toBeInTheDocument()
+      expect(screen.getByLabelText('Grant a ceiling')).toBeChecked()
+      expect(screen.getByLabelText('High-cost ceiling', { selector: 'input[type="number"]' })).toHaveValue(7_000_000)
+      fireEvent.click(screen.getByLabelText('Not granted'))
+      expect(screen.queryByLabelText('High-cost ceiling', { selector: 'input[type="number"]' })).not.toBeInTheDocument()
+      fireEvent.submit(slots.closest('form')!)
+      await waitFor(() => expect(updateUnitCapacity).toHaveBeenLastCalledWith('unit-retail', { max_concurrent_scans: 2, max_probe_count: null, max_naabu_probe_count: 1_000_000, high_cost_ceiling: 0 }))
+      await waitFor(() => expect(screen.getByLabelText('Not granted')).toBeChecked())
+      fireEvent.click(screen.getByLabelText('Use the deployment’s setting', { selector: 'input[type="radio"]' }))
+      expect(screen.getByText('A job approved for high-cost scanning may send up to 100,000,000 probes, the absolute probe ceiling.')).toBeInTheDocument()
+    })
+
     it('reloads the unit after a capacity change, so a rename or a disable that follows it sends the new revision', async () => {
       // A fake server: a capacity change, like any change, moves the unit
       // to its next revision, and a stale revision is a conflict.

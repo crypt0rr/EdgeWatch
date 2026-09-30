@@ -471,7 +471,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 56 must not be opened by an older EdgeWatch
+database upgraded to schema 57 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -502,8 +502,17 @@ and sends a deletion that was already compacting the search indexes back to
 the start of its compaction. Schema 56 changes no table either: in a
 database without auto-vacuum that holds a deleted tenant, it records that
 cleanup as pending again at its overwrite of free pages, and it sends a
-deletion that had reached its log truncation back to that overwrite. Back up
-the complete `./data` directory before the upgrade.
+deletion that had reached its log truncation back to that overwrite. Schema
+57 records whether a unit has a high-cost grant. A unit without one, as
+every new unit starts, keeps its probe budgets for a job approved for
+high-cost work, whatever config.yaml sets; earlier releases stored the
+budgets in force at the unit's creation as its ceiling, which let such an
+approval raise the budgets once config.yaml lowered them. The upgrade removes that ceiling from every unit
+other than the default one whose capacity no platform administrator has
+saved, and a database check keeps a unit without a grant from holding a
+ceiling. A ceiling that a platform administrator saved stays a grant, so
+review the ceiling of those units after the upgrade. Back up the complete
+`./data` directory before the upgrade.
 
 Recovery codes are stored in the salted `v2` representation. Schema 38 removes
 legacy unsalted SHA-256 recovery-code digests and records only their count in

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/config"
@@ -97,10 +98,10 @@ func TestSetTenantCapacityValidatesBounds(t *testing.T) {
 		{TenantCapacity{MaxProbeCount: ptrTo[int64](1_001)}, "max_probe_count must be between 1 and 1000"},
 		{TenantCapacity{MaxNaabuProbeCount: ptrTo[int64](-1)}, "max_naabu_probe_count must be between 1 and 2000"},
 		{TenantCapacity{MaxNaabuProbeCount: ptrTo[int64](2_001)}, "max_naabu_probe_count must be between 1 and 2000"},
-		{TenantCapacity{HighCostCeiling: ptrTo[int64](0)}, "high_cost_ceiling must be between 1 and 100000000"},
-		{TenantCapacity{HighCostCeiling: ptrTo(config.MaxProbeCountLimit + 1)}, "high_cost_ceiling must be between 1 and 100000000"},
+		{TenantCapacity{HighCostCeiling: ptrTo[int64](-1)}, "high_cost_ceiling must be between 0 and 100000000"},
+		{TenantCapacity{HighCostCeiling: ptrTo(config.MaxProbeCountLimit + 1)}, "high_cost_ceiling must be between 0 and 100000000"},
 		// A valid setting does not save an invalid one next to it.
-		{TenantCapacity{MaxConcurrentScans: ptrTo(1), HighCostCeiling: ptrTo(config.MaxProbeCountLimit + 1)}, "high_cost_ceiling must be between 1 and 100000000"},
+		{TenantCapacity{MaxConcurrentScans: ptrTo(1), HighCostCeiling: ptrTo(config.MaxProbeCountLimit + 1)}, "high_cost_ceiling must be between 0 and 100000000"},
 	} {
 		err := platform.SetTenantCapacity(ctx, DefaultTenantID, invalid.capacity, testCapacityLimits, AuditEntry{})
 		if !errors.Is(err, ErrValidation) || err.Error() != invalid.setting {
@@ -118,6 +119,7 @@ func TestSetTenantCapacityValidatesBounds(t *testing.T) {
 	for _, valid := range []TenantCapacity{
 		{MaxConcurrentScans: ptrTo(1), MaxProbeCount: ptrTo[int64](1), MaxNaabuProbeCount: ptrTo[int64](1), HighCostCeiling: ptrTo[int64](1)},
 		{MaxConcurrentScans: ptrTo(4), MaxProbeCount: ptrTo[int64](1_000), MaxNaabuProbeCount: ptrTo[int64](2_000), HighCostCeiling: ptrTo(config.MaxProbeCountLimit)},
+		{MaxProbeCount: ptrTo[int64](1_000), HighCostCeiling: ptrTo(HighCostNotGranted)},
 		{},
 	} {
 		if err := platform.SetTenantCapacity(ctx, DefaultTenantID, valid, testCapacityLimits, platformAudit("")); err != nil {
@@ -283,20 +285,71 @@ func TestTenantCapacitiesListsTheActiveTenants(t *testing.T) {
 	}
 }
 
-// A new tenant's ceiling is the lower of its two budgets, so high-cost work
-// raises neither until a platform administrator raises the ceiling.
+// A new tenant has no high-cost grant, which no deployment budget turns
+// into a number, so high-cost work raises neither budget until a platform
+// administrator grants a ceiling.
 func TestInitialTenantCapacityKeepsHighCostOff(t *testing.T) {
+	capacity := InitialTenantCapacity()
+	want := TenantCapacity{HighCostCeiling: ptrTo(HighCostNotGranted)}
+	if !reflect.DeepEqual(capacity, want) {
+		t.Errorf("initial capacity = %s, want %s", describeCapacity(capacity), describeCapacity(want))
+	}
+	if got := describeCapacity(capacity); got != "max_concurrent_scans=deployment max_probe_count=deployment max_naabu_probe_count=deployment high_cost_ceiling=not_granted" {
+		t.Errorf("initial capacity audit detail = %q", got)
+	}
 	for _, limits := range []CapacityLimits{
 		{MaxConcurrentScans: 2, MaxProbeCount: 5, MaxNaabuProbeCount: 20},
 		{MaxConcurrentScans: 2, MaxProbeCount: 20, MaxNaabuProbeCount: 5},
 	} {
-		capacity := InitialTenantCapacity(limits)
-		want := TenantCapacity{HighCostCeiling: ptrTo[int64](5)}
-		if !reflect.DeepEqual(capacity, want) {
-			t.Errorf("%+v: initial capacity = %s, want %s", limits, describeCapacity(capacity), describeCapacity(want))
-		}
 		if err := capacity.Validate(limits); err != nil {
 			t.Errorf("%+v: the initial capacity is invalid: %v", limits, err)
 		}
+	}
+}
+
+// A tenant without a grant is stored without a ceiling, a granted ceiling
+// and the deployment's are stored as before, and each reads back as it was
+// set. The row cannot hold a ceiling beside high_cost_granted=0, so no
+// number stays behind that a later release could read as a grant.
+func TestHighCostGrantIsStoredApartFromTheCeiling(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	insertTenantUser(t, s, platformRoot, nil, RolePlatformAdmin)
+	stored := func() (any, int) {
+		t.Helper()
+		var ceiling any
+		var granted int
+		if err := s.DB.QueryRow(`SELECT high_cost_ceiling,high_cost_granted FROM tenants WHERE id=?`, DefaultTenantID).Scan(&ceiling, &granted); err != nil {
+			t.Fatal(err)
+		}
+		return ceiling, granted
+	}
+	for _, check := range []struct {
+		ceiling *int64
+		column  any
+		granted int
+	}{
+		{ptrTo(HighCostNotGranted), nil, 0},
+		{ptrTo[int64](1), int64(1), 1},
+		{nil, nil, 1},
+		{ptrTo(config.MaxProbeCountLimit), config.MaxProbeCountLimit, 1},
+		{ptrTo(HighCostNotGranted), nil, 0},
+	} {
+		capacity := TenantCapacity{HighCostCeiling: check.ceiling}
+		if err := s.Platform().SetTenantCapacity(ctx, DefaultTenantID, capacity, testCapacityLimits, platformAudit("")); err != nil {
+			t.Fatalf("%s: %v", describeCapacity(capacity), err)
+		}
+		if column, granted := stored(); column != check.column || granted != check.granted {
+			t.Fatalf("%s is stored as high_cost_ceiling=%v high_cost_granted=%d, want %v and %d", describeCapacity(capacity), column, granted, check.column, check.granted)
+		}
+		if got, _ := tenantCapacityRow(t, s, DefaultTenantID); !reflect.DeepEqual(got, capacity) {
+			t.Fatalf("%s reads back as %s", describeCapacity(capacity), describeCapacity(got))
+		}
+	}
+	if _, err := s.DB.Exec(`UPDATE tenants SET high_cost_ceiling=5000 WHERE id=?`, DefaultTenantID); err == nil || !strings.Contains(err.Error(), "CHECK constraint failed") {
+		t.Fatalf("a ceiling beside high_cost_granted=0: %v, want a check constraint failure", err)
+	}
+	if _, err := s.DB.Exec(`UPDATE tenants SET high_cost_granted=2 WHERE id=?`, DefaultTenantID); err == nil || !strings.Contains(err.Error(), "CHECK constraint failed") {
+		t.Fatalf("high_cost_granted=2: %v, want a check constraint failure", err)
 	}
 }

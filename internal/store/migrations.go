@@ -76,6 +76,25 @@ func newerSchemaError(version int) error {
 	return fmt.Errorf("database schema version %d is newer than supported version %d", version, schemaVersion)
 }
 
+// ErrSchemaUpgradePending is the refusal of OpenExistingUpgraded and
+// OpenReadOnlyExistingUpgraded for a database with an older schema. Only the
+// daemon migrates, at its next start.
+var ErrSchemaUpgradePending = errors.New("database schema upgrade pending")
+
+// schemaUpgradePendingError names the schema version of a database that
+// this release has not migrated yet.
+type schemaUpgradePendingError struct {
+	version int
+}
+
+func (e schemaUpgradePendingError) Error() string {
+	return fmt.Sprintf("database schema version %d has not been upgraded to version %d yet", e.version, schemaVersion)
+}
+
+func (e schemaUpgradePendingError) Is(target error) bool {
+	return target == ErrSchemaUpgradePending
+}
+
 func migrate(db *sql.DB) error {
 	return migrateContext(context.Background(), db)
 }

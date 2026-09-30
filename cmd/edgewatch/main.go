@@ -95,6 +95,12 @@ func run(args []string) error {
 	if cmd == "notify-send" {
 		return notify.RunSendChild(os.Stdin)
 	}
+	if cmd == "config" {
+		if action != "validate" {
+			return errors.New("expected: config validate")
+		}
+		return validateConfig(*configPath, *output)
+	}
 	loadConfig := config.Load
 	if cmd == "admin" || cmd == "backup" || cmd == "verify" || cmd == "health" || cmd == "status" || cmd == "history" || cmd == "restore" || (cmd == "baseline" && action == "export") {
 		// Host recovery must not depend on monitor-only configuration such as
@@ -106,11 +112,12 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	if cmd == "config" {
-		if action != "validate" {
-			return errors.New("expected: config validate")
+	if cmd == "daemon" {
+		// Refuse an unusable key file or notification URL before the
+		// database is opened, so a refused start never migrates it.
+		if err := validateStartupConfig(cfg); err != nil {
+			return err
 		}
-		return printValue(*output, normalizedConfig(cfg))
 	}
 	if cmd == "restore" {
 		if *fromPath == "" {
@@ -156,10 +163,17 @@ func run(args []string) error {
 	// migration and resumable-backfill progress uses the same structured output
 	// as the rest of the daemon.
 	logger := newLoggerTo(commandLogWriter(cmd), cfg.LogLevel(), deploymentLocation(cfg))
+	// health, verify, and backup work on the whole database, of the current
+	// schema or of an older one, so that a restored older backup can be
+	// verified and backed up before the daemon upgrades it. The other
+	// commands act on business units or accounts, whose rows the migrations
+	// reshape: they refuse a database that the daemon has not upgraded yet.
 	var openStore func(string) (*store.Store, error)
 	switch {
-	case readOnlyCommand:
+	case cmd == "health" || cmd == "verify":
 		openStore = store.OpenReadOnlyExisting
+	case readOnlyCommand:
+		openStore = store.OpenReadOnlyExistingUpgraded
 	case cmd == "backup":
 		openStore = store.OpenExisting
 	case cmd == "daemon":
@@ -182,9 +196,12 @@ func run(args []string) error {
 			return store.OpenWithLogger(path, logger)
 		}
 	default:
-		openStore = store.OpenExisting
+		openStore = store.OpenExistingUpgraded
 	}
 	s, err := openStore(cfg.Database)
+	if errors.Is(err, store.ErrSchemaUpgradePending) {
+		return fmt.Errorf("%w; start the daemon once to upgrade it, then run this command again", err)
+	}
 	if err != nil {
 		return err
 	}
@@ -193,14 +210,10 @@ func run(args []string) error {
 	// or seals TOTP secrets. The daemon's compatibility migration and the host
 	// recovery commands run before app.New, which otherwise applies this path;
 	// without it they would use, or auto-create, a default key beside the
-	// database that the configured key cannot open.
+	// database that the configured key cannot open. The daemon validated the
+	// configured key before it opened the database.
 	s.SetAuthKeyPath(cfg.Web.AuthKeyFile)
 	if cmd == "daemon" {
-		if cfg.Web.AuthKeyFile != "" {
-			if err := store.ValidateAuthKeyFile(cfg.Web.AuthKeyFile); err != nil {
-				return fmt.Errorf("validate authentication key file: %w", err)
-			}
-		}
 		if err := s.MigrateAdminCompatibility(context.Background()); err != nil {
 			return fmt.Errorf("migrate administrator compatibility state: %w", err)
 		}
@@ -276,6 +289,14 @@ func run(args []string) error {
 		events, err := tenant.ListEvents(ctx, *jobName, *limit)
 		if err != nil {
 			return err
+		}
+		// Print empty lists, not null, for a unit without history, as the
+		// web API does.
+		if scans == nil {
+			scans = []model.Scan{}
+		}
+		if events == nil {
+			events = []model.Event{}
 		}
 		return printValue(*output, map[string]any{"scans": scans, "events": events})
 	case "baseline":
@@ -450,9 +471,15 @@ func adminRecovery(ctx context.Context, action string, s *store.Store, passwordF
 	if username == "" {
 		username = "admin"
 	}
+	// An account is "not configured" only when it does not exist. Any other
+	// failure, such as an invalid username or a database error, is reported
+	// as it is.
 	user, err := s.GetUserByUsername(ctx, username)
-	if err != nil {
+	if errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("user %q is not configured", username)
+	}
+	if err != nil {
+		return fmt.Errorf("look up user %q: %w", username, err)
 	}
 	// The host may recover an account of any tenant. The change goes through
 	// the store of the account's own tenant, as the console's would. A
@@ -462,9 +489,13 @@ func adminRecovery(ctx context.Context, action string, s *store.Store, passwordF
 	if user.Role == store.RolePlatformAdmin {
 		accounts = s.Platform().Account(user.ID)
 	} else {
+		// An account of a deleted unit no longer exists either.
 		scope, err := s.TenantScopeByID(ctx, user.TenantID)
-		if err != nil {
+		if errors.Is(err, store.ErrNoTenantScope) {
 			return fmt.Errorf("user %q is not configured", username)
+		}
+		if err != nil {
+			return fmt.Errorf("look up the business unit of user %q: %w", username, err)
 		}
 		accounts = s.Tenant(scope)
 	}
@@ -636,6 +667,44 @@ func printValue(format string, v any) error {
 	return nil
 }
 
+// validateStartupConfig checks the configured key files and the notification
+// URLs from config.yaml as the daemon's startup does, with no database: the
+// daemon runs it before it opens and migrates the database, and config
+// validate runs it after config.Load. The URL error names only a digest
+// prefix. app.New keeps its own checks for embedded callers.
+func validateStartupConfig(cfg *config.Config) error {
+	if cfg.Web.AuthKeyFile != "" {
+		if err := store.ValidateAuthKeyFile(cfg.Web.AuthKeyFile); err != nil {
+			return fmt.Errorf("validate authentication key file (web.auth_key_file): %w", err)
+		}
+	}
+	if cfg.Notifications.EncryptionKeyFile != "" {
+		if err := notify.ValidateKeyFile(cfg.Notifications.EncryptionKeyFile); err != nil {
+			return fmt.Errorf("validate notification encryption key file (notifications.encryption_key_file): %w", err)
+		}
+	}
+	if err := notify.ValidateConfiguredURLs(cfg.Notifications.URLs); err != nil {
+		return fmt.Errorf("%w in notifications.urls or notifications.urls_file", err)
+	}
+	return nil
+}
+
+// validateConfig is config validate. It prints the normalized configuration
+// with "valid": true when the daemon would accept it, and otherwise
+// "valid": false with the reason, and then fails.
+func validateConfig(path, output string) error {
+	cfg, err := config.Load(path)
+	if err == nil {
+		err = validateStartupConfig(cfg)
+	}
+	if err != nil {
+		// A boolean and a string always encode.
+		_ = printValue(output, map[string]any{"valid": false, "error": err.Error()})
+		return err
+	}
+	return printValue(output, normalizedConfig(cfg))
+}
+
 func normalizedConfig(cfg *config.Config) map[string]any {
 	jobs := make([]map[string]any, 0, len(cfg.Jobs))
 	for _, j := range cfg.Jobs {
@@ -666,7 +735,8 @@ func status(ctx context.Context, ts *store.TenantStore, unitState string, cfg *c
 		NextRun             string `json:"next_run,omitempty"`
 		FailedDeliveries    int    `json:"failed_deliveries"`
 	}
-	var rows []row
+	// A unit without jobs prints an empty list, not null.
+	rows := []row{}
 	display := deploymentLocation(cfg)
 	failedDeliveries, err := ts.FailedDeliveries(ctx)
 	if err != nil {

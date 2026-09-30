@@ -137,13 +137,33 @@ func OpenReadOnlyExistingContext(ctx context.Context, path string) (*Store, erro
 	return openWithOptionsContext(ctx, path, openOptions{requireExisting: true, queryOnly: true})
 }
 
+// OpenExistingUpgraded is OpenExisting for the host commands that act on
+// business units or accounts, whose rows the migrations reshape. It also
+// refuses, before anything reads or writes, a database with an older schema
+// that the daemon has not migrated yet, such as a restored backup of an
+// older release, with an error that wraps ErrSchemaUpgradePending.
+func OpenExistingUpgraded(path string) (*Store, error) {
+	return openWithOptions(path, openOptions{requireExisting: true, refuseOlderSchema: true})
+}
+
+// OpenReadOnlyExistingUpgraded is OpenReadOnlyExisting with the refusal of
+// OpenExistingUpgraded, for the read-only commands that act on a business
+// unit.
+func OpenReadOnlyExistingUpgraded(path string) (*Store, error) {
+	return openWithOptions(path, openOptions{requireExisting: true, queryOnly: true, refuseOlderSchema: true})
+}
+
 type openOptions struct {
 	create          bool
 	requireExisting bool
 	migrate         bool
 	configureWAL    bool
 	queryOnly       bool
-	logger          *slog.Logger
+	// refuseOlderSchema refuses a database whose schema is older than this
+	// release's, with ErrSchemaUpgradePending. It applies to the opens that
+	// do not migrate.
+	refuseOlderSchema bool
+	logger            *slog.Logger
 }
 
 func openWithOptions(path string, options openOptions) (*Store, error) {
@@ -234,6 +254,8 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 	if !options.migrate && !options.queryOnly {
 		// Write-capable host commands open without migrating. Refuse a schema
 		// from a newer release before anything writes, as the daemon does.
+		// The commands that need the current schema also refuse one that
+		// the daemon has not migrated yet.
 		var version int
 		if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 			db.Close()
@@ -242,6 +264,10 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 		if version > schemaVersion {
 			db.Close()
 			return nil, newerSchemaError(version)
+		}
+		if version < schemaVersion && options.refuseOlderSchema {
+			db.Close()
+			return nil, schemaUpgradePendingError{version: version}
 		}
 	}
 	if options.migrate && !options.queryOnly {
@@ -278,7 +304,11 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 			return nil, fmt.Errorf("verify SQLite journal mode: %w", err)
 		}
 		walEnabled = strings.EqualFold(strings.TrimSpace(journalMode), "wal")
-		if !walEnabled {
+		// Only an open that asked for WAL learns that the storage refused
+		// it. The other write-capable opens leave the journal mode as they
+		// find it, and a backup or a restored copy is in rollback-journal
+		// mode until the daemon's next start switches it to WAL.
+		if !walEnabled && options.configureWAL {
 			logger := options.logger
 			if logger == nil {
 				logger = slog.Default()
@@ -318,6 +348,19 @@ func openWithOptionsContext(ctx context.Context, path string, options openOption
 			store.probeSidecars = probeSidecars
 		}
 		opened = true
+		if options.refuseOlderSchema {
+			// Close removes the empty sidecars that this inspection
+			// connection may have created.
+			var version int
+			if err := db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+				store.Close()
+				return nil, err
+			}
+			if version < schemaVersion {
+				store.Close()
+				return nil, schemaUpgradePendingError{version: version}
+			}
+		}
 		return store, nil
 	}
 	var readDB *sql.DB

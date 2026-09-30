@@ -91,6 +91,14 @@ func configuredURLs(urls []string) ([]configuredURL, error) {
 	return out, nil
 }
 
+// ValidateConfiguredURLs checks the notification URLs from config.yaml as
+// the daemon's import does at startup, without a database. The error names
+// only a short digest prefix of an invalid URL, never the URL.
+func ValidateConfiguredURLs(urls []string) error {
+	_, err := configuredURLs(urls)
+	return err
+}
+
 // ImportConfiguredURLs turns every notification URL from config.yaml that has
 // not been imported yet into an encrypted web-managed destination, and moves
 // all references to its deployment destination onto it in the same

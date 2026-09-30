@@ -144,18 +144,143 @@ func TestMergeWorkSnapshotsFoldsRepeatedPortsDeterministically(t *testing.T) {
 	fragment := func(address, state, service string) model.Snapshot {
 		return model.Snapshot{Units: []model.Unit{{Target: "edge.example", Protocol: "tcp", Addresses: []string{address}, Ports: []model.PortState{{Port: 22, State: state, Service: service, Evidence: []string{address}}}}}}
 	}
-	result := MergeWorkSnapshots(plan, []model.Snapshot{
+	fragments := []model.Snapshot{
 		fragment("192.0.2.2", "open|filtered", ""),
 		fragment("192.0.2.1", "open", "ssh"),
 		fragment("192.0.2.2", "open|filtered", "other"),
+	}
+	// Every fragment order folds to the same record: the port is open when
+	// any fragment saw it open, and its service is the sorted union of every
+	// fingerprint, as aggregate() reports it for a single invocation.
+	for _, order := range [][]int{{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}} {
+		ordered := make([]model.Snapshot, 0, len(order))
+		for _, index := range order {
+			ordered = append(ordered, fragments[index])
+		}
+		result := MergeWorkSnapshots(plan, ordered)
+		if len(result.Units) != 1 || len(result.Units[0].Ports) != 1 {
+			t.Fatalf("order %v: repeated port was not folded into one record: %#v", order, result.Units)
+		}
+		port := result.Units[0].Ports[0]
+		if port.State != "open" || port.Service != "other || ssh" || len(port.Evidence) != 2 || port.Evidence[0] != "192.0.2.1" || port.Evidence[1] != "192.0.2.2" {
+			t.Fatalf("order %v: folded port = %#v, want open, service \"other || ssh\", and both addresses as evidence", order, port)
+		}
+	}
+}
+
+// A DNS target's addresses can be scanned in different work units: the
+// planner splits address families, a singular {address} profile scans one
+// address per unit, and Naabu enrichment groups addresses by port set. The
+// resumable merge must report the same service as the single-invocation
+// aggregate() for the same observations, whatever the fragment order, so a
+// fingerprint change on any address is compared.
+func TestMergeWorkSnapshotsUnionsDNSServiceFingerprints(t *testing.T) {
+	const (
+		openSSH  = "ssh | OpenSSH | 9.6 |"
+		dropbear = "ssh | Dropbear | 9.6 |"
+	)
+	observed := func(address, service string) model.Unit {
+		return model.Unit{Target: address, Protocol: "tcp", Addresses: []string{address}, Ports: []model.PortState{{Port: 22, State: "open", Service: service, Evidence: []string{address}}}}
+	}
+	// fragment aggregates the observations of one work unit exactly as the
+	// scanner does before the unit is checkpointed.
+	fragment := func(target resolvedTarget, units ...model.Unit) model.Snapshot {
+		byAddress := map[string]model.Unit{}
+		var addresses []string
+		for _, unit := range units {
+			byAddress[unit.Target] = unit
+			addresses = append(addresses, unit.Target)
+		}
+		unitTarget := target
+		unitTarget.Addresses = addresses
+		return model.Snapshot{Units: []model.Unit{aggregate(unitTarget, byAddress, "tcp")}}
+	}
+	// direct is the single-invocation aggregate over every address.
+	direct := func(t *testing.T, target resolvedTarget, units ...model.Unit) model.PortState {
+		t.Helper()
+		byAddress := map[string]model.Unit{}
+		for _, unit := range units {
+			byAddress[unit.Target] = unit
+		}
+		unit := aggregate(target, byAddress, "tcp")
+		if len(unit.Ports) != 1 {
+			t.Fatalf("direct aggregate = %#v", unit)
+		}
+		return unit.Ports[0]
+	}
+	merge := func(t *testing.T, target resolvedTarget, fragments ...model.Snapshot) model.PortState {
+		t.Helper()
+		plan := WorkPlan{Scopes: []model.Scope{{Target: target.Name, Protocol: "tcp", Ports: "22", ServiceDetection: true}}, DNS: map[string][]string{target.Name: target.Addresses}}
+		result := MergeWorkSnapshots(plan, fragments)
+		if len(result.Units) != 1 || len(result.Units[0].Ports) != 1 {
+			t.Fatalf("merged units = %#v", result.Units)
+		}
+		return result.Units[0].Ports[0]
+	}
+	sameAsDirect := func(t *testing.T, label string, got, want model.PortState) {
+		t.Helper()
+		if got.Service != want.Service || got.State != want.State || fmt.Sprint(got.Evidence) != fmt.Sprint(want.Evidence) {
+			t.Fatalf("%s: merged port = %#v, want the single-invocation result %#v", label, got, want)
+		}
+	}
+
+	t.Run("dual stack", func(t *testing.T) {
+		target := resolvedTarget{Name: "edge.example", Addresses: []string{"192.0.2.10", "2001:db8::10"}, Aggregate: true, Hostname: true}
+		v4 := observed("192.0.2.10", openSSH)
+		v6 := observed("2001:db8::10", dropbear)
+		ipv4, ipv6 := fragment(target, v4), fragment(target, v6)
+		want := direct(t, target, v4, v6)
+		if want.Service != dropbear+" || "+openSSH {
+			t.Fatalf("single-invocation service = %q", want.Service)
+		}
+		sameAsDirect(t, "IPv4 fragment first", merge(t, target, ipv4, ipv6), want)
+		sameAsDirect(t, "IPv6 fragment first", merge(t, target, ipv6, ipv4), want)
 	})
-	if len(result.Units) != 1 || len(result.Units[0].Ports) != 1 {
-		t.Fatalf("repeated port was not folded into one record: %#v", result.Units)
-	}
-	port := result.Units[0].Ports[0]
-	if port.State != "open" || port.Service != "ssh" || len(port.Evidence) != 2 || port.Evidence[0] != "192.0.2.1" || port.Evidence[1] != "192.0.2.2" {
-		t.Fatalf("folded port = %#v, want open ssh with both addresses as evidence", port)
-	}
+
+	t.Run("fragment already aggregating several addresses", func(t *testing.T) {
+		target := resolvedTarget{Name: "edge.example", Addresses: []string{"192.0.2.10", "192.0.2.11", "2001:db8::10"}, Aggregate: true, Hostname: true}
+		first := observed("192.0.2.10", "ssh | A |")
+		second := observed("192.0.2.11", "ssh | C |")
+		third := observed("2001:db8::10", "ssh | B |")
+		batched := fragment(target, first, second)
+		if batched.Units[0].Ports[0].Service != "ssh | A | || ssh | C |" {
+			t.Fatalf("batched fragment service = %q", batched.Units[0].Ports[0].Service)
+		}
+		single := fragment(target, third)
+		want := direct(t, target, first, second, third)
+		sameAsDirect(t, "batched fragment first", merge(t, target, batched, single), want)
+		sameAsDirect(t, "single fragment first", merge(t, target, single, batched), want)
+		// A fingerprint seen by several fragments is listed once.
+		repeated := fragment(target, observed("2001:db8::10", "ssh | A |"))
+		want = direct(t, target, first, second, observed("2001:db8::10", "ssh | A |"))
+		sameAsDirect(t, "repeated fingerprint", merge(t, target, repeated, batched), want)
+	})
+
+	t.Run("equal or missing fingerprints", func(t *testing.T) {
+		target := resolvedTarget{Name: "edge.example", Addresses: []string{"192.0.2.10", "2001:db8::10"}, Aggregate: true, Hostname: true}
+		v4 := observed("192.0.2.10", openSSH)
+		for _, v6 := range []model.Unit{observed("2001:db8::10", openSSH), observed("2001:db8::10", "")} {
+			want := direct(t, target, v4, v6)
+			if want.Service != openSSH {
+				t.Fatalf("single-invocation service = %q", want.Service)
+			}
+			sameAsDirect(t, "IPv4 fragment first", merge(t, target, fragment(target, v4), fragment(target, v6)), want)
+			sameAsDirect(t, "IPv6 fragment first", merge(t, target, fragment(target, v6), fragment(target, v4)), want)
+		}
+	})
+
+	t.Run("port reported by one fragment", func(t *testing.T) {
+		// Port-chunked scans of one address report each port once, so every
+		// service is kept exactly as observed.
+		plan := WorkPlan{Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "22,443", ServiceDetection: true}}, DNS: map[string][]string{}}
+		chunk := func(port int, service string) model.Snapshot {
+			return model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: port, State: "open", Service: service, Evidence: []string{"192.0.2.1"}}}}}}
+		}
+		result := MergeWorkSnapshots(plan, []model.Snapshot{chunk(443, "http | a || b |"), chunk(22, openSSH)})
+		if len(result.Units) != 1 || len(result.Units[0].Ports) != 2 || result.Units[0].Ports[0].Service != openSSH || result.Units[0].Ports[1].Service != "http | a || b |" {
+			t.Fatalf("single-fragment services changed: %#v", result.Units)
+		}
+	})
 }
 
 // A host with every port open arrives as sixteen 4096-port checkpoints. The

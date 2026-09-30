@@ -2533,6 +2533,10 @@ func verificationRank(value string) int {
 	}
 }
 
+// serviceFingerprintSeparator joins the service fingerprints of a logical
+// target's addresses into the one service value that the engine compares.
+const serviceFingerprintSeparator = " || "
+
 func aggregate(target resolvedTarget, units map[string]model.Unit, protocol string) model.Unit {
 	out := model.Unit{Target: target.Name, Protocol: protocol, Addresses: append([]string(nil), target.Addresses...)}
 	// A resolved target can share addresses with another logical target. Keep
@@ -2580,7 +2584,7 @@ func aggregate(target resolvedTarget, units map[string]model.Unit, protocol stri
 			services = append(services, v)
 		}
 		sort.Strings(services)
-		p.Service = strings.Join(services, " || ")
+		p.Service = strings.Join(services, serviceFingerprintSeparator)
 		out.Ports = append(out.Ports, p)
 	}
 	sort.Slice(out.Ports, func(i, j int) bool { return out.Ports[i].Port < out.Ports[j].Port })

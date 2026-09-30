@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1581,5 +1582,223 @@ func TestSuppressedServiceChangeIsNotLearnedWithoutAcceptedPortRecord(t *testing
 	events, _, err := processSuccessWithChanges(&state, job, scan("scan-2", current))
 	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != key {
 		t.Fatalf("change was not reported again after the suppression: %#v, %v", events, err)
+	}
+}
+
+// learningSnapshot observes 192.0.2.1:443 with the given service. When
+// complete, 192.0.2.2:443 answers with a fixed fingerprint; otherwise that
+// address times out, which makes the scan incomplete while the 192.0.2.1
+// target keeps complete coverage.
+func learningSnapshot(service string, complete bool) model.Snapshot {
+	snapshot := model.Snapshot{
+		Scopes: []model.Scope{
+			{Target: "192.0.2.1", Protocol: "tcp", Ports: "443", ServiceDetection: true},
+			{Target: "192.0.2.2", Protocol: "tcp", Ports: "443", ServiceDetection: true},
+		},
+		Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 443, State: "open", Service: service, Evidence: []string{"192.0.2.1"}}}}},
+	}
+	if complete {
+		snapshot.Units = append(snapshot.Units, model.Unit{Target: "192.0.2.2", Protocol: "tcp", Addresses: []string{"192.0.2.2"}, Ports: []model.PortState{{Port: 443, State: "open", Service: "http | nginx | 1.25 |", Evidence: []string{"192.0.2.2"}}}})
+	} else {
+		snapshot.Hosts = []model.HostObservation{{Address: "192.0.2.2", Status: "unreachable", StatusReason: "nmap-host-timeout"}}
+	}
+	snapshot.Normalize()
+	return snapshot
+}
+
+// eventLines describes events and their changes for comparison in tests.
+func eventLines(events []model.Event, skip ...string) []string {
+	var lines []string
+	for _, event := range events {
+		if slices.Contains(skip, event.Type) {
+			continue
+		}
+		lines = append(lines, event.Type)
+		for _, change := range event.Changes {
+			lines = append(lines, "  "+change.Key+" "+change.Old+" -> "+change.New)
+		}
+	}
+	return lines
+}
+
+// A baseline port without a fingerprint learns it from complete scans
+// without an alert (#529). An incomplete scan leaves that learning to the next
+// complete scan, so it must not report the fingerprint either: the service
+// incident it opened would stop the fingerprint from ever being learned.
+func TestIncompleteScanDoesNotReportLearnableFingerprint(t *testing.T) {
+	const (
+		fingerprint = "http | nginx | 1.25 |"
+		key         = "service|192.0.2.1|tcp|443"
+	)
+	for _, managed := range []bool{false, true} {
+		for _, tc := range []struct{ samples, confirmations int }{{1, 1}, {2, 1}, {1, 2}, {2, 2}} {
+			t.Run(fmt.Sprintf("managed-%t-samples-%d-confirmations-%d", managed, tc.samples, tc.confirmations), func(t *testing.T) {
+				ctx := context.Background()
+				db, err := store.Open(storetest.FreshPath(t))
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer db.Close()
+				tenant := defaultTenant(db)
+				e := Engine{Store: db}
+				job := config.Job{Name: "test", Baseline: config.Baseline{Samples: tc.samples}, Change: config.Change{Confirmations: tc.confirmations}}
+				var record store.JobRecord
+				if managed {
+					record, err = tenant.CreateJob(ctx, config.NormalizeJob(config.Job{
+						Name: "learning", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1", "192.0.2.2"},
+						TCP: &config.Protocol{Ports: "443", Mode: "connect", ServiceDetection: true}, Timeout: config.Duration(time.Minute),
+						Baseline: job.Baseline, Change: job.Change,
+					}))
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				sequence := 0
+				var last model.Scan
+				run := func(snapshot model.Snapshot) []string {
+					t.Helper()
+					sequence++
+					last = scan(fmt.Sprint("scan-", sequence), snapshot)
+					var events []model.Event
+					var err error
+					if managed {
+						last.JobID, last.JobRevision, last.Job, last.ConfigHash = record.ID, record.Revision, record.Job.Name, record.Job.SecurityHash()
+						events, err = e.FinalizeManagedScan(ctx, record.ID, record.Job, &last, nil)
+					} else {
+						events, err = e.Success(ctx, job, last)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					return eventLines(events)
+				}
+				runtime := func() model.JobState {
+					t.Helper()
+					var state model.JobState
+					var err error
+					if managed {
+						state, err = tenant.RuntimeState(ctx, record.ID)
+					} else {
+						state, err = tenant.State(ctx, job.Name)
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					return state
+				}
+				expect := func(label string, got []string, want ...string) {
+					t.Helper()
+					if strings.Join(got, "\n") != strings.Join(want, "\n") {
+						t.Fatalf("%s: events = %q, want %q", label, got, want)
+					}
+				}
+
+				for i := 1; i < tc.samples; i++ {
+					expect("baseline sample", run(learningSnapshot("", true)))
+				}
+				expect("baseline", run(learningSnapshot("", true)), "baseline-complete")
+				candidates := fmt.Sprint(runtime().FingerprintCandidates)
+
+				// As many incomplete scans as a change needs to be confirmed.
+				for i := 1; i <= tc.confirmations; i++ {
+					expect(fmt.Sprint("incomplete scan ", i), run(learningSnapshot(fingerprint, false)), "scan-incomplete")
+					state := runtime()
+					if _, open := state.Incidents[key]; open {
+						t.Fatalf("incomplete scan %d opened a service incident for a learnable fingerprint: %#v", i, state.Incidents)
+					}
+					if pending, ok := state.Pending[key]; ok {
+						t.Fatalf("incomplete scan %d left a pending service change: %#v", i, pending)
+					}
+					if got := baselineService(*state.Baseline, "192.0.2.1", "tcp", 443); got != "" {
+						t.Fatalf("incomplete scan %d learned the fingerprint: %q", i, got)
+					}
+					if got := fmt.Sprint(state.FingerprintCandidates); got != candidates {
+						t.Fatalf("incomplete scan %d changed fingerprint candidates: %s, want %s", i, got, candidates)
+					}
+					if managed {
+						stored, err := tenant.GetScan(ctx, last.ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if stored.Status != "incomplete" || len(stored.Changes) != 0 {
+							t.Fatalf("stored incomplete scan = status %q changes %#v, want no changes", stored.Status, stored.Changes)
+						}
+					}
+				}
+
+				// Complete scans then learn the fingerprint without an event.
+				for i := 1; i <= tc.samples; i++ {
+					if got := baselineService(*runtime().Baseline, "192.0.2.1", "tcp", 443); got != "" {
+						t.Fatalf("fingerprint learned after %d of %d complete scans: %q", i-1, tc.samples, got)
+					}
+					expect(fmt.Sprint("complete scan ", i), run(learningSnapshot(fingerprint, true)))
+				}
+				state := runtime()
+				if got := baselineService(*state.Baseline, "192.0.2.1", "tcp", 443); got != fingerprint {
+					t.Fatalf("complete scans did not learn the fingerprint: %q", got)
+				}
+				if len(state.Incidents) != 0 || len(state.Pending) != 0 {
+					t.Fatalf("learning left findings: incidents=%#v pending=%#v", state.Incidents, state.Pending)
+				}
+				expect("learned fingerprint", run(learningSnapshot(fingerprint, true)))
+			})
+		}
+	}
+}
+
+// Deferring learnable fingerprints must not hide a service change that a
+// complete scan reports. An incomplete scan still reports it when the port's
+// own target completed, exactly as a complete scan does.
+func TestIncompleteScanReportsServiceChangesExcludedFromLearning(t *testing.T) {
+	const (
+		fingerprint = "http | nginx | 1.25 |"
+		key         = "service|192.0.2.1|tcp|443"
+	)
+	withoutPort := learningSnapshot("", true)
+	withoutPort.Units = withoutPort.Units[1:]
+	reported := model.Change{Key: key, Kind: "service", Severity: "warning", Target: "192.0.2.1", Protocol: "tcp", Port: 443, Old: "not-open", New: fingerprint}
+	for _, tc := range []struct {
+		name     string
+		baseline model.Snapshot
+		prepare  func(*model.JobState)
+		want     []string
+		open     bool
+	}{
+		{name: "fingerprinted port", baseline: learningSnapshot("http | nginx | 1.24 |", true), want: []string{"changes-detected", "  " + key + " http | nginx | 1.24 | -> " + fingerprint}, open: true},
+		{name: "new port", baseline: withoutPort, want: []string{"changes-detected", "  port|192.0.2.1|tcp|443 not-open -> open", "  " + key + " not-open -> " + fingerprint}, open: true},
+		{name: "service decision required", baseline: learningSnapshot("", true), prepare: func(state *model.JobState) {
+			state.ServiceDecisionRequired = map[string]bool{key: true}
+		}, want: []string{"changes-detected", "  " + key + " not-open -> " + fingerprint}, open: true},
+		{name: "open service incident", baseline: learningSnapshot("", true), prepare: func(state *model.JobState) {
+			state.Incidents[key] = model.Incident{Change: reported, ScanID: "earlier"}
+		}, open: true},
+		{name: "suppressed service change", baseline: learningSnapshot("", true), prepare: func(state *model.JobState) {
+			state.Suppressed[key] = 1
+			state.SuppressedChanges[key] = reported
+		}},
+	} {
+		for _, complete := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s-complete-%t", tc.name, complete), func(t *testing.T) {
+				baseline := cloneSnapshot(tc.baseline)
+				state := model.JobState{Baseline: &baseline, BaselineConfigHash: "hash", Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{}, Suppressed: map[string]int{}, SuppressedChanges: map[string]model.Change{}, FingerprintCandidates: map[string]model.ValueCount{}}
+				if tc.prepare != nil {
+					tc.prepare(&state)
+				}
+				job := config.Job{Name: "test", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+				events, _, err := processSuccessWithChanges(&state, job, scan("scan", learningSnapshot(fingerprint, complete)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := eventLines(events, "scan-incomplete"); strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
+					t.Fatalf("events = %q, want %q", got, tc.want)
+				}
+				if _, open := state.Incidents[key]; open != tc.open {
+					t.Fatalf("service incident open = %t, want %t: %#v", open, tc.open, state.Incidents)
+				}
+				if got, want := baselineService(*state.Baseline, "192.0.2.1", "tcp", 443), baselineService(tc.baseline, "192.0.2.1", "tcp", 443); got != want {
+					t.Fatalf("baseline service = %q, want %q", got, want)
+				}
+			})
+		}
 	}
 }

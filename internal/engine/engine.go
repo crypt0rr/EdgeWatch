@@ -159,6 +159,8 @@ func processSuccessWithChanges(state *model.JobState, job config.Job, scan model
 // scan. It deliberately leaves baseline candidates, fingerprint learning, and
 // failure counters untouched: an incomplete result is useful for detecting a
 // reachable addition, but cannot establish expected state from missing data.
+// A service change that a complete scan would learn is therefore neither
+// learned nor reported here; the next complete scan learns it.
 // While no baseline exists, a separate counter records repeated incomplete
 // attempts so the UI can surface a stalled learning state without pretending
 // that partial evidence is safe to establish as expected state.
@@ -189,7 +191,17 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		changes = Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
 		filtered := changes[:0]
 		allowedIncompleteAdditions := make(map[string]struct{})
+		deferredLearning := make(map[string]struct{})
 		for _, change := range changes {
+			// A complete scan learns a missing fingerprint of a baseline port
+			// without reporting it. This scan cannot learn, so it defers the
+			// change to the next complete scan instead of reporting it: an
+			// incident opened here would also stop the fingerprint from ever
+			// being learned.
+			if change.Kind == "service" && fingerprintLearnable(state, change.Target, change.Protocol, change.Port) {
+				deferredLearning[change.Key] = struct{}{}
+				continue
+			}
 			if incompleteChange(change, protectedTargetProtocols, protectedTargets) {
 				// A positive port addition can still be authoritative when its
 				// evidence names only effective addresses that completed. This is
@@ -208,6 +220,9 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		protectedKeys := protectedChangeKeys(state, *state.Baseline, scan.Snapshot, protectedTargetProtocols, protectedTargets)
 		for key := range allowedIncompleteAdditions {
 			delete(protectedKeys, key)
+		}
+		for key := range deferredLearning {
+			protectedKeys[key] = true
 		}
 		events = append(events, applyChangesWithIncomplete(state, job.Name, scan.ID, changes, job.Change.Confirmations, scan.FinishedAt, protectedKeys)...)
 	}
@@ -708,32 +723,10 @@ func learnMissingFingerprints(state *model.JobState, current model.Snapshot, req
 	seen := map[string]bool{}
 	for _, unit := range current.Units {
 		for _, port := range unit.Ports {
-			if port.Service == "" || !scopeAllows(*state.Baseline, unit.Target, unit.Protocol, port.Port, true) {
-				continue
-			}
-			// Only a port that is already expected can learn its missing
-			// fingerprint. The service of a port that is not in the baseline is
-			// part of that port's new observation and goes through the normal
-			// comparison; learning it here could never complete and would make
-			// the service incident open and recover on alternate scans.
-			expected, ok := baselinePort(*state.Baseline, unit.Target, unit.Protocol, port.Port)
-			if !ok || expected.Service != "" {
+			if port.Service == "" || !fingerprintLearnable(state, unit.Target, unit.Protocol, port.Port) {
 				continue
 			}
 			key := fingerprintKey(unit.Target, unit.Protocol, port.Port)
-			// A service incident reported before its port entered the baseline
-			// (for example, when an operator accepted the port first) stays
-			// under normal comparison until the operator acts on it. Learning it
-			// now would recover an unchanged fingerprint. The same holds after
-			// the incident is suppressed or recovers: the port was accepted
-			// without its service, so only an accepted service ends the
-			// comparison. The suppression check also covers a port accepted
-			// before accepted ports were recorded.
-			_, reported := state.Incidents[key]
-			_, suppressed := state.Suppressed[key]
-			if reported || suppressed || state.ServiceDecisionRequired[key] {
-				continue
-			}
 			seen[key] = true
 			candidate := state.FingerprintCandidates[key]
 			if candidate.Value == port.Service {
@@ -761,6 +754,36 @@ func learnMissingFingerprints(state *model.JobState, current model.Snapshot, req
 		}
 	}
 	return learning
+}
+
+// fingerprintLearnable reports whether a complete scan learns an observed
+// service of this port instead of comparing it. It does not change state, so
+// an incomplete scan can use it to defer the same services.
+func fingerprintLearnable(state *model.JobState, target, protocol string, port int) bool {
+	if state.Baseline == nil || !scopeAllows(*state.Baseline, target, protocol, port, true) {
+		return false
+	}
+	// Only a port that is already expected can learn its missing
+	// fingerprint. The service of a port that is not in the baseline is
+	// part of that port's new observation and goes through the normal
+	// comparison; learning it here could never complete and would make
+	// the service incident open and recover on alternate scans.
+	expected, ok := baselinePort(*state.Baseline, target, protocol, port)
+	if !ok || expected.Service != "" {
+		return false
+	}
+	key := fingerprintKey(target, protocol, port)
+	// A service incident reported before its port entered the baseline
+	// (for example, when an operator accepted the port first) stays
+	// under normal comparison until the operator acts on it. Learning it
+	// now would recover an unchanged fingerprint. The same holds after
+	// the incident is suppressed or recovers: the port was accepted
+	// without its service, so only an accepted service ends the
+	// comparison. The suppression check also covers a port accepted
+	// before accepted ports were recorded.
+	_, reported := state.Incidents[key]
+	_, suppressed := state.Suppressed[key]
+	return !reported && !suppressed && !state.ServiceDecisionRequired[key]
 }
 
 func baselineService(snapshot model.Snapshot, target, protocol string, port int) string {

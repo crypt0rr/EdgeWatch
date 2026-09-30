@@ -300,6 +300,7 @@ export function JobDetail() {
               <button className="icon-button" onClick={() => routeScanID ? navigate(`/jobs/${encodeURIComponent(id)}`) : setSelectedScan('')} aria-label="Close scan detail">×</button>
             </div>
           </div>
+          {detail.data.scan.error && <div className="form-error scan-error" role="alert">{detail.data.scan.error}</div>}
           {selectedScanCanBeBaseline && (
             <div className="baseline-approval">
               <span className="muted">This successful scan matches the current security scope.</span>
@@ -399,7 +400,7 @@ export function JobDetail() {
         </div>
       </div>
       {value.scan_estimate && <div className="notice" role="status">Estimated per run: {value.scan_estimate.probes.toLocaleString()} probes across {value.scan_estimate.hosts.toLocaleString()} hosts ({formatEstimateProcesses(value.scan_estimate)}, roughly {formatEstimateDuration(value.scan_estimate.estimated_seconds)}).{value.scan_estimate.unknown_dns ? ` DNS expansion may increase this estimate for ${value.scan_estimate.unknown_dns} name${value.scan_estimate.unknown_dns === 1 ? '' : 's'}.` : ''}</div>}
-      {activeCycle && <div className={activeCycle.status === 'stalled' ? 'form-error banner' : 'notice'} role="status"><strong>{activeCycle.status === 'paused' ? 'Broad scan paused safely.' : activeCycle.status === 'stalled' ? 'Broad scan stalled.' : 'Broad scan cycle active.'}</strong> {activeCycle.completed_units} of {activeCycle.total_units} work units and {activeCycle.completed_probes.toLocaleString()} of {activeCycle.total_probes.toLocaleString()} probes complete. {activeCycle.last_error && <span>{activeCycle.last_error}</span>} {canOperate && (activeCycle.status === 'paused' || activeCycle.status === 'stalled') && <button className="button ghost" onClick={() => { setActionError(''); setDialog('discard-cycle') }} disabled={!!actionBusy}>Discard saved progress</button>}</div>}
+      {activeCycle && <div className={activeCycle.status === 'stalled' ? 'form-error banner cycle-banner' : 'notice cycle-banner'} role="status"><span className="cycle-banner-copy"><strong>{activeCycle.status === 'paused' ? 'Broad scan paused safely.' : activeCycle.status === 'stalled' ? 'Broad scan stalled.' : 'Broad scan cycle active.'}</strong> {activeCycle.completed_units} of {activeCycle.total_units} work units and {activeCycle.completed_probes.toLocaleString()} of {activeCycle.total_probes.toLocaleString()} probes complete. {activeCycle.last_error && <span>{activeCycle.last_error}</span>}</span> {canOperate && (activeCycle.status === 'paused' || activeCycle.status === 'stalled') && <button className="button ghost" onClick={() => { setActionError(''); setDialog('discard-cycle') }} disabled={!!actionBusy}>Discard saved progress</button>}</div>}
       {value.scan_cycle_error === 'cycle_status_unavailable' && !cycle.data && <div className="notice" role="status">Saved scan progress could not be loaded. EdgeWatch will retry automatically; refresh the job if this continues.</div>}
       {!!value.missing_notification_destinations?.length && <div className="notice warning" role="status"><span><strong>Notification routing needs attention.</strong> {value.missing_notification_destinations.length === 1 ? 'A selected notification destination no longer exists' : `${value.missing_notification_destinations.length} selected notification destinations no longer exist`}, so this job’s alerts do not reach {value.missing_notification_destinations.length === 1 ? 'it' : 'them'}. Changing a deployment URL in config.yaml creates a new destination. {canOperate && !value.archived ? <Link to={`/jobs/${id}/edit`}>Edit the job to choose a current destination.</Link> : 'An operator can edit the job to choose a current destination.'}</span></div>}
 
@@ -504,7 +505,7 @@ export function JobDetail() {
                     <span className={scan.status === 'success' ? 'activity-dot success' : 'activity-dot fail'} />
                     <div className="scan-row-copy">
                       <strong>{formatDateTime(scan.finished_at)}</strong>
-                      <span>
+                      <span className={scan.error ? 'scan-row-error' : undefined} title={scan.error ?? undefined}>
                         {scan.status === 'success'
                           ? 'Completed successfully · Open results to inspect the snapshot'
                           : scan.status === 'incomplete'

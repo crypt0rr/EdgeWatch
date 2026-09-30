@@ -85,7 +85,7 @@ export function JobEditor() {
   const [suggestionInput, setSuggestionInput] = useState({ schedule: defaults.schedule, timezone: defaults.timezone })
   const [dismissedSuggestion, setDismissedSuggestion] = useState('')
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
-  const [rebaselinePrompt, setRebaselinePrompt] = useState<{ values: JobFormFields; summary: string } | null>(null)
+  const [rebaselinePrompt, setRebaselinePrompt] = useState<{ values: JobFormFields; changes: string[] } | null>(null)
   const loadedRevision = useRef<{ id?: string; revision: number } | null>(null)
   const { register, handleSubmit, reset, watch, setValue, formState: { errors: formErrors, isDirty } } = useForm<JobFormFields>({
     defaultValues: defaults,
@@ -235,8 +235,7 @@ export function JobEditor() {
       }
       if (!confirm && (message.includes('rebaseline') || (err instanceof APIError && err.code === 'rebaseline_confirmation_required'))) {
         const changes = err instanceof APIError && Array.isArray(err.details?.changes) ? err.details.changes.filter((change): change is string => typeof change === 'string') : []
-        const summary = changes.length ? `\n\nScope changes:\n• ${changes.join('\n• ')}` : ''
-        setRebaselinePrompt({ values, summary })
+        setRebaselinePrompt({ values, changes })
       } else {
         setError(message)
       }
@@ -359,13 +358,15 @@ export function JobEditor() {
             <label>Resume window<input {...register('resume_window')} placeholder="8d" />{(formErrors.resume_window?.message || fieldErrors.resume_window) && <small className="field-error">{formErrors.resume_window?.message || fieldErrors.resume_window}</small>}<small>How long paused broad-scan progress is kept (1h–30d).</small></label>
             {remoteRevision !== null && <div className="notice warning" role="alert"><TriangleAlert size={16} /><span>This job was saved elsewhere while you were editing. Your draft is preserved. <button type="button" className="link-button" onClick={() => existing.data && applyServerJob(existing.data)}>Reload saved version</button></span></div>}
             {timing === 'fast' && <div className="notice warning"><TriangleAlert size={16} /><span>Fast timing can miss responses on congested or filtered networks.</span></div>}
-            {error && <div className="form-error" role="alert">{error}</div>}
-            <button disabled={saving} className="button primary wide" type="submit"><Save size={16} />{saving ? 'Saving…' : edit ? 'Save changes' : 'Create job'}</button>
-            <button type="button" className="button ghost wide" onClick={() => navigate(edit ? `/jobs/${id}` : '/jobs')}>Cancel</button>
           </div>
         </aside>
+        <div className="editor-actions">
+          {error && <div className="form-error" role="alert">{error}</div>}
+          <button disabled={saving} className="button primary" type="submit"><Save size={16} />{saving ? 'Saving…' : edit ? 'Save changes' : 'Create job'}</button>
+          <button type="button" className="button ghost" onClick={() => navigate(edit ? `/jobs/${id}` : '/jobs')}>Cancel</button>
+        </div>
       </form>
-      {rebaselinePrompt && <ActionDialog title="Confirm scan-scope change" description={`This changes the scan scope. The current baseline and active incidents will be cleared, and a new baseline will be learned.${rebaselinePrompt.summary}`} confirmLabel="Reset baseline and save" destructive onConfirm={async () => { await save(rebaselinePrompt.values, true) }} onCancel={() => { setRebaselinePrompt(null); setError('Scope change cancelled.') }} error={error} />}
+      {rebaselinePrompt && <ActionDialog title="Confirm scan-scope change" description="This changes the scan scope. The current baseline and active incidents will be cleared, and a new baseline will be learned." confirmLabel="Reset baseline and save" destructive onConfirm={async () => { await save(rebaselinePrompt.values, true) }} onCancel={() => { setRebaselinePrompt(null); setError('Scope change cancelled.') }} error={error}>{rebaselinePrompt.changes.length > 0 && <ul className="scope-change-list">{rebaselinePrompt.changes.map(change => <li key={change}>{change}</li>)}</ul>}</ActionDialog>}
     </section>
   )
 }

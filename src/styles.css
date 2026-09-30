@@ -1127,6 +1127,171 @@
 .enrollment-user { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .totp-enrollment-notice { margin-bottom: 18px; font-size: 12px; }
 
+/* Responsive follow-up for the verified UI backlog (#970–#977). Keep grid
+   tracks shrinkable so long values do not expand the page or displace actions. */
+.dashboard-jobs,
+.activity-list,
+.scan-list,
+.active-scan-list,
+.result-list,
+.notification-list,
+.public-picker {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.dashboard-jobs > *,
+.activity-list > *,
+.scan-list > *,
+.active-scan-list > *,
+.result-list > *,
+.notification-list > *,
+.public-picker > * {
+  min-width: 0;
+}
+
+.sidebar { overflow-y: auto; overscroll-behavior-y: contain; transition-property: transform; }
+.unit-chip svg,
+.user-chip .avatar { flex: 0 0 auto; }
+.user-chip > span { min-width: 0; }
+.panel-heading > svg,
+.page-heading > svg { flex: 0 0 auto; }
+
+.dashboard-job > *,
+.activity-row > *,
+.result-row > *,
+.notification-row > * {
+  min-width: 0;
+}
+
+.detail-summary { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.summary-card { min-width: 0; }
+.summary-card .muted { overflow-wrap: anywhere; }
+.audit-actor { grid-template-columns: minmax(0, 1fr); overflow-wrap: anywhere; }
+.audit-unit { overflow-wrap: anywhere; }
+
+/* Keep account identity readable beside status/actions, including platform
+   account rows which share this component. */
+.user-row { grid-template-columns: minmax(10rem, 1fr) auto; }
+.user-row-actions { grid-column: 1 / -1; flex-wrap: wrap; justify-content: flex-start; }
+.user-row > div:first-child { overflow-wrap: break-word; }
+
+/* Long fingerprints may scroll inside their own evidence table, but must not
+   impose their min-content width on the surrounding protocol card. */
+.protocol-stack { grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.protocol-card,
+.port-table-wrap { min-width: 0; max-width: 100%; }
+.port-table-wrap { width: 100%; }
+.port-table td:last-child { min-width: 16rem; white-space: normal; }
+.service-cell,
+.service-cell small { min-width: 0; overflow-wrap: anywhere; }
+
+/* Diff values are meaningful evidence; wrap them inside the row rather than
+   letting the expanded scan card clip them. */
+.change-row { grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr); min-width: 0; }
+.change-row > * { min-width: 0; overflow-wrap: anywhere; }
+.scan-row-error,
+.activity-error { white-space: normal !important; overflow: visible !important; overflow-wrap: anywhere; text-overflow: clip !important; }
+.scan-error { display: block; white-space: normal; overflow-wrap: anywhere; }
+
+/* Banners can contain arbitrary scanner output, URLs, or account names. Keep
+   their icons and controls visible while allowing explanatory copy to wrap. */
+.success-banner,
+.form-error { align-items: flex-start; flex-wrap: wrap; overflow-wrap: anywhere; }
+.success-banner > svg,
+.form-error > svg,
+.legacy-banner > svg,
+.notice > svg { flex: 0 0 auto; }
+.success-banner > *,
+.form-error > *,
+.legacy-banner > span,
+.notice > span { min-width: 0; overflow-wrap: anywhere; }
+.legacy-banner { align-items: flex-start; }
+.cycle-banner { align-items: flex-start; flex-wrap: wrap; }
+.cycle-banner-copy { flex: 1 1 16rem; min-width: 0; overflow-wrap: anywhere; }
+.cycle-banner-copy > strong { margin-right: .25rem; }
+
+/* A fixed reconnect notice should fit the viewport and leave scroll room for
+   the page's last controls while it is visible. */
+.connection-notice {
+  box-sizing: border-box;
+  left: 16px;
+  right: 16px;
+  width: max-content;
+  max-width: calc(100% - 32px);
+  margin-inline: auto;
+  transform: none;
+  bottom: max(18px, env(safe-area-inset-bottom));
+  overflow-wrap: anywhere;
+}
+body:has(.connection-notice) .content,
+body:has(.connection-notice) .auth-side { padding-bottom: 110px; }
+
+/* Separate adjacent warnings, panels, and action rows instead of making them
+   look like one merged card. */
+.page > .notice,
+.page > .legacy-banner,
+.page > .success-banner,
+.page > .form-error { margin-bottom: 16px; }
+.page > .notice + .notice,
+.page > .notice + .form-error,
+.page > .form-error + .notice,
+.page > .legacy-banner + .panel,
+.page > .panel + .panel,
+.page > .panel + .heading-actions { margin-top: 16px; }
+.notification-config-import { margin-bottom: 17px; }
+.settings-grid .panel > .settings-form + .button { margin-top: 16px; }
+
+/* The editor's submit controls follow all form fields, not the sticky schedule
+   card. At tablet widths a single column prevents the fixed sidebar plus two
+   editor columns from squeezing controls into one another. */
+.sticky { position: static; }
+.editor-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; }
+.editor-actions .form-error { flex: 1 0 100%; }
+.editor-actions .button { min-width: 120px; }
+.schedule-suggestion-copy { grid-template-columns: minmax(0, 1fr); overflow-wrap: anywhere; }
+.action-dialog > p { white-space: pre-line; }
+.scope-change-list { display: grid; gap: 6px; margin: 0; padding-left: 20px; color: #d4e5f6; font-size: 12px; overflow-wrap: anywhere; }
+
+/* Tablet layouts retain the sidebar, so stack the page heading/actions and
+   settings cards before their content columns become too narrow. */
+@media (max-width: 1100px) {
+  .page-heading { flex-direction: column; align-items: flex-start; gap: 18px; }
+  .heading-actions { width: 100%; max-width: 100%; flex-wrap: wrap; justify-content: flex-start; }
+  .settings-grid { grid-template-columns: minmax(0, 1fr); }
+  .editor { grid-template-columns: minmax(0, 1fr); }
+  .editor-side { grid-row: auto; }
+  .audit-row { grid-template-columns: minmax(0, 1fr) auto; gap: 8px 16px; }
+  .audit-row time { grid-column: 1 / -1; }
+  .desktop-incident-table { display: none; }
+  .mobile-incident-list { display: grid; gap: 10px; }
+}
+
+@media (max-width: 760px) {
+  .sidebar.open { background: #06111f; box-shadow: 12px 0 40px #0009; }
+  .audit-row { grid-template-columns: minmax(0, 1fr); }
+  .detail-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .page-heading > svg.muted-icon,
+  .audit-filters > svg { display: none; }
+  .editor-side { grid-row: auto; }
+  .editor-actions { justify-content: stretch; }
+  .editor-actions .button { flex: 1 1 auto; }
+}
+
+@media (max-width: 620px) {
+  .change-row { grid-template-columns: auto minmax(0, 1fr); }
+  .change-row > .muted { grid-column: 2; }
+  .schedule-suggestion { flex-wrap: wrap; }
+  .schedule-suggestion > .button { margin-left: 25px; }
+}
+
+@media (max-width: 480px) {
+  .user-row,
+  .account-row { grid-template-columns: minmax(0, 1fr); }
+  .user-row > .pill,
+  .account-badges { grid-column: 1; grid-row: auto; justify-self: start; }
+  .user-row-actions { grid-column: 1; }
+}
+
 @media (max-width: 760px) {
   .unit-row { grid-template-columns: minmax(0, 1fr) auto; }
   .unit-facts { grid-column: 1 / -1; grid-template-columns: 1fr; gap: 8px; }

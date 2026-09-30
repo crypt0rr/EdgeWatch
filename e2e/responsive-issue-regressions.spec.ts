@@ -1,0 +1,332 @@
+import { expect, test, type Page } from '@playwright/test'
+import { mockConsole } from './mock-console'
+
+const timestamp = '2026-09-29T10:00:00Z'
+const longValue = `gateway-${'customer-facing-api-cluster-'.repeat(7)}example.internal`
+
+async function expectNoHorizontalScroll(page: Page) {
+  const widths = await page.evaluate(() => ({ client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }))
+  expect(widths.scroll, `page scroll width ${widths.scroll} exceeds viewport ${widths.client}`).toBeLessThanOrEqual(widths.client)
+}
+
+test.describe('responsive issue regressions', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(testInfo.project.name !== 'desktop', 'This suite controls its own viewport sizes.')
+  })
+
+  test('sidebar and mobile drawer scroll to sign out on short screens (#970)', async ({ page }) => {
+    await page.setViewportSize({ width: 844, height: 390 })
+    await mockConsole(page, 'administrator')
+    await page.goto('/jobs')
+    const sidebar = page.locator('#primary-navigation')
+    expect(await sidebar.evaluate(element => getComputedStyle(element).overflowY)).toBe('auto')
+    const signOut = page.getByRole('button', { name: 'Sign out' })
+    await signOut.scrollIntoViewIfNeeded()
+    let box = (await signOut.boundingBox())!
+    expect(box.y).toBeGreaterThanOrEqual(0)
+    expect(box.y + box.height).toBeLessThanOrEqual(390)
+
+    await page.setViewportSize({ width: 390, height: 664 })
+    await page.getByRole('button', { name: 'Open navigation' }).click()
+    await expect(sidebar).toHaveAttribute('aria-hidden', 'false')
+    expect(await sidebar.evaluate(element => getComputedStyle(element).backgroundColor)).toBe('rgb(6, 17, 31)')
+    await signOut.scrollIntoViewIfNeeded()
+    box = (await signOut.boundingBox())!
+    expect(box.y + box.height).toBeLessThanOrEqual(664)
+  })
+
+  test('long dashboard values stay in shrinkable cards (#971)', async ({ page }) => {
+    await mockConsole(page, 'operator')
+    await page.route('**/api/v1/jobs**', async route => {
+      if (route.request().method() !== 'GET' || new URL(route.request().url()).pathname !== '/api/v1/jobs') return route.fallback()
+      await route.fulfill({ json: { jobs: [{
+        id: 'job-1', revision: 1, enabled: true, archived: false, security_hash: 'hash', created_at: timestamp, updated_at: timestamp,
+        job: { name: longValue, schedule: '0 * * * *', timezone: 'UTC', targets: [longValue], max_expanded_hosts: 32, tcp: { ports: '443', mode: 'connect', service_detection: false }, baseline_samples: 1, change_confirmations: 1 },
+        baseline: { status: 'complete', samples: 1, attempts: 1, host_count: 1 },
+      }] } })
+    })
+    await page.route('**/api/v1/scans**', async route => {
+      if (route.request().method() !== 'GET' || new URL(route.request().url()).pathname !== '/api/v1/scans') return route.fallback()
+      await route.fulfill({ json: { scans: [{ id: 'scan-long', job_id: 'job-1', job: longValue, started_at: timestamp, finished_at: timestamp, status: 'failed', error: longValue, config_hash: 'hash' }], pagination: { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null } } })
+    })
+
+    for (const width of [320, 768]) {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/')
+      await expect(page.getByText(longValue, { exact: false }).first()).toBeVisible()
+      await expectNoHorizontalScroll(page)
+    }
+  })
+
+  test('long values stay inside notification, profile, picker and host result rows (#971)', async ({ page }) => {
+    await mockConsole(page, 'administrator')
+    const longIPv6 = '2a01:4f8:c17:b8f2:9c2b:4bff:fe12:3456'
+    const longProfile = 'perimeter_naabu_full_tcp_nmap_confirmed_v2_customer_edge'
+
+    await page.route('**/api/v1/notifications/destinations', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await route.fulfill({ json: {
+        destinations: [{ id: 'dest-long', name: longValue, provider: 'generic', source: 'web', enabled: true, locked: false, read_only: false, revision: 1 }],
+        status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' },
+        update_routing: { configured: true, destinations: ['dest-long'] },
+      } })
+    })
+    await page.route('**/api/v1/scanner-profiles*', async route => {
+      if (route.request().method() !== 'GET' || new URL(route.request().url()).pathname !== '/api/v1/scanner-profiles') return route.fallback()
+      await route.fulfill({ json: { profiles: [{
+        id: 'profile-long', name: longProfile, built_in: false, archived: false, revision: 1,
+        definition: { engine: 'nmap', naabu: {}, nmap_args: [], naabu_args: [], enrichment_args: [] },
+      }] } })
+    })
+    await page.route('**/api/v1/hosts**', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await route.fulfill({ json: { hosts: [{
+        address: longIPv6, address_family: 'IPv6', source_targets: [longValue], dns_names: [],
+        job_id: 'job-1', job: longValue, scan_id: 'scan-1', scanned_at: timestamp,
+        open_ports: 1, open_filtered_ports: 0, has_open_ports: true, data_quality: 'detailed', protocols: [],
+      }], pagination: { limit: 100, offset: 0, total: 1, has_more: false, next_offset: null } } })
+    })
+    await page.route('**/api/v1/scans/scan-1/hosts**', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await route.fulfill({ json: {
+        job_id: 'job-1', job: longValue, scan: { id: 'scan-1', job_id: 'job-1', job: longValue, started_at: timestamp, finished_at: timestamp, status: 'success', config_hash: 'hash' },
+        hosts: [{ address: longIPv6, address_family: 'IPv6', protocols: [], open_ports: 1, open_filtered_ports: 0 }],
+        pagination: { limit: 50, offset: 0, total: 1, has_more: false, next_offset: null },
+      } })
+    })
+    await page.route('**/api/v1/scans/scan-1/summary', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await route.fulfill({ json: { scan: { id: 'scan-1', job_id: 'job-1', job: longValue, started_at: timestamp, finished_at: timestamp, status: 'success', config_hash: 'hash' } } })
+    })
+    await page.route('**/api/v1/jobs/job-1', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await route.fulfill({ json: {
+        id: 'job-1', revision: 1, enabled: true, archived: false, security_hash: 'hash', created_at: timestamp, updated_at: timestamp,
+        job: { name: longValue, schedule: '0 * * * *', timezone: 'UTC', targets: [longValue], max_expanded_hosts: 32, tcp: { ports: '443', mode: 'connect', service_detection: false }, baseline_samples: 1, change_confirmations: 1 },
+        baseline: { status: 'complete', samples: 1, attempts: 1, host_count: 1 },
+      } })
+    })
+    await page.route('**/api/v1/public-dashboard', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await route.fulfill({ json: { enabled: false, title: 'Fixture public status', introduction: '', updated_at: timestamp, hosts: [] } })
+    })
+
+    for (const path of ['/notifications', '/scanner-profiles', '/public-dashboard', '/hosts', '/jobs/job-1', '/scans/scan-1']) {
+      for (const width of [320, 375, 414, 768, 844, 1280, 1920]) {
+        await page.setViewportSize({ width, height: 1024 })
+        await page.goto(path)
+        await expectNoHorizontalScroll(page)
+      }
+    }
+
+    for (const width of [320, 768, 1280]) {
+      await page.setViewportSize({ width, height: 1024 })
+      await page.goto('/notifications')
+      const notificationPanel = page.locator('.notification-list-panel')
+      const notificationEdit = notificationPanel.getByRole('button', { name: 'Edit' })
+      await expect(notificationEdit).toBeVisible()
+      const [notificationPanelBox, notificationEditBox] = await Promise.all([notificationPanel.boundingBox(), notificationEdit.boundingBox()])
+      expect(notificationEditBox!.x + notificationEditBox!.width).toBeLessThanOrEqual(notificationPanelBox!.x + notificationPanelBox!.width)
+      for (const button of await notificationPanel.locator('.notification-actions button').all()) {
+        const [panelBox, buttonBox] = await Promise.all([notificationPanel.boundingBox(), button.boundingBox()])
+        expect(buttonBox!.x + buttonBox!.width).toBeLessThanOrEqual(panelBox!.x + panelBox!.width)
+      }
+
+      await page.goto('/scanner-profiles')
+      const profileEdit = page.getByRole('button', { name: `Edit ${longProfile}` })
+      const profileArchive = page.getByRole('button', { name: `Archive ${longProfile}` })
+      await expect(profileEdit).toBeVisible()
+      await expect(profileArchive).toBeVisible()
+      for (const action of [profileEdit, profileArchive]) {
+        const actionBox = (await action.boundingBox())!
+        expect(actionBox.x + actionBox.width).toBeLessThanOrEqual(width)
+      }
+      const profileHit = await profileEdit.evaluate(button => {
+        const box = button.getBoundingClientRect()
+        const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)
+        return hit instanceof Node && (button === hit || button.contains(hit))
+      })
+      expect(profileHit).toBe(true)
+
+      await page.goto('/public-dashboard')
+      await expect(page.locator('.public-picker-row strong')).toContainText(longIPv6)
+      await page.goto('/scans/scan-1')
+      await expect(page.locator('.result-row strong')).toContainText(longIPv6)
+      await page.goto('/jobs/job-1')
+      await expect(page.locator('.detail-summary')).toContainText(longValue)
+      await expectNoHorizontalScroll(page)
+    }
+  })
+
+  test('user and audit copy keep useful width at tablet sizes (#972)', async ({ page }) => {
+    await mockConsole(page, 'administrator')
+    for (const width of [768, 844, 900, 1024, 1100, 1280, 1920]) {
+      await page.setViewportSize({ width, height: 1024 })
+      await page.goto('/users')
+      const name = page.locator('.user-row > div:first-child').first()
+      await expect(name).toBeVisible()
+      expect((await name.boundingBox())!.width).toBeGreaterThan(120)
+      await expectNoHorizontalScroll(page)
+
+      await page.goto('/audit')
+      const main = page.locator('.audit-main').first()
+      await expect(main).toBeVisible()
+      expect((await main.boundingBox())!.width).toBeGreaterThan(200)
+      await expectNoHorizontalScroll(page)
+    }
+
+    await mockConsole(page, 'platform_admin')
+    await page.route('**/api/v1/platform/units/unit-retail/accounts', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await route.fulfill({ json: { accounts: [{
+        id: 'acct-pending', username: 'pending.admin@corp.example.com', display_name: 'Pending Administrator',
+        role: 'administrator', enabled: false, pending: true, totp_enabled: false,
+        created_at: timestamp, updated_at: timestamp, revision: 1,
+      }] } })
+    })
+    await page.setViewportSize({ width: 320, height: 720 })
+    await page.goto('/platform/units/unit-retail/accounts')
+    const accountName = page.locator('.account-row > div:first-child').first()
+    await expect(accountName).toContainText('pending.admin@corp.example.com')
+    expect((await accountName.boundingBox())!.width).toBeGreaterThan(120)
+    await expectNoHorizontalScroll(page)
+  })
+
+  test('incident actions and host evidence remain within their cards (#973)', async ({ page }) => {
+    await page.setViewportSize({ width: 820, height: 900 })
+    await mockConsole(page, 'administrator')
+    await page.goto('/incidents')
+    await expect(page.locator('.desktop-incident-table')).toBeHidden()
+    await expect(page.locator('.mobile-incident-list')).toBeVisible()
+    const incidentCard = page.locator('.mobile-incident-list article').first()
+    const action = incidentCard.getByRole('button', { name: 'Accept change' })
+    await expect(action).toBeVisible()
+    const [cardBox, actionBox] = await Promise.all([incidentCard.boundingBox(), action.boundingBox()])
+    expect(actionBox!.x + actionBox!.width).toBeLessThanOrEqual(cardBox!.x + cardBox!.width)
+
+    const address = '2001:db8:85a3::8a2e:370:7334'
+    const fingerprint = `${'Apache httpd OpenSSL mod_wsgi Python mod_perl '.repeat(5)}2.4.62`
+    const host = {
+      address, address_family: 'IPv6', source_targets: [longValue], status: 'up',
+      protocols: [{ protocol: 'tcp', scanned_ports: '443', scanned_port_count: 1, service_detection: true, ports: [{ port: 443, state: 'open', service: { name: 'https', product: fingerprint, version: '2.4.62', extra_info: fingerprint } }], state_summaries: [] }],
+    }
+    await page.route('**/api/v1/scans/scan-1/hosts/**', async route => {
+      const pathname = new URL(route.request().url()).pathname
+      if (pathname.endsWith('/rdap')) return route.fulfill({ json: { rdap: { status: 'private', address } } })
+      await route.fulfill({ json: { job_id: 'job-1', job: 'fixture-job', data_quality: 'detailed', scan: { id: 'scan-1', job_id: 'job-1', job: 'fixture-job', started_at: timestamp, finished_at: timestamp, status: 'success', config_hash: 'hash' }, host } })
+    })
+    await page.setViewportSize({ width: 768, height: 1024 })
+    await page.goto(`/scans/scan-1/hosts/${encodeURIComponent(address)}`)
+    await expect(page.getByRole('heading', { name: address })).toBeVisible()
+    await expectNoHorizontalScroll(page)
+    const protocol = page.locator('.protocol-card').first()
+    const protocolBox = (await protocol.boundingBox())!
+    expect(protocolBox.x + protocolBox.width).toBeLessThanOrEqual(768)
+    expect(await page.locator('.port-table-wrap').evaluate(element => getComputedStyle(element).overflowX)).toBe('auto')
+  })
+
+  test('scan diff wraps changes and shows the complete failure reason (#974)', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 900 })
+    await mockConsole(page, 'administrator')
+    const error = `Nmap failed to resolve ${longValue}; ${'coverage incomplete after retries. '.repeat(5)}`
+    const scan = { id: 'scan-1', job_id: 'job-1', job: 'fixture-job', started_at: timestamp, finished_at: timestamp, status: 'failed', error, config_hash: 'fixture-security-hash' }
+    const change = { kind: 'service', target: '2001:0db8:85a3:0000:0000:8a2e:0370:7334', protocol: 'tcp', port: 444, old: `${'nginx 1.18 Ubuntu reverse proxy '.repeat(4)}`, new: `${'Apache httpd Debian OpenSSL mod_wsgi '.repeat(4)}`, severity: 'warning' }
+    await page.route('**/api/v1/jobs/job-1/scans**', async route => {
+      const pathname = new URL(route.request().url()).pathname
+      if (pathname === '/api/v1/jobs/job-1/scans') return route.fulfill({ json: { scans: [scan], pagination: { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null } } })
+      if (pathname === '/api/v1/jobs/job-1/scans/scan-1') return route.fulfill({ json: { scan, changes: [change], changes_pagination: { limit: 50, offset: 0, total: 1, has_more: false, next_offset: null }, current_security_hash: 'fixture-security-hash', comparison_state: 'not_compared' } })
+      return route.fallback()
+    })
+    await page.goto('/jobs/job-1/scans/scan-1')
+    const detail = page.locator('.scan-detail-inline')
+    await expect(detail).toContainText(error)
+    const clipCount = await page.evaluate(() => {
+      const entry = document.querySelector('.scan-entry.expanded')
+      if (!entry) return -1
+      const right = entry.getBoundingClientRect().right
+      return [...entry.querySelectorAll('.change-row > *')].filter(element => element.getBoundingClientRect().right > right + 1).length
+    })
+    expect(clipCount).toBe(0)
+    await expectNoHorizontalScroll(page)
+
+    await page.route('**/api/v1/scans/scan-1/summary', route => route.fulfill({ json: { scan } }))
+    await page.goto('/scans/scan-1')
+    await expect(page.locator('.scan-error')).toContainText(error)
+  })
+
+  test('job editor actions follow the form and tablet headings/settings fit (#975, #977)', async ({ page }) => {
+    await mockConsole(page, 'administrator')
+    await page.route('**/api/v1/jobs/schedule-suggestion**', route => route.fulfill({ json: {
+      suggested: true,
+      suggested_schedule: '30 */6 * * *',
+      offset_minutes: 30,
+      gap_minutes: 0,
+      nearest: { id: 'job-2', name: longValue, schedule: '0 */6 * * *', timezone: 'America/Argentina/ComodRivadavia', next_run: timestamp },
+    } }))
+    for (const width of [375, 768, 834, 1024]) {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/jobs/new')
+      const main = (await page.locator('.editor-main').boundingBox())!
+      const side = (await page.locator('.editor-side').boundingBox())!
+      const actions = (await page.locator('.editor-actions').boundingBox())!
+      expect(main.y + main.height).toBeLessThanOrEqual(side.y + 1)
+      expect(actions.y).toBeGreaterThanOrEqual(Math.max(main.y + main.height, side.y + side.height) - 1)
+      const create = (await page.getByRole('button', { name: 'Create job' }).boundingBox())!
+      expect(create.x + create.width).toBeLessThanOrEqual(width)
+      if (width === 375) {
+        const suggestion = page.locator('.schedule-suggestion')
+        await expect(suggestion).toContainText('Stagger scheduled scans')
+        const title = (await suggestion.locator('strong').boundingBox())!
+        const useTime = (await suggestion.getByRole('button').boundingBox())!
+        expect(title.x + title.width <= useTime.x || useTime.x + useTime.width <= title.x || title.y + title.height <= useTime.y || useTime.y + useTime.height <= title.y).toBe(true)
+      }
+      await expectNoHorizontalScroll(page)
+    }
+
+    await page.setViewportSize({ width: 834, height: 900 })
+    await page.goto('/jobs/job-1')
+    const headingActions = page.locator('.page-heading .heading-actions')
+    await expect(headingActions).toBeVisible()
+    const lastAction = (await headingActions.locator('button, a').last().boundingBox())!
+    expect(lastAction.x + lastAction.width).toBeLessThanOrEqual(834)
+    await expectNoHorizontalScroll(page)
+
+    await mockConsole(page, 'platform_admin')
+    await page.setViewportSize({ width: 768, height: 1024 })
+    await page.goto('/platform/units/unit-retail')
+    const grid = page.locator('.settings-grid').first()
+    await expect(grid).toBeVisible()
+    expect((await grid.evaluate(element => getComputedStyle(element).gridTemplateColumns)).trim().split(/\s+/)).toHaveLength(1)
+    await expectNoHorizontalScroll(page)
+  })
+
+  test('stalled scan banners and reconnect notices wrap within the viewport (#976)', async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 720 })
+    await mockConsole(page, 'administrator')
+    await page.route('**/api/v1/jobs/job-1/scan-cycle', route => route.fulfill({ json: { cycle: {
+      id: 'cycle-1', job_id: 'job-1', job_revision: 1, status: 'stalled', attempt_count: 4, no_progress_attempts: 3,
+      total_units: 4096, completed_units: 1234, total_probes: 268505088, completed_probes: 81234567,
+      started_at: timestamp, updated_at: timestamp, expires_at: '2026-10-07T10:00:00Z', last_error: longValue,
+    } } }))
+    await page.goto('/jobs/job-1')
+    const banner = page.locator('.cycle-banner')
+    const discard = page.getByRole('button', { name: 'Discard saved progress' })
+    await expect(banner).toContainText(longValue)
+    const box = (await discard.boundingBox())!
+    expect(box.x + box.width).toBeLessThanOrEqual(320)
+    await expectNoHorizontalScroll(page)
+
+    await page.evaluate(() => {
+      const notice = document.createElement('div')
+      notice.className = 'connection-notice'
+      notice.textContent = 'Unable to contact EdgeWatch. Retry when the service is available.'
+      document.body.append(notice)
+    })
+    const notice = page.locator('.connection-notice')
+    const noticeBox = (await notice.boundingBox())!
+    expect(noticeBox.x).toBeGreaterThanOrEqual(0)
+    expect(noticeBox.x + noticeBox.width).toBeLessThanOrEqual(320)
+    expect(await page.locator('.content').evaluate(element => parseFloat(getComputedStyle(element).paddingBottom))).toBeGreaterThanOrEqual(110)
+    await expectNoHorizontalScroll(page)
+  })
+})

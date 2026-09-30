@@ -17,7 +17,7 @@ test('public status save exposes failure and success outcomes', async ({ page },
   await expect(page.getByRole('alert')).toContainText('fixture public-dashboard failed')
 
   await page.getByRole('button', { name: 'Save public view' }).click()
-  await expect(page.getByRole('status')).toContainText('Public view saved')
+  await expect(page.locator('.save-feedback[role="status"]')).toContainText('Public view saved.')
   expect(controls.payloads['public-dashboard']).toHaveLength(2)
 })
 
@@ -57,7 +57,7 @@ test('inline update notification toggles expose failure and success outcomes', a
   const retryDialog = page.getByRole('dialog', { name: 'Confirm update alerts for Operations' })
   await retryDialog.getByLabel('Account password').fill('fixture-password')
   await retryDialog.getByRole('button', { name: 'Disable update alerts' }).click()
-  await expect(page.getByRole('status')).toContainText('Application update alerts disabled for Operations')
+  await expect(page.locator('.destination-feedback[role="status"]')).toContainText('Application update alerts disabled for Operations')
   expect(controls.payloads['update-routing']).toHaveLength(2)
 })
 
@@ -73,7 +73,7 @@ test('scanner profile validation exposes failure and success outcomes', async ({
   await expect(page.getByRole('alert')).toContainText('fixture profile-validate failed')
 
   await validate.click()
-  await expect(page.getByRole('status')).toContainText('Profile is valid')
+  await expect(page.locator('.profile-save-feedback [role="status"]')).toContainText('Profile is valid')
   expect(controls.calls['profile-validate']).toBe(2)
 })
 
@@ -90,7 +90,7 @@ test('user invitation exposes failure and success outcomes', async ({ page }, te
   await expect(page.getByRole('alert')).toContainText('fixture user-create failed')
 
   await page.getByRole('button', { name: 'Create activation link' }).click()
-  await expect(page.getByRole('status')).toContainText('Created new-user')
+  await expect(page.locator('.success-banner[role="status"]')).toContainText('Created new-user')
   await expect(page.getByText('FIXTURE-TOKEN')).toBeVisible()
   expect(controls.payloads['user-create']).toHaveLength(2)
 })

@@ -26,6 +26,7 @@ const frontendReport = (overrides = {}) => {
     'src/baseline.ts',
     'src/components/ActionDialog.tsx',
     'src/components/AuditLog.tsx',
+    'src/components/ErrorNotice.tsx',
     'src/components/navigation.ts',
     'src/components/Pagination.tsx',
     'src/components/PortScopeDetails.tsx',

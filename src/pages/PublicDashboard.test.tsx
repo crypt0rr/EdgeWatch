@@ -170,7 +170,7 @@ describe('public dashboard pages', () => {
       await Promise.resolve()
       await Promise.resolve()
     })
-    await vi.waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toBe('the introduction cannot contain line breaks'), { timeout: 1000 })
+    await vi.waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toContain('the introduction cannot contain line breaks'), { timeout: 1000 })
   })
 
   it('separates archived and legacy hosts and saves checkbox changes', async () => {

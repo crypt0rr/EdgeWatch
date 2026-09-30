@@ -10,6 +10,7 @@ import type { JobForm, Protocol } from '../types'
 import type { ScannerCapabilities, ScannerProfile } from '../api'
 import { cidrWarning, duplicateTarget, targetKind } from '../target'
 import { ActionDialog } from '../components/ActionDialog'
+import { ErrorNotice } from '../components/ErrorNotice'
 import { formatDateTime, getDisplayTimeZone } from '../format'
 
 const blank: Omit<JobForm, 'timezone'> = {
@@ -332,7 +333,7 @@ export function JobEditor() {
                 </ul>
               </div>
             </div>}
-            {notificationDestinations.isLoading ? <div className="loading"><span className="spinner" />Loading destinations…</div> : notificationDestinations.error ? <div className="form-error" role="alert">Notification destinations could not be loaded. The existing routing will be preserved.</div> : notificationDestinations.data?.destinations.length ? <div className="job-notification-list">
+            {notificationDestinations.isLoading ? <div className="loading"><span className="spinner" />Loading destinations…</div> : notificationDestinations.error ? <ErrorNotice message="Notification destinations could not be loaded. The existing routing will be preserved." onRetry={() => notificationDestinations.refetch()} /> : notificationDestinations.data?.destinations.length ? <div className="job-notification-list">
               {notificationDestinations.data.destinations.map(destination => <label className="switch-row job-notification-option" key={destination.id}>
                 <input type="checkbox" checked={selectedNotificationIDs.includes(destination.id)} onChange={event => { setNotificationSelectionTouched(true); setDraftDirty(true); setSelectedNotificationIDs(current => event.target.checked ? [...current, destination.id] : current.filter(idValue => idValue !== destination.id)) }} />
                 <span><strong title={destination.name}>{destination.name}</strong><small>{destination.provider || 'unknown provider'} · {destination.source === 'deployment' ? 'deployment-managed' : 'web-managed'}{destination.locked ? ' · credentials locked' : !destination.enabled ? ' · paused' : ''}</small></span>

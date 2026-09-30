@@ -5,6 +5,7 @@ import { Building2, Plus } from 'lucide-react'
 import { createUnit, getUnitCapacity, listUnits } from '../../api'
 import type { BusinessUnit, SessionUser } from '../../api'
 import { ActionDialog } from '../../components/ActionDialog'
+import { ErrorNotice } from '../../components/ErrorNotice'
 import { errorMessage, formatCount, Loading, plural, slugProblem, UnitStatusPill } from './common'
 
 /**
@@ -46,7 +47,7 @@ export function Units() {
   const limits = units.data?.limits
   return <section className="page">
     <div className="page-heading"><div><p className="eyebrow">Platform</p><h1>Business units</h1><p className="muted">Each unit owns its jobs, results, notification destinations, and accounts. You manage the units and their administrators; you never see their scan data.</p></div><div className="heading-actions"><button type="button" className="button primary" onClick={() => { setError(''); setCreating(true) }}><Plus size={16} /> New unit</button></div></div>
-    {units.isLoading ? <Loading label="Loading business units…" /> : units.error || !units.data ? <div className="error-card" role="alert">Could not load business units.</div> : <div className="panel">
+    {units.isLoading ? <Loading label="Loading business units…" /> : units.error || !units.data ? <ErrorNotice message="Could not load business units." onRetry={() => units.refetch()} /> : <div className="panel">
       <div className="panel-heading"><div><h2>{plural(visible.length, 'unit')}</h2>{limits && <p className="muted">Deployment limits: {plural(limits.max_concurrent_scans, 'scan slot')} · {formatCount(limits.max_probe_count)} Nmap and {formatCount(limits.max_naabu_probe_count)} Naabu probes per run.</p>}</div><Building2 className="muted-icon" size={20} /></div>
       {visible.length ? <div className="unit-list">{visible.map(unit => <UnitRow key={unit.id} unit={unit} />)}</div> : <div className="inline-empty">No business units yet.</div>}
     </div>}

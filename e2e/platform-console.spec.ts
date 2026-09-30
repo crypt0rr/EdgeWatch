@@ -214,6 +214,7 @@ test('the platform console fits a phone', async ({ page }, testInfo) => {
 test('a one-time link for a long username fits a phone', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === 'desktop', 'The responsive smoke runs in the mobile projects.')
   await page.emulateMedia({ reducedMotion: 'reduce' })
+  await page.setViewportSize({ width: 320, height: 720 })
   await mockConsole(page, 'platform_admin')
   const username = 'morgan.reyes@corp.example.com'
   for (const path of ['/platform/admins', '/platform/units/unit-retail/accounts']) {
@@ -223,6 +224,42 @@ test('a one-time link for a long username fits a phone', async ({ page }, testIn
     await page.getByRole('button', { name: 'Create activation link' }).click()
     await expect(page.getByLabel(`Activation link for ${username}`)).toContainText('/activate#token=')
     await expect(page.getByText(`Activation link for ${username}`, { exact: true })).toBeVisible()
+    const link = page.locator('.one-time-link')
+    const code = await link.locator('code').boundingBox()
+    const actions = await link.locator('.one-time-link-actions').boundingBox()
+    const buttons = link.locator('.one-time-link-actions .button')
+    const copyButton = await buttons.nth(0).boundingBox()
+    const doneButton = await buttons.nth(1).boundingBox()
+    expect(code).not.toBeNull()
+    expect(actions).not.toBeNull()
+    expect(copyButton).not.toBeNull()
+    expect(doneButton).not.toBeNull()
+    expect(actions!.y - (code!.y + code!.height)).toBeLessThanOrEqual(16)
+    expect(Math.abs(copyButton!.height - doneButton!.height)).toBeLessThanOrEqual(1)
+    expect(await buttons.nth(0).evaluate(element => getComputedStyle(element).whiteSpace)).toBe('nowrap')
+    expect(await buttons.nth(0).evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true)
+    await expectNoHorizontalScroll(page)
+  }
+})
+
+test('one-time link actions stay below the link on wide screens', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The desktop layout check runs once on the desktop project.')
+  await mockConsole(page, 'platform_admin')
+  await page.goto('/platform/admins')
+  await page.getByLabel('Username').fill('avery')
+  await page.getByLabel('Your password').fill('fixture-password')
+  await page.getByRole('button', { name: 'Create activation link' }).click()
+  await expect(page.getByLabel('Activation link for avery')).toContainText('/activate#token=FIXTURE-ADMIN')
+
+  for (const width of [1280, 1920]) {
+    await page.setViewportSize({ width, height: 900 })
+    const link = page.locator('.one-time-link')
+    const code = await link.locator('code').boundingBox()
+    const actions = await link.locator('.one-time-link-actions').boundingBox()
+    expect(code).not.toBeNull()
+    expect(actions).not.toBeNull()
+    expect(actions!.y - (code!.y + code!.height)).toBeLessThanOrEqual(16)
+    expect(Math.abs(actions!.x - code!.x)).toBeLessThanOrEqual(1)
     await expectNoHorizontalScroll(page)
   }
 })

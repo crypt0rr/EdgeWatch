@@ -397,7 +397,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/scanner-profiles' && method === 'POST') { await mutate('profile-create', profile, 201); return }
     if (path === '/scanner-profiles/profile-1' && method === 'PUT') { await mutate('profile-update', profile); return }
     if (path === '/users' && method === 'POST') {
-      await mutate('user-create', { user: { id: 'user-created', username: 'new-user', display_name: 'New User', role: 'viewer', enabled: false, pending: true, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 1 }, activation_token: 'FIXTURE-TOKEN', activation_path: '/activate?token=FIXTURE-TOKEN' }, 201); return
+      await mutate('user-create', { user: { id: 'user-created', username: 'new-user', display_name: 'New User', role: 'viewer', enabled: false, pending: true, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 1 }, activation_token: 'FIXTURE-TOKEN', activation_path: '/activate#token=FIXTURE-TOKEN' }, 201); return
     }
     if (path === '/users/user-2' && method === 'PATCH') { await mutate('user-update', { ...job, id: 'user-2' }); return }
     if (path === '/auth/display-name' && method === 'PUT') { await mutate('display-name', { display_name: 'Renamed admin' }); return }

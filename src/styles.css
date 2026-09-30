@@ -1088,8 +1088,6 @@
 .fixed-role { display: grid; gap: 3px; font-size: 12px; }
 .fixed-role span { color: var(--muted); }
 .fixed-role small { color: #7c98b6; font-size: 11px; }
-.one-time-link code { overflow-wrap: anywhere; }
-.one-time-link .heading-actions { flex-wrap: wrap; }
 .one-time-warning { margin-top: 10px; font-size: 12px; }
 .action-dialog-details { margin: 0 0 16px; font-size: 12px; }
 .action-dialog-details .notice { font-size: 12px; }

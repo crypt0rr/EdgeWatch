@@ -1527,3 +1527,216 @@ body:has(.connection-notice) .auth-side { padding-bottom: 110px; }
   .public-save-controls .heading-actions .button { flex: 1 1 auto; }
   .destination-feedback { margin-left: 0; }
 }
+
+/* Keep native controls consistent with the console's dark-only palette. */
+:root { color-scheme: dark; }
+
+/* Form values should read as values, not as part of their semibold labels. */
+input,
+select,
+textarea {
+  font-weight: 400;
+}
+
+textarea {
+  display: block;
+  width: 100%;
+  min-height: 7.5em;
+  padding: 10px 11px;
+  border: 1px solid #28415e;
+  border-radius: 7px;
+  background: #091727;
+  color: #ecf4fc;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: #7289a3;
+  font-weight: 400;
+  opacity: 1;
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+  border-style: dashed;
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.switch-row:has(input:disabled),
+.checkbox-label:has(input:disabled) {
+  cursor: not-allowed;
+  opacity: .58;
+}
+
+/* A visible, high-contrast keyboard indicator for native controls and rows. */
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible,
+select:focus-visible {
+  outline: 2px solid #71b7ff;
+  outline-offset: 2px;
+  box-shadow: none;
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus-visible,
+textarea:focus-visible {
+  border-color: #71b7ff;
+  box-shadow: 0 0 0 3px #5499dc80;
+}
+
+.host-toolbar select:focus,
+.host-toolbar select:focus-visible {
+  border-color: #71b7ff;
+}
+
+.unit-row:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid #8fc8ff;
+  outline-offset: 2px;
+}
+
+.tab-bar {
+  padding: 3px 3px 0;
+}
+
+.tab:focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: 2px solid #8fc8ff;
+  outline-offset: -2px;
+  border-radius: 6px 6px 0 0;
+}
+
+/* Disabled actions must not advertise a hover state or accept pointer input. */
+button:disabled,
+button[aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+.button:disabled,
+.button[aria-disabled="true"] {
+  opacity: .45;
+  box-shadow: none;
+}
+
+.button:not(:disabled):not([aria-disabled="true"]):hover {
+  filter: brightness(1.16);
+}
+
+.button:disabled:hover,
+.button[aria-disabled="true"]:hover {
+  filter: none;
+}
+
+.button.danger:disabled:hover,
+.button.danger[aria-disabled="true"]:hover {
+  background: #48242e;
+  filter: none;
+}
+
+.error-card .button:disabled:hover,
+.error-card .button[aria-disabled="true"]:hover {
+  filter: none;
+}
+
+.action-dialog-actions {
+  position: sticky;
+  bottom: -24px;
+  z-index: 1;
+  margin-right: -24px;
+  margin-bottom: -24px;
+  margin-left: -24px;
+  padding: 12px 24px 24px;
+  border-top: 1px solid var(--line);
+  background: #0b1a2c;
+}
+
+/* Coarse-pointer devices include landscape phones and tablets wider than the
+   narrow-screen layout breakpoint; keep their hit targets comfortably sized. */
+@media (pointer: coarse) {
+  .button,
+  .back-link,
+  .text-button,
+  .link-button,
+  .sort-button,
+  .icon-button,
+  .nav-link,
+  .tab,
+  .checkbox-label,
+  .switch-row,
+  .notification-check,
+  .notification-update-toggle,
+  .pagination-actions .button,
+  .notification-actions .button,
+  .notification-edit-actions .button,
+  .password-dialog-actions .button,
+  .action-dialog-actions .button,
+  .scope-details summary,
+  .user-chip .app-version .version-link,
+  .user-chip .app-version .version-update,
+  .public-page footer a {
+    min-height: 44px;
+  }
+
+  .icon-button,
+  .version-update {
+    min-width: 44px;
+    width: 44px;
+    height: 44px;
+  }
+
+  .text-button,
+  .link-button,
+  .back-link,
+  .tab,
+  .user-chip .app-version .version-link,
+  .public-page footer a {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .checkbox-label,
+  .switch-row,
+  .notification-check {
+    align-items: center;
+  }
+}
+
+/* Small desktop targets are also brought up to WCAG's 24px minimum. */
+@media (pointer: fine), (pointer: none) {
+  .scope-details summary,
+  .user-chip .app-version .version-link,
+  .user-chip .app-version .version-update,
+  .public-page footer a {
+    min-height: 24px;
+  }
+
+  .user-chip .app-version .version-link,
+  .public-page footer a {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .version-update {
+    min-width: 24px;
+    width: 24px;
+    height: 24px;
+  }
+}
+
+@media (max-width: 760px) {
+  .action-dialog-actions {
+    bottom: -20px;
+    margin-right: -20px;
+    margin-bottom: -20px;
+    margin-left: -20px;
+    padding: 12px 20px 20px;
+  }
+}

@@ -476,6 +476,14 @@ binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
 refuse a schema newer than the binary supports before they write anything.
+Only the daemon migrates. The host commands that act on business units or
+accounts (`admin`, `scan`, `status`, `history`, `baseline`, and `notify
+test`) refuse a schema that the daemon has not upgraded yet, such as a
+restored backup of an older release, before they read or write anything, so
+account recovery never reports an existing account as missing. The daemon
+checks `web.auth_key_file`, `notifications.encryption_key_file`, and the
+notification URLs in config.yaml before it opens the database, so a start
+that these refuse never migrates it; `config validate` runs the same checks.
 Schema 51 keeps every security audit record, attributes it to the default
 tenant, and adds a category derived from its action. Update alert routing and
 the public status publication move to the default tenant unchanged: alerts go

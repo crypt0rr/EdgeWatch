@@ -915,8 +915,22 @@ notify test, baseline approve and reset, and backup) refuse a newer schema
 with `database schema version N is newer than supported version M`. Back up
 such a database with the release that upgraded it, or copy ./data while
 EdgeWatch is stopped. A daemon that finds another daemon's live lease exits
-before it migrates the database. Keep encryption keys with the database or
+before it migrates the database, and so does a daemon whose configured key
+file or notification URL is unusable (see `config validate` under
+[Useful commands](#useful-commands)). Keep encryption keys with the database or
 encrypted web-managed destinations and never commit them.
+
+Only the daemon migrates the database, when it starts. A restored backup of an
+older release keeps its schema until then. On such a database, `restore`,
+`verify`, `health`, and `backup` work as usual, so the restored copy can be
+checked and backed up first. The commands that act on business units or
+accounts need the upgraded schema, whether they only read (`status`,
+`history`, and `baseline export`) or also write (`admin`, `scan`, `baseline
+approve` and `reset`, and `notify test`). They change nothing and stop with
+`database schema version N has not been upgraded to version M yet; start the
+daemon once to upgrade it, then run this command again`. Start the service,
+for example with `docker compose up -d edgewatch`, and run the command
+again; it can run while the daemon is running.
 
 Schema 48 rebuilds the baseline host search index at startup in bounded,
 resumable batches. While it runs, `edgewatch health` reports the
@@ -1054,6 +1068,16 @@ docker compose exec edgewatch edgewatch status \
   --config /etc/edgewatch/config.yaml --tenant UNIT_SLUG --output json
 ```
 
+`config validate` runs every check of the daemon's startup that needs no
+database: the deployment settings, the notification URLs file, the key in
+`web.auth_key_file` and in `notifications.encryption_key_file` when they are
+set (present, private to its owner, and well formed), and the syntax of each
+notification URL in `notifications.urls` and `notifications.urls_file`. It
+prints the normalized configuration with `"valid": true`, or `"valid": false`
+with the reason and exits non-zero. An invalid URL is named by a digest
+prefix, never by the URL. The daemon runs the same checks before it opens the
+database, so a start that they refuse leaves the database as it was.
+
 `scan`, `status`, `history`, `baseline approve|reset|export`, and `notify test`
 act on the default business unit. `--tenant UNIT_SLUG` makes them act on that
 unit's jobs, scans, baselines, and destinations instead, and record their
@@ -1091,7 +1115,9 @@ tested nor counted.
 Each `status` row has a `state`: `scheduled`, `paused`, `archived`,
 `unit_disabled` for an enabled job of a disabled unit, which is off the
 schedule until the unit is enabled, or `legacy` for an inactive YAML job.
-Only scheduled jobs have a `next_run`. Commands print
+Only scheduled jobs have a `next_run`. For a unit without jobs, `status
+--output json` prints `[]`, and `history --output json` prints empty `scans`
+and `events` lists for a unit without history. Commands print
 their result on stdout and write log lines to stderr, so `--output json` output
 can be piped straight into a JSON parser. Only the daemon logs to stdout.
 

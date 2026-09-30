@@ -328,6 +328,27 @@ func TestImportConfiguredURLsRejectsInvalidURLWithoutLeakingIt(t *testing.T) {
 	}
 }
 
+// ValidateConfiguredURLs refuses, without a database, exactly the URLs that
+// the import refuses at startup, and names them by digest only.
+func TestValidateConfiguredURLsMatchesTheImport(t *testing.T) {
+	valid := []string{"generic://127.0.0.1:9/x", "generic://127.0.0.1:9/x"}
+	if err := ValidateConfiguredURLs(valid); err != nil {
+		t.Fatalf("valid URLs: %v", err)
+	}
+	if err := ValidateConfiguredURLs(nil); err != nil {
+		t.Fatalf("no URLs: %v", err)
+	}
+	invalid := []string{"generic://127.0.0.1:9/x", "unknown-service://secret-token@example.invalid/path"}
+	err := ValidateConfiguredURLs(invalid)
+	if err == nil || strings.Contains(err.Error(), "secret-token") {
+		t.Fatalf("invalid URL error = %v", err)
+	}
+	db, _ := openImportStore(t)
+	if _, importErr := ImportConfiguredURLs(context.Background(), db, invalid, ""); importErr == nil || importErr.Error() != err.Error() {
+		t.Fatalf("validation error %q differs from the import error %v", err, importErr)
+	}
+}
+
 func TestImportConfiguredURLsWithoutURLsDoesNothing(t *testing.T) {
 	db, dir := openImportStore(t)
 	result, err := ImportConfiguredURLs(context.Background(), db, nil, "")

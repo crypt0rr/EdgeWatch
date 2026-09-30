@@ -16,7 +16,7 @@ export function unitAccount(overrides: Partial<UnitAccount> & Pick<UnitAccount, 
 }
 
 export function unitCapacity(overrides: Partial<UnitCapacity> = {}): UnitCapacity {
-  return { unit_id: 'unit-retail', capacity: { max_concurrent_scans: 2, max_probe_count: null, max_naabu_probe_count: 1_000_000, high_cost_ceiling: 1_000_000 }, limits: deploymentLimits, slots: { in_use: 1, queued: 2, limit: 2 }, ...overrides }
+  return { unit_id: 'unit-retail', revision: 3, capacity: { max_concurrent_scans: 2, max_probe_count: null, max_naabu_probe_count: 1_000_000, high_cost_ceiling: 1_000_000 }, limits: deploymentLimits, slots: { in_use: 1, queued: 2, limit: 2 }, ...overrides }
 }
 
 export function platformSession(overrides: Partial<SessionUser> = {}): SessionUser {

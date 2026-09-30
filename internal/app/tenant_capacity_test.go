@@ -572,6 +572,36 @@ func TestSetTenantCapacityIsCheckedAndApplies(t *testing.T) {
 	}
 }
 
+// A capacity change based on an earlier revision of the tenant is refused
+// with ErrConflict and changes neither the stored capacity nor the slot
+// pool; at the current revision it is saved and its slot cap applies at once.
+func TestSetTenantCapacityAtAppliesOnlyAtTheCurrentRevision(t *testing.T) {
+	ctx := context.Background()
+	f := newCapacityTenants(t, schedulerFake{}, 2)
+	limitOfB := func() int { return f.app.slots.CapacitySnapshot().Keys[secondTenantID].Limit }
+	release := mustAcquireSlot(t, f.app.slots, secondTenantID)
+	defer release()
+	_, revision, err := f.db.Platform().TenantCapacityRevision(ctx, secondTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.app.SetTenantCapacityAt(ctx, secondTenantID, revision-1, store.TenantCapacity{MaxConcurrentScans: ptrTo(1)}, capacityActor(t, f.db)); !errors.Is(err, store.ErrConflict) {
+		t.Fatalf("change at the stale revision %d: %v, want ErrConflict", revision-1, err)
+	}
+	if got, err := f.db.Tenant(f.b).Capacity(ctx); err != nil || got.MaxConcurrentScans != nil {
+		t.Fatalf("tenant B's capacity after a refused change = %+v, %v", got, err)
+	}
+	if got := limitOfB(); got != 2 {
+		t.Fatalf("tenant B's limit after a refused change = %d, want 2", got)
+	}
+	if err := f.app.SetTenantCapacityAt(ctx, secondTenantID, revision, store.TenantCapacity{MaxConcurrentScans: ptrTo(1)}, capacityActor(t, f.db)); err != nil {
+		t.Fatal(err)
+	}
+	if got := limitOfB(); got != 1 {
+		t.Fatalf("tenant B's limit after the change = %d, want 1", got)
+	}
+}
+
 // The schedule reconciliation reloads the slot caps, so a change that did
 // not go through SetTenantCapacity applies too.
 func TestScheduleReconciliationReloadsSlotCaps(t *testing.T) {

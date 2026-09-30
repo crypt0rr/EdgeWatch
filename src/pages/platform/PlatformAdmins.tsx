@@ -5,7 +5,7 @@ import { APIError, deletePendingPlatformAdmin, getSession, invitePlatformAdmin, 
 import type { UserSummary } from '../../api'
 import { ActionDialog } from '../../components/ActionDialog'
 import { usernameProblem } from '../Users'
-import { errorMessage, isConflict, lastSignIn, Loading, OneTimeLink } from './common'
+import { errorMessage, isChangedElsewhere, isConflict, lastSignIn, Loading, OneTimeLink } from './common'
 
 /** The actions on a pending administrator, which has not redeemed its invitation. */
 type PendingAction = 'renew' | 'revoke' | 'remove'
@@ -109,6 +109,19 @@ export function PlatformAdmins() {
       await client.invalidateQueries({ queryKey: ['platform-admins'] })
       setPending(null)
     } catch (err) {
+      if (isChangedElsewhere(err)) {
+        // The account may have redeemed its link, or been removed, elsewhere:
+        // reload the list, and ask again only while the account is still
+        // pending.
+        await client.invalidateQueries({ queryKey: ['platform-admins'] })
+        const current = client.getQueryData<{ admins: UserSummary[] }>(['platform-admins'])?.admins.find(item => item.id === admin.id)
+        if (!current?.pending) {
+          setPending(null)
+          setPendingError('')
+          setMessage(`${admin.username} changed elsewhere. The latest state is loaded.`)
+          return
+        }
+      }
       // An invitation that expired or was revoked has no link left to stop:
       // point to the actions that recover the account.
       setPendingError(err instanceof APIError && err.code === 'no_active_activation'
@@ -119,7 +132,7 @@ export function PlatformAdmins() {
   return <section className="page">
     <div className="page-heading"><div><p className="eyebrow">Platform</p><h1>Platform admins</h1><p className="muted">Platform administrators create business units and manage their administrators. They never see a unit’s jobs, scans, hosts, or incidents.</p></div><UsersRound className="muted-icon" size={24} /></div>
     {message && <div className="success-banner" role="status">{message}</div>}
-    {link && <OneTimeLink title={link.title} path={link.path} note="Shown once; it expires in 30 minutes. Send it to the new platform administrator directly." onDismiss={() => setLink(null)} />}
+    {link && <OneTimeLink key={link.path} title={link.title} path={link.path} note="Shown once; it expires in 30 minutes. Send it to the new platform administrator directly." onDismiss={() => setLink(null)} />}
     <div className="settings-grid">
       <div className="panel"><div className="panel-heading"><div><h2>Invite a platform administrator</h2><p className="muted">They choose their own password, and must set up TOTP once more than one unit exists: it protects the password resets of every unit’s administrators.</p></div><UserPlus className="muted-icon" size={20} /></div>
         {error && <div className="form-error" role="alert">{error}</div>}

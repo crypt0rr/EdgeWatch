@@ -1,12 +1,12 @@
 import { FormEvent, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, KeyRound, LogOut, ShieldCheck, UserPlus } from 'lucide-react'
-import { inviteUnitAdmin, listUnitAccounts, resetUnitAdminPassword, revokeUnitAccountSessions } from '../../api'
+import { APIError, inviteUnitAdmin, listUnitAccounts, resetUnitAdminPassword, revokeUnitAccountSessions } from '../../api'
 import type { BusinessUnit, UnitAccount } from '../../api'
 import { ActionDialog } from '../../components/ActionDialog'
 import { formatDateTime } from '../../format'
 import { usernameProblem } from '../Users'
-import { errorMessage, lastSignIn, Loading, OneTimeLink, unitRoleLabels } from './common'
+import { errorMessage, isChangedElsewhere, lastSignIn, Loading, OneTimeLink, unitRoleLabels } from './common'
 
 type Prompt = { kind: 'sessions' | 'reset'; account: UnitAccount }
 
@@ -88,13 +88,30 @@ export function UnitAccounts({ unit }: { unit: BusinessUnit }) {
       await refresh()
       setPrompt(null)
     } catch (err) {
-      setPromptError(errorMessage(err, 'The account change could not be completed.'))
+      // Only the unit's administrators enable an account, so the server's
+      // advice to enable it is replaced with who disabled it.
+      const disabledByUnit = err instanceof APIError && err.code === 'user_disabled'
+      if (isChangedElsewhere(err)) {
+        // The account or the unit changed elsewhere: reload them, and ask
+        // again only while the reloaded account still offers the action.
+        await refresh()
+        const current = client.getQueryData<{ accounts: UnitAccount[] }>(['platform-unit-accounts', unit.id])?.accounts.find(item => item.id === account.id)
+        const unitNow = client.getQueryData<BusinessUnit>(['platform-unit', unit.id]) ?? unit
+        if (!current || !accountActions(current, unitNow.status === 'active')[prompt.kind]) {
+          const changed = current && unitNow.status !== unit.status ? unit.name : account.username
+          setPrompt(null)
+          setPromptError('')
+          setMessage(disabledByUnit ? `${account.username} was disabled by ${unit.name}’s administrators. The latest state is loaded.` : `${changed} changed elsewhere. The latest state is loaded.`)
+          return
+        }
+      }
+      setPromptError(disabledByUnit ? `${account.username} was disabled by ${unit.name}’s administrators.` : errorMessage(err, 'The account change could not be completed.'))
     }
   }
 
   return <div className="unit-accounts">
     {message && <div className="success-banner" role="status">{message}</div>}
-    {link && <OneTimeLink {...link} onDismiss={() => setLink(null)} />}
+    {link && <OneTimeLink key={link.path} {...link} onDismiss={() => setLink(null)} />}
     <div className="settings-grid">
       <div className="panel"><div className="panel-heading"><div><h2>Invite an administrator</h2><p className="muted">You invite the unit’s administrators; they invite its operators and viewers. The person chooses their own password from a one-time link.</p></div><UserPlus className="muted-icon" size={20} /></div>
         {error && <div className="form-error" role="alert">{error}</div>}
@@ -116,18 +133,28 @@ export function UnitAccounts({ unit }: { unit: BusinessUnit }) {
   </div>
 }
 
+/**
+ * The actions that an account row offers. The server resets an
+ * administrator that is enabled or still pending, which renews its
+ * activation link, and only while the unit is active. Revoking sessions
+ * stays available in a disabled unit, for any account that has signed up.
+ */
+function accountActions(account: UnitAccount, unitActive: boolean): Record<Prompt['kind'], boolean> {
+  return {
+    sessions: !account.pending,
+    reset: unitActive && account.role === 'administrator' && (account.enabled || account.pending),
+  }
+}
+
 function AccountRow({ account, unitActive, onAction }: { account: UnitAccount; unitActive: boolean; onAction: (prompt: Prompt) => void }) {
   const status = account.pending ? ['Pending activation', 'amber'] : account.enabled ? ['Enabled', 'green'] : ['Disabled', 'gray']
-  // The server resets an administrator that is enabled or still pending,
-  // which renews its activation link, and only while the unit is active.
-  // Revoking sessions stays available in a disabled unit.
-  const resettable = unitActive && account.role === 'administrator' && (account.enabled || account.pending)
+  const offered = accountActions(account, unitActive)
   return <div className="user-row account-row" data-testid={`account-${account.username}`}>
     <div><strong>{account.display_name}</strong><span>{account.username} · {unitRoleLabels[account.role] ?? account.role}{lastSignIn(account.last_login_at)}</span></div>
     <span className="account-badges"><span className={`pill ${status[1]}`}>{status[0]}</span><span className={account.totp_enabled ? 'pill green' : 'pill amber'}>{account.totp_enabled ? 'TOTP on' : 'No TOTP'}</span></span>
-    {(!account.pending || resettable) && <div className="user-row-actions">
-      {!account.pending && <button type="button" className="button ghost" onClick={() => onAction({ kind: 'sessions', account })}><LogOut size={14} /> Revoke sessions</button>}
-      {resettable && <button type="button" className="button ghost" onClick={() => onAction({ kind: 'reset', account })}><KeyRound size={14} /> {account.pending ? 'New activation link' : 'Reset password'}</button>}
+    {(offered.sessions || offered.reset) && <div className="user-row-actions">
+      {offered.sessions && <button type="button" className="button ghost" onClick={() => onAction({ kind: 'sessions', account })}><LogOut size={14} /> Revoke sessions</button>}
+      {offered.reset && <button type="button" className="button ghost" onClick={() => onAction({ kind: 'reset', account })}><KeyRound size={14} /> {account.pending ? 'New activation link' : 'Reset password'}</button>}
     </div>}
   </div>
 }

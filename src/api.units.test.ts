@@ -20,7 +20,7 @@ describe('business units API contract', () => {
     await apiRoutes.enableUnit('unit/1', 3, 'pw')
     await apiRoutes.deleteUnit('unit/1', 'Retail', 'pw')
     await apiRoutes.getUnitCapacity('unit/1')
-    await apiRoutes.updateUnitCapacity('unit/1', { max_concurrent_scans: 2, high_cost_ceiling: null })
+    await apiRoutes.updateUnitCapacity('unit/1', 6, { max_concurrent_scans: 2, high_cost_ceiling: null })
     await apiRoutes.listUnitAccounts('unit/1')
     await apiRoutes.inviteUnitAdmin('unit/1', { username: 'riley', display_name: 'Riley', password: 'pw' })
     await apiRoutes.resetUnitAdminPassword('unit/1', 'user/2', 'pw')
@@ -71,7 +71,8 @@ describe('business units API contract', () => {
     expect(body(4)).toEqual({ revision: 2, name: 'Stores' })
     expect(body(5)).toEqual({ revision: 2, password: 'pw' })
     expect(body(7)).toEqual({ confirm_name: 'Retail', password: 'pw' })
-    expect(body(9)).toEqual({ max_concurrent_scans: 2, high_cost_ceiling: null })
+    // A capacity change names only the changed settings and the unit's revision.
+    expect(body(9)).toEqual({ max_concurrent_scans: 2, high_cost_ceiling: null, revision: 6 })
     // The platform invites only administrators.
     expect(body(11)).toEqual({ username: 'riley', display_name: 'Riley', password: 'pw', role: 'administrator' })
     expect(body(12)).toEqual({ password: 'pw' })

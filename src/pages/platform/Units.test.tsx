@@ -46,7 +46,7 @@ describe('business unit list', () => {
     ] })
     vi.mocked(getUnitCapacity).mockImplementation(async id => {
       if (id === 'unit-default') throw new APIError('failed', 'store')
-      return { unit_id: id, capacity: { max_concurrent_scans: 2, max_probe_count: null, max_naabu_probe_count: null, high_cost_ceiling: null }, limits, slots: { in_use: 1, queued: 2, limit: 2 } }
+      return { unit_id: id, revision: 3, capacity: { max_concurrent_scans: 2, max_probe_count: null, max_naabu_probe_count: null, high_cost_ceiling: null }, limits, slots: { in_use: 1, queued: 2, limit: 2 } }
     })
     vi.mocked(createUnit).mockResolvedValue(businessUnit({ id: 'unit-new', name: 'Logistics', slug: 'logistics' }))
   })

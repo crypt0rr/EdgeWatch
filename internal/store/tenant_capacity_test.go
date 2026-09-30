@@ -261,6 +261,97 @@ func TestSetTenantCapacityRequiresAnEnabledPlatformAdministrator(t *testing.T) {
 	}
 }
 
+// A capacity change based on a read is written only while the tenant is
+// still at the revision of that read. A change that another change has
+// overtaken, such as another platform administrator's capacity change, is
+// ErrConflict, and no capacity, revision, or audit record is written, so it
+// cannot revert the setting that the other change saved. The read returns
+// the capacity with its revision; a tenant that is gone or being deleted is
+// not found whatever the revision.
+func TestSetTenantCapacityAtRefusesAStaleRevision(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	insertTenantUser(t, f.store, platformRoot, nil, RolePlatformAdmin)
+	ps := f.store.Platform()
+	read, revision, err := ps.TenantCapacityRevision(ctx, secondTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row, rowRevision := tenantCapacityRow(t, f.store, secondTenantID); !reflect.DeepEqual(read, row) || revision != rowRevision {
+		t.Fatalf("read %s at revision %d, stored %s at %d", describeCapacity(read), revision, describeCapacity(row), rowRevision)
+	}
+
+	// Another platform administrator lowers the Nmap budget first.
+	lowered := read
+	lowered.MaxProbeCount = ptrTo[int64](250)
+	if err := ps.SetTenantCapacityAt(ctx, secondTenantID, revision, lowered, testCapacityLimits, platformAudit("")); err != nil {
+		t.Fatal(err)
+	}
+	// A change based on the earlier read would restore the deployment's
+	// budget with its slot cap; it is refused.
+	stale := read
+	stale.MaxConcurrentScans = ptrTo(2)
+	if err := ps.SetTenantCapacityAt(ctx, secondTenantID, revision, stale, testCapacityLimits, platformAudit("")); !errors.Is(err, ErrConflict) {
+		t.Fatalf("change at the stale revision %d: %v, want ErrConflict", revision, err)
+	}
+	if row, rowRevision := tenantCapacityRow(t, f.store, secondTenantID); !reflect.DeepEqual(row, lowered) || rowRevision != revision+1 {
+		t.Fatalf("after the refused change: %s at revision %d, want %s at %d", describeCapacity(row), rowRevision, describeCapacity(lowered), revision+1)
+	}
+	if count := capacityAuditCount(t, f.store); count != 1 {
+		t.Fatalf("capacity audit records = %d, want 1", count)
+	}
+
+	// Read again, the same change is saved over the current budget.
+	current, currentRevision, err := ps.TenantCapacityRevision(ctx, secondTenantID)
+	if err != nil || !reflect.DeepEqual(current, lowered) || currentRevision != revision+1 {
+		t.Fatalf("second read = %s at revision %d, %v", describeCapacity(current), currentRevision, err)
+	}
+	current.MaxConcurrentScans = ptrTo(2)
+	if err := ps.SetTenantCapacityAt(ctx, secondTenantID, currentRevision, current, testCapacityLimits, platformAudit("")); err != nil {
+		t.Fatal(err)
+	}
+	if row, rowRevision := tenantCapacityRow(t, f.store, secondTenantID); !reflect.DeepEqual(row, current) || rowRevision != currentRevision+1 {
+		t.Fatalf("saved %s at revision %d, want %s at %d", describeCapacity(row), rowRevision, describeCapacity(current), currentRevision+1)
+	}
+
+	// A guarded change keeps the high-cost states: taking the grant away
+	// stores no ceiling.
+	notGranted := current
+	notGranted.HighCostCeiling = ptrTo(HighCostNotGranted)
+	if err := ps.SetTenantCapacityAt(ctx, secondTenantID, currentRevision+1, notGranted, testCapacityLimits, platformAudit("")); err != nil {
+		t.Fatal(err)
+	}
+	if row, rowRevision := tenantCapacityRow(t, f.store, secondTenantID); !reflect.DeepEqual(row, notGranted) || rowRevision != currentRevision+2 {
+		t.Fatalf("saved %s at revision %d, want %s at %d", describeCapacity(row), rowRevision, describeCapacity(notGranted), currentRevision+2)
+	}
+	currentRevision++
+
+	// The checks of the unguarded change still apply: the settings, the actor.
+	if err := ps.SetTenantCapacityAt(ctx, secondTenantID, currentRevision+1, TenantCapacity{MaxConcurrentScans: ptrTo(9)}, testCapacityLimits, platformAudit("")); !errors.Is(err, ErrValidation) {
+		t.Errorf("an invalid change = %v, want ErrValidation", err)
+	}
+	if err := ps.SetTenantCapacityAt(ctx, secondTenantID, currentRevision+1, current, testCapacityLimits, AuditEntry{}); !errors.Is(err, ErrAccountNotPermitted) {
+		t.Errorf("a change without an actor = %v, want ErrAccountNotPermitted", err)
+	}
+	for _, state := range []string{TenantStateDeleting, TenantStateDeleted} {
+		setTenantState(t, f.store, secondTenantID, state)
+		for _, expected := range []int64{currentRevision + 1, currentRevision} {
+			if err := ps.SetTenantCapacityAt(ctx, secondTenantID, expected, current, testCapacityLimits, platformAudit("")); !errors.Is(err, ErrNotFound) || errors.Is(err, ErrConflict) {
+				t.Errorf("%s tenant at revision %d: error = %v, want ErrNotFound", state, expected, err)
+			}
+		}
+	}
+	if _, _, err := ps.TenantCapacityRevision(ctx, secondTenantID); !errors.Is(err, ErrNoTenantScope) {
+		t.Errorf("read of a deleted tenant: %v, want ErrNoTenantScope", err)
+	}
+	if err := ps.SetTenantCapacityAt(ctx, "00000000-0000-0000-0000-00000000dead", 1, current, testCapacityLimits, platformAudit("")); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown tenant: error = %v, want ErrNotFound", err)
+	}
+	if count := capacityAuditCount(t, f.store); count != 3 {
+		t.Fatalf("capacity audit records = %d, want 3", count)
+	}
+}
+
 // The scheduler's view holds the capacity of the active tenants only.
 func TestTenantCapacitiesListsTheActiveTenants(t *testing.T) {
 	ctx := context.Background()

@@ -4,6 +4,7 @@ import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, deleteUnit, disableUnit, enableUnit, getUnit, getUnitCapacity, inviteUnitAdmin, listUnitAccounts, renameUnit, resetUnitAdminPassword, revokeUnitAccountSessions, updateUnitCapacity } from '../../api'
+import type { BusinessUnit, UnitCapacitySettings } from '../../api'
 import { formatDateTime } from '../../format'
 import { businessUnit, platformPermissions, unitAccount, unitCapacity } from '../../test/platform-fixtures'
 import { renderWithProviders } from '../../test/test-utils'
@@ -54,7 +55,7 @@ describe('business unit detail', () => {
     vi.mocked(enableUnit).mockResolvedValue(businessUnit())
     vi.mocked(deleteUnit).mockResolvedValue(businessUnit({ status: 'deleting' }))
     vi.mocked(getUnitCapacity).mockResolvedValue(unitCapacity())
-    vi.mocked(updateUnitCapacity).mockImplementation(async (_id, value) => unitCapacity({ capacity: { max_concurrent_scans: null, max_probe_count: null, max_naabu_probe_count: null, high_cost_ceiling: null, ...value } }))
+    vi.mocked(updateUnitCapacity).mockImplementation(async (_id, revision, value) => unitCapacity({ revision: revision + 1, capacity: { ...unitCapacity().capacity, ...value } }))
   })
   afterEach(() => vi.clearAllMocks())
 
@@ -180,6 +181,125 @@ describe('business unit detail', () => {
       expect(screen.getByRole('button', { name: /Copy link/ })).toBeInTheDocument()
     })
 
+    it('shows a new link as not copied until that link is copied', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined)
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+      renderUnit('accounts')
+      await screen.findByText('Riley Novak')
+      fireEvent.change(screen.getByLabelText(/^Username/), { target: { value: 'morgan.retail' } })
+      fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'my-password' } })
+      fireEvent.submit(screen.getByLabelText(/^Username/).closest('form')!)
+      expect(await screen.findByLabelText('Activation link for morgan.retail')).toHaveTextContent('/activate#token=invite-token')
+      fireEvent.click(screen.getByRole('button', { name: /Copy link/ }))
+      expect(await screen.findByRole('button', { name: /Copied/ })).toBeInTheDocument()
+      expect(writeText).toHaveBeenLastCalledWith(`${window.location.origin}/activate#token=invite-token`)
+
+      // A reset link replaces the invitation link without Done: it has not been copied yet.
+      fireEvent.click(within(row('riley')).getByRole('button', { name: /Reset password/ }))
+      await confirmWithPassword()
+      expect(await screen.findByLabelText('Password reset link for riley')).toHaveTextContent('/activate#token=reset-token')
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(screen.queryByRole('button', { name: /Copied/ })).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: /Copy link/ }))
+      expect(await screen.findByRole('button', { name: /Copied/ })).toBeInTheDocument()
+      expect(writeText).toHaveBeenLastCalledWith(`${window.location.origin}/activate#token=reset-token`)
+    })
+
+    it('never says a link was copied when the browser offers no clipboard', async () => {
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: undefined })
+      renderUnit('accounts')
+      await screen.findByText('Riley Novak')
+      fireEvent.click(within(row('riley')).getByRole('button', { name: /Reset password/ }))
+      await confirmWithPassword()
+      await screen.findByLabelText('Password reset link for riley')
+      fireEvent.click(screen.getByRole('button', { name: /Copy link/ }))
+      await act(async () => { await Promise.resolve() })
+      expect(screen.queryByRole('button', { name: /Copied/ })).not.toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Copy link/ })).toBeInTheDocument()
+    })
+
+    for (const { name, refusal, changed, message } of [
+      {
+        name: 'the unit’s administrators disabled the account',
+        refusal: new APIError('disabled users cannot receive activation or password-reset links', 'user_disabled', { enabled: 'enable the account before issuing an activation or password-reset link' }, 409),
+        changed: { enabled: false, revision: 2 },
+        message: 'riley was disabled by Retail’s administrators. The latest state is loaded.',
+      },
+      {
+        name: 'the unit’s administrators changed the account’s role',
+        refusal: new APIError('a platform administrator resets only unit administrators', 'not_permitted', undefined, 403),
+        changed: { role: 'operator' as const, revision: 2 },
+        message: 'riley changed elsewhere. The latest state is loaded.',
+      },
+    ]) {
+      it(`reloads the accounts and stops offering a reset that was refused because ${name}`, async () => {
+        let riley = accounts[0]
+        vi.mocked(listUnitAccounts).mockImplementation(async () => ({ accounts: [riley, ...accounts.slice(1)] }))
+        vi.mocked(resetUnitAdminPassword).mockRejectedValueOnce(refusal)
+        renderUnit('accounts')
+        await screen.findByText('Riley Novak')
+        fireEvent.click(within(row('riley')).getByRole('button', { name: /Reset password/ }))
+        riley = { ...riley, ...changed }
+        await confirmWithPassword()
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+        expect(resetUnitAdminPassword).toHaveBeenCalledWith('unit-retail', 'a-riley', 'my-password')
+        expect(listUnitAccounts).toHaveBeenCalledTimes(2)
+        expect(screen.getByRole('status')).toHaveTextContent(message)
+        expect(screen.queryByText(/enable the account/)).not.toBeInTheDocument()
+        expect(within(row('riley')).queryByRole('button', { name: /Reset password/ })).not.toBeInTheDocument()
+        expect(within(row('riley')).getByRole('button', { name: /Revoke sessions/ })).toBeInTheDocument()
+        expect(screen.queryByLabelText('Password reset link for riley')).not.toBeInTheDocument()
+      })
+    }
+
+    it('keeps the dialog open after a refused reset when the reloaded account still allows it', async () => {
+      vi.mocked(resetUnitAdminPassword).mockRejectedValueOnce(new APIError('disabled users cannot receive activation or password-reset links', 'user_disabled', { enabled: 'enable the account before issuing an activation or password-reset link' }, 409))
+      vi.mocked(resetUnitAdminPassword).mockRejectedValueOnce(new APIError('password confirmation failed', 'password_invalid'))
+      renderUnit('accounts')
+      await screen.findByText('Riley Novak')
+      fireEvent.click(within(row('riley')).getByRole('button', { name: /Reset password/ }))
+      let dialog = await confirmWithPassword()
+      // The reloaded list still shows riley enabled, so the refusal stays in
+      // the dialog, worded for a platform administrator, who cannot enable
+      // the account.
+      expect(await within(dialog).findByText('riley was disabled by Retail’s administrators.')).toBeInTheDocument()
+      expect(within(dialog).queryByText(/enable the account/)).not.toBeInTheDocument()
+      await waitFor(() => expect(listUnitAccounts).toHaveBeenCalledTimes(2))
+      dialog = await confirmWithPassword('wrong')
+      expect(await within(dialog).findByText('password confirmation failed')).toBeInTheDocument()
+      expect(listUnitAccounts).toHaveBeenCalledTimes(2)
+    })
+
+    it('reloads the unit after a refused reset in a unit that was disabled elsewhere', async () => {
+      let current = businessUnit()
+      vi.mocked(getUnit).mockImplementation(async () => current)
+      vi.mocked(resetUnitAdminPassword).mockRejectedValueOnce(new APIError('the business unit is not active', 'unit_not_active', undefined, 409))
+      renderUnit('accounts')
+      await screen.findByText('Riley Novak')
+      fireEvent.click(within(row('riley')).getByRole('button', { name: /Reset password/ }))
+      current = businessUnit({ status: 'disabled', revision: 4 })
+      await confirmWithPassword()
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(screen.getByText('Retail changed elsewhere. The latest state is loaded.')).toBeInTheDocument()
+      expect(await screen.findByText('This unit is disabled.')).toBeInTheDocument()
+      expect(within(row('riley')).queryByRole('button', { name: /Reset password/ })).not.toBeInTheDocument()
+      expect(within(row('riley')).getByRole('button', { name: /Revoke sessions/ })).toBeInTheDocument()
+    })
+
+    it('reloads the accounts after a refused session revocation of an account removed elsewhere', async () => {
+      let current = accounts
+      vi.mocked(listUnitAccounts).mockImplementation(async () => ({ accounts: current }))
+      vi.mocked(revokeUnitAccountSessions).mockRejectedValueOnce(new APIError('account not found', 'not_found', undefined, 404))
+      renderUnit('accounts')
+      await screen.findByText('Casey Lindqvist')
+      fireEvent.click(within(row('casey')).getByRole('button', { name: /Revoke sessions/ }))
+      current = accounts.filter(account => account.username !== 'casey')
+      await confirmWithPassword()
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(screen.getByRole('status')).toHaveTextContent('casey changed elsewhere. The latest state is loaded.')
+      await waitFor(() => expect(screen.queryByTestId('account-casey')).not.toBeInTheDocument())
+    })
+
     it('revokes an account’s sessions and reports a refusal inside the dialog', async () => {
       vi.mocked(revokeUnitAccountSessions).mockRejectedValueOnce(new APIError('password confirmation failed', 'password_invalid'))
       renderUnit('accounts')
@@ -289,12 +409,16 @@ describe('business unit detail', () => {
       fireEvent.change(nmap, { target: { value: '2000000' } })
       fireEvent.click(screen.getAllByLabelText('Use the deployment’s setting')[3])
       fireEvent.submit(slots.closest('form')!)
-      await waitFor(() => expect(updateUnitCapacity).toHaveBeenCalledWith('unit-retail', { max_concurrent_scans: 3, max_probe_count: 2_000_000, max_naabu_probe_count: 1_000_000, high_cost_ceiling: null }))
+      // Only the settings that changed are sent, with the revision the form was loaded at.
+      await waitFor(() => expect(updateUnitCapacity).toHaveBeenCalledWith('unit-retail', 3, { max_concurrent_scans: 3, max_probe_count: 2_000_000, high_cost_ceiling: null }))
       expect(await screen.findByText('Capacity saved. It applies to the next scan this unit queues.')).toBeInTheDocument()
+      // The saved form has nothing left to save.
+      expect(screen.getByRole('button', { name: 'Save capacity' })).toBeDisabled()
+      expect(screen.getByLabelText('Scan slot cap', { selector: 'input[type="number"]' })).toHaveValue(3)
     })
 
     it('shows a unit without a high-cost grant as not granted, and saving other settings keeps it so', async () => {
-      vi.mocked(getUnitCapacity).mockResolvedValue(unitCapacity({ capacity: { ...unitCapacity().capacity, high_cost_ceiling: 0 } }))
+      const server = capacityServer({ max_probe_count: null, high_cost_ceiling: 0 })
       renderUnit('capacity')
       const slots = await screen.findByLabelText('Scan slot cap', { selector: 'input[type="number"]' })
       expect(screen.getByLabelText('Not granted')).toBeChecked()
@@ -303,13 +427,15 @@ describe('business unit detail', () => {
       expect(screen.getByText('A job approved for high-cost scanning keeps this unit’s probe budgets, whatever config.yaml sets.')).toBeInTheDocument()
       fireEvent.change(slots, { target: { value: '3' } })
       fireEvent.submit(slots.closest('form')!)
-      await waitFor(() => expect(updateUnitCapacity).toHaveBeenCalledWith('unit-retail', { max_concurrent_scans: 3, max_probe_count: null, max_naabu_probe_count: 1_000_000, high_cost_ceiling: 0 }))
+      // The ceiling that stays not granted is not sent, so the stored one is kept.
+      await waitFor(() => expect(updateUnitCapacity).toHaveBeenCalledWith('unit-retail', 3, { max_concurrent_scans: 3 }))
       expect(await screen.findByText('Capacity saved. It applies to the next scan this unit queues.')).toBeInTheDocument()
+      expect(server.stored.high_cost_ceiling).toBe(0)
       expect(screen.getByLabelText('Not granted')).toBeChecked()
     })
 
     it('grants a typed high-cost ceiling, and takes it away again', async () => {
-      vi.mocked(getUnitCapacity).mockResolvedValue(unitCapacity({ capacity: { ...unitCapacity().capacity, high_cost_ceiling: 0 } }))
+      const server = capacityServer({ high_cost_ceiling: 0 })
       renderUnit('capacity')
       const slots = await screen.findByLabelText('Scan slot cap', { selector: 'input[type="number"]' })
       fireEvent.click(screen.getByLabelText('Grant a ceiling'))
@@ -320,15 +446,16 @@ describe('business unit detail', () => {
       expect(screen.getByRole('button', { name: 'Save capacity' })).toBeDisabled()
       fireEvent.change(ceiling, { target: { value: '7000000' } })
       fireEvent.submit(slots.closest('form')!)
-      await waitFor(() => expect(updateUnitCapacity).toHaveBeenLastCalledWith('unit-retail', { max_concurrent_scans: 2, max_probe_count: null, max_naabu_probe_count: 1_000_000, high_cost_ceiling: 7_000_000 }))
+      await waitFor(() => expect(updateUnitCapacity).toHaveBeenLastCalledWith('unit-retail', 3, { high_cost_ceiling: 7_000_000 }))
       expect(await screen.findByText('Capacity saved. It applies to the next scan this unit queues.')).toBeInTheDocument()
       expect(screen.getByLabelText('Grant a ceiling')).toBeChecked()
       expect(screen.getByLabelText('High-cost ceiling', { selector: 'input[type="number"]' })).toHaveValue(7_000_000)
       fireEvent.click(screen.getByLabelText('Not granted'))
       expect(screen.queryByLabelText('High-cost ceiling', { selector: 'input[type="number"]' })).not.toBeInTheDocument()
       fireEvent.submit(slots.closest('form')!)
-      await waitFor(() => expect(updateUnitCapacity).toHaveBeenLastCalledWith('unit-retail', { max_concurrent_scans: 2, max_probe_count: null, max_naabu_probe_count: 1_000_000, high_cost_ceiling: 0 }))
+      await waitFor(() => expect(updateUnitCapacity).toHaveBeenLastCalledWith('unit-retail', 4, { high_cost_ceiling: 0 }))
       await waitFor(() => expect(screen.getByLabelText('Not granted')).toBeChecked())
+      expect(server.stored).toEqual({ ...unitCapacity().capacity, max_probe_count: null, high_cost_ceiling: 0 })
       fireEvent.click(screen.getByLabelText('Use the deployment’s setting', { selector: 'input[type="radio"]' }))
       expect(screen.getByText('A job approved for high-cost scanning may send up to 100,000,000 probes, the absolute probe ceiling.')).toBeInTheDocument()
     })
@@ -338,9 +465,11 @@ describe('business unit detail', () => {
       // to its next revision, and a stale revision is a conflict.
       let current = businessUnit()
       vi.mocked(getUnit).mockImplementation(async () => current)
-      vi.mocked(updateUnitCapacity).mockImplementation(async (_id, value) => {
+      vi.mocked(getUnitCapacity).mockImplementation(async () => unitCapacity({ revision: current.revision }))
+      vi.mocked(updateUnitCapacity).mockImplementation(async (_id, revision, value) => {
+        if (revision !== current.revision) throw new APIError('the business unit was modified; reload and try again', 'conflict')
         current = businessUnit({ ...current, revision: current.revision + 1 })
-        return unitCapacity({ capacity: { ...unitCapacity().capacity, ...value } })
+        return unitCapacity({ revision: current.revision, capacity: { ...unitCapacity().capacity, ...value } })
       })
       vi.mocked(renameUnit).mockImplementation(async (_id, value) => {
         if (value.revision !== current.revision) throw new APIError('the business unit was modified; reload and try again', 'conflict', { current })
@@ -385,10 +514,110 @@ describe('business unit detail', () => {
       expect(await screen.findByRole('button', { name: 'Enable unit' })).toBeInTheDocument()
     })
 
+    // A fake server that applies a capacity change as the handler does: an
+    // absent setting is kept, and a change at a stale revision is refused.
+    function capacityServer(overrides: Partial<UnitCapacitySettings> = {}) {
+      const state = { revision: 3, stored: { ...unitCapacity().capacity, max_probe_count: null, ...overrides } as UnitCapacitySettings }
+      vi.mocked(getUnitCapacity).mockImplementation(async () => unitCapacity({ revision: state.revision, capacity: { ...state.stored } }))
+      vi.mocked(updateUnitCapacity).mockImplementation(async (_id, revision, value) => {
+        if (revision !== state.revision) throw new APIError('the business unit was modified; reload and try again', 'conflict', undefined, 409)
+        state.stored = { ...state.stored, ...value }
+        state.revision += 1
+        return unitCapacity({ revision: state.revision, capacity: { ...state.stored } })
+      })
+      return state
+    }
+
+    it('sends only the changed settings, so a budget that another administrator saved meanwhile is kept', async () => {
+      const server = capacityServer()
+      const { client } = renderUnit('capacity')
+      const slots = await screen.findByLabelText('Scan slot cap', { selector: 'input[type="number"]' })
+      expect(screen.getAllByLabelText('Use the deployment’s setting')[1]).toBeChecked()
+      // Another platform administrator lowers the Nmap budget, and the tab
+      // refreshes: a form without edits shows the stored values.
+      server.stored = { ...server.stored, max_probe_count: 250_000 }
+      server.revision = 4
+      await act(async () => { await client.refetchQueries({ queryKey: ['platform-unit-capacity', 'unit-retail'] }) })
+      expect(await screen.findByLabelText('Nmap probe budget per run', { selector: 'input[type="number"]' })).toHaveValue(250_000)
+      expect(screen.queryByText(/Another platform administrator changed/)).not.toBeInTheDocument()
+      fireEvent.change(slots, { target: { value: '3' } })
+      await act(async () => {
+        fireEvent.submit(slots.closest('form')!)
+        await Promise.resolve()
+      })
+      expect(await screen.findByText('Capacity saved. It applies to the next scan this unit queues.')).toBeInTheDocument()
+      expect(updateUnitCapacity).toHaveBeenCalledTimes(1)
+      expect(updateUnitCapacity).toHaveBeenCalledWith('unit-retail', 4, { max_concurrent_scans: 3 })
+      expect(server.stored).toEqual({ max_concurrent_scans: 3, max_probe_count: 250_000, max_naabu_probe_count: 1_000_000, high_cost_ceiling: 1_000_000 })
+    })
+
+    it('keeps unsaved edits over a capacity changed elsewhere, says so, and saves them only at the current revision', async () => {
+      const server = capacityServer()
+      const { client } = renderUnit('capacity')
+      const slots = await screen.findByLabelText('Scan slot cap', { selector: 'input[type="number"]' })
+      fireEvent.change(slots, { target: { value: '3' } })
+      // The refresh brings another administrator's Nmap budget under the edit.
+      server.stored = { ...server.stored, max_probe_count: 250_000 }
+      server.revision = 4
+      await act(async () => { await client.refetchQueries({ queryKey: ['platform-unit-capacity', 'unit-retail'] }) })
+      expect(await screen.findByText('Another platform administrator changed this unit’s capacity. The form shows the saved values with your unsaved changes; review them before saving.')).toBeInTheDocument()
+      expect(slots).toHaveValue(3)
+      expect(screen.getByLabelText('Nmap probe budget per run', { selector: 'input[type="number"]' })).toHaveValue(250_000)
+
+      // A change saved after the last refresh makes the server refuse the
+      // save; the form loads it and keeps the edit.
+      server.stored = { ...server.stored, max_naabu_probe_count: 2_000_000 }
+      server.revision = 5
+      await act(async () => {
+        fireEvent.submit(slots.closest('form')!)
+        await Promise.resolve()
+      })
+      expect(await screen.findByText('Another platform administrator changed this unit. The current values are loaded with your changes; review them and save again.')).toBeInTheDocument()
+      expect(updateUnitCapacity).toHaveBeenLastCalledWith('unit-retail', 4, { max_concurrent_scans: 3 })
+      await waitFor(() => expect(screen.getByLabelText('Naabu probe budget per run', { selector: 'input[type="number"]' })).toHaveValue(2_000_000))
+      expect(slots).toHaveValue(3)
+      expect(server.stored.max_concurrent_scans).toBe(2)
+
+      await act(async () => {
+        fireEvent.submit(slots.closest('form')!)
+        await Promise.resolve()
+      })
+      expect(await screen.findByText('Capacity saved. It applies to the next scan this unit queues.')).toBeInTheDocument()
+      expect(updateUnitCapacity).toHaveBeenLastCalledWith('unit-retail', 5, { max_concurrent_scans: 3 })
+      expect(server.stored).toEqual({ max_concurrent_scans: 3, max_probe_count: 250_000, max_naabu_probe_count: 2_000_000, high_cost_ceiling: 1_000_000 })
+      expect(screen.queryByText(/Another platform administrator changed/)).not.toBeInTheDocument()
+    })
+
+    it('keeps a ceiling grant that has no number yet over a refreshed capacity, and sends only the grant', async () => {
+      const server = capacityServer({ high_cost_ceiling: 0 })
+      const { client } = renderUnit('capacity')
+      await screen.findByLabelText('Scan slot cap', { selector: 'input[type="number"]' })
+      fireEvent.click(screen.getByLabelText('Grant a ceiling'))
+      server.stored = { ...server.stored, max_probe_count: 250_000 }
+      server.revision = 4
+      await act(async () => { await client.refetchQueries({ queryKey: ['platform-unit-capacity', 'unit-retail'] }) })
+      expect(await screen.findByLabelText('Nmap probe budget per run', { selector: 'input[type="number"]' })).toHaveValue(250_000)
+      expect(screen.getByLabelText('Grant a ceiling')).toBeChecked()
+      const ceiling = screen.getByLabelText('High-cost ceiling', { selector: 'input[type="number"]' })
+      fireEvent.change(ceiling, { target: { value: '7000000' } })
+      await act(async () => {
+        fireEvent.submit(ceiling.closest('form')!)
+        await Promise.resolve()
+      })
+      expect(await screen.findByText('Capacity saved. It applies to the next scan this unit queues.')).toBeInTheDocument()
+      expect(updateUnitCapacity).toHaveBeenCalledWith('unit-retail', 4, { high_cost_ceiling: 7_000_000 })
+      expect(server.stored).toEqual({ ...unitCapacity().capacity, max_probe_count: 250_000, high_cost_ceiling: 7_000_000 })
+    })
+
     it('reports a refused change and a capacity that cannot be loaded', async () => {
       vi.mocked(updateUnitCapacity).mockRejectedValueOnce(new APIError('invalid', 'validation_failed', { max_probe_count: 'max_probe_count must be between 1 and 5000000' }))
       const view = renderUnit('capacity')
       const slots = await screen.findByLabelText('Scan slot cap', { selector: 'input[type="number"]' })
+      // A form without changes has nothing to save.
+      expect(screen.getByRole('button', { name: 'Save capacity' })).toBeDisabled()
+      fireEvent.submit(slots.closest('form')!)
+      expect(updateUnitCapacity).not.toHaveBeenCalled()
+      fireEvent.change(slots, { target: { value: '1' } })
       fireEvent.submit(slots.closest('form')!)
       expect(await screen.findByRole('alert')).toHaveTextContent('max_probe_count must be between 1 and 5000000')
       view.unmount()
@@ -447,6 +676,111 @@ describe('business unit detail', () => {
       expect(await within(dialog).findByText('password confirmation failed')).toBeInTheDocument()
       fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+
+    // A fake server that checks a unit change as checkTenantChange does: the
+    // revision first, then the state.
+    function lifecycleServer(start: BusinessUnit) {
+      let current = start
+      function check(revision: number, state: string) {
+        if (revision !== current.revision) throw new APIError('the resource was modified; reload and try again', 'conflict')
+        if (current.status !== state) throw new APIError(`business unit state change not permitted: it is ${current.status}`, 'unit_state')
+      }
+      vi.mocked(getUnit).mockImplementation(async () => current)
+      vi.mocked(disableUnit).mockImplementation(async (_id, revision) => {
+        check(revision, 'active')
+        current = { ...current, status: 'disabled', revision: current.revision + 1 }
+        return current
+      })
+      vi.mocked(enableUnit).mockImplementation(async (_id, revision) => {
+        check(revision, 'disabled')
+        current = { ...current, status: 'active', revision: current.revision + 1 }
+        return current
+      })
+      return { change: (next: Partial<BusinessUnit>) => { current = { ...current, ...next } }, get: () => current }
+    }
+
+    for (const [start, other, opener, reverse] of [['active', 'disabled', 'Disable unit', 'Enable Retail?'], ['disabled', 'active', 'Enable unit', 'Disable Retail?']] as const) {
+      it(`never turns the dialog for a ${start} unit into the opposite change after another administrator made the unit ${other}`, async () => {
+        const server = lifecycleServer(businessUnit({ status: start, revision: 3 }))
+        renderUnit('danger')
+        fireEvent.click(await screen.findByRole('button', { name: opener }))
+        server.change({ status: other, revision: 4 })
+        await confirmWithPassword('pw-1')
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+        expect(screen.queryByRole('dialog', { name: reverse })).not.toBeInTheDocument()
+        expect(screen.getByText(`Retail was ${other === 'active' ? 'enabled' : 'disabled'} elsewhere. The latest state is loaded.`)).toBeInTheDocument()
+        // The page offers the change that the unit's state now allows.
+        expect(await screen.findByRole('button', { name: other === 'active' ? 'Disable unit' : 'Enable unit' })).toBeInTheDocument()
+        const [first, second] = start === 'active' ? [disableUnit, enableUnit] : [enableUnit, disableUnit]
+        expect(first).toHaveBeenCalledTimes(1)
+        expect(first).toHaveBeenCalledWith('unit-retail', 3, 'pw-1')
+        expect(second).not.toHaveBeenCalled()
+        expect(server.get()).toMatchObject({ status: other, revision: 4 })
+      })
+    }
+
+    it('closes an open dialog when the unit is reloaded in a state that no longer allows its change', async () => {
+      const server = lifecycleServer(businessUnit({ status: 'active', revision: 3 }))
+      const { client } = renderUnit('danger')
+      fireEvent.click(await screen.findByRole('button', { name: 'Disable unit' }))
+      const dialog = await screen.findByRole('dialog', { name: 'Disable Retail?' })
+      fireEvent.change(within(dialog).getByLabelText('Your password'), { target: { value: 'pw-1' } })
+      // Another platform administrator disables the unit, and the page
+      // reloads it, as it does when the window regains focus.
+      server.change({ status: 'disabled', revision: 4 })
+      await act(async () => { await client.refetchQueries({ queryKey: ['platform-unit', 'unit-retail'] }) })
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(screen.queryByRole('dialog', { name: 'Enable Retail?' })).not.toBeInTheDocument()
+      expect(screen.getByText('Retail was disabled elsewhere. The latest state is loaded.')).toBeInTheDocument()
+      expect(disableUnit).not.toHaveBeenCalled()
+      expect(enableUnit).not.toHaveBeenCalled()
+      // The next dialog is the one for the unit's current state, with an empty password.
+      fireEvent.click(screen.getByRole('button', { name: 'Enable unit' }))
+      expect(within(await screen.findByRole('dialog', { name: 'Enable Retail?' })).getByLabelText('Your password')).toHaveValue('')
+    })
+
+    it('keeps the dialog for the same change when only the unit’s revision moved, and confirms it again with the new revision', async () => {
+      const server = lifecycleServer(businessUnit({ status: 'active', revision: 3 }))
+      renderUnit('danger')
+      fireEvent.click(await screen.findByRole('button', { name: 'Disable unit' }))
+      // Another platform administrator renamed the unit.
+      server.change({ revision: 4 })
+      const dialog = await confirmWithPassword('pw-1')
+      expect(await within(dialog).findByText('the resource was modified; reload and try again')).toBeInTheDocument()
+      expect(screen.getByRole('dialog', { name: 'Disable Retail?' })).toBe(dialog)
+      await act(async () => {
+        fireEvent.submit(within(dialog).getByLabelText('Your password').closest('form')!)
+        await Promise.resolve()
+      })
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(disableUnit).toHaveBeenLastCalledWith('unit-retail', 4, 'pw-1')
+      expect(enableUnit).not.toHaveBeenCalled()
+      expect(server.get()).toMatchObject({ status: 'disabled', revision: 5 })
+      expect(screen.queryByText(/elsewhere/)).not.toBeInTheDocument()
+      expect(await screen.findByRole('button', { name: 'Enable unit' })).toBeInTheDocument()
+    })
+
+    it('reloads the unit when a delete is refused because another administrator enabled it', async () => {
+      let current = businessUnit({ status: 'disabled', revision: 4 })
+      vi.mocked(getUnit).mockImplementation(async () => current)
+      vi.mocked(deleteUnit).mockRejectedValueOnce(new APIError('business unit state change not permitted: it is active', 'unit_state'))
+      renderUnit('danger')
+      fireEvent.click(await screen.findByRole('button', { name: 'Delete unit…' }))
+      const dialog = await screen.findByRole('dialog')
+      current = businessUnit({ status: 'active', revision: 5 })
+      fireEvent.change(within(dialog).getByLabelText('Type “Retail” to confirm'), { target: { value: 'Retail' } })
+      fireEvent.change(within(dialog).getByLabelText('Your password'), { target: { value: 'my-password' } })
+      await act(async () => {
+        fireEvent.submit(within(dialog).getByLabelText('Your password').closest('form')!)
+        await Promise.resolve()
+      })
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(deleteUnit).toHaveBeenCalledWith('unit-retail', 'Retail', 'my-password')
+      expect(getUnit).toHaveBeenCalledTimes(2)
+      expect(screen.getByText('Retail was enabled elsewhere. The latest state is loaded.')).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Delete unit…' })).toBeDisabled()
+      expect(screen.getByRole('button', { name: 'Disable unit' })).toBeInTheDocument()
     })
 
     it('never offers to delete the default unit', async () => {

@@ -6,7 +6,7 @@ import { APIError, deleteUnit, disableUnit, enableUnit, getUnit, getUnitCapacity
 import type { BusinessUnit, DeploymentLimits, UnitCapacity, UnitCapacitySettings } from '../../api'
 import { ActionDialog } from '../../components/ActionDialog'
 import { formatDateTime } from '../../format'
-import { errorMessage, formatCount, isConflict, Loading, plural, publicPath, publicURL, slugProblem, UnitStatusPill } from './common'
+import { errorMessage, formatCount, isChangedElsewhere, isConflict, Loading, plural, publicPath, publicURL, slugProblem, UnitStatusPill } from './common'
 import { UnitAccounts } from './UnitAccounts'
 
 const tabs = [
@@ -35,7 +35,7 @@ export function UnitDetail({ permissions }: { permissions: string[] }) {
       {value.status === 'disabled' && <div className="legacy-banner" role="status"><AlertTriangle size={17} /><span><strong>This unit is disabled.</strong> Its members cannot sign in, its schedules are stopped, and its public page is offline. Its data is kept until the unit is deleted.</span></div>}
       <nav className="tab-bar" aria-label={`${value.name} sections`}>{visibleTabs.map(item => <Link key={item.key} to={`/platform/units/${encodeURIComponent(value.id)}/${item.key}`} aria-current={active === item.key ? 'page' : undefined} className={active === item.key ? 'tab active' : 'tab'}>{item.label}</Link>)}</nav>
       {active === 'overview' && <UnitOverview unit={value} />}
-      {active === 'accounts' && <UnitAccounts unit={value} />}
+      {active === 'accounts' && <UnitAccounts key={value.id} unit={value} />}
       {active === 'capacity' && <UnitCapacityTab unit={value} />}
       {active === 'danger' && <UnitDangerZone unit={value} />}
     </>}
@@ -150,6 +150,25 @@ function capacitySettings(draft: CapacityDraft): UnitCapacitySettings {
   return value
 }
 
+/**
+ * The settings that the draft changed from the saved capacity it was built
+ * from: a setting whose choice or number differs. A ceiling that stays not
+ * granted is no change, so a save keeps it as it is stored.
+ */
+function capacityEdits(draft: CapacityDraft, saved: UnitCapacitySettings) {
+  const settings = capacitySettings(draft)
+  const original = capacityDraft(saved)
+  const edits: Partial<UnitCapacitySettings> = {}
+  for (const { key } of capacityFields) {
+    if (draft[key].mode !== original[key].mode || settings[key] !== saved[key]) edits[key] = settings[key]
+  }
+  return edits
+}
+
+function sameCapacity(left: UnitCapacitySettings, right: UnitCapacitySettings) {
+  return capacityFields.every(({ key }) => left[key] === right[key])
+}
+
 /** Validate a unit's capacity against the deployment's limits, as the server does. */
 export function capacityProblems(draft: CapacityDraft, limits: DeploymentLimits) {
   const problems: Partial<Record<CapacityField, string>> = {}
@@ -173,10 +192,28 @@ function UnitCapacityTab({ unit }: { unit: BusinessUnit }) {
 function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: UnitCapacity }) {
   const client = useQueryClient()
   const limits = capacity.limits
+  // The saved capacity that the draft was built from. A save sends only the
+  // settings the draft changed, so it never reverts a setting that another
+  // platform administrator saved meanwhile, and names the revision the
+  // capacity was read at, so the server refuses it once another change
+  // was saved.
+  const [base, setBase] = useState(capacity)
   const [draft, setDraft] = useState(() => capacityDraft(capacity.capacity))
   const [message, setMessage] = useState('')
+  const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+  const edits = capacityEdits(draft, base.capacity)
+  const edited = Object.keys(edits).length > 0
+  // When the capacity is read again, every 15 seconds and after a refused
+  // save, the form shows the saved values and keeps the edits on top.
+  if (capacity.revision !== base.revision || !sameCapacity(capacity.capacity, base.capacity)) {
+    const next = capacityDraft(capacity.capacity)
+    for (const key of Object.keys(edits) as CapacityField[]) next[key] = draft[key]
+    setBase(capacity)
+    setDraft(next)
+    if (edited && !sameCapacity(capacity.capacity, base.capacity)) setNotice('Another platform administrator changed this unit’s capacity. The form shows the saved values with your unsaved changes; review them before saving.')
+  }
   const problems = capacityProblems(draft, limits)
   const invalid = Object.keys(problems).length > 0
   function change(key: CapacityField, next: Partial<{ mode: CapacityMode; value: string }>) {
@@ -187,18 +224,30 @@ function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: Un
     event.preventDefault()
     setMessage('')
     setError('')
-    if (invalid) return
+    if (invalid || !edited) return
     setBusy(true)
     try {
-      const saved = await updateUnitCapacity(unit.id, capacitySettings(draft))
-      client.setQueryData(['platform-unit-capacity', unit.id], saved)
+      const saved = await updateUnitCapacity(unit.id, base.revision, edits)
+      setBase(saved)
       setDraft(capacityDraft(saved.capacity))
+      setNotice('')
+      client.setQueryData(['platform-unit-capacity', unit.id], saved)
       // Saving the capacity moves the unit to a new revision, so the page
       // reloads the unit before its next rename, disable, or enable.
       await refreshUnit(client, unit.id)
       setMessage('Capacity saved. It applies to the next scan this unit queues.')
     } catch (err) {
-      setError(errorMessage(err, 'The capacity could not be saved.'))
+      if (!isConflict(err)) {
+        setError(errorMessage(err, 'The capacity could not be saved.'))
+        return
+      }
+      // The unit changed since the capacity was read: read it again, which
+      // keeps the edits over the saved values, and let the administrator
+      // review the result before saving again.
+      await client.invalidateQueries({ queryKey: ['platform-unit-capacity', unit.id] })
+      await refreshUnit(client, unit.id)
+      setNotice('')
+      setError('Another platform administrator changed this unit. The current values are loaded with your changes; review them and save again.')
     } finally {
       setBusy(false)
     }
@@ -206,6 +255,7 @@ function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: Un
   return <div className="settings-grid">
     <div className="panel"><div className="panel-heading"><div><h2>Unit share</h2><p className="muted">Now {capacity.slots.in_use} in use and {capacity.slots.queued} queued, with at most {plural(capacity.slots.limit ?? limits.max_concurrent_scans, 'slot')}.</p></div><Gauge className="muted-icon" size={20} /></div>
       {message && <div className="success-banner" role="status">{message}</div>}
+      {notice && <div className="notice warning" role="status"><AlertTriangle size={14} /><span>{notice}</span></div>}
       {error && <div className="form-error" role="alert">{error}</div>}
       <form className="settings-form" onSubmit={save} noValidate>
         {capacityFields.map(field => {
@@ -227,7 +277,7 @@ function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: Un
           </fieldset>
         })}
         <p className="notice">A cap is a limit, not a reservation. When units wait for slots, free slots go round-robin to the waiting units, up to each unit’s cap.</p>
-        <button className="button primary" type="submit" disabled={busy || invalid}>{busy ? 'Saving…' : 'Save capacity'}</button>
+        <button className="button primary" type="submit" disabled={busy || invalid || !edited}>{busy ? 'Saving…' : 'Save capacity'}</button>
       </form>
     </div>
     <div className="panel"><div className="panel-heading"><div><h2>Deployment limits</h2><p className="muted">Set in config.yaml on the EdgeWatch host. Read-only here.</p></div></div>
@@ -250,50 +300,96 @@ const erasedData = [
   { label: 'The unit’s own audit', detail: 'The records of your actions on the unit stay in the platform audit.' },
 ]
 
+/** The change a Danger zone dialog was opened for. */
+type DangerDialog = { kind: 'toggle'; enable: boolean } | { kind: 'delete' }
+
+/** Whether the unit's state still allows the change that a dialog was opened for. */
+function dialogApplies(unit: BusinessUnit, dialog: DangerDialog) {
+  if (dialog.kind === 'delete') return unit.status === 'disabled' && !unit.is_default
+  return unit.status === (dialog.enable ? 'disabled' : 'active')
+}
+
+/** What a platform administrator is told when the unit changed under an open dialog. */
+function changedElsewhere(unit: BusinessUnit) {
+  const change = unit.status === 'active' ? 'enabled' : unit.status === 'disabled' ? 'disabled' : 'changed'
+  return `${unit.name} was ${change} elsewhere. The latest state is loaded.`
+}
+
 function UnitDangerZone({ unit }: { unit: BusinessUnit }) {
   const client = useQueryClient()
-  const [dialog, setDialog] = useState<'toggle' | 'delete' | null>(null)
+  const [dialog, setDialog] = useState<DangerDialog | null>(null)
   const [error, setError] = useState('')
+  const [notice, setNotice] = useState('')
   const disabled = unit.status === 'disabled'
   const deleteBlocked = unit.is_default
     ? 'The default unit cannot be deleted. It holds everything that existed before business units were enabled, and the legacy /public page serves it.'
     : !disabled ? 'Disable the unit first. Only a disabled unit can be deleted.' : ''
-  function open(kind: 'toggle' | 'delete') {
+  // A dialog confirms the change it was opened for, or nothing. When the unit
+  // is reloaded while a dialog is open, for example because the window
+  // regained focus, and its state no longer allows that change, the dialog
+  // closes and discards the password typed into it, instead of offering the
+  // opposite change.
+  if (dialog && !dialogApplies(unit, dialog)) {
+    setDialog(null)
     setError('')
-    setDialog(kind)
+    setNotice(changedElsewhere(unit))
+  }
+  function open(next: DangerDialog) {
+    setError('')
+    setNotice('')
+    setDialog(next)
+  }
+  /**
+   * After a refusal that reports the unit's current state, reload the unit.
+   * The dialog stays open only while the reloaded unit still allows its
+   * change, as when only the unit's revision moved; confirming it again
+   * then sends the new revision.
+   */
+  async function reloadAfterRefusal(err: unknown, intent: DangerDialog) {
+    if (!isChangedElsewhere(err)) return false
+    await refreshUnit(client, unit.id)
+    const current = client.getQueryData<BusinessUnit>(['platform-unit', unit.id])
+    if (!current || dialogApplies(current, intent)) return false
+    setDialog(null)
+    setError('')
+    setNotice(changedElsewhere(current))
+    return true
   }
   async function toggle(password: string) {
+    if (dialog?.kind !== 'toggle') return
+    const intent = dialog
     setError('')
     try {
-      if (disabled) await enableUnit(unit.id, unit.revision, password)
+      if (intent.enable) await enableUnit(unit.id, unit.revision, password)
       else await disableUnit(unit.id, unit.revision, password)
-      await refreshUnit(client, unit.id)
       setDialog(null)
+      await refreshUnit(client, unit.id)
     } catch (err) {
-      if (isConflict(err)) await refreshUnit(client, unit.id)
-      setError(errorMessage(err, 'The unit could not be changed.'))
+      if (!await reloadAfterRefusal(err, intent)) setError(errorMessage(err, 'The unit could not be changed.'))
     }
   }
   async function remove(confirmName: string, password = '') {
     setError('')
     try {
       await deleteUnit(unit.id, confirmName, password)
-      await refreshUnit(client, unit.id)
       setDialog(null)
+      await refreshUnit(client, unit.id)
     } catch (err) {
-      setError(errorMessage(err, 'The unit could not be deleted.'))
+      if (!await reloadAfterRefusal(err, { kind: 'delete' })) setError(errorMessage(err, 'The unit could not be deleted.'))
     }
   }
+  const toggleDialog = dialog?.kind === 'toggle' ? dialog : null
   return <div className="danger-zone">
+    {notice && <div className="success-banner" role="status">{notice}</div>}
     <div className="panel danger-panel"><div className="panel-heading"><div><h2>{disabled ? 'Enable unit' : 'Disable unit'}</h2><p className="muted">{disabled ? 'Members can sign in again and schedules resume. Invitations that were revoked when the unit was disabled stay revoked, and held alerts are delivered.' : 'Ends every session in the unit and blocks sign-in, revokes open invitations, cancels running scans, stops schedules, holds alerts, and takes the public page offline. The data is kept.'}</p></div></div>
-      <button type="button" className={disabled ? 'button secondary' : 'button danger'} onClick={() => open('toggle')}>{disabled ? 'Enable unit' : 'Disable unit'}</button>
+      <button type="button" className={disabled ? 'button secondary' : 'button danger'} onClick={() => open({ kind: 'toggle', enable: disabled })}>{disabled ? 'Enable unit' : 'Disable unit'}</button>
     </div>
     <div className="panel danger-panel"><div className="panel-heading"><div><h2>Delete unit</h2><p className="muted">Permanently erases the unit and everything in it. This cannot be undone, and older backups still contain the unit.</p></div><Trash2 className="muted-icon" size={20} /></div>
       {deleteBlocked && <p className="notice" id="delete-unit-blocked">{deleteBlocked}</p>}
-      <button type="button" className="button danger" disabled={!!deleteBlocked} aria-describedby={deleteBlocked ? 'delete-unit-blocked' : undefined} onClick={() => open('delete')}>Delete unit…</button>
+      <button type="button" className="button danger" disabled={!!deleteBlocked} aria-describedby={deleteBlocked ? 'delete-unit-blocked' : undefined} onClick={() => open({ kind: 'delete' })}>Delete unit…</button>
     </div>
-    {dialog === 'toggle' && <ActionDialog title={disabled ? `Enable ${unit.name}?` : `Disable ${unit.name}?`} description={disabled ? 'Members can sign in again and scheduled jobs resume at their next run. Confirm with your password.' : `Everyone in ${unit.name} is signed out and cannot sign in, and its scans stop. Nothing is deleted. Confirm with your password.`} confirmLabel={disabled ? 'Enable unit' : 'Disable unit'} destructive={!disabled} valueLabel="Your password" valueType="password" valueRequired autoComplete="current-password" onConfirm={toggle} onCancel={() => setDialog(null)} error={error} />}
-    {dialog === 'delete' && <ActionDialog title={`Delete ${unit.name} permanently?`} description="EdgeWatch erases the following in the background. Nothing can be recovered afterwards." confirmLabel="Delete unit" destructive valueLabel={`Type “${unit.name}” to confirm`} valueRequired expectedValue={unit.name} autoComplete="off" secondaryValueLabel="Your password" secondaryValueType="password" secondaryValueRequired secondaryAutoComplete="current-password" onConfirm={remove} onCancel={() => setDialog(null)} error={error}>
+    {toggleDialog && <ActionDialog title={toggleDialog.enable ? `Enable ${unit.name}?` : `Disable ${unit.name}?`} description={toggleDialog.enable ? 'Members can sign in again and scheduled jobs resume at their next run. Confirm with your password.' : `Everyone in ${unit.name} is signed out and cannot sign in, and its scans stop. Nothing is deleted. Confirm with your password.`} confirmLabel={toggleDialog.enable ? 'Enable unit' : 'Disable unit'} destructive={!toggleDialog.enable} valueLabel="Your password" valueType="password" valueRequired autoComplete="current-password" onConfirm={toggle} onCancel={() => setDialog(null)} error={error} />}
+    {dialog?.kind === 'delete' && <ActionDialog title={`Delete ${unit.name} permanently?`} description="EdgeWatch erases the following in the background. Nothing can be recovered afterwards." confirmLabel="Delete unit" destructive valueLabel={`Type “${unit.name}” to confirm`} valueRequired expectedValue={unit.name} autoComplete="off" secondaryValueLabel="Your password" secondaryValueType="password" secondaryValueRequired secondaryAutoComplete="current-password" onConfirm={remove} onCancel={() => setDialog(null)} error={error}>
       <ul className="erase-list" aria-label="Data that will be erased">{erasedData.map(item => <li key={item.label}><strong>{item.label}</strong><span>{item.detail}</span></li>)}</ul>
     </ActionDialog>}
   </div>

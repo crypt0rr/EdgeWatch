@@ -395,6 +395,70 @@ func TestPlatformUnitCapacity(t *testing.T) {
 	}
 }
 
+// The capacity view names the unit's revision, and a change that names a
+// revision is saved only while the unit is still at it. A change read before
+// another platform administrator's change is refused with 409 conflict, so
+// it cannot revert the setting that the other change saved, and neither the
+// capacity nor the unit's audit changes. A change without a revision is
+// still applied to the current settings.
+func TestPlatformUnitCapacityRefusesAStaleRevision(t *testing.T) {
+	ctx := context.Background()
+	f := newPlatformFixture(t)
+	capacityPath := "/platform/units/" + f.unitB + "/capacity"
+	// The capacity and the revision that the view reports.
+	type capacityAt struct {
+		Revision int64                    `json:"revision"`
+		Capacity platformCapacitySettings `json:"capacity"`
+	}
+	var unit platformUnitView
+	expectResponse(t, f.call(t, actorPlatform, http.MethodGet, "/platform/units/"+f.unitB, ""), http.StatusOK, "unit", &unit)
+	var read capacityAt
+	expectResponse(t, f.call(t, actorPlatform, http.MethodGet, capacityPath, ""), http.StatusOK, "capacity", &read)
+	if read.Revision != unit.Revision || read.Capacity.MaxProbeCount != nil {
+		t.Fatalf("capacity read at revision %d, unit at %d: %+v", read.Revision, unit.Revision, read.Capacity)
+	}
+
+	// Another platform administrator lowers the Nmap budget first.
+	var lowered capacityAt
+	expectResponse(t, f.call(t, actorPlatform, http.MethodPatch, capacityPath, fmt.Sprintf(`{"revision":%d,"max_probe_count":250000}`, read.Revision)), http.StatusOK, "lower the Nmap budget", &lowered)
+	if lowered.Revision != read.Revision+1 || lowered.Capacity.MaxProbeCount == nil || *lowered.Capacity.MaxProbeCount != 250_000 {
+		t.Fatalf("lowered capacity = %+v at revision %d", lowered.Capacity, lowered.Revision)
+	}
+	before, err := f.db.Platform().TenantCapacity(ctx, f.unitB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := auditRecords(t, f.db, f.unitB)
+	for _, body := range []string{
+		fmt.Sprintf(`{"revision":%d,"max_concurrent_scans":1,"max_probe_count":null}`, read.Revision),
+		fmt.Sprintf(`{"revision":%d,"max_concurrent_scans":1}`, read.Revision),
+	} {
+		expectError(t, f.call(t, actorPlatform, http.MethodPatch, capacityPath, body), http.StatusConflict, "conflict", "a change at the stale revision: "+body)
+	}
+	if after, err := f.db.Platform().TenantCapacity(ctx, f.unitB); err != nil || !reflect.DeepEqual(after, before) {
+		t.Fatalf("capacity after the refused changes = %+v, %v; want %+v", after, err, before)
+	}
+	if after := auditRecords(t, f.db, f.unitB); !reflect.DeepEqual(after, records) {
+		t.Fatalf("the refused changes wrote unit B audit records: before %v, after %v", records, after)
+	}
+
+	// At the current revision the change is saved and keeps the lowered budget.
+	var saved capacityAt
+	expectResponse(t, f.call(t, actorPlatform, http.MethodPatch, capacityPath, fmt.Sprintf(`{"revision":%d,"max_concurrent_scans":1}`, lowered.Revision)), http.StatusOK, "cap the slots", &saved)
+	if saved.Revision != lowered.Revision+1 || saved.Capacity.MaxConcurrentScans == nil || *saved.Capacity.MaxConcurrentScans != 1 || saved.Capacity.MaxProbeCount == nil || *saved.Capacity.MaxProbeCount != 250_000 {
+		t.Fatalf("saved capacity = %+v at revision %d", saved.Capacity, saved.Revision)
+	}
+	// A rename moves the unit to its next revision too.
+	expectResponse(t, f.call(t, actorPlatform, http.MethodPatch, "/platform/units/"+f.unitB, fmt.Sprintf(`{"revision":%d,"name":"Bravo stores"}`, saved.Revision)), http.StatusOK, "rename", nil)
+	expectError(t, f.call(t, actorPlatform, http.MethodPatch, capacityPath, fmt.Sprintf(`{"revision":%d,"max_concurrent_scans":2}`, saved.Revision)), http.StatusConflict, "conflict", "a change read before a rename")
+	var unguarded capacityAt
+	expectResponse(t, f.call(t, actorPlatform, http.MethodPatch, capacityPath, `{"max_concurrent_scans":2}`), http.StatusOK, "a change without a revision", &unguarded)
+	if unguarded.Revision != saved.Revision+2 || unguarded.Capacity.MaxConcurrentScans == nil || *unguarded.Capacity.MaxConcurrentScans != 2 || unguarded.Capacity.MaxProbeCount == nil || *unguarded.Capacity.MaxProbeCount != 250_000 {
+		t.Fatalf("capacity after a change without a revision = %+v at revision %d", unguarded.Capacity, unguarded.Revision)
+	}
+	expectError(t, f.call(t, actorPlatform, http.MethodPatch, capacityPath, `{"revision":"two"}`), http.StatusBadRequest, "invalid_json", "a revision of the wrong type")
+}
+
 // A capacity change is authorized when its request passes the gate, and
 // checked again when it is written, as the other platform writes are. When
 // another platform administrator disables the actor while the request's

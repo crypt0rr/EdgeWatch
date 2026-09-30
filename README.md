@@ -730,10 +730,15 @@ account then enrols again.
 - **Capacity:** the `scheduler` settings in config.yaml stay the deployment's
   limits. On a unit's **Capacity** tab, a platform administrator can cap the
   unit's scan slots and its Nmap and Naabu probe budgets below those limits,
-  or keep the deployment's setting. A slot cap is a limit, not a reservation:
-  free slots go in turn to the units that have queued scans, up to each
-  unit's cap. A unit's **Overview** shows its own limit, the cap where it has
-  one and the deployment's setting otherwise, as "N scans at a time", and
+  or keep the deployment's setting. A save changes only the settings that
+  were edited on the tab, and EdgeWatch rejects it with a conflict when
+  another change to the unit was saved after the tab read its capacity; the
+  tab then shows the current values with the edits, to review before saving
+  again. API clients send the `revision` from the capacity they read. A slot
+  cap is a limit, not a reservation: free slots go in turn to the units that
+  have queued scans, up to each unit's cap. A unit's **Overview** shows its
+  own limit, the cap where it has one and the deployment's setting
+  otherwise, as "N scans at a time", and
   the API's status reports the unit's own slots and probe budgets the same
   way. The high-cost ceiling is the most probes that a job approved
   for high-cost work may send. A new unit has none: its **Capacity** tab

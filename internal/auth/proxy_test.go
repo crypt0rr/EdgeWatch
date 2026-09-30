@@ -3,9 +3,11 @@ package auth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -724,5 +726,198 @@ func TestLoginAuditRecordsResolvedClientIP(t *testing.T) {
 	}
 	if source != "198.51.100.20" {
 		t.Fatalf("audit source = %q", source)
+	}
+}
+
+// Through a shared loopback peer, a successful sign-in leaves the peer's
+// failures and its cooldown as they are, whichever account signs in: an
+// account of the same unit, of another unit, or a platform administrator.
+// The failures leave the window after five minutes, as a client's budget's
+// do. With no time passing, sign-ins between the failed ones therefore let
+// no more wrong passwords or one-time codes be checked than without them,
+// the next attempt waits the two-second cooldown, and a correct sign-in
+// through the peer succeeds once the cooldown ends. A client with its own
+// address keeps its budget.
+func TestSignInsThroughASharedLoopbackPeerKeepItsCooldown(t *testing.T) {
+	type attempt struct{ username, password, otp string }
+	wrongPassword := func(round, guess int) attempt {
+		return attempt{"unit-admin", fmt.Sprintf("wrong password %d-%d", round, guess), ""}
+	}
+	for _, check := range []struct {
+		name, peer, other, retryAfter string
+		wrongCode                     bool
+	}{
+		{"wrong passwords with sign-ins of the same unit", "127.0.0.1:443", "unit-operator", "2", false},
+		{"wrong passwords with sign-ins of another unit", "127.0.0.1:443", "bravo-viewer", "2", false},
+		{"wrong passwords with sign-ins of a platform administrator", "[::1]:443", "platform-root", "2", false},
+		{"wrong one-time codes with sign-ins of another unit", "[::1]:443", "bravo-viewer", "2", true},
+		{"a client with its own address", "203.0.113.50:443", "bravo-viewer", "300", false},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			ctx := context.Background()
+			now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+			s, wrongCode := clientBudgetStore(t, now)
+			m := NewManager(s)
+			m.Now = func() time.Time { return now }
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+			request.RemoteAddr = check.peer
+			wrong := wrongPassword
+			if check.wrongCode {
+				wrong = func(int, int) attempt { return attempt{"unit-totp", "unit-totp password", wrongCode} }
+			}
+			checked, signedIn := 0, 0
+			for round := 0; round < 20; round++ {
+				for guess := 0; guess < authFailureThreshold-1; guess++ {
+					a := wrong(round, guess)
+					if _, _, err := m.LoginAs(ctx, request, a.username, a.password, a.otp, ""); err == nil {
+						t.Fatalf("round %d, guess %d as %s was accepted", round, guess, a.username)
+					} else if !errors.Is(err, ErrRateLimited) {
+						checked++
+					}
+				}
+				// Once the cooldown starts, this sign-in is refused too.
+				if raw, _, err := m.LoginAs(ctx, request, check.other, check.other+" password", "", ""); err == nil && raw != "" {
+					signedIn++
+				}
+			}
+			if checked != authFailureThreshold || signedIn == 0 {
+				t.Fatalf("with no time passing, %d wrong attempts were checked and %d sign-ins succeeded between them; want %d checked after at least one sign-in", checked, signedIn, authFailureThreshold)
+			}
+			a := wrong(20, 0)
+			if _, _, err := m.LoginAs(ctx, request, a.username, a.password, a.otp, ""); !errors.Is(err, ErrRateLimited) || RetryAfterHeaderValue(err) != check.retryAfter {
+				t.Fatalf("next wrong attempt = %v (Retry-After %s), want ErrRateLimited with Retry-After %s", err, RetryAfterHeaderValue(err), check.retryAfter)
+			}
+			if check.retryAfter != "2" {
+				return
+			}
+			now = now.Add(authSharedLoopbackRetryDelay)
+			if raw, _, err := m.LoginAs(ctx, request, check.other, check.other+" password", "", ""); err != nil || raw == "" {
+				t.Fatalf("sign-in after the cooldown = %q, %v", raw, err)
+			}
+			// The failures are still in the window, so the next failure
+			// starts the cooldown again.
+			a = wrong(21, 0)
+			if _, _, err := m.LoginAs(ctx, request, a.username, a.password, a.otp, ""); err == nil || errors.Is(err, ErrRateLimited) {
+				t.Fatalf("wrong attempt after the cooldown = %v, want a failed sign-in", err)
+			}
+			if _, _, err := m.LoginAs(ctx, request, check.other, check.other+" password", "", ""); !errors.Is(err, ErrRateLimited) || RetryAfterHeaderValue(err) != "2" {
+				t.Fatalf("sign-in right after that failure = %v (Retry-After %s), want the 2-second cooldown", err, RetryAfterHeaderValue(err))
+			}
+			// Once the failures have left the window, the peer has all five
+			// attempts again.
+			now = now.Add(authFailureWindow)
+			for guess := 0; guess < authFailureThreshold; guess++ {
+				a := wrong(22, guess)
+				if _, _, err := m.LoginAs(ctx, request, a.username, a.password, a.otp, ""); err == nil || errors.Is(err, ErrRateLimited) {
+					t.Fatalf("wrong attempt %d after the window = %v, want a failed sign-in", guess+1, err)
+				}
+			}
+		})
+	}
+}
+
+// Through a loopback peer that is not a trusted proxy, every signed-in
+// account of every unit, and every platform administrator, confirms its
+// password or one-time code from the same address. Failed confirmations
+// there count against the confirming account only, never against the
+// address, so the failures of one unit's accounts do not block the
+// confirmations of another unit's accounts or of a platform administrator,
+// however many accounts fail. Each account keeps its own limit of five
+// failed confirmations in five minutes. A client with its own address keeps
+// the backstop that blocks it for five minutes after a hundred failures.
+func TestLoopbackConfirmationFailuresCountAgainstTheirAccountOnly(t *testing.T) {
+	const secret = "JBSWY3DPEHPK3PXP"
+	for _, kind := range []string{"password", "totp"} {
+		for _, peer := range []string{"127.0.0.1:443", "[::1]:443", "198.51.100.90:443"} {
+			t.Run(kind+" from "+peer, func(t *testing.T) {
+				ctx := context.Background()
+				now := time.Date(2026, time.September, 24, 12, 0, 0, 0, time.UTC)
+				s, wrongCode := clientBudgetStore(t, now)
+				m := NewManager(s)
+				m.Now = func() time.Time { return now }
+				request := httptest.NewRequest(http.MethodPost, "/api/v1/auth/password", nil)
+				request.RemoteAddr = peer
+				root, err := s.GetUserByUsername(ctx, "platform-root")
+				if err != nil {
+					t.Fatal(err)
+				}
+				root.TOTPEnabled, root.TOTPSecret = true, secret
+				if err := s.Platform().Account(root.ID).SaveUserSecurity(ctx, root, nil, false, false, store.AuditEntry{}); err != nil {
+					t.Fatal(err)
+				}
+				confirm := func(user store.User, right bool) error {
+					if kind == "password" {
+						password := "wrong password"
+						if right {
+							password = user.Username + " password"
+						}
+						return m.ConfirmPasswordForUser(ctx, request, user.ID, password)
+					}
+					code := wrongCode
+					if right {
+						code = totpCode(secret, now.Unix()/30)
+					}
+					return m.ConfirmTOTPForUser(ctx, request, user.ID, code, "")
+				}
+				scope, err := s.TenantScopeByID(ctx, platformTestTenantID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var bravo []store.User
+				for i := 0; i < authSourceFailureThreshold/authFailureThreshold; i++ {
+					user := store.User{Username: fmt.Sprintf("bravo-%02d", i), Role: store.RoleViewer, PasswordHash: cheapHash(fmt.Sprintf("bravo-%02d password", i)), Enabled: true}
+					created, err := s.Tenant(scope).CreateUser(ctx, user, store.AuditEntry{})
+					if err != nil {
+						t.Fatal(err)
+					}
+					created.TOTPEnabled, created.TOTPSecret = true, secret
+					if err := s.Tenant(scope).SaveUserSecurity(ctx, created, nil, false, false, store.AuditEntry{}); err != nil {
+						t.Fatal(err)
+					}
+					for j := 0; j < authFailureThreshold; j++ {
+						if err := confirm(created, false); err == nil || errors.Is(err, ErrRateLimited) {
+							t.Fatalf("wrong confirmation %d of %s = %v, want a failure", j+1, created.Username, err)
+						}
+					}
+					bravo = append(bravo, created)
+				}
+				unitAccount := "unit-admin"
+				if kind == "totp" {
+					unitAccount = "unit-totp"
+				}
+				others := []string{unitAccount, "platform-root"}
+				if strings.HasPrefix(peer, "198.51.100.") {
+					// A client with its own address has used its backstop.
+					for _, username := range others {
+						user, err := s.GetUserByUsername(ctx, username)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if err := confirm(user, true); !errors.Is(err, ErrRateLimited) || RetryAfterHeaderValue(err) != "300" {
+							t.Fatalf("%s's right confirmation after %d failures from its client = %v (Retry-After %s), want the five-minute block", username, authSourceFailureThreshold, err, RetryAfterHeaderValue(err))
+						}
+					}
+					return
+				}
+				for _, username := range others {
+					user, err := s.GetUserByUsername(ctx, username)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if err := confirm(user, true); err != nil {
+						t.Errorf("%s's right confirmation after %d failures of unit B's accounts = %v, want it accepted", username, authSourceFailureThreshold, err)
+					}
+				}
+				// Each failing account stays refused, even with the right
+				// password or code, until its failures leave the window.
+				if err := confirm(bravo[0], true); !errors.Is(err, ErrRateLimited) {
+					t.Fatalf("sixth confirmation of %s = %v, want ErrRateLimited", bravo[0].Username, err)
+				}
+				now = now.Add(authBlockDuration)
+				if err := confirm(bravo[0], true); err != nil {
+					t.Fatalf("confirmation of %s once its block ended = %v", bravo[0].Username, err)
+				}
+			})
+		}
 	}
 }

@@ -196,7 +196,7 @@ describe('dashboard', () => {
     await vi.waitFor(() => expect(container.textContent).toContain('Requests arrive through a proxy that EdgeWatch does not trust.'), { timeout: 1000 })
     const banner = container.querySelector('[role="status"].legacy-banner')
     expect(banner?.textContent).toContain('10.0.0.5 sends X-Forwarded-For, but web.trusted_proxies does not list it')
-    expect(banner?.textContent).toContain('Add 10.0.0.5 to web.trusted_proxies in config.yaml')
+    expect(banner?.textContent).toContain('If 10.0.0.5 is a proxy that you run, add it to web.trusted_proxies in config.yaml')
   })
 
   it('hides operational controls and incident metrics for viewers', async () => {

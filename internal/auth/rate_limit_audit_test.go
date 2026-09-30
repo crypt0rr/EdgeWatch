@@ -55,9 +55,9 @@ func TestRateLimitAuditCoalescesRotatingLoginIdentities(t *testing.T) {
 // for a platform administrator or a username that no account has. The
 // record of a throttled password or TOTP confirmation belongs to the
 // confirming account's unit, or to platform scope for a platform
-// administrator. Setup and activation name no account and stay in the
-// default unit. Each case throttles its own client, whose address the
-// record carries.
+// administrator. Setup, and an activation token that no link has, name no
+// account and stay in the default unit. Each case throttles its own client,
+// whose address the record carries.
 func TestRateLimitRecordsBelongToTheAccountsScope(t *testing.T) {
 	ctx := context.Background()
 	s, defaultAdmin, _ := platformTestStore(t)

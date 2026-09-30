@@ -160,48 +160,64 @@ const (
 	untrustedProxyNoticeTTL = 24 * time.Hour
 )
 
-// UntrustedProxy describes the latest request whose directly connected peer
-// was neither a loopback address nor in web.trusted_proxies but carried a
-// client-address forwarding header: the request of a proxy that EdgeWatch
-// does not trust. Every client behind such a proxy has the proxy's address,
-// so they share its sign-in budget, the source backstop of the setups and
-// activation, and its audit address.
+// UntrustedProxy describes the latest request that came through a proxy
+// that EdgeWatch does not trust: a proxy that is not in web.trusted_proxies
+// but forwarded the request for another client. That is a directly
+// connected peer that sends a client-address forwarding header, whether it
+// is a proxy on the host, which connects from a loopback address, or not,
+// or, behind trusted proxies, the address at which the forwarding chain
+// leaves them when the chain names a client to its left, such as a proxy on
+// another host in front of the trusted proxy on the host. Every client
+// behind such a proxy has the proxy's address, so they share its sign-in
+// limits, the limits of the setups and activation, and its audit address.
 type UntrustedProxy struct {
 	Peer       string    `json:"peer"`
 	Header     string    `json:"header"`
 	LastSeenAt time.Time `json:"last_seen_at"`
 }
 
-// NoteForwarding records the request when it comes from an untrusted proxy,
-// as UntrustedProxy describes it. It returns the proxy, and whether the
-// warning about it is to be logged now, at most once per
-// untrustedProxyLogInterval. A loopback peer, which the shared loopback
-// cooldown covers, a trusted proxy, and a request without a forwarding header
-// are not recorded.
+// NoteForwarding records the request when it comes through an untrusted
+// proxy, as UntrustedProxy describes it. It returns the proxy, and whether
+// the warning about it is to be logged now, at most once per
+// untrustedProxyLogInterval. A request without a forwarding header, a
+// trusted proxy's request whose chain ends at the client's own address or
+// at a trusted proxy, and a request whose peer is not an IP address are not
+// recorded. A client can send a forwarding header itself, so the proxy may
+// be a client's own address: the record only asks the operator to check the
+// proxy configuration, and never changes a client's identity.
 func (m *Manager) NoteForwarding(request *http.Request) (UntrustedProxy, bool) {
 	if m == nil || request == nil {
 		return UntrustedProxy{}, false
 	}
-	header := ""
-	switch {
-	case strings.TrimSpace(request.Header.Get("X-Forwarded-For")) != "":
-		header = "X-Forwarded-For"
-	case strings.TrimSpace(request.Header.Get("Forwarded")) != "":
-		header = "Forwarded"
-	default:
+	peer := net.ParseIP(strings.TrimSpace(limiterKey(requestRemote(request))))
+	if peer == nil {
 		return UntrustedProxy{}, false
 	}
-	peer := net.ParseIP(strings.TrimSpace(limiterKey(requestRemote(request))))
-	if peer == nil || peer.IsLoopback() {
-		return UntrustedProxy{}, false
+	trusted, forwardedHeader := m.forwardingPolicy()
+	proxy, header := peer, ""
+	if !ipInNetworks(peer, trusted) {
+		switch {
+		case strings.TrimSpace(request.Header.Get("X-Forwarded-For")) != "":
+			header = "X-Forwarded-For"
+		case strings.TrimSpace(request.Header.Get("Forwarded")) != "":
+			header = "Forwarded"
+		default:
+			return UntrustedProxy{}, false
+		}
+	} else {
+		client, forwarder := walkForwardedChain(peer, forwardedCandidatesFor(request, forwardedHeader), trusted)
+		if !forwarder {
+			return UntrustedProxy{}, false
+		}
+		proxy, header = client, "X-Forwarded-For"
+		if forwardedHeader == forwardedHeaderForwarded {
+			header = "Forwarded"
+		}
 	}
 	now := m.now()
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if ipInNetworks(peer, m.trustedProxies) {
-		return UntrustedProxy{}, false
-	}
-	m.untrustedProxy = UntrustedProxy{Peer: peer.String(), Header: header, LastSeenAt: now}
+	m.untrustedProxy = UntrustedProxy{Peer: proxy.String(), Header: header, LastSeenAt: now}
 	if !m.untrustedProxyLogged.IsZero() && now.Sub(m.untrustedProxyLogged) < untrustedProxyLogInterval {
 		return m.untrustedProxy, false
 	}
@@ -343,21 +359,42 @@ func (m *Manager) ClientIP(request *http.Request) string {
 	if peer == nil {
 		return remote
 	}
-	m.mu.Lock()
-	trusted := append([]*net.IPNet(nil), m.trustedProxies...)
-	forwardedHeader := m.forwardedHeader
-	m.mu.Unlock()
+	trusted, forwardedHeader := m.forwardingPolicy()
 	if !ipInNetworks(peer, trusted) {
 		return peer.String()
 	}
+	client, _ := walkForwardedChain(peer, forwardedCandidatesFor(request, forwardedHeader), trusted)
+	return client.String()
+}
+
+// forwardingPolicy returns the trusted proxy networks and the forwarding
+// header that they use.
+func (m *Manager) forwardingPolicy() ([]*net.IPNet, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	forwardedHeader := m.forwardedHeader
 	if forwardedHeader == "" {
 		forwardedHeader = forwardedHeaderXForwardedFor
 	}
+	return append([]*net.IPNet(nil), m.trustedProxies...), forwardedHeader
+}
+
+// walkForwardedChain resolves the client address of a request whose
+// directly connected peer is a trusted proxy, from the forwarded addresses
+// that the trusted proxies appended, the nearest last. It walks the chain
+// from right to left and stops at the first address that is not a trusted
+// proxy, or at a hop that cannot be read. forwarder reports whether the
+// walk stopped at an address that is not trusted while the chain has
+// entries to its left: that address forwarded the request for another
+// client, so it is a proxy that EdgeWatch does not trust. The address
+// itself comes from a trusted proxy, but whether entries to its left exist
+// is up to the client, so it only feeds the untrusted-proxy notice, never
+// the client identity.
+func walkForwardedChain(peer net.IP, candidates []string, trusted []*net.IPNet) (client net.IP, forwarder bool) {
 	current := peer
-	candidates := forwardedCandidatesFor(request, forwardedHeader)
 	for index := len(candidates) - 1; index >= 0; index-- {
 		if !ipInNetworks(current, trusted) {
-			break
+			return current, true
 		}
 		parsed := net.ParseIP(candidates[index])
 		if parsed == nil {
@@ -365,7 +402,7 @@ func (m *Manager) ClientIP(request *http.Request) string {
 		}
 		current = parsed
 	}
-	return current.String()
+	return current, false
 }
 
 func ipInNetworks(ip net.IP, networks []*net.IPNet) bool {
@@ -633,6 +670,9 @@ func (m *Manager) SetupRequest(ctx context.Context, request *http.Request, token
 // never consumes the invite. On success it returns the activated user's ID so
 // the caller can close live-update streams opened with the sessions that the
 // activation revoked.
+//
+// The records of a failed redemption, and of a refusal, belong where the
+// successful redemption's record does, see activationScope.
 func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, token, password string) (string, error) {
 	// The token is normalized once, so the check and the redemption below
 	// use the same token.
@@ -640,18 +680,21 @@ func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, to
 	source := m.sourceScopeFor(request, "activation")
 	account := "activation:" + digest(token)
 	if !m.allowScoped(source, account) {
-		m.auditRateLimit(ctx, "activation", request)
+		// The refusal checks no password, but its record needs the link's
+		// scope: one indexed read of the token's hash, for every token alike.
+		link, _ := m.Store.CheckActivationToken(ctx, digest(token), m.now())
+		m.auditActivationRateLimit(ctx, link, request)
 		return "", m.rateLimitError(source, account)
 	}
 	defer m.releaseScoped(source, account)
-	usable, checkErr := m.Store.ActivationTokenUsable(ctx, digest(token), m.now())
+	link, checkErr := m.Store.CheckActivationToken(ctx, digest(token), m.now())
 	if checkErr != nil {
-		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
+		m.auditActivationFailure(ctx, store.ActivationLink{}, request)
 		return "", errors.New("activation could not be completed")
 	}
-	if !usable {
+	if !link.Usable {
 		m.failedScoped(source, account, "")
-		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
+		m.auditActivationFailure(ctx, link, request)
 		return "", errors.New("activation could not be completed")
 	}
 	var hash string
@@ -661,18 +704,18 @@ func (m *Manager) ActivateRequest(ctx context.Context, request *http.Request, to
 		return hashErr
 	}); err != nil {
 		if errors.Is(err, ErrRateLimited) {
-			m.auditRateLimit(ctx, "activation", request)
+			m.auditActivationRateLimit(ctx, link, request)
 			return "", err
 		}
 		m.failedScoped(source, account, "")
-		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
+		m.auditActivationFailure(ctx, link, request)
 		return "", err
 	}
 	now := m.now()
 	activated, err := m.Store.ActivateUser(ctx, digest(token), hash, now, store.AuditEntry{Action: "user.activated", Detail: "user account activated"})
 	if err != nil {
 		m.failedScoped(source, account, "")
-		m.auditAuthFailure(ctx, "auth.activation_failed", "activation", request)
+		m.auditActivationFailure(ctx, link, request)
 		return "", err
 	}
 	m.clearScoped(source, account)
@@ -950,13 +993,14 @@ func (m *Manager) LoginAs(ctx context.Context, request *http.Request, username, 
 		m.auditAccountFailure(ctx, "auth.recovery_code_used", identity, user, request)
 	}
 	// A successful sign-in clears the client's bucket for the account it
-	// signed in to, and the source backstop, which holds a shared loopback
-	// peer's cooldown. It leaves the client's sign-in budget as it is: the
-	// client's failures, the account's own included, stay counted until they
-	// leave the window or the block ends. The success proves only this
-	// account's credentials. Clearing or reducing the budget would let a
-	// client that holds one valid account sign in between failed attempts on
-	// other names and never be throttled.
+	// signed in to. It leaves the client's sign-in budget as it is, and a
+	// shared loopback peer's failures and cooldown, which every client of
+	// the peer shares as its budget: the failures, the account's own
+	// included, stay counted until they leave the window or the block ends.
+	// The success proves only this account's credentials. Clearing or
+	// reducing the budget would let a client that holds one valid account
+	// sign in between failed attempts on other names and never be
+	// throttled.
 	m.clearScoped(source, account)
 	return session, user, nil
 }
@@ -1047,9 +1091,39 @@ func (m *Manager) ConfirmTOTPForUser(ctx context.Context, request *http.Request,
 // an unavailable audit table to alter the response to the original request.
 // Values are bounded and never contain passwords, OTPs, or recovery codes.
 // The event names no account, so it belongs to the default tenant, whose
-// console serves setup and activation.
+// console serves the first-run setup.
 func (m *Manager) auditAuthFailure(ctx context.Context, action, subject string, request *http.Request) {
 	m.recordAuthEvent(ctx, action, subject, "", false, request)
+}
+
+// auditActivationFailure records a failed redemption of the activation or
+// password-reset link in the link's scope; see activationScope.
+func (m *Manager) auditActivationFailure(ctx context.Context, link store.ActivationLink, request *http.Request) {
+	tenantID, platform := activationScope(link)
+	m.recordAuthEvent(ctx, "auth.activation_failed", "activation", tenantID, platform, request)
+}
+
+// auditActivationRateLimit is auditRateLimit for a redemption of the
+// activation or password-reset link: the transition is recorded, and
+// coalesced, in the link's scope; see activationScope.
+func (m *Manager) auditActivationRateLimit(ctx context.Context, link store.ActivationLink, request *http.Request) {
+	tenantID, platform := activationScope(link)
+	if m.claimRateAudit("activation", tenantID, platform, request) {
+		m.recordAuthEvent(ctx, "auth.rate_limited", "activation", tenantID, platform, request)
+	}
+}
+
+// activationScope returns the scope of the records of a redemption of the
+// link, which the successful redemption's record has too: the tenant of the
+// link's account, or platform scope for an account without a tenant, a
+// platform administrator's invitation. A token that no link has, or a link
+// that could not be read, names no account, so its records belong to the
+// default tenant, whose console serves activation.
+func activationScope(link store.ActivationLink) (string, bool) {
+	if !link.Found {
+		return "", false
+	}
+	return link.TenantID, link.TenantID == ""
 }
 
 // auditUnknownAccountFailure is auditAuthFailure for a sign-in with a
@@ -1205,10 +1279,10 @@ func (m *Manager) WaitForRateLimitRecords(ctx context.Context) error {
 // auditRateLimit records only the transition into a rate-limited episode. A
 // blocked client can send an unbounded number of rejected requests; writing an
 // audit row for each one would turn the protection itself into a storage DoS.
-// It is for an operation that names no account, setup and activation, so
-// the record belongs to the default tenant, as auditAuthFailure's does.
-// Sign-in and the confirmations name an account and use
-// auditLoginRateLimit and auditAccountRateLimit.
+// It is for an operation that names no account, setup, so the record
+// belongs to the default tenant, as auditAuthFailure's does. Sign-in, the
+// confirmations and activation name an account and use
+// auditLoginRateLimit, auditAccountRateLimit and auditActivationRateLimit.
 func (m *Manager) auditRateLimit(ctx context.Context, subject string, request *http.Request) {
 	m.auditRateLimitIn(ctx, subject, request, false)
 }
@@ -1391,7 +1465,10 @@ func normalizeLoginIdentity(username string) string {
 // same brief source-wide cooldown for existing and unknown usernames to
 // prevent account enumeration, and the setups and activation through a
 // shared loopback peer use it too, so wrong tokens from one client cannot
-// block every client of the peer for five minutes.
+// block every client of the peer for five minutes. Password and TOTP
+// confirmations through a loopback peer keep each account's limit but have
+// no source backstop, so the accounts of one unit cannot block every
+// account's confirmations.
 func (m *Manager) allowScoped(source, account string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1408,14 +1485,18 @@ func (m *Manager) allowScoped(source, account string) bool {
 	// resolves the forwarded address and this exception no longer applies, so
 	// normal hard source/account limits remain for trustworthy client identities.
 	sharedLoopback := sharedLoopbackSource(source, account)
+	// A password or TOTP confirmation through a loopback peer counts its
+	// failures against the confirming account only; see
+	// loopbackConfirmation.
+	sourceBackstop := !loopbackConfirmation(source, account)
 	accountKey := scopedAccountKey(source, account)
 	if !sharedLoopback {
-		if legacy := legacySourceScope(source); legacy != "" {
+		if legacy := legacySourceScope(source); sourceBackstop && legacy != "" {
 			if until, ok := m.blocked[legacy]; ok && now.Before(until) {
 				return false
 			}
 		}
-		if until, ok := m.blocked[source]; ok && now.Before(until) {
+		if until, ok := m.blocked[source]; sourceBackstop && ok && now.Before(until) {
 			return false
 		}
 		if account != "" {
@@ -1441,7 +1522,11 @@ func (m *Manager) allowScoped(source, account string) bool {
 			return false
 		}
 	} else {
-		if len(m.fails[source])+m.sourceInFlight[source] >= authSourceFailureThreshold {
+		admitted := m.sourceInFlight[source]
+		if sourceBackstop {
+			admitted += len(m.fails[source])
+		}
+		if admitted >= authSourceFailureThreshold {
 			return false
 		}
 		if accountKey != "" && len(m.accountFails[accountKey])+m.accountInFlight[accountKey] >= authFailureThreshold {
@@ -1532,14 +1617,16 @@ func (m *Manager) releaseLoginClient(client string) {
 // failedScoped records a failed authentication in the source backstop and in
 // the source's bucket for the account. For a sign-in from a client with its
 // own address, loginClient names the client's sign-in budget, and the
-// failure is recorded there too; every other operation passes "".
+// failure is recorded there too; every other operation passes "". A
+// confirmation through a loopback peer is recorded in the account's bucket
+// only.
 func (m *Manager) failedScoped(source, account, loginClient string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := m.now()
 	m.ensureScopedLimiterMapsLocked()
 	m.sweepLimiterLocked(now)
-	if source != "" {
+	if source != "" && !loopbackConfirmation(source, account) {
 		recordFailureLocked(now, source, authSourceFailureThreshold, m.fails, m.blocked)
 	}
 	if account != "" && !sharedLoopbackSource(source, account) {
@@ -1563,7 +1650,10 @@ func (m *Manager) failedScoped(source, account, loginClient string) {
 
 // clearScoped clears the source's bucket for the account and the source
 // backstop after a successful operation. It never clears a client's sign-in
-// budget; LoginAs explains why.
+// budget, and it never clears a shared loopback peer's failures and
+// cooldown, which are the sign-in budget of every client of the peer;
+// LoginAs explains why. Those failures leave the window as a client's
+// budget's do.
 func (m *Manager) clearScoped(source, account string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -1571,6 +1661,9 @@ func (m *Manager) clearScoped(source, account string) {
 	accountKey := scopedAccountKey(source, account)
 	delete(m.accountFails, accountKey)
 	delete(m.accountBlocked, accountKey)
+	if sharedLoopbackSource(source, account) {
+		return
+	}
 	delete(m.fails, source)
 	delete(m.blocked, source)
 	// Clear a legacy bucket as well when a compatibility caller and a normal
@@ -1600,11 +1693,29 @@ func sharedLoopbackSource(source, account string) bool {
 	for _, prefix := range []string{"login:", "setup:", "platform-setup:", "activation:"} {
 		shared = shared || strings.HasPrefix(account, prefix)
 	}
-	if !shared {
+	return shared && loopbackSource(source)
+}
+
+// loopbackConfirmation reports whether the operation is a password or TOTP
+// confirmation from a loopback peer that is not a trusted proxy. Every
+// signed-in account of every unit, and every platform administrator, may
+// confirm through that peer, so a failed confirmation there counts only in
+// the source's bucket for the confirming account, never in the source
+// backstop: the failures of one unit's accounts cannot block the
+// confirmations of another unit or of the platform. Each account keeps its
+// own limit, and a confirmation needs a session of the account.
+func loopbackConfirmation(source, account string) bool {
+	account = strings.TrimSpace(account)
+	if !strings.HasPrefix(account, "confirm:") && !strings.HasPrefix(account, "totp-confirm:") {
 		return false
 	}
-	address := legacySourceScope(source)
-	ip := net.ParseIP(address)
+	return loopbackSource(source)
+}
+
+// loopbackSource reports whether the source's client address is a loopback
+// address.
+func loopbackSource(source string) bool {
+	ip := net.ParseIP(legacySourceScope(source))
 	return ip != nil && ip.IsLoopback()
 }
 

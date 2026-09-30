@@ -37,16 +37,16 @@ func (b *lockedBuffer) String() string {
 // proxy with forwarding headers.
 const untrustedProxyWarning = "requests from a proxy that is not in web.trusted_proxies carry forwarding headers"
 
-// A request from an address that is neither loopback nor in
-// web.trusted_proxies, but carries forwarding headers, comes from a proxy
-// that EdgeWatch does not trust: every client behind it shares the proxy's
-// sign-in budget, the source backstop of the setups and activation, and its
-// audit address. The daemon logs a warning that recommends
+// A request from an address that is not in web.trusted_proxies, but
+// carries forwarding headers, comes from a proxy that EdgeWatch does not
+// trust: every client behind it shares the proxy's address for sign-in
+// limits, the limits of the setups and activation, and the audit. That
+// holds for a proxy on the host, which connects from a loopback address, as
+// for any other. The daemon logs a warning that recommends
 // web.trusted_proxies, at most once per interval, and the platform status
 // reports the proxy. Once more than one unit exists, a unit's status leaves
-// it out, as it leaves out the other deployment-wide signals. Loopback
-// peers, requests without forwarding headers, and trusted proxies are not
-// reported.
+// it out, as it leaves out the other deployment-wide signals. Requests
+// without forwarding headers and trusted proxies are not reported.
 func TestUntrustedProxyForwardingIsReported(t *testing.T) {
 	f := newPlatformFixture(t)
 	logs := &lockedBuffer{}
@@ -82,11 +82,11 @@ func TestUntrustedProxyForwardingIsReported(t *testing.T) {
 		return status
 	}
 
-	send("127.0.0.1:5000", map[string]string{"X-Forwarded-For": "198.51.100.7"})
-	send("[::1]:5000", map[string]string{"Forwarded": "for=198.51.100.7"})
+	send("127.0.0.1:5000", nil)
+	send("[::1]:5000", nil)
 	send("10.0.0.5:5000", nil)
 	if got := warnings(); got != 0 {
-		t.Fatalf("warnings for loopback peers and a request without forwarding headers = %d, want none: %s", got, logs.String())
+		t.Fatalf("warnings for requests without forwarding headers = %d, want none: %s", got, logs.String())
 	}
 	if _, reported := platformStatus()["untrusted_proxy"]; reported {
 		t.Fatal("the platform status reports an untrusted proxy before one was seen")
@@ -122,14 +122,86 @@ func TestUntrustedProxyForwardingIsReported(t *testing.T) {
 		t.Fatalf("warnings after the interval = %d, want two, the second for 10.0.0.6: %s", got, logs.String())
 	}
 
+	// A proxy on the host that is not trusted connects from a loopback
+	// address, and is reported as well.
+	for i, peer := range []struct{ remote, header, value, want string }{
+		{"127.0.0.1:5000", "X-Forwarded-For", "198.51.100.21", "127.0.0.1"},
+		{"[::1]:5000", "Forwarded", "for=198.51.100.22", "::1"},
+	} {
+		now = now.Add(time.Hour)
+		send(peer.remote, map[string]string{peer.header: peer.value})
+		if got := warnings(); got != 3+i || !strings.Contains(logs.String(), "peer="+peer.want+" header="+peer.header) {
+			t.Fatalf("warnings after a request from an untrusted proxy at %s = %d, want %d: %s", peer.want, got, 3+i, logs.String())
+		}
+		if notice, reported := f.server.Auth.UntrustedProxy(); !reported || notice.Peer != peer.want || notice.Header != peer.header {
+			t.Fatalf("untrusted proxy = %+v, %t; want %s", notice, reported, peer.want)
+		}
+	}
+
 	// A trusted proxy is not reported.
 	if err := f.server.Auth.SetTrustedProxies([]string{"10.0.0.7/32"}); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Hour)
 	send("10.0.0.7:5000", map[string]string{"X-Forwarded-For": "198.51.100.30"})
-	if got := warnings(); got != 2 {
-		t.Fatalf("warnings after a request from a trusted proxy = %d, want two: %s", got, logs.String())
+	if got := warnings(); got != 4 {
+		t.Fatalf("warnings after a request from a trusted proxy = %d, want four: %s", got, logs.String())
+	}
+}
+
+// When the proxy on the host is trusted, a proxy on another host in front
+// of it is the address at which the forwarding chain leaves the trusted
+// proxies. When that address forwarded the request for another client, it
+// is a proxy that EdgeWatch does not trust: the daemon logs the warning
+// with its address and the platform status reports it. A client of the
+// trusted proxy, whose chain ends at its own address, is not reported.
+func TestUntrustedProxyBehindATrustedProxyIsReported(t *testing.T) {
+	f := newPlatformFixture(t)
+	logs := &lockedBuffer{}
+	f.server.Log = slog.New(slog.NewTextHandler(logs, nil))
+	if err := f.server.Auth.SetTrustedProxies([]string{"127.0.0.1/32"}); err != nil {
+		t.Fatal(err)
+	}
+	handler := f.server.Handler()
+	send := func(forwardedFor string) {
+		t.Helper()
+		request := httptest.NewRequest(http.MethodGet, consoleAPIBase+"/setup/status", nil)
+		request.Host = "127.0.0.1:8080"
+		request.RemoteAddr = "127.0.0.1:50000"
+		request.Header.Set("X-Forwarded-For", forwardedFor)
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("setup status forwarded for %s = %d %s", forwardedFor, recorder.Code, recorder.Body.String())
+		}
+	}
+	platformStatus := func() map[string]any {
+		t.Helper()
+		response := f.call(t, actorPlatform, http.MethodGet, "/platform/status", "")
+		if response.Code != http.StatusOK {
+			t.Fatalf("platform status = %d %s", response.Code, response.Body.String())
+		}
+		var status map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+			t.Fatal(err)
+		}
+		return status
+	}
+
+	send("198.51.100.7")
+	if strings.Contains(logs.String(), untrustedProxyWarning) {
+		t.Fatalf("warning for a client of the trusted proxy: %s", logs.String())
+	}
+	if _, reported := platformStatus()["untrusted_proxy"]; reported {
+		t.Fatal("the platform status reports a client of the trusted proxy")
+	}
+
+	send("198.51.100.7, 203.0.113.9")
+	if strings.Count(logs.String(), untrustedProxyWarning) != 1 || !strings.Contains(logs.String(), "peer=203.0.113.9 header=X-Forwarded-For") {
+		t.Fatalf("warning for an untrusted proxy behind the trusted proxy: %s", logs.String())
+	}
+	if notice, reported := platformStatus()["untrusted_proxy"].(map[string]any); !reported || notice["peer"] != "203.0.113.9" || notice["header"] != "X-Forwarded-For" {
+		t.Fatalf("platform status untrusted_proxy = %#v, want 203.0.113.9", platformStatus()["untrusted_proxy"])
 	}
 }
 

@@ -249,17 +249,19 @@ func (s *Server) Handler() http.Handler {
 }
 
 // noteUntrustedProxy logs a warning, at most once an hour, when requests
-// come from a proxy that is not in web.trusted_proxies but send a forwarding
-// header: EdgeWatch then sees every client behind the proxy as the proxy's
-// address, which the clients share for the sign-in budget, the setup and
-// activation backstop, and the audit. The console's status shows the proxy
-// to administrators, see adminStatus and platformStatus.
+// come through a proxy that is not in web.trusted_proxies but forwards them
+// for other clients, as auth.UntrustedProxy describes it: the proxy on the
+// host, which connects from a loopback address, or one behind the trusted
+// proxies. EdgeWatch then sees every client behind the proxy as the proxy's
+// address, which the clients share for the sign-in limits, the limits of
+// the setups and activation, and the audit. The console's status shows the
+// proxy to administrators, see adminStatus and platformStatus.
 func (s *Server) noteUntrustedProxy(r *http.Request) {
 	if s == nil || s.Auth == nil || s.Log == nil {
 		return
 	}
 	if proxy, logNow := s.Auth.NoteForwarding(r); logNow {
-		s.Log.Warn("requests from a proxy that is not in web.trusted_proxies carry forwarding headers; every client behind it shares the proxy's sign-in budget, setup and activation backstop, and audit address", "peer", proxy.Peer, "header", proxy.Header, "hint", "add the proxy address to web.trusted_proxies and set web.forwarded_header to the header that the proxy sanitizes")
+		s.Log.Warn("requests from a proxy that is not in web.trusted_proxies carry forwarding headers; every client behind it shares the proxy's address for sign-in limits, setup and activation limits, and the audit", "peer", proxy.Peer, "header", proxy.Header, "hint", "if the address is a proxy that you run, add it to web.trusted_proxies and set web.forwarded_header to the header that the proxy sanitizes")
 	}
 }
 

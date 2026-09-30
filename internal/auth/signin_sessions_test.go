@@ -753,10 +753,11 @@ func TestSignInFailsWhenTheReplayGuardCannotBeRead(t *testing.T) {
 	}
 }
 
-// NoteForwarding records a request from a proxy that is neither loopback
-// nor trusted and that sends a client-address forwarding header, and asks for
-// the warning at most once per interval. UntrustedProxy reports the latest
-// such proxy for a day after its last request.
+// NoteForwarding records a request whose directly connected peer is not a
+// trusted proxy and sends a client-address forwarding header, whether the
+// peer is loopback, as a proxy on the host is, or not, and asks for the
+// warning at most once per interval. UntrustedProxy reports the latest such
+// proxy for a day after its last request.
 func TestNoteForwardingRecordsUntrustedProxies(t *testing.T) {
 	var none *Manager
 	if _, logNow := none.NoteForwarding(httptest.NewRequest(http.MethodGet, "/", nil)); logNow {
@@ -785,8 +786,7 @@ func TestNoteForwardingRecordsUntrustedProxies(t *testing.T) {
 	for _, r := range []*http.Request{
 		request("10.0.0.5:4000", "", ""),
 		request("10.0.0.5:4000", "X-Forwarded-For", " "),
-		request("127.0.0.1:4000", "X-Forwarded-For", "198.51.100.7"),
-		request("[::1]:4000", "Forwarded", "for=198.51.100.7"),
+		request("127.0.0.1:4000", "", ""),
 		request("not-an-address", "X-Forwarded-For", "198.51.100.7"),
 		request("10.0.0.9:4000", "X-Forwarded-For", "198.51.100.7"),
 	} {
@@ -816,6 +816,72 @@ func TestNoteForwardingRecordsUntrustedProxies(t *testing.T) {
 	now = now.Add(untrustedProxyNoticeTTL)
 	if proxy, seen := m.UntrustedProxy(); seen {
 		t.Fatalf("untrusted proxy a day after its last request = %+v", proxy)
+	}
+	// A proxy on the host that is not trusted connects from a loopback
+	// address.
+	proxy, _ = m.NoteForwarding(request("127.0.0.1:4000", "X-Forwarded-For", "198.51.100.7"))
+	if want := (UntrustedProxy{Peer: "127.0.0.1", Header: "X-Forwarded-For", LastSeenAt: now}); proxy != want {
+		t.Fatalf("request from an untrusted proxy on the host = %+v, want %+v", proxy, want)
+	}
+	proxy, _ = m.NoteForwarding(request("[::1]:4000", "Forwarded", "for=198.51.100.7"))
+	if want := (UntrustedProxy{Peer: "::1", Header: "Forwarded", LastSeenAt: now}); proxy != want {
+		t.Fatalf("request from an untrusted IPv6 proxy on the host = %+v, want %+v", proxy, want)
+	}
+}
+
+// Behind a trusted proxy, the client address is the first address from the
+// right of the forwarding chain that is not a trusted proxy. When the chain
+// has entries to the left of that address, the address forwarded the
+// request for another client: it is a proxy that EdgeWatch does not trust,
+// such as a proxy on another host in front of the trusted proxy on the
+// host. NoteForwarding records it with the header in use, and the client
+// address stays the proxy's. A chain that ends at the client's own address,
+// a chain of trusted proxies, a hop that cannot be read, and a header that
+// EdgeWatch does not read are not recorded.
+func TestNoteForwardingRecordsTheUntrustedProxyBehindATrustedOne(t *testing.T) {
+	now := time.Date(2026, time.September, 30, 9, 0, 0, 0, time.UTC)
+	for _, check := range []struct {
+		name, forwarded, remote, header, value, client, proxy string
+	}{
+		{"an untrusted proxy in front of the host's proxy", "", "127.0.0.1:50000", "X-Forwarded-For", "198.51.100.7, 203.0.113.9", "203.0.113.9", "203.0.113.9"},
+		{"an untrusted proxy in front of two trusted proxies", "", "127.0.0.1:50000", "X-Forwarded-For", "198.51.100.7, 203.0.113.9, 10.0.0.9", "203.0.113.9", "203.0.113.9"},
+		{"an untrusted proxy that forwarded for an unreadable client", "", "127.0.0.1:50000", "X-Forwarded-For", "unknown, 203.0.113.9", "203.0.113.9", "203.0.113.9"},
+		{"an untrusted proxy in a Forwarded chain", "forwarded", "[::1]:50000", "Forwarded", `for=198.51.100.7, for="[2001:db8::9]:443"`, "2001:db8::9", "2001:db8::9"},
+		{"the client of the host's proxy", "", "127.0.0.1:50000", "X-Forwarded-For", "198.51.100.7", "198.51.100.7", ""},
+		{"the client of two trusted proxies", "", "127.0.0.1:50000", "X-Forwarded-For", "198.51.100.7, 10.0.0.9", "198.51.100.7", ""},
+		{"a chain of trusted proxies only", "", "127.0.0.1:50000", "X-Forwarded-For", "10.0.0.9", "10.0.0.9", ""},
+		{"an unreadable hop", "", "127.0.0.1:50000", "X-Forwarded-For", "198.51.100.7, not-an-address", "127.0.0.1", ""},
+		{"a header that EdgeWatch does not read", "", "127.0.0.1:50000", "Forwarded", "for=198.51.100.7, for=203.0.113.9", "127.0.0.1", ""},
+		{"forwarded client addresses turned off", "none", "127.0.0.1:50000", "X-Forwarded-For", "198.51.100.7, 203.0.113.9", "127.0.0.1", ""},
+	} {
+		t.Run(check.name, func(t *testing.T) {
+			m := NewManager(nil)
+			m.Now = func() time.Time { return now }
+			if err := m.SetTrustedProxies([]string{"127.0.0.1/32", "::1/128", "10.0.0.9/32"}); err != nil {
+				t.Fatal(err)
+			}
+			if err := m.SetForwardedHeader(check.forwarded); err != nil {
+				t.Fatal(err)
+			}
+			r := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+			r.RemoteAddr = check.remote
+			r.Header.Set(check.header, check.value)
+			if got := m.ClientIP(r); got != check.client {
+				t.Fatalf("client address = %q, want %q", got, check.client)
+			}
+			proxy, logNow := m.NoteForwarding(r)
+			seen, reported := m.UntrustedProxy()
+			if check.proxy == "" {
+				if proxy.Peer != "" || logNow || reported {
+					t.Fatalf("recorded %+v (warning %t, reported %t), want nothing", seen, logNow, reported)
+				}
+				return
+			}
+			want := UntrustedProxy{Peer: check.proxy, Header: check.header, LastSeenAt: now}
+			if proxy != want || !logNow || !reported || seen != want {
+				t.Fatalf("recorded %+v (warning %t), reported %+v (%t); want %+v with a warning", proxy, logNow, seen, reported, want)
+			}
+		})
 	}
 }
 

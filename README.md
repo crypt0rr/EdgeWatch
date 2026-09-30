@@ -295,14 +295,19 @@ Important defaults:
 - If a tunnel or reverse proxy is not listed in web.trusted_proxies, every
   client may appear as the same loopback peer. After five failed login or TOTP
   attempts within five minutes, all logins through that shared peer receive a
-  short two-second cooldown instead of a five-minute lockout. Applying the same
+  short two-second cooldown instead of a five-minute lockout. A successful
+  sign-in through the peer, with any account, does not reset the count; each
+  failure expires five minutes after it happened. Applying the same
   cooldown to known and unknown usernames avoids revealing account existence.
   The first-run setup, the platform setup, and account activation through that
   peer get the same cooldown after five wrong tokens, so wrong tokens cannot
-  block them for five minutes. Configure the proxy network and forwarding
-  header when you need per-client rate limits and audit identities. EdgeWatch
-  logs a startup warning when approved proxy hosts lack trusted client-IP
-  forwarding.
+  block them for five minutes. Password and TOTP confirmations through that
+  peer are limited per account: an account that fails five confirmations
+  within five minutes is refused for five minutes, and other accounts, in any
+  unit or on the platform, are not affected. Configure the proxy network and
+  forwarding header when you need per-client rate limits and audit
+  identities. EdgeWatch logs a startup warning when approved proxy hosts lack
+  trusted client-IP forwarding.
 - A client identified by its own address may fail five sign-ins within five
   minutes. Every failed sign-in counts the same: an unknown username, a
   disabled account, an account whose unit is not active, and a wrong
@@ -314,11 +319,16 @@ Important defaults:
   share one address, such as the clients of an untrusted proxy on another
   host, share this budget, and a hundred wrong setup or activation tokens from
   that address block setup and activation for all of them for five minutes.
-  When a peer that is neither loopback nor listed in web.trusted_proxies sends
-  X-Forwarded-For or Forwarded, EdgeWatch logs a warning at most once an hour
-  and shows the proxy's address on the dashboard of a single unit's
-  administrators and on the platform status page; add that address to
-  web.trusted_proxies.
+  When requests come through a proxy that EdgeWatch does not trust, EdgeWatch
+  logs a warning at most once an hour and shows the proxy's address on the
+  dashboard of a single unit's administrators and on the platform status
+  page. Such a proxy is a peer that is not listed in web.trusted_proxies and
+  sends X-Forwarded-For or Forwarded, such as an unlisted proxy on the host,
+  or, behind the listed proxies, the first unlisted address in the forwarding
+  chain when the chain names another client before it, such as an unlisted
+  proxy on another host in front of the proxy on the host. A client can send
+  these headers itself and have its own address shown, so add the address to
+  web.trusted_proxies only when it is a proxy that you run.
 - Sessions end after 24 hours without activity and 30 days after sign-in; the
   daemon removes ended sessions at startup and once a day. An account keeps
   at most 20 sessions: a new sign-in beyond that ends the account's least
@@ -727,7 +737,11 @@ account then enrols again.
   capacity, without the platform administrator's source address. The platform
   audit shows the records that belong to no unit, such as each unit's
   creation, rename, disabling, enabling, and deletion, and every unit's
-  account records, never its data records. Both views are read-only. The
+  account records, never its data records. A failed redemption of an
+  activation or password-reset link, and its rate-limit record, are in the
+  audit of the link's unit, or in the platform audit for a platform
+  administrator's invitation; a token that matches no link is recorded in
+  the default unit's audit. Both views are read-only. The
   platform audit filters by unit, by the start of the action, which is
   lower-case, and by day; a day is a calendar day in the configured
   `timezone`, in which the entries are shown, or in the browser's timezone

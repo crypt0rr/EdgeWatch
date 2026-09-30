@@ -435,6 +435,7 @@ describe('business unit detail', () => {
     for (const [phase, activity] of [
       ['verify', 'Checking that nothing is left'],
       ['compact:baseline_host_search', 'Compacting the search indexes'],
+      ['free-pages', 'Overwriting free database pages'],
       ['checkpoint', 'Truncating the database log'],
     ]) {
       vi.mocked(getUnit).mockResolvedValue(businessUnit({ status: 'deleting', purge: { phase, rows: 1500 } }))

@@ -271,6 +271,7 @@ function purgeActivity(phase = '') {
   if (!phase) return 'Waiting to start'
   if (phase === 'verify') return 'Checking that nothing is left'
   if (phase.startsWith('compact:')) return 'Compacting the search indexes'
+  if (phase === 'free-pages') return 'Overwriting free database pages'
   if (phase === 'checkpoint') return 'Truncating the database log'
   return `Erasing ${phase.replace(/_/g, ' ')}`
 }

@@ -770,15 +770,22 @@ Deleting a unit needs a disabled unit, its exact name typed, and the platform
 administrator's password. Its jobs are archived at once, and the daemon then
 erases its data in small batches, compacts the search indexes, and truncates
 the database's write-ahead log, so neither keeps copies of the erased data.
-The deletion continues in the background, resumes after a restart, and waits
-for a running scan to finish; a running backup delays its last step until
-the backup ends. The unit's page shows its progress. The records of platform
-administrators' actions and of the deletion stay in the platform audit; the
-unit's other audit records are erased. Afterwards the unit's name and slug
-can be used again. Backups taken before the deletion still contain the unit.
-Releases before schema 55 could finish a deletion before the compaction and
-the log truncation had; the upgrade to schema 55 runs them once more, as
-described in [Data, backup, and recovery](#data-backup-and-recovery).
+Before it truncates the log, it also clears the database's free pages, which
+can still hold the unit's history that retention removed while the unit
+existed: a database created by v0.18.31 or later returns them to the file
+system, and in an older one, which keeps them in the file and whose
+`auto_vacuum` mode `edgewatch verify` reports as `none`, the deletion
+overwrites every one of them with zeros. The deletion continues in the
+background, resumes after a restart, and waits for a running scan to finish;
+a running backup delays its last step until the backup ends. The unit's page
+shows its progress. The records of platform administrators' actions and of
+the deletion stay in the platform audit; the unit's other audit records are
+erased. Afterwards the unit's name and slug can be used again. Backups taken
+before the deletion still contain the unit. Releases before schema 55 could
+finish a deletion before the compaction and the log truncation had, and
+releases before schema 56 did not overwrite free pages; the upgrades to
+schema 55 and 56 finish that work once, as described in
+[Data, backup, and recovery](#data-backup-and-recovery).
 
 ### Limits
 
@@ -831,6 +838,14 @@ docker compose exec edgewatch edgewatch verify \
   --config /etc/edgewatch/config.yaml --output json
 ```
 
+`edgewatch verify` also reports the database's `auto_vacuum` mode. A
+database created by v0.18.31 or later has `incremental` and returns the pages
+it frees to the file system; an older one has `none` and keeps them in the
+file, with the rows they held, until SQLite reuses them. A backup made with
+the backup command holds no free pages, but a raw copy of ./data holds the
+database file whole. Deleting a business unit leaves no free page with the
+unit's rows in either mode.
+
 The backup command uses SQLite's online snapshot support. A raw directory copy
 must be made while EdgeWatch is stopped so the database and WAL sidecars stay
 consistent. Never replace a live database. Restore with the host-safe command,
@@ -876,7 +891,7 @@ needs one. Print a new platform setup token with `edgewatch admin
 platform-setup-token`; while no administrator exists, the daemon prints a new
 setup token when it starts.
 
-The current schema is version 55. Database migrations are forward-only. An
+The current schema is version 56. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,
@@ -956,6 +971,23 @@ finished; the daemon logs its start and its end. It never runs again.
 Backups taken before it has finished may still hold the erased rows of
 those units. An older release refuses the upgraded database, so a rollback
 means restoring the pre-upgrade ./data backup.
+
+Schema 56 finishes the deletion of business units in a database whose
+`auto_vacuum` mode is `none`, one created before v0.18.31. Earlier releases
+left the free pages of such a database as they were, and those may still hold
+rows of a deleted unit that retention removed while the unit existed. When
+such a database holds a deleted unit, the migration records the cleanup of
+schema 55 as pending again, from its overwrite of free pages: the daemon
+overwrites every free page with zeros in the same bounded, resumable passes
+and then truncates the write-ahead log, without compacting the search indexes
+again. While it is pending, `edgewatch health` reports the
+`legacy-tenant-purge:free-pages` phase, and `edgewatch verify` lists the
+`legacy_tenant_purge_maintenance` checkpoint as not complete. A deletion that
+was in progress at the upgrade and had reached its log truncation goes back
+to the overwrite. A database with `auto_vacuum` mode `incremental` is not
+changed. Raw copies of ./data made before the cleanup has finished may still
+hold those rows. An older release refuses the upgraded database, so a
+rollback means restoring the pre-upgrade ./data backup.
 
 ## Useful commands
 

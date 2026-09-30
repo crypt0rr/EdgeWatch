@@ -19,6 +19,23 @@ type DatabaseVerification struct {
 	IntegrityCheck       string                `json:"integrity_check"`
 	ForeignKeyViolations []ForeignKeyViolation `json:"foreign_key_violations"`
 	FTSBackfill          []FTSBackfillProgress `json:"fts_backfill,omitempty"`
+	// AutoVacuum is the database's auto-vacuum mode, as autoVacuumModeName
+	// names it: incremental for a database that v0.18.31 or later created,
+	// none for an older one, which keeps the pages it frees in the file.
+	AutoVacuum string `json:"auto_vacuum"`
+}
+
+// autoVacuumModeName names a value of PRAGMA auto_vacuum.
+func autoVacuumModeName(mode int) string {
+	switch mode {
+	case 0:
+		return "none"
+	case 1:
+		return "full"
+	case 2:
+		return "incremental"
+	}
+	return fmt.Sprintf("unknown (%d)", mode)
 }
 
 // FTSBackfillProgress is the durable, read-only diagnostic state for one
@@ -100,6 +117,11 @@ func (s *Store) Verify(ctx context.Context) (DatabaseVerification, error) {
 	result.SchemaVersion = schemaVersionValue
 	result.SchemaSupported = schemaVersionValue >= 1 && schemaVersionValue <= schemaVersion
 	result.EdgeWatchSchema = detectEdgeWatchSchema(ctx, reader)
+	var autoVacuum int
+	if err := reader.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&autoVacuum); err != nil {
+		return result, err
+	}
+	result.AutoVacuum = autoVacuumModeName(autoVacuum)
 	if err := reader.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&result.IntegrityCheck); err != nil {
 		return result, err
 	}

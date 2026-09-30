@@ -277,13 +277,23 @@ the administrator is demoted or disabled, or the unit is disabled, is
 refused with `403 forbidden` and writes nothing, so no link outlives the
 change. Deleting a unit erases its rows in bounded batches with SQLite's
 `secure_delete` on, then compacts the search indexes and truncates the
-write-ahead log, both of which may still hold copies of the erased rows. The
-unit stays in the deleting state until the compaction has finished and a
-checkpoint has truncated the log: each purge pass continues the compaction
-within a bounded time, and a reader that holds an older snapshot of the
-database, such as a running backup, keeps the log from being truncated until
-it ends, which the daemon logs as a warning. Deleting a destination removes
-its delivery health; the purge also erases the delivery health that earlier
+write-ahead log, both of which may still hold copies of the erased rows.
+Between the two it clears the database's free pages, which may hold rows of
+the unit that other writers, such as retention, deleted without
+`secure_delete` while it existed, or search terms of it that a retention
+merge freed during the deletion: a database with incremental auto-vacuum,
+the mode of every database created by v0.18.31 or later, returns them to the
+file system, and in a database without auto-vacuum, which `edgewatch verify`
+reports as `auto_vacuum` `none`, the purge allocates every free page to a
+scratch table and frees them again with `secure_delete` on, so SQLite
+overwrites each of them with zeros. The pages in use are not rewritten, so
+stale bytes in their unused space are not covered. The unit stays in the
+deleting state until the compaction and the overwrite have finished and a
+checkpoint has truncated the log: each purge pass continues them within a
+bounded time, and a reader that holds an older snapshot of the database,
+such as a running backup, keeps the log from being truncated until it ends,
+which the daemon logs as a warning. Deleting a destination removes its
+delivery health; the purge also erases the delivery health that earlier
 releases kept for deleted destinations, which names no owner and counts in
 no unit's totals. Backups taken before the deletion still hold the unit's
 data, and the records of platform administrators' actions on it stay in the
@@ -298,7 +308,14 @@ older snapshot, and while a unit is being deleted it leaves the work to that
 unit's deletion. `edgewatch health` reports the cleanup as `maintenance`
 until it has finished, and `edgewatch verify` lists its
 `legacy_tenant_purge_maintenance` checkpoint. Backups taken before it has
-finished may still hold the erased rows of those units.
+finished may still hold the erased rows of those units. Releases before
+schema 56 did not overwrite free pages, so in a database without
+auto-vacuum the free pages, which raw copies of `./data` include, may still
+hold rows of the units they deleted. When such a database holds a deleted
+unit, the upgrade to schema 56 records the same cleanup as pending again
+from its overwrite of free pages, which then truncates the log without
+compacting the indexes again, and sends a deletion that had reached its
+log truncation back to the overwrite.
 
 ### Signals between units
 
@@ -450,7 +467,7 @@ or of the platform is still locked, whichever unit `--tenant` selects, and
 reports that count as `deployment_locked`, never a URL. The console
 notification test covers only the unit's own destinations, so a unit's
 administrators learn nothing about another unit's or the platform's. A
-database upgraded to schema 55 must not be opened by an older EdgeWatch
+database upgraded to schema 56 must not be opened by an older EdgeWatch
 binary; downgrade by restoring the complete pre-upgrade `./data` backup
 before starting the old version. The
 daemon and the host commands that write to the database, including `backup`,
@@ -478,8 +495,11 @@ tenant that is being deleted. Schema 55 changes no table: when a tenant has
 been deleted, it records the one-time cleanup after deleted tenants
 described under [Public pages, audit, and deletion](#public-pages-audit-and-deletion),
 and sends a deletion that was already compacting the search indexes back to
-the start of its compaction. Back up the complete `./data` directory before
-the upgrade.
+the start of its compaction. Schema 56 changes no table either: in a
+database without auto-vacuum that holds a deleted tenant, it records that
+cleanup as pending again at its overwrite of free pages, and it sends a
+deletion that had reached its log truncation back to that overwrite. Back up
+the complete `./data` directory before the upgrade.
 
 Recovery codes are stored in the salted `v2` representation. Schema 38 removes
 legacy unsalted SHA-256 recovery-code digests and records only their count in

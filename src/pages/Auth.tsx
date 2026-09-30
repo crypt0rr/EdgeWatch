@@ -5,7 +5,12 @@ import { Eye, EyeOff, LockKeyhole, Wifi } from 'lucide-react'
 import { activate, login, platformSetup, setCSRF, setup, setupStatus } from '../api'
 import { usernameProblem } from './Users'
 
-function activationTokenFromLocation(search: string, hash: string) {
+/**
+ * The one-time token of an activation or password-reset link: from the URL
+ * fragment, or from the query string of a link issued before tokens moved to
+ * the fragment. It is empty when the address holds none.
+ */
+export function activationTokenFromLocation(search: string, hash: string) {
   const fragment = new URLSearchParams(hash.startsWith('#') ? hash.slice(1) : hash)
   return fragment.get('token') ?? new URLSearchParams(search).get('token') ?? ''
 }
@@ -39,15 +44,28 @@ export function Login() {
 }
 
 export function Setup() {
-  // An installation that is already set up offers the platform setup while
-  // the token that `edgewatch admin platform-setup-token` printed on the
-  // host is valid. Otherwise this is the first-run setup.
+  // An installation without an administrator gets the first-run setup. Once
+  // it is set up, this page offers the platform setup while the token that
+  // `edgewatch admin platform-setup-token` printed on the host is valid, and
+  // otherwise says that setup is complete and leads to sign-in.
   const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus, staleTime: 30_000 })
-  if (status.data?.platform_setup_available) return <PlatformSetup minimumLength={status.data.password_requirements?.minimum_length ?? 12} />
-  return <InitialSetup />
+  const platformSetupAvailable = !!status.data?.configured && !!status.data.platform_setup_available
+  // A token that expires, or that another operator uses, while the platform
+  // setup is open keeps the form and what was typed in it. The form says
+  // that the token lapsed and takes a new one from the host.
+  const [platformSetupOpened, setPlatformSetupOpened] = useState(false)
+  if (platformSetupAvailable && !platformSetupOpened) setPlatformSetupOpened(true)
+  if (!status.data) return status.isError ? <AuthFrame eyebrow="Setup" title="EdgeWatch is unavailable" subtitle="The setup status could not be read. Reload this page when the service is available."><Link className="link-button" to="/login">Go to sign in</Link></AuthFrame> : <div className="loading"><span className="spinner" />Loading EdgeWatch…</div>
+  if (!status.data.configured) return <InitialSetup />
+  if (platformSetupAvailable || platformSetupOpened) return <PlatformSetup minimumLength={status.data.password_requirements?.minimum_length ?? 12} tokenLapsed={!platformSetupAvailable} />
+  return <SetupComplete />
 }
 
-function PlatformSetup({ minimumLength }: { minimumLength: number }) {
+function SetupComplete() {
+  return <AuthFrame eyebrow="Setup" title="EdgeWatch is already set up" subtitle="The first administrator exists, and no valid platform setup token is waiting to create the first platform administrator."><div className="auth-form"><div className="notice"><LockKeyhole size={14} /><span>To create the first platform administrator, print a platform setup token on the EdgeWatch host with <code>edgewatch admin platform-setup-token</code> and reload this page within 15 minutes. Otherwise, sign in with your account.</span></div><Link className="button primary wide" to="/login">Go to sign in</Link></div></AuthFrame>
+}
+
+function PlatformSetup({ minimumLength, tokenLapsed }: { minimumLength: number; tokenLapsed: boolean }) {
   const navigate = useNavigate(); const queryClient = useQueryClient(); const [token, setToken] = useState(''); const [username, setUsername] = useState(''); const [password, setPassword] = useState(''); const [confirm, setConfirm] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false)
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -68,7 +86,7 @@ function PlatformSetup({ minimumLength }: { minimumLength: number }) {
       setBusy(false)
     }
   }
-  return <AuthFrame eyebrow="Business units" title="Create the platform administrator" subtitle="Platform administrators create business units and manage their administrators, but never see a unit’s scan data. Existing accounts keep working in the default unit."><form onSubmit={submit} className="auth-form"><div className="notice"><LockKeyhole size={14} /><span>Use the token that <code>edgewatch admin platform-setup-token</code> printed on the EdgeWatch host. It expires 15 minutes after it was printed.</span></div><label>Platform setup token<input autoFocus value={token} onChange={e => setToken(e.target.value)} autoComplete="one-time-code" placeholder="Paste the token from the host" required /></label><label>Username<input value={username} onChange={e => setUsername(e.target.value)} autoComplete="username" required maxLength={80} /><small>Usernames are unique across the deployment, including every unit.</small></label><label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="new-password" minLength={minimumLength} required /><small>At least {minimumLength} characters. Set up TOTP after signing in; it is required once more than one unit exists.</small></label><label>Confirm password<input type="password" value={confirm} onChange={e => setConfirm(e.target.value)} autoComplete="new-password" required /></label>{error && <div className="form-error" role="alert">{error}</div>}<button disabled={busy} className="button primary wide" type="submit">{busy ? 'Creating account…' : 'Create platform administrator'}</button><Link className="link-button" to="/login">Back to sign in</Link></form></AuthFrame>
+  return <AuthFrame eyebrow="Business units" title="Create the platform administrator" subtitle="Platform administrators create business units and manage their administrators, but never see a unit’s scan data. Existing accounts keep working in the default unit."><form onSubmit={submit} className="auth-form"><div className="notice"><LockKeyhole size={14} /><span>Use the token that <code>edgewatch admin platform-setup-token</code> printed on the EdgeWatch host. It expires 15 minutes after it was printed.</span></div>{tokenLapsed && !busy && <div className="notice warning" role="status"><LockKeyhole size={14} /><span>The platform setup token has expired or was already used. Print a new one on the EdgeWatch host with <code>edgewatch admin platform-setup-token</code> and paste it below; what you typed is kept. Once a platform administrator exists, sign in instead.</span></div>}<label>Platform setup token<input autoFocus value={token} onChange={e => setToken(e.target.value)} autoComplete="one-time-code" placeholder="Paste the token from the host" required /></label><label>Username<input value={username} onChange={e => setUsername(e.target.value)} autoComplete="username" required maxLength={80} /><small>Usernames are unique across the deployment, including every unit.</small></label><label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="new-password" minLength={minimumLength} required /><small>At least {minimumLength} characters. Set up TOTP after signing in; it is required once more than one unit exists.</small></label><label>Confirm password<input type="password" value={confirm} onChange={e => setConfirm(e.target.value)} autoComplete="new-password" required /></label>{error && <div className="form-error" role="alert">{error}</div>}<button disabled={busy} className="button primary wide" type="submit">{busy ? 'Creating account…' : 'Create platform administrator'}</button><Link className="link-button" to="/login">Back to sign in</Link></form></AuthFrame>
 }
 
 function InitialSetup() {
@@ -85,6 +103,20 @@ export function Activate() {
   }, [location.hash, location.pathname, location.search, location.state, navigate])
   async function submit(event: FormEvent) { event.preventDefault(); setError(''); if (password !== confirm) { setError('Passwords do not match.'); return }; setBusy(true); try { await activate(token.trim(), password); navigate('/login', { replace: true, state: { message: 'Account activated. Sign in with your new password.' } }) } catch (err) { setError(err instanceof Error ? err.message : 'Activation failed') } finally { setBusy(false) } }
   return <AuthFrame eyebrow="Activate account" title="Choose your password" subtitle="This activation link is single-use and expires shortly."><form onSubmit={submit} className="auth-form"><label>Activation token<input autoFocus value={token} onChange={e => setToken(e.target.value)} autoComplete="one-time-code" required /></label><label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="new-password" minLength={12} required /><small>At least 12 characters.</small></label><label>Confirm password<input type="password" value={confirm} onChange={e => setConfirm(e.target.value)} autoComplete="new-password" required /></label>{error && <div className="form-error" role="alert">{error}</div>}<button disabled={busy} className="button primary wide" type="submit">{busy ? 'Activating…' : 'Activate account'}</button></form></AuthFrame>
+}
+
+/**
+ * An activation or password-reset link opened in a browser that holds a
+ * session. The link sets the password of the account that it was issued
+ * for, which need not be the signed-in account, so the console neither uses
+ * it with this session nor drops it: the token stays in the address until
+ * the visitor signs out, and the activation page then opens with it. The
+ * visitor may also return to the console, which leaves the link unused.
+ */
+export function SignedInActivation({ displayName, username, onSignOut }: { displayName?: string; username: string; onSignOut: () => Promise<void> }) {
+  const navigate = useNavigate(); const [busy, setBusy] = useState(false)
+  const account = displayName && displayName !== username ? `${displayName} (${username})` : username
+  return <AuthFrame eyebrow="Account link" title="You are already signed in" subtitle="This activation or password-reset link sets the password of the account it was issued for. Sign out to use it."><div className="auth-form"><div className="notice"><LockKeyhole size={14} /><span>Signed in as <strong>{account}</strong>. The link is not used with this session: it opens once you have signed out, and stays valid until it expires.</span></div><button type="button" className="button primary wide" disabled={busy} onClick={() => { setBusy(true); void onSignOut() }}>{busy ? 'Signing out…' : 'Sign out and continue'}</button><button type="button" className="link-button" onClick={() => navigate('/', { replace: true })}>Return to the console</button></div></AuthFrame>
 }
 
 function AuthFrame({ eyebrow, title, subtitle, children }: { eyebrow: string; title: string; subtitle: string; children: React.ReactNode }) { return <div className="auth-layout"><div className="auth-art"><div className="brand light"><span className="brand-mark"><Wifi size={19} /></span><span>EdgeWatch</span></div><div className="art-copy"><div className="signal"><i /><i /><i /><i /><i /></div><h2>Know what changed.</h2><p>Simple, scheduled network visibility for the systems you own.</p></div><span className="art-footer">Local-first · Privacy-minded · Built for operators</span></div><div className="auth-side"><div className="auth-card"><div className="auth-mobile-brand"><Wifi size={18} /> EdgeWatch</div><div className="auth-heading"><div className="auth-icon"><LockKeyhole size={20} /></div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p className="muted">{subtitle}</p></div>{children}</div></div></div> }

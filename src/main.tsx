@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tan
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { Activity, ArrowUp, Bell, Boxes, Building2, ClipboardList, Code2, Gauge, Globe2, LogOut, Menu, ScrollText, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
 import { acceptIncident, adminStatus, APIError, getSession, listIncidents, listJobs, setCSRF, setForbiddenHandler, setupStatus, suppressIncident, logout as apiLogout } from './api'
-import type { UnitRef } from './api'
+import type { SessionUser, UnitRef } from './api'
 import { useActivityHeartbeat, useNavigationDrawer } from './components/navigation'
 import { Audit } from './pages/Audit'
 import { PlatformShell } from './pages/platform/PlatformShell'
@@ -12,7 +12,7 @@ import { TotpEnrollmentShell } from './pages/TotpEnrollment'
 import { Dashboard } from './pages/Dashboard'
 import { JobEditor } from './pages/JobEditor'
 import { JobDetail } from './pages/JobDetail'
-import { Activate, Login, Setup, signInReturnPath } from './pages/Auth'
+import { Activate, activationTokenFromLocation, Login, Setup, SignedInActivation, signInReturnPath } from './pages/Auth'
 import { Security } from './pages/Security'
 import { Notifications } from './pages/Notifications'
 import { BaselineHosts } from './pages/BaselineHosts'
@@ -278,7 +278,7 @@ function IncidentActions({ row, busy, acceptID, suppressID, onAction }: { row: I
   return <div className="incident-actions"><button className="button secondary" type="button" onClick={() => onAction(row, 'accept')} disabled={!key || !!busy}>{busy === acceptID ? 'Accepting…' : 'Accept change'}</button><button className="button ghost" type="button" onClick={() => onAction(row, 'suppress')} disabled={!key || !!busy}>{busy === suppressID ? 'Suppressing…' : 'Suppress 1 scan'}</button></div>
 }
 
-export function ProtectedApp({ onLogout }: { onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); const location = useLocation(); useEffect(() => { if (session.error && status.data?.configured) navigate('/login') }, [session.error, status.data, navigate])
+export function ProtectedApp({ onLogout }: { onLogout: () => Promise<void> }) { const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus }); const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false }); const navigate = useNavigate(); const location = useLocation(); useEffect(() => { if (session.error && !session.data && status.data?.configured) navigate('/login') }, [session.error, session.data, status.data, navigate])
   // A refused request re-reads the session, so the console follows a session
   // that changed on the server: a second business unit restricts an
   // administrator without TOTP to the enrolment below, and a role change
@@ -289,7 +289,10 @@ export function ProtectedApp({ onLogout }: { onLogout: () => Promise<void> }) { 
   // codes are still on screen. Stay on the enrolment screen until sign-out,
   // which ends it, so a session refresh cannot unmount the codes.
   const mustEnrol = !!session.data?.totp_enrollment_required; const [enrolling, setEnrolling] = useState(false); useEffect(() => { if (mustEnrol) setEnrolling(true) }, [mustEnrol])
-  if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />; if (session.error) return <Navigate to="/login" replace />; const displayName = session.data?.display_name ?? session.data?.username ?? 'admin'; const permissions = session.data?.permissions ?? []
+  if (status.isLoading || session.isLoading) return <Loading />; if (!status.data?.configured) return <Navigate to="/setup" replace />
+  // A read that fails keeps the session that the console holds; only a
+  // session that ended (401) or never began leaves it without one.
+  if (!session.data) return <Navigate to="/login" replace />; const displayName = session.data?.display_name ?? session.data?.username ?? 'admin'; const permissions = session.data?.permissions ?? []
   // An administrator who must enrol TOTP first gets only the enrolment, a
   // password change, and sign-out. A platform administrator gets the
   // platform console, which never mounts a unit's pages.
@@ -308,6 +311,25 @@ export function AuthRoutes({ configured }: { configured: boolean }) { const loca
 
 export function App() { return <BrowserRouter><AppContent /></BrowserRouter> }
 
+/**
+ * The account and business unit that a session belongs to. The console's
+ * cached data belongs to them.
+ */
+function sessionIdentity(session: SessionUser | null | undefined) {
+  return session ? JSON.stringify([session.user_id, session.scope, session.unit?.id ?? null]) : null
+}
+
+/**
+ * While EdgeWatch does not answer, as while it restarts, a read that failed
+ * after an earlier one succeeded is repeated this often, in milliseconds,
+ * until it answers.
+ */
+const reconnectInterval = 3_000
+
+function reconnectWhileFailing(query: { state: { status: string; data: unknown } }) {
+  return query.state.status === 'error' && query.state.data != null ? reconnectInterval : false
+}
+
 export function AppContent() {
   const location = useLocation()
   const client = useQueryClient()
@@ -320,8 +342,11 @@ export function AppContent() {
   // The public highlights page is deliberately independent of setup/session
   // state. This avoids an unnecessary authenticated request and keeps the
   // unauthenticated route usable while the administrator is signed out.
-  const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus, retry: false, enabled: !isPublic })
-  const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false, enabled: !isPublic })
+  // A read that fails while the console holds a session and the setup
+  // status, as while EdgeWatch restarts, keeps both and is repeated until
+  // it answers.
+  const status = useQuery({ queryKey: ['setup-status'], queryFn: setupStatus, retry: false, refetchInterval: reconnectWhileFailing, enabled: !isPublic })
+  const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value }, retry: false, refetchInterval: reconnectWhileFailing, enabled: !isPublic })
   useEffect(() => {
     // A session that ends on the server, by idle expiry, revocation, or its
     // account or unit being disabled, leaves nothing of its account behind,
@@ -344,15 +369,52 @@ export function AppContent() {
       window.removeEventListener('edgewatch:authenticated', handleAuthenticated)
     }
   }, [client])
-  const authenticated = !signedOut && !!session.data && !session.error
+  useEffect(() => {
+    // A session read can find another account than the one whose data the
+    // cache holds without any 401: another tab of the browser signed out and
+    // signed in as someone else, which replaced the shared cookie. That
+    // account must not see the previous one's cached data either, so the
+    // cache is dropped as after a 401, keeping the setup status and the new
+    // session, before the console renders the new session. A read that finds
+    // the same account keeps the cache. Every page's session query shares
+    // this entry, so the check follows the cache, not one query function,
+    // and it applies the CSRF token of the session that was read.
+    let identity = sessionIdentity(client.getQueryData<SessionUser | null>(['session']))
+    return client.getQueryCache().subscribe(event => {
+      if (event.type !== 'updated' || event.action.type !== 'success' || event.query.queryKey.length !== 1 || event.query.queryKey[0] !== 'session') return
+      const value = event.query.state.data as SessionUser | null | undefined
+      const next = sessionIdentity(value)
+      if (identity !== null && next !== null && next !== identity) {
+        client.removeQueries({ predicate: query => query.queryKey[0] !== 'setup-status' && query !== event.query })
+        client.getMutationCache().clear()
+      }
+      identity = next
+      if (value) setCSRF(value.csrf_token)
+    })
+  }, [client])
+  // Only a session that ended signs the console out, which the 401 handler
+  // above records. A read that fails otherwise, with a network error or a
+  // 5xx, keeps the console and what was typed in it, says that it
+  // reconnects, and is repeated until EdgeWatch answers.
+  const authenticated = !signedOut && !!session.data
+  const reconnecting = (!!session.data && (session.isError || session.failureCount > 0)) || (!!status.data && (status.isError || status.failureCount > 0))
+  // An activation or password-reset link sets the password of the account it
+  // was issued for, so a browser that holds a session keeps it until the
+  // visitor signs out instead of opening the signed-in console on it.
+  const activationLink = /^\/activate\/?$/.test(location.pathname) && activationTokenFromLocation(location.search, location.hash) !== ''
   async function handleLogout() {
     try { await apiLogout() } catch { /* The server clears the cookie before reporting audit errors. */ }
     finally { setCSRF(''); client.clear(); client.setQueryData(['session'], null); setSignedOut(true) }
   }
   if (isPublic) return <PublicDashboard slug={publicSlug} />
   if (status.isLoading || session.isLoading) return <Loading />
-  if (status.error) return <ErrorCard message="Unable to contact EdgeWatch. Retry when the service is available." />
-  return status.data?.configured && authenticated ? <ProtectedApp onLogout={handleLogout} /> : <AuthGate statusConfigured={!!status.data?.configured} />
+  if (status.error && !status.data) return <ErrorCard message="Unable to contact EdgeWatch. Retry when the service is available." />
+  const notice = reconnecting ? <div className="connection-notice" role="status">Cannot reach EdgeWatch. Reconnecting…</div> : null
+  if (!status.data?.configured || !authenticated) return <>{notice}<AuthGate statusConfigured={!!status.data?.configured} /></>
+  if (activationLink) return <>{notice}<SignedInActivation displayName={session.data?.display_name} username={session.data?.username ?? ''} onSignOut={handleLogout} /></>
+  // Another account's session mounts a new console, which keeps nothing of
+  // the previous account's pages.
+  return <>{notice}<ProtectedApp key={sessionIdentity(session.data)} onLogout={handleLogout} /></>
 }
 
 function AuthGate({ statusConfigured }: { statusConfigured: boolean }) { return <AuthRoutes configured={statusConfigured} /> }

@@ -300,6 +300,7 @@ describe('application shell', () => {
     renderWithProviders(<AuthRoutes configured={true} />, { route: ['/unknown'] })
     await waitFor(() => expect(screen.getByRole('heading', { name: /Sign in to EdgeWatch/ })).toBeInTheDocument())
     cleanup()
+    vi.mocked(setupStatus).mockResolvedValue({ configured: false } as never)
     renderWithProviders(<AuthRoutes configured={false} />, { route: ['/unknown'] })
     await waitFor(() => expect(screen.getByRole('heading', { name: /Create your administrator/ })).toBeInTheDocument())
 

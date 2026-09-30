@@ -86,6 +86,13 @@ describe('authentication pages', () => {
     })
   }
 
+  /** The first-run setup, which an installation without an administrator shows. */
+  async function renderFirstRunSetup() {
+    vi.mocked(setupStatus).mockResolvedValue({ configured: false, setup_available: true, password_requirements: { minimum_length: 12 } })
+    await renderPage(<Setup />, '/setup')
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+  }
+
   async function renderBrowserPage(element: React.ReactNode, initialEntry: string) {
     window.history.replaceState({}, '', initialEntry)
     await act(async () => {
@@ -143,7 +150,7 @@ describe('authentication pages', () => {
   })
 
   it('validates setup locally, toggles password visibility, and creates the administrator', async () => {
-    await renderPage(<Setup />, '/setup')
+    await renderFirstRunSetup()
     const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
     setInputValue(inputs[0], '  setup-token  ')
     setInputValue(inputs[1], 'short')
@@ -219,7 +226,7 @@ describe('authentication pages', () => {
 
   it('announces setup and activation failures accessibly', async () => {
     vi.mocked(setup).mockRejectedValueOnce(new Error('setup unavailable'))
-    await renderPage(<Setup />, '/setup')
+    await renderFirstRunSetup()
     let inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
     setInputValue(inputs[0], 'setup-token')
     setInputValue(inputs[1], 'correct horse battery staple')

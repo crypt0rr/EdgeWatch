@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 
 import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { act } from 'react'
 import { Route, Routes, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { APIError, login, platformSetup, setup, setupStatus } from '../api'
@@ -71,6 +72,53 @@ describe('platform setup', () => {
     expect(await screen.findByRole('heading', { name: 'Create your administrator' })).toBeInTheDocument()
     await waitFor(() => expect(setupStatus).toHaveBeenCalled())
     expect(screen.queryByRole('heading', { name: 'Create the platform administrator' })).not.toBeInTheDocument()
+  })
+
+  it('explains that a set-up deployment has no platform setup token instead of offering the first-run setup', async () => {
+    vi.mocked(setupStatus).mockResolvedValue({ configured: true, setup_available: false, password_requirements: { minimum_length: 12 }, platform_setup_available: false })
+    renderSetup()
+    expect(await screen.findByRole('heading', { name: 'EdgeWatch is already set up' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Create your administrator' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Create the platform administrator' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Setup token')).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    // It says how to get a platform setup token, and leads to sign-in.
+    expect(screen.getByText('edgewatch admin platform-setup-token')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Go to sign in' })).toHaveAttribute('href', '/login')
+    expect(setup).not.toHaveBeenCalled()
+  })
+
+  it('keeps the platform setup and what was typed when its token lapses while the page is open', async () => {
+    const { client } = renderSetup()
+    expect(await screen.findByRole('heading', { name: 'Create the platform administrator' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Platform setup token'), { target: { value: 'platform-token' } })
+    fireEvent.change(screen.getByLabelText(/^Username/), { target: { value: 'morgan' } })
+    expect(screen.queryByText(/has expired or was already used/)).not.toBeInTheDocument()
+
+    // The token expires, or another operator uses it, and the status is read
+    // again.
+    vi.mocked(setupStatus).mockResolvedValue({ configured: true, setup_available: false, password_requirements: { minimum_length: 14 }, platform_setup_available: false })
+    await act(async () => { await client.refetchQueries({ queryKey: ['setup-status'] }); await new Promise(resolve => setTimeout(resolve, 20)) })
+    expect(screen.queryByRole('heading', { name: 'Create your administrator' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'EdgeWatch is already set up' })).not.toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Create the platform administrator' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Platform setup token')).toHaveValue('platform-token')
+    expect(screen.getByLabelText(/^Username/)).toHaveValue('morgan')
+    expect(await screen.findByText(/The platform setup token has expired or was already used/)).toBeInTheDocument()
+
+    // A new token printed on the host makes the status available again.
+    vi.mocked(setupStatus).mockResolvedValue({ configured: true, setup_available: false, password_requirements: { minimum_length: 14 }, platform_setup_available: true })
+    await act(async () => { await client.refetchQueries({ queryKey: ['setup-status'] }) })
+    await waitFor(() => expect(screen.queryByText(/has expired or was already used/)).not.toBeInTheDocument())
+    expect(screen.getByLabelText(/^Username/)).toHaveValue('morgan')
+  })
+
+  it('offers no setup form while the setup status cannot be read', async () => {
+    vi.mocked(setupStatus).mockRejectedValue(new Error('offline'))
+    renderSetup()
+    expect(await screen.findByRole('heading', { name: 'EdgeWatch is unavailable' })).toBeInTheDocument()
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Go to sign in' })).toHaveAttribute('href', '/login')
   })
 
   it('points the sign-in page to the platform setup while its token is valid', async () => {

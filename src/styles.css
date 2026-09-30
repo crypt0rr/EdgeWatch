@@ -42,6 +42,24 @@
   opacity: 0.55;
 }
 
+/* Shown over the console while EdgeWatch does not answer; the console stays
+   usable underneath. */
+.connection-notice {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  z-index: 50;
+  transform: translateX(-50%);
+  max-width: calc(100% - 32px);
+  padding: 10px 14px;
+  border: 1px solid #745b2e;
+  border-radius: 9px;
+  background: #302719;
+  color: #f1c776;
+  font-size: 12px;
+  box-shadow: 0 10px 30px #0008;
+}
+
 /* Mobile hardening: keep the shell, dialogs, dense evidence, and actions usable
    when browser chrome and touch input reduce the available space. */
 .app-shell,

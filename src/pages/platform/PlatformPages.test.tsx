@@ -303,6 +303,41 @@ describe('platform notifications', () => {
     await confirmWithPassword('Account password')
     await waitFor(() => expect(deletePlatformNotification).toHaveBeenCalledWith('p-ops', 2, 'my-password'))
   })
+
+  it('shows the delivery health of a failing platform destination', async () => {
+    vi.mocked(listPlatformNotifications).mockResolvedValue({
+      destinations: [destination({ id: 'p-ops', name: 'Operations', revision: 2, pending: 1, terminal_failures: 2, last_failure_at: '2026-09-20T10:00:00Z', last_terminal_at: '2026-09-20T10:00:00Z', last_error_code: 'delivery_failed' }), destination({ id: 'p-sec', name: 'Security desk' })],
+      status: { deployment: 0, managed: 2, active: 2, locked: 0, key_state: 'ready', delivery_pending: 1, delivery_terminal_failures: 2 },
+      update_routing: { configured: true, destinations: ['p-ops'] },
+    })
+    renderWithProviders(<PlatformNotifications />)
+    const operations = (await screen.findByText('Operations')).closest('.notification-row') as HTMLElement
+    const health = within(operations).getByText('Delivery health').closest('.notification-health') as HTMLElement
+    expect(within(health).getByText('1 pending')).toBeInTheDocument()
+    expect(within(health).getByText('2 terminal failures')).toBeInTheDocument()
+    const security = screen.getByText('Security desk').closest('.notification-row') as HTMLElement
+    expect(within(security).queryByText('Delivery health')).toBeNull()
+  })
+
+  it('reports discarded alerts only when an edit replaces the URL', async () => {
+    renderWithProviders(<PlatformNotifications />)
+    const operations = (await screen.findByText('Operations')).closest('.notification-row') as HTMLElement
+    const edits: { change: (form: HTMLFormElement) => void; options: { url?: string; enabled?: boolean }; name: string; banner: string }[] = [
+      { change: form => fireEvent.change(within(form).getByDisplayValue('Operations'), { target: { value: 'Operations renamed' } }), options: { enabled: true }, name: 'Operations renamed', banner: 'Notification destination updated.' },
+      { change: form => fireEvent.click(within(form).getByRole('checkbox')), options: { enabled: false }, name: 'Operations', banner: 'Notification destination updated.' },
+      { change: form => fireEvent.change(within(form).getByPlaceholderText('Leave blank to keep the encrypted URL'), { target: { value: 'generic://pager.example.test/rotated' } }), options: { enabled: true, url: 'generic://pager.example.test/rotated' }, name: 'Operations', banner: 'Notification destination updated. Alerts queued for the previous URL were discarded.' },
+    ]
+    for (const edit of edits) {
+      vi.mocked(updatePlatformNotification).mockClear()
+      fireEvent.click(within(operations).getByRole('button', { name: /Edit/ }))
+      const form = within(operations).getByRole('button', { name: 'Save changes' }).closest('form')!
+      edit.change(form)
+      fireEvent.click(within(form).getByRole('button', { name: 'Save changes' }))
+      await confirmWithPassword('Account password')
+      await waitFor(() => expect(updatePlatformNotification).toHaveBeenCalledWith('p-ops', 2, edit.name, 'my-password', edit.options))
+      await waitFor(() => expect(document.querySelector('.success-banner')?.textContent).toBe(edit.banner))
+    }
+  })
 })
 
 describe('platform audit', () => {

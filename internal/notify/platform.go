@@ -34,14 +34,22 @@ func (pn *PlatformNotifier) destinations(ctx context.Context) (destinationSet, e
 	return pn.n.platformSet(), nil
 }
 
-// Destinations returns the redacted metadata of the platform's destinations,
-// sorted for display, and their counts and key state.
+// Destinations returns the redacted metadata and delivery health of the
+// platform's destinations, sorted for display, and their counts, key state,
+// and delivery totals, as a tenant's list and status report them. The
+// health of a tenant's destinations is never read.
 func (pn *PlatformNotifier) Destinations(ctx context.Context) ([]DestinationView, map[string]any, error) {
 	set, err := pn.destinations(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
-	return finishViews(set.views(), nil), set.status(), nil
+	status := set.status()
+	var health map[string]store.DeliveryHealth
+	if current, err := pn.ps.ListDeliveryHealth(ctx); err == nil {
+		health = current
+		addDeliveryTotals(status, health)
+	}
+	return finishViews(set.views(), health), status, nil
 }
 
 // ValidateDestinationSelection checks the platform's update routing against

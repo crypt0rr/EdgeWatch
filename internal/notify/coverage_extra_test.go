@@ -176,6 +176,7 @@ func TestNotifierRecoversInterruptedKeyAndResolvesManagedSelectors(t *testing.T)
 	notifier.managed["active"] = managedDestination{record: store.ManagedNotification{ID: "active", Enabled: true, Revision: 1, CredentialRevision: 1}, url: "generic://localhost/active?disabletls=yes"}
 	notifier.managed["paused"] = managedDestination{record: store.ManagedNotification{ID: "paused", Enabled: false, Revision: 1, CredentialRevision: 1}, url: "generic://localhost/paused?disabletls=yes"}
 	notifier.managed["locked"] = managedDestination{record: store.ManagedNotification{ID: "locked", Enabled: true, Revision: 1, CredentialRevision: 1}, locked: true}
+	notifier.managed["paused-locked"] = managedDestination{record: store.ManagedNotification{ID: "paused-locked", Enabled: false, Revision: 1, CredentialRevision: 1}, locked: true}
 	// Renamed at revision 2 and 3; the credentials are those of revision 1.
 	notifier.managed["renamed"] = managedDestination{record: store.ManagedNotification{ID: "renamed", Enabled: true, Revision: 3, CredentialRevision: 1}, url: "generic://localhost/renamed?disabletls=yes"}
 	// The URL was replaced at revision 3.
@@ -187,7 +188,8 @@ func TestNotifierRecoversInterruptedKeyAndResolvesManagedSelectors(t *testing.T)
 	}{
 		{"invalid", managedMissing},
 		{"managed:missing:1", managedMissing},
-		{"managed:paused:1", managedDeferred},
+		{"managed:paused:1", managedPaused},
+		{"managed:paused-locked:1", managedPaused},
 		{"managed:locked:1", managedDeferred},
 		{"managed:active:1", managedReady},
 		{"managed:renamed:1", managedReady},
@@ -196,6 +198,10 @@ func TestNotifierRecoversInterruptedKeyAndResolvesManagedSelectors(t *testing.T)
 		{"managed:rotated:2", managedReplaced},
 		{"managed:rotated:x", managedReplaced},
 		{"managed:rotated:3", managedReady},
+		// A selector newer than the cached record: the cache is stale.
+		{"managed:active:2", managedStale},
+		{"managed:rotated:4", managedStale},
+		{"managed:paused:2", managedStale},
 	} {
 		raw, got := notifier.resolveManagedDelivery(tc.selector)
 		if got != tc.want || (got == managedReady) != (raw != "") {

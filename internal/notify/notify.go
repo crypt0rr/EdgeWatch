@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/containrrr/shoutrrr"
@@ -106,6 +107,11 @@ type Notifier struct {
 	keyPath       string
 	keyErr        error
 	autoCreateKey bool
+	// reloads numbers each Reload before it reads the destinations, and
+	// installed is the number of the Reload whose snapshot managed holds.
+	// installed is guarded by mu.
+	reloads   atomic.Uint64
+	installed uint64
 }
 
 func New(s *store.Store, urls []string) (*Notifier, error) {
@@ -213,6 +219,10 @@ func validateManagedURL(raw string) (string, error) {
 // every tenant and of the platform, because the delivery worker delivers
 // the alerts of all of them; each method that answers for a tenant uses only
 // that tenant's destinations.
+//
+// Concurrent reloads may finish in any order, but the cache never goes back
+// to an older snapshot: see install. When Reload returns, the cache holds
+// every change that was committed before Reload was called.
 func (n *Notifier) Reload(ctx context.Context) error {
 	if n.Store == nil {
 		// Library-only notifier instances have no managed destinations to
@@ -223,16 +233,31 @@ func (n *Notifier) Reload(ctx context.Context) error {
 		n.mu.Unlock()
 		return nil
 	}
+	generation := n.reloads.Add(1)
 	records, err := n.Store.System().ListManagedNotifications(ctx)
 	if err != nil {
 		return err
 	}
 	managed, keyErr := n.openManaged(records)
-	n.mu.Lock()
-	n.managed = managed
-	n.keyErr = keyErr
-	n.mu.Unlock()
+	n.install(generation, managed, keyErr)
 	return nil
+}
+
+// install puts the snapshot that the reload numbered generation read in the
+// cache, unless the cache already holds the snapshot of a reload numbered
+// later, and reports whether it did. A reload is numbered before it reads,
+// so a reload numbered later started reading after this one was numbered
+// and read every change committed before that: installing this snapshot
+// over it could only take the cache back to older destinations, such as a
+// URL that a replacement has retired.
+func (n *Notifier) install(generation uint64, managed map[string]managedDestination, keyErr error) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if generation <= n.installed {
+		return false
+	}
+	n.managed, n.keyErr, n.installed = managed, keyErr, generation
+	return true
 }
 
 // openManaged decrypts the records with the current key. A missing or
@@ -410,7 +435,12 @@ const (
 	// managedReplaced: the destination's credentials changed after the
 	// alert was queued, so the alert must never be sent with them.
 	managedReplaced
-	// managedDeferred: the destination is paused or locked.
+	// managedStale: the cached destination is older than the revision the
+	// alert was queued for, so its URL may be one that was since replaced.
+	managedStale
+	// managedPaused: the destination is paused.
+	managedPaused
+	// managedDeferred: the destination is locked.
 	managedDeferred
 	// managedReady: the delivery can be sent to the resolved URL.
 	managedReady
@@ -421,8 +451,9 @@ const (
 // row to still be current. Metadata-only edits intentionally advance that
 // revision while preserving queued alerts; an in-flight delivery may still
 // carry the previous selector when the edit commits. Returning the current
-// URL here lets that delivery complete with the current credentials and also
-// gives paused/locked destinations the normal deferral path.
+// URL here lets that delivery complete with the current credentials. A
+// paused destination is managedPaused, so its alert is held without a
+// failure, and a locked one managedDeferred, the normal deferral path.
 //
 // A credential change advances the credential revision too, and an alert
 // queued before it was queued for the old credentials: a selector whose
@@ -430,6 +461,12 @@ const (
 // never resolved to the replacement URL. The URL and the credential revision
 // come from the same record, so a concurrent reload cannot pair a new URL
 // with an old credential revision.
+//
+// An alert is queued for the destination's revision at that time, which
+// every later revision only exceeds. A selector whose revision is newer than
+// the cached record was therefore resolved against a cache older than the
+// alert, whose URL may be one that a replacement has retired: it is
+// managedStale, and its cached URL is never returned.
 func (n *Notifier) resolveManagedDelivery(selector string) (string, managedDelivery) {
 	parts := strings.Split(selector, ":")
 	if len(parts) < 3 || parts[0] != "managed" || parts[1] == "" {
@@ -441,10 +478,15 @@ func (n *Notifier) resolveManagedDelivery(selector string) (string, managedDeliv
 	if !ok {
 		return "", managedMissing
 	}
-	if revision, err := strconv.ParseInt(parts[2], 10, 64); err != nil || revision < entry.record.CredentialRevision {
+	revision, err := strconv.ParseInt(parts[2], 10, 64)
+	switch {
+	case err != nil || revision < entry.record.CredentialRevision:
 		return "", managedReplaced
-	}
-	if !entry.record.Enabled || entry.locked {
+	case revision > entry.record.Revision:
+		return "", managedStale
+	case !entry.record.Enabled:
+		return "", managedPaused
+	case entry.locked:
 		return "", managedDeferred
 	}
 	return entry.url, managedReady
@@ -699,7 +741,23 @@ func (n *Notifier) deliverOne(ctx context.Context, delivery store.Delivery, dest
 	if managedDestination {
 		var state managedDelivery
 		raw, state = n.resolveManagedDelivery(delivery.Destination)
+		if state == managedStale {
+			// The cache is older than the alert. Read the destinations
+			// again instead of sending with a URL that may have been
+			// replaced since.
+			if reloadErr := n.Reload(ctx); reloadErr != nil {
+				return errors.Join(reloadErr, n.releaseClaimWithoutBudget(ctx, delivery, 0))
+			}
+			raw, state = n.resolveManagedDelivery(delivery.Destination)
+		}
 		switch state {
+		case managedStale, managedPaused:
+			// Return the claim without using a retry or deferral budget
+			// and without recording a delivery failure. A later pass
+			// resolves a stale delivery again; a paused destination's
+			// alert is left out of every pass until the destination is
+			// enabled again, as a deliberate pause is not a failure.
+			return n.releaseClaimWithoutBudget(ctx, delivery, 0)
 		case managedDeferred:
 			return n.releaseClaim(ctx, delivery, store.ErrDeliveryDestinationLocked, time.Minute)
 		case managedMissing, managedReplaced:

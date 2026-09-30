@@ -207,19 +207,25 @@ func (n *Notifier) completeStatus(ctx context.Context, set destinationSet, ts *s
 		}
 	}
 	if health, err := ts.ListDeliveryHealth(ctx); err == nil {
-		pending, retrying, deferrals, terminal := 0, 0, 0, 0
-		for _, item := range health {
-			pending += item.Pending
-			retrying += item.Retrying
-			deferrals += item.Deferrals
-			terminal += item.TerminalFailures
-		}
-		status["delivery_pending"] = pending
-		status["delivery_retrying"] = retrying
-		status["delivery_deferrals"] = deferrals
-		status["delivery_terminal_failures"] = terminal
+		addDeliveryTotals(status, health)
 	}
 	return status
+}
+
+// addDeliveryTotals adds the delivery totals of one owner's destinations to
+// its status: counts only, never a URL or a provider error.
+func addDeliveryTotals(status map[string]any, health map[string]store.DeliveryHealth) {
+	pending, retrying, deferrals, terminal := 0, 0, 0, 0
+	for _, item := range health {
+		pending += item.Pending
+		retrying += item.Retrying
+		deferrals += item.Deferrals
+		terminal += item.TerminalFailures
+	}
+	status["delivery_pending"] = pending
+	status["delivery_retrying"] = retrying
+	status["delivery_deferrals"] = deferrals
+	status["delivery_terminal_failures"] = terminal
 }
 
 // keys returns the destinations that an alert with the legacy nil selection

@@ -99,7 +99,7 @@ function MetricRetry({ onRetry }: { onRetry: () => Promise<unknown> }) {
 }
 
 function LatestActivityRow({ scan }: { scan: Awaited<ReturnType<typeof listScans>>['scans'][number] }) {
-  const content = <><span className={scan.status === 'success' ? 'activity-dot success' : scan.status === 'failed' ? 'activity-dot fail' : 'activity-dot'} /><div><strong>{scan.job}</strong><span>{scan.status === 'success' ? 'Completed successfully · Open scan details' : scan.error ?? scan.status}</span></div><time>{formatTime(scan.finished_at, { hour: '2-digit', minute: '2-digit' })}</time></>
+  const content = <><span className={scan.status === 'success' ? 'activity-dot success' : scan.status === 'failed' ? 'activity-dot fail' : 'activity-dot'} /><div><strong>{scan.job}</strong><span className={scan.error ? 'activity-error' : undefined} title={scan.error ?? undefined}>{scan.status === 'success' ? 'Completed successfully · Open scan details' : scan.error ?? scan.status}</span></div><time>{formatTime(scan.finished_at, { hour: '2-digit', minute: '2-digit' })}</time></>
   if (scan.job_id) return <Link className="activity-row" to={`/jobs/${encodeURIComponent(scan.job_id)}/scans/${encodeURIComponent(scan.id)}`} aria-label={`Open scan details for ${scan.job}`}>{content}</Link>
   return <Link className="activity-row" to={`/scans/${encodeURIComponent(scan.id)}`} aria-label={`Open scan details for ${scan.job}`}>{content}</Link>
 }

@@ -193,6 +193,7 @@ describe('job editor workflow coverage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
     await waitFor(() => expect(screen.getByRole('dialog')).toHaveTextContent('Confirm scan-scope change'))
     expect(screen.getByRole('dialog')).toHaveTextContent('TCP port scope')
+    expect(screen.getByRole('list')).toHaveTextContent('TCP port scope')
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="button"]')!)
     expect(screen.getByText('Scope change cancelled.')).toBeInTheDocument()
   })

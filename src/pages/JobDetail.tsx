@@ -330,7 +330,7 @@ export function JobDetail() {
           <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} />
           {showResults && <div className="scan-results">
             <div className="panel-heading"><div><h3>Snapshot results</h3><p className="muted">Loaded on demand; open an effective host for technical evidence.</p></div></div>
-            {results.isLoading ? <div className="skeleton-list" /> : results.error ? <div className="form-error" role="alert">Could not load scan results.</div> : results.data?.hosts.length ? <div className="result-list">{results.data.hosts.map((host) => <Link className="result-row" to={`/jobs/${id}/scans/${selectedScan}/hosts/${encodeURIComponent(host.address)}`} key={host.address}><strong>{host.address}</strong><span className="pill blue">{host.protocols?.map(protocol => protocol.protocol.toUpperCase()).join(' + ') || 'HOST'}</span><span className="muted">{host.open_ports + host.open_filtered_ports} positive ports · View host details</span></Link>)}</div> : <div className="inline-empty">No effective hosts in this scan.</div>}
+            {results.isLoading ? <div className="skeleton-list" /> : results.error ? <div className="form-error" role="alert">Could not load scan results.</div> : results.data?.hosts.length ? <div className="result-list">{results.data.hosts.map((host) => <Link className="result-row" to={`/jobs/${id}/scans/${selectedScan}/hosts/${encodeURIComponent(host.address)}`} key={host.address}><strong title={host.address}>{host.address}</strong><span className="pill blue">{host.protocols?.map(protocol => protocol.protocol.toUpperCase()).join(' + ') || 'HOST'}</span><span className="muted">{host.open_ports + host.open_filtered_ports} positive ports · View host details</span></Link>)}</div> : <div className="inline-empty">No effective hosts in this scan.</div>}
             <Pagination page={results.data?.pagination} onChange={setResultsOffset} />
           </div>}
         </>
@@ -380,10 +380,13 @@ export function JobDetail() {
         <div className="summary-card">
           <span className="summary-label">Targets</span>
           <strong>{value.job.targets.length}</strong>
-          <span className="muted">
+          <div className="muted targets-summary">
             {value.job.targets.slice(0, 2).join(', ')}
-            {value.job.targets.length > 2 ? ` +${value.job.targets.length - 2} more` : ''}
-          </span>
+            {value.job.targets.length > 2 && <details className="target-list-details">
+              <summary>View all {value.job.targets.length} targets</summary>
+              <ul>{value.job.targets.map((target, index) => <li key={`${target}-${index}`}>{target}</li>)}</ul>
+            </details>}
+          </div>
         </div>
         <div className="summary-card">
           <span className="summary-label">Schedule</span>

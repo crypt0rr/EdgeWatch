@@ -50,6 +50,22 @@ describe('SurfaceUnitList', () => {
     expect(container.textContent).toContain('No positive ports')
   })
 
+  it('keeps long targets and every effective address available', () => {
+    const target = `${'edgewatch'.repeat(12)}.example.test`
+    const addresses = ['192.0.2.1', '192.0.2.2', '192.0.2.3', '192.0.2.4']
+    act(() => root.render(<SurfaceUnitList units={[{ target, protocol: 'tcp', addresses, ports: [] }]} />))
+
+    const targetLabel = container.querySelector('.surface-unit-title strong')
+    expect(targetLabel).toHaveTextContent(target)
+    expect(targetLabel).toHaveAttribute('title', target)
+    const disclosure = container.querySelector<HTMLDetailsElement>('.surface-unit-address-details')
+    expect(disclosure?.querySelector('summary')).toHaveTextContent('+1 more')
+    expect(disclosure?.open).toBe(false)
+    act(() => { if (disclosure) disclosure.open = true })
+    expect(disclosure?.querySelectorAll('li')).toHaveLength(addresses.length)
+    expect(disclosure?.querySelector('li:last-child')).toHaveTextContent(addresses[3])
+  })
+
   it('renders a useful empty-list message', () => {
     act(() => root.render(<SurfaceUnitList units={[]} emptyLabel="No current baseline results." />))
     expect(container.textContent).toContain('No current baseline results.')

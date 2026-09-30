@@ -39,10 +39,13 @@ export function SurfaceUnitList({ units, emptyLabel = 'No expected results.' }: 
           <article className="surface-unit-row" role="listitem" key={key}>
             <div className="surface-unit-header">
               <div className="surface-unit-title">
-                <strong>{unit.target}</strong>
+                <strong title={unit.target}>{unit.target}</strong>
                 <span className="pill blue">{unit.protocol.toUpperCase()}</span>
               </div>
-              <span className="surface-unit-addresses" title={(unit.addresses ?? []).join(', ')}>{addressSummary(unit.addresses)}</span>
+              {(unit.addresses?.length ?? 0) > 3 ? <details className="surface-unit-address-details">
+                <summary>{addressSummary(unit.addresses)}</summary>
+                <ul>{unit.addresses?.map(address => <li key={address}><code>{address}</code></li>)}</ul>
+              </details> : <span className="surface-unit-addresses" title={(unit.addresses ?? []).join(', ')}>{addressSummary(unit.addresses)}</span>}
             </div>
             <div className="surface-unit-evidence">
               {ports.length > 0 ? (

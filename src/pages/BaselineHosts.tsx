@@ -30,8 +30,8 @@ function visibility(address: string) {
 
 function HostRow({ host, jobID }: { host: HostSummary; jobID: string }) {
   return <Link className="host-row" to={`/jobs/${jobID}/baseline/hosts/${encodeURIComponent(host.address)}`}>
-    <span className="host-address"><strong>{host.address}</strong><span className="host-badges"><span className="pill blue">{host.address_family ?? addressKind(host.address)}</span><span className={visibility(host.address) === 'Public' ? 'pill green' : 'pill gray'}>{visibility(host.address)}</span>{host.legacy && <span className="pill amber">Legacy detail</span>}</span></span>
-    <span className="host-source">{host.source_targets?.join(', ') || 'Configured target'}</span>
+    <span className="host-address"><strong title={host.address}>{host.address}</strong><span className="host-badges"><span className="pill blue">{host.address_family ?? addressKind(host.address)}</span><span className={visibility(host.address) === 'Public' ? 'pill green' : 'pill gray'}>{visibility(host.address)}</span>{host.legacy && <span className="pill amber">Legacy detail</span>}</span></span>
+    <span className="host-source" title={host.source_targets?.join(', ') || 'Configured target'}>{host.source_targets?.join(', ') || 'Configured target'}</span>
     <span className="host-coverage">{host.protocols?.map(protocol => <span key={protocol.protocol} className="coverage-chip"><b>{protocol.protocol.toUpperCase()}</b> {protocol.open_ports} open{protocol.open_filtered_ports ? ` · ${protocol.open_filtered_ports} open|filtered` : ''}</span>)}</span>
     <span className="host-open-count">{host.open_ports + host.open_filtered_ports}<small> positive ports</small></span>
   </Link>

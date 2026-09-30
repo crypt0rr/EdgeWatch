@@ -65,6 +65,38 @@ describe('notification destination workflows', () => {
     await waitFor(() => expect(deleteNotificationDestination).toHaveBeenCalledWith('destination-1', 4, 'administrator-password'))
   })
 
+  // Only a new URL discards the alerts queued for a destination; a rename or
+  // a pause saved through the edit form keeps them.
+  async function saveEdit(change: (form: HTMLFormElement) => void) {
+    renderWithProviders(<Notifications />)
+    await waitFor(() => expect(screen.getByText('Mattermost')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    const editForm = screen.getByRole('button', { name: 'Save changes' }).closest('form')!
+    change(editForm)
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await confirmDialog()
+    await waitFor(() => expect(updateNotificationDestination).toHaveBeenCalledTimes(1))
+    return (await screen.findByText(/^Notification destination updated\./)).textContent
+  }
+
+  it('does not report discarded alerts after a rename-only edit', async () => {
+    const banner = await saveEdit(form => fireEvent.change(form.querySelector('input')!, { target: { value: 'Alerts renamed' } }))
+    expect(updateNotificationDestination).toHaveBeenCalledWith('destination-1', 4, 'Alerts renamed', 'administrator-password', { enabled: true })
+    expect(banner).toBe('Notification destination updated.')
+  })
+
+  it('does not report discarded alerts after an edit that only pauses the destination', async () => {
+    const banner = await saveEdit(form => fireEvent.click(form.querySelector('input[type="checkbox"]')!))
+    expect(updateNotificationDestination).toHaveBeenCalledWith('destination-1', 4, 'Mattermost', 'administrator-password', { enabled: false })
+    expect(banner).toBe('Notification destination updated.')
+  })
+
+  it('reports discarded alerts after an edit that replaces the URL', async () => {
+    const banner = await saveEdit(form => fireEvent.change(form.querySelector('input[type="url"]')!, { target: { value: ' generic://example.test/rotated ' } }))
+    expect(updateNotificationDestination).toHaveBeenCalledWith('destination-1', 4, 'Mattermost', 'administrator-password', { enabled: true, url: 'generic://example.test/rotated' })
+    expect(banner).toBe('Notification destination updated. Alerts queued for the previous URL were discarded.')
+  })
+
   it('keeps protected destination state unchanged when confirmation fails', async () => {
     vi.mocked(updateNotificationDestination).mockRejectedValue(new APIError('wrong password', 'invalid_password'))
     renderWithProviders(<Notifications />)

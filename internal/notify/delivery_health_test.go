@@ -2,6 +2,8 @@ package notify
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -78,5 +80,99 @@ func TestDeletedDestinationsOfOtherOwnersLeaveTheDefaultTotals(t *testing.T) {
 	var rows int
 	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM notification_delivery_health`).Scan(&rows); err != nil || rows != 0 {
 		t.Fatalf("delivery health rows after both deletes = %d, %v; want none", rows, err)
+	}
+}
+
+// The platform's destinations report their delivery health in the platform
+// view and their delivery totals in the platform status, as a unit's do. A
+// unit's destinations never count in the platform's, and the platform's
+// never count in a unit's, the default unit's included. No view carries a
+// URL or a provider error.
+func TestPlatformDestinationsReportTheirDeliveryHealth(t *testing.T) {
+	ctx := context.Background()
+	notifier, db, own, other := twoTenantNotifier(t)
+	audit := addPlatformAdmin(t, db)
+	platform := notifier.Platform(db.Platform())
+	failing, err := platform.CreateManagedWithAudit(ctx, "Platform hook", "generic://localhost/platform-secret?disabletls=yes", true, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quiet, err := platform.CreateManagedWithAudit(ctx, "Quiet hook", "generic://localhost/quiet?disabletls=yes", true, audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Each of these destinations has an update alert that failed terminally
+	// and one that is pending: one of the platform's, and one in each unit,
+	// which the platform must not count.
+	type owned struct {
+		destination DestinationView
+		tenant      string
+	}
+	queued := []owned{{failing, ""}}
+	for _, unit := range []struct {
+		ts     *store.TenantStore
+		tenant string
+		url    string
+	}{
+		{own, store.DefaultTenantID, "generic://localhost/unit-a?disabletls=yes"},
+		{other, otherTenantID, "generic://localhost/unit-b?disabletls=yes"},
+	} {
+		created, err := notifier.Tenant(unit.ts).CreateManagedWithAudit(ctx, "Unit hook", unit.url, true, store.AuditEntry{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		queued = append(queued, owned{created, unit.tenant})
+	}
+	for _, item := range queued {
+		failTerminally(t, db, item.destination, model.Event{Type: "application-update-available", LatestVersion: "9.9.8", TenantID: item.tenant, CreatedAt: time.Now().UTC()})
+	}
+	for _, item := range queued {
+		if err := db.System().QueueEvent(ctx, managedKey(item.destination.ID, item.destination.Revision), model.Event{Type: "application-update-available", LatestVersion: "9.9.9", TenantID: item.tenant, CreatedAt: time.Now().UTC()}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	views, status, err := platform.Destinations(ctx)
+	if err != nil || len(views) != 2 {
+		t.Fatalf("platform destinations = %+v, %v", views, err)
+	}
+	byID := map[string]DestinationView{}
+	for _, view := range views {
+		byID[view.ID] = view
+		if strings.Contains(fmt.Sprintf("%+v", view), "platform-secret") {
+			t.Fatalf("a platform view carries the URL: %+v", view)
+		}
+	}
+	got := byID[failing.ID]
+	if got.TerminalFailures != 1 || got.Pending != 1 || got.LastTerminalAt == "" || got.LastFailureAt == "" || got.LastErrorCode != "delivery_failed" {
+		t.Fatalf("failing platform destination = %+v; want one terminal failure and one pending alert", got)
+	}
+	if quietView := byID[quiet.ID]; quietView.TerminalFailures != 0 || quietView.Pending != 0 || quietView.LastFailureAt != "" {
+		t.Fatalf("quiet platform destination = %+v; want no delivery health", quietView)
+	}
+	for key, want := range map[string]int{"delivery_pending": 1, "delivery_retrying": 0, "delivery_deferrals": 0, "delivery_terminal_failures": 1} {
+		if status[key] != want {
+			t.Errorf("platform status %s = %v, want %d (status %v)", key, status[key], want, status)
+		}
+	}
+
+	// Each unit counts only its own destination.
+	for _, ts := range []*store.TenantStore{own, other} {
+		unitStatus, err := notifier.Tenant(ts).Status(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if unitStatus["delivery_pending"] != 1 || unitStatus["delivery_terminal_failures"] != 1 {
+			t.Errorf("unit status = %v; want only its own destination's pending alert and terminal failure", unitStatus)
+		}
+		unitViews, err := notifier.Tenant(ts).Destinations(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, view := range unitViews {
+			if view.ID == failing.ID || view.ID == quiet.ID {
+				t.Errorf("a unit lists a platform destination: %+v", view)
+			}
+		}
 	}
 }

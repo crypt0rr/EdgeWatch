@@ -448,9 +448,13 @@ still configured, it is checked at startup, must be a regular file with mode
 while either key is set.
 
 Notification delivery health is exposed only as named-destination counts and
-timestamps. Terminal drops store a stable destination/error fingerprint and a
-bounded error code; raw provider responses, URLs, and credentials are not
-included in API responses, logs, or system events.
+timestamps. A unit sees the health of its own destinations only, and the
+platform console that of the platform's own destinations only. Terminal drops
+store a stable destination/error fingerprint and a bounded error code; raw
+provider responses, URLs, and credentials are not included in API responses,
+logs, or system events. Once a destination's URL replacement is saved, an
+alert raised afterwards is sent only to the new URL, even while a delivery
+worker is still reading the destinations from before the replacement.
 
 Optional TOTP seeds are encrypted independently with AES-256-GCM. The default
 authentication key is `./data/auth.key`; set `web.auth_key_file` for a separate

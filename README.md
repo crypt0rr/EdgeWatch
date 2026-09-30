@@ -470,14 +470,22 @@ raised while the rename is saved. Replacing its URL discards its queued alerts
 instead of sending them to the new URL, and deleting it discards them too.
 This includes an alert that a delivery pass has picked up but not yet sent. An
 alert raised while either change is saved is also discarded, and the security
-audit log records it as `notifications.pending_discarded`. To rotate a
+audit log records it as `notifications.pending_discarded`. An alert raised
+after the replacement is saved goes only to the new URL. To rotate a
 credential, such as a webhook token, replace the destination's URL in the
 console.
+
+Pausing a destination keeps its queued alerts until it is enabled again,
+including an alert that a delivery pass has picked up but not yet sent. A
+pause uses none of their retries and is not reported as a delivery failure.
 
 Scan changes, scan failures, cancellations, timeouts, stalled cycles, and
 recovery events can all generate notifications. Delivery is retried durably;
 terminal failures are visible in the console without exposing provider errors
-or destination secrets.
+or destination secrets. Each destination shows its pending and retrying
+alerts, terminal failures, and last success and failure: a unit's on its
+**Notifications** page, and the platform's own destinations on the platform
+console's.
 
 ### Notification URLs in config.yaml (deprecated)
 

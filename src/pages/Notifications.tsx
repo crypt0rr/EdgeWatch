@@ -163,7 +163,9 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
       if (edit.url.trim()) options.url = edit.url.trim()
       await scope.update(edit.id, destination.revision, edit.name.trim(), confirmation, options)
       setEdit(null)
-      setMessage('Notification destination updated. Any pending deliveries for the previous revision were discarded.')
+      // Only a new URL discards the queued alerts; a rename or a pause keeps
+      // them for delivery.
+      setMessage(options.url ? 'Notification destination updated. Alerts queued for the previous URL were discarded.' : 'Notification destination updated.')
       await client.invalidateQueries({ queryKey: scope.queryKey })
     } catch (err) {
       reportError(err, 'Could not update notification destination.')

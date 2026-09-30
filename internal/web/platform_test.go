@@ -916,6 +916,92 @@ func TestPlatformNotifications(t *testing.T) {
 	expectNoMarkers(t, strings.Join(records, "\n"), "platform audit", "platform-secret-hook")
 }
 
+// The platform's notification list reports the delivery health of the
+// platform's own destinations, as a unit's list does: pending alerts,
+// terminal failures and when they happened, and the totals in its status.
+// A unit's destinations never count in it, the platform's never count in a
+// unit's, and neither a URL nor a provider error is returned.
+func TestPlatformNotificationsReportDeliveryHealth(t *testing.T) {
+	ctx := context.Background()
+	f := newPlatformFixture(t)
+	const secretURL = "generic://localhost/platform-health-secret?disabletls=yes"
+	var created struct {
+		ID       string `json:"id"`
+		Revision int64  `json:"revision"`
+	}
+	expectResponse(t, f.call(t, actorPlatform, http.MethodPost, "/platform/notifications", confirmBody(`"name":"platform-ops","url":"`+secretURL+`"`)), http.StatusCreated, "create", &created)
+	owners := []struct {
+		destination string
+		tenant      string
+	}{
+		{fmt.Sprintf("managed:%s:%d", created.ID, created.Revision), ""},
+		{"managed:" + f.destinationA + ":1", store.DefaultTenantID},
+		{"managed:" + f.destinationB + ":1", f.unitB},
+	}
+	// Each destination has an update alert that the provider refused for
+	// good, with the provider's own text, and one that is pending.
+	for _, owner := range owners {
+		event := model.Event{Type: "application-update-available", LatestVersion: "9.9.8", TenantID: owner.tenant, CreatedAt: time.Now().UTC()}
+		if err := f.db.System().QueueEvent(ctx, owner.destination, event); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := f.db.DB.ExecContext(ctx, `UPDATE outbox SET attempts=7 WHERE destination=?`, owner.destination); err != nil {
+			t.Fatal(err)
+		}
+		due, err := f.db.System().DueDeliveries(ctx, 10)
+		if err != nil || len(due) != 1 {
+			t.Fatalf("claimed deliveries = %+v, %v", due, err)
+		}
+		if err := f.db.System().DeliveryResultClaim(ctx, due[0].ID, due[0].ClaimToken, fmt.Errorf("%w: provider-said-token-rejected", store.ErrDeliveryProvider)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, owner := range owners {
+		event := model.Event{Type: "application-update-available", LatestVersion: "9.9.9", TenantID: owner.tenant, CreatedAt: time.Now().UTC()}
+		if err := f.db.System().QueueEvent(ctx, owner.destination, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var list struct {
+		Destinations []struct {
+			ID               string `json:"id"`
+			Pending          int    `json:"pending"`
+			TerminalFailures int    `json:"terminal_failures"`
+			LastFailureAt    string `json:"last_failure_at"`
+			LastTerminalAt   string `json:"last_terminal_at"`
+			LastErrorCode    string `json:"last_error_code"`
+		} `json:"destinations"`
+		Status map[string]any `json:"status"`
+	}
+	listed := f.call(t, actorPlatform, http.MethodGet, "/platform/notifications", "")
+	expectResponse(t, listed, http.StatusOK, "list", &list)
+	if len(list.Destinations) != 1 || list.Destinations[0].ID != created.ID {
+		t.Fatalf("platform destinations = %+v", list.Destinations)
+	}
+	if got := list.Destinations[0]; got.Pending != 1 || got.TerminalFailures != 1 || got.LastFailureAt == "" || got.LastTerminalAt == "" || got.LastErrorCode != "delivery_failed" {
+		t.Fatalf("platform destination health = %+v; want one pending alert and one terminal failure", got)
+	}
+	for key, want := range map[string]float64{"delivery_pending": 1, "delivery_retrying": 0, "delivery_deferrals": 0, "delivery_terminal_failures": 1} {
+		if list.Status[key] != want {
+			t.Errorf("platform status %s = %v, want %v", key, list.Status[key], want)
+		}
+	}
+	expectNoMarkers(t, listed.Body.String(), "platform destinations", "platform-health-secret", "provider-said-token-rejected", "alpha-destination", "bravo-destination", f.destinationA, f.destinationB)
+
+	for _, actor := range []string{actorAdminA, actorAdminB} {
+		var unit struct {
+			Status map[string]any `json:"status"`
+		}
+		response := f.call(t, actor, http.MethodGet, "/notifications/destinations", "")
+		expectResponse(t, response, http.StatusOK, actor+" list", &unit)
+		if unit.Status["delivery_pending"] != float64(1) || unit.Status["delivery_terminal_failures"] != float64(1) {
+			t.Errorf("%s status = %v; want only its own destination's pending alert and terminal failure", actor, unit.Status)
+		}
+		expectNoMarkers(t, response.Body.String(), actor+" destinations", created.ID, "platform-ops", "provider-said-token-rejected")
+	}
+}
+
 // The store checks an update routing selection again when it writes it, for
 // a caller that skipped the notifier's check or a destination deleted since
 // that check. Its refusal gets the answer of the notifier's check byte for

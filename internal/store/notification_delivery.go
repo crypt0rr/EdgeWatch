@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -162,6 +163,14 @@ const (
 	defaultPendingSQL     = `(o.destination NOT LIKE 'managed:%' OR EXISTS (SELECT 1 FROM managed_notifications AS m WHERE o.destination LIKE 'managed:' || m.id || ':%' AND m.tenant_id=? AND m.enabled=1))`
 )
 
+// The platform's delivery health is that of its own destinations, the
+// managed destinations without a tenant, and of their deliveries, which
+// carry no tenant either. The predicates take no argument.
+const (
+	platformHealthSQL  = `h.destination_identity LIKE 'managed:%' AND EXISTS (SELECT 1 FROM managed_notifications AS m WHERE m.id=substr(h.destination_identity,9) AND m.tenant_id IS NULL)`
+	platformPendingSQL = `o.tenant_id IS NULL AND o.destination LIKE 'managed:%' AND EXISTS (SELECT 1 FROM managed_notifications AS m WHERE o.destination LIKE 'managed:' || m.id || ':%' AND m.tenant_id IS NULL AND m.enabled=1)`
+)
+
 // ListDeliveryHealth returns the durable outcome metadata of the tenant's
 // destinations merged with their current unsent outbox counts. It never
 // reads notification payloads or credentials. The health of another
@@ -176,8 +185,27 @@ func (ts *TenantStore) ListDeliveryHealth(ctx context.Context) (map[string]Deliv
 		healthQuery = `SELECT ` + deliveryHealthColumns + ` FROM notification_delivery_health AS h WHERE ` + defaultHealthSQL
 		outboxQuery = `SELECT ` + pendingOutboxColumns + ` FROM outbox AS o WHERE o.sent_at IS NULL AND o.terminal_at='' AND o.attempts < ? AND ` + defaultPendingSQL + ` GROUP BY o.destination`
 	}
+	return listDeliveryHealth(ctx, ts.store.reader(), healthQuery, []any{ts.scope.id}, outboxQuery, []any{deliveryMaxAttempts, ts.scope.id})
+}
+
+// ListDeliveryHealth returns the delivery health of the platform's own
+// destinations, as TenantStore.ListDeliveryHealth does for a tenant's: the
+// durable outcome metadata merged with the current unsent outbox counts,
+// without notification payloads or credentials. The health of a tenant's
+// destinations and of the deployment destinations, which belong to the
+// default tenant, is never returned.
+func (ps *PlatformStore) ListDeliveryHealth(ctx context.Context) (map[string]DeliveryHealth, error) {
+	healthQuery := `SELECT ` + deliveryHealthColumns + ` FROM notification_delivery_health AS h WHERE ` + platformHealthSQL
+	outboxQuery := `SELECT ` + pendingOutboxColumns + ` FROM outbox AS o WHERE o.sent_at IS NULL AND o.terminal_at='' AND o.attempts < ? AND ` + platformPendingSQL + ` GROUP BY o.destination`
+	return listDeliveryHealth(ctx, ps.store.reader(), healthQuery, nil, outboxQuery, []any{deliveryMaxAttempts})
+}
+
+// listDeliveryHealth runs one owner's health query, which selects
+// deliveryHealthColumns, and outbox query, which selects
+// pendingOutboxColumns, and merges their rows by destination identity.
+func listDeliveryHealth(ctx context.Context, reader *sql.DB, healthQuery string, healthArgs []any, outboxQuery string, outboxArgs []any) (map[string]DeliveryHealth, error) {
 	out := map[string]DeliveryHealth{}
-	rows, err := ts.store.reader().QueryContext(ctx, healthQuery, ts.scope.id)
+	rows, err := reader.QueryContext(ctx, healthQuery, healthArgs...)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +229,7 @@ func (ts *TenantStore) ListDeliveryHealth(ctx context.Context) (map[string]Deliv
 		return nil, err
 	}
 
-	rows, err = ts.store.reader().QueryContext(ctx, outboxQuery, deliveryMaxAttempts, ts.scope.id)
+	rows, err = reader.QueryContext(ctx, outboxQuery, outboxArgs...)
 	if err != nil {
 		return nil, err
 	}

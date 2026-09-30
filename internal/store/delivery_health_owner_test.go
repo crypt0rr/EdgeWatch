@@ -144,3 +144,63 @@ func TestTenantPurgeErasesDeliveryHealthOfDeletedDestinations(t *testing.T) {
 		}
 	}
 }
+
+// The platform's delivery health covers the platform's own destinations
+// only: their health rows and their pending deliveries. A unit's
+// destinations, the deployment destinations, which belong to the default
+// unit, and a managed identity that names no destination are never in it,
+// and a paused platform destination's pending deliveries are not counted.
+func TestPlatformDeliveryHealthCoversOnlyPlatformDestinations(t *testing.T) {
+	ctx := context.Background()
+	f := newTenantFixture(t)
+	ids := tenantFixtureNotifications
+	queueFixtureDeliveries(t, f)
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	deleted := "managed:" + unknownNotificationID
+	platform := "managed:" + ids.platform
+	for _, statement := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO notification_delivery_health(destination_identity,terminal_failures,updated_at) VALUES(?,4,?)`, []any{deleted, stamp}},
+		{`INSERT INTO notification_delivery_health(destination_identity,terminal_failures,updated_at) VALUES('deployment-id',1,?)`, []any{stamp}},
+		{`INSERT INTO outbox(destination,payload_json,next_at) VALUES(?,'{"n":1}',?)`, []any{deleted + ":1", stamp}},
+		{`INSERT INTO outbox(destination,payload_json,next_at,tenant_id) VALUES('deployment-id','{"n":2}',?,?)`, []any{stamp, DefaultTenantID}},
+		{`UPDATE outbox SET attempts=1,deferrals=2 WHERE destination=?`, []any{managedNotificationKey(ids.platform, 1)}},
+		{`UPDATE notification_delivery_health SET terminal_failures=5,last_failure_at=?,last_error_code='delivery_failed' WHERE destination_identity=?`, []any{stamp, platform}},
+		{`UPDATE notification_delivery_health SET terminal_failures=2 WHERE destination_identity=?`, []any{"managed:" + ids.a}},
+		{`UPDATE notification_delivery_health SET terminal_failures=3 WHERE destination_identity=?`, []any{"managed:" + ids.b}},
+	} {
+		if _, err := f.store.DB.ExecContext(ctx, statement.query, statement.args...); err != nil {
+			t.Fatalf("%s: %v", statement.query, err)
+		}
+	}
+	health, err := f.store.Platform().ListDeliveryHealth(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(health) != 1 {
+		t.Fatalf("platform delivery health = %+v, want only the platform destination's", health)
+	}
+	got := health[platform]
+	if got.Pending != 1 || got.Retrying != 1 || got.Deferrals != 2 || got.TerminalFailures != 5 || got.LastFailureAt.IsZero() || got.LastErrorCode != "delivery_failed" {
+		t.Fatalf("platform destination health = %+v", got)
+	}
+	// Each unit's health is still its own.
+	if unit, err := f.store.Tenant(f.b).ListDeliveryHealth(ctx); err != nil || len(unit) != 1 || unit["managed:"+ids.b].TerminalFailures != 3 {
+		t.Fatalf("tenant B delivery health = %+v, %v", unit, err)
+	}
+	if unit, err := f.store.Tenant(f.a).ListDeliveryHealth(ctx); err != nil || unit[platform].DestinationIdentity != "" || unit["managed:"+ids.a].TerminalFailures != 2 {
+		t.Fatalf("tenant A delivery health = %+v, %v; want its own and no platform destination", unit, err)
+	}
+	if _, err := f.store.DB.ExecContext(ctx, `UPDATE managed_notifications SET enabled=0 WHERE id=?`, ids.platform); err != nil {
+		t.Fatal(err)
+	}
+	health, err = f.store.Platform().ListDeliveryHealth(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := health[platform]; got.Pending != 0 || got.TerminalFailures != 5 {
+		t.Fatalf("paused platform destination health = %+v, want its failures without pending deliveries", got)
+	}
+}

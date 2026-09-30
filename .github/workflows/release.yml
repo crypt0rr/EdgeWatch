@@ -1,5 +1,28 @@
 name: Release
 
+# Re-running a failed release
+#
+# Use "Re-run failed jobs" on the failed run; do not push the tag again. A
+# partial re-run repeats only the failed jobs and the jobs that need them, and
+# the smoke and promote-semver jobs read the candidate image from the output of
+# the image job, which GitHub keeps from the attempt that built it. The re-run
+# therefore continues with the image that was built and verified before:
+# - smoke failed: the re-run verifies the same draft release and candidate
+#   image, then publishes the release and promotes the image;
+# - publish-release failed: the re-run publishes the draft and promotes the
+#   image;
+# - promote-semver failed after the release was published: the re-run creates
+#   ghcr.io/crypt0rr/edgewatch:<version> from the candidate that smoke
+#   verified, usually in the first attempt, and then moves latest. A semver
+#   tag that already points to that candidate counts as promoted, and any
+#   other existing semver tag is never overwritten;
+# - promote-latest failed: the re-run moves latest to the semver image.
+# A re-run of binaries or image downloads the release-candidate artifact of the
+# verify job, so re-run those within its seven-day retention; GitHub allows
+# re-runs for 30 days. "Re-run all jobs" builds and pushes a new candidate
+# image, and the binaries job refuses it once the release is published; use it
+# only for a run that stopped before the release was published.
+
 on:
   push:
     tags: ["v*"]
@@ -15,10 +38,6 @@ env:
   # Docker image references must be lowercase even though GitHub repository
   # names may contain uppercase characters.
   REGISTRY_IMAGE: ghcr.io/crypt0rr/edgewatch
-  # Each release attempt gets a unique staging tag. This keeps retries after a
-  # failed smoke run independent while the public semver tag remains absent
-  # until the candidate has passed every verification step.
-  CANDIDATE_IMAGE: ghcr.io/crypt0rr/edgewatch:candidate-${{ github.run_id }}-${{ github.run_attempt }}
   NODE_VERSION: 24.21.0
   GORELEASER_VERSION: v2.18.0
   # docker/build-push-action uploads a build-record artifact for every image
@@ -259,6 +278,17 @@ jobs:
       packages: write
       id-token: write
       attestations: write
+    # Later jobs read the candidate from this output and never rebuild its
+    # attempt-scoped tag: a partial re-run does not repeat this job, and GitHub
+    # keeps its outputs, so the re-run tests and promotes this exact image.
+    outputs:
+      candidate: ${{ steps.candidate.outputs.reference }}
+    env:
+      # Each attempt of this job pushes a unique staging tag. This keeps a
+      # rebuilt candidate independent of an earlier one while the public semver
+      # tag remains absent until the candidate has passed every verification
+      # step.
+      CANDIDATE_IMAGE: ghcr.io/crypt0rr/edgewatch:candidate-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -314,6 +344,20 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+      - name: Record the pushed candidate
+        id: candidate
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+          IMAGE: ${{ env.REGISTRY_IMAGE }}
+        run: |
+          set -euo pipefail
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "the image build reported no manifest digest: '$DIGEST'" >&2
+            exit 1
+          fi
+          # The digest pins the exact image index that smoke verifies and
+          # promote-semver tags, whichever attempt those jobs run in.
+          echo "reference=$IMAGE@$DIGEST" >> "$GITHUB_OUTPUT"
       - name: Attest image provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
@@ -386,8 +430,15 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Pull and inspect the candidate image
+        env:
+          CANDIDATE: ${{ needs.image.outputs.candidate }}
         run: |
-          image="${{ env.CANDIDATE_IMAGE }}"
+          digest="${CANDIDATE#"$REGISTRY_IMAGE@"}"
+          if [ "$digest" = "$CANDIDATE" ] || [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "the image job did not provide a digest-pinned candidate: '$CANDIDATE'" >&2
+            exit 1
+          fi
+          image="$CANDIDATE"
           echo "IMAGE=$image" >> "$GITHUB_ENV"
           docker pull "$image"
           docker buildx imagetools inspect "$image" | tee image-manifest.txt
@@ -563,7 +614,7 @@ jobs:
 
   promote-semver:
     name: Promote verified image to semver
-    needs: [smoke, publish-release]
+    needs: [image, smoke, publish-release]
     if: ${{ needs.smoke.result == 'success' && needs.publish-release.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -580,14 +631,25 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Promote candidate after smoke verification
         env:
-          CANDIDATE: ${{ env.CANDIDATE_IMAGE }}
+          CANDIDATE: ${{ needs.image.outputs.candidate }}
           IMAGE: ${{ env.REGISTRY_IMAGE }}
         run: |
           set -euo pipefail
+          candidate_digest="${CANDIDATE#"$IMAGE@"}"
+          if [ "$candidate_digest" = "$CANDIDATE" ] || [[ ! "$candidate_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "the image job did not provide a digest-pinned candidate: '$CANDIDATE'" >&2
+            exit 1
+          fi
           image_tag="${GITHUB_REF_NAME#v}"
           semver_image="$IMAGE:$image_tag"
           docker buildx imagetools inspect "$CANDIDATE" >/dev/null
-          if docker buildx imagetools inspect "$semver_image" >/dev/null 2>&1; then
+          if existing="$(docker buildx imagetools inspect "$semver_image" --format '{{json .Manifest}}' 2>/dev/null)"; then
+            # A re-run after this job created the tag but failed later finds
+            # the verified candidate already promoted.
+            if [ "$(jq -r '.digest' <<<"$existing")" = "$candidate_digest" ]; then
+              echo "$semver_image already points to the verified candidate"
+              exit 0
+            fi
             echo "image tag already exists; refusing to overwrite $semver_image" >&2
             exit 1
           fi

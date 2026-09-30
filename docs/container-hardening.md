@@ -16,16 +16,28 @@ The image and Compose deployment still apply the following controls:
 - `compose.syn.yaml` is an explicit administrator opt-in for `NET_ADMIN`;
 - `no-new-privileges` is enabled;
 - the container is not privileged, sets no `unconfined` seccomp or AppArmor
-  profile, does not join the host PID or IPC namespace, and does not opt out
-  of daemon user-namespace remapping with `userns_mode: host`;
+  profile, does not join the host PID, IPC, UTS or cgroup namespace, and does
+  not opt out of daemon user-namespace remapping with `userns_mode: host`;
+- the container receives no host devices: no `devices` entries and no
+  `device_cgroup_rules`;
 - the root filesystem is read-only and only `/tmp` is writable through a
-  bounded tmpfs;
+  tmpfs with a positive `size=` bound (the kernel treats `size=0` as no
+  limit);
 - SQLite state is limited to the explicit `./data` bind mount;
+- the only other mounts are the read-only `config.yaml` bind and optional
+  read-only secret files under `/run/secrets/`; the container mounts no Docker
+  or other runtime socket, no host root or system directory, and nothing from
+  `/proc`, `/sys`, `/dev` or `/run` on the host;
 - Compose grants a seven-minute stop grace period so the daemon can cancel
   scanner processes and persist large snapshots within its six-minute
   graceful-shutdown deadline;
 - scanner executables and their argument surface are fixed by EdgeWatch, and
   the web listener remains loopback-only.
+
+CI renders `compose.yaml`, and `compose.yaml` with `compose.syn.yaml`, and
+`scripts/verify-compose-policy.sh` checks the capability, privilege,
+namespace, device, filesystem and mount controls above on each render. A
+change to either file that drops one of them fails CI.
 
 ## Compatibility matrix
 

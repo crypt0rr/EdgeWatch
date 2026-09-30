@@ -186,6 +186,7 @@ var globalStoreMethods = map[string]string{
 	"TOTPStepAvailable":              globalAccount,
 	"RecoveryCodeCount":              globalAccount,
 	"RequireActiveAccountTenant":     globalAccount,
+	"CheckActivationToken":           globalAccount,
 	"Audit":                          globalAccount,
 	"AuditEntry":                     globalAccount,
 	"sealTOTPSecret":                 globalAccount,

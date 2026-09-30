@@ -30,13 +30,22 @@ Docker host and any SSH tunnel access restricted to trusted administrators.
 When an untrusted tunnel or reverse proxy makes every remote client appear as
 the same loopback peer, all login attempts are throttled after five failed
 password or TOTP attempts in five minutes with a short two-second retry delay.
+A successful sign-in through the peer, with any account, does not reset those
+failures; each one expires five minutes after it happened, so signing in
+between failed attempts gains no further attempts.
 The shared response avoids both a long lockout and revealing account existence,
 but cannot provide per-client attribution. The first-run setup, the platform
 setup, and account activation through such a shared loopback peer get the
 same two-second cooldown after five wrong tokens, instead of the five-minute
-block that a hundred failures from one address otherwise cause. For
-per-client rate limits and audit identities, configure only the actual proxy
-addresses in `web.trusted_proxies` and the sanitized `web.forwarded_header`.
+block that a hundred failures from one address otherwise cause. Password and
+TOTP confirmations of signed-in accounts through such a peer count each
+failure against the confirming account only: an account that fails five
+confirmations within five minutes is refused for five minutes, while every
+other account, in any unit or on the platform, keeps confirming, and the peer
+is never blocked after a hundred failed confirmations as an address that is
+not loopback is. For per-client rate limits and audit identities, configure
+only the actual proxy addresses in `web.trusted_proxies` and the sanitized
+`web.forwarded_header`.
 A client identified by its own address has a budget of five failed sign-ins
 in five minutes. Every failed sign-in costs it the same, whether the username
 is unknown, the account is disabled or its unit is not active, or the
@@ -52,15 +61,23 @@ clients are not affected; clients that share one address, such as the clients
 of an untrusted proxy on another host, share the budget, and they share the
 backstop of the setups and activation, which blocks the address for five
 minutes after a hundred wrong tokens. EdgeWatch keeps these limits for an
-address that is not loopback. When a peer that is neither loopback nor listed
-in `web.trusted_proxies` sends `X-Forwarded-For` or `Forwarded`, it logs a
-warning that recommends `web.trusted_proxies`, at most once an hour, and the
-console shows the proxy's address to the administrators of a deployment with
-one unit and on the platform status page, until a day after its last request.
-EdgeWatch also logs a startup warning when proxy hostnames are approved
-without trusted client-IP forwarding. Failed login and TOTP attempts, along
-with rate-limit events, are written to the security audit log; they do not
-currently send notification-channel alerts.
+address that is not loopback. When requests come through a proxy that
+EdgeWatch does not trust, it logs a warning that recommends
+`web.trusted_proxies`, at most once an hour, and the console shows the
+proxy's address to the administrators of a deployment with one unit and on
+the platform status page, until a day after its last request. Such a proxy
+is a directly connected peer that is not listed in `web.trusted_proxies` and
+sends `X-Forwarded-For` or `Forwarded`, such as an unlisted proxy on the
+host, which connects from a loopback address; or, behind listed proxies, the
+first address from the right of the configured forwarding header that is not
+listed, when the header names another client before it, such as an unlisted
+proxy on another host in front of the listed proxy on the host. A client can
+send these headers itself and have its own address shown, so list an address
+only when it is a proxy that you run. The notice never changes the address
+that EdgeWatch uses for a client. EdgeWatch also logs a startup warning when
+proxy hostnames are approved without trusted client-IP forwarding. Failed
+login and TOTP attempts, along with rate-limit events, are written to the
+security audit log; they do not currently send notification-channel alerts.
 
 Setting up or replacing an authenticator requires the account password, plus
 the current authenticator or a recovery code when TOTP is already enabled. The
@@ -233,12 +250,19 @@ account has are recorded in platform scope, outside every unit's audit. The
 record that a sign-in, password confirmation, or TOTP confirmation became
 rate limited follows the same rule: it belongs to the unit of the account it
 names, or to platform scope for a platform administrator or an unknown
-username. Such records are coalesced per client, operation and scope for five
-minutes, so a client throttled on accounts of several units gets a record in
-each of them. A unit's administrators read their unit's audit, which hides the
-source address of a platform administrator's actions; the platform audit
-shows the records in platform scope and every unit's account and platform
-records, never a unit's data records. Both views are read-only.
+username. A failed redemption of an activation or password-reset link, and
+the record that its redemptions became rate limited, belong to the unit of
+the link's account, or to platform scope for a platform administrator's
+invitation, where the link's successful redemption is recorded too; that
+holds for an expired or used link and a link of a disabled unit. A token that
+matches no link names no account, so its records stay in the default unit,
+whose console serves activation. Such rate-limit records are coalesced per
+client, operation and scope for five minutes, so a client throttled on
+accounts of several units gets a record in each of them. A unit's
+administrators read their unit's audit, which hides the source address of a
+platform administrator's actions; the platform audit shows the records in
+platform scope and every unit's account and platform records, never a unit's
+data records. Both views are read-only.
 
 Disabling a unit ends its sessions and revokes its open invitations in the
 same transaction; from then on its accounts cannot sign in or redeem a link,
@@ -299,7 +323,12 @@ Some signals cross units by design:
   `platform_setup_available` whether a platform setup token is waiting to be
   used.
 - Behind a proxy that is not listed in `web.trusted_proxies`, the shared
-  sign-in cooldown applies to the accounts of every unit.
+  sign-in cooldown applies to the accounts of every unit. Password and TOTP
+  confirmations there are limited per account, so they do not cross units.
+- A redemption with a token that matches no link, such as a mistyped link of
+  any unit or of a platform administrator's invitation, is recorded in the
+  default unit's audit with its source address, because the token names no
+  account.
 
 Other signals are closed. Once more than one unit exists, a unit's status
 leaves out the deployment-wide live-update counters, and it leaves them out

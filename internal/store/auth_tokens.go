@@ -38,26 +38,51 @@ func (ps *PlatformStore) setupTokenUsable(ctx context.Context, tokenHash, purpos
 // tenant that is disabled or being deleted stops the redemption of its
 // links.
 func (s *Store) ActivationTokenUsable(ctx context.Context, tokenHash string, now time.Time) (bool, error) {
+	link, err := s.CheckActivationToken(ctx, tokenHash, now)
+	return link.Usable, err
+}
+
+// ActivationLink is what CheckActivationToken reports about the activation
+// or password-reset link with a token.
+type ActivationLink struct {
+	// Found reports whether a link has the token, whatever its state.
+	Found bool
+	// Usable reports whether the link can be redeemed now, as
+	// ActivationTokenUsable reports it.
+	Usable bool
+	// TenantID is the tenant of the link's account, or "" for an account
+	// without one, a platform administrator's.
+	TenantID string
+}
+
+// CheckActivationToken is ActivationTokenUsable that also reports whether a
+// link has the token and the tenant of the link's account, also when the
+// link cannot be redeemed, so the records of a failed redemption belong
+// where the successful redemption's record does. It is one indexed read of
+// the token's hash.
+func (s *Store) CheckActivationToken(ctx context.Context, tokenHash string, now time.Time) (ActivationLink, error) {
 	var expires string
 	var used sql.NullString
 	var passwordHash string
 	var enabled int
 	var tenantID, tenantState string
 	if err := s.reader().QueryRowContext(ctx, `SELECT i.expires_at,i.used_at,u.password_hash,u.enabled,COALESCE(u.tenant_id,''),COALESCE(t.state,'') FROM user_invites i JOIN users u ON u.id=i.user_id LEFT JOIN tenants t ON t.id=u.tenant_id WHERE i.id_hash=?`, tokenHash).Scan(&expires, &used, &passwordHash, &enabled, &tenantID, &tenantState); errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+		return ActivationLink{}, nil
 	} else if err != nil {
-		return false, err
+		return ActivationLink{}, err
 	}
+	link := ActivationLink{Found: true, TenantID: tenantID}
 	if used.Valid || !now.Before(scanTime(expires)) {
-		return false, nil
+		return link, nil
 	}
 	if tenantID != "" && tenantState != TenantStateActive {
-		return false, nil
+		return link, nil
 	}
 	// A reset link must not re-enable a previously configured account that was
 	// disabled. Pending invitees are the sole disabled account allowed through.
 	if enabled == 0 && len(passwordHash) > 0 && passwordHash[0] != '!' {
-		return false, nil
+		return link, nil
 	}
-	return true, nil
+	link.Usable = true
+	return link, nil
 }

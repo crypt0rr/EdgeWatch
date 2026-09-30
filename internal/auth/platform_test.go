@@ -387,3 +387,160 @@ func TestPlatformAndUnknownSignInFailuresBelongToThePlatform(t *testing.T) {
 		t.Fatalf("platform sign-in audit record = %s/%s, %v", tenant, kind, err)
 	}
 }
+
+// A failed redemption of an activation or password-reset link, and the
+// record that the link's redemptions from a client became rate limited,
+// belong where the link's successful redemption is recorded: the unit of
+// the link's account, or platform scope for a platform administrator's
+// invitation. That holds for a password that is too short, an expired or
+// used link, a link of a disabled unit, a refusal of the limiter and one of
+// the password-check queue, so no other unit's audit shows them. A token
+// that no link has names no account, and its records stay in the default
+// unit, whose console serves activation.
+func TestFailedLinkRedemptionsBelongToTheLinksAccount(t *testing.T) {
+	ctx := context.Background()
+	s, defaultAdmin, _ := platformTestStore(t)
+	addSecondUnit(t, s)
+	m := NewManager(s)
+	now := time.Now().UTC().Truncate(time.Second)
+	m.Now = func() time.Time { return now }
+	root := createPlatformAdmin(t, m, "platform-root", "platform administrator password")
+	scopeB, err := s.TenantScopeByID(ctx, platformTestTenantID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminB, err := s.Tenant(scopeB).CreateUser(ctx, store.User{Username: "bravo-admin", Role: store.RoleAdministrator, PasswordHash: cheapHash("bravo administrator password"), Enabled: true}, store.AuditEntry{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	invite := func(scope store.TenantScope, actor, username string, valid time.Duration) string {
+		t.Helper()
+		plain, hash, err := NewOpaqueToken()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Tenant(scope).CreateUserWithInvite(ctx, store.User{Username: username, Role: store.RoleViewer, PasswordHash: "!pending", Enabled: false}, hash, now, now.Add(valid), store.AuditEntry{ActorUserID: actor}); err != nil {
+			t.Fatal(err)
+		}
+		return plain
+	}
+	bravoLink := invite(scopeB, adminB.ID, "bravo-invitee", time.Hour)
+	bravoLateLink := invite(scopeB, adminB.ID, "bravo-late", time.Minute)
+	bravoPausedLink := invite(scopeB, adminB.ID, "bravo-paused", time.Hour)
+	defaultLink := invite(store.DefaultTenantScope(), defaultAdmin.ID, "alpha-invitee", time.Hour)
+	platformLink, platformHash, err := NewOpaqueToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Platform().InvitePlatformAdmin(ctx, store.User{Username: "platform-two"}, platformHash, now, now.Add(30*time.Minute), store.AuditEntry{ActorUserID: root.ID}); err != nil {
+		t.Fatal(err)
+	}
+	from := func(address string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/v1/auth/activate", nil)
+		r.RemoteAddr = address + ":4000"
+		return r
+	}
+	records := func(address string) []string {
+		t.Helper()
+		rows, err := s.DB.Query(`SELECT COALESCE(tenant_id,'<null>'),action,actor_kind FROM security_audit WHERE action IN ('auth.activation_failed','auth.rate_limited') AND source_ip=? ORDER BY id`, address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var got []string
+		for rows.Next() {
+			var tenant, action, kind string
+			if err := rows.Scan(&tenant, &action, &kind); err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, tenant+" "+action+" "+kind)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	const platform = "<null>"
+	failed := func(scope string) string { return scope + " auth.activation_failed " + store.AuditActorUnit }
+	limited := func(scope string) string { return scope + " auth.rate_limited " + store.AuditActorUnit }
+	const validPassword = "invitee account password"
+	for _, check := range []struct {
+		name, address, token, password, want string
+		before                               func()
+	}{
+		{"a password that is too short for a unit B link", "198.51.100.21", bravoLink, "too short", platformTestTenantID, nil},
+		{"a password that is too short for a platform administrator's invitation", "198.51.100.22", platformLink, "too short", platform, nil},
+		{"a password that is too short for a default unit link", "198.51.100.23", defaultLink, "too short", store.DefaultTenantID, nil},
+		{"an expired unit B link", "198.51.100.24", bravoLateLink, validPassword, platformTestTenantID, func() { now = now.Add(2 * time.Minute) }},
+		{"a token that no link has", "198.51.100.25", "not-a-link", validPassword, store.DefaultTenantID, nil},
+		{"a used unit B link", "198.51.100.26", bravoLink, validPassword, platformTestTenantID, func() {
+			if _, err := m.ActivateRequest(ctx, from("198.51.100.20"), bravoLink, validPassword); err != nil {
+				t.Fatalf("redemption of the unit B link = %v", err)
+			}
+		}},
+		{"a link of a disabled unit", "198.51.100.27", bravoPausedLink, validPassword, platformTestTenantID, func() {
+			if _, err := s.DB.Exec(`UPDATE tenants SET state='disabled' WHERE id=?`, platformTestTenantID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		if check.before != nil {
+			check.before()
+		}
+		if _, err := m.ActivateRequest(ctx, from(check.address), check.token, check.password); err == nil || errors.Is(err, ErrRateLimited) {
+			t.Fatalf("%s: redemption = %v, want a failure", check.name, err)
+		}
+		if got, want := records(check.address), []string{failed(check.want)}; !slices.Equal(got, want) {
+			t.Errorf("%s: records = %q, want %q", check.name, got, want)
+		}
+	}
+	var activatedIn string
+	if err := s.DB.QueryRow(`SELECT COALESCE(tenant_id,'<null>') FROM security_audit WHERE action='user.activated' AND actor_username='bravo-invitee'`).Scan(&activatedIn); err != nil || activatedIn != platformTestTenantID {
+		t.Fatalf("the unit B link's redemption was recorded in %s, %v; want unit B", activatedIn, err)
+	}
+
+	// A client that fails a link's redemption five times is refused, and
+	// the refusal is recorded where the failures are.
+	for _, check := range []struct{ address, token, want string }{
+		{"198.51.100.31", platformLink, platform},
+		{"198.51.100.32", bravoLink, platformTestTenantID},
+		{"198.51.100.33", "another token that no link has", store.DefaultTenantID},
+	} {
+		var want []string
+		for attempt := 0; attempt < authFailureThreshold; attempt++ {
+			if _, err := m.ActivateRequest(ctx, from(check.address), check.token, "too short"); err == nil || errors.Is(err, ErrRateLimited) {
+				t.Fatalf("failure %d from %s = %v", attempt+1, check.address, err)
+			}
+			want = append(want, failed(check.want))
+		}
+		if _, err := m.ActivateRequest(ctx, from(check.address), check.token, validPassword); !errors.Is(err, ErrRateLimited) {
+			t.Fatalf("redemption from %s after %d failures = %v, want ErrRateLimited", check.address, authFailureThreshold, err)
+		}
+		if got := records(check.address); !slices.Equal(got, append(want, limited(check.want))) {
+			t.Errorf("records from %s = %q, want %d failures and a refusal in %s", check.address, got, authFailureThreshold, check.want)
+		}
+	}
+
+	// A redemption that the password-check queue refuses is recorded in the
+	// link's scope too.
+	for i := 0; i < authArgon2MaxConcurrent; i++ {
+		m.argon2Sem <- struct{}{}
+	}
+	_, err = m.ActivateRequest(ctx, from("198.51.100.34"), platformLink, validPassword)
+	for i := 0; i < authArgon2MaxConcurrent; i++ {
+		<-m.argon2Sem
+	}
+	if !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("redemption with every password check busy = %v, want ErrRateLimited", err)
+	}
+	if got, want := records("198.51.100.34"), []string{limited(platform)}; !slices.Equal(got, want) {
+		t.Errorf("records of the refused redemption = %q, want %q", got, want)
+	}
+
+	// The default unit's audit shows only the redemptions of its own links
+	// and of tokens that no link has.
+	var foreign int
+	if err := s.DB.QueryRow(`SELECT COUNT(*) FROM security_audit WHERE action IN ('auth.activation_failed','auth.rate_limited') AND tenant_id=? AND source_ip NOT IN ('198.51.100.23','198.51.100.25','198.51.100.33')`, store.DefaultTenantID).Scan(&foreign); err != nil || foreign != 0 {
+		t.Fatalf("the default unit's audit shows %d records of other scopes' links, %v", foreign, err)
+	}
+}

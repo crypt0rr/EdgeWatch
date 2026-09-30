@@ -35,6 +35,49 @@ test.describe('responsive issue regressions', () => {
     expect(box.y + box.height).toBeLessThanOrEqual(664)
   })
 
+  test('sign-in setup link is actionable, secondary links align, and throttling explains its wait (#991)', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.route('**/api/v1/**', async route => {
+      const path = new URL(route.request().url()).pathname
+      if (path === '/api/v1/setup/status') {
+        await route.fulfill({ json: { configured: true, platform_setup_available: true, public_dashboard_enabled: true, password_requirements: { minimum_length: 12 } } })
+        return
+      }
+      if (path === '/api/v1/auth/session') {
+        await route.fulfill({ status: 401, json: { error: { code: 'unauthorized', message: 'authentication required' } } })
+        return
+      }
+      if (path === '/api/v1/auth/login') {
+        await route.fulfill({ status: 429, headers: { 'Retry-After': '60' }, json: { error: { code: 'rate_limited', message: 'too many login attempts; try again later' } } })
+        return
+      }
+      await route.fulfill({ status: 401, json: { error: { code: 'unauthorized', message: 'authentication required' } } })
+    })
+
+    await page.goto('/login')
+    const setupLink = page.getByRole('link', { name: 'Create the platform administrator' })
+    const setupLinkAppearance = await setupLink.evaluate(element => ({
+      decoration: getComputedStyle(element).textDecorationLine,
+      height: element.getBoundingClientRect().height,
+    }))
+    expect(setupLinkAppearance.decoration).toContain('underline')
+    expect(setupLinkAppearance.height).toBeGreaterThanOrEqual(24)
+
+    const secondaryActions = [
+      page.getByRole('button', { name: 'Use a recovery code' }),
+      page.getByRole('link', { name: 'Activate an account' }),
+      page.getByRole('link', { name: 'View read-only highlights' }),
+    ]
+    const xPositions = await Promise.all(secondaryActions.map(async action => (await action.boundingBox())!.x))
+    expect(Math.max(...xPositions) - Math.min(...xPositions)).toBeLessThanOrEqual(1)
+
+    await page.getByLabel('Password').fill('wrong password')
+    await page.getByRole('button', { name: 'Sign in' }).click()
+    await expect(page.getByRole('alert')).toHaveText('Too many sign-in attempts. Try again in about 1 minute.')
+    await page.getByRole('button', { name: 'Use a recovery code' }).click()
+    await expect(page.getByRole('alert')).toHaveCount(0)
+  })
+
   test('live status, breadcrumbs, skip link and route focus stay useful (#989, #990)', async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 800 })
     await mockConsole(page, 'administrator')

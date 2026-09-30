@@ -386,7 +386,7 @@ test('two business units stay apart through the real console, TOTP enrolment, pu
     expect((await callAPI(unitB, '/auth/session', 'GET')).status).toBe(401)
     await unitB.reload()
     await signIn(unitB, unitBUsername, unitBPassword, { recoveryCode: unitBFactor.recoveryCodes[0] })
-    await expect(unitB.getByRole('alert')).toHaveText('invalid credentials')
+    await expect(unitB.getByRole('alert')).toHaveText('The username, password, or authenticator code is incorrect.')
     await guest.goto(`${harness.url}/public/unit-b`)
     await expect(guest.getByRole('heading', { name: 'Public status unavailable' })).toBeVisible()
 

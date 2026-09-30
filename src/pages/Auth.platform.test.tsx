@@ -93,6 +93,20 @@ describe('platform setup', () => {
     expect(await screen.findByRole('heading', { name: 'Create the platform administrator' })).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Platform setup token'), { target: { value: 'platform-token' } })
     fireEvent.change(screen.getByLabelText(/^Username/), { target: { value: 'morgan' } })
+    fireEvent.change(screen.getByLabelText(/^Password/), { target: { value: 'correct horse battery staple' } })
+    fireEvent.change(screen.getByLabelText('Confirm password'), { target: { value: 'correct horse battery staple' } })
+    vi.mocked(platformSetup).mockRejectedValueOnce(new APIError('previous setup request failed', 'setup_failed'))
+    fireEvent.submit(screen.getByLabelText('Platform setup token').closest('form')!)
+    expect(await screen.findByRole('alert')).toHaveTextContent('previous setup request failed')
+
+    const passwordVisibility = screen.getByRole('button', { name: 'Show password' })
+    const confirmationVisibility = screen.getByRole('button', { name: 'Show confirmation password' })
+    expect(passwordVisibility).toHaveAttribute('aria-controls', 'platform-password')
+    expect(confirmationVisibility).toHaveAttribute('aria-controls', 'platform-password-confirm')
+    fireEvent.click(passwordVisibility)
+    fireEvent.click(confirmationVisibility)
+    expect(screen.getByLabelText(/^Password/)).toHaveAttribute('type', 'text')
+    expect(screen.getByLabelText('Confirm password')).toHaveAttribute('type', 'text')
     expect(screen.queryByText(/has expired or was already used/)).not.toBeInTheDocument()
 
     // The token expires, or another operator uses it, and the status is read
@@ -104,6 +118,7 @@ describe('platform setup', () => {
     expect(screen.getByRole('heading', { name: 'Create the platform administrator' })).toBeInTheDocument()
     expect(screen.getByLabelText('Platform setup token')).toHaveValue('platform-token')
     expect(screen.getByLabelText(/^Username/)).toHaveValue('morgan')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     expect(await screen.findByText(/The platform setup token has expired or was already used/)).toBeInTheDocument()
 
     // A new token printed on the host makes the status available again.
@@ -111,6 +126,7 @@ describe('platform setup', () => {
     await act(async () => { await client.refetchQueries({ queryKey: ['setup-status'] }) })
     await waitFor(() => expect(screen.queryByText(/has expired or was already used/)).not.toBeInTheDocument())
     expect(screen.getByLabelText(/^Username/)).toHaveValue('morgan')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
   it('offers no setup form while the setup status cannot be read', async () => {

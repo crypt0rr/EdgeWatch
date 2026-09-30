@@ -1,4 +1,10 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
+import { mockConsole } from './mock-console'
+
+async function expectNoHorizontalScroll(page: Page) {
+  const viewport = await page.evaluate(() => ({ clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }))
+  expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth)
+}
 
 const adminPermissions = [
   'overview.read', 'jobs.read', 'jobs.write', 'jobs.run', 'jobs.delete',
@@ -233,4 +239,26 @@ test('mobile job detail keeps recent scan rows inside the viewport', async ({ pa
   expect(expandedBounds.entry?.right).toBeLessThanOrEqual(expandedBounds.panel?.right ?? 0)
   const expandedViewport = await page.evaluate(() => ({ clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }))
   expect(expandedViewport.scrollWidth).toBeLessThanOrEqual(expandedViewport.clientWidth)
+})
+
+test('the users and notifications pages fit a phone, with every account action on screen', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === 'desktop', 'The responsive smoke runs in the mobile projects.')
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await mockConsole(page, 'administrator')
+  await page.goto('/users')
+  // An enabled account that is not the signed-in one offers all three actions.
+  const actions = page.locator('.user-row').filter({ hasText: 'Operator' }).getByRole('button')
+  await expect(actions).toHaveText(['Disable', 'Reset activation', 'Revoke link'])
+  const width = await page.evaluate(() => document.documentElement.clientWidth)
+  for (const action of await actions.all()) {
+    const box = await action.boundingBox()
+    expect(box).not.toBeNull()
+    expect(box!.x).toBeGreaterThanOrEqual(0)
+    expect(box!.x + box!.width).toBeLessThanOrEqual(width)
+  }
+  await expectNoHorizontalScroll(page)
+
+  await page.goto('/notifications')
+  await expect(page.locator('.notification-footnote')).toBeVisible()
+  await expectNoHorizontalScroll(page)
 })

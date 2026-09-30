@@ -189,7 +189,8 @@ test('a unit without a high-cost grant stays without one when its capacity is sa
   await page.getByLabel('Scan slot cap', { exact: true }).fill('1')
   await page.getByRole('button', { name: 'Save capacity' }).click()
   await expect(page.getByText('Capacity saved. It applies to the next scan this unit queues.')).toBeVisible()
-  expect(controls.payloads['unit-capacity']).toEqual([{ max_concurrent_scans: 1, max_probe_count: null, max_naabu_probe_count: null, high_cost_ceiling: 0 }])
+  // Only the edited setting is sent, with the revision the capacity was read at.
+  expect(controls.payloads['unit-capacity']).toEqual([{ max_concurrent_scans: 1, revision: 1 }])
   await expect(page.getByLabel('Not granted')).toBeChecked()
 })
 
@@ -197,7 +198,7 @@ test('the platform console fits a phone', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name === 'desktop', 'The responsive smoke runs in the mobile projects.')
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await mockConsole(page, 'platform_admin')
-  for (const path of ['/platform/units', '/platform/units/unit-retail', '/platform/units/unit-retail/accounts', '/platform/units/unit-retail/capacity', '/platform/audit', '/platform/status']) {
+  for (const path of ['/platform/units', '/platform/units/unit-retail', '/platform/units/unit-retail/accounts', '/platform/units/unit-retail/capacity', '/platform/admins', '/platform/notifications', '/platform/audit', '/platform/status']) {
     await page.goto(path)
     await expect(page.locator('.page h1')).toBeVisible()
     await expectNoHorizontalScroll(page)
@@ -208,4 +209,20 @@ test('the platform console fits a phone', async ({ page }, testInfo) => {
   await drawer.getByRole('link', { name: 'Units' }).click()
   await expect(page).toHaveURL(/\/platform\/units$/)
   await expect(page.getByRole('dialog', { name: 'Primary navigation' })).toHaveCount(0)
+})
+
+test('a one-time link for a long username fits a phone', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name === 'desktop', 'The responsive smoke runs in the mobile projects.')
+  await page.emulateMedia({ reducedMotion: 'reduce' })
+  await mockConsole(page, 'platform_admin')
+  const username = 'morgan.reyes@corp.example.com'
+  for (const path of ['/platform/admins', '/platform/units/unit-retail/accounts']) {
+    await page.goto(path)
+    await page.getByLabel('Username').fill(username)
+    await page.getByLabel('Your password').fill('fixture-password')
+    await page.getByRole('button', { name: 'Create activation link' }).click()
+    await expect(page.getByLabel(`Activation link for ${username}`)).toContainText('/activate#token=')
+    await expect(page.getByText(`Activation link for ${username}`, { exact: true })).toBeVisible()
+    await expectNoHorizontalScroll(page)
+  }
 })

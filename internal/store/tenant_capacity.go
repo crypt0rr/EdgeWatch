@@ -179,6 +179,23 @@ func scanTenantCapacity(scan func(...any) error, leading ...any) (TenantCapacity
 // kind are set here. A tenant that is missing, deleted, or being deleted is
 // not found, and nothing changes.
 func (ps *PlatformStore) SetTenantCapacity(ctx context.Context, tenantID string, capacity TenantCapacity, limits CapacityLimits, audit AuditEntry) error {
+	return ps.setTenantCapacity(ctx, tenantID, nil, capacity, limits, audit)
+}
+
+// SetTenantCapacityAt is SetTenantCapacity for a capacity that is based on
+// the tenant at expectedRevision, as TenantCapacityRevision read it. A
+// tenant that another change has moved to a later revision, such as another
+// platform administrator's capacity change or a rename, is ErrConflict, and
+// nothing changes, so the change cannot revert a setting that it did not
+// read. A tenant that is missing, deleted, or being deleted is not found
+// whatever the revision.
+func (ps *PlatformStore) SetTenantCapacityAt(ctx context.Context, tenantID string, expectedRevision int64, capacity TenantCapacity, limits CapacityLimits, audit AuditEntry) error {
+	return ps.setTenantCapacity(ctx, tenantID, &expectedRevision, capacity, limits, audit)
+}
+
+// setTenantCapacity writes the capacity for SetTenantCapacity, and for
+// SetTenantCapacityAt when expectedRevision is not nil.
+func (ps *PlatformStore) setTenantCapacity(ctx context.Context, tenantID string, expectedRevision *int64, capacity TenantCapacity, limits CapacityLimits, audit AuditEntry) error {
 	if err := capacity.Validate(limits); err != nil {
 		return err
 	}
@@ -192,24 +209,43 @@ func (ps *PlatformStore) SetTenantCapacity(ctx context.Context, tenantID string,
 		return err
 	}
 	ceiling, granted := capacity.highCostColumns()
+	where, args := `WHERE id=? AND state IN (?,?)`, []any{tenantID, TenantStateActive, TenantStateDisabled}
+	if expectedRevision != nil {
+		where, args = where+` AND revision=?`, append(args, *expectedRevision)
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE tenants SET `+
-		`max_concurrent_scans=?,max_probe_count=?,max_naabu_probe_count=?,high_cost_ceiling=?,high_cost_granted=?,revision=revision+1,updated_at=? `+
-		`WHERE id=? AND state IN (?,?)`,
-		nullableInt(capacity.MaxConcurrentScans), nullableInt64(capacity.MaxProbeCount), nullableInt64(capacity.MaxNaabuProbeCount), ceiling, granted,
-		sqliteTimestamp(now), tenantID, TenantStateActive, TenantStateDisabled)
+		`max_concurrent_scans=?,max_probe_count=?,max_naabu_probe_count=?,high_cost_ceiling=?,high_cost_granted=?,revision=revision+1,updated_at=? `+where,
+		append([]any{nullableInt(capacity.MaxConcurrentScans), nullableInt64(capacity.MaxProbeCount), nullableInt64(capacity.MaxNaabuProbeCount), ceiling, granted, sqliteTimestamp(now)}, args...)...)
 	if err != nil {
 		return err
 	}
 	if changed, err := result.RowsAffected(); err != nil {
 		return err
 	} else if changed == 0 {
-		return fmt.Errorf("%w: tenant %s", ErrNoTenantScope, tenantID)
+		return tenantCapacityUnchangedTx(ctx, tx, tenantID, expectedRevision != nil)
 	}
 	audit.Action, audit.Detail, audit.TenantID, audit.ActorKind = auditActionTenantCapacityChanged, capacity.auditDetail(), tenantID, AuditActorPlatform
 	if err := insertAuditEntryExec(ctx, tx, audit, now); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// tenantCapacityUnchangedTx explains a capacity write that changed no row: a
+// tenant that is still active or disabled was at another revision, which is
+// ErrConflict when the write expected one, and any other tenant is not found.
+func tenantCapacityUnchangedTx(ctx context.Context, tx *sql.Tx, tenantID string, expectedRevision bool) error {
+	if expectedRevision {
+		var exists int
+		err := tx.QueryRowContext(ctx, `SELECT 1 FROM tenants WHERE id=? AND state IN (?,?)`, tenantID, TenantStateActive, TenantStateDisabled).Scan(&exists)
+		if err == nil {
+			return ErrConflict
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: tenant %s", ErrNoTenantScope, tenantID)
 }
 
 // TenantCapacities returns the capacity of every active tenant, keyed by

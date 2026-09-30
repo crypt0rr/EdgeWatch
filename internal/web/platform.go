@@ -505,9 +505,11 @@ func (s *Server) deletePlatformUnit(w http.ResponseWriter, r *http.Request, sess
 // platformCapacityView is a unit's capacity: its own settings, where null
 // inherits the deployment's and a high_cost_ceiling of 0
 // (store.HighCostNotGranted) is no high-cost grant, the deployment's
-// limits, and its slot use.
+// limits, and its slot use. Revision is the unit's revision when the
+// settings were read, which a change of them names.
 type platformCapacityView struct {
 	UnitID   string                   `json:"unit_id"`
+	Revision int64                    `json:"revision"`
 	Capacity platformCapacitySettings `json:"capacity"`
 	Limits   platformLimitsView       `json:"limits"`
 	Slots    platformSlotView         `json:"slots"`
@@ -534,12 +536,14 @@ func (s *Server) platformCapacityViewOf(id string, capacity store.TenantCapacity
 }
 
 func (s *Server) getPlatformUnitCapacity(w http.ResponseWriter, r *http.Request, id string) {
-	capacity, err := s.Store.Platform().TenantCapacity(r.Context(), id)
+	capacity, revision, err := s.Store.Platform().TenantCapacityRevision(r.Context(), id)
 	if err != nil {
 		s.writePlatformError(w, r, err, "", "business unit not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, s.platformCapacityViewOf(id, capacity))
+	view := s.platformCapacityViewOf(id, capacity)
+	view.Revision = revision
+	writeJSON(w, http.StatusOK, view)
 }
 
 // optionalLimit is a capacity setting in a PATCH body: absent keeps the
@@ -570,8 +574,16 @@ func (o optionalLimit) apply(setting **int64) {
 	}
 }
 
+// updatePlatformUnitCapacity changes the settings that the body names and
+// keeps the others. A body that names the unit's revision, which the
+// capacity view reports, is refused with 409 conflict once another change
+// moved the unit on, so a form read before another platform
+// administrator's change cannot revert it. Without a revision, the change
+// applies to the settings read here, and is refused the same way when
+// another change is saved between that read and its write.
 func (s *Server) updatePlatformUnitCapacity(w http.ResponseWriter, r *http.Request, session store.Session, id string) {
 	var input struct {
+		Revision           *int64        `json:"revision"`
 		MaxConcurrentScans optionalLimit `json:"max_concurrent_scans"`
 		MaxProbeCount      optionalLimit `json:"max_probe_count"`
 		MaxNaabuProbeCount optionalLimit `json:"max_naabu_probe_count"`
@@ -580,9 +592,13 @@ func (s *Server) updatePlatformUnitCapacity(w http.ResponseWriter, r *http.Reque
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	capacity, err := s.Store.Platform().TenantCapacity(r.Context(), id)
+	capacity, revision, err := s.Store.Platform().TenantCapacityRevision(r.Context(), id)
 	if err != nil {
 		s.writePlatformError(w, r, err, "", "business unit not found")
+		return
+	}
+	if input.Revision != nil && *input.Revision != revision {
+		writeCapacityConflict(w)
 		return
 	}
 	if input.MaxConcurrentScans.set {
@@ -599,11 +615,22 @@ func (s *Server) updatePlatformUnitCapacity(w http.ResponseWriter, r *http.Reque
 	input.MaxProbeCount.apply(&capacity.MaxProbeCount)
 	input.MaxNaabuProbeCount.apply(&capacity.MaxNaabuProbeCount)
 	input.HighCostCeiling.apply(&capacity.HighCostCeiling)
-	if err := s.App.SetTenantCapacity(r.Context(), id, capacity, platformActorAudit(session, "", "")); err != nil {
+	err = s.App.SetTenantCapacityAt(r.Context(), id, revision, capacity, platformActorAudit(session, "", ""))
+	if errors.Is(err, store.ErrConflict) {
+		writeCapacityConflict(w)
+		return
+	}
+	if err != nil {
 		s.writePlatformError(w, r, err, "tenant.capacity_changed", "business unit not found")
 		return
 	}
 	s.getPlatformUnitCapacity(w, r, id)
+}
+
+// writeCapacityConflict refuses a capacity change that is based on an
+// earlier revision of the unit.
+func writeCapacityConflict(w http.ResponseWriter) {
+	writeError(w, http.StatusConflict, "conflict", "the business unit was modified; reload its capacity and try again", nil)
 }
 
 func (s *Server) listPlatformUnitAccounts(w http.ResponseWriter, r *http.Request, id string) {

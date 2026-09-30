@@ -156,6 +156,9 @@ describe('platform administrators', () => {
     const dialog = await confirmWithPassword()
     expect(await within(dialog).findByText('only a pending platform administrator\'s invitation can be renewed')).toBeInTheDocument()
     expect(screen.queryByLabelText('Activation link for lee')).not.toBeInTheDocument()
+    // The refusal reloads the list, which still shows lee pending, so the
+    // dialog asks again.
+    await waitFor(() => expect(listPlatformAdmins).toHaveBeenCalledTimes(2))
     await act(async () => {
       fireEvent.submit(within(dialog).getByLabelText('Your password').closest('form')!)
       await Promise.resolve()
@@ -165,7 +168,7 @@ describe('platform administrators', () => {
     expect(renewPlatformAdminInvitation).toHaveBeenCalledTimes(2)
     expect(screen.getByRole('status')).toHaveTextContent('A new activation link for lee was created; any earlier link no longer works.')
     expect(screen.getByLabelText('Activation link for lee')).toHaveTextContent('/activate#token=renewed')
-    expect(listPlatformAdmins).toHaveBeenCalledTimes(2)
+    expect(listPlatformAdmins).toHaveBeenCalledTimes(3)
 
     // Revoking the invitation stops the link on the page too.
     fireEvent.click(within(screen.getByTestId('admin-lee')).getByRole('button', { name: 'Revoke invitation' }))
@@ -250,6 +253,56 @@ describe('platform administrators', () => {
     fireEvent.submit(screen.getByLabelText(/^Username/).closest('form')!)
     await waitFor(() => expect(invitePlatformAdmin).toHaveBeenLastCalledWith({ username: 'avery', display_name: '', password: 'my-password' }))
     expect(await screen.findByLabelText('Activation link for avery')).toHaveTextContent('/activate#token=token')
+  })
+
+  for (const [action, refusal, change] of [
+    ['Remove', new APIError('only a pending platform administrator, which has not redeemed its invitation, can be removed', 'not_permitted', undefined, 403), 'redeemed'],
+    ['Renew invitation', new APIError('only a pending platform administrator\'s invitation can be renewed', 'not_permitted', undefined, 403), 'redeemed'],
+    ['Revoke invitation', new APIError('platform administrator not found', 'not_found', undefined, 404), 'removed'],
+  ] as const) {
+    it(`reloads the list and stops offering “${action}” after a refusal for an administrator that was ${change} elsewhere`, async () => {
+      let lee: UserSummary | null = admin({ id: 'acct-lee', username: 'lee', pending: true, enabled: false })
+      vi.mocked(listPlatformAdmins).mockImplementation(async () => ({ admins: [admin({ id: 'acct-morgan', username: 'morgan', display_name: 'Morgan Reyes' }), ...(lee ? [lee] : [])] }))
+      for (const call of [deletePendingPlatformAdmin, renewPlatformAdminInvitation, revokePlatformAdminInvitation]) vi.mocked(call).mockRejectedValueOnce(refusal)
+      renderWithProviders(<PlatformAdmins />)
+      fireEvent.click(within(await screen.findByTestId('admin-lee')).getByRole('button', { name: action }))
+      lee = change === 'redeemed' ? admin({ id: 'acct-lee', username: 'lee', revision: 2 }) : null
+      await confirmWithPassword()
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+      expect(listPlatformAdmins).toHaveBeenCalledTimes(2)
+      expect(screen.getByRole('status')).toHaveTextContent('lee changed elsewhere. The latest state is loaded.')
+      if (change === 'removed') {
+        expect(screen.queryByTestId('admin-lee')).not.toBeInTheDocument()
+        return
+      }
+      const row = screen.getByTestId('admin-lee')
+      expect(within(row).queryByText('Pending activation')).not.toBeInTheDocument()
+      expect(within(row).getAllByRole('button').map(button => button.textContent)).toEqual(['Disable'])
+    })
+  }
+
+  it('shows the link of a second invitation as not copied until that link is copied', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } })
+    vi.mocked(invitePlatformAdmin)
+      .mockResolvedValueOnce({ user: admin({ id: 'acct-alex', username: 'alex', pending: true, enabled: false }), activation_token: 'alex-token', activation_path: '/activate#token=alex-token' })
+      .mockResolvedValueOnce({ user: admin({ id: 'acct-blake', username: 'blake', pending: true, enabled: false }), activation_token: 'blake-token', activation_path: '/activate#token=blake-token' })
+    renderWithProviders(<PlatformAdmins />)
+    await screen.findByTestId('admin-morgan')
+    for (const username of ['alex', 'blake']) {
+      fireEvent.change(screen.getByLabelText(/^Username/), { target: { value: username } })
+      fireEvent.change(screen.getByLabelText('Your password'), { target: { value: 'my-password' } })
+      await act(async () => {
+        fireEvent.submit(screen.getByLabelText(/^Username/).closest('form')!)
+        await Promise.resolve()
+      })
+      expect(await screen.findByLabelText(`Activation link for ${username}`)).toHaveTextContent(`/activate#token=${username}-token`)
+      // Each new link starts as not copied, even when the one before it was.
+      expect(screen.queryByRole('button', { name: /Copied/ })).not.toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: /Copy link/ }))
+      expect(await screen.findByRole('button', { name: /Copied/ })).toBeInTheDocument()
+      expect(writeText).toHaveBeenLastCalledWith(`${window.location.origin}/activate#token=${username}-token`)
+    }
   })
 
   it('reports a list that cannot be loaded', async () => {

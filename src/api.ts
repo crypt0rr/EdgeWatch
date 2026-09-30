@@ -313,7 +313,8 @@ export type BusinessUnit = UnitRef & { status: BusinessUnitStatus; is_default: b
 export type UnitCapacitySettings = { max_concurrent_scans: number | null; max_probe_count: number | null; max_naabu_probe_count: number | null; high_cost_ceiling: number | null }
 /** The high_cost_ceiling of a unit without a high-cost grant, which a new unit starts with. */
 export const highCostNotGranted = 0
-export type UnitCapacity = { unit_id: string; capacity: UnitCapacitySettings; limits: DeploymentLimits; slots: UnitSlots }
+/** revision is the unit's revision, which a change of the capacity names. */
+export type UnitCapacity = { unit_id: string; revision: number; capacity: UnitCapacitySettings; limits: DeploymentLimits; slots: UnitSlots }
 export type UnitAccount = Omit<UserSummary, 'role'> & { role: UnitRole }
 export type AccountInvitation<T> = { user: T; activation_token: string; activation_path: string }
 /** totp_enrolled tells whether the account keeps its authenticator after the reset. */
@@ -342,7 +343,8 @@ export const deleteUnit = (id: string, confirmName: string, password: string) =>
 export const getUnitCapacity = (id: string) => api<UnitCapacity>(`${unitPath(id)}/capacity`)
 // A key that is absent keeps the setting, null inherits the deployment's, and
 // a number sets it; a high_cost_ceiling of highCostNotGranted grants none.
-export const updateUnitCapacity = (id: string, value: Partial<UnitCapacitySettings>) => api<UnitCapacity>(`${unitPath(id)}/capacity`, { method: 'PATCH', body: JSON.stringify(value) })
+// The server refuses a change at a revision other than the unit's current one, as a conflict.
+export const updateUnitCapacity = (id: string, revision: number, value: Partial<UnitCapacitySettings>) => api<UnitCapacity>(`${unitPath(id)}/capacity`, { method: 'PATCH', body: JSON.stringify({ ...value, revision }) })
 export const listUnitAccounts = (id: string) => api<{ accounts: UnitAccount[] }>(`${unitPath(id)}/accounts`)
 // The platform invites only a unit's administrators; they invite the unit's operators and viewers.
 export const inviteUnitAdmin = (id: string, value: { username: string; display_name: string; password: string }) => api<AccountInvitation<UnitAccount>>(`${unitPath(id)}/accounts`, { method: 'POST', body: JSON.stringify({ ...value, role: 'administrator' }) })

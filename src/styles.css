@@ -694,7 +694,11 @@
 
 .activation-token > div {
   flex: 1 1 240px;
+  min-width: 0;
 }
+
+/* A long username, such as an e-mail address, wraps inside the panel. */
+.activation-token strong { overflow-wrap: anywhere; }
 
 .activation-token code {
   display: block;
@@ -724,6 +728,7 @@
 .user-row:first-child { border-top: 0; }
 .user-row strong, .user-row span { display: block; }
 .user-row > div:first-child span { margin-top: 3px; color: #7892ae; font-size: 11px; }
+.user-row > div:first-child { min-width: 0; overflow-wrap: anywhere; }
 .user-row-actions { display: flex; gap: 7px; }
 
 .public-page {
@@ -865,7 +870,7 @@
 
 @media (max-width: 680px) {
   .user-row { grid-template-columns: 1fr auto; }
-  .user-row-actions { grid-column: 1 / -1; }
+  .user-row-actions { grid-column: 1 / -1; flex-wrap: wrap; }
   .public-header { display: block; }
   .public-updated { display: block; margin-top: 10px; }
 }

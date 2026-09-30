@@ -121,11 +121,24 @@ func (ps *PlatformStore) RevokeUnitAccountSessions(ctx context.Context, tenantID
 // TenantCapacity returns the capacity of a tenant that is not deleted. A
 // missing or deleted tenant is ErrNoTenantScope.
 func (ps *PlatformStore) TenantCapacity(ctx context.Context, tenantID string) (TenantCapacity, error) {
-	capacity, err := scanTenantCapacity(ps.store.reader().QueryRowContext(ctx, `SELECT `+tenantCapacityColumns+` FROM tenants WHERE id=? AND state<>?`, tenantID, TenantStateDeleted).Scan)
-	if errors.Is(err, sql.ErrNoRows) {
-		return TenantCapacity{}, fmt.Errorf("%w: tenant %s", ErrNoTenantScope, tenantID)
-	}
+	capacity, _, err := ps.TenantCapacityRevision(ctx, tenantID)
 	return capacity, err
+}
+
+// TenantCapacityRevision returns the capacity of a tenant that is not
+// deleted with the tenant's revision, read together, so a change based on
+// the capacity can expect that revision (SetTenantCapacityAt). A missing or
+// deleted tenant is ErrNoTenantScope.
+func (ps *PlatformStore) TenantCapacityRevision(ctx context.Context, tenantID string) (TenantCapacity, int64, error) {
+	var revision int64
+	capacity, err := scanTenantCapacity(ps.store.reader().QueryRowContext(ctx, `SELECT revision,`+tenantCapacityColumns+` FROM tenants WHERE id=? AND state<>?`, tenantID, TenantStateDeleted).Scan, &revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TenantCapacity{}, 0, fmt.Errorf("%w: tenant %s", ErrNoTenantScope, tenantID)
+	}
+	if err != nil {
+		return TenantCapacity{}, 0, err
+	}
+	return capacity, revision, nil
 }
 
 // userSummaryColumns are the columns that scanUserSummary reads.

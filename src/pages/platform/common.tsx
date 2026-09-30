@@ -68,6 +68,20 @@ export function isConflict(error: unknown) {
   return error instanceof APIError && error.code === 'conflict'
 }
 
+// The refusals that report the target's current state: it moved to a new
+// revision, its state or its unit's no longer allows the change, it is no
+// longer of the kind the change needs, or it is gone.
+const changedElsewhereCodes = new Set(['conflict', 'not_found', 'not_permitted', 'unit_state', 'unit_not_active', 'user_disabled'])
+
+/**
+ * Whether a refused change may have been refused because its account or unit
+ * changed elsewhere. The page then reloads it, and offers the change again
+ * only when the reloaded account or unit still allows it.
+ */
+export function isChangedElsewhere(error: unknown) {
+  return error instanceof APIError && changedElsewhereCodes.has(error.code ?? '')
+}
+
 export function Loading({ label }: { label: string }) {
   return <div className="loading"><span className="spinner" />{label}</div>
 }
@@ -75,13 +89,18 @@ export function Loading({ label }: { label: string }) {
 /**
  * A one-time activation or password-reset link. The server returns it once,
  * so the console shows it until it is dismissed and never fetches it again.
+ * It says "Copied" only after the clipboard took this link, so a page renders
+ * each new link with its path as the key, which starts it as not copied.
  */
 export function OneTimeLink({ title, path, note, warning, onDismiss }: { title: string; path: string; note: string; warning?: string; onDismiss: () => void }) {
   const [copied, setCopied] = useState(false)
   const url = `${window.location.origin}${path}`
   async function copy() {
+    // Without a clipboard, as on a page that is not served over HTTPS,
+    // nothing is copied.
+    if (!navigator.clipboard) return
     try {
-      await navigator.clipboard?.writeText(url)
+      await navigator.clipboard.writeText(url)
       setCopied(true)
     } catch {
       setCopied(false)

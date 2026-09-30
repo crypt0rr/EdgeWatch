@@ -25,12 +25,29 @@ func (a *App) SetTenantCapacity(ctx context.Context, tenantID string, capacity s
 	if err := a.Store.Platform().SetTenantCapacity(ctx, tenantID, capacity, a.capacityLimits(), audit); err != nil {
 		return err
 	}
+	a.applyTenantCapacity(ctx)
+	return nil
+}
+
+// SetTenantCapacityAt is SetTenantCapacity for a capacity that is based on
+// the tenant at expectedRevision. A tenant that has moved to a later
+// revision is store.ErrConflict, and nothing changes.
+func (a *App) SetTenantCapacityAt(ctx context.Context, tenantID string, expectedRevision int64, capacity store.TenantCapacity, audit store.AuditEntry) error {
+	if err := a.Store.Platform().SetTenantCapacityAt(ctx, tenantID, expectedRevision, capacity, a.capacityLimits(), audit); err != nil {
+		return err
+	}
+	a.applyTenantCapacity(ctx)
+	return nil
+}
+
+// applyTenantCapacity gives a saved capacity change's slot cap to the scan
+// slot pool at once.
+func (a *App) applyTenantCapacity(ctx context.Context) {
 	if err := a.refreshSlotCaps(ctx); err != nil && a.Logger != nil {
 		// The change is saved; the next schedule reconciliation applies
 		// the slot cap.
 		a.Logger.Warn("tenant slot caps could not be refreshed", "error", err)
 	}
-	return nil
 }
 
 // capacityLimits returns the deployment's scan settings, which bound every

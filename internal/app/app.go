@@ -964,6 +964,16 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 		a.Logger.Info("scan completed for superseded security scope; runtime state unchanged", "job", job.Name, "scan_id", scan.ID)
 		events, finalizeErr = nil, nil
 	}
+	if managed && errors.Is(finalizeErr, store.ErrTenantNotActive) {
+		// The job's business unit was paused while the scan ran, whether this
+		// process cancelled the scan or another one, such as a host command,
+		// ran it. The store recorded the scan as the pause cancelled it and
+		// changed no baseline, incident or alert, so there are no events.
+		a.Logger.Info("scan finished after its business unit was paused; runtime state unchanged", "job", job.Name, "scan_id", scan.ID, "status", scan.Status)
+		completionEvent.Message = "Scan " + scan.Status
+		a.emitTenantEvents(scope, []model.Event{completionEvent})
+		return scan, nil, errors.Join(finalizeErr, scanErr)
+	}
 	if finalizeErr != nil {
 		a.emitTenantEvents(scope, []model.Event{completionEvent})
 		return scan, nil, finalizeErr

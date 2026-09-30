@@ -58,9 +58,12 @@ func (a *App) RenameUnit(ctx context.Context, id string, expectedRevision int64,
 // DisableUnit pauses an active business unit. The store ends the sessions of
 // its accounts and revokes their invitations, and from then on refuses them
 // sign-in, and holds the unit's alerts. The application then fails the
-// unit's runs that wait for a scan slot, cancels its running scans, which
-// record a canceled scan and leave the baselines as they are, and removes
-// the unit's jobs from the schedule.
+// unit's runs that wait for a scan slot, cancels its running scans, and
+// removes the unit's jobs from the schedule. A scan of the unit that
+// finishes after the disable, cancelled here or run by another process
+// such as a host command, is recorded as canceled and changes no baseline,
+// incident or alert: SystemStore.FinalizeManagedScan checks the unit's
+// state as it saves the scan.
 func (a *App) DisableUnit(ctx context.Context, id string, expectedRevision int64, audit store.AuditEntry) (store.TenantRecord, error) {
 	record, err := a.Store.Platform().DisableTenant(ctx, id, expectedRevision, audit)
 	if err != nil {

@@ -258,6 +258,9 @@ func run(args []string) error {
 			return fmt.Errorf("unknown managed job %q; YAML jobs are inactive and must be recreated in the web console", *jobName)
 		}
 		scan, events, err := application.RunJobRecord(ctx, record)
+		if errors.Is(err, store.ErrTenantNotActive) {
+			err = hostScanPausedError(unit, scan, err)
+		}
 		auditHostCommand(ctx, tenant, store.AuditEntry{Action: "scan.run_requested", Detail: scanAuditDetail(record.ID, scan.Status, err)})
 		if printErr := printValue(*output, map[string]any{"scan": scan, "events": events}); printErr != nil {
 			return printErr

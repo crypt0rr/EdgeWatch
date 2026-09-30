@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/crypt0rr/edgewatch/internal/model"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -124,6 +125,18 @@ func hostUnitStore(ctx context.Context, s *store.Store, slug, cmd, action string
 		return store.Tenant{}, nil, fmt.Errorf("business unit %q is being deleted; %s cannot use it", unit.Slug, name)
 	}
 	return unit, s.Tenant(scope), nil
+}
+
+// hostScanPausedError explains a scan that stopped because its business unit
+// is no longer active. hostUnitStore found the unit active, so it was
+// disabled afterwards: before the scan took its lease, when nothing ran, or
+// while the scan ran. Such a scan is recorded as canceled and changes no
+// baseline, incident or alert, whichever process ran it.
+func hostScanPausedError(unit store.Tenant, scan model.Scan, err error) error {
+	if scan.ID == "" {
+		return fmt.Errorf("business unit %q was disabled before the scan started: %w", unit.Slug, err)
+	}
+	return fmt.Errorf("business unit %q was disabled while the scan ran; scan %s was canceled and changed no baseline, incident or alert: %w", unit.Slug, scan.ID, err)
 }
 
 // confirmAccountUnit runs before a recovery command changes the account.

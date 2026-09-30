@@ -75,9 +75,9 @@ func TestCreateAndRenameUnit(t *testing.T) {
 
 // Disabling a unit ends its sessions and invitations, fails its run that
 // waits for a scan slot, cancels its running scan, which is recorded as
-// canceled and leaves the baseline alone, and removes its jobs from the
-// schedule. The default unit's queued run takes the freed slot and
-// completes, and its accounts and schedule are untouched.
+// canceled and leaves the baseline and the alerts alone, and removes its
+// jobs from the schedule. The default unit's queued run takes the freed
+// slot and completes, and its accounts and schedule are untouched.
 func TestDisableUnitPausesTheUnitsWork(t *testing.T) {
 	ctx := context.Background()
 	sc := gatedScanner{started: make(chan string, 2), finish: make(chan struct{})}
@@ -100,6 +100,7 @@ func TestDisableUnitPausesTheUnitsWork(t *testing.T) {
 			}
 		}
 	}
+	alertsB := unitAlerts(t, f.db, secondTenantID)
 	runCtx, _ := f.app.BeginRun(ctx)
 	defer f.app.StopRun()
 	f.startSchedules(t, runCtx)
@@ -157,6 +158,9 @@ func TestDisableUnitPausesTheUnitsWork(t *testing.T) {
 	}
 	if state, err := b.RuntimeState(ctx, f.jobB.ID); err != nil || state.Baseline != nil || state.CandidateCount != 0 {
 		t.Fatalf("the cancelled scan changed tenant B's runtime state: %+v, %v", state, err)
+	}
+	if got := unitAlerts(t, f.db, secondTenantID); got != alertsB {
+		t.Fatalf("the cancelled scan added tenant B's events and queued alerts: %v, want %v", got, alertsB)
 	}
 	if state, err := f.db.Tenant(f.a).RuntimeState(ctx, f.jobA.ID); err != nil || state.Baseline == nil {
 		t.Fatalf("tenant A's run did not set its baseline: %+v, %v", state, err)

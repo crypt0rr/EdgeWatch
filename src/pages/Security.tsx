@@ -27,11 +27,13 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
   const [disablePrompt, setDisablePrompt] = useState(false)
   const [recoveryPrompt, setRecoveryPrompt] = useState(false)
   const [replacePrompt, setReplacePrompt] = useState(false)
+  const [setupPrompt, setSetupPrompt] = useState(false)
   const [revokePrompt, setRevokePrompt] = useState(false)
   const [recoveryBusy, setRecoveryBusy] = useState(false)
   const [displayName, setDisplayName] = useState('')
   const [displayNameBusy, setDisplayNameBusy] = useState(false)
   const [enrollmentPassword, setEnrollmentPassword] = useState('')
+  const [secretCopyMessage, setSecretCopyMessage] = useState('')
   const displayNameInitialized = useRef(false)
 
   useEffect(() => {
@@ -88,14 +90,32 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
     }
   }
 
-  async function beginTotp(password = current, factor = currentFactor) {
+  async function beginTotp(password: string, factor = '') {
     setError('')
     try {
       const value = await api<{ secret: string; otpauth: string }>('/auth/totp/setup', { method: 'POST', body: JSON.stringify({ password, ...(session.data?.totp_enabled ? factorPayload(factor) : {}) }) })
       setTotp(value)
+      setSecretCopyMessage('')
+      setCurrent('')
+      setEnrollmentPassword('')
+      setSetupPrompt(false)
       if (session.data?.totp_enabled) setReplacePrompt(false)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not start TOTP setup')
+    }
+  }
+
+  async function copyTotpSecret() {
+    setSecretCopyMessage('')
+    if (!totp || !navigator.clipboard?.writeText) {
+      setSecretCopyMessage('Clipboard access is unavailable. Select and copy the secret manually.')
+      return
+    }
+    try {
+      await navigator.clipboard.writeText(totp.secret)
+      setSecretCopyMessage('Authenticator secret copied.')
+    } catch {
+      setSecretCopyMessage('The secret could not be copied. Select and copy it manually.')
     }
   }
 
@@ -213,10 +233,21 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
       </div>
       <div className="panel">
         <div className="panel-heading"><div><h2>Authenticator app</h2><p className="muted">{session.data?.totp_enabled ? 'TOTP is protecting your sign-in.' : enrollment ? 'Required before you can use the console.' : 'Optional extra protection for sign-in.'}</p></div><ShieldCheck className={session.data?.totp_enabled ? 'green-icon' : 'muted-icon'} size={20} /></div>
-        {totp ? <div className="settings-form"><p className="muted">{session.data?.totp_enabled ? 'Scan this new secret in your authenticator app, then enter the six-digit code.' : 'Scan this secret in your authenticator app, then enter the six-digit code.'}</p><code className="secret">{totp.secret}</code><label>Verification code<input inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} placeholder="123456" /></label><button className="button primary" type="button" onClick={() => void enableTotp()}>{session.data?.totp_enabled ? 'Replace authenticator' : 'Enable TOTP'}</button></div> : session.data?.totp_enabled ? <div className="settings-form"><div className="status-line"><span className="pill green">Enabled</span><span className="muted">Recovery codes are single-use.</span></div>{!enrollment && <div className="heading-actions"><button className="button secondary" type="button" onClick={() => { setError(''); setRecoveryPrompt(true) }}>Regenerate recovery codes</button><button className="button secondary" type="button" onClick={() => { setError(''); setReplacePrompt(true) }}>Replace authenticator</button><button className="button secondary" type="button" onClick={() => { setError(''); setDisablePrompt(true) }}>Disable TOTP</button></div>}</div> : enrollment ? <form className="settings-form" onSubmit={event => { event.preventDefault(); void beginTotp(enrollmentPassword) }}><label>Account password<input type="password" value={enrollmentPassword} onChange={(event) => setEnrollmentPassword(event.target.value)} autoComplete="current-password" required /><small>Confirm your password, then scan the secret with your authenticator app.</small></label><button className="button primary" type="submit">Set up authenticator</button></form> : <div className="settings-form"><p className="muted">Enter your current password, then set up an authenticator app.</p><button className="button secondary" type="button" onClick={() => void beginTotp()}>Set up authenticator</button></div>}
+        {totp ? <div className="settings-form">
+          <p className="muted">Open the setup link in your authenticator app, or copy the grouped secret manually. Then enter the six-digit code shown by the app.</p>
+          <a className="button secondary" href={totp.otpauth}>Open authenticator app</a>
+          <div className="totp-secret-row">
+            <code className="secret" aria-label="Authenticator secret">{totp.secret.match(/.{1,4}/g)?.join(' ') ?? totp.secret}</code>
+            <button className="button secondary" type="button" onClick={() => void copyTotpSecret()}><Copy size={16} /> Copy secret</button>
+          </div>
+          {secretCopyMessage && <p className="helper" role="status">{secretCopyMessage}</p>}
+          <label>Verification code<input inputMode="numeric" value={code} onChange={(event) => setCode(event.target.value)} placeholder="123456" autoComplete="one-time-code" /></label>
+          <button className="button primary" type="button" onClick={() => void enableTotp()}>{session.data?.totp_enabled ? 'Replace authenticator' : 'Enable TOTP'}</button>
+        </div> : session.data?.totp_enabled ? <div className="settings-form"><div className="status-line"><span className="pill green">Enabled</span><span className="muted">Recovery codes are single-use.</span></div>{!enrollment && <div className="heading-actions"><button className="button secondary" type="button" onClick={() => { setError(''); setRecoveryPrompt(true) }}>Regenerate recovery codes</button><button className="button secondary" type="button" onClick={() => { setError(''); setReplacePrompt(true) }}>Replace authenticator</button><button className="button secondary" type="button" onClick={() => { setError(''); setDisablePrompt(true) }}>Disable TOTP</button></div>}</div> : enrollment ? <form className="settings-form" onSubmit={event => { event.preventDefault(); void beginTotp(enrollmentPassword) }}><label>Account password<input type="password" value={enrollmentPassword} onChange={(event) => setEnrollmentPassword(event.target.value)} autoComplete="current-password" required /><small>Confirm your password, then scan the secret with your authenticator app.</small></label><button className="button primary" type="submit">Set up authenticator</button></form> : <div className="settings-form"><p className="muted">Confirm your account password to set up an authenticator app.</p><button className="button secondary" type="button" onClick={() => { setCurrent(''); setError(''); setSetupPrompt(true) }}>Set up authenticator</button></div>}
       </div>
     </div>
-    {recovery.length > 0 && <div className="panel recovery"><h2>Save your recovery codes</h2><p className="muted">These are shown once. Store them somewhere offline before leaving this page.</p><div className="code-grid">{recovery.map((value) => <code key={value}>{value}</code>)}</div><label className="checkbox-row"><input type="checkbox" checked={recoveryAcknowledged} onChange={(event) => setRecoveryAcknowledged(event.target.checked)} /> I saved these recovery codes in a secure place.</label><div className="heading-actions"><button className="button secondary" type="button" onClick={() => navigator.clipboard?.writeText(recovery.join('\n'))}><Copy size={16} /> Copy codes</button><button className="button primary" type="button" onClick={finishTotpSetup} disabled={recoveryBusy || !recoveryAcknowledged}>{recoveryBusy ? 'Signing out…' : 'Continue to sign in'}</button></div></div>}
+    {recovery.length > 0 && <div className="panel recovery"><h2>Save your recovery codes</h2><p className="muted">These are shown once. Store them somewhere offline before leaving this page.</p><div className="code-grid">{recovery.map((value) => <code key={value}>{value}</code>)}</div><label className="checkbox-label recovery-ack"><input type="checkbox" checked={recoveryAcknowledged} onChange={(event) => setRecoveryAcknowledged(event.target.checked)} /><span>I saved these recovery codes in a secure place.</span></label><div className="heading-actions"><button className="button secondary" type="button" onClick={() => navigator.clipboard?.writeText(recovery.join('\n'))}><Copy size={16} /> Copy codes</button><button className="button primary" type="button" onClick={finishTotpSetup} disabled={recoveryBusy || !recoveryAcknowledged}>{recoveryBusy ? 'Signing out…' : 'Continue to sign in'}</button></div></div>}
+    {setupPrompt && <ActionDialog title="Set up authenticator?" description="Confirm your account password to begin setting up an authenticator app." confirmLabel="Start setup" valueLabel="Account password" valueType="password" valueRequired autoComplete="current-password" onConfirm={password => beginTotp(password)} onCancel={() => { setSetupPrompt(false); setError('') }} error={error} />}
     {disablePrompt && <ActionDialog title="Disable authenticator protection?" description="Enter your account password and current authenticator code (or a recovery code) to disable TOTP. Existing browser sessions will be signed out." confirmLabel="Disable TOTP" destructive valueLabel="Account password" valueType="password" valueRequired autoComplete="current-password" secondaryValueLabel="Current authenticator code or recovery code" secondaryValueRequired secondaryAutoComplete="one-time-code" onConfirm={(password, factor) => disableTotp(password, factor)} onCancel={() => setDisablePrompt(false)} error={error} />}
     {recoveryPrompt && <ActionDialog title="Regenerate recovery codes?" description="Enter your account password and current authenticator code (or a recovery code). Existing recovery codes will stop working immediately." confirmLabel="Regenerate codes" destructive valueLabel="Account password" valueType="password" valueRequired autoComplete="current-password" secondaryValueLabel="Current authenticator code or recovery code" secondaryValueRequired secondaryAutoComplete="one-time-code" onConfirm={(password, factor) => regenerateRecoveryCodes(password, factor)} onCancel={() => setRecoveryPrompt(false)} error={error} />}
     {replacePrompt && <ActionDialog title="Replace authenticator?" description="Enter your account password and current authenticator code (or a recovery code) to enroll a new authenticator without disabling TOTP." confirmLabel="Start replacement" valueLabel="Account password" valueType="password" valueRequired autoComplete="current-password" secondaryValueLabel="Current authenticator code or recovery code" secondaryValueRequired secondaryAutoComplete="one-time-code" onConfirm={(password, factor) => beginTotp(password, factor)} onCancel={() => setReplacePrompt(false)} error={error} />}

@@ -372,4 +372,80 @@ test.describe('responsive issue regressions', () => {
     expect(await page.locator('.content').evaluate(element => parseFloat(getComputedStyle(element).paddingBottom))).toBeGreaterThanOrEqual(110)
     await expectNoHorizontalScroll(page)
   })
+
+  test('TOTP setup uses its own password prompt and keeps recovery acknowledgement inline (#988)', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 })
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: async (value: string) => { document.documentElement.dataset.copiedSecret = value } },
+      })
+    })
+    await mockConsole(page, 'administrator')
+    let setupAttempts = 0
+    await page.route('**/api/v1/auth/totp/setup', async route => {
+      setupAttempts += 1
+      if (setupAttempts === 1) {
+        await route.fulfill({ status: 401, json: { error: { code: 'invalid_credentials', message: 'The password is incorrect.' } } })
+        return
+      }
+      await route.fulfill({ json: { secret: 'JBSWY3DPEHPK3PXP', otpauth: 'otpauth://totp/EdgeWatch:admin' } })
+    })
+    await page.route('**/api/v1/auth/totp/enable', async route => {
+      await route.fulfill({ json: { recovery_codes: ['AAAA-1111', 'BBBB-2222'] } })
+    })
+    await page.goto('/security')
+
+    const passwordPanel = page.getByLabel('Current password')
+    await passwordPanel.fill('password-from-password-panel')
+    await page.getByRole('button', { name: 'Set up authenticator' }).click()
+    const setupDialog = page.getByRole('dialog', { name: 'Set up authenticator?' })
+    await expect(setupDialog).toBeVisible()
+    await expect(passwordPanel).toHaveValue('')
+    await setupDialog.getByLabel('Account password').fill('incorrect-password')
+    await setupDialog.getByRole('button', { name: 'Start setup' }).click()
+    await expect(setupDialog.getByRole('alert')).toContainText('The password is incorrect.')
+    await expect(setupDialog.getByRole('alert')).toBeInViewport()
+    await setupDialog.getByLabel('Account password').fill('account-password')
+    await setupDialog.getByRole('button', { name: 'Start setup' }).click()
+    await expect(page.getByRole('link', { name: 'Open authenticator app' })).toHaveAttribute('href', 'otpauth://totp/EdgeWatch:admin')
+    await expect(page.getByLabel('Authenticator secret')).toHaveText('JBSW Y3DP EHPK 3PXP')
+    await page.getByRole('button', { name: 'Copy secret' }).click()
+    await expect(page.locator('.helper[role="status"]')).toContainText('Authenticator secret copied.')
+    expect(await page.evaluate(() => document.documentElement.dataset.copiedSecret)).toBe('JBSWY3DPEHPK3PXP')
+    await expectNoHorizontalScroll(page)
+
+    await page.getByLabel('Verification code').fill('123456')
+    await page.getByRole('button', { name: 'Enable TOTP' }).click()
+    const acknowledgement = page.getByRole('checkbox', { name: 'I saved these recovery codes in a secure place.' })
+    const label = page.locator('label.recovery-ack')
+    await expect(label).toBeVisible()
+    for (const width of [320, 1280, 1920]) {
+      await page.setViewportSize({ width, height: 844 })
+      await expectNoHorizontalScroll(page)
+      const layout = await acknowledgement.evaluate(input => {
+        const parent = input.closest('label')!
+        const inputBox = input.getBoundingClientRect()
+        const textBox = parent.querySelector('span')!.getBoundingClientRect()
+        const style = getComputedStyle(parent)
+        return {
+          width: inputBox.width,
+          height: inputBox.height,
+          display: style.display,
+          alignItems: style.alignItems,
+          gap: style.gap,
+          marginTop: style.marginTop,
+          marginBottom: style.marginBottom,
+          centersAligned: Math.abs((inputBox.top + inputBox.bottom) / 2 - (textBox.top + textBox.bottom) / 2) < 3,
+        }
+      })
+      expect(layout.width).toBe(16)
+      expect(layout.height).toBe(16)
+      expect(layout.display).toBe('flex')
+      expect(layout.alignItems).toBe('center')
+      expect(layout.centersAligned).toBe(true)
+      expect(layout.marginTop).toBe('4px')
+      expect(layout.marginBottom).toBe('14px')
+    }
+  })
 })

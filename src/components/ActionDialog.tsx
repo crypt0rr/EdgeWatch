@@ -103,7 +103,9 @@ export function ActionDialog({
     const focusables = () => Array.from(dialog?.querySelectorAll<HTMLElement>(focusableSelector) ?? [])
     const first = () => focusables()[0]
     const last = () => focusables().at(-1)
-    ;(valueRef.current ?? first())?.focus({ preventScroll: true })
+    // The dialog can be taller than a phone or landscape viewport. Let the
+    // browser scroll its own container so the focused field is actually visible.
+    ;(valueRef.current ?? first())?.focus()
 
     function onKeyDown(event: KeyboardEvent) {
       if (event.key === 'Escape') {

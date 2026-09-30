@@ -36,6 +36,18 @@ describe('job editor workflow coverage', () => {
   })
   afterEach(() => vi.clearAllMocks())
 
+  it('retries notification-destination loading without changing the new-job form', async () => {
+    vi.mocked(listNotificationDestinations).mockRejectedValueOnce(new Error('notification store unavailable'))
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Notification destinations could not be loaded.'))
+    expect(screen.getByLabelText('Job name')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /Mattermost/ })).toBeInTheDocument())
+    expect(screen.getByLabelText('Job name')).toBeInTheDocument()
+  })
+
   it('creates a Naabu job with startup disabled and explicit empty notification routing', async () => {
     renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())

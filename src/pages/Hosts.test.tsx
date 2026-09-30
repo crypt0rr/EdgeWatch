@@ -94,12 +94,16 @@ describe('global hosts explorer', () => {
   })
 
   it('shows an actionable error when the host index cannot be queried', async () => {
-    vi.mocked(listHosts).mockRejectedValue(new Error('offline'))
+    vi.mocked(listHosts).mockRejectedValueOnce(new Error('offline'))
+    vi.mocked(listHosts).mockResolvedValueOnce(response)
     await act(async () => {
       root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Hosts /></MemoryRouter></QueryClientProvider>)
     })
     await vi.waitFor(() => expect(container.querySelector('[role="alert"]')).toBeTruthy(), { timeout: 1000 })
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('Could not load scanned hosts.')
+    const retry = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Retry') as HTMLButtonElement
+    await act(async () => retry.click())
+    await vi.waitFor(() => expect(container.textContent).toContain('IPv6'), { timeout: 1000 })
   })
 
   it('keeps newer search results when an aborted request resolves late', async () => {

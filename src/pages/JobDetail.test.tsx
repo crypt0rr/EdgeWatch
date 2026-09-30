@@ -13,6 +13,7 @@ import {
   latestSuccessfulScan,
   scanDetail,
   scanCycle,
+  scanHosts,
   scanResults,
 } from '../api'
 import type { Job, ScanSummary } from '../types'
@@ -111,6 +112,7 @@ describe('job surface overview', () => {
     vi.mocked(jobBaseline).mockResolvedValue(baselineResponse)
     vi.mocked(latestSuccessfulScan).mockResolvedValue(latestResponse)
     vi.mocked(scanResults).mockResolvedValue(latestResultsResponse)
+    vi.mocked(scanHosts).mockResolvedValue({ hosts: [], pagination } as never)
     vi.mocked(scanDetail).mockResolvedValue(detailResponse)
     vi.mocked(jobScans).mockResolvedValue({ scans: [summary], pagination })
     vi.mocked(scanCycle).mockResolvedValue({ cycle: null })
@@ -129,6 +131,48 @@ describe('job surface overview', () => {
       await Promise.resolve()
     })
   }
+
+  it('retries baseline, latest-scan, history, and latest-result read errors', async () => {
+    vi.mocked(jobBaseline).mockRejectedValueOnce(new Error('baseline unavailable'))
+    vi.mocked(latestSuccessfulScan).mockRejectedValueOnce(new Error('latest scan unavailable'))
+    vi.mocked(jobScans).mockRejectedValueOnce(new Error('scan history unavailable'))
+    vi.mocked(scanResults).mockRejectedValueOnce(new Error('latest results unavailable'))
+    await renderPage()
+    for (const message of ['Could not load expected baseline results.', 'Could not load the latest successful scan.', 'Could not load recent scans.']) {
+      await vi.waitFor(() => expect(container.textContent).toContain(message), { timeout: 1000 })
+    }
+
+    const retries = Array.from(container.querySelectorAll('.error-card button')) as HTMLButtonElement[]
+    expect(retries).toHaveLength(3)
+    await act(async () => {
+      for (const retry of retries) retry.click()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.textContent).toContain('Could not load latest scan results.'), { timeout: 1000 })
+    const latestResultsRetry = Array.from(container.querySelectorAll('.error-card')).find(notice => notice.textContent?.includes('Could not load latest scan results.'))?.querySelector('button') as HTMLButtonElement
+    await act(async () => latestResultsRetry.click())
+    await vi.waitFor(() => expect(container.textContent).toContain('443/tcp'), { timeout: 1000 })
+  })
+
+  it('retries selected scan detail and snapshot-result read errors inline', async () => {
+    vi.mocked(scanDetail).mockRejectedValueOnce(new Error('scan detail unavailable'))
+    vi.mocked(scanDetail).mockResolvedValueOnce(detailResponse)
+    await renderPage()
+    await vi.waitFor(() => expect(container.querySelector('.scan-row')).not.toBeNull(), { timeout: 1000 })
+    act(() => (container.querySelector('.scan-row') as HTMLButtonElement).click())
+    await vi.waitFor(() => expect(container.textContent).toContain('Could not load this scan’s details.'), { timeout: 1000 })
+    const detailRetry = Array.from(container.querySelectorAll('.error-card')).find(notice => notice.textContent?.includes('Could not load this scan’s details.'))?.querySelector('button') as HTMLButtonElement
+    await act(async () => detailRetry.click())
+    await vi.waitFor(() => expect(container.textContent).toContain('Scan diff'), { timeout: 1000 })
+
+    vi.mocked(scanHosts).mockRejectedValueOnce(new Error('snapshot unavailable'))
+    vi.mocked(scanHosts).mockResolvedValueOnce({ hosts: [{ address: '198.51.100.10', open_ports: 1, open_filtered_ports: 0, protocols: [{ protocol: 'tcp' }] }], pagination } as never)
+    act(() => (Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'View results') as HTMLButtonElement).click())
+    await vi.waitFor(() => expect(container.textContent).toContain('Could not load scan results.'), { timeout: 1000 })
+    const resultsRetry = Array.from(container.querySelectorAll('.error-card')).find(notice => notice.textContent?.includes('Could not load scan results.'))?.querySelector('button') as HTMLButtonElement
+    await act(async () => resultsRetry.click())
+    await vi.waitFor(() => expect(container.textContent).toContain('View host details'), { timeout: 1000 })
+  })
 
   it('orders expected baseline, latest successful scan, and history vertically', async () => {
     await renderPage()

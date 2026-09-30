@@ -133,6 +133,34 @@ describe('public dashboard pages', () => {
     expect(container.querySelector('a[href="/login"]')).toBeTruthy()
   })
 
+  it('retries public-status configuration and host-list read failures', async () => {
+    vi.mocked(getPublicDashboardConfig).mockRejectedValueOnce(new Error('configuration unavailable'))
+    await renderPage(<PublicDashboardAdmin />)
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('Could not load the public-status configuration')
+    vi.mocked(getPublicDashboardConfig).mockResolvedValueOnce(publicConfig)
+    await act(async () => (container.querySelector('[role="alert"] button') as HTMLButtonElement).click())
+    await vi.waitFor(() => expect(container.textContent).toContain('Published hosts'), { timeout: 1000 })
+
+    act(() => {
+      const input = container.querySelector('input:not([type="checkbox"])') as HTMLInputElement
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+      setter?.call(input, 'EdgeWatch status')
+      input.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    expect((container.querySelector('input:not([type="checkbox"])') as HTMLInputElement).value).toBe('EdgeWatch status')
+
+    act(() => root.unmount())
+    root = createRoot(container)
+    queryClient.clear()
+    vi.mocked(getPublicDashboardConfig).mockResolvedValue(publicConfig)
+    vi.mocked(listHosts).mockRejectedValueOnce(new Error('host list unavailable'))
+    vi.mocked(listHosts).mockResolvedValueOnce(pickerResponse)
+    await renderPage(<PublicDashboardAdmin />)
+    await vi.waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toContain('Could not load scanned hosts.'), { timeout: 1000 })
+    await act(async () => (container.querySelector('[role="alert"] button') as HTMLButtonElement).click())
+    await vi.waitFor(() => expect(container.textContent).toContain('production'), { timeout: 1000 })
+  })
+
   it('limits public text by Unicode code points rather than UTF-16 units', () => {
     const emoji = '🙂'.repeat(120)
     expect(Array.from(limitUnicode(`${emoji}x`, 120))).toHaveLength(120)
@@ -170,7 +198,10 @@ describe('public dashboard pages', () => {
       await Promise.resolve()
       await Promise.resolve()
     })
-    await vi.waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toBe('the introduction cannot contain line breaks'), { timeout: 1000 })
+    await vi.waitFor(() => expect(container.querySelector('[role="alert"]')?.textContent).toContain('the introduction cannot contain line breaks'), { timeout: 1000 })
+    vi.mocked(savePublicDashboardConfig).mockResolvedValueOnce({ ...publicConfig, enabled: true })
+    await act(async () => (container.querySelector('[role="alert"] button') as HTMLButtonElement).click())
+    await vi.waitFor(() => expect(container.textContent).toContain('Public view saved.'), { timeout: 1000 })
   })
 
   it('separates archived and legacy hosts and saves checkbox changes', async () => {

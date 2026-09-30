@@ -4,6 +4,7 @@ import { ShieldCheck, UserPlus, UsersRound } from 'lucide-react'
 import { APIError, deletePendingPlatformAdmin, getSession, invitePlatformAdmin, listPlatformAdmins, renewPlatformAdminInvitation, revokePlatformAdminInvitation, setPlatformAdminEnabled } from '../../api'
 import type { UserSummary } from '../../api'
 import { ActionDialog } from '../../components/ActionDialog'
+import { ErrorNotice } from '../../components/ErrorNotice'
 import { usernameProblem } from '../Users'
 import { errorMessage, isChangedElsewhere, isConflict, lastSignIn, Loading, OneTimeLink } from './common'
 
@@ -144,7 +145,7 @@ export function PlatformAdmins() {
         </form>
       </div>
       <div className="panel"><div className="panel-heading"><div><h2>Platform administrators</h2><p className="muted">At least one enabled platform administrator is always kept. Disabling one ends its sessions. A pending one has not redeemed its invitation yet: renew the invitation for a new link, revoke it to stop the link, or remove the account to free its username.</p></div><ShieldCheck className="muted-icon" size={20} /></div>
-        {admins.isLoading ? <Loading label="Loading platform administrators…" /> : !admins.data ? <div className="error-card" role="alert">Could not load the platform administrators.</div> : <div className="user-list">{admins.data.admins.map(admin => {
+        {admins.isLoading ? <Loading label="Loading platform administrators…" /> : admins.error || !admins.data ? <ErrorNotice message="Could not load the platform administrators." onRetry={() => admins.refetch()} /> : <div className="user-list">{admins.data.admins.map(admin => {
           const self = admin.id === session.data?.user_id
           return <div className="user-row account-row" key={admin.id} data-testid={`admin-${admin.username}`}>
             <div><strong>{admin.display_name}{self ? ' (you)' : ''}</strong><span>{admin.username}{lastSignIn(admin.last_login_at)}</span></div>

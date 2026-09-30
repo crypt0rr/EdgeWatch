@@ -4,6 +4,7 @@ import { AlertTriangle, KeyRound, LogOut, ShieldCheck, UserPlus } from 'lucide-r
 import { APIError, inviteUnitAdmin, listUnitAccounts, resetUnitAdminPassword, revokeUnitAccountSessions } from '../../api'
 import type { BusinessUnit, UnitAccount } from '../../api'
 import { ActionDialog } from '../../components/ActionDialog'
+import { ErrorNotice } from '../../components/ErrorNotice'
 import { formatDateTime } from '../../format'
 import { usernameProblem } from '../Users'
 import { errorMessage, isChangedElsewhere, lastSignIn, Loading, OneTimeLink, unitRoleLabels } from './common'
@@ -126,7 +127,7 @@ export function UnitAccounts({ unit }: { unit: BusinessUnit }) {
       </div>
       <div className="panel"><div className="panel-heading"><div><h2>Accounts in {unit.name}</h2><p className="muted">You can reset the password only of an administrator, to recover a unit that is locked out. The unit’s administrators reset operators and viewers.</p></div><ShieldCheck className="muted-icon" size={20} /></div>
         {!active && <p className="notice">Enable the unit before resetting passwords or renewing activation links. The accounts of a disabled unit cannot sign in or redeem a link.</p>}
-        {accounts.isLoading ? <Loading label="Loading accounts…" /> : !accounts.data ? <div className="error-card" role="alert">Could not load the unit’s accounts.</div> : accounts.data.accounts.length ? <div className="user-list">{accounts.data.accounts.map(account => <AccountRow key={account.id} account={account} unitActive={active} onAction={ask} />)}</div> : <div className="inline-empty">No accounts yet. Invite the unit’s first administrator.</div>}
+        {accounts.isLoading ? <Loading label="Loading accounts…" /> : accounts.error || !accounts.data ? <ErrorNotice message="Could not load the unit’s accounts." onRetry={() => accounts.refetch()} /> : accounts.data.accounts.length ? <div className="user-list">{accounts.data.accounts.map(account => <AccountRow key={account.id} account={account} unitActive={active} onAction={ask} />)}</div> : <div className="inline-empty">No accounts yet. Invite the unit’s first administrator.</div>}
       </div>
     </div>
     {prompt && <AccountDialog prompt={prompt} unitName={unit.name} error={promptError} onConfirm={confirm} onCancel={() => { setPrompt(null); setPromptError('') }} />}

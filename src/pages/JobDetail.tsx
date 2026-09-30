@@ -33,6 +33,7 @@ import {
 } from '../api'
 import { Pagination } from '../components/Pagination'
 import { ActionDialog } from '../components/ActionDialog'
+import { ErrorNotice } from '../components/ErrorNotice'
 import { PortScopeDetails } from '../components/PortScopeDetails'
 import { SurfaceUnitList } from '../components/SurfaceUnitList'
 import type { WorkEstimate } from '../types'
@@ -124,7 +125,7 @@ export function JobDetail() {
     return <div className="loading"><span className="spinner" />Loading job…</div>
   }
   if (job.error || !job.data) {
-    return <div className="error-card" role="alert">{job.error ? 'This job could not be loaded.' : 'This job could not be found.'} {job.error && <button type="button" className="button ghost" onClick={() => void job.refetch()}>Retry</button>}</div>
+    return <section className="page"><Link className="back-link" to="/jobs">← Jobs</Link><ErrorNotice message={job.error ? 'This job could not be loaded.' : 'This job could not be found.'} onRetry={job.error ? () => job.refetch() : undefined} /></section>
   }
 
   const value = job.data
@@ -287,7 +288,7 @@ export function JobDetail() {
       aria-label={detail.data ? undefined : `Details for scan ${selectedScan.slice(0, 8)}`}
     >
       {detail.isLoading && <div className="loading"><span className="spinner" />Loading scan details…</div>}
-      {detail.error && <div className="error-card" role="alert">Could not load this scan’s details.</div>}
+      {detail.error && <ErrorNotice message="Could not load this scan’s details." onRetry={() => detail.refetch()} />}
       {detail.data && (
         <>
           <div className="panel-heading">
@@ -330,7 +331,7 @@ export function JobDetail() {
           <Pagination page={detail.data?.changes_pagination} onChange={setChangeOffset} />
           {showResults && <div className="scan-results">
             <div className="panel-heading"><div><h3>Snapshot results</h3><p className="muted">Loaded on demand; open an effective host for technical evidence.</p></div></div>
-            {results.isLoading ? <div className="skeleton-list" /> : results.error ? <div className="form-error" role="alert">Could not load scan results.</div> : results.data?.hosts.length ? <div className="result-list">{results.data.hosts.map((host) => <Link className="result-row" to={`/jobs/${id}/scans/${selectedScan}/hosts/${encodeURIComponent(host.address)}`} key={host.address}><strong title={host.address}>{host.address}</strong><span className="pill blue">{host.protocols?.map(protocol => protocol.protocol.toUpperCase()).join(' + ') || 'HOST'}</span><span className="muted">{host.open_ports + host.open_filtered_ports} positive ports · View host details</span></Link>)}</div> : <div className="inline-empty">No effective hosts in this scan.</div>}
+            {results.isLoading ? <div className="skeleton-list" /> : results.error ? <ErrorNotice message="Could not load scan results." onRetry={() => results.refetch()} /> : results.data?.hosts.length ? <div className="result-list">{results.data.hosts.map(host => <Link className="result-row" to={`/jobs/${id}/scans/${selectedScan}/hosts/${encodeURIComponent(host.address)}`} key={host.address}><strong title={host.address}>{host.address}</strong><span className="pill blue">{host.protocols?.map(protocol => protocol.protocol.toUpperCase()).join(' + ') || 'HOST'}</span><span className="muted">{host.open_ports + host.open_filtered_ports} positive ports · View host details</span></Link>)}</div> : <div className="inline-empty">No effective hosts in this scan.</div>}
             <Pagination page={results.data?.pagination} onChange={setResultsOffset} />
           </div>}
         </>
@@ -452,7 +453,7 @@ export function JobDetail() {
           </div>
           {baselineActive && (
             <div className="overview-results">
-              {baseline.isLoading ? <div className="skeleton-list" /> : baseline.error ? <div className="form-error" role="alert">Could not load expected baseline results.</div> : baseline.data?.snapshot?.units?.length ? <SurfaceUnitList units={baseline.data.snapshot.units} /> : <div className="inline-empty">No positive ports are in the current baseline.</div>}
+              {baseline.isLoading ? <div className="skeleton-list" /> : baseline.error ? <ErrorNotice message="Could not load expected baseline results." onRetry={() => baseline.refetch()} /> : baseline.data?.snapshot?.units?.length ? <SurfaceUnitList units={baseline.data.snapshot.units} /> : <div className="inline-empty">No positive ports are in the current baseline.</div>}
               <Pagination page={baseline.data?.pagination} onChange={setBaselineOffset} />
             </div>
           )}
@@ -466,14 +467,14 @@ export function JobDetail() {
             </div>
             <Clock3 size={18} className="muted-icon" />
           </div>
-          {latest.isLoading ? <div className="skeleton-list" /> : latest.error ? <div className="error-card" role="alert">Could not load the latest successful scan.</div> : latest.data?.scan ? (
+          {latest.isLoading ? <div className="skeleton-list" /> : latest.error ? <ErrorNotice message="Could not load the latest successful scan." onRetry={() => latest.refetch()} /> : latest.data?.scan ? (
             <>
               <div className="latest-scan-meta">
                 <div><strong>{formatDateTime(latest.data.scan.finished_at)}</strong><span className="muted">Scan {latest.data.scan.id.slice(0, 8)}</span></div>
                 <Link className="button ghost" to={`/jobs/${id}/scans/${encodeURIComponent(latest.data.scan.id)}`}>Open scan details →</Link>
               </div>
               <div className="overview-results">
-                {latestResults.isLoading ? <div className="skeleton-list" /> : latestResults.error ? <div className="form-error" role="alert">Could not load latest scan results.</div> : latestResults.data?.results?.length ? <SurfaceUnitList units={latestResults.data.results} emptyLabel="No positive ports were found in this scan." /> : <div className="inline-empty">No positive ports were found in this scan.</div>}
+                {latestResults.isLoading ? <div className="skeleton-list" /> : latestResults.error ? <ErrorNotice message="Could not load latest scan results." onRetry={() => latestResults.refetch()} /> : latestResults.data?.results?.length ? <SurfaceUnitList units={latestResults.data.results} emptyLabel="No positive ports were found in this scan." /> : <div className="inline-empty">No positive ports were found in this scan.</div>}
                 <Pagination page={latestResults.data?.pagination} onChange={setLatestResultsOffset} />
               </div>
             </>
@@ -494,7 +495,7 @@ export function JobDetail() {
               {selectedScanDetail}
             </div>
           )}
-          {scans.isLoading ? <div className="skeleton-list" /> : scans.error ? <div className="error-card" role="alert">Could not load recent scans.</div> : scans.data?.scans.length ? (
+          {scans.isLoading ? <div className="skeleton-list" /> : scans.error ? <ErrorNotice message="Could not load recent scans." onRetry={() => scans.refetch()} /> : scans.data?.scans.length ? (
             <div className="scan-list">
               {scans.data.scans.map((scan) => (
                 <div className={selectedScan === scan.id ? 'scan-entry expanded' : 'scan-entry'} key={scan.id}>

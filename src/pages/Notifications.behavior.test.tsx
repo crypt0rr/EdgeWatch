@@ -36,6 +36,23 @@ describe('notification destination workflows', () => {
     })
   }
 
+  it('retries an unavailable destination list', async () => {
+    vi.mocked(listNotificationDestinations).mockRejectedValueOnce(new Error('destination store unavailable'))
+    renderWithProviders(<Notifications />)
+    await waitFor(() => expect(screen.getByText('Could not load notification destinations.')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.getByText('Mattermost')).toBeInTheDocument())
+  })
+
+  it('lets an administrator cancel destination editing', async () => {
+    renderWithProviders(<Notifications />)
+    await waitFor(() => expect(screen.getByText('Mattermost')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByRole('button', { name: 'Save changes' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('button', { name: 'Save changes' })).not.toBeInTheDocument()
+  })
+
   it('creates, edits, pauses, tests, and removes a destination', async () => {
     renderWithProviders(<Notifications />)
     await waitFor(() => expect(screen.getByText('Mattermost')).toBeInTheDocument())

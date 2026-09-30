@@ -5,6 +5,7 @@ import { AlertTriangle, Gauge, Globe2, Trash2 } from 'lucide-react'
 import { APIError, deleteUnit, disableUnit, enableUnit, getUnit, getUnitCapacity, highCostNotGranted, renameUnit, updateUnitCapacity } from '../../api'
 import type { BusinessUnit, DeploymentLimits, UnitCapacity, UnitCapacitySettings } from '../../api'
 import { ActionDialog } from '../../components/ActionDialog'
+import { ErrorNotice } from '../../components/ErrorNotice'
 import { formatDateTime } from '../../format'
 import { errorMessage, formatCount, isChangedElsewhere, isConflict, Loading, plural, publicPath, publicURL, slugProblem, UnitStatusPill } from './common'
 import { UnitAccounts } from './UnitAccounts'
@@ -27,7 +28,7 @@ export function UnitDetail({ permissions }: { permissions: string[] }) {
   const visibleTabs = tabs.filter(item => !item.permission || permissions.includes(item.permission))
   const active = visibleTabs.some(item => item.key === tab) ? tab : 'overview'
   if (unit.isLoading) return <Loading label="Loading business unit…" />
-  if (unit.error || !unit.data) return <section className="page"><Link className="back-link" to="/platform/units">← Business units</Link><div className="error-card" role="alert">This business unit could not be loaded.</div></section>
+  if (unit.error || !unit.data) return <section className="page"><Link className="back-link" to="/platform/units">← Business units</Link><ErrorNotice message="This business unit could not be loaded." onRetry={() => unit.refetch()} /></section>
   const value = unit.data
   return <section className="page">
     <div className="page-heading"><div><Link className="back-link" to="/platform/units">← Business units</Link><div className="title-row"><h1>{value.name}</h1><UnitStatusPill status={value.status} />{value.is_default && <span className="pill blue">Default</span>}</div><p className="muted">/public/{value.slug} · {plural(value.accounts, 'account')} · {plural(value.jobs, 'job')} · {plural(value.stored_scans, 'stored scan')} · created {formatDateTime(value.created_at)}</p></div></div>
@@ -185,7 +186,7 @@ export function capacityProblems(draft: CapacityDraft, limits: DeploymentLimits)
 function UnitCapacityTab({ unit }: { unit: BusinessUnit }) {
   const capacity = useQuery({ queryKey: ['platform-unit-capacity', unit.id], queryFn: () => getUnitCapacity(unit.id), refetchInterval: 15_000 })
   if (capacity.isLoading) return <Loading label="Loading capacity…" />
-  if (!capacity.data) return <div className="error-card" role="alert">Could not load the unit’s capacity.</div>
+  if (!capacity.data) return <ErrorNotice message="Could not load the unit’s capacity." onRetry={() => capacity.refetch()} />
   return <UnitCapacityForm unit={unit} capacity={capacity.data} />
 }
 

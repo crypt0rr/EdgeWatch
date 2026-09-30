@@ -3,6 +3,7 @@ import { Activity } from 'lucide-react'
 import { platformStatus } from '../../api'
 import type { ApplicationUpdateStatus } from '../../api'
 import { UntrustedProxyBanner } from '../../components/UntrustedProxyBanner'
+import { ErrorNotice } from '../../components/ErrorNotice'
 import { formatCount, Loading, plural } from './common'
 
 /** How the release check describes the running version. */
@@ -24,7 +25,7 @@ export function updateSummary(updates?: ApplicationUpdateStatus) {
 export function PlatformStatusPage() {
   const status = useQuery({ queryKey: ['platform-status'], queryFn: platformStatus, refetchInterval: 15_000 })
   if (status.isLoading) return <Loading label="Loading the platform status…" />
-  if (!status.data) return <section className="page"><div className="error-card" role="alert">Could not load the platform status.</div></section>
+  if (!status.data) return <section className="page"><div className="page-heading"><div><p className="eyebrow">Platform</p><h1>Status</h1><p className="muted">The deployment at a glance. Which jobs run is visible only inside each unit.</p></div><Activity className="muted-icon" size={24} /></div><ErrorNotice message="Could not load the platform status." onRetry={() => status.refetch()} /></section>
   const value = status.data
   const { limits, slots } = value.capacity
   const releaseURL = value.updates?.release_url

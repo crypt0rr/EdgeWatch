@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, Code2, LockKeyhole, Plus, RotateCcw, Save, ShieldCheck, Trash2 } from 'lucide-react'
 import { APIError, archiveScannerProfile, createScannerProfile, getSession, listScannerProfiles, restoreScannerProfile, updateScannerProfile, validateScannerProfile } from '../api'
 import type { ScannerProfile, ScannerProfilePayload } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
+import { ErrorNotice } from '../components/ErrorNotice'
 
 type PreviewCommand = { executable: string; args: string[] }
 
@@ -37,6 +38,11 @@ export function ScannerProfiles() {
   const [saving, setSaving] = useState(false)
   const [preview, setPreview] = useState<PreviewCommand[]>([])
   const [pendingLifecycle, setPendingLifecycle] = useState<{ profile: ScannerProfile; action: 'archive' | 'restore' } | null>(null)
+  const feedbackRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (message || error) feedbackRef.current?.scrollIntoView?.({ block: 'nearest' })
+  }, [message, error])
 
   function reset() {
     setEditing(null)
@@ -141,11 +147,9 @@ export function ScannerProfiles() {
 
   return <section className="page">
     <div className="page-heading"><div><p className="eyebrow">Administration</p><h1>Scanner profiles</h1><p className="muted">Tune fixed Naabu and Nmap executables with validated argument arrays. Profiles are revisioned and never execute through a shell.</p></div>{canManage && <button className="button primary" onClick={reset}><Plus size={16} /> New profile</button>}</div>
-    {message && <div className="success-banner" role="status"><ShieldCheck size={16} />{message}</div>}
-    {error && <div className="form-error banner" role="alert">{error}</div>}
     <div className="dashboard-columns">
       <div className="panel"><div className="panel-heading"><div><h2>Available profiles</h2><p className="muted">Built-ins are immutable. Archived profiles remain available to existing jobs.</p></div><Code2 className="muted-icon" size={18} /></div>
-        {profiles.isLoading ? <div className="loading"><span className="spinner" />Loading profiles…</div> : profiles.error ? <div className="error-card" role="alert">Could not load scanner profiles.</div> : <>{(profiles.data?.invalid_profiles?.length ?? 0) > 0 && <div className="notice warning" role="status"><AlertTriangle size={16} /><span><strong>{profiles.data?.invalid_profiles?.length} stored profile{profiles.data?.invalid_profiles?.length === 1 ? '' : 's'} need attention.</strong> Invalid definitions are hidden from selection until repaired or removed.</span></div>}{profiles.data?.profiles.length ? <div className="activity-list">{profiles.data.profiles.map(profile => <div className="activity-row" key={profile.id}><div><strong>{profile.name}</strong><span>{profile.definition.engine === 'naabu_nmap' ? 'Naabu full TCP → Nmap' : 'Nmap'} · revision {profile.revision}{profile.archived ? ' · archived' : ''}</span></div><span className={profile.built_in ? 'pill blue' : profile.archived ? 'pill gray' : 'pill green'}>{profile.built_in ? 'Built-in' : profile.archived ? 'Archived' : 'Managed'}</span>{canManage && !profile.built_in && <><button className="icon-button" aria-label={`Edit ${profile.name}`} onClick={() => select(profile)}><Save size={15} /></button>{profile.archived ? <button className="icon-button" aria-label={`Restore ${profile.name}`} onClick={() => requestLifecycle(profile, 'restore')}><RotateCcw size={15} /></button> : <button className="icon-button" aria-label={`Archive ${profile.name}`} onClick={() => requestLifecycle(profile, 'archive')}><Trash2 size={15} /></button>}</>}</div>)}</div> : <div className="inline-empty">No valid scanner profiles are configured.</div>}</>}
+        {profiles.isLoading ? <div className="loading"><span className="spinner" />Loading profiles…</div> : profiles.error ? <ErrorNotice message="Could not load scanner profiles." onRetry={() => profiles.refetch()} /> : <>{(profiles.data?.invalid_profiles?.length ?? 0) > 0 && <div className="notice warning" role="status"><AlertTriangle size={16} /><span><strong>{profiles.data?.invalid_profiles?.length} stored profile{profiles.data?.invalid_profiles?.length === 1 ? '' : 's'} need attention.</strong> Invalid definitions are hidden from selection until repaired or removed.</span></div>}{profiles.data?.profiles.length ? <div className="activity-list">{profiles.data.profiles.map(profile => <div className="activity-row" key={profile.id}><div><strong>{profile.name}</strong><span>{profile.definition.engine === 'naabu_nmap' ? 'Naabu full TCP → Nmap' : 'Nmap'} · revision {profile.revision}{profile.archived ? ' · archived' : ''}</span></div><span className={profile.built_in ? 'pill blue' : profile.archived ? 'pill gray' : 'pill green'}>{profile.built_in ? 'Built-in' : profile.archived ? 'Archived' : 'Managed'}</span>{canManage && !profile.built_in && <><button className="icon-button" aria-label={`Edit ${profile.name}`} onClick={() => select(profile)}><Save size={15} /></button>{profile.archived ? <button className="icon-button" aria-label={`Restore ${profile.name}`} onClick={() => requestLifecycle(profile, 'restore')}><RotateCcw size={15} /></button> : <button className="icon-button" aria-label={`Archive ${profile.name}`} onClick={() => requestLifecycle(profile, 'archive')}><Trash2 size={15} /></button>}</>}</div>)}</div> : <div className="inline-empty">No valid scanner profiles are configured.</div>}</>}
       </div>
       <div className="panel form-panel"><div className="panel-heading"><div><h2 title={editing ? `Edit ${editing.name}` : 'Create profile'}>{editing ? `Edit ${editing.name}` : 'Create profile'}</h2><p className="muted">{canManage ? 'Password confirmation is required for every mutation.' : 'Profiles are read-only for your account.'}</p></div><LockKeyhole className="muted-icon" size={18} /></div>{!canManage && <div className="notice notification-read-only" role="status"><LockKeyhole size={16} />Only administrators can create, validate, or revise scanner profiles.</div>}
         <label>Name<input value={draft.name ?? ''} title={draft.name ?? ''} onChange={event => setDraft({ ...draft, name: event.target.value })} placeholder="Careful Naabu defaults" /></label>
@@ -169,6 +173,7 @@ export function ScannerProfiles() {
         <fieldset><legend>Operator-adjustable fields</legend><div className="two-fields">{adjustable.map(field => <label key={field} className="switch-row"><input type="checkbox" checked={(draft.operator_adjustable ?? []).includes(field)} onChange={event => toggleAdjustable(field, event.target.checked)} /><span><strong>{field}</strong><small>Permit job-level tuning within bounds</small></span></label>)}</div><p className="helper">Bounds use the product safety limits by default; the API validates any administrator changes.</p></fieldset>
         {preview.length > 0 && <div className="scanner-preview" role="region" aria-label="Effective command preview"><h3>Effective command preview</h3><p className="helper">Documentation-only examples use fixed EdgeWatch executables and safe sample values. They are never executed.</p>{preview.map((command, index) => <pre key={`${command.executable}-${index}`}><code>{formatCommand(command)}</code></pre>)}</div>}
         {canManage && <><label>Password confirmation<input type="password" value={password} onChange={event => setPassword(event.target.value)} autoComplete="current-password" /></label><div className="heading-actions"><button className="button secondary" type="button" onClick={validate}>Validate & preview</button><button className="button primary" type="button" disabled={saving} onClick={save}><Save size={16} />{saving ? 'Saving…' : editing ? 'Save revision' : 'Create profile'}</button></div></>}
+        {(message || error) && <div ref={feedbackRef} className="profile-save-feedback save-feedback">{message && <div className="success-banner" role="status"><ShieldCheck size={16} />{message}</div>}{error && !pendingLifecycle && <div className="form-error" role="alert">{error}</div>}</div>}
       </div>
     </div>
     {pendingLifecycle && <ActionDialog

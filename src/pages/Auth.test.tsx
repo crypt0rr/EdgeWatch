@@ -163,6 +163,49 @@ describe('authentication pages', () => {
     expect(container.querySelector('[role="alert"]')).toBeNull()
   })
 
+  it.each([
+    [undefined, 'a short while'],
+    [1, '1 second'],
+    [61, '2 minutes'],
+    [3600, '1 hour'],
+    [7200, '2 hours'],
+    [86400, '1 day'],
+    [172800, '2 days'],
+  ] as const)('formats a %s-second sign-in cooldown', async (seconds, expectedWait) => {
+    await renderPage(<Login />, '/login')
+    const form = container.querySelector('form') as HTMLFormElement
+    vi.mocked(login).mockRejectedValueOnce(new APIError('rate limited', 'rate_limited', undefined, 429, seconds))
+
+    await act(async () => {
+      submitForm(form)
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    expect(container.querySelector('[role="alert"]')?.textContent).toBe(`Too many sign-in attempts. Try again in about ${expectedWait}.`)
+  })
+
+  it('normalizes unexpected authentication errors and handles empty or non-error failures', async () => {
+    await renderPage(<Login />, '/login')
+    const form = container.querySelector('form') as HTMLFormElement
+    const failures: Array<[unknown, string]> = [
+      [new APIError('service unavailable', 'internal_error'), 'Service unavailable.'],
+      [new Error(''), 'Sign-in failed.'],
+      ['unexpected failure', 'Unable to sign in.'],
+      [new Error('Already expired!'), 'Already expired!'],
+    ]
+
+    for (const [failure, expected] of failures) {
+      vi.mocked(login).mockRejectedValueOnce(failure)
+      await act(async () => {
+        submitForm(form)
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+      expect(container.querySelector('[role="alert"]')?.textContent).toBe(expected)
+    }
+  })
+
   it('validates setup locally, toggles password visibility, and creates the administrator', async () => {
     await renderFirstRunSetup()
     const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]

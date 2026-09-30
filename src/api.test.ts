@@ -49,6 +49,37 @@ describe('API pagination contract', () => {
     })
   })
 
+  it('parses HTTP-date Retry-After headers and ignores malformed values', async () => {
+    const retryAt = new Date(Date.now() + 60_000).toUTCString()
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'too many attempts' } }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', 'Retry-After': retryAt },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'too many attempts' } }), {
+        status: 429,
+        headers: { 'Content-Type': 'application/json', 'Retry-After': 'not a date' },
+      }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    let datedError: unknown
+    try {
+      await api('/auth/login', { method: 'POST', body: '{}' })
+    } catch (error) {
+      datedError = error
+    }
+    expect(datedError).toMatchObject({ retryAfterSeconds: expect.any(Number) })
+    expect((datedError as APIError).retryAfterSeconds).toBeGreaterThan(0)
+
+    let malformedError: unknown
+    try {
+      await api('/auth/login', { method: 'POST', body: '{}' })
+    } catch (error) {
+      malformedError = error
+    }
+    expect(malformedError).toMatchObject({ retryAfterSeconds: undefined })
+  })
+
   it('signals session expiry for authenticated requests without redirecting login failures', async () => {
     const dispatchEvent = vi.fn()
     vi.stubGlobal('window', { dispatchEvent })

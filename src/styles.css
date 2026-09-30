@@ -1875,6 +1875,59 @@ label small,
   }
 }
 
+/* Shared console orientation and state indicators (#989–#990). */
+.skip-link {
+  position: fixed;
+  top: 12px;
+  left: -10000px;
+  z-index: 200;
+  padding: 10px 14px;
+  border: 1px solid #65a9ff;
+  border-radius: 8px;
+  background: #10243a;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.skip-link:focus {
+  left: 16px;
+  outline: 3px solid #65a9ff;
+  outline-offset: 2px;
+}
+
+.main:focus { outline: 2px solid #65a9ff; outline-offset: -2px; }
+.status-dot.connecting i { background: var(--amber); box-shadow: 0 0 0 4px #f1bd6a1c; }
+.status-dot.live i { background: var(--green); box-shadow: 0 0 0 4px #5bd4a01c; }
+.status-dot.reconnecting i { background: var(--red); box-shadow: 0 0 0 4px #f37d831c; }
+.status-dot.unavailable i { background: #8296ae; box-shadow: 0 0 0 4px #8296ae1c; }
+.platform-update-notice { margin-bottom: 16px; }
+
+@media (max-width: 760px) {
+  .topbar-actions .status-dot {
+    display: inline-flex;
+    min-width: 16px;
+    justify-content: center;
+    color: transparent;
+  }
+
+  .topbar-actions .status-dot-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .platform-shell .topbar-actions { display: none; }
+  .platform-breadcrumb-prefix { display: none; }
+  .enrollment-account .button { flex: 0 0 auto; white-space: nowrap; }
+}
+
 .totp-secret-row {
   display: flex;
   align-items: center;

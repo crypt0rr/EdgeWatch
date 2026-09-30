@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useQuery } from '@tanstack/react-query'
 import { useLocation } from 'react-router-dom'
 import { APIError, adminStatus, acceptIncident, getSession, listIncidents, listJobs, login, logout, recordActivity, setupStatus, suppressIncident } from './api'
-import { AppContent, AuthRoutes, createQueryClient, Incidents, Jobs, ProtectedApp, retryQuery, Shell } from './main'
+import { AppContent, AuthRoutes, createQueryClient, Incidents, Jobs, ProtectedApp, retryQuery, Shell, unitBreadcrumb } from './main'
 import { renderWithProviders } from './test/test-utils'
 
 vi.mock('./api', async () => {
@@ -72,7 +72,30 @@ describe('application shell', () => {
     expect(screen.queryByRole('link', { name: 'Notifications' })).not.toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('EdgeWatch v0.18.70')).toBeInTheDocument())
     expect(screen.getByRole('link', { name: /Update available/ })).toBeInTheDocument()
+    expect(screen.getByRole('status', { name: 'Live updates unavailable' })).toHaveClass('unavailable')
     expect(adminStatus).toHaveBeenCalledOnce()
+  })
+
+  it('uses stable page labels for breadcrumbs and excludes record IDs and encoded addresses', () => {
+    const links = [{ to: '/jobs', label: 'Jobs' }, { to: '/hosts', label: 'Hosts' }, { to: '/scanner-profiles', label: 'Scanner profiles' }]
+    expect(unitBreadcrumb('/scanner-profiles', links)).toBe('Scanner profiles')
+    expect(unitBreadcrumb('/public-dashboard', [{ to: '/public-dashboard', label: 'Public status' }])).toBe('Public status')
+    expect(unitBreadcrumb('/jobs/job-123/scans/scan-456', links)).toBe('Jobs / Scan')
+    expect(unitBreadcrumb('/jobs/job-123/baseline/hosts/2001%3Adb8%3A%3A1', links)).toBe('Jobs / Baseline host')
+    expect(unitBreadcrumb('/scans/scan-456/hosts/2001%3Adb8%3A%3A1', links)).toBe('Hosts / Scan host')
+  })
+
+  it('provides a skip link, marks the current page, names the document, and focuses main after navigation', async () => {
+    renderWithProviders(<Shell displayName="Admin" role="administrator" permissions={['jobs.read', 'hosts.read', 'stream.read']} onLogout={vi.fn()} />, { route: ['/jobs'] })
+    expect(screen.getByRole('link', { name: 'Skip to content' })).toHaveAttribute('href', '#main-content')
+    expect(screen.getByRole('link', { name: 'Jobs' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByLabelText('Breadcrumb: Jobs')).toBeInTheDocument()
+    expect(document.title).toBe('Jobs · EdgeWatch')
+    fireEvent.click(screen.getByRole('link', { name: 'Hosts' }))
+    await waitFor(() => expect(document.getElementById('main-content')).toHaveFocus())
+    expect(screen.getByRole('link', { name: 'Hosts' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByLabelText('Breadcrumb: Hosts')).toBeInTheDocument()
+    expect(document.title).toBe('Hosts · EdgeWatch')
   })
 
   it('keeps the protected shell loading while the authenticated session is still pending', async () => {
@@ -129,9 +152,9 @@ describe('application shell', () => {
       stream.emit('unrecognised-event')
       stream.onopen?.()
     })
-    await waitFor(() => expect(screen.getByText('Live updates')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Live updates' })).toHaveClass('live'))
     act(() => stream.onerror?.())
-    await waitFor(() => expect(screen.getByText('Reconnecting…')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Reconnecting…' })).toHaveClass('reconnecting'))
   })
 
   it('shows the version as plain text when the build has no published release', async () => {

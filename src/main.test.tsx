@@ -205,6 +205,9 @@ describe('application shell', () => {
     vi.mocked(listJobs).mockRejectedValueOnce(new Error('jobs unavailable'))
     renderWithProviders(<Jobs />)
     await waitFor(() => expect(screen.getByText('Could not load jobs.')).toBeInTheDocument())
+    vi.mocked(listJobs).mockResolvedValueOnce({ jobs: [] } as never)
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.getByText('No jobs yet')).toBeInTheDocument())
     cleanup()
     vi.mocked(listJobs).mockResolvedValueOnce({ jobs: [] } as never)
     vi.mocked(getSession).mockResolvedValueOnce({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: [], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 } } as never)
@@ -238,6 +241,15 @@ describe('application shell', () => {
     fireEvent.click(create)
   })
 
+  it('retries a failed incident list read', async () => {
+    vi.mocked(listIncidents).mockRejectedValueOnce(new Error('incident service unavailable'))
+    renderWithProviders(<Incidents />)
+    await waitFor(() => expect(screen.getByText('Could not load active incidents.')).toBeInTheDocument())
+    vi.mocked(listIncidents).mockResolvedValueOnce({ incidents: [], pagination: { limit: 50, offset: 0, total: 0, has_more: false, next_offset: null } })
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.getByText('No active incidents')).toBeInTheDocument())
+  })
+
   it('accepts and suppresses incidents, refreshes conflicts, and disables legacy actions', async () => {
     const incident = { job_id: 'job-1', job: 'TCP monitor', incident: { change: { key: 'tcp:198.51.100.10:443', kind: 'port', target: '198.51.100.10', protocol: 'tcp', port: 443, old: 'closed', new: 'open', severity: 'critical' }, opened_at: '2026-01-01T00:00:00Z', last_seen_at: '2026-01-01T00:01:00Z' } }
     const legacy = { ...incident, job_id: 'job-2', incident: { ...incident.incident, change: { ...incident.incident.change, key: undefined, old: undefined, new: undefined } } }
@@ -246,6 +258,9 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getAllByRole('button', { name: 'Accept change' })).toHaveLength(4))
     expect(screen.getAllByText('No before/after value recorded')).toHaveLength(2)
     expect(screen.getAllByRole('button', { name: 'Accept change' })[1]).toBeDisabled()
+    fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
     await waitFor(() => expect(acceptIncident).toHaveBeenCalledWith('job-1', 'tcp:198.51.100.10:443', incident.incident.change))
@@ -356,6 +371,9 @@ describe('application shell', () => {
     vi.mocked(getSession).mockRejectedValueOnce(new Error('unauthenticated'))
     renderWithProviders(<AppContent />, { route: ['/'] })
     await waitFor(() => expect(screen.getByText('Unable to contact EdgeWatch.')).toBeInTheDocument())
+    vi.mocked(setupStatus).mockResolvedValueOnce({ configured: true } as never)
+    fireEvent.click(screen.getByRole('button', { name: 'Reload status' }))
+    await waitFor(() => expect(screen.getByRole('heading', { name: /Sign in to EdgeWatch/ })).toBeInTheDocument())
     cleanup()
     vi.mocked(setupStatus).mockResolvedValueOnce({ configured: true } as never)
     vi.mocked(getSession).mockRejectedValueOnce(new Error('unauthenticated'))

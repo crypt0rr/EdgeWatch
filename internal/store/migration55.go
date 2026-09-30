@@ -21,14 +21,18 @@ import (
 // legacyPurgeMaintenanceState, which edgewatch verify lists. The daemon's
 // purge worker then runs RunLegacyPurgeMaintenance on each pass, which runs
 // the maintenance of the tenant purge (runSearchMaintenance) once more: a
-// merge of every segment of each search index, resumable across passes and
-// restarts within the same bounded budget per pass, then a checkpoint that
-// must truncate the log. It marks the row complete once all of that has
-// finished; the cleanup never runs again.
+// merge of every segment of each search index, then, in a database without
+// incremental auto-vacuum, the overwrite of every free page, resumable
+// across passes and restarts within the same bounded budget per pass, then
+// a checkpoint that must truncate the log. It marks the row complete once
+// all of that has finished; the cleanup does not run again unless a later
+// migration records it again (see migration56.go).
 //
 // The checkpoint row's last_rowid is the position of the phase the cleanup
 // reached in legacyPurgeMaintenancePhases, and processed_rows the number of
-// phases it has finished.
+// phases it has finished. Releases before schema 56 had no free-pages phase,
+// so their last position, the checkpoint phase, is now that of the
+// free-pages phase, which comes before it.
 const (
 	// legacyPurgeMaintenanceState is the fts_backfill_state checkpoint of the
 	// cleanup.
@@ -57,14 +61,15 @@ AND EXISTS (SELECT 1 FROM fts_backfill_state WHERE table_name='` + legacyPurgeMa
 }
 
 // legacyPurgeMaintenancePhases are the phases of the cleanup in order: the
-// cleanup before it has begun, the compaction of each search index, and the
-// checkpoint.
+// cleanup before it has begun, the compaction of each search index, the
+// overwrite of free pages, which a database with incremental auto-vacuum
+// skips, and the checkpoint.
 func legacyPurgeMaintenancePhases() []string {
 	phases := []string{""}
 	for _, index := range tenantPurgeSearchIndexes {
 		phases = append(phases, tenantPurgePhaseCompact+index)
 	}
-	return append(phases, tenantPurgePhaseCheckpoint)
+	return append(phases, tenantPurgePhaseFreePages, tenantPurgePhaseCheckpoint)
 }
 
 // legacyPurgeMaintenancePhaseAt returns the phase at a position of
@@ -86,13 +91,14 @@ type LegacyPurgeMaintenanceResult struct {
 	Pending bool
 	// Started reports that this pass began the cleanup.
 	Started bool
-	// Phase is the phase the cleanup reached: a compaction phase or the
-	// checkpoint phase of the tenant purge, "" before it has begun, or
-	// complete.
+	// Phase is the phase the cleanup reached: a compaction phase, the
+	// free-pages phase or the checkpoint phase of the tenant purge, "" before
+	// it has begun, or complete.
 	Phase string
 	// Deferred reports that a tenant is being deleted. Its purge compacts
-	// the search indexes and truncates the log once its rows are erased,
-	// which completes this cleanup too, so the pass left the cleanup alone.
+	// the search indexes, overwrites free pages where it must, and truncates
+	// the log once its rows are erased, which completes this cleanup too, so
+	// the pass left the cleanup alone.
 	Deferred bool
 	// Complete reports that the cleanup finished in this pass.
 	Complete bool

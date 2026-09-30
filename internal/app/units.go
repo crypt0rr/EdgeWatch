@@ -214,8 +214,9 @@ func (a *App) purgeDeletedUnits(ctx context.Context) {
 	for _, result := range results {
 		// A deferred pass waits for a running scan to release its lease. A
 		// pass with maintenance pending has erased the unit's rows, but has
-		// not finished compacting the search indexes or truncating the
-		// write-ahead log; the unit stays deleting until a later pass has.
+		// not finished compacting the search indexes, overwriting the free
+		// pages, or truncating the write-ahead log; the unit stays deleting
+		// until a later pass has.
 		logger.Info("business unit purge pass", "tenant_id", result.TenantID, "phase", result.Phase, "rows", result.TotalRows, "complete", result.Complete, "deferred", result.Deferred, "maintenance_pending", result.MaintenancePending)
 		if result.CheckpointBusy {
 			logger.Warn("a reader of the database, such as a running backup, kept the business unit purge from truncating the write-ahead log, which may still hold the erased rows; the next pass retries it", "tenant_id", result.TenantID)
@@ -232,18 +233,19 @@ func (a *App) purgeDeletedUnits(ctx context.Context) {
 
 // legacyUnitCleanupFinished is the log message of the finished cleanup after
 // the business units that earlier releases deleted.
-const legacyUnitCleanupFinished = "cleanup after business units deleted by earlier releases finished: the search indexes are compacted and the write-ahead log is truncated"
+const legacyUnitCleanupFinished = "cleanup after business units deleted by earlier releases finished: the search indexes are compacted, the free pages overwritten or returned to the file system, and the write-ahead log truncated"
 
 // cleanUpAfterLegacyDeletions runs one pass of the cleanup after the
 // business units that earlier releases deleted, while it is pending, and
-// logs its outcome. Those releases could leave the search indexes and the
-// write-ahead log holding the units' erased rows. While a unit is being
-// deleted, the pass waits: that unit's purge compacts the indexes and
-// truncates the log, which completes the cleanup too.
+// logs its outcome. Those releases could leave the search indexes, the free
+// pages of a database without incremental auto-vacuum, and the write-ahead
+// log holding the units' erased rows. While a unit is being deleted, the
+// pass waits: that unit's purge compacts the indexes, overwrites those free
+// pages, and truncates the log, which completes the cleanup too.
 func (a *App) cleanUpAfterLegacyDeletions(ctx context.Context, logger *slog.Logger) {
 	result, err := a.Store.System().RunLegacyPurgeMaintenance(ctx)
 	if result.Started {
-		logger.Info("cleanup after business units deleted by earlier releases started: compacting the search indexes and truncating the write-ahead log, which may still hold their erased rows")
+		logger.Info("cleanup after business units deleted by earlier releases started: the search indexes, the free pages, or the write-ahead log may still hold their erased rows")
 	}
 	if result.Pending {
 		logger.Info("business unit cleanup pass", "phase", result.Phase, "complete", result.Complete, "deferred", result.Deferred)

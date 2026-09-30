@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -168,9 +169,32 @@ func TestVerifyReturnsHealthyResult(t *testing.T) {
 	if !result.SchemaSupported || !result.EdgeWatchSchema || result.SchemaVersion != schemaVersion {
 		t.Fatalf("schema verification = %#v", result)
 	}
+	if result.AutoVacuum != "incremental" {
+		t.Fatalf("auto-vacuum mode of a new database = %q", result.AutoVacuum)
+	}
 	var verificationErr *VerificationError
 	if errors.As(err, &verificationErr) {
 		t.Fatalf("healthy database returned verification error: %v", verificationErr)
+	}
+}
+
+// Verify names the database's auto-vacuum mode: a database created before
+// v0.18.31 has none.
+func TestVerifyReportsTheAutoVacuumMode(t *testing.T) {
+	s := openTestStore(t)
+	useAutoVacuum(t, s, "NONE")
+	result, err := s.Verify(context.Background())
+	if err != nil || result.AutoVacuum != "none" {
+		t.Fatalf("verify of a database without auto-vacuum = %#v, %v", result, err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil || !strings.Contains(string(encoded), `"auto_vacuum":"none"`) {
+		t.Fatalf("verify output %s, %v", encoded, err)
+	}
+	for mode, name := range map[int]string{0: "none", 1: "full", 2: "incremental", 7: "unknown (7)"} {
+		if got := autoVacuumModeName(mode); got != name {
+			t.Errorf("auto-vacuum mode %d is named %q, want %q", mode, got, name)
+		}
 	}
 }
 

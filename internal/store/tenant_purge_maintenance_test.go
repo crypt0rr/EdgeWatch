@@ -283,14 +283,15 @@ func TestTenantPurgeMaintenanceStopsWhenCancelled(t *testing.T) {
 	}
 }
 
-// A pass resumes the maintenance at the phase it finds: the checkpoint
-// phase merges nothing, and a compaction phase that names no index, such as
-// one that a later release removed, starts the compaction over. A tenant
-// that leaves the deleting state stops it, and a failed database is
-// reported.
+// A pass resumes the maintenance at the phase it finds: the free-pages and
+// checkpoint phases merge nothing, and a compaction phase that names no
+// index, such as one that a later release removed, starts the compaction
+// over. A tenant that leaves the deleting state stops it, and a failed
+// database is reported.
 func TestTenantPurgeMaintenanceResumesAtItsPhase(t *testing.T) {
 	ctx := context.Background()
 	for phase, want := range map[string][]string{
+		tenantPurgePhaseFreePages:                 nil,
 		tenantPurgePhaseCheckpoint:                nil,
 		tenantPurgePhaseCompact + "retired_index": tenantPurgeSearchIndexes,
 	} {

@@ -28,17 +28,23 @@ import (
 //     takes it for one batch at a time, so scans, the console and the
 //     daemon's heartbeat keep writing while a large tenant is purged.
 //   - Once the rows are erased, and before the tombstone, it compacts the
-//     search indexes, whose segments still hold the terms of the erased
-//     rows, returns free pages to the file system when the database uses
-//     incremental auto-vacuum, and truncates the write-ahead log, which may
-//     still hold old copies of the erased pages. These are phases of the
-//     purge like its steps: a pass that runs out of its maintenance budget,
-//     or whose checkpoint a reader keeps from truncating the log, leaves the
-//     tenant in the deleting state, and the next pass continues. Backups
-//     taken before the purge still hold the tenant's data. Releases before
-//     schema 55 made the tombstone first and could leave this maintenance
-//     unfinished; RunLegacyPurgeMaintenance runs it once after the upgrade
-//     (see migration55.go).
+//     search indexes, whose segments still hold the terms of the erased rows,
+//     and clears the database's free pages, which may still hold rows that
+//     other writers deleted without secure_delete while the tenant existed, or
+//     search terms that a retention merge freed between two passes: a database
+//     without incremental auto-vacuum, one created before v0.18.31, keeps them
+//     in the file, so the purge overwrites every one of them (see
+//     overwriteFreePages); a database with it gets them returned to the file
+//     system. It then truncates the write-ahead log, which may still hold old
+//     copies of the erased pages. These are phases of the purge like its steps:
+//     a pass that runs out of its maintenance budget, or whose checkpoint a
+//     reader keeps from truncating the log, leaves the tenant in the deleting
+//     state, and the next pass continues. Backups taken before the purge still
+//     hold the tenant's data. Releases before schema 55 made the tombstone
+//     first and could leave this maintenance unfinished, and releases before
+//     schema 56 did not overwrite free pages; RunLegacyPurgeMaintenance runs
+//     what they left once after the upgrade (see migration55.go and
+//     migration56.go).
 //   - While a job of the tenant holds a live scan lease, the tenant is left
 //     for the next pass.
 //   - The tenant's audit records are erased, except those of platform
@@ -49,21 +55,25 @@ import (
 // tenantPurgeBatchSize bounds the rows one purge transaction erases.
 const tenantPurgeBatchSize = 500
 
-// tenantPurgeMaintenanceBudget bounds the index compaction and the
-// incremental vacuum of one purge pass. The next pass continues whatever is
-// left; the checkpoint that truncates the write-ahead log runs after them in
-// every pass, even one whose budget ran out.
+// tenantPurgeMaintenanceBudget bounds the index compaction, the overwrite of
+// free pages and the incremental vacuum of one purge pass. The next pass
+// continues whatever is left; the checkpoint that truncates the write-ahead
+// log runs after them in every pass, even one whose budget ran out.
 const tenantPurgeMaintenanceBudget = 30 * time.Second
 
 // The purge_phase values that are not a table of tenantPurgeSteps. After the
 // last step the purge checks that nothing of the tenant is left (verify).
 // It then compacts each search index of tenantPurgeSearchIndexes in turn,
-// each in the phase tenantPurgePhaseCompact followed by the index's name,
-// and returns free pages to the file system and truncates the write-ahead
-// log (checkpoint). The tombstone is the finished purge (complete).
+// each in the phase tenantPurgePhaseCompact followed by the index's name. A
+// database without incremental auto-vacuum then has its free pages
+// overwritten (free-pages); a database with it skips that phase. Last, the
+// purge returns free pages to the file system when the database uses
+// incremental auto-vacuum, and truncates the write-ahead log (checkpoint).
+// The tombstone is the finished purge (complete).
 const (
 	tenantPurgePhaseVerify     = "verify"
 	tenantPurgePhaseCompact    = "compact:"
+	tenantPurgePhaseFreePages  = "free-pages"
 	tenantPurgePhaseCheckpoint = "checkpoint"
 	tenantPurgePhaseComplete   = "complete"
 )
@@ -153,11 +163,11 @@ type TenantPurgeResult struct {
 	// tombstone.
 	Complete bool
 	// MaintenancePending reports that the tenant's rows are erased, but the
-	// compaction of the search indexes or the truncation of the write-ahead
-	// log, which may still hold the erased rows, has not finished: the pass
-	// ran out of its maintenance budget, or a reader kept the checkpoint
-	// from truncating the log. The tenant stays in the deleting state, and
-	// the next pass continues from Phase.
+	// compaction of the search indexes, the overwrite of the free pages or
+	// the truncation of the write-ahead log, which may still hold the erased
+	// rows, has not finished: the pass ran out of its maintenance budget, or
+	// a reader kept the checkpoint from truncating the log. The tenant stays
+	// in the deleting state, and the next pass continues from Phase.
 	MaintenancePending bool
 	// CheckpointBusy reports that a reader, such as a running backup, held
 	// an older snapshot of the database, so the pass's checkpoint could not
@@ -185,6 +195,10 @@ type tenantPurgeOptions struct {
 	// bounded by the maintenance budget, the index, and the merge's page
 	// count, which is negative for a merge of every segment.
 	afterMerge func(ctx context.Context, index string, pages int) error
+	// afterFreePages, when set, runs after each committed step of the
+	// overwrite of free pages, with the context bounded by the maintenance
+	// budget and the step (see freePagesStep).
+	afterFreePages func(ctx context.Context, step freePagesStep) error
 }
 
 // PurgeDeletingTenants runs one purge pass over every tenant that is being
@@ -434,9 +448,12 @@ func tenantRowsRemaining(ctx context.Context, db *sql.DB, id string) (string, er
 //
 // The purge's compaction of every search index began after the tenants that
 // earlier releases deleted were erased (schema 55 sends a purge that was
-// already compacting at the upgrade back to its verify phase), and its
-// checkpoint truncated the log, so the same transaction also marks the
-// cleanup after those tenants finished when it is pending.
+// already compacting at the upgrade back to its verify phase), so did its
+// overwrite of free pages in a database without incremental auto-vacuum
+// (schema 56 sends a purge that was already in its checkpoint phase at the
+// upgrade back to that overwrite), and its checkpoint truncated the log, so
+// the same transaction also marks the cleanup after those tenants finished
+// when it is pending.
 func finishTenantPurge(ctx context.Context, db *sql.DB, id, name, slug string, result *TenantPurgeResult) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
@@ -497,16 +514,18 @@ func purgeTenantMaintenance(ctx context.Context, db *sql.DB, id string, options 
 type recordMaintenancePhase func(ctx context.Context, execer contextExecer, phase string) error
 
 // runSearchMaintenance runs the maintenance after erased rows from *phase,
-// which is a compaction phase, the checkpoint phase, or any other value to
-// start at the first index, and advances *phase as it goes. Within the
-// maintenance budget it compacts the search indexes and returns free pages
-// to the file system. It then runs a checkpoint that truncates the
-// write-ahead log, even when the budget ran out, so the log does not keep
-// old copies of the erased pages longer than it must, and reports whether
-// that checkpoint was busy. The maintenance has finished only when the
-// compaction and the vacuum have, and the checkpoint was not busy. A spent
-// budget and a busy checkpoint leave *phase for the next pass; cancellation
-// and database errors are returned.
+// which is a compaction phase, the free-pages phase, the checkpoint phase,
+// or any other value to start at the first index, and advances *phase as it
+// goes. Within the maintenance budget it compacts the search indexes, and
+// overwrites the free pages of a database without incremental auto-vacuum
+// or returns them to the file system in one with it. It then runs a
+// checkpoint that truncates the write-ahead log, even when the budget ran
+// out, so the log does not keep old copies of the erased pages longer than
+// it must, and reports whether that checkpoint was busy. The maintenance
+// has finished only when the compaction, the overwrite and the vacuum have,
+// and the checkpoint was not busy. A spent budget and a busy checkpoint
+// leave *phase for the next pass; cancellation and database errors are
+// returned.
 func runSearchMaintenance(ctx context.Context, db *sql.DB, record recordMaintenancePhase, options tenantPurgeOptions, phase *string) (finished, busy bool, err error) {
 	budgetCtx, cancel := options.budget(ctx)
 	defer cancel()
@@ -522,12 +541,14 @@ func runSearchMaintenance(ctx context.Context, db *sql.DB, record recordMaintena
 }
 
 // compactSearchIndexes compacts each search index in turn, from the one that
-// *phase names, and then returns free pages to the file system when the
-// database uses incremental auto-vacuum. It records each phase it enters
-// with record, and reports whether it finished.
+// *phase names, then overwrites the free pages of a database without
+// incremental auto-vacuum (overwriteFreePages), and then returns free pages
+// to the file system when the database uses incremental auto-vacuum. It
+// records each phase it enters with record, and reports whether it
+// finished.
 func compactSearchIndexes(ctx context.Context, db *sql.DB, record recordMaintenancePhase, options tenantPurgeOptions, phase *string) (bool, error) {
 	first, started := 0, false
-	if *phase == tenantPurgePhaseCheckpoint {
+	if *phase == tenantPurgePhaseFreePages || *phase == tenantPurgePhaseCheckpoint {
 		first = len(tenantPurgeSearchIndexes)
 	} else if index, ok := strings.CutPrefix(*phase, tenantPurgePhaseCompact); ok {
 		// A phase that names no index, such as one that a later release
@@ -552,10 +573,9 @@ func compactSearchIndexes(ctx context.Context, db *sql.DB, record recordMaintena
 		}
 	}
 	if *phase != tenantPurgePhaseCheckpoint {
-		if err := record(ctx, db, tenantPurgePhaseCheckpoint); err != nil {
+		if err := overwriteFreePages(ctx, db, record, options, phase); err != nil {
 			return false, err
 		}
-		*phase = tenantPurgePhaseCheckpoint
 	}
 	if err := incrementalVacuum(ctx, db); err != nil {
 		return false, err
@@ -577,6 +597,14 @@ func (options tenantPurgeOptions) merged(ctx context.Context, index string, page
 		return nil
 	}
 	return options.afterMerge(ctx, index, pages)
+}
+
+// freePagesStepped runs the afterFreePages hook, if any.
+func (options tenantPurgeOptions) freePagesStepped(ctx context.Context, step freePagesStep) error {
+	if options.afterFreePages == nil {
+		return nil
+	}
+	return options.afterFreePages(ctx, step)
 }
 
 // setTenantPurgePhase records the phase of a tenant that is being deleted.

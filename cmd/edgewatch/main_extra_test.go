@@ -566,7 +566,7 @@ func TestHealthAndVerifyReportThePendingCleanupAfterDeletedUnits(t *testing.T) {
 	if err := json.Unmarshal([]byte(healthOut), &health); err != nil {
 		t.Fatalf("health output %q: %v", healthOut, err)
 	}
-	if health.Status != "ready" || health.Maintenance == nil || health.Maintenance.Phase != "legacy-tenant-purge" || health.Maintenance.Progress != 0 || health.Maintenance.Total != 4 {
+	if health.Status != "ready" || health.Maintenance == nil || health.Maintenance.Phase != "legacy-tenant-purge" || health.Maintenance.Progress != 0 || health.Maintenance.Total != 5 {
 		t.Fatalf("health with the cleanup pending = %s", healthOut)
 	}
 	verifyOut, _, err := captureCLIOutput(t, func() error {

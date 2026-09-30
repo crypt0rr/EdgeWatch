@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 55
+const schemaVersion = 56
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -1248,6 +1248,10 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 		// recorded as pending, and the daemon's purge worker runs it. See
 		// migration55.go.
 		55: migration55Statements(),
+		// The cleanup after deleted tenants is recorded as pending again, at
+		// its overwrite of free pages, in a database without incremental
+		// auto-vacuum. See migration56.go.
+		56: migration56Statements(),
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an

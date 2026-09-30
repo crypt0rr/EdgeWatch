@@ -52,6 +52,13 @@ func reopenAtSchema54(t *testing.T, s *Store) *Store {
 	return upgraded
 }
 
+// legacyPurgeMaintenancePosition returns the position of a phase of the
+// cleanup after deleted tenants, as its checkpoint row records it. The
+// checkpoint phase is the last.
+func legacyPurgeMaintenancePosition(phase string) int64 {
+	return int64(slices.Index(legacyPurgeMaintenancePhases(), phase))
+}
+
 // insertTenantInState adds a tenant in the state and purge phase given.
 func insertTenantInState(t *testing.T, s *Store, id, state, phase string) {
 	t.Helper()
@@ -214,7 +221,8 @@ func TestLegacyPurgeMaintenanceErasesWhatAnEarlierReleaseLeft(t *testing.T) {
 		t.Fatalf("the cleanup started merges of %v, want every index", merged.started)
 	}
 	assertNothingOfTheMarkerLeft(t, f.store)
-	if row, ok := legacyPurgeMaintenanceRow(t, f.store); !ok || !row.Complete || !row.Initialized || row.LastRowID != 4 || row.ProcessedRows != 4 {
+	last := legacyPurgeMaintenancePosition(tenantPurgePhaseCheckpoint)
+	if row, ok := legacyPurgeMaintenanceRow(t, f.store); !ok || !row.Complete || !row.Initialized || row.LastRowID != last || row.ProcessedRows != last {
 		t.Fatalf("the finished cleanup = %+v, %v", row, ok)
 	}
 	if result, err := f.store.System().RunLegacyPurgeMaintenance(ctx); err != nil || result != (LegacyPurgeMaintenanceResult{}) {
@@ -233,7 +241,8 @@ func TestLegacyPurgeMaintenanceRetriesABusyCheckpoint(t *testing.T) {
 	if err != nil || result != (LegacyPurgeMaintenanceResult{Pending: true, Started: true, Phase: tenantPurgePhaseCheckpoint, CheckpointBusy: true}) {
 		t.Fatalf("cleanup with a reader open = %+v, %v; want the checkpoint pending", result, err)
 	}
-	if row, ok := legacyPurgeMaintenanceRow(t, f.store); !ok || row.Complete || row.LastRowID != 4 || row.ProcessedRows != 3 {
+	last := legacyPurgeMaintenancePosition(tenantPurgePhaseCheckpoint)
+	if row, ok := legacyPurgeMaintenanceRow(t, f.store); !ok || row.Complete || row.LastRowID != last || row.ProcessedRows != last-1 {
 		t.Fatalf("the cleanup whose checkpoint was busy = %+v, %v", row, ok)
 	}
 	for _, index := range tenantPurgeSearchIndexes {
@@ -274,7 +283,8 @@ func TestLegacyPurgeMaintenanceResumesAfterASpentBudgetAndARestart(t *testing.T)
 	if err := f.store.System().AcquireLease(ctx, "daemon"); err != nil {
 		t.Fatal(err)
 	}
-	assertLegacyPurgeMaintenanceReported(t, f.store, &MaintenanceStatus{Phase: legacyPurgeMaintenancePhase, Progress: 0, Total: 4})
+	total := legacyPurgeMaintenancePosition(tenantPurgePhaseCheckpoint)
+	assertLegacyPurgeMaintenanceReported(t, f.store, &MaintenanceStatus{Phase: legacyPurgeMaintenancePhase, Progress: 0, Total: total})
 
 	var spent mergeLog
 	var spend context.CancelFunc
@@ -303,7 +313,7 @@ func TestLegacyPurgeMaintenanceResumesAfterASpentBudgetAndARestart(t *testing.T)
 	if _, copies := walMarkers(t, f.store); copies != 0 {
 		t.Fatalf("the log holds %d copies of the erased rows after a pass whose budget ran out", copies)
 	}
-	assertLegacyPurgeMaintenanceReported(t, f.store, &MaintenanceStatus{Phase: legacyPurgeMaintenancePhase + ":" + first, Progress: 0, Total: 4})
+	assertLegacyPurgeMaintenanceReported(t, f.store, &MaintenanceStatus{Phase: legacyPurgeMaintenancePhase + ":" + first, Progress: 0, Total: total})
 
 	if err := f.store.Close(); err != nil {
 		t.Fatal(err)
@@ -405,7 +415,7 @@ func TestLegacyPurgeMaintenanceWaitsForAUnitPurgeThatCompletesIt(t *testing.T) {
 	if err != nil || len(results) != 1 || results[0].TenantID != third.ID || !results[0].Complete || !results[0].LegacyMaintenanceCompleted {
 		t.Fatalf("purge of the third tenant = %+v, %v; want it to complete the cleanup", results, err)
 	}
-	if row, ok := legacyPurgeMaintenanceRow(t, f.store); !ok || !row.Complete || row.ProcessedRows != 4 {
+	if row, ok := legacyPurgeMaintenanceRow(t, f.store); !ok || !row.Complete || row.ProcessedRows != legacyPurgeMaintenancePosition(tenantPurgePhaseCheckpoint) {
 		t.Fatalf("the cleanup after the purge = %+v, %v", row, ok)
 	}
 	if result, err := f.store.System().RunLegacyPurgeMaintenance(ctx); err != nil || result.Pending {
@@ -450,7 +460,7 @@ func TestLegacyPurgeMaintenanceStopsWhenItIsNoLongerPending(t *testing.T) {
 
 	// The cleanup completes in its checkpoint phase, without recording a
 	// phase, before the pass does.
-	if _, err := s.DB.Exec(`UPDATE fts_backfill_state SET complete=0,initialized=0,last_rowid=4 WHERE table_name=?`, legacyPurgeMaintenanceState); err != nil {
+	if _, err := s.DB.Exec(`UPDATE fts_backfill_state SET complete=0,initialized=0,last_rowid=? WHERE table_name=?`, legacyPurgeMaintenancePosition(tenantPurgePhaseCheckpoint), legacyPurgeMaintenanceState); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := s.DB.Exec(`CREATE TRIGGER complete_on_start AFTER UPDATE OF initialized ON fts_backfill_state WHEN NEW.table_name='` + legacyPurgeMaintenanceState + `' BEGIN ` + complete + `; END`); err != nil {

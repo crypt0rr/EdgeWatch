@@ -66,6 +66,8 @@ describe('business unit list', () => {
     await waitFor(() => expect(within(defaultUnit).getByText('0 in use · 0 queued · cap unavailable')).toBeInTheDocument())
     const deleting = screen.getByRole('link', { name: 'Open Old' })
     expect(within(deleting).getByText('Deleting · 1,200 rows erased')).toBeInTheDocument()
+    expect(within(deleting).getByText('Deletion progress', { selector: 'dt' })).toBeInTheDocument()
+    expect(within(deleting).queryByText('Scan slots', { selector: 'dt' })).not.toBeInTheDocument()
     expect(getUnitCapacity).not.toHaveBeenCalledWith('unit-old')
     expect(screen.queryByRole('link', { name: 'Open Gone' })).not.toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '3 units' })).toBeInTheDocument()
@@ -89,6 +91,32 @@ describe('business unit list', () => {
     for (const [unit, slots] of [['Retail', '1 in use · 2 queued · cap 2'], ['New', '1 in use · 2 queued · cap 2'], ['Default', '1 in use · 2 queued · cap unavailable']]) {
       await waitFor(() => expect(within(screen.getByRole('link', { name: `Open ${unit}` })).getByText(slots)).toBeInTheDocument())
     }
+  })
+
+  it('filters units by name or slug and by lifecycle state', async () => {
+    vi.mocked(listUnits).mockResolvedValue({ limits, units: [
+      businessUnit({ id: 'unit-default', name: 'Default', slug: 'default', is_default: true }),
+      businessUnit(),
+      businessUnit({ id: 'unit-warehouse', name: 'North Warehouse', slug: 'north-warehouse', status: 'disabled' }),
+      businessUnit({ id: 'unit-old', name: 'Old Warehouse', slug: 'old-warehouse', status: 'deleting', purge: { phase: 'scan_hosts', rows: 1200 } }),
+    ] })
+    renderUnits()
+
+    const search = await screen.findByRole('searchbox', { name: 'Search by name or public slug' })
+    fireEvent.change(search, { target: { value: 'NORTH-WAREHOUSE' } })
+    expect(screen.getByRole('link', { name: 'Open North Warehouse' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Open Retail' })).not.toBeInTheDocument()
+
+    fireEvent.change(search, { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'disabled' } })
+    expect(screen.getByRole('link', { name: 'Open North Warehouse' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Open Old Warehouse' })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('State'), { target: { value: 'deleting' } })
+    expect(screen.getByRole('link', { name: 'Open Old Warehouse' })).toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Open North Warehouse' })).not.toBeInTheDocument()
+    fireEvent.change(search, { target: { value: 'does-not-exist' } })
+    expect(screen.getByText('No units match these filters.')).toBeInTheDocument()
   })
 
   it('creates a unit with a derived or a chosen slug and opens its accounts', async () => {

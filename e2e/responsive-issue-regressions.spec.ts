@@ -153,6 +153,46 @@ test.describe('responsive issue regressions', () => {
     await expectNoHorizontalScroll(page)
   })
 
+  test('platform unit tabs, capacity ceiling and unit list remain usable on phones (#992)', async ({ page }) => {
+    await mockConsole(page, 'platform_admin')
+    await page.setViewportSize({ width: 320, height: 760 })
+    await page.goto('/platform/units/unit-retail/overview')
+
+    const tabs = page.getByRole('navigation', { name: 'Retail sections' }).getByRole('link')
+    await expect(tabs).toHaveCount(4)
+    for (const tab of await tabs.all()) {
+      await expect(tab).toBeVisible()
+      const box = (await tab.boundingBox())!
+      expect(box.x).toBeGreaterThanOrEqual(0)
+      expect(box.x + box.width).toBeLessThanOrEqual(320)
+    }
+    await expectNoHorizontalScroll(page)
+
+    await page.goto('/platform/units/unit-retail/capacity')
+    const grant = page.getByRole('radio', { name: 'Grant a ceiling' })
+    await grant.check()
+    const grantOption = page.locator('.ceiling-option').filter({ has: grant })
+    const ceiling = grantOption.getByLabel('High-cost ceiling')
+    await expect(ceiling).toBeVisible()
+    await ceiling.fill('5000000')
+    await expect(grantOption).toContainText('Granted ceiling: 5,000,000 probes per run. Maximum 100,000,000.')
+    await expectNoHorizontalScroll(page)
+
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await page.goto('/platform/units')
+    const accountLabels = page.locator('.unit-row .unit-facts > div:first-child dt')
+    await expect(accountLabels).toHaveCount(2)
+    const labelPositions = await accountLabels.evaluateAll(elements => elements.map(element => element.getBoundingClientRect().x))
+    expect(Math.abs(labelPositions[0] - labelPositions[1])).toBeLessThanOrEqual(1)
+
+    await page.setViewportSize({ width: 320, height: 760 })
+    const search = page.getByRole('searchbox', { name: 'Search by name or public slug' })
+    await search.fill('retail')
+    await expect(page.getByRole('link', { name: 'Open Retail' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Open Default' })).toHaveCount(0)
+    await expectNoHorizontalScroll(page)
+  })
+
   test('long dashboard values stay in shrinkable cards (#971)', async ({ page }) => {
     await mockConsole(page, 'operator')
     await page.route('**/api/v1/jobs**', async route => {

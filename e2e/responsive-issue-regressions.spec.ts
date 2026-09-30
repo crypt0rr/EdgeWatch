@@ -35,6 +35,81 @@ test.describe('responsive issue regressions', () => {
     expect(box.y + box.height).toBeLessThanOrEqual(664)
   })
 
+  test('live status, breadcrumbs, skip link and route focus stay useful (#989, #990)', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await mockConsole(page, 'administrator')
+    await page.goto('/scanner-profiles')
+
+    const reconnecting = page.getByRole('status', { name: 'Reconnecting…' })
+    await expect(reconnecting).toBeVisible()
+    await expect(reconnecting).toHaveClass(/reconnecting/)
+    expect(await reconnecting.locator('i').evaluate(element => getComputedStyle(element).backgroundColor)).toBe('rgb(243, 125, 131)')
+    await expect(page.locator('.breadcrumb')).toHaveText('Scanner profiles')
+    await expect(page.locator('.nav-link.active')).toHaveAttribute('aria-current', 'page')
+    await expect(page).toHaveTitle('Scanner profiles · EdgeWatch')
+
+    await page.keyboard.press('Tab')
+    const skip = page.getByRole('link', { name: 'Skip to content' })
+    await expect(skip).toBeFocused()
+    expect((await skip.boundingBox())!.x).toBeGreaterThanOrEqual(0)
+
+    await page.getByRole('link', { name: 'Jobs' }).click()
+    await expect(page).toHaveURL(/\/jobs$/)
+    await expect(page.locator('#main-content')).toBeFocused()
+    await expect(page).toHaveTitle('Jobs · EdgeWatch')
+
+    await page.setViewportSize({ width: 375, height: 812 })
+    const mobileStatus = page.getByRole('status', { name: 'Reconnecting…' })
+    await expect(mobileStatus).toBeVisible()
+    expect(await mobileStatus.evaluate(element => getComputedStyle(element).display)).not.toBe('none')
+    await page.getByRole('button', { name: 'Open navigation' }).click()
+    await page.getByRole('dialog', { name: 'Primary navigation' }).getByRole('link', { name: 'Hosts' }).click()
+    await expect(page).toHaveURL(/\/hosts$/)
+    await expect(page.locator('#main-content')).toBeFocused()
+    await expectNoHorizontalScroll(page)
+  })
+
+  test('viewer is not left with a permanent connecting message (#989)', async ({ page }) => {
+    await page.setViewportSize({ width: 375, height: 812 })
+    await mockConsole(page, 'viewer')
+    await page.goto('/jobs')
+    const status = page.getByRole('status', { name: 'Live updates unavailable' })
+    await expect(status).toBeVisible()
+    await expect(status).toHaveClass(/unavailable/)
+    expect(await status.locator('i').evaluate(element => getComputedStyle(element).backgroundColor)).toBe('rgb(130, 150, 174)')
+    await expectNoHorizontalScroll(page)
+  })
+
+  test('platform update indicator and status notice are visible on a phone (#989, #990)', async ({ page }) => {
+    await page.setViewportSize({ width: 320, height: 760 })
+    await mockConsole(page, 'platform_admin')
+    await page.route('**/api/v1/platform/status', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await route.fulfill({ json: {
+        version: 'v0.20.13', version_release_url: 'https://example.test/releases/v0.20.13',
+        updates: { enabled: true, status: 'update_available', available: true, current_version: 'v0.20.13', latest_version: 'v0.21.0', release_url: 'https://example.test/releases/v0.21.0' },
+        units: { total: 2, active: 2, disabled: 0, deleting: 0 }, accounts: 5, jobs: 3, stored_scans: 12,
+        platform_admins: { total: 1, enabled: 1 }, capacity: { limits: { max_concurrent_scans: 4, max_probe_count: 5000000, max_naabu_probe_count: 20000000, max_probe_count_limit: 100000000 }, slots: { capacity: 4, in_use: 1, queued: 0 } },
+      } })
+    })
+    await page.goto('/platform/status')
+    await expect(page).toHaveTitle('Status · EdgeWatch')
+    await page.keyboard.press('Tab')
+    await expect(page.getByRole('link', { name: 'Skip to content' })).toBeFocused()
+    await page.keyboard.press('Tab')
+    const menu = page.getByRole('button', { name: 'Open navigation' })
+    await expect(menu).toBeFocused()
+    await page.keyboard.press('Enter')
+    const indicator = page.getByRole('link', { name: 'Update available: v0.20.13 to v0.21.0' })
+    await expect(indicator).toBeVisible()
+    await expect(indicator).toHaveAttribute('href', 'https://example.test/releases/v0.21.0')
+    await page.getByRole('dialog', { name: 'Primary navigation' }).getByRole('button', { name: 'Close navigation' }).click()
+    await expect(page.getByRole('status')).toContainText('Version v0.21.0 is available.')
+    await expect(page.getByRole('link', { name: 'Release notes' })).toBeVisible()
+    expect(await page.locator('.breadcrumb').evaluate(element => element.innerText)).toBe('Status')
+    await expectNoHorizontalScroll(page)
+  })
+
   test('long dashboard values stay in shrinkable cards (#971)', async ({ page }) => {
     await mockConsole(page, 'operator')
     await page.route('**/api/v1/jobs**', async route => {

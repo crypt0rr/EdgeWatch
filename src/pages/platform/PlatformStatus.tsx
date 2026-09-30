@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Activity } from 'lucide-react'
+import { Activity, ArrowUp } from 'lucide-react'
 import { platformStatus } from '../../api'
 import type { ApplicationUpdateStatus } from '../../api'
 import { UntrustedProxyBanner } from '../../components/UntrustedProxyBanner'
@@ -29,6 +29,7 @@ export function PlatformStatusPage() {
   const value = status.data
   const { limits, slots } = value.capacity
   const releaseURL = value.updates?.release_url
+  const updateAvailable = !!value.updates && (value.updates.available === true || value.updates.status === 'update_available')
   return <section className="page">
     <div className="page-heading"><div><p className="eyebrow">Platform</p><h1>Status</h1><p className="muted">The deployment at a glance. Which jobs run is visible only inside each unit.</p></div><Activity className="muted-icon" size={24} /></div>
     <UntrustedProxyBanner proxy={value.untrusted_proxy} />
@@ -47,7 +48,8 @@ export function PlatformStatusPage() {
           <div><dt>Absolute probe ceiling</dt><dd>{formatCount(limits.max_probe_count_limit)}</dd></div>
         </dl>
       </div>
-      <div className="panel"><div className="panel-heading"><div><h2>Version</h2><p className="muted">{updateSummary(value.updates)}</p></div></div>
+      <div className="panel"><div className="panel-heading"><div><h2>Version</h2>{!updateAvailable && <p className="muted">{updateSummary(value.updates)}</p>}</div></div>
+        {updateAvailable && <div className="notice platform-update-notice" role="status"><ArrowUp size={15} aria-hidden="true" /><span>{updateSummary(value.updates)}{releaseURL && <> <a className="text-button" href={releaseURL} target="_blank" rel="noopener noreferrer">Release notes</a></>}</span></div>}
         <dl className="fact-grid">
           <div><dt>Running</dt><dd>{value.version_release_url ? <a className="text-button" href={value.version_release_url} target="_blank" rel="noopener noreferrer">EdgeWatch {value.version}</a> : `EdgeWatch ${value.version}`}</dd></div>
           {value.updates?.latest_version && <div><dt>Latest release</dt><dd>{releaseURL ? <a className="text-button" href={releaseURL} target="_blank" rel="noopener noreferrer">{value.updates.latest_version}</a> : value.updates.latest_version}</dd></div>}

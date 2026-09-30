@@ -52,6 +52,8 @@ describe('platform console shell', () => {
     expect(screen.getByText('All business units')).toBeInTheDocument()
     expect(screen.getByText('Platform administrator')).toBeInTheDocument()
     expect(screen.getByLabelText('Breadcrumb: Platform / Units')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Skip to content' })).toHaveAttribute('href', '#main-content')
+    expect(document.title).toBe('Units · EdgeWatch')
     await waitFor(() => expect(screen.getByText('EdgeWatch v0.19.0')).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Sign out' }))
     expect(onLogout).toHaveBeenCalledOnce()
@@ -85,6 +87,17 @@ describe('platform console shell', () => {
     expect(screen.getByLabelText('Breadcrumb: Platform / Audit')).toBeInTheDocument()
   })
 
+  it('shows an accessible platform release indicator beside the installed version', async () => {
+    vi.mocked(platformStatus).mockResolvedValue({ ...status, version_release_url: 'https://example.test/releases/v0.20.0', updates: { enabled: true, status: 'update_available', available: true, current_version: 'v0.19.0', latest_version: 'v0.20.0', release_url: 'https://example.test/releases/v0.20.0' } })
+    renderShell('/platform/status')
+    const version = await screen.findByRole('link', { name: 'Release notes for EdgeWatch v0.19.0' })
+    expect(version).toHaveAttribute('href', 'https://example.test/releases/v0.20.0')
+    const update = screen.getByRole('link', { name: 'Update available: v0.19.0 to v0.20.0' })
+    expect(update).toHaveAttribute('href', 'https://example.test/releases/v0.20.0')
+    expect(update).toHaveAttribute('target', '_blank')
+    expect(update).toHaveAttribute('rel', 'noopener noreferrer')
+  })
+
   it('opens and closes the mobile navigation drawer', async () => {
     vi.stubGlobal('matchMedia', vi.fn().mockReturnValue({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }))
     renderShell('/platform/status')
@@ -99,5 +112,7 @@ describe('platform console shell', () => {
     fireEvent.click(screen.getByRole('link', { name: 'Audit' }))
     await waitFor(() => expect(screen.getByTestId('location')).toHaveTextContent('/platform/audit'))
     expect(screen.queryByRole('dialog', { name: 'Primary navigation' })).not.toBeInTheDocument()
+    expect(document.getElementById('main-content')).toHaveFocus()
+    expect(document.title).toBe('Audit · EdgeWatch')
   })
 })

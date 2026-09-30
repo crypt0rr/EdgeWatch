@@ -246,6 +246,7 @@ describe('authentication pages', () => {
     expect(window.location.pathname).toBe('/activate')
     expect(window.location.search).toBe('?source=invite')
     expect(window.location.hash).toBe('')
+    setInputValue(inputs[0], 'temporary-token')
     setInputValue(inputs[0], ' invite-token ')
     setInputValue(inputs[1], 'correct horse battery staple')
     setInputValue(inputs[2], 'different password')
@@ -265,6 +266,29 @@ describe('authentication pages', () => {
       await Promise.resolve()
     })
     expect(activate).toHaveBeenCalledWith('invite-token', 'correct horse battery staple')
+    expect(container.querySelector('[data-testid="location"]')?.textContent).toBe('/login')
+  })
+
+  it('shows an in-progress state while the activation request is pending', async () => {
+    let finishActivation = () => {}
+    const pendingActivation = new Promise<void>(resolve => { finishActivation = resolve })
+    vi.mocked(activate).mockReturnValueOnce(pendingActivation)
+    await renderBrowserPage(<Activate />, '/activate#token=invite-token')
+    const inputs = Array.from(container.querySelectorAll('input')) as HTMLInputElement[]
+    setInputValue(inputs[1], 'correct horse battery staple')
+    setInputValue(inputs[2], 'correct horse battery staple')
+
+    await act(async () => {
+      submitForm(container.querySelector('form') as HTMLFormElement)
+      await Promise.resolve()
+    })
+    expect((container.querySelector('button[type="submit"]') as HTMLButtonElement).textContent).toBe('Activating…')
+
+    await act(async () => {
+      finishActivation()
+      await pendingActivation
+      await Promise.resolve()
+    })
     expect(container.querySelector('[data-testid="location"]')?.textContent).toBe('/login')
   })
 

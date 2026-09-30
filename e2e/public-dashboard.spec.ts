@@ -56,7 +56,7 @@ test('public status controls remain interactive and navigation leaves the page',
   await host.check()
   await expect(host).toBeChecked()
   await page.getByRole('button', { name: 'Save public view' }).click()
-  await expect(page.getByRole('status')).toContainText('Public view saved')
+  await expect(page.locator('.save-feedback[role="status"]')).toContainText('Public view saved.')
   expect(saved).toMatchObject({ enabled: true, hosts: [{ job_id: 'job-1', address: '192.0.2.1' }] })
 
   const openNavigation = page.getByRole('button', { name: 'Open navigation' })

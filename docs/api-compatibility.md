@@ -1,5 +1,13 @@
 # API compatibility
 
+## Job scan work estimates
+
+`scan_estimate` probe, host, and process counts are preflight scope figures,
+not predictions of elapsed scan time. `estimated_seconds` is omitted when no
+defensible duration estimate is available. Clients should treat this field as
+optional and must not infer that a scan will finish within any fixed time from
+the probe count alone.
+
 ## Scan history
 
 The authenticated historical scan endpoints have two response shapes:

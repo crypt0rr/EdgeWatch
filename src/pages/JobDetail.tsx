@@ -403,7 +403,7 @@ export function JobDetail() {
           ].filter((item): item is { protocol: string; ports: string } => Boolean(item))} />
         </div>
       </div>
-      {value.scan_estimate && <div className="notice" role="status">Estimated per run: {value.scan_estimate.probes.toLocaleString()} probes across {value.scan_estimate.hosts.toLocaleString()} hosts ({formatEstimateProcesses(value.scan_estimate)}, roughly {formatEstimateDuration(value.scan_estimate.estimated_seconds)}).{value.scan_estimate.unknown_dns ? ` DNS expansion may increase this estimate for ${value.scan_estimate.unknown_dns} name${value.scan_estimate.unknown_dns === 1 ? '' : 's'}.` : ''}</div>}
+      {value.scan_estimate && <div className="notice" role="status"><strong>Scan work per run:</strong> {value.scan_estimate.probes.toLocaleString()} estimated probes across {value.scan_estimate.hosts.toLocaleString()} configured hosts/targets ({formatEstimateProcesses(value.scan_estimate)}). Elapsed time varies with target responses and scanner settings{value.scan_estimate.unknown_dns ? `; DNS expansion may increase the work for ${value.scan_estimate.unknown_dns} name${value.scan_estimate.unknown_dns === 1 ? '' : 's'}` : ''}.</div>}
       {activeCycle && <div className={activeCycle.status === 'stalled' ? 'form-error banner cycle-banner' : 'notice cycle-banner'} role="status"><span className="cycle-banner-copy"><strong>{activeCycle.status === 'paused' ? 'Broad scan paused safely.' : activeCycle.status === 'stalled' ? 'Broad scan stalled.' : 'Broad scan cycle active.'}</strong> {activeCycle.completed_units} of {activeCycle.total_units} work units and {activeCycle.completed_probes.toLocaleString()} of {activeCycle.total_probes.toLocaleString()} probes complete. {activeCycle.last_error && <span>{activeCycle.last_error}</span>}</span> {canOperate && (activeCycle.status === 'paused' || activeCycle.status === 'stalled') && <button className="button ghost" onClick={() => { setActionError(''); setDialog('discard-cycle') }} disabled={!!actionBusy}>Discard saved progress</button>}</div>}
       {value.scan_cycle_error === 'cycle_status_unavailable' && !cycle.data && <div className="notice" role="status">Saved scan progress could not be loaded. EdgeWatch will retry automatically; refresh the job if this continues.</div>}
       {!!value.missing_notification_destinations?.length && <div className="notice warning" role="status"><span><strong>Notification routing needs attention.</strong> {value.missing_notification_destinations.length === 1 ? 'A selected notification destination no longer exists' : `${value.missing_notification_destinations.length} selected notification destinations no longer exist`}, so this job’s alerts do not reach {value.missing_notification_destinations.length === 1 ? 'it' : 'them'}. Changing a deployment URL in config.yaml creates a new destination. {canOperate && !value.archived ? <Link to={`/jobs/${id}/edit`}>Edit the job to choose a current destination.</Link> : 'An operator can edit the job to choose a current destination.'}</span></div>}
@@ -534,13 +534,6 @@ export function JobDetail() {
       {dialog === 'discard-cycle' && <ActionDialog title="Discard saved broad-scan progress?" description="The next trigger will start a fresh full-range scan. Existing attempt history remains available." confirmLabel="Discard progress" destructive onConfirm={() => discardCycle()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
     </section>
   )
-}
-
-function formatEstimateDuration(seconds: number) {
-  if (seconds < 60) return `${seconds}s`
-  const minutes = Math.ceil(seconds / 60)
-  if (minutes < 60) return `${minutes}m`
-  return `${Math.ceil(minutes / 60)}h`
 }
 
 function formatEstimateProcesses(estimate: WorkEstimate) {

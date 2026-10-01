@@ -584,8 +584,35 @@ func TestEstimateJobWorkIncludesProtocolsAndServiceCost(t *testing.T) {
 		t.Fatalf("unexpected work estimate: %#v", estimate)
 	}
 	// TCP service detection doubles its probes: 5*(2*2 + 1) = 25.
-	if estimate.Probes != 25 || estimate.NmapInvocations == 0 || estimate.EstimatedSeconds == 0 {
+	if estimate.Probes != 25 || estimate.NmapInvocations == 0 || estimate.EstimatedSeconds != 0 {
 		t.Fatalf("unexpected probe estimate: %#v", estimate)
+	}
+}
+
+func TestEstimateNaabuWorkDoesNotPredictDuration(t *testing.T) {
+	job := NormalizeJob(Job{
+		Targets: []string{"192.0.2.10"},
+		TCP: &Protocol{
+			Engine: EngineNaabuNmap,
+			Naabu:  &NaabuOptions{Rate: 100, Retries: 5, TimeoutMS: 5000},
+		},
+	})
+	estimate, err := EstimateJobWork(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if estimate.Probes != 65_535 || estimate.NaabuProbes != 65_535 {
+		t.Fatalf("full-range probe count = %d/%d, want 65535", estimate.Probes, estimate.NaabuProbes)
+	}
+	if estimate.EstimatedSeconds != 0 {
+		t.Fatalf("estimated duration = %d seconds, want unknown (zero)", estimate.EstimatedSeconds)
+	}
+	encoded, err := json.Marshal(estimate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "estimated_seconds") {
+		t.Fatalf("unknown duration should be omitted from the work estimate: %s", encoded)
 	}
 }
 

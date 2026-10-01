@@ -206,15 +206,15 @@ describe('job detail actions', () => {
     expect(screen.queryByRole('button', { name: /Explore baseline/ })).not.toBeInTheDocument()
   })
 
-  it('explains mixed Naabu and Nmap estimates and DNS expansion', async () => {
+  it('explains estimated scan work without promising a duration', async () => {
     vi.mocked(getJob).mockResolvedValue({
       ...job,
-      scan_estimate: { probes: 65_535, hosts: 2, naabu_invocations: 1, nmap_invocations: 2, estimated_seconds: 3_661, unknown_dns: 2 },
+      scan_estimate: { probes: 65_535, hosts: 2, naabu_invocations: 1, nmap_invocations: 2, unknown_dns: 2 },
     } as never)
     renderPage()
 
     expect(await screen.findByRole('status')).toHaveTextContent(
-      'Estimated per run: 65,535 probes across 2 hosts (1 Naabu + 2 Nmap processes, roughly 2h). DNS expansion may increase this estimate for 2 names.',
+      'Scan work per run: 65,535 estimated probes across 2 configured hosts/targets (1 Naabu + 2 Nmap processes). Elapsed time varies with target responses and scanner settings; DNS expansion may increase the work for 2 names.',
     )
   })
 

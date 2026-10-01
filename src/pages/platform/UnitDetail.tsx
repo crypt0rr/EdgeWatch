@@ -267,14 +267,22 @@ function UnitCapacityForm({ unit, capacity }: { unit: BusinessUnit; capacity: Un
           // proposes no number of its own, so a grant is always one that a
           // platform administrator typed or saved.
           const ceiling = field.key === 'high_cost_ceiling'
-          const help = (ceiling && ceilingModes.find(option => option.mode === entry.mode)?.help) || field.help
           return <fieldset className="capacity-field" key={field.key}>
             <legend>{field.label}</legend>
             {ceiling
-              ? ceilingModes.map(option => <label className="checkbox-label" key={option.mode} htmlFor={`${inputID}-${option.mode}`}><input id={`${inputID}-${option.mode}`} type="radio" name={`${inputID}-mode`} checked={entry.mode === option.mode} onChange={() => change(field.key, { mode: option.mode })} /><span>{option.label}</span></label>)
-              : <label className="checkbox-label" htmlFor={`${inputID}-inherit`}><input id={`${inputID}-inherit`} type="checkbox" checked={entry.mode === 'inherit'} onChange={event => change(field.key, { mode: event.target.checked ? 'inherit' : 'set', value: entry.value || String(field.maximum(limits)) })} /><span>Use the deployment’s setting</span></label>}
-            {entry.mode === 'set' && <label htmlFor={inputID}><span className="sr-only">{field.label}</span><input id={inputID} type="number" inputMode="numeric" min={1} max={field.maximum(limits)} step={1} value={entry.value} onChange={event => change(field.key, { value: event.target.value })} aria-invalid={!!problem} aria-describedby={`${inputID}-help`} /></label>}
-            <small id={`${inputID}-help`} className={problem ? 'field-error' : undefined}>{problem ?? help(limits)}</small>
+              ? <div className="ceiling-options">{ceilingModes.map(option => <div className="ceiling-option" key={option.mode}>
+                <label className="checkbox-label" htmlFor={`${inputID}-${option.mode}`}><input id={`${inputID}-${option.mode}`} type="radio" name={`${inputID}-mode`} checked={entry.mode === option.mode} onChange={() => change(field.key, { mode: option.mode })} /><span>{option.label}</span></label>
+                {entry.mode === option.mode && option.help && <small>{option.help(limits)}</small>}
+                {option.mode === 'set' && entry.mode === 'set' && <div className="ceiling-input-group">
+                  <label htmlFor={inputID}><span className="sr-only">{field.label}</span><input id={inputID} type="number" inputMode="numeric" min={1} max={field.maximum(limits)} step={1} value={entry.value} onChange={event => change(field.key, { value: event.target.value })} aria-invalid={!!problem} aria-describedby={`${inputID}-help`} /></label>
+                  <small id={`${inputID}-help`} className={problem ? 'field-error' : undefined}>{problem ?? (entry.value.trim() ? `Granted ceiling: ${formatCount(Number(entry.value))} probes per run. Maximum ${formatCount(field.maximum(limits))}.` : field.help(limits))}</small>
+                </div>}
+              </div>)}</div>
+              : <>
+                <label className="checkbox-label" htmlFor={`${inputID}-inherit`}><input id={`${inputID}-inherit`} type="checkbox" checked={entry.mode === 'inherit'} onChange={event => change(field.key, { mode: event.target.checked ? 'inherit' : 'set', value: entry.value || String(field.maximum(limits)) })} /><span>Use the deployment’s setting</span></label>
+                {entry.mode === 'set' && <label htmlFor={inputID}><span className="sr-only">{field.label}</span><input id={inputID} type="number" inputMode="numeric" min={1} max={field.maximum(limits)} step={1} value={entry.value} onChange={event => change(field.key, { value: event.target.value })} aria-invalid={!!problem} aria-describedby={`${inputID}-help`} /></label>}
+                <small id={`${inputID}-help`} className={problem ? 'field-error' : undefined}>{problem ?? field.help(limits)}</small>
+              </>}
           </fieldset>
         })}
         <p className="notice">A cap is a limit, not a reservation. When units wait for slots, free slots go round-robin to the waiting units, up to each unit’s cap.</p>
@@ -409,7 +417,7 @@ function purgeActivity(phase = '') {
 
 function DeleteProgress({ unit }: { unit: BusinessUnit }) {
   const purge = unit.purge
-  return <div className="panel delete-progress" role="status" aria-live="polite"><h2>Deleting {unit.name}…</h2><p>{purgeActivity(purge?.phase)} · {plural(purge?.rows ?? 0, 'row')} erased so far.</p><p className="muted">EdgeWatch erases the unit in small batches, then compacts the search indexes and truncates the database log, which a running backup can delay. You can leave this page: the deletion continues in the background and resumes after a restart.</p></div>
+  return <div className="panel delete-progress" role="status" aria-live="polite"><h2>Deleting {unit.name}…</h2><p className="delete-progress-line"><span className="spinner" aria-hidden="true" />{purgeActivity(purge?.phase)} · {plural(purge?.rows ?? 0, 'row')} erased so far.</p><p className="muted">EdgeWatch erases the unit in small batches, then compacts the search indexes and truncates the database log, which a running backup can delay. You can leave this page: the deletion continues in the background and resumes after a restart.</p></div>
 }
 
 function DeletedNotice({ unit }: { unit: BusinessUnit }) {

@@ -442,9 +442,13 @@ describe('business unit detail', () => {
       // A grant starts empty, so it is always a number the administrator typed.
       const ceiling = screen.getByLabelText('High-cost ceiling', { selector: 'input[type="number"]' })
       expect(ceiling).toHaveValue(null)
+      const grantOption = screen.getByLabelText('Grant a ceiling').closest<HTMLElement>('.ceiling-option')!
+      expect(within(grantOption).getByLabelText('High-cost ceiling', { selector: 'input[type="number"]' })).toBeInTheDocument()
+      expect(within(grantOption).queryByText('Use the deployment’s setting')).not.toBeInTheDocument()
       expect(screen.getByText('Use a whole number from 1 to 100,000,000.')).toBeInTheDocument()
       expect(screen.getByRole('button', { name: 'Save capacity' })).toBeDisabled()
       fireEvent.change(ceiling, { target: { value: '7000000' } })
+      expect(screen.getByText('Granted ceiling: 7,000,000 probes per run. Maximum 100,000,000.')).toBeInTheDocument()
       fireEvent.submit(slots.closest('form')!)
       await waitFor(() => expect(updateUnitCapacity).toHaveBeenLastCalledWith('unit-retail', 3, { high_cost_ceiling: 7_000_000 }))
       expect(await screen.findByText('Capacity saved. It applies to the next scan this unit queues.')).toBeInTheDocument()
@@ -796,7 +800,9 @@ describe('business unit detail', () => {
     vi.mocked(getUnit).mockResolvedValue(businessUnit({ status: 'deleting', jobs: 0, stored_scans: 40, purge: { phase: 'scan_hosts', rows: 1500 } }))
     const view = renderUnit('danger')
     expect(await screen.findByRole('heading', { name: 'Deleting Retail…' })).toBeInTheDocument()
-    expect(screen.getByText('Erasing scan hosts · 1,500 rows erased so far.')).toBeInTheDocument()
+    const progressLine = screen.getByText('Erasing scan hosts · 1,500 rows erased so far.').closest('p')!
+    expect(progressLine).toHaveClass('delete-progress-line')
+    expect(progressLine.querySelector('.spinner')).toBeInTheDocument()
     // The heading counts the scans that the purge has yet to erase.
     expect(screen.getByText(/ · 0 jobs · 40 stored scans · created /)).toBeInTheDocument()
     expect(screen.queryByRole('navigation', { name: 'Retail sections' })).not.toBeInTheDocument()

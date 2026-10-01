@@ -201,7 +201,7 @@ var globalStoreMethods = map[string]string{
 	"SaveAdminSecurity":          globalLegacyAdmin,
 	"SaveAdminSecurityWithAudit": globalLegacyAdmin,
 	"SaveAdminSecurityWithAuditPreservingSession": globalLegacyAdmin,
-	"adminTOTPForSave":                            globalLegacyAdmin,
+	"adminTOTPForSave": globalLegacyAdmin,
 
 	"GetRDAPCache": globalShared,
 	"PutRDAPCache": globalShared,

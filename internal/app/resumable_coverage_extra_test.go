@@ -26,6 +26,32 @@ type coverageResumableScanner struct {
 	clearLeases bool
 }
 
+type lateSuccessScanner struct {
+	cancel context.CancelFunc
+}
+
+func (s lateSuccessScanner) Version(context.Context) string { return "late-success" }
+func (s lateSuccessScanner) Scan(context.Context, config.Job) (model.Snapshot, error) {
+	return model.Snapshot{}, errors.New("ordinary scan path is not expected")
+}
+func (s lateSuccessScanner) Plan(context.Context, config.Job) (scanner.WorkPlan, error) {
+	return scanner.WorkPlan{Units: []scanner.WorkUnit{
+		{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1},
+		{Sequence: 1, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "2", PortCount: 1, Probes: 1},
+	}}, nil
+}
+func (s lateSuccessScanner) ScanWorkUnit(_ context.Context, _ config.Job, unit scanner.WorkUnit, _ scanner.ProgressReporter) (model.Snapshot, error) {
+	if s.cancel != nil {
+		s.cancel()
+		return model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: unit.Addresses, Ports: []model.PortState{{Port: 999, State: "open"}}}}}, nil
+	}
+	port := 443
+	if unit.Sequence == 1 {
+		port = 80
+	}
+	return model.Snapshot{Units: []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Addresses: unit.Addresses, Ports: []model.PortState{{Port: port, State: "open"}}}}}, nil
+}
+
 type transientResumableScanner struct {
 	mu         sync.Mutex
 	calls      map[int]int
@@ -131,6 +157,56 @@ func TestResumableScanRetriesTransientUnitFailure(t *testing.T) {
 	}
 	if second.CycleID == cycle.ID {
 		t.Fatalf("run reused discarded cycle %q", cycle.ID)
+	}
+}
+
+func TestResumableAttemptDiscardsLateSuccessfulResultAfterCancellation(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := config.NormalizeJob(config.Job{Name: "late-success", Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"}, TCP: &config.Protocol{Ports: "1-2", Mode: "connect"}, Timeout: config.Duration(time.Minute), ResumeWindow: config.Duration(time.Hour)})
+	record, err := defaultTenant(db).CreateJob(ctx, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	attemptCtx, cancel := context.WithCancel(ctx)
+	var interrupted model.Scan
+	handled, lateFragment, runErr := a.runResumableAttempt(ctx, attemptCtx, defaultTenant(db), job, record.ID, &interrupted, nil, lateSuccessScanner{cancel: cancel}, false)
+	if !handled || !errors.Is(runErr, context.Canceled) || interrupted.Status != "canceled" || !interrupted.Resumable || interrupted.CycleStatus != "paused" {
+		t.Fatalf("late successful return = handled %v scan %#v err %v", handled, interrupted, runErr)
+	}
+	if len(lateFragment.Units) != 1 || lateFragment.Units[0].Ports[0].Port != 999 {
+		t.Fatalf("scanner fixture did not return its late fragment: %#v", lateFragment)
+	}
+	cycle, err := defaultTenant(db).GetActiveScanCycle(ctx, record.ID)
+	if err != nil || cycle.Status != "paused" || cycle.CompletedUnits != 0 {
+		t.Fatalf("cycle after canceled late return = %#v, %v", cycle, err)
+	}
+	summaries, err := defaultTenant(db).ListScanCycleUnitSummaries(ctx, cycle.ID)
+	if err != nil || len(summaries) != 2 || summaries[0].Status != "pending" || summaries[1].Status != "pending" {
+		t.Fatalf("late result was checkpointed: %#v, %v", summaries, err)
+	}
+	_, checkpoints, err := db.System().LoadScanCycleFragments(ctx, cycle.ID)
+	if err != nil || len(checkpoints) != 0 {
+		t.Fatalf("canceled attempt fragments = %#v, %v", checkpoints, err)
+	}
+
+	var resumed model.Scan
+	handled, snapshot, runErr := a.runResumableAttempt(ctx, ctx, defaultTenant(db), job, record.ID, &resumed, nil, lateSuccessScanner{}, false)
+	if !handled || runErr != nil || resumed.Status != "success" || resumed.CycleStatus != "completed" {
+		t.Fatalf("resumed attempt = handled %v scan %#v err %v", handled, resumed, runErr)
+	}
+	if len(snapshot.Units) != 1 || len(snapshot.Units[0].Ports) != 2 || snapshot.Units[0].Ports[0].Port != 80 || snapshot.Units[0].Ports[1].Port != 443 {
+		t.Fatalf("resumed snapshot included the discarded late result: %#v", snapshot)
 	}
 }
 

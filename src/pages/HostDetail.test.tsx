@@ -144,6 +144,23 @@ describe('host detail', () => {
     expect(container.querySelector('a[href="/hosts"]')).toBeTruthy()
   })
 
+  it('keeps job-scoped historical evidence visible when RDAP is unavailable', async () => {
+    vi.mocked(scanHostRDAP).mockRejectedValue(new Error('registry timeout'))
+    await renderRoute('/jobs/job-1/scans/scan-1/hosts/198.51.100.10', '/jobs/:id/scans/:scanId/hosts/:address')
+    expect(scanHost).toHaveBeenCalledWith('job-1', 'scan-1', '198.51.100.10')
+    expect(container.textContent).toContain('nginx · 1.25')
+    expect(container.textContent).toContain('Registry lookup is temporarily unavailable. Local host evidence is unaffected.')
+  })
+
+  it('labels legacy fallback evidence without inventing a source scan', async () => {
+    vi.mocked(baselineHost).mockResolvedValue({ ...detail, data_quality: 'legacy', source_scan: undefined })
+    await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')
+    expect(container.textContent).toContain('Legacy detail')
+    expect(container.textContent).toContain('Legacy snapshot')
+    expect(container.textContent).not.toContain('scan-1')
+    expect(container.textContent).toContain('nginx · 1.25')
+  })
+
   it('shows completed full-range coverage without an incomplete warning', async () => {
     const tcpProtocol = host.protocols?.[0]
     if (!tcpProtocol) throw new Error('test host is missing TCP evidence')

@@ -42,8 +42,8 @@ describe('job detail actions', () => {
   })
   afterEach(() => vi.clearAllMocks())
 
-  function renderPage() {
-    return renderWithProviders(<Routes><Route path="/jobs/:id/*" element={<JobDetail />} /></Routes>, { route: ['/jobs/job-1'] })
+  function renderPage(route = ['/jobs/job-1']) {
+    return renderWithProviders(<Routes><Route path="/jobs/:id/scans/:scanId" element={<JobDetail />} /><Route path="/jobs/:id/*" element={<JobDetail />} /></Routes>, { route })
   }
 
   it('starts a scan and refreshes the relevant queries', async () => {
@@ -67,6 +67,16 @@ describe('job detail actions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Use as baseline' }))
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
     await waitFor(() => expect(approveBaseline).toHaveBeenCalledWith('job-1', 'scan-1', 'scan-1', false))
+  })
+
+  it('uses the legacy baseline action when no revision guard is available', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, baseline: { status: 'complete', samples: 1, attempts: 1 } } as never)
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reset baseline' })).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reset baseline' }))
+    fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
+    await waitFor(() => expect(resetBaseline).toHaveBeenCalledWith('job-1'))
   })
 
   it('reports action failures and archives through confirmation', async () => {
@@ -93,6 +103,41 @@ describe('job detail actions', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Discard saved progress' }))
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
     await waitFor(() => expect(discardScanCycle).toHaveBeenCalledWith('job-1', 'cycle-1'))
+  })
+
+  it('hides stale cycle data after a successful poll reports no active cycle', async () => {
+    vi.mocked(getJob).mockResolvedValue({
+      ...job,
+      scan_cycle: { id: 'cycle-1', status: 'paused', completed_units: 1, total_units: 2, completed_probes: 100, total_probes: 200 },
+    } as never)
+    vi.mocked(scanCycle).mockResolvedValue({ cycle: null })
+    renderPage()
+
+    await waitFor(() => expect(screen.getByText('Expected baseline')).toBeInTheDocument())
+    await waitFor(() => {
+      expect(screen.queryByText('Broad scan paused safely.')).not.toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Discard saved progress' })).not.toBeInTheDocument()
+    })
+  })
+
+  it('shows failed scan evidence without comparison, results, or baseline approval actions', async () => {
+    const failed = { ...scan, status: 'failed', error: 'Nmap exited unsuccessfully' }
+    vi.mocked(jobScans).mockResolvedValue({ scans: [failed], pagination: page } as never)
+    vi.mocked(scanDetail).mockResolvedValue({
+      scan: failed,
+      changes: [],
+      changes_pagination: page,
+      comparison_state: 'not_compared',
+      current_security_hash: 'scope',
+      comparison_source: 'scan_time',
+    } as never)
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('button', { name: /scan-1/i }))
+    expect(await screen.findByText('No comparison was performed for this scan.')).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Nmap exited unsuccessfully')
+    expect(screen.queryByRole('button', { name: 'View results' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Use as baseline' })).not.toBeInTheDocument()
   })
 
   it('restores an archived job and permanently deletes it with the guarded name', async () => {
@@ -159,6 +204,33 @@ describe('job detail actions', () => {
     await waitFor(() => expect(screen.getByText('Learning')).toBeInTheDocument())
     expect(screen.getByText('1 of 1 samples')).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /Explore baseline/ })).not.toBeInTheDocument()
+  })
+
+  it('explains mixed Naabu and Nmap estimates and DNS expansion', async () => {
+    vi.mocked(getJob).mockResolvedValue({
+      ...job,
+      scan_estimate: { probes: 65_535, hosts: 2, naabu_invocations: 1, nmap_invocations: 2, estimated_seconds: 3_661, unknown_dns: 2 },
+    } as never)
+    renderPage()
+
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'Estimated per run: 65,535 probes across 2 hosts (1 Naabu + 2 Nmap processes, roughly 2h). DNS expansion may increase this estimate for 2 names.',
+    )
+  })
+
+  it('keeps a directly linked older scan visible above history and closes back to the job', async () => {
+    const historical = { ...scan, id: 'historical-scan', scanner_engine: 'naabu_nmap', naabu_version: '2.6.1', scanner_profile_id: 'profile-1', scanner_profile_revision: 4, discovery_ports: 3, discovery_duration_ms: 999, confirmed_ports: 2, enrichment_duration_ms: 12_000 }
+    vi.mocked(scanDetail).mockResolvedValue({ scan: historical, changes: [], changes_pagination: page, current_security_hash: 'scope', comparison_source: 'scan_time' } as never)
+    renderPage(['/jobs/job-1/scans/historical-scan'])
+
+    expect(await screen.findByText('Selected scan historic is not on this history page.')).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: 'Scan diff' })).toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Naabu full TCP discovery → Nmap confirmation')
+    expect(screen.getByRole('status')).toHaveTextContent('3 ports · 999 ms')
+    expect(screen.getByRole('status')).toHaveTextContent('2 ports · 12 s')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close scan detail' }))
+    await waitFor(() => expect(screen.queryByText('Selected scan historic is not on this history page.')).not.toBeInTheDocument())
   })
 
   it('presents an updating baseline as active and keeps its evidence available', async () => {

@@ -48,12 +48,15 @@ describe('scanner profiles', () => {
     fireEvent.change(screen.getByLabelText('Nmap argument array'), { target: { value: '-n\n{address(es)}\n-p\n{ports}\n{structured_output}' } })
     fireEvent.change(screen.getByLabelText('Naabu argument array'), { target: { value: '-host\n{address(es)}\n-p\n{ports}\n{structured_output}' } })
     fireEvent.change(screen.getByLabelText('Enrichment argument array'), { target: { value: '-n\n{address(es)}\n-p\n{ports}\n{structured_output}' } })
+    fireEvent.change(screen.getByLabelText('NSE profile'), { target: { value: 'banner' } })
+    fireEvent.change(screen.getByLabelText(/NSE arguments/), { target: { value: 'timeout=5s\nmode=brief' } })
+    fireEvent.click(screen.getByRole('checkbox', { name: /rate/ }))
     fireEvent.change(screen.getByLabelText('Password confirmation'), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Validate & preview' }))
     await waitFor(() => expect(validateScannerProfile).toHaveBeenCalled())
     await waitFor(() => expect(screen.getByRole('region', { name: 'Effective command preview' })).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: 'Create profile' }))
-    await waitFor(() => expect(createScannerProfile).toHaveBeenCalledWith(expect.objectContaining({ name: 'Full scan', engine: 'naabu_nmap', password: 'administrator-password' })))
+    await waitFor(() => expect(createScannerProfile).toHaveBeenCalledWith(expect.objectContaining({ name: 'Full scan', engine: 'naabu_nmap', nse_profile: 'banner', nse_args: { timeout: '5s', mode: 'brief' }, operator_adjustable: ['rate'], operator_bounds: { rate: { min: 1, max: 100000 } }, password: 'administrator-password' })))
     expect(screen.getByText('Scanner profile saved. Jobs keep their pinned revision until explicitly upgraded.')).toBeInTheDocument()
   })
 
@@ -67,6 +70,18 @@ describe('scanner profiles', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Archive profile' }))
     await waitFor(() => expect(archiveScannerProfile).toHaveBeenCalledWith('profile-1', 3, 'administrator-password'))
     expect(screen.getAllByRole('alert').some(element => element.textContent?.includes('profile changed'))).toBe(true)
+  })
+
+  it('archives a managed profile after confirmation and reports the completed action', async () => {
+    renderWithProviders(<ScannerProfiles />)
+    await waitFor(() => expect(screen.getByText('Managed connect')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Archive Managed connect' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(dialog.querySelector('input[type="password"]')!, { target: { value: 'administrator-password' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Archive profile' }))
+
+    await waitFor(() => expect(archiveScannerProfile).toHaveBeenCalledWith('profile-1', 3, 'administrator-password'))
+    expect(await screen.findByRole('status')).toHaveTextContent('Scanner profile archived.')
   })
 
   it('edits a profile, toggles operator bounds, and restores an archived profile', async () => {
@@ -104,5 +119,44 @@ describe('scanner profiles', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Create profile' }))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('profile rejected'))
     expect(screen.getByRole('heading', { name: 'Create profile' })).toBeInTheDocument()
+  })
+
+  it('does not show a command preview when server validation rejects a profile', async () => {
+    vi.mocked(validateScannerProfile).mockResolvedValue({ valid: false, preview: [] })
+    renderWithProviders(<ScannerProfiles />)
+    await waitFor(() => expect(screen.getByText('Managed connect')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'New profile' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Validate & preview' }))
+    expect(await screen.findByText('Profile is invalid.')).toBeInTheDocument()
+    expect(screen.queryByRole('region', { name: 'Effective command preview' })).not.toBeInTheDocument()
+  })
+
+  it('recovers the profile list after a transient load failure', async () => {
+    vi.mocked(listScannerProfiles).mockRejectedValueOnce(new Error('profile service unavailable'))
+    const { client } = renderWithProviders(<ScannerProfiles />)
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('Could not load scanner profiles.'))
+    await waitFor(() => expect(client.getQueryState(['scanner-profiles', true])?.status).toBe('error'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(screen.getByText('Managed connect')).toBeInTheDocument())
+    expect(listScannerProfiles).toHaveBeenCalledTimes(2)
+  })
+
+  it('explains an empty catalog without presenting stale profile controls', async () => {
+    vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [] })
+    renderWithProviders(<ScannerProfiles />)
+
+    expect(await screen.findByText('No valid scanner profiles are configured.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit Managed connect' })).not.toBeInTheDocument()
+  })
+
+  it('quotes unsafe argument values in the documentation-only preview', async () => {
+    vi.mocked(validateScannerProfile).mockResolvedValue({ valid: true, preview: [{ executable: '/usr/bin/nmap', args: ['-p', '22, 80', '--script-args', 'mode=brief;'] }] })
+    renderWithProviders(<ScannerProfiles />)
+    await waitFor(() => expect(screen.getByText('Managed connect')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Validate & preview' }))
+
+    const preview = await screen.findByRole('region', { name: 'Effective command preview' })
+    expect(preview.querySelector('code')).toHaveTextContent('/usr/bin/nmap -p "22, 80" --script-args "mode=brief;"')
   })
 })

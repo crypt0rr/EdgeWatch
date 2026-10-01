@@ -1257,7 +1257,7 @@ type WorkEstimate struct {
 	NmapProbes       int64 `json:"nmap_probes"`
 	NmapInvocations  int64 `json:"nmap_invocations"`
 	NaabuInvocations int64 `json:"naabu_invocations"`
-	EstimatedSeconds int64 `json:"estimated_seconds"`
+	EstimatedSeconds int64 `json:"estimated_seconds,omitempty"`
 	UnknownDNS       int   `json:"unknown_dns"`
 }
 
@@ -1372,11 +1372,10 @@ func EstimateJobWork(j Job) (WorkEstimate, error) {
 		}
 		estimate.NmapInvocations = saturatingAdd(estimate.NmapInvocations, saturatingMul(ceilDiv(unknown, workBatchSize), factor))
 	}
-	// This is intentionally a rough operator-facing estimate, not an SLA. It
-	// scales with probes and process launches while remaining stable across
-	// machines and provider timing.
-	totalInvocations := saturatingAdd(estimate.NmapInvocations, estimate.NaabuInvocations)
-	estimate.EstimatedSeconds = maxInt64(1, saturatingAdd(ceilDiv(probes, 20_000), totalInvocations))
+	// Keep probe and process counts as deterministic scope estimates, but do
+	// not turn them into a duration. Actual scan time depends on scanner tuning,
+	// target responses, retries, and (for Naabu) the ports found for Nmap
+	// enrichment. There is not enough information before a run to predict it.
 	return estimate, nil
 }
 

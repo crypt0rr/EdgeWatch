@@ -144,18 +144,21 @@ func backfillBaselineHostSearchBatchContext(ctx context.Context, db *sql.DB) (ft
 		searchText string
 	}
 	batch := make([]row, 0, batchRows)
-	for rows.Next() {
-		var item row
-		if err := rows.Scan(&item.id, &item.address, &item.hostJSON, &item.searchText); err != nil {
-			_ = rows.Close()
-			return progress, err
+	rowsErr := func() (rowsErr error) {
+		defer func() {
+			if closeErr := rows.Close(); rowsErr == nil {
+				rowsErr = closeErr
+			}
+		}()
+		for rows.Next() {
+			var item row
+			if err := rows.Scan(&item.id, &item.address, &item.hostJSON, &item.searchText); err != nil {
+				return err
+			}
+			batch = append(batch, item)
 		}
-		batch = append(batch, item)
-	}
-	rowsErr := rows.Err()
-	if closeErr := rows.Close(); rowsErr == nil {
-		rowsErr = closeErr
-	}
+		return rows.Err()
+	}()
 	if rowsErr != nil {
 		return progress, rowsErr
 	}

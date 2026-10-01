@@ -80,6 +80,29 @@ describe('baseline host explorer', () => {
     })
   })
 
+  it('keeps short searches local and explains the minimum before querying', async () => {
+    await renderPage()
+    const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
+    vi.mocked(baselineHosts).mockClear()
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set
+
+    await act(async () => {
+      setter?.call(search, '4')
+      search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+    })
+    expect(container.querySelector('[role="status"]')?.textContent).toContain('at least 3 characters')
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    expect(baselineHosts).not.toHaveBeenCalled()
+
+    await act(async () => {
+      setter?.call(search, '443')
+      search.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }))
+      await new Promise(resolve => setTimeout(resolve, 300))
+    })
+    expect(baselineHosts).toHaveBeenCalledTimes(1)
+    expect(baselineHosts).toHaveBeenCalledWith('job-1', expect.objectContaining({ q: '443' }))
+  })
+
   it('explains when a job has no active baseline', async () => {
     vi.mocked(baselineHosts).mockResolvedValue({ ...detailed, data_quality: 'none', hosts: [], pagination: { limit: 50, offset: 0, total: 0, has_more: false, next_offset: null } })
     await act(async () => {

@@ -174,7 +174,7 @@ func TestMigration48RebuildsBaselineHostSearchByRowid(t *testing.T) {
 
 			assertBaselineSearchTotal(t, upgraded, "upgrade-web", "nginx", webHosts)
 			assertBaselineSearchTotal(t, upgraded, "upgrade-web", tc.lastWebHost, 1)
-			assertBaselineSearchTotal(t, upgraded, "upgrade-web", "80", webHosts)
+			assertBaselineSearchTotal(t, upgraded, "upgrade-web", "ttp", webHosts)
 			assertBaselineSearchTotal(t, upgraded, "upgrade-web", "retired-orphan-marker", 0)
 			assertBaselineSearchTotal(t, upgraded, "upgrade-mail", "nginx", mailHosts)
 			if _, err := upgraded.DB.ExecContext(ctx, `UPDATE jobs SET name='renamed-upgrade' WHERE id='upgrade-web'`); err != nil {

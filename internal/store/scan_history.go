@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
@@ -117,73 +118,72 @@ func saveScanHostsExec(ctx context.Context, execer contextExecer, scan model.Sca
 	return nil
 }
 
-const maxHostSearchTextBytes = 64 * 1024
+const (
+	maxHostSearchTextBytes = 64 * 1024
+	// Leave room for the bounded current job name, which the SQLite FTS
+	// triggers append separately so a job rename remains searchable.
+	maxHostSearchJobBytes = config.MaxJobNameRunes * 4
+)
 
-// hostSearchContent is deliberately built from the small set of fields that
-// the host inventory promises to search. Keeping the serialized evidence out
-// of this document bounds FTS maintenance time as service and Nmap metadata
-// grows while preserving address, job, target, DNS, hostname, port, and
-// service searches. Values are de-duplicated and the document has a hard byte
-// cap so a host with thousands of open services cannot recreate the old
-// host_json write amplification through the search projection.
-func hostSearchContent(job string, host model.HostObservation) string {
+// hostSearchContent is deliberately built from a bounded, prioritized set of
+// fields that the host inventory promises to search. Identity and target
+// fields are retained first, followed by distinct service names and products
+// before verbose details and port numbers. This lets a distinctive service
+// late in a large port list remain searchable without copying serialized
+// evidence or growing FTS writes without bound.
+func hostSearchContent(_ string, host model.HostObservation) string {
 	var builder strings.Builder
 	seen := make(map[string]struct{})
-	appendValue := func(raw string) bool {
-		value := strings.ToLower(strings.TrimSpace(raw))
-		if value == "" {
-			return true
+	contentLimit := maxHostSearchTextBytes - maxHostSearchJobBytes - 1
+	appendValues := func(values []string, maxBytes int) {
+		for _, raw := range values {
+			value := strings.ToLower(strings.TrimSpace(raw))
+			if value == "" {
+				continue
+			}
+			if _, exists := seen[value]; exists {
+				continue
+			}
+			if builder.Len()+len(value)+1 > maxBytes {
+				continue
+			}
+			seen[value] = struct{}{}
+			builder.WriteString(value)
+			builder.WriteByte(' ')
 		}
-		if _, exists := seen[value]; exists {
-			return true
-		}
-		if builder.Len()+len(value)+1 > maxHostSearchTextBytes {
-			return false
-		}
-		seen[value] = struct{}{}
-		builder.WriteString(value)
-		builder.WriteByte(' ')
-		return true
 	}
-	if !appendValue(host.Address) || !appendValue(job) {
-		return strings.TrimSpace(builder.String())
-	}
+	appendValues([]string{host.Address}, contentLimit)
+	var targetValues []string
 	for _, target := range host.SourceTargets {
-		if !appendValue(target) {
-			return strings.TrimSpace(builder.String())
-		}
+		targetValues = append(targetValues, target)
 	}
 	for _, name := range host.DNSNames {
-		if !appendValue(name) {
-			return strings.TrimSpace(builder.String())
-		}
+		targetValues = append(targetValues, name)
 	}
 	for _, hostname := range host.Hostnames {
-		if !appendValue(hostname.Name) {
-			return strings.TrimSpace(builder.String())
-		}
+		targetValues = append(targetValues, hostname.Name)
 	}
+	// Keep numerous target metadata values from consuming the budget intended
+	// for searchable service identifiers.
+	appendValues(targetValues, min(contentLimit, builder.Len()+8*1024))
+	var serviceNames, serviceProducts, serviceDetails, portNumbers []string
 	for _, protocol := range host.Protocols {
 		for _, port := range protocol.Ports {
-			if !appendValue(strconv.Itoa(port.Port)) {
-				return strings.TrimSpace(builder.String())
-			}
+			portNumbers = append(portNumbers, strconv.Itoa(port.Port))
 			if port.Service == nil {
 				continue
 			}
 			service := port.Service
-			for _, value := range []string{service.Name, service.Product, service.Version, service.ExtraInfo, service.OSType, service.DeviceType} {
-				if !appendValue(value) {
-					return strings.TrimSpace(builder.String())
-				}
-			}
-			for _, cpe := range service.CPEs {
-				if !appendValue(cpe) {
-					return strings.TrimSpace(builder.String())
-				}
-			}
+			serviceNames = append(serviceNames, service.Name)
+			serviceProducts = append(serviceProducts, service.Product)
+			serviceDetails = append(serviceDetails, service.Version, service.ExtraInfo, service.OSType, service.DeviceType)
+			serviceDetails = append(serviceDetails, service.CPEs...)
 		}
 	}
+	appendValues(serviceNames, contentLimit)
+	appendValues(serviceProducts, contentLimit)
+	appendValues(serviceDetails, contentLimit)
+	appendValues(portNumbers, contentLimit)
 	return strings.TrimSpace(builder.String())
 }
 
@@ -255,6 +255,10 @@ func scanNotFound(id string) error {
 // payloads into Go.
 func (ts *TenantStore) ListScanHostsPage(ctx context.Context, scanID, query, protocol string, hasOpen *bool, limit, offset int) (Page[ScanHost], error) {
 	if err := ts.ready(); err != nil {
+		return Page[ScanHost]{}, err
+	}
+	query = strings.TrimSpace(query)
+	if err := ValidateHostSearchQuery(query); err != nil {
 		return Page[ScanHost]{}, err
 	}
 	queries := scanHostsPageQueries(ts.scope.id, scanID, query, protocol, hasOpen, limit, offset)
@@ -345,6 +349,10 @@ func (ts *TenantStore) GetScanHost(ctx context.Context, scanID, address string) 
 // successful scan and rebuilt after retention deletes.
 func (ts *TenantStore) ListLatestScanHostsPage(ctx context.Context, query, protocol string, hasOpen *bool, limit, offset int) (Page[LatestScanHost], error) {
 	if err := ts.ready(); err != nil {
+		return Page[LatestScanHost]{}, err
+	}
+	query = strings.TrimSpace(query)
+	if err := ValidateHostSearchQuery(query); err != nil {
 		return Page[LatestScanHost]{}, err
 	}
 	queries := latestScanHostsPageQueries(ts.scope.id, query, protocol, hasOpen, limit, offset)

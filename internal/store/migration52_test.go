@@ -260,6 +260,12 @@ func schema52RowSnapshot(t *testing.T, db *sql.DB) string {
 		`SELECT rowid,id,name,provider,ciphertext,nonce,enabled,revision,created_at,updated_at,credential_revision FROM managed_notifications ORDER BY rowid`,
 	}
 	for _, table := range schema52ChildTables {
+		if table == "baseline_hosts" {
+			// search_text is a derived projection rebuilt by schema 58 when
+			// host-search indexing changes; compare the underlying evidence here.
+			queries = append(queries, `SELECT rowid,job_id,address,host_json FROM baseline_hosts ORDER BY rowid`)
+			continue
+		}
 		queries = append(queries, `SELECT rowid,* FROM `+table+` ORDER BY rowid`)
 	}
 	var out strings.Builder

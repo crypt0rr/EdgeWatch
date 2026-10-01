@@ -3,8 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
@@ -51,7 +53,7 @@ func TestBaselineHostProjectionPaginatesAcceptedOverlay(t *testing.T) {
 	}
 }
 
-func TestBaselineHostProjectionSearchAcceptsShortQueries(t *testing.T) {
+func TestBaselineHostProjectionBoundsSearchQueries(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	snapshot := model.Snapshot{Hosts: []model.HostObservation{
@@ -64,28 +66,17 @@ func TestBaselineHostProjectionSearchAcceptsShortQueries(t *testing.T) {
 	if err := s.System().ReplaceBaselineHostProjection(ctx, "short-search", snapshot); err != nil {
 		t.Fatal(err)
 	}
-	// Queries shorter than the FTS trigram length use the LIKE fallback. They
-	// must filter the accepted overlay the same way scan and inventory host
-	// searches do instead of failing on the escape clause.
-	for _, tc := range []struct {
-		query string
-		want  string
-	}{
-		{query: "8", want: "192.0.2.1"},
-		{query: "80", want: "192.0.2.1"},
-		{query: "44", want: "192.0.2.3"},
-	} {
-		page, err := defaultTenant(s).ListBaselineHostsPage(ctx, "short-search", tc.query, "", nil, 10, 0)
-		if err != nil {
-			t.Fatalf("short baseline search %q: %v", tc.query, err)
-		}
-		if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Host.Address != tc.want {
-			t.Fatalf("short baseline search %q = %#v, want only %s", tc.query, page, tc.want)
+	for _, query := range []string{"8", "80"} {
+		if _, err := defaultTenant(s).ListBaselineHostsPage(ctx, "short-search", query, "", nil, 10, 0); !errors.Is(err, ErrHostSearchQueryTooShort) {
+			t.Fatalf("short baseline search %q error = %v", query, err)
 		}
 	}
-	page, err := defaultTenant(s).ListBaselineHostsPage(ctx, "short-search", "7", "", nil, 10, 0)
-	if err != nil || page.Total != 0 || len(page.Items) != 0 {
-		t.Fatalf("unmatched short baseline search = %#v, %v", page, err)
+	if _, err := defaultTenant(s).ListBaselineHostsPage(ctx, "short-search", strings.Repeat("x", MaxHostSearchQueryRunes+1), "", nil, 10, 0); !errors.Is(err, ErrHostSearchQueryTooLong) {
+		t.Fatalf("oversized baseline search error = %v", err)
+	}
+	page, err := defaultTenant(s).ListBaselineHostsPage(ctx, "short-search", "443", "", nil, 10, 0)
+	if err != nil || page.Total != 1 || len(page.Items) != 1 || page.Items[0].Host.Address != "192.0.2.3" {
+		t.Fatalf("indexed baseline search = %#v, %v", page, err)
 	}
 }
 

@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 57
+const schemaVersion = 58
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -1275,6 +1275,10 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 		// automatic ceiling of a tenant whose capacity no platform
 		// administrator saved is no longer one. See migration57.go.
 		57: migration57Statements(),
+		// Rebuild bounded host-search documents so late service identifiers
+		// remain searchable after the prioritized index format change. See
+		// migration58.go.
+		58: migration58Statements(),
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an

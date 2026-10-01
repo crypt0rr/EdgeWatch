@@ -131,7 +131,7 @@ func TestScanRoutesUseTheSessionTenant(t *testing.T) {
 		return hosts
 	}
 	for account, want := range map[string]string{"own": "scan-tenant-a@" + recordA.ID + "/" + address, "other": "scan-tenant-b@" + jobB + "/" + address} {
-		for _, query := range []string{"", "?q=" + address, "?q=19", "?protocol=tcp&has_open_ports=true"} {
+		for _, query := range []string{"", "?q=" + address, "?q=192", "?protocol=tcp&has_open_ports=true"} {
 			if got := inventory(account, query); len(got) != 1 || got[0] != want {
 				t.Errorf("%s: host inventory%s = %v, want [%s]", account, query, got, want)
 			}

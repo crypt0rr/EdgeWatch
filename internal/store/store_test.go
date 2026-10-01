@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -237,7 +238,7 @@ func TestScanHostIndexSupportsFilteringPaginationAndLatestRows(t *testing.T) {
 	}
 }
 
-func TestHostSearchShortQueriesEscapeLikeWildcards(t *testing.T) {
+func TestHostSearchPunctuationUsesLiteralFTSPhrases(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	insertJobRows(t, s, "job-underscore", "job-underscore-x", "job-wildcard")
@@ -250,22 +251,40 @@ func TestHostSearchShortQueriesEscapeLikeWildcards(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "_", "", nil, 50, 0)
-	if err != nil || page.Total != 2 {
+	page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "edge_x", "", nil, 50, 0)
+	if err != nil || page.Total != 1 || page.Items[0].Job != "edge_x" {
 		t.Fatalf("literal underscore search = %#v, %v", page, err)
 	}
-	for _, item := range page.Items {
-		if item.Job == "axb" {
-			t.Fatalf("underscore wildcard matched unrelated job: %#v", page.Items)
-		}
-	}
-	page, err = defaultTenant(s).ListLatestScanHostsPage(ctx, "_x", "", nil, 50, 0)
-	if err != nil || page.Total != 1 || page.Items[0].Job != "edge_x" {
-		t.Fatalf("literal underscore suffix search = %#v, %v", page, err)
-	}
-	page, err = defaultTenant(s).ListLatestScanHostsPage(ctx, "%", "", nil, 50, 0)
+	page, err = defaultTenant(s).ListLatestScanHostsPage(ctx, "a%b", "", nil, 50, 0)
 	if err != nil || page.Total != 0 {
 		t.Fatalf("literal percent search = %#v, %v", page, err)
+	}
+	page, err = defaultTenant(s).ListLatestScanHostsPage(ctx, "axb", "", nil, 50, 0)
+	if err != nil || page.Total != 1 || page.Items[0].Job != "axb" {
+		t.Fatalf("normal literal search = %#v, %v", page, err)
+	}
+}
+
+func TestHostSearchQueryBoundsApplyToAllIndexedPages(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	for _, query := range []string{"1", "ab"} {
+		if err := ValidateHostSearchQuery(query); !errors.Is(err, ErrHostSearchQueryTooShort) {
+			t.Errorf("ValidateHostSearchQuery(%q) = %v", query, err)
+		}
+		if _, err := defaultTenant(s).ListLatestScanHostsPage(ctx, query, "", nil, 50, 0); !errors.Is(err, ErrHostSearchQueryTooShort) {
+			t.Errorf("latest host query %q error = %v", query, err)
+		}
+		if _, err := defaultTenant(s).ListScanHostsPage(ctx, "missing", query, "", nil, 50, 0); !errors.Is(err, ErrHostSearchQueryTooShort) {
+			t.Errorf("scan host query %q error = %v", query, err)
+		}
+		if _, err := defaultTenant(s).ListBaselineHostsPage(ctx, "missing", query, "", nil, 50, 0); !errors.Is(err, ErrHostSearchQueryTooShort) {
+			t.Errorf("baseline host query %q error = %v", query, err)
+		}
+	}
+	query := strings.Repeat("x", MaxHostSearchQueryRunes+1)
+	if err := ValidateHostSearchQuery(query); !errors.Is(err, ErrHostSearchQueryTooLong) {
+		t.Fatalf("overlong query error = %v", err)
 	}
 }
 
@@ -353,6 +372,7 @@ func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 					Ports:              []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https", Product: "nginx", Version: "1.25"}}},
 				}},
 			},
+			{Address: "2001:db8::44", DNSNames: []string{"node-v6.example"}, Protocols: []model.ProtocolObservation{{Protocol: "udp", ScannedPorts: "53", ScannedPortCount: 1}}},
 		}},
 	}
 	if err := s.System().SaveScan(ctx, job); err != nil {
@@ -371,14 +391,37 @@ func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 	if strings.Contains(indexedContent, "evidence-must-not-be-indexed") || strings.Contains(indexedContent, "fingerprint-must-not-be-indexed") {
 		t.Fatalf("FTS indexed unbounded host evidence: %q", indexedContent)
 	}
-	for _, query := range []string{"nginx", "edge-router", "production", "router.example", "198.51.100.4"} {
-		page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, query, "", nil, 50, 0)
+	if len(indexedContent) > maxHostSearchTextBytes {
+		t.Fatalf("FTS document length %d exceeds %d bytes", len(indexedContent), maxHostSearchTextBytes)
+	}
+	for _, tc := range []struct {
+		query     string
+		addresses []string
+	}{
+		{"nginx", []string{"198.51.100.44"}},
+		{"edge-router", []string{"198.51.100.44"}},
+		{"production", []string{"198.51.100.44", "2001:db8::44"}},
+		{"router.example", []string{"198.51.100.44"}},
+		{"198.51.100.4", []string{"198.51.100.44"}},
+		{"db8::", []string{"2001:db8::44"}},
+		{"node-v6", []string{"2001:db8::44"}},
+	} {
+		page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, tc.query, "", nil, 50, 0)
 		if err != nil {
-			t.Fatalf("search %q: %v", query, err)
+			t.Fatalf("search %q: %v", tc.query, err)
 		}
-		if page.Total != 1 || len(page.Items) != 1 || page.Items[0].Host.Address != "198.51.100.44" {
-			t.Fatalf("search %q returned %#v", query, page)
+		addresses := make([]string, 0, len(page.Items))
+		for _, item := range page.Items {
+			addresses = append(addresses, item.Host.Address)
 		}
+		slices.Sort(addresses)
+		if page.Total != len(tc.addresses) || !slices.Equal(addresses, tc.addresses) {
+			t.Fatalf("search %q returned %#v", tc.query, page)
+		}
+	}
+	page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "   ", "", nil, 50, 0)
+	if err != nil || page.Total != 2 {
+		t.Fatalf("whitespace-only search = %#v, %v; want an unfiltered page", page, err)
 	}
 
 	// The FTS virtual-table plan proves the search predicate is served by the
@@ -417,7 +460,7 @@ func TestHostSearchIndexCoversServiceFieldsAndProjectionUpdates(t *testing.T) {
 	if _, err := s.DB.ExecContext(ctx, `UPDATE latest_scan_hosts SET job=? WHERE address=?`, "Database edge", "198.51.100.44"); err != nil {
 		t.Fatal(err)
 	}
-	page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "database", "", nil, 50, 0)
+	page, err = defaultTenant(s).ListLatestScanHostsPage(ctx, "database", "", nil, 50, 0)
 	if err != nil || page.Total != 1 {
 		t.Fatalf("updated projection search = %#v, %v", page, err)
 	}
@@ -435,6 +478,7 @@ func TestHostSearchContentIsBoundedForLargeEvidence(t *testing.T) {
 	for i := range ports {
 		ports[i] = model.PortObservation{Port: i + 1, State: "open", Service: &model.ServiceObservation{Product: fmt.Sprintf("product-%d", i), Version: strings.Repeat("v", 16)}}
 	}
+	ports[len(ports)-1].Service.Name = "lateuniqueservice"
 	content := hostSearchContent("large-job", model.HostObservation{
 		Address:   "203.0.113.44",
 		Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: ports}},
@@ -442,8 +486,11 @@ func TestHostSearchContentIsBoundedForLargeEvidence(t *testing.T) {
 	if len(content) > maxHostSearchTextBytes {
 		t.Fatalf("host search content length %d exceeds %d", len(content), maxHostSearchTextBytes)
 	}
-	if !strings.Contains(content, "203.0.113.44") || !strings.Contains(content, "large-job") {
+	if !strings.Contains(content, "203.0.113.44") {
 		t.Fatalf("bounded host search content lost identity fields: %q", content[:min(len(content), 200)])
+	}
+	if !strings.Contains(content, "lateuniqueservice") {
+		t.Fatal("bounded host search content dropped a late service name behind verbose port data")
 	}
 }
 

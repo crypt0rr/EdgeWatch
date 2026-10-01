@@ -152,10 +152,7 @@ func TestBaselineHostSearchQueriesUseRowidLookups(t *testing.T) {
 		// join its rowids; the lookup must not be repeated for every host.
 		{name: "match", query: "nginx", want: "M"},
 		{name: "filtered match", query: "nginx", protocol: "tcp", hasOpen: &open, want: "M"},
-		// Shorter values cannot use trigrams. Each host of the job reads only
-		// its own search row by rowid instead of scanning every job's rows.
-		{name: "short", query: "80", want: "="},
-		{name: "filtered short", query: "8", protocol: "tcp", hasOpen: &open, want: "="},
+		{name: "partial service match", query: "ttp", want: "M"},
 	} {
 		queries := baselineHostsPageQueries(DefaultTenantID, "plan-job", tc.query, tc.protocol, tc.hasOpen, 50, 0)
 		for _, statement := range []struct {

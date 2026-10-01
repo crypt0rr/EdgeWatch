@@ -444,6 +444,10 @@ IP. A host detail page shows configured-target relationships, TCP/UDP coverage,
 positive ports, services, scanner provenance, and summarized closed/filtered
 results. Opening a public host may load normalized RDAP information from the
 authoritative registry; raw responses and contact records are not retained.
+Host searches cover partial IP addresses, DNS names, targets, job names, and
+service names or products. Enter at least 3 and no more than 256 characters;
+searches stay on the indexed path and service names/products are prioritized
+within the bounded search document.
 
 ## Notifications
 
@@ -912,7 +916,7 @@ needs one. Print a new platform setup token with `edgewatch admin
 platform-setup-token`; while no administrator exists, the daemon prints a new
 setup token when it starts.
 
-The current schema is version 57. Database migrations are forward-only. An
+The current schema is version 58. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,
@@ -924,6 +928,11 @@ before it migrates the database, and so does a daemon whose configured key
 file or notification URL is unusable (see `config validate` under
 [Useful commands](#useful-commands)). Keep encryption keys with the database or
 encrypted web-managed destinations and never commit them.
+
+Schema 58 rebuilds the bounded host-search indexes from retained scan and
+baseline evidence in restartable batches. Service names and products are
+prioritized so services on late ports remain searchable even when a host has
+many positive ports. The rebuild does not change scan results or baselines.
 
 Only the daemon migrates the database, when it starts. A restored backup of an
 older release keeps its schema until then. On such a database, `restore`,

@@ -1,10 +1,10 @@
 /** @vitest-environment jsdom */
 
-import { fireEvent, screen, waitFor } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { act } from 'react'
 import { Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { APIError, createJob, getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
+import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
 import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
 import { setDisplayTimeZone } from '../format'
 import { JobEditor } from './JobEditor'
@@ -48,6 +48,17 @@ describe('job editor workflow coverage', () => {
     expect(screen.getByLabelText('Job name')).toBeInTheDocument()
   })
 
+  it('does not replace notification routing with an empty selection when destinations fail to load', async () => {
+    vi.mocked(listNotificationDestinations).mockRejectedValue(new Error('notification store unavailable'))
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Preserve routing' } })
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.100.10' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create job' }))
+    await waitFor(() => expect(createJob).toHaveBeenCalled())
+    expect(vi.mocked(createJob).mock.calls[0][0].notification_destinations).toBeUndefined()
+  })
+
   it('creates a Naabu job with startup disabled and explicit empty notification routing', async () => {
     renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
@@ -64,6 +75,75 @@ describe('job editor workflow coverage', () => {
     await waitFor(() => expect(createJob).toHaveBeenCalled())
     const payload = vi.mocked(createJob).mock.calls[0][0]
     expect(payload).toMatchObject({ name: 'Public edge', targets: ['198.51.100.10'], run_on_start: false, notification_destinations: [], tcp: { engine: 'naabu_nmap', ports: '1-65535' } })
+  })
+
+  it('keeps the built-in Naabu profile selectable when profile listing is unavailable', async () => {
+    vi.mocked(listScannerProfiles).mockRejectedValue(new Error('profile service unavailable'))
+    const { client } = renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    await waitFor(() => expect(client.getQueryState(['scanner-profiles'])?.status).toBe('error'))
+
+    fireEvent.change(screen.getByLabelText(/^TCP engine/), { target: { value: 'nmap' } })
+    fireEvent.change(screen.getByLabelText(/^TCP engine/), { target: { value: 'naabu_nmap' } })
+    fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Fallback profile' } })
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.100.10' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create job' }))
+
+    await waitFor(() => expect(createJob).toHaveBeenCalled())
+    expect(vi.mocked(createJob).mock.calls[0][0].tcp).toMatchObject({ engine: 'naabu_nmap', profile_id: BUILTIN_NAABU_PROFILE_ID })
+    expect(vi.mocked(createJob).mock.calls[0][0].tcp?.profile_revision).toBeUndefined()
+  })
+
+  it('limits job-level scanner tuning to fields enabled by the selected profile', async () => {
+    vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [{
+      ...profile,
+      id: BUILTIN_NAABU_PROFILE_ID,
+      definition: { ...profile.definition, operator_adjustable: ['rate'], operator_bounds: { rate: { min: 100, max: 2000 } } },
+    }] } as never)
+    renderWithProviders(<JobEditor />, { route: ['/jobs/new'] })
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Create a monitoring job' })).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByLabelText('Rate')).toBeEnabled())
+
+    expect(screen.getByLabelText('Workers')).toBeDisabled()
+    expect(screen.getByRole('checkbox', { name: /Verify discoveries/ })).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Rate'), { target: { value: '1500' } })
+    fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Bounded operator tuning' } })
+    fireEvent.change(screen.getByLabelText('Target 1'), { target: { value: '198.51.100.10' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Create job' }))
+
+    await waitFor(() => expect(createJob).toHaveBeenCalled())
+    expect(vi.mocked(createJob).mock.calls[0][0].tcp).toMatchObject({ profile_id: BUILTIN_NAABU_PROFILE_ID, naabu: { rate: 1500, workers: 25, verify: true } })
+  })
+
+  it('applies a newer scanner-profile revision only after an explicit choice', async () => {
+    const currentProfile = {
+      ...profile,
+      id: BUILTIN_NAABU_PROFILE_ID,
+      revision: 2,
+      definition: { ...profile.definition, naabu: { ...profile.definition.naabu, rate: 2500 }, operator_adjustable: ['rate'] },
+    }
+    const saved = {
+      ...approvedJob,
+      job: {
+        ...approvedJob.job,
+        tcp: {
+          ports: '1-65535', mode: 'connect', service_detection: false, engine: 'naabu_nmap',
+          profile_id: BUILTIN_NAABU_PROFILE_ID, profile_revision: 1, profile_update_available: true, profile_latest_revision: 2,
+          naabu: { scan_type: 'connect', rate: 1000, workers: 25, retries: 3, timeout_ms: 1000, warm_up_seconds: 2, verify: true, address_batch_size: 16 },
+        },
+      },
+    }
+    vi.mocked(getJob).mockResolvedValue(saved as never)
+    vi.mocked(listScannerProfiles).mockResolvedValue({ profiles: [currentProfile] } as never)
+    vi.mocked(updateJob).mockResolvedValue({ ...saved, revision: 5 } as never)
+    renderWithProviders(<Routes><Route path="/jobs/:id/edit" element={<JobEditor />} /></Routes>, { route: ['/jobs/job-1/edit'] })
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Apply latest profile' }))
+    expect(screen.getByLabelText('Rate')).toHaveValue(2500)
+    expect(screen.queryByRole('button', { name: 'Apply latest profile' })).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(updateJob).toHaveBeenCalled())
+    expect(vi.mocked(updateJob).mock.calls[0][2].tcp).toMatchObject({ profile_id: BUILTIN_NAABU_PROFILE_ID, profile_revision: 2, naabu: { rate: 2500 } })
   })
 
   it('defaults a new job to the deployment timezone from the session', async () => {
@@ -210,6 +290,23 @@ describe('job editor workflow coverage', () => {
     expect(screen.getByText('Scope change cancelled.')).toBeInTheDocument()
   })
 
+  it('saves a scope change only after the administrator confirms the rebaseline', async () => {
+    const existing = { id: 'job-1', revision: 4, enabled: true, archived: false, security_hash: 'old', job: { name: 'Existing', schedule: '0 */6 * * *', timezone: 'UTC', targets: ['198.51.100.10'], max_expanded_hosts: 256, tcp: { ports: '22', mode: 'connect', service_detection: false, engine: 'nmap' }, timing: 'balanced', timeout: '1h', resume_window: '8d', baseline_samples: 1, change_confirmations: 1 }, baseline: { status: 'complete', samples: 1, attempts: 1 } }
+    vi.mocked(getJob).mockResolvedValue(existing as never)
+    vi.mocked(updateJob)
+      .mockRejectedValueOnce(new APIError('rebaseline confirmation required', 'rebaseline_confirmation_required', { changes: ['TCP port scope'] }))
+      .mockResolvedValueOnce({ ...existing, revision: 5 } as never)
+    renderWithProviders(<Routes><Route path="/jobs/:id/edit" element={<JobEditor />} /></Routes>, { route: ['/jobs/job-1/edit'] })
+    await waitFor(() => expect(screen.getByDisplayValue('Existing')).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText(/^Ports/), { target: { value: '443' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    const dialog = await screen.findByRole('dialog')
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Reset baseline and save' }))
+    await waitFor(() => expect(updateJob).toHaveBeenCalledTimes(2))
+    expect(vi.mocked(updateJob).mock.calls[1][2]).toMatchObject({ tcp: { ports: '443' } })
+    expect(vi.mocked(updateJob).mock.calls[1][3]).toBe(true)
+  })
+
   it('restores server notification routing when reloading a newer revision', async () => {
     const saved = {
       id: 'job-1', revision: 4, enabled: true, archived: false, security_hash: 'old',
@@ -245,6 +342,19 @@ describe('job editor workflow coverage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
     await waitFor(() => expect(updateJob).toHaveBeenCalled())
     expect(vi.mocked(updateJob).mock.calls.at(-1)?.[2]).toMatchObject({ notification_destinations: ['notify-2'] })
+  })
+
+  it('blocks saving a dirty draft after a newer job revision arrives', async () => {
+    vi.mocked(getJob).mockResolvedValue(approvedJob as never)
+    const { client } = renderWithProviders(<Routes><Route path="/jobs/:id/edit" element={<JobEditor />} /></Routes>, { route: ['/jobs/job-1/edit'] })
+    await waitFor(() => expect(screen.getByDisplayValue('Broad edge')).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Job name'), { target: { value: 'Draft name' } })
+    vi.mocked(getJob).mockResolvedValue({ ...approvedJob, revision: 5 } as never)
+    await client.invalidateQueries({ queryKey: ['job', 'job-1'] })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reload saved version' })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(screen.getAllByRole('alert').some(alert => alert.textContent?.includes('Reload the saved version before continuing.'))).toBe(true))
+    expect(updateJob).not.toHaveBeenCalled()
   })
 
   describe('with a saved destination that no longer exists', () => {

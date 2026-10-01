@@ -3,8 +3,10 @@ package web
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -458,5 +460,120 @@ func TestSSECursorReservationRecoversAfterStartupFailure(t *testing.T) {
 	}
 	if durableCursor < int64(recoveredID) {
 		t.Fatalf("durable cursor=%d is behind recovered event=%d", durableCursor, recoveredID)
+	}
+}
+
+func TestSSEReservationFailureBackoffCapsAndRecoversMonotonically(t *testing.T) {
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.DB.ExecContext(context.Background(), `CREATE TRIGGER fail_sse_reservation BEFORE UPDATE ON sse_event_cursor BEGIN SELECT RAISE(ABORT, 'temporary cursor failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(nil, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	now := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
+	server.now = func() time.Time { return now }
+	server.mu.Lock()
+	server.sseDurable = false
+	server.sseRetryAt = now.Add(-time.Second)
+	server.nextEventID = 100
+	server.eventIDLimit = 99
+	server.mu.Unlock()
+
+	server.retrySSEReservationContext(context.Background())
+	server.mu.Lock()
+	if server.sseDurable || server.sseRetryDelay != 2*defaultSSEReservationRetry || !server.sseRetryAt.Equal(now.Add(2*defaultSSEReservationRetry)) || server.nextEventID <= 100 || server.eventIDLimit != ^uint64(0) {
+		got := fmt.Sprintf("durable=%t delay=%s retry=%s next=%d limit=%d", server.sseDurable, server.sseRetryDelay, server.sseRetryAt, server.nextEventID, server.eventIDLimit)
+		server.mu.Unlock()
+		t.Fatalf("first failed reservation state: %s", got)
+	}
+	fallbackID := server.nextEventID
+	server.sseRetryDelay = maxSSEReservationRetry/2 + time.Nanosecond
+	server.mu.Unlock()
+
+	now = now.Add(2 * defaultSSEReservationRetry)
+	server.retrySSEReservationContext(context.Background())
+	server.mu.Lock()
+	if server.sseDurable || server.sseRetryDelay != maxSSEReservationRetry || !server.sseRetryAt.Equal(now.Add(maxSSEReservationRetry)) {
+		got := fmt.Sprintf("durable=%t delay=%s retry=%s", server.sseDurable, server.sseRetryDelay, server.sseRetryAt)
+		server.mu.Unlock()
+		t.Fatalf("capped reservation retry state: %s", got)
+	}
+	server.mu.Unlock()
+
+	if _, err := db.DB.ExecContext(context.Background(), `DROP TRIGGER fail_sse_reservation`); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(maxSSEReservationRetry + time.Second)
+	server.retrySSEReservationContext(context.Background())
+	server.mu.Lock()
+	recoveredID, durable, delay, retryAt := server.nextEventID, server.sseDurable, server.sseRetryDelay, server.sseRetryAt
+	server.mu.Unlock()
+	if !durable || recoveredID < fallbackID || delay != 0 || !retryAt.IsZero() {
+		t.Fatalf("recovered cursor state: durable=%t previous=%d recovered=%d delay=%s retry=%s", durable, fallbackID, recoveredID, delay, retryAt)
+	}
+	server.broadcast(map[string]any{"type": "after-reservation-recovery"})
+	server.mu.Lock()
+	monotonicID := server.nextEventID
+	server.mu.Unlock()
+	if monotonicID <= fallbackID {
+		t.Fatalf("post-recovery event ID %d did not advance beyond fallback ID %d", monotonicID, fallbackID)
+	}
+}
+
+func TestListenAndServeEnforcesLoopbackAndJoinsOnShutdown(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	for _, address := range []string{"0.0.0.0:8080", "example.com:8080", "127.0.0.1:0", "not-a-listener"} {
+		if err := server.ListenAndServe(context.Background(), address); err == nil {
+			t.Errorf("ListenAndServe accepted unsafe or invalid address %q", address)
+		}
+	}
+
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := server.ListenAndServe(context.Background(), reserved.Addr().String()); err == nil {
+		t.Fatal("ListenAndServe unexpectedly bound an address already in use")
+	}
+	if err := reserved.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := probe.Addr().String()
+	if err := probe.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- server.ListenAndServe(ctx, address) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		connection, dialErr := net.DialTimeout("tcp", address, 25*time.Millisecond)
+		if dialErr == nil {
+			_ = connection.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatalf("loopback listener did not start: %v", dialErr)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("graceful listener shutdown: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ListenAndServe did not join after context cancellation")
 	}
 }

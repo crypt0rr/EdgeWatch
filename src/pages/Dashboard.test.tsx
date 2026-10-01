@@ -238,6 +238,43 @@ describe('dashboard', () => {
     expect(container.querySelector('button[aria-label="Run demo"]')).toBeNull()
   })
 
+  it('allows operators to run jobs without exposing administrator notification controls', async () => {
+    vi.mocked(getSession).mockResolvedValue({ ...session('operator'), permissions: ['jobs.read', 'jobs.write', 'scans.read'] })
+    await renderDashboard()
+    expect(container.querySelector('button[aria-label="Run demo"]')).toBeTruthy()
+    expect(container.textContent).toContain('Configure job')
+    expect(container.textContent).not.toContain('Test notifications')
+    expect(notificationTest).not.toHaveBeenCalled()
+  })
+
+  it('restores run, cancel, and notification actions after API failures', async () => {
+    vi.mocked(runJob).mockRejectedValueOnce(new Error('worker unavailable'))
+    vi.mocked(cancelScan).mockRejectedValueOnce(new Error('cancel unavailable'))
+    vi.mocked(notificationTest).mockRejectedValueOnce(new Error('delivery unavailable'))
+    await renderDashboard()
+
+    const run = container.querySelector('button[aria-label="Run demo"]') as HTMLButtonElement
+    await act(async () => { run.click(); await Promise.resolve(); await Promise.resolve() })
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('worker unavailable')
+    expect(run).toBeEnabled()
+    await act(async () => { run.click(); await Promise.resolve(); await Promise.resolve() })
+    expect(runJob).toHaveBeenCalledTimes(2)
+
+    const cancel = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Cancel scan')) as HTMLButtonElement
+    await act(async () => { cancel.click(); await Promise.resolve(); await Promise.resolve() })
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('cancel unavailable')
+    expect(cancel).toBeEnabled()
+    await act(async () => { cancel.click(); await Promise.resolve(); await Promise.resolve() })
+    expect(cancelScan).toHaveBeenCalledTimes(2)
+
+    const notify = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Test notifications')) as HTMLButtonElement
+    await act(async () => { notify.click(); await Promise.resolve(); await Promise.resolve() })
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('delivery unavailable')
+    await act(async () => { notify.click(); await Promise.resolve(); await Promise.resolve() })
+    expect(container.querySelector('[role="status"]')?.textContent).toContain('1 destination tested')
+    expect(notificationTest).toHaveBeenCalledTimes(2)
+  })
+
   it('keeps the page usable when jobs fail to load', async () => {
     vi.mocked(listJobs).mockRejectedValue(new Error('database unavailable'))
     await act(async () => {
@@ -286,5 +323,33 @@ describe('dashboard', () => {
       await Promise.resolve()
     })
     expect(listJobs).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps the last live scan count visible as stale and recovers it on retry', async () => {
+    await renderDashboard()
+    vi.mocked(activeScans).mockRejectedValueOnce(new Error('temporary polling failure'))
+    const recentScansMetric = Array.from(container.querySelectorAll('.stat-card')).find(card => card.querySelector('.stat-label')?.textContent === 'Recent scans')
+
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: ['active-scans'], exact: true })
+    })
+    await vi.waitFor(() => expect(recentScansMetric?.querySelector('.stat-detail')?.textContent).toContain('1 in progress · stale'))
+
+    const retry = recentScansMetric?.querySelector('.stat-detail .stat-retry') as HTMLButtonElement
+    expect(retry).toBeEnabled()
+    await act(async () => {
+      retry.click()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(recentScansMetric?.querySelector('.stat-detail')?.textContent).not.toContain('stale'))
+    expect(recentScansMetric?.querySelector('.stat-detail')?.textContent).toContain('1 in progress')
+  })
+
+  it('explains when no notification destination is configured', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, notification_destinations: 0 })
+    await renderDashboard()
+
+    expect(container.querySelector('.page-heading')?.textContent).toContain('Notifications are configured by an administrator.')
+    expect(container.querySelector('.page-heading')?.textContent).not.toContain('notification destination configured')
   })
 })

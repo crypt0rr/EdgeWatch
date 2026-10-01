@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,19 +38,28 @@ func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Req
 		return
 	}
 	routing := map[string]any{"configured": false, "destinations": []string{}}
-	if current, err := ts.ApplicationUpdateRouting(r.Context()); err == nil {
-		// Show legacy deployment digests as current selectors. The console
-		// drops selectors that are not in the destination list before saving.
-		destinations, _, _ := notifier.CanonicalSelection(r.Context(), current.Destinations)
-		if destinations == nil {
-			destinations = []string{}
-		}
-		routing = map[string]any{"configured": current.Configured, "destinations": destinations}
-	} else {
+	current, err := ts.ApplicationUpdateRouting(r.Context())
+	if err != nil {
 		if s.Log != nil {
 			s.Log.Warn("application update routing state unavailable", "error", err)
 		}
+		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
+		return
 	}
+	// Show legacy deployment digests as current selectors. The console
+	// drops selectors that are not in the destination list before saving.
+	destinations, _, err := notifier.CanonicalSelection(r.Context(), current.Destinations)
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Warn("application update routing destinations unavailable", "error", err)
+		}
+		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
+		return
+	}
+	if destinations == nil {
+		destinations = []string{}
+	}
+	routing = map[string]any{"configured": current.Configured, "destinations": destinations}
 	writeJSON(w, http.StatusOK, map[string]any{"destinations": views, "status": status, "update_routing": routing})
 }
 
@@ -80,6 +90,8 @@ func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, "validation_failed", "destinations must be an array", map[string]string{"destinations": "select zero or more configured destinations"})
 		return
 	}
+	s.updateRoutingMu.Lock()
+	defer s.updateRoutingMu.Unlock()
 	// The routing may select only the tenant's own destinations; another
 	// tenant's destination is refused as an unknown one. The store checks
 	// the selection again when it writes it.
@@ -105,6 +117,94 @@ func (s *Server) updateNotificationRouting(w http.ResponseWriter, r *http.Reques
 		destinations = current.Destinations
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "destinations": destinations})
+}
+
+type toggleNotificationUpdateRoutingPayload struct {
+	DestinationID string `json:"destination_id"`
+	Enabled       *bool  `json:"enabled"`
+	Password      string `json:"password"`
+}
+
+// toggleNotificationUpdateRouting changes one selector against the latest
+// persisted routing, instead of replacing the full list a browser may have
+// read before another administrator changed a different destination.
+func (s *Server) toggleNotificationUpdateRouting(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+	w.Header().Set("Cache-Control", "no-store")
+	var input toggleNotificationUpdateRoutingPayload
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.DestinationID = strings.TrimSpace(input.DestinationID)
+	if input.DestinationID == "" || input.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "validation_failed", "destination_id and enabled are required", map[string]string{"destination_id": "select one configured destination"})
+		return
+	}
+	if strings.TrimSpace(input.Password) == "" {
+		writeError(w, http.StatusBadRequest, "password_required", "account password confirmation is required", map[string]string{"password": "password confirmation is required"})
+		return
+	}
+	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, input.Password); err != nil {
+		s.writeNotificationAuthError(w, err)
+		return
+	}
+	s.updateRoutingMu.Lock()
+	defer s.updateRoutingMu.Unlock()
+	notifier := s.App.Notifier.Tenant(ts)
+	if err := notifier.ValidateDestinationSelection(r.Context(), []string{input.DestinationID}); err != nil {
+		if !writeDestinationSelectionError(w, err) {
+			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
+		}
+		return
+	}
+	current, err := ts.ApplicationUpdateRouting(r.Context())
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Warn("application update routing state unavailable", "error", err)
+		}
+		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
+		return
+	}
+	selection := current.Destinations
+	if !current.Configured {
+		selection, err = notifier.LegacySelection(r.Context())
+		if err != nil {
+			if s.Log != nil {
+				s.Log.Warn("legacy application update routing unavailable", "error", err)
+			}
+			writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
+			return
+		}
+	}
+	selection = toggleUpdateDestination(selection, input.DestinationID, *input.Enabled)
+	if err := ts.SetApplicationUpdateDestinations(r.Context(), selection, store.AuditEntry{Action: "notifications.update_routing", Detail: "application update notification routing changed", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+		if writeDestinationSelectionError(w, err) || s.writeAuditUnavailable(w, err, "notifications.update_routing") {
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "notification", "application update notification routing could not be saved", nil)
+		return
+	}
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed"})
+	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "destinations": selection})
+}
+
+func toggleUpdateDestination(selection []string, destinationID string, enabled bool) []string {
+	selected := make(map[string]struct{}, len(selection)+1)
+	for _, id := range selection {
+		if id = strings.TrimSpace(id); id != "" {
+			selected[id] = struct{}{}
+		}
+	}
+	if enabled {
+		selected[destinationID] = struct{}{}
+	} else {
+		delete(selected, destinationID)
+	}
+	result := make([]string, 0, len(selected))
+	for id := range selected {
+		result = append(result, id)
+	}
+	sort.Strings(result)
+	return result
 }
 
 // writeDestinationSelectionError answers a routing selection that names a

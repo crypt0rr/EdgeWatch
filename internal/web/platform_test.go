@@ -954,6 +954,11 @@ func TestPlatformNotifications(t *testing.T) {
 	if state, err := f.db.Platform().GetApplicationUpdateState(context.Background()); err != nil || len(state.UpdateNotificationDestinations) != 1 {
 		t.Fatalf("stored platform routing = %+v, %v", state.UpdateNotificationDestinations, err)
 	}
+	toggled := f.call(t, actorPlatform, http.MethodPatch, "/platform/notifications/update-routing", confirmBody(`"destination_id":"`+view.ID+`","enabled":false`))
+	expectResponse(t, toggled, http.StatusOK, "disable one update destination", &routed)
+	if !routed.Configured || len(routed.Destinations) != 0 {
+		t.Fatalf("platform routing after toggle = %+v, want configured empty", routed)
+	}
 
 	destinationPath := "/platform/notifications/" + view.ID
 	expectError(t, f.call(t, actorPlatform, http.MethodPatch, destinationPath, confirmBody(`"name":"renamed"`)), http.StatusBadRequest, "revision_required", "update without a revision")

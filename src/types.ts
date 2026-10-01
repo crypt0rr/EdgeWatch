@@ -56,7 +56,7 @@ export type HostProtocolSummary = {
   service_detection: boolean; open_ports: number; open_filtered_ports: number
 }
 export type HostSummary = {
-  address: string; address_family?: string; source_targets?: string[]; dns_names?: string[]; protocols?: HostProtocolSummary[]
+  address: string; address_family?: string; visibility?: 'public' | 'non_public' | 'unknown' | string; source_targets?: string[]; dns_names?: string[]; protocols?: HostProtocolSummary[]
   open_ports: number; open_filtered_ports: number; has_open_ports: boolean; legacy?: boolean
 }
 export type GlobalHostSummary = HostSummary & {

@@ -58,7 +58,10 @@ test('inline update notification toggles expose failure and success outcomes', a
   await retryDialog.getByLabel('Account password').fill('fixture-password')
   await retryDialog.getByRole('button', { name: 'Disable update alerts' }).click()
   await expect(page.locator('.destination-feedback[role="status"]')).toContainText('Application update alerts disabled for Operations')
-  expect(controls.payloads['update-routing']).toHaveLength(2)
+  expect(controls.payloads['update-routing']).toEqual([
+    { destination_id: 'dest-1', enabled: false, password: 'fixture-password' },
+    { destination_id: 'dest-1', enabled: false, password: 'fixture-password' },
+  ])
 })
 
 test('scanner profile validation exposes failure and success outcomes', async ({ page }, testInfo) => {

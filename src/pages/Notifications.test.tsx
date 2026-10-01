@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   getSession,
   listNotificationDestinations,
-  updateNotificationRouting,
+  toggleNotificationUpdateAlert,
 } from '../api'
 import { Notifications } from './Notifications'
 import { defaultUnitScope } from '../test/test-utils'
@@ -22,7 +22,7 @@ vi.mock('../api', () => ({
   listNotificationDestinations: vi.fn(),
   testNotificationDestination: vi.fn(),
   updateNotificationDestination: vi.fn(),
-  updateNotificationRouting: vi.fn(),
+  toggleNotificationUpdateAlert: vi.fn(),
 }))
 
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -60,7 +60,7 @@ describe('notification update-alert routing', () => {
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(listNotificationDestinations).mockResolvedValue(response(false, []))
-    vi.mocked(updateNotificationRouting).mockResolvedValue({ configured: true, destinations: [] })
+    vi.mocked(toggleNotificationUpdateAlert).mockResolvedValue({ configured: true, destinations: [] })
   })
 
   afterEach(() => {
@@ -96,6 +96,17 @@ describe('notification update-alert routing', () => {
     expect(container.querySelector('input[aria-label="Enable update alerts for Backup"]')).toBeTruthy()
   })
 
+  it('does not render writable update routing when destination state is unavailable', async () => {
+    vi.mocked(listNotificationDestinations).mockRejectedValueOnce(new Error('routing unavailable'))
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><Notifications /></QueryClientProvider>)
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.textContent).toContain('Could not load notification destinations'), { timeout: 1000 })
+    expect(container.querySelector('.notification-update-toggle')).toBeNull()
+    expect(toggleNotificationUpdateAlert).not.toHaveBeenCalled()
+  })
+
   it('leaves the toggle unchanged when password confirmation is cancelled', async () => {
     vi.mocked(listNotificationDestinations).mockResolvedValue(response(true, ['dest-1']))
     await renderPage()
@@ -106,12 +117,12 @@ describe('notification update-alert routing', () => {
     act(() => (dialog.querySelector('button[type="button"]') as HTMLButtonElement).click())
 
     expect(first.checked).toBe(true)
-    expect(updateNotificationRouting).not.toHaveBeenCalled()
+    expect(toggleNotificationUpdateAlert).not.toHaveBeenCalled()
   })
 
   it('confirms each toggle, rolls back failed saves, and disables other toggles while pending', async () => {
     vi.mocked(listNotificationDestinations).mockResolvedValue(response(true, ['dest-1']))
-    vi.mocked(updateNotificationRouting).mockRejectedValueOnce(new Error('server refused'))
+    vi.mocked(toggleNotificationUpdateAlert).mockRejectedValueOnce(new Error('server refused'))
     await renderPage()
 
     const first = container.querySelector('input[aria-label="Disable update alerts for Operations"]') as HTMLInputElement
@@ -143,8 +154,8 @@ describe('notification update-alert routing', () => {
     })
     await vi.waitFor(() => expect(container.querySelector('[role="status"]')?.textContent).toContain('Application update alerts disabled for Operations'), { timeout: 1000 })
     expect(first.checked).toBe(false)
-    expect(updateNotificationRouting).toHaveBeenNthCalledWith(1, [], 'fixture-password')
-    expect(updateNotificationRouting).toHaveBeenNthCalledWith(2, [], 'fixture-password')
+    expect(toggleNotificationUpdateAlert).toHaveBeenNthCalledWith(1, 'dest-1', false, 'fixture-password')
+    expect(toggleNotificationUpdateAlert).toHaveBeenNthCalledWith(2, 'dest-1', false, 'fixture-password')
   })
 
   describe('with routing changed in another session', () => {
@@ -172,7 +183,7 @@ describe('notification update-alert routing', () => {
 
     beforeEach(() => {
       vi.mocked(listNotificationDestinations).mockResolvedValue(routed(['dest-1']))
-      vi.mocked(updateNotificationRouting).mockImplementation(async selected => ({ configured: true, destinations: selected }))
+      vi.mocked(toggleNotificationUpdateAlert).mockImplementation(async (id, enabled) => ({ configured: true, destinations: enabled ? [id] : [] }))
     })
 
     it('shows the refetched routing and toggles only the chosen destination', async () => {
@@ -185,7 +196,7 @@ describe('notification update-alert routing', () => {
 
       act(() => (container.querySelector('input[aria-label="Enable update alerts for Pager"]') as HTMLInputElement).click())
       await confirm('fixture-password')
-      await vi.waitFor(() => expect(updateNotificationRouting).toHaveBeenCalledWith(['dest-1', 'dest-2', 'dest-3'], 'fixture-password'), { timeout: 1000 })
+      await vi.waitFor(() => expect(toggleNotificationUpdateAlert).toHaveBeenCalledWith('dest-3', true, 'fixture-password'), { timeout: 1000 })
     })
 
     it('applies a toggle to routing that changed while the password prompt was open', async () => {
@@ -195,7 +206,7 @@ describe('notification update-alert routing', () => {
       vi.mocked(listNotificationDestinations).mockResolvedValue(routed(['dest-1', 'dest-2']))
       await act(async () => { await queryClient.invalidateQueries({ queryKey: ['notifications'] }) })
       await confirm('fixture-password')
-      await vi.waitFor(() => expect(updateNotificationRouting).toHaveBeenCalledWith(['dest-1', 'dest-2', 'dest-3'], 'fixture-password'), { timeout: 1000 })
+      await vi.waitFor(() => expect(toggleNotificationUpdateAlert).toHaveBeenCalledWith('dest-3', true, 'fixture-password'), { timeout: 1000 })
     })
   })
 })

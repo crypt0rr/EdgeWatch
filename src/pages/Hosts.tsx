@@ -13,25 +13,18 @@ function addressKind(address: string) {
   return address.includes(':') ? 'IPv6' : 'IPv4'
 }
 
-function visibility(address: string) {
-  const value = address.toLowerCase()
-  if (value === 'localhost') return 'Private'
-  if (value.includes(':')) {
-    if (value === '::' || value === '::1' || value.startsWith('fc') || value.startsWith('fd') || value.startsWith('fe8') || value.startsWith('fe9') || value.startsWith('fea') || value.startsWith('feb') || value.startsWith('ff')) return 'Private'
-    return 'Public'
-  }
-  const octets = value.split('.').map(Number)
-  if (octets.length !== 4 || octets.some(octet => !Number.isInteger(octet) || octet < 0 || octet > 255)) return 'Public'
-  const [first, second] = octets
-  if (first === 0 || first === 10 || first === 127 || (first === 172 && second >= 16 && second <= 31) || (first === 192 && second === 168) || (first === 169 && second === 254) || (first === 100 && second >= 64 && second <= 127) || (first >= 224 && first <= 255)) return 'Private'
-  return 'Public'
+function visibilityLabel(visibility: GlobalHostSummary['visibility']) {
+  if (visibility === 'public') return 'Public'
+  if (visibility === 'non_public') return 'Non-public'
+  return 'Unknown'
 }
 
 function HostRow({ host }: { host: GlobalHostSummary }) {
   const source = host.source_targets?.length ? host.source_targets.join(', ') : host.dns_names?.join(', ')
   const scannedAt = host.scanned_at ? formatDateTime(host.scanned_at) : 'Unknown time'
+  const visibility = visibilityLabel(host.visibility)
   return <Link className="host-row global-host-row" to={`/scans/${encodeURIComponent(host.scan_id)}/hosts/${encodeURIComponent(host.address)}`}>
-    <span className="host-address"><strong title={host.address}>{host.address}</strong><span className="host-badges"><span className="pill blue">{host.address_family ?? addressKind(host.address)}</span><span className={visibility(host.address) === 'Public' ? 'pill green' : 'pill gray'}>{visibility(host.address)}</span>{host.legacy && <span className="pill amber">Legacy detail</span>}</span></span>
+    <span className="host-address"><strong title={host.address}>{host.address}</strong><span className="host-badges"><span className="pill blue">{host.address_family ?? addressKind(host.address)}</span><span className={host.visibility === 'public' ? 'pill green' : 'pill gray'}>{visibility}</span>{host.legacy && <span className="pill amber">Legacy detail</span>}</span></span>
     <span className="host-source"><strong title={host.job || 'Legacy scan'}>{host.job || 'Legacy scan'}</strong><small>{scannedAt}</small><span title={source || 'Configured target'}>{source || 'Configured target'}</span></span>
     <span className="host-coverage">{host.protocols?.map(protocol => <span key={protocol.protocol} className="coverage-chip"><b>{protocol.protocol.toUpperCase()}</b> {protocol.open_ports} open{protocol.open_filtered_ports ? ` · ${protocol.open_filtered_ports} open|filtered` : ''}</span>)}</span>
     <span className="host-open-count">{host.open_ports + host.open_filtered_ports}<small> positive ports</small></span>

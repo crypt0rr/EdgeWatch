@@ -15,8 +15,8 @@ vi.mock('../api', () => ({ listHosts: vi.fn() }))
 
 const response: GlobalHostsResponse = {
   hosts: [
-    { address: '198.51.100.10', address_family: 'IPv4', source_targets: ['router.example'], protocols: [{ protocol: 'tcp', scanned_ports: '22,443', scanned_port_count: 2, service_detection: false, open_ports: 1, open_filtered_ports: 0 }], open_ports: 1, open_filtered_ports: 0, has_open_ports: true, job_id: 'job-1', job: 'production', scan_id: 'scan-1', scanned_at: '2026-09-12T07:00:00Z', data_quality: 'detailed' },
-    { address: 'fd00::1', address_family: 'IPv6', dns_names: ['internal.example'], protocols: [{ protocol: 'udp', scanned_ports: '53', scanned_port_count: 1, service_detection: true, open_ports: 0, open_filtered_ports: 1 }], open_ports: 0, open_filtered_ports: 1, has_open_ports: true, job_id: 'job-2', job: 'retired', scan_id: 'scan-2', scanned_at: '2026-09-11T07:00:00Z', data_quality: 'legacy', archived: true, legacy: true },
+    { address: '198.51.100.10', address_family: 'IPv4', visibility: 'non_public', source_targets: ['router.example'], protocols: [{ protocol: 'tcp', scanned_ports: '22,443', scanned_port_count: 2, service_detection: false, open_ports: 1, open_filtered_ports: 0 }], open_ports: 1, open_filtered_ports: 0, has_open_ports: true, job_id: 'job-1', job: 'production', scan_id: 'scan-1', scanned_at: '2026-09-12T07:00:00Z', data_quality: 'detailed' },
+    { address: 'fd00::1', address_family: 'IPv6', visibility: 'non_public', dns_names: ['internal.example'], protocols: [{ protocol: 'udp', scanned_ports: '53', scanned_port_count: 1, service_detection: true, open_ports: 0, open_filtered_ports: 1 }], open_ports: 0, open_filtered_ports: 1, has_open_ports: true, job_id: 'job-2', job: 'retired', scan_id: 'scan-2', scanned_at: '2026-09-11T07:00:00Z', data_quality: 'legacy', archived: true, legacy: true },
   ],
   pagination: { limit: 1, offset: 0, total: 2, has_more: true, next_offset: 1 },
 }
@@ -62,6 +62,7 @@ describe('global hosts explorer', () => {
     expect(container.textContent).toContain('Archived jobs')
     expect(container.textContent).toContain('198.51.100.10')
     expect(container.textContent).toContain('IPv6')
+    expect(container.textContent).toContain('Non-public')
     expect(container.textContent).toContain('Legacy detail')
     expect(container.querySelector('a[href="/scans/scan-1/hosts/198.51.100.10"]')).toBeTruthy()
     expect(container.querySelector('a[href="/scans/scan-2/hosts/fd00%3A%3A1"]')).toBeTruthy()

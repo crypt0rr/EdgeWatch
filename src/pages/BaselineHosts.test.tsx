@@ -106,8 +106,8 @@ describe('baseline host explorer', () => {
 
   it('resets pagination for every filter and renders legacy/private host states', async () => {
     const hosts = [
-      { address: '10.0.0.1', source_targets: [], protocols: [{ protocol: 'tcp', open_ports: 0, open_filtered_ports: 0 }], open_ports: 0, open_filtered_ports: 0, has_open_ports: false },
-      { address: '2001:db8::1', address_family: 'IPv6', source_targets: ['dns.example'], protocols: [{ protocol: 'udp', open_ports: 1, open_filtered_ports: 2 }], open_ports: 1, open_filtered_ports: 2, has_open_ports: true, legacy: true },
+      { address: '10.0.0.1', visibility: 'non_public', source_targets: [], protocols: [{ protocol: 'tcp', open_ports: 0, open_filtered_ports: 0 }], open_ports: 0, open_filtered_ports: 0, has_open_ports: false },
+      { address: '2001:db8::1', address_family: 'IPv6', visibility: 'non_public', source_targets: ['dns.example'], protocols: [{ protocol: 'udp', open_ports: 1, open_filtered_ports: 2 }], open_ports: 1, open_filtered_ports: 2, has_open_ports: true, legacy: true },
     ] as never
     vi.mocked(baselineHosts).mockImplementation(async (_job, filters) => ({
       ...detailed,
@@ -117,7 +117,7 @@ describe('baseline host explorer', () => {
     }))
     await renderPage()
     expect(container.textContent).toContain('Older scan details')
-    expect(container.textContent).toContain('Private')
+    expect(container.textContent).toContain('Non-public')
     expect(container.textContent).toContain('Legacy detail')
     expect(container.textContent).toContain('2 open|filtered')
 

@@ -1,4 +1,4 @@
-import { createPlatformNotification, deletePlatformNotification, listPlatformNotifications, updatePlatformNotification, updatePlatformNotificationRouting } from '../../api'
+import { createPlatformNotification, deletePlatformNotification, listPlatformNotifications, togglePlatformNotificationUpdateAlert, updatePlatformNotification } from '../../api'
 import { NotificationsView, type NotificationScope } from '../Notifications'
 
 // The platform's own destinations. They receive the platform's copy of each
@@ -10,7 +10,7 @@ const platformNotifications: NotificationScope = {
   create: (name, url, password, enabled) => createPlatformNotification(name, url, password, enabled),
   update: (id, revision, name, password, options) => updatePlatformNotification(id, revision, name, password, options),
   remove: (id, revision, password) => deletePlatformNotification(id, revision, password),
-  updateRouting: (destinations, password) => updatePlatformNotificationRouting(destinations, password),
+  toggleRouting: (destinationID, enabled, password) => togglePlatformNotificationUpdateAlert(destinationID, enabled, password),
   routingDefaultsToEnabled: false,
   configImport: false,
   eyebrow: 'Platform',

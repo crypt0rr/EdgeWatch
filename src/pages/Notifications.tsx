@@ -10,8 +10,8 @@ import {
   type NotificationDestinationsResponse,
   type NotificationUpdateRouting,
   testNotificationDestination,
+  toggleNotificationUpdateAlert,
   updateNotificationDestination,
-  updateNotificationRouting,
   getSession,
 } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
@@ -47,7 +47,7 @@ export type NotificationScope = {
   remove: (id: string, revision: number, password: string) => Promise<unknown>
   /** Sends a test message; the platform's destinations have none. */
   test?: (id: string) => Promise<unknown>
-  updateRouting: (destinations: string[], password: string) => Promise<NotificationUpdateRouting>
+  toggleRouting: (destinationID: string, enabled: boolean, password: string) => Promise<NotificationUpdateRouting>
   /** Whether routing that was never saved sends update alerts to every enabled destination. */
   routingDefaultsToEnabled: boolean
   /** Whether the page reports the import of config.yaml notification URLs. */
@@ -66,7 +66,7 @@ const unitNotifications: NotificationScope = {
   update: (id, revision, name, password, options) => updateNotificationDestination(id, revision, name, password, options),
   remove: (id, revision, password) => deleteNotificationDestination(id, revision, password),
   test: id => testNotificationDestination(id),
-  updateRouting: (destinations, password) => updateNotificationRouting(destinations, password),
+  toggleRouting: (destinationID, enabled, password) => toggleNotificationUpdateAlert(destinationID, enabled, password),
   routingDefaultsToEnabled: true,
   configImport: true,
   eyebrow: 'Delivery',
@@ -253,16 +253,12 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
     clearRowFeedback(destination.id)
     const confirmation = await askPassword(`Confirm update alerts for ${destination.name}`, `Enter your account password to ${checked ? 'send' : 'stop sending'} release and upgrade alerts through this destination.`, checked ? 'Enable update alerts' : 'Disable update alerts')
     if (confirmation === null) return
-    // The request replaces the whole routing list. Build it from the latest
-    // fetched routing, which may include changes saved in another session
-    // while the password prompt was open, and change only this destination.
-    const selected = selectedUpdateDestinationIds(client.getQueryData<NotificationDestinationsResponse>(scope.queryKey) ?? destinations.data, scope.routingDefaultsToEnabled)
-    const next = checked
-      ? [...new Set([...selected, destination.id])]
-      : selected.filter(id => id !== destination.id)
     setBusy(`update-routing:${destination.id}`)
     try {
-      const result = await scope.updateRouting(next, confirmation)
+      // This endpoint toggles just one selector against the latest persisted
+      // state, so a change made in another session while the prompt was open
+      // is preserved.
+      const result = await scope.toggleRouting(destination.id, checked, confirmation)
       client.setQueryData<NotificationDestinationsResponse>(scope.queryKey, current => current && { ...current, update_routing: result })
       reportRowMessage(destination.id, `Application update alerts ${checked ? 'enabled' : 'disabled'} for ${destination.name}.`)
       await client.invalidateQueries({ queryKey: scope.queryKey })

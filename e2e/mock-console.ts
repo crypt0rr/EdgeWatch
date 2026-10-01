@@ -316,10 +316,13 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
         await json({ entries: [{ id: 2, created_at: '2026-01-01T00:00:02Z', action: 'tenant.created', category: 'platform', actor: { kind: 'platform', username: 'platform' }, detail: 'business unit Retail created', unit: { id: 'unit-retail', name: 'Retail', slug: 'retail' } }], next_before: null }); return
       }
       if (parts.length === 1 && parts[0] === 'notifications' && method === 'GET') { await json({ destinations: [{ ...destination, id: 'platform-1', name: 'Platform pager' }], status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' }, update_routing: platformRouting }); return }
-      if (parts.length === 2 && parts[0] === 'notifications' && parts[1] === 'update-routing' && method === 'PUT') {
-        const value = body() as { destinations?: string[] }
+      if (parts.length === 2 && parts[0] === 'notifications' && parts[1] === 'update-routing' && method === 'PATCH') {
+        const value = body() as { destination_id: string; enabled: boolean; password: string }
         record('platform-update-routing', value)
-        platformRouting = { configured: true, destinations: value.destinations ?? [] }
+        const selected = new Set(platformRouting.configured ? platformRouting.destinations : [])
+        if (value.enabled) selected.add(value.destination_id)
+        else selected.delete(value.destination_id)
+        platformRouting = { configured: true, destinations: [...selected].sort() }
         await json(platformRouting); return
       }
       if (parts.length === 1 && parts[0] === 'status' && method === 'GET') {
@@ -382,11 +385,14 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       if (failures.delete('incident-suppress')) { await json(jsonError('incident-suppress'), 422); return }
       await route.fulfill({ status: 204 }); return
     }
-    if (path === '/notifications/update-routing' && method === 'PUT') {
-      const value = body() as { destinations?: string[] }
+    if (path === '/notifications/update-routing' && method === 'PATCH') {
+      const value = body() as { destination_id: string; enabled: boolean; password: string }
       record('update-routing', value)
       if (failures.delete('update-routing')) { await json(jsonError('update-routing'), 422); return }
-      updateRouting = { configured: true, destinations: value.destinations ?? [] }
+      const selected = new Set(updateRouting.configured ? updateRouting.destinations : ['dest-1'])
+      if (value.enabled) selected.add(value.destination_id)
+      else selected.delete(value.destination_id)
+      updateRouting = { configured: true, destinations: [...selected].sort() }
       await json(updateRouting); return
     }
     if (path === '/notifications/destinations' && method === 'POST') { await mutate('notification-create', destination, 201); return }

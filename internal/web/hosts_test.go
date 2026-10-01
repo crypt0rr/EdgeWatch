@@ -494,3 +494,26 @@ func TestSummaryForHostCollapsesChunkedProtocolObservations(t *testing.T) {
 		}
 	}
 }
+
+func TestSummaryForHostUsesRDAPSpecialUseVisibilityPolicy(t *testing.T) {
+	tests := []struct {
+		address string
+		want    string
+	}{
+		{address: "8.8.8.8", want: "public"},
+		{address: "2001:4860:4860::8888", want: "public"},
+		{address: "100.64.0.1", want: "non_public"},
+		{address: "192.0.2.1", want: "non_public"},
+		{address: "198.18.0.1", want: "non_public"},
+		{address: "::ffff:192.168.1.1", want: "non_public"},
+		{address: "2001:db8::1", want: "non_public"},
+		{address: "not-an-ip", want: "unknown"},
+	}
+	for _, test := range tests {
+		t.Run(test.address, func(t *testing.T) {
+			if got := summaryForHost(model.HostObservation{Address: test.address}, false).Visibility; got != test.want {
+				t.Fatalf("visibility = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

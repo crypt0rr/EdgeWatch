@@ -65,9 +65,14 @@ describe('platform administrators', () => {
     // A pending administrator has not redeemed its invitation, which is
     // renewed or revoked, or the account removed, instead of disabled.
     expect(within(screen.getByTestId('admin-lee')).getAllByRole('button').map(button => button.textContent)).toEqual(['Renew invitation', 'Revoke invitation', 'Remove'])
+    const pendingActions = within(screen.getByTestId('admin-lee')).getAllByRole('button')
+    expect(pendingActions[0]).not.toHaveClass('danger-text')
+    expect(pendingActions[1]).toHaveClass('danger-text')
+    expect(pendingActions[2]).toHaveClass('danger-text')
     expect(within(screen.getByTestId('admin-lee')).getByText('Pending activation')).toBeInTheDocument()
     expect(within(screen.getByTestId('admin-sam')).getByText('No TOTP')).toBeInTheDocument()
     expect(within(screen.getByTestId('admin-kim')).getByRole('button', { name: 'Enable' })).toBeInTheDocument()
+    expect(within(screen.getByTestId('admin-sam')).getByRole('button', { name: 'Disable' })).toHaveClass('danger-text')
 
     vi.mocked(setPlatformAdminEnabled).mockRejectedValueOnce(new APIError('the platform keeps at least one enabled platform administrator', 'last_platform_admin'))
     fireEvent.click(within(screen.getByTestId('admin-sam')).getByRole('button', { name: 'Disable' }))

@@ -59,6 +59,7 @@ const frontendReport = (overrides = {}) => {
     'src/pages/Security.tsx',
     'src/pages/TotpEnrollment.tsx',
     'src/pages/Users.tsx',
+    'src/status.ts',
     'src/target.ts',
     'src/types.ts',
     'src/useDebouncedValue.ts',

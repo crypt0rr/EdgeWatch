@@ -108,6 +108,7 @@ describe('business unit detail', () => {
         expect(within(row(username)).queryByRole('button', { name: /Reset password|New activation link/ })).not.toBeInTheDocument()
       }
       for (const username of ['riley', 'jordan', 'dana', 'casey', 'taylor']) expect(within(row(username)).getByRole('button', { name: /Revoke sessions/ })).toBeInTheDocument()
+      expect(within(row('casey')).getByRole('button', { name: /Revoke sessions/ })).toHaveClass('danger-text')
       expect(within(row('sam')).queryByRole('button', { name: /Revoke sessions/ })).not.toBeInTheDocument()
       expect(within(row('casey')).getByText('casey · Operator')).toBeInTheDocument()
       expect(within(row('sam')).getByText('Pending activation')).toBeInTheDocument()

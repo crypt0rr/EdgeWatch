@@ -2007,3 +2007,11 @@ label small,
     flex-direction: column;
   }
 }
+
+/* Keep pill copy intentional; identifiers are formatted by the UI. */
+.pill { text-transform: none; }
+
+/* Archived is a compact marker, not a full-width grid row. */
+.public-picker-archived { justify-self: start; margin-left: 0; }
+
+.legacy-banner-recheck { flex: 0 0 auto; white-space: nowrap; }

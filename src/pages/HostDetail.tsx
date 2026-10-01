@@ -7,13 +7,14 @@ import { ErrorNotice } from '../components/ErrorNotice'
 import { PortScopeDetails } from '../components/PortScopeDetails'
 import type { HostObservation, PortObservation, ProtocolObservation, RdapResult } from '../types'
 import { formatDate, formatDateTime } from '../format'
+import { hostStatusLabel } from '../status'
 
 function displayStatusReason(reason?: string) {
   return reason === 'scan-complete' ? 'full-range scan complete' : reason
 }
 
 function HostIdentity({ host }: { host: HostObservation }) {
-  return <div className="host-identity"><div className="host-identity-icon"><Server size={25} /></div><div><h2>{host.address}</h2><div className="host-badges"><span className="pill blue">{host.address_family ?? (host.address.includes(':') ? 'IPv6' : 'IPv4')}</span><span className={host.status === 'up' ? 'pill green' : 'pill gray'}>{host.status ?? 'up'}</span>{host.status_reason && <span className="muted">{displayStatusReason(host.status_reason)}{host.reason_ttl ? ` · TTL ${host.reason_ttl}` : ''}</span>}</div></div></div>
+  return <div className="host-identity"><div className="host-identity-icon"><Server size={25} /></div><div><h2>{host.address}</h2><div className="host-badges"><span className="pill blue">{host.address_family ?? (host.address.includes(':') ? 'IPv6' : 'IPv4')}</span><span className={host.status === 'up' ? 'pill green' : 'pill gray'}>{hostStatusLabel(host.status ?? 'up')}</span>{host.status_reason && <span className="muted">{displayStatusReason(host.status_reason)}{host.reason_ttl ? ` · TTL ${host.reason_ttl}` : ''}</span>}</div></div></div>
 }
 
 function ServiceText({ port }: { port: PortObservation }) {

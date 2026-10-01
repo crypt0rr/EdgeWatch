@@ -193,6 +193,28 @@ test.describe('responsive issue regressions', () => {
     await expectNoHorizontalScroll(page)
   })
 
+  test('status labels stay readable and archived host badges stay compact (#994)', async ({ page }) => {
+    await mockConsole(page, 'administrator')
+    await page.route('**/api/v1/hosts**', async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      await route.fulfill({ json: { hosts: [{
+        address: '198.51.100.20', job_id: 'job-archived', job: 'retired job', scan_id: 'scan-archived',
+        scanned_at: timestamp, data_quality: 'detailed', open_ports: 0, open_filtered_ports: 0,
+        has_open_ports: false, archived: true,
+      }], pagination: { limit: 100, offset: 0, total: 1, has_more: false, next_offset: null } } })
+    })
+
+    await page.goto('/scanner-profiles')
+    const builtIn = page.getByText('Built-in', { exact: true })
+    await expect(builtIn).toBeVisible()
+    expect(await builtIn.evaluate(element => getComputedStyle(element).textTransform)).toBe('none')
+
+    await page.goto('/public-dashboard')
+    const archived = page.locator('.public-picker-archived')
+    await expect(archived).toHaveText('Archived')
+    expect(await archived.evaluate(element => getComputedStyle(element).justifySelf)).toBe('start')
+  })
+
   test('long dashboard values stay in shrinkable cards (#971)', async ({ page }) => {
     await mockConsole(page, 'operator')
     await page.route('**/api/v1/jobs**', async route => {

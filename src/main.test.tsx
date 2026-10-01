@@ -238,6 +238,14 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByText('No jobs configured')).toBeInTheDocument())
   })
 
+  it('shows paused jobs in amber on the jobs list', async () => {
+    vi.mocked(listJobs).mockResolvedValue({ jobs: [{ id: 'job-paused', revision: 1, enabled: false, archived: false, job: { name: 'Paused monitor', targets: [], schedule: '0 * * * *' }, baseline: { status: 'complete', samples: 1, host_count: 0 } }] } as never)
+    renderWithProviders(<Jobs />)
+    const card = await screen.findByRole('link', { name: /Paused monitor/ })
+    expect(card.querySelector('.pill')).toHaveTextContent('Paused')
+    expect(card.querySelector('.pill')).toHaveClass('amber')
+  })
+
   it('lists a baseline whose stored scope is being updated as ready', async () => {
     vi.mocked(listJobs).mockResolvedValue({ jobs: [{ id: 'job-4', revision: 3, enabled: true, archived: false, job: { name: 'Legacy ports', targets: ['198.51.100.13'], tcp: { ports: '2, 1' }, schedule: '0 * * * *', baseline_samples: 2 }, baseline: { status: 'updating', scan_id: 'scan-4', host_count: 1, samples: 0 } }] } as never)
     renderWithProviders(<Jobs />)
@@ -279,6 +287,8 @@ describe('application shell', () => {
     vi.mocked(listIncidents).mockResolvedValue({ incidents: [incident, legacy], pagination: { limit: 50, offset: 0, total: 2, has_more: false, next_offset: null } } as never)
     renderWithProviders(<Incidents />)
     await waitFor(() => expect(screen.getAllByRole('button', { name: 'Accept change' })).toHaveLength(4))
+    expect(screen.getAllByText('Port opened / tcp:443').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Critical').length).toBeGreaterThan(0)
     expect(screen.getAllByText('No before/after value recorded')).toHaveLength(2)
     expect(screen.getAllByRole('button', { name: 'Accept change' })[1]).toBeDisabled()
     fireEvent.click(screen.getAllByRole('button', { name: 'Accept change' })[0])

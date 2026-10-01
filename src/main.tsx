@@ -30,6 +30,7 @@ import { compactPortExpression } from './components/PortScopeDetails'
 import type { Incident } from './types'
 import { baselinePresentation } from './baseline'
 import { formatDateTime } from './format'
+import { changeKindLabel, jobStatePresentation, severityLabel } from './status'
 import './tailwind.css'
 import './styles.css'
 
@@ -214,7 +215,44 @@ export function Jobs() {
   const jobs = useQuery({ queryKey: ['jobs', true], queryFn: () => listJobs(true) })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
   const canWrite = session.data?.permissions.includes('jobs.write') ?? false
-  return <section className="page"><div className="page-heading"><div><p className="eyebrow">Configuration</p><h1>Jobs</h1><p className="muted">Each job owns its targets, protocols, schedule, and baseline.</p></div>{canWrite && <button className="button primary" onClick={() => navigate('/jobs/new')}>＋ New job</button>}</div>{jobs.isLoading ? <Loading /> : jobs.error ? <ErrorNotice message="Could not load jobs." onRetry={() => jobs.refetch()} /> : <div className="job-grid">{jobs.data?.jobs.map(job => { const baseline = baselinePresentation(job.baseline); return <Link className={job.archived ? 'job-card archived' : 'job-card'} to={`/jobs/${job.id}`} key={job.id}><div className="job-card-top"><span className={job.enabled && !job.archived ? 'pill green' : 'pill gray'}>{job.archived ? 'Archived' : job.enabled ? 'Scheduled' : 'Paused'}</span><span className="revision">r{job.revision}</span></div><h3>{job.job.name}</h3><p className="muted">{job.job.targets.length} target{job.job.targets.length === 1 ? '' : 's'} · {protocolSummary(job)}</p><div className="job-card-bottom"><span className={`baseline${baseline.status === 'complete' ? ' complete' : baseline.status === 'stalled' ? ' stalled' : ''}`}>{baseline.marker} {baseline.status === 'complete' ? `Baseline ${baseline.label.toLowerCase()}` : baseline.status === 'stalled' ? 'Baseline stalled' : `Collecting ${job.baseline.samples ?? 0}/${job.job.baseline_samples}`}</span><span>{job.job.schedule}</span></div></Link> })}{!jobs.data?.jobs.length && canWrite && <Empty title="No jobs yet" body="Create your first TCP or UDP monitoring job." action={<button className="button primary" onClick={() => navigate('/jobs/new')}>Create a job</button>} />}{!jobs.data?.jobs.length && !canWrite && <Empty title="No jobs configured" body="An operator can create a monitoring job for this EdgeWatch instance." />}</div>}</section>
+  return (
+    <section className="page">
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">Configuration</p>
+          <h1>Jobs</h1>
+          <p className="muted">Each job owns its targets, protocols, schedule, and baseline.</p>
+        </div>
+        {canWrite && <button className="button primary" onClick={() => navigate('/jobs/new')}>＋ New job</button>}
+      </div>
+      {jobs.isLoading ? <Loading /> : jobs.error ? <ErrorNotice message="Could not load jobs." onRetry={() => jobs.refetch()} /> : (
+        <div className="job-grid">
+          {jobs.data?.jobs.map(job => {
+            const baseline = baselinePresentation(job.baseline)
+            const state = jobStatePresentation(job.archived, job.enabled)
+            return (
+              <Link className={job.archived ? 'job-card archived' : 'job-card'} to={`/jobs/${job.id}`} key={job.id}>
+                <div className="job-card-top">
+                  <span className={`pill ${state.tone}`}>{state.label}</span>
+                  <span className="revision">r{job.revision}</span>
+                </div>
+                <h3>{job.job.name}</h3>
+                <p className="muted">{job.job.targets.length} target{job.job.targets.length === 1 ? '' : 's'} · {protocolSummary(job)}</p>
+                <div className="job-card-bottom">
+                  <span className={`baseline${baseline.status === 'complete' ? ' complete' : baseline.status === 'stalled' ? ' stalled' : ''}`}>
+                    {baseline.marker} {baseline.status === 'complete' ? `Baseline ${baseline.label.toLowerCase()}` : baseline.status === 'stalled' ? 'Baseline stalled' : `Collecting ${job.baseline.samples ?? 0}/${job.job.baseline_samples}`}
+                  </span>
+                  <span>{job.job.schedule}</span>
+                </div>
+              </Link>
+            )
+          })}
+          {!jobs.data?.jobs.length && canWrite && <Empty title="No jobs yet" body="Create your first TCP or UDP monitoring job." action={<button className="button primary" onClick={() => navigate('/jobs/new')}>Create a job</button>} />}
+          {!jobs.data?.jobs.length && !canWrite && <Empty title="No jobs configured" body="An operator can create a monitoring job for this EdgeWatch instance." />}
+        </div>
+      )}
+    </section>
+  )
 }
 
 function protocolSummary(job: { job: { tcp?: { ports: string }; udp?: { ports: string } } }) {
@@ -286,18 +324,18 @@ function IncidentTableRow({ row, busy, onAction }: { row: Incident; busy: string
   const key = row.incident.change.key
   const acceptID = `accept:${row.job_id}:${key ?? ''}`
   const suppressID = `suppress:${row.job_id}:${key ?? ''}`
-  return <tr><td><strong>{row.job}</strong></td><td>{row.incident.change.target}</td><td><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></td><td><span className={`pill ${row.incident.change.severity === 'critical' ? 'red' : 'amber'}`}>{row.incident.change.severity}</span></td><td>{formatDateTime(row.incident.last_seen_at)}</td><td><IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} /></td></tr>
+  return <tr><td><strong>{row.job}</strong></td><td>{row.incident.change.target}</td><td><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></td><td><span className={`pill ${row.incident.change.severity === 'critical' ? 'red' : 'amber'}`}>{severityLabel(row.incident.change.severity)}</span></td><td>{formatDateTime(row.incident.last_seen_at)}</td><td><IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} /></td></tr>
 }
 
 function IncidentCard({ row, busy, onAction }: { row: Incident; busy: string; onAction: (row: Incident, action: 'accept' | 'suppress') => void }) {
   const key = row.incident.change.key
   const acceptID = `accept:${row.job_id}:${key ?? ''}`
   const suppressID = `suppress:${row.job_id}:${key ?? ''}`
-  return <article className="incident-card" aria-label={`Incident for ${row.job}`}><div className="incident-card-heading"><strong>{row.job}</strong><span className={`pill ${row.incident.change.severity === 'critical' ? 'red' : 'amber'}`}>{row.incident.change.severity}</span></div><dl className="incident-facts"><div><dt>Target</dt><dd>{row.incident.change.target}</dd></div><div><dt>Change</dt><dd><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></dd></div><div><dt>Last seen</dt><dd>{formatDateTime(row.incident.last_seen_at)}</dd></div></dl><IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} /></article>
+  return <article className="incident-card" aria-label={`Incident for ${row.job}`}><div className="incident-card-heading"><strong>{row.job}</strong><span className={`pill ${row.incident.change.severity === 'critical' ? 'red' : 'amber'}`}>{severityLabel(row.incident.change.severity)}</span></div><dl className="incident-facts"><div><dt>Target</dt><dd>{row.incident.change.target}</dd></div><div><dt>Change</dt><dd><strong>{formatIncidentChange(row.incident.change)}</strong><br /><span className="muted">{changeValues(row.incident.change)}</span></dd></div><div><dt>Last seen</dt><dd>{formatDateTime(row.incident.last_seen_at)}</dd></div></dl><IncidentActions row={row} busy={busy} acceptID={acceptID} suppressID={suppressID} onAction={onAction} /></article>
 }
 
 function formatIncidentChange(change: Incident['incident']['change']) {
-  return `${change.kind}${change.port ? ` / ${change.protocol}:${change.port}` : ''}`
+  return `${changeKindLabel(change.kind, change.old, change.new)}${change.port ? ` / ${change.protocol}:${change.port}` : ''}`
 }
 
 function changeValues(change: Incident['incident']['change']) {

@@ -151,8 +151,8 @@ export function PlatformAdmins() {
             <div><strong>{admin.display_name}{self ? ' (you)' : ''}</strong><span>{admin.username}{lastSignIn(admin.last_login_at)}</span></div>
             <span className="account-badges"><span className={admin.pending ? 'pill amber' : admin.enabled ? 'pill green' : 'pill gray'}>{admin.pending ? 'Pending activation' : admin.enabled ? 'Enabled' : 'Disabled'}</span><span className={admin.totp_enabled ? 'pill green' : 'pill amber'}>{admin.totp_enabled ? 'TOTP on' : 'No TOTP'}</span></span>
             {!self && <div className="user-row-actions">{admin.pending
-              ? (Object.keys(pendingActions) as PendingAction[]).map(action => <button key={action} type="button" className="button ghost" onClick={() => { setMessage(''); setPendingError(''); setPending({ action, admin }) }}>{pendingActions[action].button}</button>)
-              : <button type="button" className="button ghost" onClick={() => { setMessage(''); setToggleError(''); setToggle(admin) }}>{admin.enabled ? 'Disable' : 'Enable'}</button>}</div>}
+              ? (Object.keys(pendingActions) as PendingAction[]).map(action => <button key={action} type="button" className={`button ghost${pendingActions[action].destructive ? ' danger-text' : ''}`} onClick={() => { setMessage(''); setPendingError(''); setPending({ action, admin }) }}>{pendingActions[action].button}</button>)
+              : <button type="button" className={`button ghost${admin.enabled ? ' danger-text' : ''}`} onClick={() => { setMessage(''); setToggleError(''); setToggle(admin) }}>{admin.enabled ? 'Disable' : 'Enable'}</button>}</div>}
           </div>
         })}</div>}
       </div>

@@ -174,6 +174,18 @@ describe('job surface overview', () => {
     await vi.waitFor(() => expect(container.textContent).toContain('View host details'), { timeout: 1000 })
   })
 
+  it('uses a consistent paused tone and keeps incomplete scan activity neutral', async () => {
+    vi.mocked(getJob).mockResolvedValue({ ...job, enabled: false })
+    vi.mocked(jobScans).mockResolvedValue({ scans: [{ ...summary, status: 'incomplete' }, { ...summary, id: 'scan-2', status: 'failed' }], pagination: { ...pagination, total: 2 } })
+    await renderPage()
+    await vi.waitFor(() => expect(container.querySelectorAll('.scan-row')).toHaveLength(2), { timeout: 1000 })
+    expect(container.querySelector('.title-row .pill')).toHaveClass('amber')
+    const dots = Array.from(container.querySelectorAll('.scan-row .activity-dot'))
+    expect(dots[0]).not.toHaveClass('fail')
+    expect(dots[0]).not.toHaveClass('success')
+    expect(dots[1]).toHaveClass('fail')
+  })
+
   it('orders expected baseline, latest successful scan, and history vertically', async () => {
     await renderPage()
     await vi.waitFor(() => expect(container.textContent).toContain('Latest successful scan'), { timeout: 1000 })

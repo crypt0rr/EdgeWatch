@@ -39,6 +39,7 @@ import { SurfaceUnitList } from '../components/SurfaceUnitList'
 import type { WorkEstimate } from '../types'
 import { baselinePresentation } from '../baseline'
 import { formatDateTime } from '../format'
+import { changeKindLabel, jobStatePresentation, scanOutcomeTone } from '../status'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
 
@@ -321,7 +322,7 @@ export function JobDetail() {
             <div className="change-list">
               {detail.data.changes.map((change, index) => (
                 <div className="change-row" key={`${change.kind}-${index}`}>
-                  <span className={`pill ${change.severity === 'critical' ? 'red' : 'amber'}`}>{change.kind}</span>
+                  <span className={`pill ${change.severity === 'critical' ? 'red' : 'amber'}`}>{changeKindLabel(change.kind, change.old, change.new)}</span>
                   <strong>{change.target}{change.port ? ` · ${change.protocol}:${change.port}` : ''}</strong>
                   <span className="muted">{change.old ?? '—'} → {change.new ?? '—'}</span>
                 </div>
@@ -340,6 +341,7 @@ export function JobDetail() {
   ) : null
   const selectedScanIsVisible = Boolean(selectedScan && scans.data?.scans.some((scan) => scan.id === selectedScan))
   const baselineStatus = baselinePresentation(value.baseline)
+  const jobStatus = jobStatePresentation(value.archived, value.enabled)
 
   return (
     <section className="page">
@@ -348,9 +350,7 @@ export function JobDetail() {
           <Link className="back-link" to="/jobs">← Jobs</Link>
           <div className="title-row">
             <h1>{value.job.name}</h1>
-            <span className={value.archived ? 'pill gray' : value.enabled ? 'pill green' : 'pill amber'}>
-              {value.archived ? 'Archived' : value.enabled ? 'Scheduled' : 'Paused'}
-            </span>
+            <span className={`pill ${jobStatus.tone}`}>{jobStatus.label}</span>
           </div>
           <p className="muted">Revision {value.revision} · Updated {formatDateTime(value.updated_at)}</p>
         </div>
@@ -506,7 +506,7 @@ export function JobDetail() {
                     aria-expanded={selectedScan === scan.id}
                     aria-controls={selectedScan === scan.id ? selectedScanDetailID : undefined}
                   >
-                    <span className={scan.status === 'success' ? 'activity-dot success' : 'activity-dot fail'} />
+                    <span className={`activity-dot${scanOutcomeTone(scan.status) === 'neutral' ? '' : ` ${scanOutcomeTone(scan.status)}`}`} />
                     <div className="scan-row-copy">
                       <strong>{formatDateTime(scan.finished_at)}</strong>
                       <span className={scan.error ? 'scan-row-error' : undefined} title={scan.error ?? undefined}>

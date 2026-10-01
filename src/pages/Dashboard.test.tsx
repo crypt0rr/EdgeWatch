@@ -185,6 +185,30 @@ describe('dashboard', () => {
     expect(container.textContent).toContain('1 destination tested')
   })
 
+  it('labels the legacy-job action as a status check and refreshes the status', async () => {
+    vi.mocked(adminStatus).mockResolvedValue({ ...status, legacy_yaml_jobs: ['office'] })
+    await renderDashboard()
+    const checkAgain = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Check again') as HTMLButtonElement
+    expect(checkAgain).toBeTruthy()
+    expect(container.querySelector('[aria-label="Refresh status"]')).toBeNull()
+    await act(async () => {
+      checkAgain.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    expect(adminStatus).toHaveBeenCalledTimes(2)
+  })
+
+  it('uses neutral activity markers for incomplete scans and red only for failures', async () => {
+    vi.mocked(listScans).mockResolvedValue({ scans: [{ ...scan, id: 'incomplete', status: 'incomplete' }, { ...scan, id: 'failed', status: 'failed' }], pagination: { ...pagination, total: 2 } })
+    await renderDashboard()
+    const dots = Array.from(container.querySelectorAll('.activity-list .activity-dot'))
+    expect(dots).toHaveLength(2)
+    expect(dots[0]).not.toHaveClass('fail')
+    expect(dots[0]).not.toHaveClass('success')
+    expect(dots[1]).toHaveClass('fail')
+  })
+
   it('warns about a proxy that web.trusted_proxies does not list, only when the status reports one', async () => {
     await renderDashboard()
     expect(container.textContent).not.toContain('web.trusted_proxies')

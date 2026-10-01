@@ -154,7 +154,7 @@ function AccountRow({ account, unitActive, onAction }: { account: UnitAccount; u
     <div><strong>{account.display_name}</strong><span>{account.username} · {unitRoleLabels[account.role] ?? account.role}{lastSignIn(account.last_login_at)}</span></div>
     <span className="account-badges"><span className={`pill ${status[1]}`}>{status[0]}</span><span className={account.totp_enabled ? 'pill green' : 'pill amber'}>{account.totp_enabled ? 'TOTP on' : 'No TOTP'}</span></span>
     {(offered.sessions || offered.reset) && <div className="user-row-actions">
-      {offered.sessions && <button type="button" className="button ghost" onClick={() => onAction({ kind: 'sessions', account })}><LogOut size={14} /> Revoke sessions</button>}
+      {offered.sessions && <button type="button" className="button ghost danger-text" onClick={() => onAction({ kind: 'sessions', account })}><LogOut size={14} /> Revoke sessions</button>}
       {offered.reset && <button type="button" className="button ghost" onClick={() => onAction({ kind: 'reset', account })}><KeyRound size={14} /> {account.pending ? 'New activation link' : 'Reset password'}</button>}
     </div>}
   </div>

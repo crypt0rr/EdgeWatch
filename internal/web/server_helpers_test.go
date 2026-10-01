@@ -96,6 +96,7 @@ func TestRequiredPermissionAndMutationMatrix(t *testing.T) {
 		{"/users/id/password-reset", http.MethodPost, "users.manage"},
 		{"/notifications/destinations/id/test", http.MethodPost, "notifications.manage"},
 		{"/notifications/update-routing", http.MethodPut, "notifications.manage"},
+		{"/notifications/update-routing", http.MethodPatch, "notifications.manage"},
 		{"/notifications/update-routing", http.MethodGet, auth.PermissionDenied},
 		{"/scans/id/hosts/198.51.100.1", http.MethodGet, "hosts.read"},
 		{"/scans/id/hosts/198.51.100.1/rdap", http.MethodGet, "hosts.read"},

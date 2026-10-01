@@ -2,7 +2,7 @@
 
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { APIError, createPlatformNotification, deletePendingPlatformAdmin, deletePlatformNotification, getSession, invitePlatformAdmin, listPlatformAdmins, listPlatformNotifications, listUnits, platformAudit, platformStatus, renewPlatformAdminInvitation, revokePlatformAdminInvitation, setPlatformAdminEnabled, updatePlatformNotification, updatePlatformNotificationRouting } from '../../api'
+import { APIError, createPlatformNotification, deletePendingPlatformAdmin, deletePlatformNotification, getSession, invitePlatformAdmin, listPlatformAdmins, listPlatformNotifications, listUnits, platformAudit, platformStatus, renewPlatformAdminInvitation, revokePlatformAdminInvitation, setPlatformAdminEnabled, togglePlatformNotificationUpdateAlert, updatePlatformNotification } from '../../api'
 import type { AuditEntry, NotificationDestination, UserSummary } from '../../api'
 import { formatDateTime, setDisplayTimeZone } from '../../format'
 import { businessUnit, deploymentLimits as limits, platformSession } from '../../test/platform-fixtures'
@@ -14,7 +14,7 @@ import { PlatformStatusPage, updateSummary } from './PlatformStatus'
 
 vi.mock('../../api', async () => {
   const actual = await vi.importActual<typeof import('../../api')>('../../api')
-  return { ...actual, createPlatformNotification: vi.fn(), deletePendingPlatformAdmin: vi.fn(), deletePlatformNotification: vi.fn(), getSession: vi.fn(), invitePlatformAdmin: vi.fn(), listPlatformAdmins: vi.fn(), listPlatformNotifications: vi.fn(), listUnits: vi.fn(), platformAudit: vi.fn(), platformStatus: vi.fn(), renewPlatformAdminInvitation: vi.fn(), revokePlatformAdminInvitation: vi.fn(), setPlatformAdminEnabled: vi.fn(), updatePlatformNotification: vi.fn(), updatePlatformNotificationRouting: vi.fn() }
+  return { ...actual, createPlatformNotification: vi.fn(), deletePendingPlatformAdmin: vi.fn(), deletePlatformNotification: vi.fn(), getSession: vi.fn(), invitePlatformAdmin: vi.fn(), listPlatformAdmins: vi.fn(), listPlatformNotifications: vi.fn(), listUnits: vi.fn(), platformAudit: vi.fn(), platformStatus: vi.fn(), renewPlatformAdminInvitation: vi.fn(), revokePlatformAdminInvitation: vi.fn(), setPlatformAdminEnabled: vi.fn(), togglePlatformNotificationUpdateAlert: vi.fn(), updatePlatformNotification: vi.fn() }
 })
 
 function admin(overrides: Partial<UserSummary> & Pick<UserSummary, 'id' | 'username'>): UserSummary {
@@ -327,7 +327,7 @@ describe('platform notifications', () => {
     vi.mocked(createPlatformNotification).mockResolvedValue(destination({ id: 'p-new', name: 'New' }))
     vi.mocked(updatePlatformNotification).mockResolvedValue(destination({ id: 'p-ops', name: 'Operations' }))
     vi.mocked(deletePlatformNotification).mockResolvedValue(undefined)
-    vi.mocked(updatePlatformNotificationRouting).mockResolvedValue({ configured: true, destinations: ['p-ops'] })
+    vi.mocked(togglePlatformNotificationUpdateAlert).mockResolvedValue({ configured: true, destinations: ['p-ops'] })
   })
 
   it('manages the platform’s own destinations with write-only URLs and routes update alerts to none by default', async () => {
@@ -351,7 +351,7 @@ describe('platform notifications', () => {
 
     fireEvent.click(screen.getByRole('checkbox', { name: 'Enable update alerts for Operations' }))
     await confirmWithPassword('Account password')
-    await waitFor(() => expect(updatePlatformNotificationRouting).toHaveBeenCalledWith(['p-ops'], 'my-password'))
+    await waitFor(() => expect(togglePlatformNotificationUpdateAlert).toHaveBeenCalledWith('p-ops', true, 'my-password'))
 
     const operations = screen.getByText('Operations').closest('.notification-row') as HTMLElement
     fireEvent.click(within(operations).getByRole('button', { name: 'Pause' }))

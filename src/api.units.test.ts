@@ -36,6 +36,7 @@ describe('business units API contract', () => {
     await apiRoutes.updatePlatformNotification('dest/1', 5, 'Ops', 'pw', { enabled: false })
     await apiRoutes.deletePlatformNotification('dest/1', 5, 'pw')
     await apiRoutes.updatePlatformNotificationRouting(['dest-1'], 'pw')
+    await apiRoutes.togglePlatformNotificationUpdateAlert('dest-1', true, 'pw')
     await apiRoutes.platformStatus()
     const calls = fetchMock.mock.calls.map(([url, init]) => `${init?.method ?? 'GET'} ${String(url)}`)
     expect(calls).toEqual([
@@ -64,6 +65,7 @@ describe('business units API contract', () => {
       'PATCH /api/v1/platform/notifications/dest%2F1',
       'DELETE /api/v1/platform/notifications/dest%2F1',
       'PUT /api/v1/platform/notifications/update-routing',
+      'PATCH /api/v1/platform/notifications/update-routing',
       'GET /api/v1/platform/status',
     ])
     const body = (index: number) => JSON.parse(String(fetchMock.mock.calls[index][1]?.body))

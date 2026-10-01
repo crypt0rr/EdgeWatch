@@ -85,7 +85,7 @@ test('a platform administrator creates a unit, invites its administrator, recove
   await routing.getByLabel('Account password').fill('fixture-password')
   await routing.getByRole('button', { name: 'Enable update alerts' }).click()
   await expect(page.getByRole('checkbox', { name: 'Disable update alerts for Platform pager' })).toBeChecked()
-  expect(controls.payloads['platform-update-routing']).toEqual([{ destinations: ['platform-1'], password: 'fixture-password' }])
+  expect(controls.payloads['platform-update-routing']).toEqual([{ destination_id: 'platform-1', enabled: true, password: 'fixture-password' }])
 
   await page.getByRole('link', { name: 'Audit' }).click()
   await expect(page.getByText('business unit Retail created')).toBeVisible()

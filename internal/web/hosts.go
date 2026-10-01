@@ -26,6 +26,7 @@ func hostStoreNotFound(err error) bool {
 type hostSummary struct {
 	Address           string                `json:"address"`
 	AddressFamily     string                `json:"address_family,omitempty"`
+	Visibility        string                `json:"visibility"`
 	SourceTargets     []string              `json:"source_targets,omitempty"`
 	DNSNames          []string              `json:"dns_names,omitempty"`
 	Protocols         []hostProtocolSummary `json:"protocols,omitempty"`
@@ -521,7 +522,7 @@ func summaryForHost(host model.HostObservation, legacy bool) hostSummary {
 	// retained one protocol record per port chunk. Normalize the copy before
 	// calculating counts so legacy rows cannot render duplicate TCP/UDP chips.
 	dedupeHost(&host)
-	result := hostSummary{Address: host.Address, AddressFamily: host.AddressFamily, SourceTargets: append([]string(nil), host.SourceTargets...), DNSNames: append([]string(nil), host.DNSNames...), Legacy: legacy}
+	result := hostSummary{Address: host.Address, AddressFamily: host.AddressFamily, Visibility: hostVisibility(host.Address), SourceTargets: append([]string(nil), host.SourceTargets...), DNSNames: append([]string(nil), host.DNSNames...), Legacy: legacy}
 	for _, protocol := range host.Protocols {
 		summary := hostProtocolSummary{Protocol: protocol.Protocol, ScanType: protocol.ScanType, ScannedPorts: protocol.ScannedPorts, ScannedPortCount: protocol.ScannedPortCount, ServiceDetection: protocol.ServiceDetection}
 		for _, port := range protocol.Ports {
@@ -538,6 +539,19 @@ func summaryForHost(host model.HostObservation, legacy bool) hostSummary {
 	}
 	result.HasOpenPorts = result.OpenPorts > 0 || result.OpenFilteredPorts > 0
 	return result
+}
+
+// hostVisibility shares the RDAP special-use classification rather than
+// duplicating an incomplete list of private address prefixes in the UI.
+func hostVisibility(address string) string {
+	ip := net.ParseIP(address)
+	if ip == nil {
+		return "unknown"
+	}
+	if rdap.IsPrivateAddress(ip) {
+		return "non_public"
+	}
+	return "public"
 }
 
 func (s *Server) latestScannedHosts(ctx context.Context, ts *store.TenantStore) ([]allHostSummary, error) {

@@ -261,6 +261,7 @@ export const listEvents = (offset = 0, limit = 20, jobId?: string) => api<{ even
 export const notificationTest = () => api<{ sent: number }>('/notifications/test', { method: 'POST' })
 export const listNotificationDestinations = () => api<NotificationDestinationsResponse>('/notifications/destinations')
 export const updateNotificationRouting = (destinations: string[], password: string) => api<NotificationUpdateRouting>('/notifications/update-routing', { method: 'PUT', body: JSON.stringify({ destinations, password }) })
+export const toggleNotificationUpdateAlert = (destinationID: string, enabled: boolean, password: string) => api<NotificationUpdateRouting>('/notifications/update-routing', { method: 'PATCH', body: JSON.stringify({ destination_id: destinationID, enabled, password }) })
 export const getNotificationDestination = (id: string) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`)
 export const createNotificationDestination = (name: string, url: string, password: string, enabled = true) => api<NotificationDestination>('/notifications/destinations', { method: 'POST', body: JSON.stringify({ name, url, password, enabled }) })
 export const updateNotificationDestination = (id: string, revision: number, name: string, password: string, options: { url?: string; enabled?: boolean } = {}) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ name, revision, password, ...options }) })
@@ -380,6 +381,7 @@ export const createPlatformNotification = (name: string, url: string, password: 
 export const updatePlatformNotification = (id: string, revision: number, name: string, password: string, options: { url?: string; enabled?: boolean } = {}) => api<NotificationDestination>(`/platform/notifications/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify({ name, revision, password, ...options }) })
 export const deletePlatformNotification = (id: string, revision: number, password: string) => api<void>(`/platform/notifications/${encodeURIComponent(id)}`, { method: 'DELETE', body: JSON.stringify({ revision, password }) })
 export const updatePlatformNotificationRouting = (destinations: string[], password: string) => api<NotificationUpdateRouting>('/platform/notifications/update-routing', { method: 'PUT', body: JSON.stringify({ destinations, password }) })
+export const togglePlatformNotificationUpdateAlert = (destinationID: string, enabled: boolean, password: string) => api<NotificationUpdateRouting>('/platform/notifications/update-routing', { method: 'PATCH', body: JSON.stringify({ destination_id: destinationID, enabled, password }) })
 export const platformStatus = () => api<PlatformStatus>('/platform/status')
 
 // Both audit views are paged newest first by keyset: pass the previous page's

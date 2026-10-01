@@ -428,6 +428,7 @@ describe('API route helpers', () => {
 		await apiRoutes.testNotificationDestination('destination/1')
 		await apiRoutes.deleteNotificationDestination('destination/1', 2, 'password')
 		await apiRoutes.updateNotificationRouting(['destination/1'], 'password')
+		await apiRoutes.toggleNotificationUpdateAlert('destination/1', false, 'password')
 		await apiRoutes.scannerCapabilities()
 		await apiRoutes.listScannerProfiles(true)
 		await apiRoutes.getScannerProfile('profile/1')

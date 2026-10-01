@@ -1029,6 +1029,7 @@ func TestRouteInventoryDriftDetectsRemovedEntries(t *testing.T) {
 		"PATCH /platform/units/{id}/capacity",
 		"DELETE /platform/units/{id}/accounts/{uid}/sessions",
 		"PUT /platform/notifications/update-routing",
+		"PATCH /platform/notifications/update-routing",
 		"GET " + publicAPIBase + "/dashboard",
 	} {
 		t.Run(removed, func(t *testing.T) {

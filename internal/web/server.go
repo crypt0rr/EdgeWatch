@@ -57,9 +57,13 @@ type Server struct {
 	now              func() time.Time
 	testMu           sync.Mutex
 	testLast         map[string]time.Time
-	publicMu         sync.Mutex
-	publicHits       map[string][]time.Time
-	publicCacheMu    sync.Mutex
+	// updateRoutingMu serializes read/modify/write changes to update-alert
+	// routing. The routing API exposes a per-destination toggle, so two admins
+	// changing different destinations cannot overwrite one another.
+	updateRoutingMu sync.Mutex
+	publicMu        sync.Mutex
+	publicHits      map[string][]time.Time
+	publicCacheMu   sync.Mutex
 	// publicPageCache caches the default tenant's page, which the legacy
 	// public URLs serve, and publicPages the page of any other tenant, by
 	// tenant ID. A request reads and fills only the cache of its public
@@ -588,6 +592,8 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		s.listNotificationDestinations(w, r, ts)
 	case path == "/notifications/update-routing" && r.Method == http.MethodPut:
 		s.updateNotificationRouting(w, r, session, ts)
+	case path == "/notifications/update-routing" && r.Method == http.MethodPatch:
+		s.toggleNotificationUpdateRouting(w, r, session, ts)
 	case path == "/notifications/destinations" && r.Method == http.MethodPost:
 		s.createNotificationDestination(w, r, session, ts)
 	case strings.HasPrefix(path, "/notifications/destinations/"):

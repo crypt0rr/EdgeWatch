@@ -95,7 +95,7 @@ func requiredPlatformPermission(path, method string) string {
 	case "notifications":
 		switch {
 		case len(parts) == 1 && (method == http.MethodGet || method == http.MethodPost),
-			len(parts) == 2 && parts[1] == "update-routing" && method == http.MethodPut,
+			len(parts) == 2 && parts[1] == "update-routing" && (method == http.MethodPut || method == http.MethodPatch),
 			len(parts) == 2 && (method == http.MethodPatch || method == http.MethodDelete):
 			return auth.PermissionPlatformNotificationsManage
 		}
@@ -190,6 +190,8 @@ func (s *Server) platformRoute(w http.ResponseWriter, r *http.Request, session s
 		s.createPlatformNotification(w, r, session)
 	case len(parts) == 2 && parts[0] == "notifications" && parts[1] == "update-routing" && r.Method == http.MethodPut:
 		s.updatePlatformNotificationRouting(w, r, session)
+	case len(parts) == 2 && parts[0] == "notifications" && parts[1] == "update-routing" && r.Method == http.MethodPatch:
+		s.togglePlatformNotificationRouting(w, r, session)
 	case len(parts) == 2 && parts[0] == "notifications" && r.Method == http.MethodPatch:
 		s.updatePlatformNotification(w, r, session, parts[1])
 	case len(parts) == 2 && parts[0] == "notifications" && r.Method == http.MethodDelete:
@@ -922,16 +924,19 @@ func (s *Server) listPlatformNotifications(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
 		return
 	}
-	routing := map[string]any{"configured": false, "destinations": []string{}}
-	if state, err := s.Store.Platform().GetApplicationUpdateState(r.Context()); err == nil {
-		destinations := state.UpdateNotificationDestinations
-		if destinations == nil {
-			destinations = []string{}
+	state, err := s.Store.Platform().GetApplicationUpdateState(r.Context())
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Warn("platform update routing state unavailable", "error", err)
 		}
-		routing = map[string]any{"configured": state.UpdateNotificationDestinationsConfigured, "destinations": destinations}
-	} else {
-		s.Log.Warn("platform update routing state unavailable", "error", err)
+		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
+		return
 	}
+	destinations := state.UpdateNotificationDestinations
+	if destinations == nil {
+		destinations = []string{}
+	}
+	routing := map[string]any{"configured": state.UpdateNotificationDestinationsConfigured, "destinations": destinations}
 	writeJSON(w, http.StatusOK, map[string]any{"destinations": views, "status": status, "update_routing": routing})
 }
 
@@ -1027,6 +1032,8 @@ func (s *Server) updatePlatformNotificationRouting(w http.ResponseWriter, r *htt
 		writeError(w, http.StatusBadRequest, "validation_failed", "destinations must be an array", map[string]string{"destinations": "select zero or more platform destinations"})
 		return
 	}
+	s.updateRoutingMu.Lock()
+	defer s.updateRoutingMu.Unlock()
 	// The store checks the selection again when it writes it.
 	platform := s.Store.Platform()
 	if err := s.App.Notifier.Platform(platform).ValidateDestinationSelection(r.Context(), input.Destinations); err != nil {
@@ -1046,6 +1053,48 @@ func (s *Server) updatePlatformNotificationRouting(w http.ResponseWriter, r *htt
 		destinations = state.UpdateNotificationDestinations
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "destinations": destinations})
+}
+
+func (s *Server) togglePlatformNotificationRouting(w http.ResponseWriter, r *http.Request, session store.Session) {
+	var input toggleNotificationUpdateRoutingPayload
+	if !decodeJSON(w, r, &input) || !s.confirmNotificationPassword(w, r, session, input.Password) {
+		return
+	}
+	input.DestinationID = strings.TrimSpace(input.DestinationID)
+	if input.DestinationID == "" || input.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "validation_failed", "destination_id and enabled are required", map[string]string{"destination_id": "select one configured destination"})
+		return
+	}
+	s.updateRoutingMu.Lock()
+	defer s.updateRoutingMu.Unlock()
+	platform := s.Store.Platform()
+	notifier := s.App.Notifier.Platform(platform)
+	if err := notifier.ValidateDestinationSelection(r.Context(), []string{input.DestinationID}); err != nil {
+		if !writeDestinationSelectionError(w, err) {
+			writeError(w, http.StatusInternalServerError, "notification", "notification destinations could not be loaded", nil)
+		}
+		return
+	}
+	state, err := platform.GetApplicationUpdateState(r.Context())
+	if err != nil {
+		if s.Log != nil {
+			s.Log.Warn("platform update routing state unavailable", "error", err)
+		}
+		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
+		return
+	}
+	selection := state.UpdateNotificationDestinations
+	if !state.UpdateNotificationDestinationsConfigured {
+		selection = nil
+	}
+	selection = toggleUpdateDestination(selection, input.DestinationID, *input.Enabled)
+	if err := platform.SetPlatformUpdateDestinations(r.Context(), selection, platformActorAudit(session, "", "platform update notification routing changed")); err != nil {
+		if !writeDestinationSelectionError(w, err) {
+			s.writePlatformError(w, r, err, "platform_notifications.update_routing", "notification destination not found")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"configured": true, "destinations": selection})
 }
 
 // platformStatus reports the deployment as numbers: the units by state,

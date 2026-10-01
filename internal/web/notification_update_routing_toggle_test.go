@@ -36,8 +36,13 @@ func toggleUpdateRoutingRequest(t *testing.T, server *Server, admin store.Sessio
 	t.Helper()
 	recorder := httptest.NewRecorder()
 	body := fmt.Sprintf(`{"destination_id":%q,"enabled":%t,"password":"administrator password"}`, destinationID, enabled)
-	server.toggleNotificationUpdateRouting(recorder, routingRequest(t, http.MethodPatch, "/api/v1/notifications/update-routing", body), admin, defaultTenantStore(server))
+	toggleUpdateRoutingBody(t, server, admin, body, recorder)
 	return recorder
+}
+
+func toggleUpdateRoutingBody(t *testing.T, server *Server, admin store.Session, body string, recorder *httptest.ResponseRecorder) {
+	t.Helper()
+	server.toggleNotificationUpdateRouting(recorder, routingRequest(t, http.MethodPatch, "/api/v1/notifications/update-routing", body), admin, defaultTenantStore(server))
 }
 
 func TestNotificationRoutingTogglePreservesConcurrentDestinations(t *testing.T) {
@@ -133,6 +138,70 @@ func TestNotificationDestinationListFailsClosedWhenRoutingCannotBeRead(t *testin
 	}
 }
 
+func TestNotificationDestinationListFailsClosedWhenCanonicalSelectionCannotBeRead(t *testing.T) {
+	server, db, _ := newUsersTestServer(t)
+	defer db.Close()
+	// The update-routing row remains readable, but loading the tenant-owned
+	// destination set fails while canonicalizing its selectors.
+	if _, err := db.DB.Exec(`DROP TABLE managed_notifications`); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	server.listNotificationDestinations(recorder, routingRequest(t, http.MethodGet, "/api/v1/notifications/destinations", ""), defaultTenantStore(server))
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("destination list status = %d, want 500: %s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), `"update_routing"`) {
+		t.Fatalf("failed canonicalization returned a fabricated selection: %s", recorder.Body.String())
+	}
+}
+
+func TestNotificationRoutingToggleRejectsInvalidInputAndStorageFailures(t *testing.T) {
+	server, db, admin := newUsersTestServer(t)
+	defer db.Close()
+	ts := defaultTenantStore(server)
+	destination := createUpdateRoutingTestDestination(t, server, admin, "Operations", "operations")
+
+	tests := []struct {
+		name   string
+		body   string
+		status int
+		code   string
+	}{
+		{name: "invalid JSON", body: `{`, status: http.StatusBadRequest, code: "invalid_json"},
+		{name: "missing fields", body: `{"password":"administrator password"}`, status: http.StatusBadRequest, code: "validation_failed"},
+		{name: "missing password", body: fmt.Sprintf(`{"destination_id":%q,"enabled":true}`, destination), status: http.StatusBadRequest, code: "password_required"},
+		{name: "wrong password", body: fmt.Sprintf(`{"destination_id":%q,"enabled":true,"password":"wrong password"}`, destination), status: http.StatusUnauthorized, code: "invalid_password"},
+		{name: "unknown destination", body: `{"destination_id":"unknown","enabled":true,"password":"administrator password"}`, status: http.StatusBadRequest, code: "validation_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			toggleUpdateRoutingBody(t, server, admin, test.body, recorder)
+			expectError(t, recorder, test.status, test.code, test.name)
+		})
+	}
+
+	if _, err := db.DB.Exec(`UPDATE tenants SET update_destinations_json='{' WHERE id=?`, store.DefaultTenantID); err != nil {
+		t.Fatal(err)
+	}
+	stateFailure := toggleUpdateRoutingRequest(t, server, admin, destination, true)
+	expectError(t, stateFailure, http.StatusInternalServerError, "notification_failed", "unreadable routing state")
+	if _, err := db.DB.Exec(`UPDATE tenants SET update_destinations_json='' WHERE id=?`, store.DefaultTenantID); err != nil {
+		t.Fatal(err)
+	}
+
+	removeAuditFailure := failTableWrites(t, db, "security_audit", "INSERT", "audit unavailable")
+	auditFailure := toggleUpdateRoutingRequest(t, server, admin, destination, true)
+	expectError(t, auditFailure, http.StatusServiceUnavailable, "audit_unavailable", "routing audit failure")
+	removeAuditFailure()
+
+	state, err := ts.ApplicationUpdateRouting(context.Background())
+	if err != nil || state.Configured {
+		t.Fatalf("failed toggle changed routing = %#v, %v; want unconfigured", state, err)
+	}
+}
+
 func TestPlatformNotificationListFailsClosedWhenRoutingCannotBeRead(t *testing.T) {
 	f := newPlatformFixture(t)
 	if _, err := f.db.DB.Exec(`UPDATE application_update_state SET notification_destinations_json='{' WHERE id=1`); err != nil {
@@ -145,6 +214,62 @@ func TestPlatformNotificationListFailsClosedWhenRoutingCannotBeRead(t *testing.T
 	if strings.Contains(recorder.Body.String(), `"update_routing"`) {
 		t.Fatalf("failed platform routing read returned fabricated selection: %s", recorder.Body.String())
 	}
+}
+
+func TestPlatformNotificationRoutingToggleValidationAndRecovery(t *testing.T) {
+	f := newPlatformFixture(t)
+	if recorder := f.call(t, actorPlatform, http.MethodGet, "/platform/notifications", ""); recorder.Code != http.StatusOK {
+		t.Fatalf("initial platform notification list = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if _, err := f.db.DB.Exec(`UPDATE application_update_state SET notification_destinations_json='' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	create := f.call(t, actorPlatform, http.MethodPost, "/platform/notifications", confirmBody(`"name":"Operations","url":"generic://localhost/platform-operations?disabletls=yes"`))
+	var destination struct {
+		ID string `json:"id"`
+	}
+	expectResponse(t, create, http.StatusCreated, "create platform destination", &destination)
+
+	tests := []struct {
+		name   string
+		body   string
+		status int
+		code   string
+	}{
+		{name: "invalid JSON", body: `{`, status: http.StatusBadRequest, code: "invalid_json"},
+		{name: "missing fields", body: confirmBody(""), status: http.StatusBadRequest, code: "validation_failed"},
+		{name: "wrong password", body: fmt.Sprintf(`{"password":"wrong password","destination_id":%q,"enabled":true}`, destination.ID), status: http.StatusUnauthorized, code: "invalid_password"},
+		{name: "unknown destination", body: confirmBody(`"destination_id":"unknown","enabled":true`), status: http.StatusBadRequest, code: "validation_failed"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			expectError(t, f.call(t, actorPlatform, http.MethodPatch, "/platform/notifications/update-routing", test.body), test.status, test.code, test.name)
+		})
+	}
+
+	// The first explicit toggle starts from platform routing's empty default.
+	firstToggle := f.call(t, actorPlatform, http.MethodPatch, "/platform/notifications/update-routing", confirmBody(fmt.Sprintf(`"destination_id":%q,"enabled":true`, destination.ID)))
+	expectResponse(t, firstToggle, http.StatusOK, "toggle from unconfigured state", nil)
+
+	if _, err := f.db.DB.Exec(`UPDATE application_update_state SET notification_destinations_json='{' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	stateFailure := f.call(t, actorPlatform, http.MethodPatch, "/platform/notifications/update-routing", confirmBody(fmt.Sprintf(`"destination_id":%q,"enabled":false`, destination.ID)))
+	expectError(t, stateFailure, http.StatusInternalServerError, "notification_failed", "unreadable platform routing")
+
+	if _, err := f.db.DB.Exec(`UPDATE application_update_state SET notification_destinations_json='["unknown"]' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	unknownStored := f.call(t, actorPlatform, http.MethodPatch, "/platform/notifications/update-routing", confirmBody(fmt.Sprintf(`"destination_id":%q,"enabled":false`, destination.ID)))
+	expectError(t, unknownStored, http.StatusBadRequest, "validation_failed", "unknown stored platform selector")
+
+	if _, err := f.db.DB.Exec(`UPDATE application_update_state SET notification_destinations_json='[]' WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+	removeAuditFailure := failTableWrites(t, f.db, "security_audit", "INSERT", "audit unavailable")
+	auditFailure := f.call(t, actorPlatform, http.MethodPatch, "/platform/notifications/update-routing", confirmBody(fmt.Sprintf(`"destination_id":%q,"enabled":true`, destination.ID)))
+	expectError(t, auditFailure, http.StatusServiceUnavailable, "audit_unavailable", "platform routing audit failure")
+	removeAuditFailure()
 }
 
 func TestPlatformNotificationRoutingTogglePreservesConcurrentDestinations(t *testing.T) {

@@ -28,16 +28,6 @@ type notificationPayload struct {
 func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	w.Header().Set("Cache-Control", "no-store")
 	notifier := s.App.Notifier.Tenant(ts)
-	views, err := notifier.Destinations(r.Context())
-	var status map[string]any
-	if err == nil {
-		status, err = notifier.Status(r.Context())
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
-		return
-	}
-	routing := map[string]any{"configured": false, "destinations": []string{}}
 	current, err := ts.ApplicationUpdateRouting(r.Context())
 	if err != nil {
 		if s.Log != nil {
@@ -56,10 +46,19 @@ func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Req
 		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
 		return
 	}
+	views, err := notifier.Destinations(r.Context())
+	var status map[string]any
+	if err == nil {
+		status, err = notifier.Status(r.Context())
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "notification_failed", "notification state could not be loaded", nil)
+		return
+	}
 	if destinations == nil {
 		destinations = []string{}
 	}
-	routing = map[string]any{"configured": current.Configured, "destinations": destinations}
+	routing := map[string]any{"configured": current.Configured, "destinations": destinations}
 	writeJSON(w, http.StatusOK, map[string]any{"destinations": views, "status": status, "update_routing": routing})
 }
 

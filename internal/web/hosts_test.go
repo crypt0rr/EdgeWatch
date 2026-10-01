@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,9 +154,9 @@ func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testi
 		t.Fatalf("accepted baseline list = %#v", listResponse.Hosts)
 	}
 	// The accepted incident makes the baseline modified, so searches use the
-	// projected overlay. One- and two-character queries take its LIKE path and
-	// must match like longer queries do. 44 only matches the accepted port.
-	for _, query := range []string{"2", "22", "44"} {
+	// projected overlay. Indexed trigram searches cover partial addresses and
+	// positive port evidence.
+	for _, query := range []string{"198", "443"} {
 		searchRecorder := httptest.NewRecorder()
 		server.jobRoute(searchRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts?q="+query, nil), store.Session{}, defaultTenantStore(server), record.ID+"/baseline/hosts")
 		if searchRecorder.Code != http.StatusOK {
@@ -170,6 +171,11 @@ func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testi
 		if len(searchResponse.Hosts) != 1 || searchResponse.Hosts[0].Address != "198.51.100.1" {
 			t.Fatalf("baseline host search q=%s = %#v", query, searchResponse.Hosts)
 		}
+	}
+	shortSearchRecorder := httptest.NewRecorder()
+	server.jobRoute(shortSearchRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/jobs/"+record.ID+"/baseline/hosts?q=22", nil), store.Session{}, defaultTenantStore(server), record.ID+"/baseline/hosts")
+	if shortSearchRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("short baseline search status %d: %s", shortSearchRecorder.Code, shortSearchRecorder.Body.String())
 	}
 
 	detailRecorder := httptest.NewRecorder()
@@ -203,6 +209,34 @@ func TestAcceptedIncidentUsesMutatedRuntimeBaselineForHostListAndDetail(t *testi
 	}
 	if len(historicalResponse.Expected.Protocols) != 1 || len(historicalResponse.Expected.Protocols[0].Ports) != 2 {
 		t.Fatalf("historical accepted baseline = %#v", historicalResponse.Expected)
+	}
+}
+
+func TestHostSearchRejectsShortAndOversizedQueriesAtAPI(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cfg := &config.Config{Version: 1, Database: db.Path, Retention: config.Duration(24 * time.Hour), Scheduler: config.Scheduler{MaxConcurrent: 1}, Web: config.Web{Listen: "127.0.0.1:8080"}}
+	a, err := app.New(cfg, db, "missing-nmap", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(a, db, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	for _, query := range []string{"1", "ab", strings.Repeat("x", store.MaxHostSearchQueryRunes+1)} {
+		request := httptest.NewRequest(http.MethodGet, "/api/v1/hosts?q="+query, nil).WithContext(ctx)
+		recorder := httptest.NewRecorder()
+		server.listHosts(recorder, request, defaultTenantStore(server))
+		if recorder.Code != http.StatusBadRequest {
+			t.Errorf("inventory search length %d status %d: %s", len([]rune(query)), recorder.Code, recorder.Body.String())
+		}
+		scanRecorder := httptest.NewRecorder()
+		server.renderScanHosts(scanRecorder, httptest.NewRequest(http.MethodGet, "/api/v1/scans/scan/hosts?q="+query, nil), defaultTenantStore(server), "", "job", model.ScanSummary{ID: "scan"})
+		if scanRecorder.Code != http.StatusBadRequest {
+			t.Errorf("scan search length %d status %d: %s", len([]rune(query)), scanRecorder.Code, scanRecorder.Body.String())
+		}
 	}
 }
 

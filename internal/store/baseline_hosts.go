@@ -104,6 +104,10 @@ func (ts *TenantStore) ListBaselineHostsPage(ctx context.Context, jobID, query, 
 	if err := ts.ready(); err != nil {
 		return Page[ScanHost]{}, err
 	}
+	query = strings.TrimSpace(query)
+	if err := ValidateHostSearchQuery(query); err != nil {
+		return Page[ScanHost]{}, err
+	}
 	queries := baselineHostsPageQueries(ts.scope.id, jobID, query, protocol, hasOpen, limit, offset)
 	var page Page[ScanHost]
 	reader := ts.store.reader()
@@ -144,21 +148,12 @@ func baselineHostsPageQueries(tenantID, jobID, query, protocol string, hasOpen *
 		// Use the same bounded FTS document as scan and latest-host queries.
 		// The current job name is matched separately so renames are searchable
 		// without leaving stale names in the per-host projection. Search rows
-		// share the baseline_hosts rowid: a full-text query runs once and its
-		// rowids are joined, while the short-query LIKE fallback reads only the
-		// search row of each host in this job.
-		var predicate string
-		var searchArg any
-		if len([]rune(filter.searchText)) < 3 {
-			predicate = `EXISTS (SELECT 1 FROM baseline_host_search hs WHERE hs.rowid=h.rowid AND hs.content LIKE ? ESCAPE '\')`
-			searchArg = "%" + escapeLikePattern(filter.searchText) + "%"
-		} else {
-			predicate = `h.rowid IN (SELECT rowid FROM baseline_host_search WHERE baseline_host_search MATCH ?)`
-			searchArg = hostSearchMatchQuery(filter.searchText)
-		}
+		// share the baseline_hosts rowid: an FTS query runs once and its rowids
+		// are joined; the store rejects queries too short for trigram matching.
+		predicate := `h.rowid IN (SELECT rowid FROM baseline_host_search WHERE baseline_host_search MATCH ?)`
 		where = append(where, `(lower(j.name) LIKE ? ESCAPE '\' OR `+predicate+")")
 		args = append(args, "%"+escapeLikePattern(filter.searchText)+"%")
-		args = append(args, searchArg)
+		args = append(args, hostSearchMatchQuery(filter.searchText))
 	}
 	whereSQL := strings.Join(where, " AND ")
 	return scanPageQueries{

@@ -94,6 +94,30 @@ describe('global hosts explorer', () => {
     })
   })
 
+  it('asks for three characters and does not submit short or oversized searches', async () => {
+    await renderPage()
+    const search = container.querySelector('input[placeholder*="Search IP"]') as HTMLInputElement
+    vi.mocked(listHosts).mockClear()
+
+    setInputValue(search, '1')
+    expect(container.querySelector('[role="status"]')?.textContent).toContain('at least 3 characters')
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    setInputValue(search, '12')
+    expect(container.querySelector('[role="status"]')?.textContent).toContain('at least 3 characters')
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    expect(listHosts).not.toHaveBeenCalled()
+
+    setInputValue(search, 'x'.repeat(257))
+    expect(container.querySelector('[role="status"]')?.textContent).toContain('limited to 256 characters')
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    expect(listHosts).not.toHaveBeenCalled()
+
+    setInputValue(search, '198')
+    await act(async () => new Promise(resolve => setTimeout(resolve, 300)))
+    expect(listHosts).toHaveBeenCalledTimes(1)
+    expect(listHosts).toHaveBeenCalledWith(expect.objectContaining({ q: '198', offset: 0 }))
+  })
+
   it('shows an actionable error when the host index cannot be queried', async () => {
     vi.mocked(listHosts).mockRejectedValueOnce(new Error('offline'))
     vi.mocked(listHosts).mockResolvedValueOnce(response)

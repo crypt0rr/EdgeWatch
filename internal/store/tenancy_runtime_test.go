@@ -511,12 +511,12 @@ var runtimeTenantLeakCases = map[string]tenantLeakCase{
 			{f.b, f.archivedA, "tenant-a", nil},
 			{f.b, runtimeUnknownJob, "", nil},
 			{f.a, f.archivedB, "edge", nil},
-			// A search, by the shared job name, a shared address, or a short
-			// text, finds only the tenant's own hosts.
+			// A search, by the shared job name or a shared address, finds only
+			// the tenant's own hosts.
 			{f.b, f.archivedB, "", wantBaselineHostMarkers("tenant-b")},
 			{f.b, f.archivedB, "edge", wantBaselineHostMarkers("tenant-b")},
 			{f.b, f.archivedB, runtimeAddress, []string{runtimeAddress + "/tenant-b"}},
-			{f.b, f.archivedB, "54", wantBaselineHostMarkers("tenant-b")},
+			{f.b, f.archivedB, "10.54", wantBaselineHostMarkers("tenant-b")},
 			{f.b, f.archivedB, "tenant-a", nil},
 			{f.a, f.archivedA, "edge", wantBaselineHostMarkers("tenant-a")},
 			{f.a, f.archivedA, "tenant-b", nil},

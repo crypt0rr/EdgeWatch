@@ -191,7 +191,7 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 	"ListScanHostsPage": {run: func(t *testing.T, f tenantFixture) {
 		ctx := context.Background()
 		scanHostOwner := func(host ScanHost) (string, string) { return host.ScanID, host.Host.Address }
-		for _, query := range []string{"", fixtureHost(0).Address, "10"} {
+		for _, query := range []string{"", fixtureHost(0).Address, "10.54"} {
 			if page, err := f.store.Tenant(f.b).ListScanHostsPage(ctx, f.scanA, query, "", nil, 50, 0); err != nil || page.Total != 0 || len(page.Items) != 0 {
 				t.Errorf("tenant B read tenant A's scan hosts for %q: %+v, %v", query, page, err)
 			}
@@ -285,12 +285,12 @@ var scanTenantLeakCases = map[string]tenantLeakCase{
 		ctx := context.Background()
 		own := map[TenantScope]string{f.a: f.scanA + "@" + f.jobA, f.b: f.scanB + "@" + f.jobB}
 		// The same addresses are in both tenants' inventories. A search by
-		// address, by DNS name, and by a short term, which takes the LIKE
-		// path instead of the full-text index, finds only the tenant's own.
+		// address, by DNS name, and by a partial IPv4 value, finds only the
+		// tenant's own rows while every non-empty query stays on indexed FTS.
 		for _, search := range []struct {
 			query       string
 			first, last int
-		}{{"", 0, 3}, {fixtureHost(2).Address, 2, 3}, {"host-0001", 1, 2}, {"10", 0, 3}} {
+		}{{"", 0, 3}, {fixtureHost(2).Address, 2, 3}, {"host-0001", 1, 2}, {"10.54", 0, 3}} {
 			for scope, owner := range own {
 				page, err := f.store.Tenant(scope).ListLatestScanHostsPage(ctx, search.query, "", nil, 50, 0)
 				if got, want := hostOwners(page.Items, latestHostOwner), fixtureHostOwners(owner, search.first, search.last); err != nil || page.Total != len(want) || !reflect.DeepEqual(got, want) {

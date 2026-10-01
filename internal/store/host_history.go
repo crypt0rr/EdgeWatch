@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
@@ -13,6 +15,37 @@ import (
 type Page[T any] struct {
 	Items []T
 	Total int
+}
+
+const (
+	// MinHostSearchQueryRunes is the shortest searchable non-empty host query.
+	MinHostSearchQueryRunes = 3
+	// MaxHostSearchQueryRunes caps work and input amplification on host search.
+	MaxHostSearchQueryRunes = 256
+)
+
+var (
+	// ErrHostSearchQueryTooShort reports a non-empty query below the indexed trigram minimum.
+	ErrHostSearchQueryTooShort = errors.New("host search must contain at least 3 characters")
+	// ErrHostSearchQueryTooLong reports a query beyond the supported search bound.
+	ErrHostSearchQueryTooLong = errors.New("host search must not exceed 256 characters")
+)
+
+// ValidateHostSearchQuery keeps broad host searches on the indexed FTS path
+// and bounds the amount of user input used to construct its query.
+func ValidateHostSearchQuery(query string) error {
+	query = strings.TrimSpace(query)
+	runes := utf8.RuneCountInString(query)
+	if runes == 0 {
+		return nil
+	}
+	if runes < MinHostSearchQueryRunes {
+		return ErrHostSearchQueryTooShort
+	}
+	if runes > MaxHostSearchQueryRunes {
+		return ErrHostSearchQueryTooLong
+	}
+	return nil
 }
 
 // ScanHost is an indexed effective-address observation. The complete host
@@ -113,15 +146,11 @@ func hostSearchPredicate(filter hostFilter, searchTable string, keyColumns strin
 		return "", "", nil
 	}
 	join = " JOIN " + searchTable + " hs ON " + keyColumns
-	if len([]rune(filter.searchText)) < 3 {
-		return join, "hs.content LIKE ? ESCAPE '\\'", []any{"%" + escapeLikePattern(filter.searchText) + "%"}
-	}
 	return join, searchTable + " MATCH ?", []any{hostSearchMatchQuery(filter.searchText)}
 }
 
-// escapeLikePattern keeps the short-query fallback literal. FTS5 handles
-// wildcard characters safely when a value is quoted as a phrase, but the
-// one- and two-character path uses LIKE for trigram-tokenizer boundaries.
+// escapeLikePattern keeps the baseline's current-job-name substring match
+// literal. Host evidence itself is searched through quoted FTS phrases.
 func escapeLikePattern(value string) string {
 	value = strings.ReplaceAll(value, `\`, `\\`)
 	value = strings.ReplaceAll(value, `%`, `\%`)

@@ -641,6 +641,10 @@ func (s *Server) listHosts(w http.ResponseWriter, r *http.Request, ts *store.Ten
 		return
 	}
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if err := store.ValidateHostSearchQuery(query); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_search_query", err.Error(), nil)
+		return
+	}
 	indexedExists, err := ts.SuccessfulScanHostIndexExists(r.Context())
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
@@ -940,7 +944,11 @@ func (s *Server) jobBaselineHosts(w http.ResponseWriter, r *http.Request, ts *st
 		writeError(w, http.StatusBadRequest, "invalid_filter", err.Error(), nil)
 		return
 	}
-	query := r.URL.Query().Get("q")
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if err := store.ValidateHostSearchQuery(query); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_search_query", err.Error(), nil)
+		return
+	}
 	baselineInfo, metaErr := ts.RuntimeBaselineInfo(r.Context(), id)
 	if metaErr != nil {
 		s.writeInternalError(w, r, "store", metaErr)
@@ -1201,6 +1209,11 @@ func (s *Server) jobScanHosts(w http.ResponseWriter, r *http.Request, ts *store.
 // ID, or empty for a legacy scan that only records its job name.
 func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, id, jobName string, summary model.ScanSummary) {
 	scanID := summary.ID
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if err := store.ValidateHostSearchQuery(query); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_search_query", err.Error(), nil)
+		return
+	}
 	limit, offset, err := parseHostPagination(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_pagination", err.Error(), nil)
@@ -1222,7 +1235,7 @@ func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, ts *sto
 		return
 	}
 	if indexedExists {
-		indexed, indexErr := ts.ListScanHostsPage(r.Context(), scanID, r.URL.Query().Get("q"), protocol, hasOpen, limit, offset)
+		indexed, indexErr := ts.ListScanHostsPage(r.Context(), scanID, query, protocol, hasOpen, limit, offset)
 		if indexErr != nil {
 			s.writeInternalError(w, r, "store", indexErr)
 			return
@@ -1240,7 +1253,7 @@ func (s *Server) renderScanHosts(w http.ResponseWriter, r *http.Request, ts *sto
 		return
 	}
 	page, _ := observationsForSnapshot(scan.Snapshot)
-	items, total := filterHosts(page.Items, page.DataQuality, r.URL.Query().Get("q"), protocol, hasOpen, offset, limit)
+	items, total := filterHosts(page.Items, page.DataQuality, query, protocol, hasOpen, offset, limit)
 	writeJSON(w, http.StatusOK, map[string]any{"job_id": id, "job": jobName, "scan": summary, "data_quality": page.DataQuality, "hosts": items, "pagination": paginationJSON(offset, limit, total)})
 }
 

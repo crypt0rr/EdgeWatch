@@ -3,7 +3,10 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"time"
+
+	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
 // baselineHostSearchBackfillTable is the fts_backfill_state checkpoint for
@@ -89,11 +92,10 @@ func ensureBaselineHostSearchContext(ctx context.Context, db *sql.DB) error {
 	return tx.Commit()
 }
 
-// backfillBaselineHostSearchBatchContext indexes the next bounded rowid range
-// of baseline_hosts and advances the checkpoint in the same transaction. The
-// stored search_text is already the bounded document written by the baseline
-// projection, so the batch is a set-based copy. Rows written after the
-// triggers were installed are already indexed under their rowid and skipped.
+// backfillBaselineHostSearchBatchContext rebuilds the next bounded rowid range
+// of baseline_hosts from the stored evidence and advances the checkpoint in
+// the same transaction. Recomputing search_text is required when its format
+// or priorities change; the update trigger refreshes the FTS row by rowid.
 func backfillBaselineHostSearchBatchContext(ctx context.Context, db *sql.DB) (ftsBatchProgress, error) {
 	progress := ftsBatchProgress{table: baselineHostSearchBackfillTable}
 	tx, err := db.BeginTx(ctx, nil)
@@ -131,10 +133,41 @@ func backfillBaselineHostSearchBatchContext(ctx context.Context, db *sql.DB) (ft
 		progress.complete = true
 		return progress, nil
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO baseline_host_search(rowid,job_id,address,content)
-SELECT h.rowid,h.job_id,h.address,lower(coalesce(h.search_text,'')) FROM baseline_hosts h
-WHERE h.rowid>? AND h.rowid<=? AND NOT EXISTS (SELECT 1 FROM baseline_host_search hs WHERE hs.rowid=h.rowid)`, lastRowID, maxRowID.Int64); err != nil {
+	rows, err := tx.QueryContext(ctx, `SELECT rowid,address,host_json,search_text FROM baseline_hosts WHERE rowid>? AND rowid<=? ORDER BY rowid`, lastRowID, maxRowID.Int64)
+	if err != nil {
 		return progress, err
+	}
+	type row struct {
+		id         int64
+		address    string
+		hostJSON   []byte
+		searchText string
+	}
+	batch := make([]row, 0, batchRows)
+	for rows.Next() {
+		var item row
+		if err := rows.Scan(&item.id, &item.address, &item.hostJSON, &item.searchText); err != nil {
+			_ = rows.Close()
+			return progress, err
+		}
+		batch = append(batch, item)
+	}
+	rowsErr := rows.Err()
+	if closeErr := rows.Close(); rowsErr == nil {
+		rowsErr = closeErr
+	}
+	if rowsErr != nil {
+		return progress, rowsErr
+	}
+	for _, item := range batch {
+		var host model.HostObservation
+		if err := json.Unmarshal(item.hostJSON, &host); err == nil {
+			host.Address = item.address
+			item.searchText = hostSearchContent("", host)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE baseline_hosts SET search_text=? WHERE rowid=?`, item.searchText, item.id); err != nil {
+			return progress, err
+		}
 	}
 	processedRows += batchRows
 	if _, err := tx.ExecContext(ctx, `UPDATE fts_backfill_state SET last_rowid=?,processed_rows=?,updated_at=? WHERE table_name=?`, maxRowID.Int64, processedRows, now, baselineHostSearchBackfillTable); err != nil {

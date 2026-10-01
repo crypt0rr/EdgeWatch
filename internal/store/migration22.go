@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
 )
 
@@ -251,15 +253,19 @@ func ensureHostSearchSchemaTx(tx *sql.Tx, recreateTriggers bool) error {
 // scan_hosts and latest_scan_hosts.
 var currentHostSearchTriggerSQL = slices.Concat(scanHostSearchTriggerSQL, latestHostSearchTriggerSQL)
 
+const boundedHostSearchJobSQL = " || ' ' || substr(coalesce(NEW.job,''),1,"
+
+var boundedHostSearchJobRunes = strconv.Itoa(config.MaxJobNameRunes)
+
 var scanHostSearchTriggerSQL = []string{
 	`CREATE TRIGGER IF NOT EXISTS scan_hosts_search_ai AFTER INSERT ON scan_hosts BEGIN
  INSERT INTO scan_host_search(rowid,scan_id,address,content)
- VALUES(NEW.rowid,NEW.scan_id,NEW.address,lower(coalesce(NEW.search_text,'') || ' ' || coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'')));
+	 VALUES(NEW.rowid,NEW.scan_id,NEW.address,lower(coalesce(NEW.search_text,'')` + boundedHostSearchJobSQL + boundedHostSearchJobRunes + `)));
 END;`,
 	`CREATE TRIGGER IF NOT EXISTS scan_hosts_search_au AFTER UPDATE ON scan_hosts BEGIN
  DELETE FROM scan_host_search WHERE rowid=OLD.rowid;
  INSERT INTO scan_host_search(rowid,scan_id,address,content)
- VALUES(NEW.rowid,NEW.scan_id,NEW.address,lower(coalesce(NEW.search_text,'') || ' ' || coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'')));
+	 VALUES(NEW.rowid,NEW.scan_id,NEW.address,lower(coalesce(NEW.search_text,'')` + boundedHostSearchJobSQL + boundedHostSearchJobRunes + `)));
 END;`,
 	`CREATE TRIGGER IF NOT EXISTS scan_hosts_search_ad AFTER DELETE ON scan_hosts BEGIN
  DELETE FROM scan_host_search WHERE rowid=OLD.rowid;
@@ -272,12 +278,12 @@ END;`,
 var latestHostSearchTriggerSQL = []string{
 	`CREATE TRIGGER IF NOT EXISTS latest_scan_hosts_search_ai AFTER INSERT ON latest_scan_hosts BEGIN
  INSERT INTO latest_host_search(rowid,address,content)
- VALUES(NEW.rowid,NEW.address,lower(coalesce(NEW.search_text,'') || ' ' || coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'')));
+	 VALUES(NEW.rowid,NEW.address,lower(coalesce(NEW.search_text,'')` + boundedHostSearchJobSQL + boundedHostSearchJobRunes + `)));
 END;`,
 	`CREATE TRIGGER IF NOT EXISTS latest_scan_hosts_search_au AFTER UPDATE ON latest_scan_hosts BEGIN
  DELETE FROM latest_host_search WHERE rowid=OLD.rowid;
  INSERT INTO latest_host_search(rowid,address,content)
- VALUES(NEW.rowid,NEW.address,lower(coalesce(NEW.search_text,'') || ' ' || coalesce(NEW.address,'') || ' ' || coalesce(NEW.job,'') || ' ' || coalesce(NEW.source_targets_json,'') || ' ' || coalesce(NEW.dns_names_json,'')));
+	 VALUES(NEW.rowid,NEW.address,lower(coalesce(NEW.search_text,'')` + boundedHostSearchJobSQL + boundedHostSearchJobRunes + `)));
 END;`,
 	`CREATE TRIGGER IF NOT EXISTS latest_scan_hosts_search_ad AFTER DELETE ON latest_scan_hosts BEGIN
  DELETE FROM latest_host_search WHERE rowid=OLD.rowid;

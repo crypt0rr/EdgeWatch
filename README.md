@@ -372,14 +372,16 @@ Naabu reports open ports only, so Nmap also confirms every TCP port the job
 still tracks: baseline ports and the ports of open incidents, pending changes,
 and suppressed changes. It checks them on every address the target resolves
 to in that scan, also after a DNS name has moved to a new address. A single
-Naabu miss cannot close them. An address with
-no Naabu result counts as complete coverage only when host discovery is
-skipped (assume_alive, the default). With SYN host discovery, Naabu cannot
-tell a down address from one without open ports, so that address stays
-incomplete, as a down host does with Nmap. Repeated Naabu results are counted
-once. One Naabu invocation keeps at most 131,070 distinct open ports, the
-equivalent of two addresses with every port open. Beyond that, the addresses
-with the most results are recorded as incomplete with the reason
+Naabu miss cannot close them. An address with no Naabu result counts as
+complete coverage only when host discovery is skipped (`assume_alive`, the
+default). With SYN host discovery, Naabu cannot tell a down address from one
+without open ports, so that address stays incomplete. With **Nmap only** and
+host discovery enabled (`assume_alive: false`), an explicit Nmap down result
+is tracked as a host-state change, not as a set of closed ports. Omitted Nmap
+hosts and timed-out probes remain incomplete. Repeated Naabu results are
+counted once. One Naabu invocation keeps at most 131,070 distinct open ports,
+the equivalent of two addresses with every port open. Beyond that, the
+addresses with the most results are recorded as incomplete with the reason
 `naabu-too-many-open-ports`.
 
 Nmap folds more than 25 `open|filtered` UDP ports into a summary line (the

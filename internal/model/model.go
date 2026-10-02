@@ -60,8 +60,13 @@ type ProtocolObservation struct {
 	// and UDP. HostObservation.Status remains a summary for display, while
 	// change detection uses these per-protocol values to avoid treating missing
 	// evidence in one protocol as missing evidence in every protocol.
-	Status           string            `json:"status,omitempty"`
-	StatusReason     string            `json:"status_reason,omitempty"`
+	Status       string `json:"status,omitempty"`
+	StatusReason string `json:"status_reason,omitempty"`
+	// DiscoveryState records an explicit Nmap host-discovery result. Unlike
+	// descriptive host metadata, this is consumed only to derive the monitored
+	// effective-host state after all configured protocols have been considered.
+	// It is blank for omitted, timed-out, assumed-alive, and Naabu-only results.
+	DiscoveryState   string            `json:"discovery_state,omitempty"`
 	ScanType         string            `json:"scan_type,omitempty"`
 	ScannedPorts     string            `json:"scanned_ports"`
 	ScannedPortCount int               `json:"scanned_port_count"`
@@ -123,11 +128,20 @@ type Scope struct {
 	ServiceDetection bool   `json:"service_detection"`
 }
 
+// HostState is the small, monitored portion of host reachability that belongs
+// in the baseline. It is separate from HostObservation so latency, MAC/vendor,
+// reasons, and scanner output cannot affect convergence or incident detection.
+type HostState struct {
+	Address string `json:"address"`
+	State   string `json:"state"`
+}
+
 type Snapshot struct {
-	Units  []Unit              `json:"units"`
-	Scopes []Scope             `json:"scopes"`
-	DNS    map[string][]string `json:"dns,omitempty"`
-	Hosts  []HostObservation   `json:"hosts,omitempty"`
+	Units      []Unit              `json:"units"`
+	Scopes     []Scope             `json:"scopes"`
+	DNS        map[string][]string `json:"dns,omitempty"`
+	Hosts      []HostObservation   `json:"hosts,omitempty"`
+	HostStates []HostState         `json:"host_states,omitempty"`
 }
 
 type Scan struct {
@@ -474,6 +488,7 @@ func (s *Snapshot) Normalize() {
 		})
 		for j := range host.Protocols {
 			protocol := &host.Protocols[j]
+			protocol.DiscoveryState = strings.ToLower(strings.TrimSpace(protocol.DiscoveryState))
 			sort.Strings(protocol.NSEOutput)
 			for _, ports := range []*[]PortObservation{&protocol.Ports, &protocol.DiscoveredPorts, &protocol.UnconfirmedPorts} {
 				sort.Slice(*ports, func(a, b int) bool {
@@ -499,6 +514,20 @@ func (s *Snapshot) Normalize() {
 		sort.Slice(host.Protocols, func(a, b int) bool { return host.Protocols[a].Protocol < host.Protocols[b].Protocol })
 	}
 	sort.Slice(s.Hosts, func(i, j int) bool { return s.Hosts[i].Address < s.Hosts[j].Address })
+	for i := range s.HostStates {
+		if ip := net.ParseIP(strings.TrimSpace(s.HostStates[i].Address)); ip != nil {
+			s.HostStates[i].Address = ip.String()
+		} else {
+			s.HostStates[i].Address = strings.TrimSpace(s.HostStates[i].Address)
+		}
+		s.HostStates[i].State = strings.ToLower(strings.TrimSpace(s.HostStates[i].State))
+	}
+	sort.Slice(s.HostStates, func(i, j int) bool {
+		if s.HostStates[i].Address == s.HostStates[j].Address {
+			return s.HostStates[i].State < s.HostStates[j].State
+		}
+		return s.HostStates[i].Address < s.HostStates[j].Address
+	})
 }
 
 func (s Snapshot) Hash() string {
@@ -514,7 +543,8 @@ func (s Snapshot) Hash() string {
 	// Host observations are descriptive evidence (latency, discovery reason,
 	// service metadata, and state summaries), not baseline identity. Keep them
 	// out of convergence and security hashes so richer output never creates a
-	// false change or forces a rebaseline.
+	// false change or forces a rebaseline. HostStates is intentionally separate:
+	// it contains only normalized reachability expectations that drive incidents.
 	stable.Hosts = nil
 	stable.Normalize()
 	b, _ = json.Marshal(stable)
@@ -534,6 +564,8 @@ func Fingerprint(name, product, version, extra string, cpes []string) string {
 
 func ChangeSummary(c Change) string {
 	switch c.Kind {
+	case "host":
+		return fmt.Sprintf("%s host state: %s -> %s", c.Target, c.Old, c.New)
 	case "dns-added", "dns-removed":
 		return fmt.Sprintf("%s %s: %s", c.Target, c.Kind, nonempty(c.New, c.Old))
 	case "service":

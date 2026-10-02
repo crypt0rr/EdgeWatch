@@ -780,6 +780,79 @@ func TestParseXMLRecordsDownHostAsUnreachable(t *testing.T) {
 	}
 }
 
+func TestScanMarksOnlyCompletedNmapHostDiscovery(t *testing.T) {
+	downXML := `<?xml version="1.0"?><nmaprun><host><status state="down" reason="no-response"/><address addr="192.0.2.9" addrtype="ipv4"/></host><runstats><finished exit="success"/></runstats></nmaprun>`
+	timeoutXML := `<?xml version="1.0"?><nmaprun><host timedout="true"><status state="up"/><address addr="192.0.2.9" addrtype="ipv4"/></host><runstats><finished exit="success"/></runstats></nmaprun>`
+	upXML := `<?xml version="1.0"?><nmaprun><host><status state="up" reason="syn-ack"/><address addr="192.0.2.9" addrtype="ipv4"/></host><runstats><finished exit="success"/></runstats></nmaprun>`
+	tests := []struct {
+		name        string
+		xml         string
+		assumeAlive bool
+		wantState   string
+		wantReason  string
+	}{
+		{name: "explicit host discovery down", xml: downXML, wantState: "down", wantReason: "no-response"},
+		{name: "timed out host", xml: timeoutXML, wantReason: "nmap-host-timeout"},
+		{name: "assumed alive skips host discovery", xml: downXML, assumeAlive: true, wantReason: "no-response"},
+		{name: "up host", xml: upXML, wantState: "up", wantReason: "syn-ack"},
+		{name: "omitted host", xml: `<?xml version="1.0"?><nmaprun><runstats><finished exit="success"/></runstats></nmaprun>`, wantReason: "nmap-omitted"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dir := t.TempDir()
+			nmapPath := filepath.Join(dir, "nmap")
+			script := "#!/bin/sh\nprintf '%s' '" + test.xml + "'\n"
+			if err := os.WriteFile(nmapPath, []byte(script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			assumeAlive := test.assumeAlive
+			job := config.NormalizeJob(config.Job{
+				Name: "host-discovery", Targets: []string{"192.0.2.9"}, MaxExpandedHosts: 1,
+				AssumeAlive: &assumeAlive, TCP: &config.Protocol{Ports: "443", Mode: "connect"},
+			})
+			snapshot, err := New(nmapPath).Scan(context.Background(), job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(snapshot.Hosts) != 1 || snapshot.Hosts[0].Address != "192.0.2.9" {
+				t.Fatalf("host observations = %#v", snapshot.Hosts)
+			}
+			host := snapshot.Hosts[0]
+			if len(host.Protocols) != 1 {
+				t.Fatalf("protocol observations = %#v", host.Protocols)
+			}
+			protocol := host.Protocols[0]
+			if protocol.DiscoveryState != test.wantState {
+				t.Errorf("discovery state = %q, want %q", protocol.DiscoveryState, test.wantState)
+			}
+			if protocol.StatusReason != test.wantReason {
+				t.Errorf("status reason = %q, want %q", protocol.StatusReason, test.wantReason)
+			}
+		})
+	}
+}
+
+func TestMergeDiscoveryStatesKeepsConflictsNonAuthoritative(t *testing.T) {
+	for _, test := range []struct {
+		name, first, second, third, want string
+	}{
+		{name: "same state", first: "up", second: "up", want: "up"},
+		{name: "up then down", first: "up", second: "down", want: "conflict"},
+		{name: "down then up", first: "down", second: "up", want: "conflict"},
+		{name: "third fragment cannot clear conflict", first: "up", second: "down", third: "up", want: "conflict"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := mergeDiscoveryStates(test.first, test.second)
+			if test.third != "" {
+				got = mergeDiscoveryStates(got, test.third)
+			}
+			if got != test.want {
+				t.Fatalf("merged discovery state = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestScanBatchesExpandedCIDRTargets(t *testing.T) {
 	dir := t.TempDir()
 	nmapPath := filepath.Join(dir, "nmap")

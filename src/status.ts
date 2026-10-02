@@ -30,6 +30,7 @@ export function changeKindLabel(kind: string, oldValue?: string, newValue?: stri
     return 'Port state'
   }
   if (normalized === 'dns' || normalized.startsWith('dns_')) return 'DNS'
+  if (normalized === 'host' || normalized.startsWith('host_')) return 'Host state'
   if (normalized === 'service' || normalized.startsWith('service_')) return 'Service'
   return humanize(normalized || kind)
 }

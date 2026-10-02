@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"sort"
 	"strconv"
 	"strings"
@@ -102,6 +103,7 @@ func processSuccessWithChanges(state *model.JobState, job config.Job, scan model
 }
 
 func processSuccessWithChangesAndReminders(state *model.JobState, job config.Job, scan model.Scan, remindersEnabled bool) ([]model.Event, []model.Change, error) {
+	completeHostDiscoveryStates(&scan.Snapshot)
 	// A partial or explicitly incomplete result may be retained for diagnosis,
 	// but it must never trigger a recurring reminder.
 	remindersEnabled = remindersEnabled && scan.Status == "success"
@@ -139,7 +141,21 @@ func processSuccessWithChangesAndReminders(state *model.JobState, job config.Job
 	// proceed. An explicit security-scope change is exempt because it already
 	// requires a deliberate rebaseline and may legitimately narrow the scope to
 	// zero positive ports.
-	if totalLoss, event := guardTotalLoss(state, scan); totalLoss {
+	if baselineSurfaceIsExplicitlyDown(*state.Baseline, scan.Snapshot) {
+		// When completed Nmap host discovery accounts for every address that
+		// supplied the old positive ports, the absence is a host-state change,
+		// not an ambiguous scan-wide port loss. Let Diff report the host
+		// transition while suppressing the now-unreachable per-port closures.
+		clearTotalLossCandidate(state)
+	} else if totalLoss, event := guardTotalLoss(state, scan); totalLoss {
+		// An explicit host-discovery transition is useful even while the
+		// zero-positive-port guard waits for confirmation of the port loss. It
+		// does not confirm individual ports as closed.
+		hostChanges := hostStateChanges(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+		if len(hostChanges) > 0 {
+			events := append(event, applyChanges(state, job.Name, scan.ID, hostChanges, job.Change.Confirmations, now)...)
+			return events, hostChanges, nil
+		}
 		return event, nil, nil
 	}
 	learningServices := learnMissingFingerprints(state, scan.Snapshot, job.Baseline.Samples)
@@ -184,6 +200,45 @@ func processSuccessWithChangesAndReminders(state *model.JobState, job config.Job
 	return events, changes, nil
 }
 
+// baselineSurfaceIsExplicitlyDown reports whether every effective address
+// contributing a positive baseline port was explicitly discovered down in
+// the current complete scan. It intentionally returns false for legacy or
+// aggregated evidence whose contributing addresses cannot be determined.
+func baselineSurfaceIsExplicitlyDown(baseline, current model.Snapshot) bool {
+	downByProtocol := completedDownAddressesByProtocol(current)
+	if len(downByProtocol) == 0 {
+		return false
+	}
+	positivePorts := 0
+	for _, unit := range baseline.Units {
+		for _, port := range unit.Ports {
+			if !isPositivePortState(port.State) {
+				continue
+			}
+			positivePorts++
+			addresses := port.Evidence
+			if len(addresses) == 0 {
+				addresses = unit.Addresses
+			}
+			if len(addresses) == 0 {
+				addresses = baseline.DNS[unit.Target]
+			}
+			if len(addresses) == 0 && net.ParseIP(strings.TrimSpace(unit.Target)) != nil {
+				addresses = []string{unit.Target}
+			}
+			if len(addresses) == 0 {
+				return false
+			}
+			for _, address := range addresses {
+				if !explicitlyDownForProtocol(downByProtocol, unit.Protocol, strings.TrimSpace(address)) {
+					return false
+				}
+			}
+		}
+	}
+	return positivePorts > 0
+}
+
 // processIncompleteSuccess compares only evidence that is complete for this
 // scan. It deliberately leaves baseline candidates, fingerprint learning, and
 // failure counters untouched: an incomplete result is useful for detecting a
@@ -208,7 +263,7 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		// confirmation counter, and discard pending closure anomalies that were
 		// waiting on this unreliable observation. A total loss that complete
 		// scans already confirmed stays confirmed.
-		if positivePortCount(scan.Snapshot) == 0 {
+		if positivePortCount(scan.Snapshot) == 0 && len(scan.Snapshot.HostStates) == 0 {
 			clearUnconfirmedTotalLoss(state)
 			clearPendingTotalLoss(state)
 			events = append(events, model.Event{Type: "scan-incomplete", Job: scan.Job, ScanID: scan.ID, Message: incompleteScanError(scan.Snapshot), CreatedAt: scan.FinishedAt})
@@ -418,8 +473,9 @@ type incompleteCoverage map[string]map[string]struct{}
 const scanCompleteCoverageReason = "scan-complete"
 
 type protocolCoverageStatus struct {
-	status string
-	reason string
+	status         string
+	reason         string
+	discoveryState string
 }
 
 func incompleteProtocolCoverage(snapshot model.Snapshot) incompleteCoverage {
@@ -478,15 +534,17 @@ func incompleteProtocolCoverage(snapshot model.Snapshot) incompleteCoverage {
 			if name == "" {
 				continue
 			}
-			observed := protocolCoverageStatus{status: status, reason: reason}
+			discoveryState := strings.ToLower(strings.TrimSpace(protocol.DiscoveryState))
+			observed := protocolCoverageStatus{status: status, reason: reason, discoveryState: discoveryState}
+			incomplete := isIncompleteCoverageObservation(status, reason) && !isCompletedHostDiscoveryDown(status, reason, discoveryState)
 			// Protocol failures are sticky even if a duplicate fragment reports
 			// the address as healthy later. A blank status is retained only until
 			// explicit evidence for the same protocol is available.
 			existing := statuses[name]
-			if isIncompleteCoverageObservation(status, reason) || existing.status == "" || (existing.status == "unknown" && strings.EqualFold(existing.reason, scanCompleteCoverageReason) && status == "up") {
+			if incomplete || existing.status == "" || (existing.status == "unknown" && strings.EqualFold(existing.reason, scanCompleteCoverageReason) && status == "up") {
 				statuses[name] = observed
 			}
-			if isIncompleteCoverageObservation(status, reason) {
+			if incomplete {
 				mark(host.Address, name)
 			}
 		}
@@ -504,19 +562,12 @@ func incompleteProtocolCoverage(snapshot model.Snapshot) incompleteCoverage {
 			mark(host.Address, "*")
 			continue
 		}
-		marked := false
 		for protocol := range protocols {
 			status, observed := statuses[protocol]
-			if !observed || status.status != "up" {
+			completeDown := observed && isCompletedHostDiscoveryDown(status.status, status.reason, status.discoveryState)
+			if !observed || (status.status != "up" && !completeDown) {
 				mark(host.Address, protocol)
-				marked = true
 			}
-		}
-		// If an address summary says coverage failed but every known protocol
-		// explicitly completed, retain the legacy conservative behavior rather
-		// than silently trusting an unexplained host-level failure.
-		if !marked {
-			mark(host.Address, "*")
 		}
 	}
 	return coverage
@@ -536,6 +587,22 @@ func isIncompleteCoverageObservation(status, reason string) bool {
 		return false
 	}
 	return isIncompleteCoverageStatus(status)
+}
+
+func isCompletedHostDiscoveryDown(status, reason, discoveryState string) bool {
+	if strings.ToLower(strings.TrimSpace(discoveryState)) != "down" {
+		return false
+	}
+	status = strings.ToLower(strings.TrimSpace(status))
+	if status != "down" && status != "unreachable" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "nmap-host-down", "host-down", "down", "no-response", "host-unreach", "net-unreach", "admin-prohibited":
+		return true
+	default:
+		return false
+	}
 }
 
 func incompleteCoverageHas(coverage incompleteCoverage, address, protocol string) bool {
@@ -562,12 +629,195 @@ func incompleteHostAddresses(snapshot model.Snapshot) []string {
 // from successful-host projections, while the engine still compares its
 // reachable evidence.
 func MarkIncompleteScan(scan *model.Scan) bool {
-	if scan == nil || scan.Status != "success" || !snapshotHasUnreachableHost(scan.Snapshot) {
+	if scan == nil || scan.Status != "success" {
+		return false
+	}
+	completeHostDiscoveryStates(&scan.Snapshot)
+	if !snapshotHasUnreachableHost(scan.Snapshot) {
 		return false
 	}
 	scan.Status = "incomplete"
 	scan.Error = incompleteScanError(scan.Snapshot)
 	return true
+}
+
+// completeHostDiscoveryStates derives the small monitored host-state set from
+// explicit Nmap discovery results. Unknown, omitted, timed-out, and Naabu-only
+// observations never become a baseline state. Existing explicit states are
+// preserved so accepting an incident in a runtime baseline remains stable.
+func completeHostDiscoveryStates(snapshot *model.Snapshot) {
+	if snapshot == nil {
+		return
+	}
+	expected := map[string]map[string]struct{}{}
+	addExpected := func(address, protocol string) {
+		address = strings.TrimSpace(address)
+		protocol = strings.ToLower(strings.TrimSpace(protocol))
+		if address == "" || protocol == "" {
+			return
+		}
+		if expected[address] == nil {
+			expected[address] = map[string]struct{}{}
+		}
+		expected[address][protocol] = struct{}{}
+	}
+	for _, scope := range snapshot.Scopes {
+		addresses := snapshot.DNS[scope.Target]
+		if len(addresses) == 0 {
+			addresses = []string{scope.Target}
+		}
+		for _, address := range addresses {
+			addExpected(address, scope.Protocol)
+		}
+	}
+	discovery := map[string]map[string]string{}
+	for _, host := range snapshot.Hosts {
+		for _, protocol := range host.Protocols {
+			name := strings.ToLower(strings.TrimSpace(protocol.Protocol))
+			state := strings.ToLower(strings.TrimSpace(protocol.DiscoveryState))
+			if name == "" || (state != "up" && state != "down") || protocol.DiscoveryEngine == "naabu" {
+				continue
+			}
+			if state == "down" && !isCompletedHostDiscoveryDown(protocol.Status, protocol.StatusReason, state) {
+				continue
+			}
+			if state == "up" && strings.ToLower(strings.TrimSpace(protocol.Status)) != "up" {
+				continue
+			}
+			address := strings.TrimSpace(host.Address)
+			if discovery[address] == nil {
+				discovery[address] = map[string]string{}
+			}
+			previous := discovery[address][name]
+			if previous == "conflict" {
+				continue
+			}
+			if previous != "" && previous != state {
+				// Different Nmap work fragments disagreed. Do not turn a
+				// contradictory result into an expected up/down state.
+				discovery[address][name] = "conflict"
+				continue
+			}
+			if _, exists := discovery[address][name]; !exists {
+				discovery[address][name] = state
+			}
+			addExpected(address, name)
+		}
+	}
+	states := make(map[string]string, len(snapshot.HostStates))
+	for _, host := range snapshot.HostStates {
+		address := strings.TrimSpace(host.Address)
+		state := strings.ToLower(strings.TrimSpace(host.State))
+		if address != "" && (state == "up" || state == "down") {
+			states[address] = state
+		}
+	}
+	for address, protocols := range expected {
+		observed := discovery[address]
+		if len(protocols) == 0 || len(observed) == 0 {
+			continue
+		}
+		allDown := true
+		anyUp := false
+		for protocol := range protocols {
+			state := observed[protocol]
+			if state == "up" {
+				anyUp = true
+			}
+			if state != "down" {
+				allDown = false
+			}
+		}
+		if anyUp {
+			states[address] = "up"
+		} else if allDown {
+			states[address] = "down"
+		}
+	}
+	snapshot.HostStates = snapshot.HostStates[:0]
+	for address, state := range states {
+		snapshot.HostStates = append(snapshot.HostStates, model.HostState{Address: address, State: state})
+	}
+	snapshot.Normalize()
+}
+
+func hostStateChanges(old, current model.Snapshot, intersectionOnly bool) []model.Change {
+	oldStates, newStates := effectiveHostStates(old), effectiveHostStates(current)
+	addresses := make(map[string]struct{}, len(oldStates)+len(newStates))
+	for address := range oldStates {
+		addresses[address] = struct{}{}
+	}
+	for address := range newStates {
+		addresses[address] = struct{}{}
+	}
+	var changes []model.Change
+	for address := range addresses {
+		oldState, hadOld := oldStates[address]
+		newState, hasNew := newStates[address]
+		if !hadOld || !hasNew || oldState == newState {
+			continue
+		}
+		change := model.Change{Key: "host|" + address, Kind: "host", Target: address, Old: oldState, New: newState, Severity: "warning"}
+		if newState == "up" {
+			change.Severity = "info"
+		}
+		if intersectionOnly && (!hostInScope(old, address) || !hostInScope(current, address)) {
+			continue
+		}
+		changes = append(changes, change)
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Key < changes[j].Key })
+	return changes
+}
+
+func effectiveHostStates(snapshot model.Snapshot) map[string]string {
+	states := make(map[string]string, len(snapshot.HostStates))
+	for _, host := range snapshot.HostStates {
+		address := strings.TrimSpace(host.Address)
+		state := strings.ToLower(strings.TrimSpace(host.State))
+		if address != "" && (state == "up" || state == "down") {
+			states[address] = state
+		}
+	}
+	for _, unit := range snapshot.Units {
+		for _, port := range unit.Ports {
+			if !isPositivePortState(port.State) {
+				continue
+			}
+			addresses := port.Evidence
+			if len(addresses) == 0 {
+				addresses = unit.Addresses
+			}
+			if len(addresses) == 0 && net.ParseIP(strings.TrimSpace(unit.Target)) != nil {
+				addresses = []string{unit.Target}
+			}
+			if len(addresses) == 1 {
+				if _, exists := states[addresses[0]]; !exists {
+					states[addresses[0]] = "up"
+				}
+			}
+		}
+	}
+	return states
+}
+
+func hostInScope(snapshot model.Snapshot, address string) bool {
+	ip := net.ParseIP(strings.TrimSpace(address))
+	for _, scope := range snapshot.Scopes {
+		target := strings.TrimSpace(scope.Target)
+		if target == address {
+			return true
+		}
+		if _, network, err := net.ParseCIDR(target); err == nil && ip != nil && network.Contains(ip) {
+			return true
+		}
+		for _, resolved := range snapshot.DNS[target] {
+			if strings.TrimSpace(resolved) == strings.TrimSpace(address) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func incompleteTargets(baseline *model.Snapshot, current model.Snapshot, coverage incompleteCoverage) (map[string]struct{}, map[string]struct{}) {
@@ -606,6 +856,11 @@ func incompleteTargets(baseline *model.Snapshot, current model.Snapshot, coverag
 				}
 			}
 		}
+	}
+	for address := range coverage {
+		// Host-state changes use the effective address as their target, whereas
+		// aggregate DNS port changes use the configured hostname.
+		protectedTargets[address] = struct{}{}
 	}
 	return protectedProtocols, protectedTargets
 }
@@ -943,6 +1198,7 @@ func items(s model.Snapshot) map[string]item {
 
 func Diff(old, new model.Snapshot, intersectionOnly bool) []model.Change {
 	a, b := items(old), items(new)
+	downByProtocol := completedDownAddressesByProtocol(new)
 	keys := map[string]bool{}
 	for k := range a {
 		keys[k] = true
@@ -988,8 +1244,12 @@ func Diff(old, new model.Snapshot, intersectionOnly bool) []model.Change {
 				c.Severity = "info"
 			}
 		}
+		if !yok && xok && (probe.Kind == "port" || probe.Kind == "service") && missingPositivePortExplainedByDown(old, probe, downByProtocol) {
+			continue
+		}
 		out = append(out, c)
 	}
+	out = append(out, hostStateChanges(old, new, intersectionOnly)...)
 	sort.Slice(out, func(i, j int) bool { return out[i].Key < out[j].Key })
 	return out
 }
@@ -998,8 +1258,101 @@ func inBothScopes(a, b model.Snapshot, v item) bool {
 	if v.Kind == "dns" {
 		return hasTarget(a, v.Target) && hasTarget(b, v.Target)
 	}
+	if v.Kind == "host" {
+		return hostInScope(a, v.Target) && hostInScope(b, v.Target)
+	}
 	return scopeAllows(a, v.Target, v.Protocol, v.Port, v.Kind == "service") && scopeAllows(b, v.Target, v.Protocol, v.Port, v.Kind == "service")
 }
+
+func missingPositivePortExplainedByDown(old model.Snapshot, value item, downByProtocol map[string]map[string]struct{}) bool {
+	if len(downByProtocol) == 0 {
+		return false
+	}
+	addresses := map[string]struct{}{}
+	found := false
+	for _, unit := range old.Units {
+		if unit.Target != value.Target || !strings.EqualFold(unit.Protocol, value.Protocol) {
+			continue
+		}
+		for _, port := range unit.Ports {
+			if port.Port != value.Port || !isPositivePortState(port.State) {
+				continue
+			}
+			found = true
+			portAddresses := port.Evidence
+			if len(portAddresses) == 0 {
+				portAddresses = unit.Addresses
+			}
+			if len(portAddresses) == 0 {
+				portAddresses = old.DNS[unit.Target]
+			}
+			if len(portAddresses) == 0 && net.ParseIP(strings.TrimSpace(unit.Target)) != nil {
+				portAddresses = []string{unit.Target}
+			}
+			if len(portAddresses) == 0 {
+				return false
+			}
+			for _, address := range portAddresses {
+				addresses[strings.TrimSpace(address)] = struct{}{}
+			}
+		}
+	}
+	if !found || len(addresses) == 0 {
+		return false
+	}
+	// An aggregate DNS port may have been observed on several addresses.
+	// Suppress its closure only when every contributing address is explicitly
+	// down; a live sibling can still establish a real removal for the target.
+	for address := range addresses {
+		if !explicitlyDownForProtocol(downByProtocol, value.Protocol, address) {
+			return false
+		}
+	}
+	return true
+}
+
+// completedDownAddressesByProtocol includes protocol-specific Nmap discovery
+// results and address-level down states (which require every configured
+// protocol to be down). Protocol-specific evidence prevents one transport's
+// host-discovery result from hiding a meaningful port change in another.
+func completedDownAddressesByProtocol(snapshot model.Snapshot) map[string]map[string]struct{} {
+	down := map[string]map[string]struct{}{}
+	add := func(protocol, address string) {
+		protocol = strings.ToLower(strings.TrimSpace(protocol))
+		address = strings.TrimSpace(address)
+		if protocol == "" || address == "" {
+			return
+		}
+		if down[protocol] == nil {
+			down[protocol] = map[string]struct{}{}
+		}
+		down[protocol][address] = struct{}{}
+	}
+	for _, host := range snapshot.HostStates {
+		if strings.EqualFold(strings.TrimSpace(host.State), "down") {
+			add("*", host.Address)
+		}
+	}
+	for _, host := range snapshot.Hosts {
+		for _, observation := range host.Protocols {
+			if isCompletedHostDiscoveryDown(observation.Status, observation.StatusReason, observation.DiscoveryState) {
+				add(observation.Protocol, host.Address)
+			}
+		}
+	}
+	return down
+}
+
+func explicitlyDownForProtocol(downByProtocol map[string]map[string]struct{}, protocol, address string) bool {
+	address = strings.TrimSpace(address)
+	for _, name := range []string{"*", strings.ToLower(strings.TrimSpace(protocol))} {
+		if _, ok := downByProtocol[name][address]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 func hasTarget(s model.Snapshot, target string) bool {
 	for _, scope := range s.Scopes {
 		if scope.Target == target {

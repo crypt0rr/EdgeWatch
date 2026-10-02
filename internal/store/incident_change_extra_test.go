@@ -46,6 +46,64 @@ func TestApplyAcceptedServiceAndDNSChanges(t *testing.T) {
 	}
 }
 
+func TestAcceptHostDownUpdatesExpectedDNSHostAndRetainsSiblingEvidence(t *testing.T) {
+	const downAddress = "192.0.2.10"
+	const liveAddress = "192.0.2.11"
+	snapshot := model.Snapshot{
+		Scopes: []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "25,443", ServiceDetection: true}},
+		DNS:    map[string][]string{"edge.example": {downAddress, liveAddress}},
+		Units: []model.Unit{{
+			Target: "edge.example", Protocol: "tcp", Addresses: []string{downAddress, liveAddress},
+			Ports: []model.PortState{
+				{Port: 25, State: "open", Service: "smtp", Evidence: []string{downAddress}},
+				{Port: 443, State: "open", Service: "https | Down || https | Live", Evidence: []string{downAddress, liveAddress}},
+			},
+		}},
+		HostStates: []model.HostState{{Address: downAddress, State: "up"}, {Address: liveAddress, State: "up"}},
+		Hosts: []model.HostObservation{
+			{Address: downAddress, Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https", Product: "Down"}}}}}},
+			{Address: liveAddress, Protocols: []model.ProtocolObservation{{Protocol: "tcp", Ports: []model.PortObservation{{Port: 443, State: "open", Service: &model.ServiceObservation{Name: "https", Product: "Live"}}}}}},
+		},
+	}
+	change := model.Change{Key: "host|" + downAddress, Kind: "host", Target: downAddress, Old: "up", New: "down"}
+	if err := applyAcceptedChange(&snapshot, change); err != nil {
+		t.Fatalf("accept host down: %v", err)
+	}
+	if len(snapshot.HostStates) != 2 || snapshot.HostStates[0] != (model.HostState{Address: downAddress, State: "down"}) {
+		t.Fatalf("accepted host states = %#v", snapshot.HostStates)
+	}
+	if len(snapshot.Units) != 1 || len(snapshot.Units[0].Ports) != 1 {
+		t.Fatalf("accepted baseline ports = %#v", snapshot.Units)
+	}
+	port := snapshot.Units[0].Ports[0]
+	if port.Port != 443 || port.Service != model.Fingerprint("https", "Live", "", "", nil) || len(port.Evidence) != 1 || port.Evidence[0] != liveAddress {
+		t.Fatalf("accepted sibling port evidence = %#v", port)
+	}
+	if snapshot.Hosts[0].Status != "unreachable" || len(snapshot.Hosts[0].Protocols[0].Ports) != 0 {
+		t.Fatalf("accepted host detail still contains positive evidence: %#v", snapshot.Hosts[0])
+	}
+}
+
+func TestAcceptHostDownPreservesLegacyAggregateServiceWithoutSiblingFingerprintEvidence(t *testing.T) {
+	const downAddress = "192.0.2.20"
+	const liveAddress = "192.0.2.21"
+	snapshot := model.Snapshot{
+		Scopes:     []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "443", ServiceDetection: true}},
+		DNS:        map[string][]string{"edge.example": {downAddress, liveAddress}},
+		HostStates: []model.HostState{{Address: downAddress, State: "up"}, {Address: liveAddress, State: "up"}},
+		Units: []model.Unit{{Target: "edge.example", Protocol: "tcp", Addresses: []string{downAddress, liveAddress}, Ports: []model.PortState{{
+			Port: 443, State: "open", Service: "https", Evidence: []string{downAddress, liveAddress},
+		}}}},
+	}
+	change := model.Change{Key: "host|" + downAddress, Kind: "host", Target: downAddress, Old: "up", New: "down"}
+	if err := applyAcceptedChange(&snapshot, change); err != nil {
+		t.Fatalf("accept host down: %v", err)
+	}
+	if len(snapshot.Units) != 1 || len(snapshot.Units[0].Ports) != 1 || snapshot.Units[0].Ports[0].Service != "https" {
+		t.Fatalf("legacy aggregate service was lost while accepting one DNS host: %#v", snapshot.Units)
+	}
+}
+
 func TestAcceptServiceRemovalAfterPortRemoval(t *testing.T) {
 	snapshot := &model.Snapshot{
 		Units: []model.Unit{{

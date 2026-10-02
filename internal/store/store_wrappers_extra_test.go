@@ -161,8 +161,21 @@ func TestDeliveryRetryPolicyIsDurableAndBounded(t *testing.T) {
 	if got := deliveryRetryDelay(2); got != 4*time.Minute {
 		t.Fatalf("second delivery retry delay = %s, want 4m", got)
 	}
-	if got := deliveryRetryDelay(deliveryMaxAttempts); got != time.Hour {
-		t.Fatalf("terminal delivery retry delay = %s, want 1h cap", got)
+	if got := deliveryRetryDelay(9); got != 512*time.Minute {
+		t.Fatalf("ninth delivery retry delay = %s, want 8h32m", got)
+	}
+	if got := deliveryRetryDelay(10); got != 12*time.Hour {
+		t.Fatalf("tenth delivery retry delay = %s, want 12h cap", got)
+	}
+	if got := deliveryRetryDelay(deliveryMaxAttempts); got != 12*time.Hour {
+		t.Fatalf("terminal delivery retry delay = %s, want 12h cap", got)
+	}
+	var retryWindow time.Duration
+	for attempt := 1; attempt < deliveryMaxAttempts; attempt++ {
+		retryWindow += deliveryRetryDelay(attempt)
+	}
+	if want := 77*time.Hour + 2*time.Minute; retryWindow != want {
+		t.Fatalf("delivery retry window = %s, want %s", retryWindow, want)
 	}
 
 	ctx := context.Background()
@@ -187,6 +200,72 @@ func TestDeliveryRetryPolicyIsDurableAndBounded(t *testing.T) {
 	}
 	if due, err := s.System().ClaimDueDeliveries(ctx, 1, "after-terminal"); err != nil || len(due) != 0 {
 		t.Fatalf("terminal delivery was claimable again: %#v, %v", due, err)
+	}
+}
+
+func TestDeliveryRetryScheduleSurvivesRestart(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	databasePath := s.FilePath()
+	if err := s.System().QueueEvent(ctx, "restart-retry", model.Event{Type: "restart-retry", CreatedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	// Place a pending delivery at the last interval before terminal failure.
+	// DeliveryResult must persist the long delay, and reopening the database
+	// must preserve both its attempt count and scheduled next-at time.
+	if _, err := s.DB.ExecContext(ctx, `UPDATE outbox SET attempts=?,next_at=? WHERE destination=?`, deliveryMaxAttempts-2, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), "restart-retry"); err != nil {
+		t.Fatal(err)
+	}
+	due, err := s.System().ClaimDueDeliveries(ctx, 1, "restart-before-close")
+	if err != nil || len(due) != 1 || due[0].Attempts != deliveryMaxAttempts-2 {
+		t.Fatalf("pre-restart claim = %#v, %v", due, err)
+	}
+	beforeFailure := time.Now().UTC()
+	if err := s.System().DeliveryResult(ctx, due[0].ID, errors.New("temporary provider outage")); err != nil {
+		t.Fatal(err)
+	}
+	var attempts int
+	var nextAtText string
+	var terminalAt string
+	if err := s.DB.QueryRowContext(ctx, `SELECT attempts,next_at,terminal_at FROM outbox WHERE id=?`, due[0].ID).Scan(&attempts, &nextAtText, &terminalAt); err != nil {
+		t.Fatal(err)
+	}
+	if attempts != deliveryMaxAttempts-1 || terminalAt != "" {
+		t.Fatalf("pre-restart retry state = attempts %d, terminal %q", attempts, terminalAt)
+	}
+	nextAt, err := time.Parse(time.RFC3339Nano, nextAtText)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nextAt.Before(beforeFailure.Add(12*time.Hour)) || nextAt.After(time.Now().UTC().Add(12*time.Hour)) {
+		t.Fatalf("persisted retry time = %s, want approximately 12h after failure", nextAt)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted, err := Open(databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	var restartedAttempts int
+	var restartedNextAt string
+	if err := restarted.DB.QueryRowContext(ctx, `SELECT attempts,next_at FROM outbox WHERE id=?`, due[0].ID).Scan(&restartedAttempts, &restartedNextAt); err != nil {
+		t.Fatal(err)
+	}
+	if restartedAttempts != attempts || restartedNextAt != nextAtText {
+		t.Fatalf("restart retry state = attempts %d at %q, want %d at %q", restartedAttempts, restartedNextAt, attempts, nextAtText)
+	}
+	if retried, err := restarted.System().ClaimDueDeliveries(ctx, 1, "restart-before-due"); err != nil || len(retried) != 0 {
+		t.Fatalf("future retry was claimable after restart: %#v, %v", retried, err)
+	}
+	if _, err := restarted.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), due[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	retried, err := restarted.System().ClaimDueDeliveries(ctx, 1, "restart-after-due")
+	if err != nil || len(retried) != 1 || retried[0].Attempts != attempts {
+		t.Fatalf("due retry after restart = %#v, %v", retried, err)
 	}
 }
 

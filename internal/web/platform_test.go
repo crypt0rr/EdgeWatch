@@ -1033,15 +1033,31 @@ func TestPlatformNotificationsReportDeliveryHealth(t *testing.T) {
 		if err := f.db.System().QueueEvent(ctx, owner.destination, event); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := f.db.DB.ExecContext(ctx, `UPDATE outbox SET attempts=7 WHERE destination=?`, owner.destination); err != nil {
+		var outboxID int64
+		if err := f.db.DB.QueryRowContext(ctx, `SELECT id FROM outbox WHERE destination=? AND sent_at IS NULL ORDER BY id DESC LIMIT 1`, owner.destination).Scan(&outboxID); err != nil {
 			t.Fatal(err)
 		}
-		due, err := f.db.System().DueDeliveries(ctx, 10)
-		if err != nil || len(due) != 1 {
-			t.Fatalf("claimed deliveries = %+v, %v", due, err)
-		}
-		if err := f.db.System().DeliveryResultClaim(ctx, due[0].ID, due[0].ClaimToken, fmt.Errorf("%w: provider-said-token-rejected", store.ErrDeliveryProvider)); err != nil {
-			t.Fatal(err)
+		for attempt := 0; attempt < 32; attempt++ {
+			due, err := f.db.System().DueDeliveries(ctx, 10)
+			if err != nil || len(due) != 1 || due[0].ID != outboxID {
+				t.Fatalf("claimed deliveries on %s attempt %d = %+v, %v", owner.destination, attempt+1, due, err)
+			}
+			if err := f.db.System().DeliveryResultClaim(ctx, due[0].ID, due[0].ClaimToken, fmt.Errorf("%w: provider-said-token-rejected", store.ErrDeliveryProvider)); err != nil {
+				t.Fatal(err)
+			}
+			var terminalAt string
+			if err := f.db.DB.QueryRowContext(ctx, `SELECT terminal_at FROM outbox WHERE id=?`, outboxID).Scan(&terminalAt); err != nil {
+				t.Fatal(err)
+			}
+			if terminalAt != "" {
+				break
+			}
+			if _, err := f.db.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), outboxID); err != nil {
+				t.Fatal(err)
+			}
+			if attempt == 31 {
+				t.Fatalf("delivery for %s did not reach a terminal failure", owner.destination)
+			}
 		}
 	}
 	for _, owner := range owners {

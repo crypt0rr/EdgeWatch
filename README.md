@@ -500,12 +500,14 @@ including an alert that a delivery pass has picked up but not yet sent. A
 pause uses none of their retries and is not reported as a delivery failure.
 
 Scan changes, scan failures, cancellations, timeouts, stalled cycles, and
-recovery events can all generate notifications. Delivery is retried durably;
-terminal failures are visible in the console without exposing provider errors
-or destination secrets. Each destination shows its pending and retrying
-alerts, terminal failures, and last success and failure: a unit's on its
-**Notifications** page, and the platform's own destinations on the platform
-console's.
+recovery events can all generate notifications. Definitive provider failures
+are retried durably for up to 15 attempts over roughly 77 hours; the delay
+doubles from two minutes and caps at 12 hours. A restart preserves each
+delivery's retry schedule. Terminal failures are visible in the console
+without exposing provider errors or destination secrets. Each destination
+shows its pending and retrying alerts, terminal failures, and last success or
+failure on its unit's **Notifications** page, or on the platform console for
+platform-owned destinations.
 
 ### Notification URLs in config.yaml (deprecated)
 

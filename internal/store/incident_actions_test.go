@@ -53,6 +53,47 @@ func TestAcceptIncidentUpdatesBaselineAndRecordsAudit(t *testing.T) {
 	}
 }
 
+func TestAcceptHostDownIncidentUpdatesExpectedBaselineState(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	record, err := defaultTenant(s).CreateJob(ctx, testJob("accept-host-down"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	address := "192.0.2.44"
+	key := "host|" + address
+	change := model.Change{Key: key, Kind: "host", Target: address, Old: "up", New: "down", Severity: "warning"}
+	_, err = s.System().UpdateRuntime(ctx, record.ID, func(state *model.JobState) ([]model.Event, error) {
+		state.Baseline = &model.Snapshot{
+			Scopes:     []model.Scope{{Target: address, Protocol: "tcp", Ports: "443"}},
+			Units:      []model.Unit{{Target: address, Protocol: "tcp", Addresses: []string{address}, Ports: []model.PortState{{Port: 443, State: "open"}}}},
+			Hosts:      []model.HostObservation{{Address: address, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up", Ports: []model.PortObservation{{Port: 443, State: "open"}}}}}},
+			HostStates: []model.HostState{{Address: address, State: "up"}},
+		}
+		state.Incidents[key] = model.Incident{Change: change, ScanID: "scan-down", OpenedAt: time.Now().UTC(), LastSeenAt: time.Now().UTC()}
+		return nil, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if events, err := defaultTenant(s).AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, key, AuditEntry{Action: "incident.accepted", Detail: record.ID + ":" + key}); err != nil {
+		t.Fatalf("accept host-down incident: events=%#v err=%v", events, err)
+	}
+	state, err := defaultTenant(s).RuntimeState(ctx, record.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Incidents) != 0 || state.Baseline == nil || len(state.Baseline.HostStates) != 1 || state.Baseline.HostStates[0] != (model.HostState{Address: address, State: "down"}) {
+		t.Fatalf("accepted host-state baseline = %#v", state)
+	}
+	if len(state.Baseline.Units) != 1 || len(state.Baseline.Units[0].Ports) != 0 {
+		t.Fatalf("accepted down host retained baseline ports: %#v", state.Baseline.Units)
+	}
+	if len(state.Baseline.Hosts) != 1 || state.Baseline.Hosts[0].Status != "unreachable" || state.Baseline.Hosts[0].Protocols[0].DiscoveryState != "down" {
+		t.Fatalf("accepted down host evidence = %#v", state.Baseline.Hosts)
+	}
+}
+
 func TestIncidentActionsQueueNotificationOutboxAtomically(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)

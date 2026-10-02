@@ -85,6 +85,7 @@ func TestSnapshotNormalizeSortsAndCanonicalizesEvidence(t *testing.T) {
 			Hostnames:     []Hostname{{Name: "z", Type: "ptr"}, {Name: "a", Type: "ptr"}},
 			Protocols: []ProtocolObservation{{
 				Protocol:       "tcp",
+				DiscoveryState: " DOWN ",
 				Ports:          []PortObservation{{Port: 443, Service: &ServiceObservation{CPEs: []string{"c2", "c1"}}}, {Port: 22}},
 				StateSummaries: []StateSummary{{State: "open", Reasons: []StateReason{{Reason: "z"}, {Reason: "a"}}}, {State: "closed"}},
 			}},
@@ -106,6 +107,9 @@ func TestSnapshotNormalizeSortsAndCanonicalizesEvidence(t *testing.T) {
 	}
 	if host.Protocols[0].Ports[0].Port != 22 || host.Protocols[0].Ports[1].Service.CPEs[0] != "c1" || host.Protocols[0].StateSummaries[1].Reasons[0].Reason != "a" {
 		t.Fatalf("host evidence was not normalized: %#v", host.Protocols[0])
+	}
+	if host.Protocols[0].DiscoveryState != "down" {
+		t.Fatalf("discovery state was not normalized: %#v", host.Protocols[0])
 	}
 }
 
@@ -134,9 +138,41 @@ func TestSnapshotHashExcludesDescriptiveHostEvidence(t *testing.T) {
 	if base.Hash() != withEvidence.Hash() {
 		t.Fatal("host metadata changed the snapshot hash")
 	}
+	withDiscoveryMetadata := withEvidence
+	withDiscoveryMetadata.Hosts = []HostObservation{{Address: "192.0.2.1", Status: "unreachable", StatusReason: "no-response", Protocols: []ProtocolObservation{{Protocol: "tcp", DiscoveryState: "down"}}}}
+	if base.Hash() != withDiscoveryMetadata.Hash() {
+		t.Fatal("discovery metadata changed the snapshot hash")
+	}
+	withExpectedDown := base
+	withExpectedDown.HostStates = []HostState{{Address: "192.0.2.1", State: "down"}}
+	if base.Hash() == withExpectedDown.Hash() {
+		t.Fatal("monitored host state did not change the snapshot hash")
+	}
 	changed := Snapshot{Units: []Unit{{Target: "host", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []PortState{{Port: 443, State: "closed", Service: "https"}}}}}
 	if base.Hash() == changed.Hash() {
 		t.Fatal("meaningful port state did not change the snapshot hash")
+	}
+}
+
+func TestSnapshotNormalizeCanonicalizesAndSortsHostStates(t *testing.T) {
+	snapshot := Snapshot{HostStates: []HostState{
+		{Address: "2001:0db8::2", State: " DOWN "},
+		{Address: "192.0.2.2", State: "up"},
+		{Address: "2001:db8::1", State: "up"},
+	}}
+	snapshot.Normalize()
+	want := []HostState{
+		{Address: "192.0.2.2", State: "up"},
+		{Address: "2001:db8::1", State: "up"},
+		{Address: "2001:db8::2", State: "down"},
+	}
+	if len(snapshot.HostStates) != len(want) {
+		t.Fatalf("normalized host states = %#v", snapshot.HostStates)
+	}
+	for i := range want {
+		if snapshot.HostStates[i] != want[i] {
+			t.Fatalf("normalized host states = %#v, want %#v", snapshot.HostStates, want)
+		}
 	}
 }
 
@@ -156,5 +192,8 @@ func TestFingerprintAndChangeSummary(t *testing.T) {
 	}
 	if got := ChangeSummary(Change{Kind: "dns-removed", Target: "router"}); got != "router dns-removed: unknown" {
 		t.Fatalf("empty DNS summary = %q", got)
+	}
+	if got := ChangeSummary(Change{Kind: "host", Target: "192.0.2.1", Old: "up", New: "down"}); got != "192.0.2.1 host state: up -> down" {
+		t.Fatalf("host summary = %q", got)
 	}
 }

@@ -789,6 +789,9 @@ func (n *Nmap) scanProtocolBatchDetailedProgressWithTemplate(ctx context.Context
 						}
 					}
 				}
+				if hostOK {
+					recordNmapDiscoveryState(&host, assumeAlive)
+				}
 				// Fingerprint the fixed executable and argv shape without
 				// retaining target addresses or any profile values in logs.
 				for index := range host.Protocols {
@@ -1956,6 +1959,38 @@ func unreachableHostObservation(address, protocol string, pc config.Protocol, re
 	}
 }
 
+// recordNmapDiscoveryState marks only explicit Nmap host-discovery answers.
+// Omitted XML, timeout evidence, and -Pn scans cannot distinguish a reachable
+// host from a silent one, so they must not become monitored up/down state.
+func recordNmapDiscoveryState(host *model.HostObservation, assumeAlive bool) {
+	if host == nil || assumeAlive {
+		return
+	}
+	status := strings.ToLower(strings.TrimSpace(host.Status))
+	discoveryState := ""
+	switch status {
+	case "up":
+		discoveryState = "up"
+	case "down", "unreachable":
+		switch strings.ToLower(strings.TrimSpace(host.StatusReason)) {
+		case "nmap-host-down", "host-down", "down", "no-response", "host-unreach", "net-unreach", "admin-prohibited":
+			discoveryState = "down"
+		}
+	}
+	if discoveryState == "" {
+		return
+	}
+	for index := range host.Protocols {
+		// Naabu's no-result is intentionally ambiguous. The optional Nmap
+		// enrichment step cannot turn that discovery result into reachability
+		// state, even if Nmap itself reports a host-discovery answer.
+		if host.Protocols[index].DiscoveryEngine == "naabu" {
+			continue
+		}
+		host.Protocols[index].DiscoveryState = discoveryState
+	}
+}
+
 func hasServiceEvidence(service struct {
 	Name       string   `xml:"name,attr"`
 	Product    string   `xml:"product,attr"`
@@ -2256,11 +2291,11 @@ func chooseHostStatusReason(current, addition string) string {
 	reasonRank := func(reason string) int {
 		switch strings.ToLower(strings.TrimSpace(reason)) {
 		case "nmap-timeout", "nmap-host-timeout", "timedout", "timeout":
-			return 4
-		case "nmap-host-down", "down", "no-response":
-			return 3
+			return 5
 		case "nmap-omitted", "omitted":
-			return 2
+			return 4
+		case "nmap-host-down", "down", "no-response", "host-unreach", "net-unreach", "admin-prohibited":
+			return 3
 		default:
 			return 1
 		}
@@ -2348,6 +2383,7 @@ func dedupeHostObservation(host *model.HostObservation) {
 		}
 		protocol := &mergedProtocols[index]
 		protocol.Status, protocol.StatusReason = mergeProtocolStatus(protocol.Status, protocol.StatusReason, incoming.Status, incoming.StatusReason)
+		protocol.DiscoveryState = mergeDiscoveryStates(protocol.DiscoveryState, incoming.DiscoveryState)
 		protocol.Ports = append(protocol.Ports, incoming.Ports...)
 		protocol.DiscoveredPorts = append(protocol.DiscoveredPorts, incoming.DiscoveredPorts...)
 		protocol.UnconfirmedPorts = append(protocol.UnconfirmedPorts, incoming.UnconfirmedPorts...)
@@ -2518,6 +2554,22 @@ func dedupeHostObservation(host *model.HostObservation) {
 	snapshot := model.Snapshot{Hosts: []model.HostObservation{*host}}
 	snapshot.Normalize()
 	*host = snapshot.Hosts[0]
+}
+
+func mergeDiscoveryStates(current, addition string) string {
+	current = strings.ToLower(strings.TrimSpace(current))
+	addition = strings.ToLower(strings.TrimSpace(addition))
+	if current == "conflict" || addition == "conflict" {
+		return "conflict"
+	}
+	if current == "" {
+		return addition
+	}
+	if addition == "" || current == addition {
+		return current
+	}
+	// Contradictory completed observations are not authoritative host state.
+	return "conflict"
 }
 
 func verificationRank(value string) int {

@@ -19,6 +19,7 @@ describe('shared status presentation', () => {
   it('turns change identifiers into readable labels', () => {
     expect(changeKindLabel('Port_closed')).toBe('Port closed')
     expect(changeKindLabel('dns')).toBe('DNS')
+    expect(changeKindLabel('host')).toBe('Host state')
     expect(changeKindLabel('service')).toBe('Service')
     expect(changeKindLabel('port', 'closed', 'open')).toBe('Port opened')
     expect(changeKindLabel('port', 'open', 'not-open')).toBe('Port closed')

@@ -743,6 +743,237 @@ func TestUnknownNoResponseEvidenceCannotLearnOrRemoveBaselinePorts(t *testing.T)
 	}
 }
 
+func TestCompletedNmapHostDiscoveryDownDoesNotMarkScanIncomplete(t *testing.T) {
+	address := "192.0.2.44"
+	scanResult := scan("explicit-down", model.Snapshot{
+		Scopes: []model.Scope{{Target: address, Protocol: "tcp", Ports: "22,443"}},
+		Hosts: []model.HostObservation{{
+			Address: address, Status: "unreachable", StatusReason: "no-response",
+			Protocols: []model.ProtocolObservation{{
+				Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down",
+			}},
+		}},
+	})
+	if MarkIncompleteScan(&scanResult) {
+		t.Fatalf("completed Nmap host-discovery result was marked incomplete: %s", scanResult.Error)
+	}
+	if scanResult.Status != "success" {
+		t.Fatalf("explicit host-down scan status = %q, want success", scanResult.Status)
+	}
+	if len(scanResult.Snapshot.HostStates) != 1 || scanResult.Snapshot.HostStates[0] != (model.HostState{Address: address, State: "down"}) {
+		t.Fatalf("explicit host-discovery state = %#v, want down for %s", scanResult.Snapshot.HostStates, address)
+	}
+
+	for _, test := range []struct {
+		name           string
+		status, reason string
+	}{
+		{name: "unmarked down is ambiguous", status: "unreachable", reason: "no-response"},
+		{name: "timeout remains incomplete", status: "unreachable", reason: "nmap-host-timeout"},
+		{name: "omitted host remains incomplete", status: "unreachable", reason: "nmap-omitted"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			partial := scan(test.name, model.Snapshot{
+				Scopes: []model.Scope{{Target: address, Protocol: "tcp", Ports: "22,443"}},
+				Hosts: []model.HostObservation{{
+					Address: address, Status: test.status, StatusReason: test.reason,
+					Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: test.status, StatusReason: test.reason}},
+				}},
+			})
+			if !MarkIncompleteScan(&partial) || partial.Status != "incomplete" {
+				t.Fatalf("ambiguous host result was treated as complete: %#v", partial)
+			}
+		})
+	}
+}
+
+func TestMixedHostDiscoveryRangeLearnsAndReportsHostDownWithoutPortClosures(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := Engine{Store: db}
+	assumeAlive := false
+	job := config.Job{Name: "mixed-discovery", AssumeAlive: &assumeAlive, Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	upAddress, downAddress := "192.0.2.41", "192.0.2.42"
+	scope := []model.Scope{{Target: upAddress, Protocol: "tcp", Ports: "22,443"}, {Target: downAddress, Protocol: "tcp", Ports: "22,443"}}
+	first := model.Snapshot{
+		Scopes: scope,
+		Units:  []model.Unit{{Target: upAddress, Protocol: "tcp", Addresses: []string{upAddress}, Ports: []model.PortState{{Port: 22, State: "open"}}}},
+		Hosts: []model.HostObservation{
+			{Address: upAddress, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}},
+			{Address: downAddress, Status: "unreachable", StatusReason: "no-response", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"}}},
+		},
+	}
+	if events, err := e.Success(ctx, job, scan("mixed-learning", first)); err != nil || len(events) != 1 || events[0].Type != "baseline-complete" {
+		t.Fatalf("mixed up/down range failed to establish baseline: events=%#v err=%v", events, err)
+	}
+	state, err := defaultTenant(db).State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Baseline == nil || state.CandidateAttempts != 0 || len(state.Baseline.HostStates) != 2 {
+		t.Fatalf("mixed range baseline = %#v; candidate attempts=%d", state.Baseline, state.CandidateAttempts)
+	}
+	if state.Baseline.HostStates[0] != (model.HostState{Address: upAddress, State: "up"}) || state.Baseline.HostStates[1] != (model.HostState{Address: downAddress, State: "down"}) {
+		t.Fatalf("mixed range host states = %#v", state.Baseline.HostStates)
+	}
+
+	// Establish a second job whose expected surface includes both hosts, then
+	// make one host explicitly down. Its old ports must be protected from
+	// closure incidents while a distinct host-state incident is confirmed.
+	job.Name = "host-goes-down"
+	baseline := model.Snapshot{
+		Scopes: scope,
+		Units: []model.Unit{
+			{Target: upAddress, Protocol: "tcp", Addresses: []string{upAddress}, Ports: []model.PortState{{Port: 22, State: "open", Evidence: []string{upAddress}}}},
+			{Target: downAddress, Protocol: "tcp", Addresses: []string{downAddress}, Ports: []model.PortState{{Port: 443, State: "open", Evidence: []string{downAddress}}}},
+		},
+		Hosts: []model.HostObservation{
+			{Address: upAddress, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}},
+			{Address: downAddress, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}},
+		},
+	}
+	if events, err := e.Success(ctx, job, scan("up-baseline", baseline)); err != nil || len(events) != 1 || events[0].Type != "baseline-complete" {
+		t.Fatalf("up baseline setup: %#v, %v", events, err)
+	}
+	current := model.Snapshot{
+		Scopes: scope,
+		Units:  []model.Unit{{Target: upAddress, Protocol: "tcp", Addresses: []string{upAddress}, Ports: []model.PortState{{Port: 22, State: "open", Evidence: []string{upAddress}}}}},
+		Hosts: []model.HostObservation{
+			{Address: upAddress, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}},
+			{Address: downAddress, Status: "unreachable", StatusReason: "no-response", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"}}},
+		},
+	}
+	events, err := e.Success(ctx, job, scan("host-down", current))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 {
+		t.Fatalf("host-down transition events = %#v, %v", events, err)
+	}
+	change := events[0].Changes[0]
+	if change.Kind != "host" || change.Target != downAddress || change.Old != "up" || change.New != "down" {
+		t.Fatalf("host-down change = %#v", change)
+	}
+	state, err = defaultTenant(db).State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := state.Incidents["port|"+downAddress+"|tcp|443"]; exists {
+		t.Fatal("missing host coverage was incorrectly reported as a closed port")
+	}
+	if _, exists := state.Incidents["host|"+downAddress]; !exists {
+		t.Fatalf("host-down incident missing: %#v", state.Incidents)
+	}
+}
+
+func TestSingleHostDownBypassesTotalLossPortClosureGuard(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := Engine{Store: db}
+	assumeAlive := false
+	job := config.Job{Name: "single-host-down", AssumeAlive: &assumeAlive, Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	address := "192.0.2.43"
+	scope := []model.Scope{{Target: address, Protocol: "tcp", Ports: "443"}}
+	baseline := model.Snapshot{Scopes: scope, Units: []model.Unit{{Target: address, Protocol: "tcp", Addresses: []string{address}, Ports: []model.PortState{{Port: 443, State: "open"}}}}, Hosts: []model.HostObservation{{Address: address, Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}}}}
+	if events, err := e.Success(ctx, job, scan("single-up", baseline)); err != nil || len(events) != 1 || events[0].Type != "baseline-complete" {
+		t.Fatalf("single-host baseline setup: %#v, %v", events, err)
+	}
+	down := model.Snapshot{Scopes: scope, Hosts: []model.HostObservation{{Address: address, Status: "unreachable", StatusReason: "no-response", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"}}}}}
+	events, err := e.Success(ctx, job, scan("single-down", down))
+	if err != nil || len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Kind != "host" {
+		t.Fatalf("explicit single-host down was hidden by total-loss guard: %#v, %v", events, err)
+	}
+}
+
+func TestDNSHostDownDoesNotHideClosureOnLiveSibling(t *testing.T) {
+	addresses := []string{"192.0.2.10", "192.0.2.11"}
+	scope := []model.Scope{{Target: "edge.example", Protocol: "tcp", Ports: "443"}}
+	baseline := model.Snapshot{
+		Scopes: scope,
+		DNS:    map[string][]string{"edge.example": addresses},
+		Units: []model.Unit{{Target: "edge.example", Protocol: "tcp", Addresses: addresses, Ports: []model.PortState{{
+			Port: 443, State: "open", Evidence: addresses,
+		}}}},
+		HostStates: []model.HostState{{Address: addresses[0], State: "up"}, {Address: addresses[1], State: "up"}},
+	}
+	current := model.Snapshot{
+		Scopes: scope,
+		DNS:    map[string][]string{"edge.example": addresses},
+		Units:  []model.Unit{{Target: "edge.example", Protocol: "tcp", Addresses: addresses}},
+		Hosts: []model.HostObservation{
+			{Address: addresses[0], Status: "unreachable", StatusReason: "no-response", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"}}},
+			{Address: addresses[1], Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}},
+		},
+		HostStates: []model.HostState{{Address: addresses[0], State: "down"}, {Address: addresses[1], State: "up"}},
+	}
+	changes := Diff(baseline, current, false)
+	var portClosure, hostDown bool
+	for _, change := range changes {
+		if change.Key == "port|edge.example|tcp|443" && change.New == "not-open" {
+			portClosure = true
+		}
+		if change.Key == "host|"+addresses[0] && change.New == "down" {
+			hostDown = true
+		}
+	}
+	if !portClosure || !hostDown {
+		t.Fatalf("DNS sibling changes = %#v; want live-sibling closure and down-host transition", changes)
+	}
+}
+
+func TestHostDiscoveryDownIsScopedToItsProtocol(t *testing.T) {
+	address := "192.0.2.12"
+	scopes := []model.Scope{
+		{Target: address, Protocol: "tcp", Ports: "22"},
+		{Target: address, Protocol: "udp", Ports: "53"},
+	}
+	baseline := model.Snapshot{
+		Scopes: scopes,
+		Units: []model.Unit{
+			{Target: address, Protocol: "tcp", Addresses: []string{address}, Ports: []model.PortState{{Port: 22, State: "open"}}},
+			{Target: address, Protocol: "udp", Addresses: []string{address}, Ports: []model.PortState{{Port: 53, State: "open"}}},
+		},
+		HostStates: []model.HostState{{Address: address, State: "up"}},
+	}
+	current := model.Snapshot{
+		Scopes: scopes,
+		Units:  []model.Unit{{Target: address, Protocol: "tcp", Addresses: []string{address}, Ports: []model.PortState{{Port: 22, State: "open"}}}},
+		Hosts: []model.HostObservation{{Address: address, Status: "unreachable", StatusReason: "no-response", Protocols: []model.ProtocolObservation{
+			{Protocol: "tcp", Status: "up", StatusReason: "syn-ack", DiscoveryState: "up"},
+			{Protocol: "udp", Status: "unreachable", StatusReason: "no-response", DiscoveryState: "down"},
+		}}},
+		HostStates: []model.HostState{{Address: address, State: "up"}},
+	}
+	completed := scan("protocol-discovery", current)
+	if MarkIncompleteScan(&completed) {
+		t.Fatalf("a completed per-protocol up/down result was marked incomplete: %s", completed.Error)
+	}
+	if changes := Diff(baseline, current, false); len(changes) != 0 {
+		t.Fatalf("one protocol's host-discovery result changed another protocol's baseline: %#v", changes)
+	}
+}
+
+func TestHostStateChangesRespectCIDRIntersectionScope(t *testing.T) {
+	old := model.Snapshot{
+		Scopes:     []model.Scope{{Target: "192.0.2.0/30", Protocol: "tcp", Ports: "1-65535"}},
+		HostStates: []model.HostState{{Address: "192.0.2.2", State: "up"}},
+	}
+	current := model.Snapshot{
+		Scopes:     []model.Scope{{Target: "192.0.2.0/30", Protocol: "tcp", Ports: "1-65535"}},
+		HostStates: []model.HostState{{Address: "192.0.2.2", State: "down"}},
+	}
+
+	changes := Diff(old, current, true)
+	if len(changes) != 1 || changes[0].Kind != "host" || changes[0].Target != "192.0.2.2" {
+		t.Fatalf("CIDR-scoped host transition was filtered out: %#v", changes)
+	}
+}
+
 func TestCompletedNaabuNoDiscoveryCanEstablishBaseline(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))

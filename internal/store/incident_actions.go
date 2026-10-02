@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -368,11 +369,153 @@ func applyAcceptedChangeWithHostIndex(snapshot *model.Snapshot, change model.Cha
 		return acceptPortChangeWithIndex(snapshot, change, hostIndex)
 	case "service":
 		return acceptServiceChangeWithIndex(snapshot, change, hostIndex)
+	case "host":
+		return acceptHostChangeWithIndex(snapshot, change, hostIndex)
 	case "dns-added", "dns-removed":
 		return acceptDNSChange(snapshot, change)
 	default:
 		return fmt.Errorf("%w: %s", ErrUnsupportedIncidentChange, change.Kind)
 	}
+}
+
+func acceptHostChangeWithIndex(snapshot *model.Snapshot, change model.Change, hostIndex acceptedHostAddressIndex) error {
+	address := normalizedAcceptedTarget(change.Target)
+	if net.ParseIP(address) == nil || (change.New != "up" && change.New != "down") {
+		return fmt.Errorf("%w: invalid host-state change", ErrUnsupportedIncidentChange)
+	}
+	if change.New == "down" {
+		for unitIndex := range snapshot.Units {
+			unit := &snapshot.Units[unitIndex]
+			unitTarget := normalizedAcceptedTarget(unit.Target)
+			if unitTarget == address {
+				unit.Ports = nil
+				continue
+			}
+			if _, belongs := hostIndex[unitTarget][address]; !belongs {
+				continue
+			}
+			ports := unit.Ports[:0]
+			for _, port := range unit.Ports {
+				if !positiveAcceptedPortState(port.State) {
+					ports = append(ports, port)
+					continue
+				}
+				if len(port.Evidence) == 0 {
+					if len(unit.Addresses) == 1 && normalizedAcceptedTarget(unit.Addresses[0]) == address {
+						continue
+					}
+					// Without address-specific evidence, keep an aggregate positive
+					// port when sibling DNS answers may still provide it.
+					ports = append(ports, port)
+					continue
+				}
+				remaining := make([]string, 0, len(port.Evidence))
+				for _, evidence := range port.Evidence {
+					if normalizedAcceptedTarget(evidence) != address {
+						remaining = append(remaining, normalizedAcceptedTarget(evidence))
+					}
+				}
+				if len(remaining) == 0 {
+					continue
+				}
+				port.Evidence = remaining
+				if service, found := acceptedServiceForEvidence(snapshot, unit.Protocol, port.Port, remaining); found {
+					port.Service = service
+				}
+				ports = append(ports, port)
+			}
+			unit.Ports = ports
+		}
+	}
+	states := make(map[string]string, len(snapshot.HostStates)+1)
+	for _, state := range snapshot.HostStates {
+		if normalizedAcceptedTarget(state.Address) != address {
+			states[normalizedAcceptedTarget(state.Address)] = state.State
+		}
+	}
+	states[address] = change.New
+	snapshot.HostStates = snapshot.HostStates[:0]
+	for hostAddress, state := range states {
+		snapshot.HostStates = append(snapshot.HostStates, model.HostState{Address: hostAddress, State: state})
+	}
+	for hostIndex := range snapshot.Hosts {
+		host := &snapshot.Hosts[hostIndex]
+		if normalizedAcceptedTarget(host.Address) != address {
+			continue
+		}
+		if change.New == "down" {
+			host.Status = "unreachable"
+			host.StatusReason = "accepted-host-down"
+		} else {
+			host.Status = "up"
+			host.StatusReason = "accepted-host-up"
+		}
+		for protocolIndex := range host.Protocols {
+			protocol := &host.Protocols[protocolIndex]
+			protocol.DiscoveryState = change.New
+			if change.New == "down" {
+				protocol.Status = "unreachable"
+				protocol.StatusReason = "accepted-host-down"
+				protocol.Ports = nil
+				protocol.StateSummaries = nil
+			} else {
+				protocol.Status = "up"
+				protocol.StatusReason = "accepted-host-up"
+			}
+		}
+	}
+	snapshot.Normalize()
+	return nil
+}
+
+func positiveAcceptedPortState(state string) bool {
+	state = strings.ToLower(strings.TrimSpace(state))
+	return state == "open" || state == "open|filtered"
+}
+
+func acceptedServiceForEvidence(snapshot *model.Snapshot, protocol string, port int, addresses []string) (string, bool) {
+	allowed := make(map[string]struct{}, len(addresses))
+	for _, address := range addresses {
+		allowed[normalizedAcceptedTarget(address)] = struct{}{}
+	}
+	services := map[string]struct{}{}
+	found := false
+	for _, host := range snapshot.Hosts {
+		if _, ok := allowed[normalizedAcceptedTarget(host.Address)]; !ok {
+			continue
+		}
+		for _, observation := range host.Protocols {
+			if !strings.EqualFold(observation.Protocol, protocol) {
+				continue
+			}
+			for _, observedPort := range observation.Ports {
+				if observedPort.Port != port {
+					continue
+				}
+				found = true
+				service := observedPort.Service
+				if service == nil {
+					continue
+				}
+				fingerprint := model.Fingerprint(service.Name, service.Product, service.Version, service.ExtraInfo, append([]string(nil), service.CPEs...))
+				if fingerprint != "" {
+					services[fingerprint] = struct{}{}
+				}
+			}
+		}
+	}
+	if !found {
+		return "", false
+	}
+	if len(services) == 0 {
+		return "", true
+	}
+	values := make([]string, 0, len(services))
+	for service := range services {
+		values = append(values, service)
+	}
+	sort.Strings(values)
+	return strings.Join(values, " || "), true
 }
 
 func acceptPortChange(snapshot *model.Snapshot, change model.Change) error {

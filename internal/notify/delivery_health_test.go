@@ -19,16 +19,28 @@ func failTerminally(t *testing.T, db *store.Store, created DestinationView, even
 	if err := db.System().QueueEvent(ctx, managedKey(created.ID, created.Revision), event); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.DB.ExecContext(ctx, `UPDATE outbox SET attempts=7 WHERE destination=?`, managedKey(created.ID, created.Revision)); err != nil {
-		t.Fatal(err)
+	for attempt := 0; attempt < 32; attempt++ {
+		due, err := db.System().DueDeliveries(ctx, 10)
+		if err != nil || len(due) != 1 {
+			t.Fatalf("claimed deliveries on attempt %d = %+v, %v", attempt+1, due, err)
+		}
+		if err := db.System().DeliveryResultClaim(ctx, due[0].ID, due[0].ClaimToken, store.ErrDeliveryProvider); err != nil {
+			t.Fatal(err)
+		}
+		var terminalAt string
+		if err := db.DB.QueryRowContext(ctx, `SELECT terminal_at FROM outbox WHERE id=?`, due[0].ID).Scan(&terminalAt); err != nil {
+			t.Fatal(err)
+		}
+		if terminalAt != "" {
+			return
+		}
+		// Make the next scheduled retry immediately due so the helper can
+		// exercise the whole durable budget without waiting for its backoff.
+		if _, err := db.DB.ExecContext(ctx, `UPDATE outbox SET next_at=? WHERE id=?`, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano), due[0].ID); err != nil {
+			t.Fatal(err)
+		}
 	}
-	due, err := db.System().DueDeliveries(ctx, 10)
-	if err != nil || len(due) != 1 {
-		t.Fatalf("claimed deliveries = %+v, %v", due, err)
-	}
-	if err := db.System().DeliveryResultClaim(ctx, due[0].ID, due[0].ClaimToken, store.ErrDeliveryProvider); err != nil {
-		t.Fatal(err)
-	}
+	t.Fatal("delivery did not reach a terminal failure within the bounded retry budget")
 }
 
 // The default unit's notification totals cover its own destinations and the

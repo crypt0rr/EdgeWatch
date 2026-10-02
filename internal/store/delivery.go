@@ -164,11 +164,14 @@ var (
 )
 
 const (
-	deliveryClaimLease       = 30 * time.Minute
-	deliveryMaxAttempts      = 8
+	deliveryClaimLease = 30 * time.Minute
+	// Fifteen attempts with exponential backoff capped at twelve hours keep a
+	// queued alert retryable for a little over three days, covering long
+	// overnight and weekend provider outages without retaining it indefinitely.
+	deliveryMaxAttempts      = 15
 	deliveryMaxDeferrals     = 8
 	deliveryInitialDelay     = 2 * time.Minute
-	deliveryMaxDelay         = time.Hour
+	deliveryMaxDelay         = 12 * time.Hour
 	deliveryLockedDelay      = time.Hour
 	deliveryMaintenanceBatch = 256
 )
@@ -567,13 +570,12 @@ func deliveryRetryDelay(attempts int) time.Duration {
 	if attempts < 1 {
 		return deliveryInitialDelay
 	}
-	shift := attempts - 1
-	if shift > 6 {
-		shift = 6
-	}
-	delay := deliveryInitialDelay * time.Duration(1<<shift)
-	if delay > deliveryMaxDelay {
-		return deliveryMaxDelay
+	delay := deliveryInitialDelay
+	for retry := 1; retry < attempts && delay < deliveryMaxDelay; retry++ {
+		if delay > deliveryMaxDelay/2 {
+			return deliveryMaxDelay
+		}
+		delay *= 2
 	}
 	return delay
 }

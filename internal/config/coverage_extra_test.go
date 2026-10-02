@@ -310,6 +310,29 @@ func TestUnspecifiedTargetsAreRejected(t *testing.T) {
 	}
 }
 
+func TestMalformedDottedNumericTargetsAreRejected(t *testing.T) {
+	for _, target := range []string{"192.168.1.300", "256.1.1.1", "10.0.0", "1.2.3.4.5", "001.2.3.4"} {
+		t.Run(target, func(t *testing.T) {
+			if err := validateTarget(target); err == nil {
+				t.Fatalf("malformed numeric target %q was accepted", target)
+			}
+			job := validCoverageJob()
+			job.Targets = []string{target}
+			if err := ValidateJob(job); err == nil {
+				t.Fatalf("job validation accepted malformed numeric target %q", target)
+			}
+		})
+	}
+
+	for _, target := range []string{"192.168.1.1", "192.168.1.0/24", "router.192.example", "123"} {
+		t.Run("valid-"+target, func(t *testing.T) {
+			if err := validateTarget(target); err != nil {
+				t.Fatalf("valid target %q was rejected: %v", target, err)
+			}
+		})
+	}
+}
+
 func TestLoadForAdminRejectsMalformedVersionAndDatabase(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
@@ -355,7 +378,7 @@ func TestConfigArithmeticAndExplicitResumeWindowEdges(t *testing.T) {
 	if got := (Job{}).ResumeWindowValue(); got != 8*24*time.Hour {
 		t.Fatalf("zero resume window default = %s", got)
 	}
-	for _, target := range []string{"bad/name", "bad\\name", "bad\tname", "bad\nname", "éxample.test"} {
+	for _, target := range []string{"bad/name", "bad\\name", "bad\tname", "bad\nname", "éxample.test", "10..1"} {
 		if err := validateTarget(target); err == nil {
 			t.Errorf("invalid target %q was accepted", target)
 		}

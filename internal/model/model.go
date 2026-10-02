@@ -353,6 +353,10 @@ type JobState struct {
 	TotalLossCandidateCount int    `json:"total_loss_candidate_count,omitempty"`
 	ConsecutiveFailures     int    `json:"consecutive_failures"`
 	LastFailureAlert        int    `json:"last_failure_alert"`
+	// LastIncidentReminderAt is the most recent persistent-incident reminder
+	// emitted for this job. It lives in runtime state so cadence survives
+	// restarts without affecting scan snapshots or baseline hashes.
+	LastIncidentReminderAt *time.Time `json:"last_incident_reminder_at,omitempty"`
 }
 
 type Event struct {

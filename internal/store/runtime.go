@@ -624,6 +624,17 @@ func (ss *SystemStore) FinalizeManagedScan(ctx context.Context, scan *model.Scan
 // inside the same transaction that records the scan and its notification
 // outbox, so a settings change and scan completion have a definite order.
 func (ss *SystemStore) FinalizeManagedScanWithReminderSetting(ctx context.Context, scan *model.Scan, jobID, securityHash string, destinations []string, fn func(*model.JobState, *model.Scan, bool) ([]model.Event, error)) ([]model.Event, error) {
+	if fn == nil {
+		return nil, errors.New("scan finalizer is required")
+	}
+	return ss.FinalizeManagedScanWithReminderSettings(ctx, scan, jobID, securityHash, destinations, func(state *model.JobState, current *model.Scan, settings IncidentReminderSettings) ([]model.Event, error) {
+		return fn(state, current, settings.Enabled)
+	})
+}
+
+// FinalizeManagedScanWithReminderSettings reads the unit's current reminder
+// preferences inside the same transaction that records the scan and outbox.
+func (ss *SystemStore) FinalizeManagedScanWithReminderSettings(ctx context.Context, scan *model.Scan, jobID, securityHash string, destinations []string, fn func(*model.JobState, *model.Scan, IncidentReminderSettings) ([]model.Event, error)) ([]model.Event, error) {
 	if scan == nil {
 		return nil, errors.New("scan is required")
 	}
@@ -641,8 +652,8 @@ func (ss *SystemStore) FinalizeManagedScanWithReminderSetting(ctx context.Contex
 
 	var raw []byte
 	var tenantState string
-	var reminderEnabled bool
-	if err := tx.QueryRowContext(ctx, `SELECT j.definition_json,t.state,t.incident_reminders_enabled FROM jobs AS j JOIN tenants AS t ON t.id=j.tenant_id WHERE j.id=?`, jobID).Scan(&raw, &tenantState, &reminderEnabled); err != nil {
+	var reminderSettings IncidentReminderSettings
+	if err := tx.QueryRowContext(ctx, `SELECT j.definition_json,t.state,t.incident_reminders_enabled,t.incident_reminder_cadence FROM jobs AS j JOIN tenants AS t ON t.id=j.tenant_id WHERE j.id=?`, jobID).Scan(&raw, &tenantState, &reminderSettings.Enabled, &reminderSettings.Cadence); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: job %s", ErrNotFound, jobID)
 		}
@@ -714,7 +725,7 @@ func (ss *SystemStore) FinalizeManagedScanWithReminderSetting(ctx context.Contex
 	if err != nil {
 		return nil, err
 	}
-	events, err := fn(&state, scan, reminderEnabled)
+	events, err := fn(&state, scan, reminderSettings)
 	if err != nil {
 		return nil, err
 	}

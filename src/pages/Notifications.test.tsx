@@ -40,6 +40,7 @@ function response(configured: boolean, selected: string[]) {
     status: { deployment: 0, managed: 2, active: 1, locked: 0, key_state: 'ready' },
     update_routing: { configured, destinations: selected },
     incident_reminders_enabled: true,
+    incident_reminder_cadence: 'every_scan' as const,
   }
 }
 
@@ -64,7 +65,7 @@ describe('notification update-alert routing', () => {
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(listNotificationDestinations).mockResolvedValue(response(false, []))
     vi.mocked(toggleNotificationUpdateAlert).mockResolvedValue({ configured: true, destinations: [] })
-    vi.mocked(updateIncidentReminders).mockResolvedValue({ enabled: false })
+    vi.mocked(updateIncidentReminders).mockResolvedValue({ enabled: false, cadence: 'every_scan' })
   })
 
   afterEach(() => {
@@ -133,7 +134,7 @@ describe('notification update-alert routing', () => {
     })
     await vi.waitFor(() => expect(container.querySelector('.notification-reminder-settings [role="alert"]')?.textContent).toContain('setting unavailable'))
     expect(reminder.checked).toBe(false)
-    vi.mocked(updateIncidentReminders).mockResolvedValue({ enabled: true })
+    vi.mocked(updateIncidentReminders).mockResolvedValue({ enabled: true, cadence: 'every_scan' })
     vi.mocked(listNotificationDestinations).mockResolvedValue({ ...response(true, []), incident_reminders_enabled: true })
     act(() => reminder.click())
     dialog = document.body.querySelector('[role="dialog"]') as HTMLElement
@@ -144,7 +145,28 @@ describe('notification update-alert routing', () => {
     })
     await vi.waitFor(() => expect(reminder.checked).toBe(true))
     expect(container.querySelector('.notification-reminder-settings [role="status"]')?.textContent).toContain('Incident reminders enabled.')
-    expect(updateIncidentReminders).toHaveBeenNthCalledWith(2, true, 'fixture-password')
+    expect(updateIncidentReminders).toHaveBeenNthCalledWith(2, { enabled: true }, 'fixture-password')
+  })
+
+  it('saves a slower reminder cadence after password confirmation', async () => {
+    vi.mocked(updateIncidentReminders).mockResolvedValue({ enabled: true, cadence: 'daily' })
+    vi.mocked(listNotificationDestinations).mockResolvedValueOnce(response(true, [])).mockResolvedValue({ ...response(true, []), incident_reminder_cadence: 'daily' })
+    await renderPage()
+    const cadence = container.querySelector('select[aria-label="Reminder cadence"]') as HTMLSelectElement
+    expect(cadence.value).toBe('every_scan')
+    act(() => {
+      Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(cadence, 'daily')
+      cadence.dispatchEvent(new Event('change', { bubbles: true }))
+    })
+    const dialog = document.body.querySelector('[role="dialog"]') as HTMLElement
+    setInputValue(dialog.querySelector('input[type="password"]') as HTMLInputElement, 'fixture-password')
+    await act(async () => {
+      ;(dialog.querySelector('button[type="submit"]') as HTMLButtonElement).click()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(cadence.value).toBe('daily'))
+    expect(updateIncidentReminders).toHaveBeenCalledWith({ cadence: 'daily' }, 'fixture-password')
+    expect(container.querySelector('.notification-reminder-settings [role="status"]')?.textContent).toContain('once per day')
   })
 
   it('preserves an explicitly empty update-alert selection', async () => {

@@ -59,17 +59,18 @@ func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Req
 		destinations = []string{}
 	}
 	routing := map[string]any{"configured": current.Configured, "destinations": destinations}
-	remindersEnabled, err := ts.IncidentRemindersEnabled(r.Context())
+	reminderSettings, err := ts.IncidentReminderSettings(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "notification_failed", "incident reminder setting could not be loaded", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"destinations": views, "status": status, "update_routing": routing, "incident_reminders_enabled": remindersEnabled})
+	writeJSON(w, http.StatusOK, map[string]any{"destinations": views, "status": status, "update_routing": routing, "incident_reminders_enabled": reminderSettings.Enabled, "incident_reminder_cadence": reminderSettings.Cadence})
 }
 
 type incidentReminderPayload struct {
-	Enabled  *bool  `json:"enabled"`
-	Password string `json:"password"`
+	Enabled  *bool   `json:"enabled"`
+	Cadence  *string `json:"cadence"`
+	Password string  `json:"password"`
 }
 
 func (s *Server) updateIncidentReminders(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
@@ -78,8 +79,12 @@ func (s *Server) updateIncidentReminders(w http.ResponseWriter, r *http.Request,
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	if input.Enabled == nil {
-		writeError(w, http.StatusBadRequest, "validation_failed", "enabled must be a boolean", map[string]string{"enabled": "choose whether incident reminders are enabled"})
+	if input.Enabled == nil && input.Cadence == nil {
+		writeError(w, http.StatusBadRequest, "validation_failed", "an incident reminder setting is required", map[string]string{"enabled": "choose whether reminders are enabled or set a cadence"})
+		return
+	}
+	if input.Cadence != nil && !store.ValidIncidentReminderCadence(*input.Cadence) {
+		writeError(w, http.StatusBadRequest, "validation_failed", "incident reminder cadence is invalid", map[string]string{"cadence": "choose every scan, hourly, every six hours, or daily"})
 		return
 	}
 	if strings.TrimSpace(input.Password) == "" {
@@ -90,7 +95,8 @@ func (s *Server) updateIncidentReminders(w http.ResponseWriter, r *http.Request,
 		s.writeNotificationAuthError(w, err)
 		return
 	}
-	if err := ts.SetIncidentRemindersEnabled(r.Context(), *input.Enabled, store.AuditEntry{Action: "notifications.incident_reminders_changed", Detail: "incident reminder setting changed", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+	settings, err := ts.SetIncidentReminderSettings(r.Context(), input.Enabled, input.Cadence, store.AuditEntry{Action: "notifications.incident_reminders_changed", Detail: "incident reminder settings changed", ActorUserID: session.UserID, ActorUsername: session.Username})
+	if err != nil {
 		if s.writeAuditUnavailable(w, err, "notifications.incident_reminders_changed") {
 			return
 		}
@@ -98,7 +104,7 @@ func (s *Server) updateIncidentReminders(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed"})
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": *input.Enabled})
+	writeJSON(w, http.StatusOK, settings)
 }
 
 type updateNotificationRoutingPayload struct {

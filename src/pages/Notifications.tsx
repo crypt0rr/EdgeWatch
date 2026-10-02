@@ -8,6 +8,7 @@ import {
   listNotificationDestinations,
   NotificationDestination,
   type NotificationDestinationsResponse,
+  type IncidentReminderCadence,
   type NotificationUpdateRouting,
   testNotificationDestination,
   toggleNotificationUpdateAlert,
@@ -57,7 +58,7 @@ export type NotificationScope = {
   description: ReactNode
   listDescription: ReactNode
   /** Only business units have job incidents; the platform has no reminder setting. */
-  incidentReminders?: (enabled: boolean, password: string) => Promise<{ enabled: boolean }>
+  incidentReminders?: (settings: { enabled?: boolean; cadence?: IncidentReminderCadence }, password: string) => Promise<{ enabled: boolean; cadence: IncidentReminderCadence }>
 }
 
 // A unit's own destinations, including the deployment URLs of the default
@@ -75,7 +76,7 @@ const unitNotifications: NotificationScope = {
   eyebrow: 'Delivery',
   description: 'Manage named Shoutrrr destinations without exposing their credentials.',
   listDescription: 'Deployment-managed URLs remain read-only here. Web-managed URLs are identified by name and provider. Use each destination’s Update alerts toggle to control release and upgrade notifications.',
-  incidentReminders: (enabled, password) => updateIncidentReminders(enabled, password),
+  incidentReminders: (settings, password) => updateIncidentReminders(settings, password),
 }
 
 export function Notifications() {
@@ -277,15 +278,37 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
 
   async function toggleIncidentReminders(checked: boolean) {
     if (!scope.incidentReminders || busy || passwordPrompt) return
+    await saveIncidentReminderSettings(
+      { enabled: checked },
+      'Confirm incident reminders',
+      `Enter your account password to ${checked ? 'enable' : 'disable'} reminders for incidents that remain open after a successful scan.`,
+      checked ? 'Enable reminders' : 'Disable reminders',
+    )
+  }
+
+  async function changeIncidentReminderCadence(cadence: IncidentReminderCadence) {
+    if (!scope.incidentReminders || busy || passwordPrompt) return
+    await saveIncidentReminderSettings(
+      { cadence },
+      'Confirm reminder cadence',
+      `Enter your account password to limit reminders for persistent incidents to ${incidentReminderCadenceLabel(cadence).toLowerCase()}.`,
+      'Save cadence',
+    )
+  }
+
+  async function saveIncidentReminderSettings(settings: { enabled?: boolean; cadence?: IncidentReminderCadence }, title: string, description: string, confirmLabel: string) {
+    if (!scope.incidentReminders) return
     setReminderError('')
     setReminderFeedback('')
-    const confirmation = await askPassword('Confirm incident reminders', `Enter your account password to ${checked ? 'enable' : 'disable'} reminders for incidents that remain open after a successful scan.`, checked ? 'Enable reminders' : 'Disable reminders')
+    const confirmation = await askPassword(title, description, confirmLabel)
     if (confirmation === null) return
     setBusy('incident-reminders')
     try {
-      const result = await scope.incidentReminders(checked, confirmation)
-      client.setQueryData<NotificationDestinationsResponse>(scope.queryKey, current => current && { ...current, incident_reminders_enabled: result.enabled })
-      setReminderFeedback(`Incident reminders ${result.enabled ? 'enabled' : 'disabled'}.`)
+      const result = await scope.incidentReminders(settings, confirmation)
+      client.setQueryData<NotificationDestinationsResponse>(scope.queryKey, current => current && { ...current, incident_reminders_enabled: result.enabled, incident_reminder_cadence: result.cadence })
+      setReminderFeedback(settings.enabled !== undefined
+        ? `Incident reminders ${result.enabled ? 'enabled' : 'disabled'}.`
+        : `Incident reminder cadence set to ${incidentReminderCadenceLabel(result.cadence)}.`)
       await client.invalidateQueries({ queryKey: scope.queryKey })
     } catch (err) {
       setReminderError(destinationErrorText(err, 'Could not change incident reminders.'))
@@ -307,13 +330,22 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
       <div className="panel-heading">
         <div>
           <h2>Incident reminders</h2>
-          <p className="muted">Send a reminder through each job’s selected destinations after every successful scan that still confirms an open incident. This setting does not affect initial incident alerts.</p>
+          <p className="muted">Send reminders when successful scans continue to confirm open incidents. Choose a minimum interval between reminders; initial incident alerts are unaffected.</p>
         </div>
         <Bell className="muted-icon" size={20} />
       </div>
       <label className="switch-row notification-check">
         <input type="checkbox" checked={destinations.data?.incident_reminders_enabled ?? true} disabled={!canManage || destinations.isLoading || !!destinations.error || !!busy || passwordPrompt !== null} onChange={event => toggleIncidentReminders(event.currentTarget.checked)} aria-label="Send reminders for incidents that remain open" />
         <span><strong>{destinations.data?.incident_reminders_enabled === false ? 'Reminders off' : 'Reminders on'}</strong><small>Incomplete, failed, cancelled, and timed-out scans do not send reminders.</small></span>
+      </label>
+      <label className="notification-reminder-cadence">Reminder cadence
+        <select aria-label="Reminder cadence" value={destinations.data?.incident_reminder_cadence ?? 'every_scan'} disabled={!canManage || destinations.isLoading || !!destinations.error || !!busy || passwordPrompt !== null} onChange={event => changeIncidentReminderCadence(event.currentTarget.value as IncidentReminderCadence)}>
+          <option value="every_scan">Every successful scan (default)</option>
+          <option value="hourly">No more than once per hour</option>
+          <option value="every_6_hours">No more than once every 6 hours</option>
+          <option value="daily">No more than once per day</option>
+        </select>
+        <small>Cadence is tracked separately for each job and survives restarts.</small>
       </label>
       {reminderError && <div className="form-error save-feedback" role="alert"><AlertTriangle size={17} />{reminderError}</div>}
       {reminderFeedback && <div className="success-banner notification-panel-feedback" role="status"><Check size={17} />{reminderFeedback}</div>}
@@ -339,6 +371,15 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
     <p className="helper notification-footnote"><LockKeyhole size={13} /><span>URLs containing credentials are encrypted with the local notification key. Back up <code>notification.key</code> with <code>edgewatch.db</code>; losing it locks web-managed destinations until the key is restored (or a destination is deleted and recreated).</span></p>
     {passwordPrompt && <ActionDialog title={passwordPrompt.title} description={passwordPrompt.description} confirmLabel={passwordPrompt.confirmLabel} valueLabel="Account password" valueType="password" valueRequired autoComplete="current-password" onConfirm={value => resolvePassword(value)} onCancel={() => resolvePassword(null)} />}
   </section>
+}
+
+function incidentReminderCadenceLabel(cadence: IncidentReminderCadence) {
+  switch (cadence) {
+    case 'hourly': return 'once per hour'
+    case 'every_6_hours': return 'once every 6 hours'
+    case 'daily': return 'once per day'
+    default: return 'every successful scan'
+  }
 }
 
 // The update-alert checkboxes always follow the latest fetched routing, so a

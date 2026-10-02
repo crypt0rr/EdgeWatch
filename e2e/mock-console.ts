@@ -159,6 +159,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
   }
   let updateRouting = { configured: true, destinations: ['dest-1'] }
   let incidentRemindersEnabled = true
+  let incidentReminderCadence = 'every_scan'
   // The platform console's state, used when the role is platform_admin.
   const units: any[] = [
     platformUnit({ id: 'unit-default', name: 'Default', slug: 'default', is_default: true, accounts: 3, administrators: 1, jobs: 1, stored_scans: 12 }),
@@ -357,7 +358,7 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
     if (path === '/scans/scan-1' && method === 'GET') { await json({ scan }); return }
     if (path.startsWith('/scans/scan-1/hosts') && method === 'GET') { await json({ job_id: 'job-1', job: job.job.name, scan, data_quality: 'detailed', hosts: [host], pagination: pagination(1) }); return }
     if (path === '/scans/active' && method === 'GET') { await json({ scans: [] }); return }
-    if (path === '/notifications/destinations' && method === 'GET') { await json({ destinations: [destination], status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' }, update_routing: updateRouting, incident_reminders_enabled: incidentRemindersEnabled }); return }
+    if (path === '/notifications/destinations' && method === 'GET') { await json({ destinations: [destination], status: { deployment: 0, managed: 1, active: 1, locked: 0, key_state: 'ready' }, update_routing: updateRouting, incident_reminders_enabled: incidentRemindersEnabled, incident_reminder_cadence: incidentReminderCadence }); return }
     if (path === '/users' && method === 'GET') {
       await json({ users: [{ id: 'user-2', username: 'operator', display_name: 'Operator', role: 'operator', enabled: true, pending: false, totp_enabled: false, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', revision: 1 }] }); return
     }
@@ -397,11 +398,12 @@ export async function mockConsole(page: Page, role: ConsoleRole = 'administrator
       await json(updateRouting); return
     }
     if (path === '/notifications/incident-reminders' && method === 'PUT') {
-      const value = body() as { enabled?: boolean; password?: string }
+      const value = body() as { enabled?: boolean; cadence?: string; password?: string }
       record('incident-reminders', value)
       if (failures.delete('incident-reminders')) { await json(jsonError('incident-reminders'), 422); return }
       incidentRemindersEnabled = value.enabled ?? incidentRemindersEnabled
-      await json({ enabled: incidentRemindersEnabled }); return
+      incidentReminderCadence = value.cadence ?? incidentReminderCadence
+      await json({ enabled: incidentRemindersEnabled, cadence: incidentReminderCadence }); return
     }
     if (path === '/notifications/destinations' && method === 'POST') { await mutate('notification-create', destination, 201); return }
     if (path === '/notifications/destinations/dest-1' && method === 'PUT') { await mutate('notification-update', destination); return }

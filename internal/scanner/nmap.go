@@ -29,6 +29,13 @@ import (
 type Resolver interface {
 	LookupIP(context.Context, string, string) ([]net.IP, error)
 }
+
+type targetResolutionFailure struct {
+	target string
+	reason string
+	err    error
+}
+
 type Nmap struct {
 	Path             string
 	NaabuPath        string
@@ -359,7 +366,7 @@ func (n *Nmap) scanWithProgress(ctx context.Context, job config.Job, report Prog
 		reportProgress(report, progress)
 	}
 	emit(Progress{Phase: "resolving", StartedAt: started})
-	targets, err := n.resolve(ctx, job)
+	targets, failures, err := n.resolvePartial(ctx, job)
 	if err != nil {
 		return model.Snapshot{}, err
 	}
@@ -373,7 +380,7 @@ func (n *Nmap) scanWithProgress(ctx context.Context, job config.Job, report Prog
 	}
 	progress := Progress{TotalProbes: totalProbes, TotalInvocations: totalInvocations, Phase: "scanning", StartedAt: started}
 	emit(progress)
-	snap := model.Snapshot{DNS: map[string][]string{}}
+	snap := model.Snapshot{DNS: map[string][]string{}, TargetFailures: coverageFailures(failures)}
 	for _, rt := range targets {
 		if rt.Hostname {
 			snap.DNS[rt.Name] = append([]string(nil), rt.Addresses...)
@@ -383,6 +390,14 @@ func (n *Nmap) scanWithProgress(ctx context.Context, job config.Job, report Prog
 		for _, rt := range targets {
 			snap.Scopes = append(snap.Scopes, model.Scope{Target: rt.Name, Protocol: "tcp", Ports: job.TCP.Ports, ServiceDetection: job.TCP.ServiceDetection})
 		}
+	}
+	if job.UDP != nil {
+		for _, rt := range targets {
+			snap.Scopes = append(snap.Scopes, model.Scope{Target: rt.Name, Protocol: "udp", Ports: job.UDP.Ports, ServiceDetection: job.UDP.ServiceDetection})
+		}
+	}
+	snap.Scopes = appendTargetFailureScopes(snap.Scopes, snap.TargetFailures, job)
+	if job.TCP != nil {
 		baseInvocations, baseProbes := progress.CompletedInvocations, progress.CompletedProbes
 		result, err := n.scanProtocolBatchDetailedProgress(ctx, targets, "tcp", *job.TCP, job.Timing, job.AssumesAlive(), func(invocations, probes int64) {
 			progress.CompletedInvocations += invocations
@@ -412,9 +427,6 @@ func (n *Nmap) scanWithProgress(ctx context.Context, job config.Job, report Prog
 		mergeHostObservations(&snap.Hosts, result.Hosts)
 	}
 	if job.UDP != nil {
-		for _, rt := range targets {
-			snap.Scopes = append(snap.Scopes, model.Scope{Target: rt.Name, Protocol: "udp", Ports: job.UDP.Ports, ServiceDetection: job.UDP.ServiceDetection})
-		}
 		baseInvocations, baseProbes := progress.CompletedInvocations, progress.CompletedProbes
 		result, err := n.scanProtocolBatchDetailedProgress(ctx, targets, "udp", *job.UDP, job.Timing, job.AssumesAlive(), func(invocations, probes int64) {
 			progress.CompletedInvocations += invocations
@@ -549,20 +561,40 @@ func valueProtocol(protocol *config.Protocol) config.Protocol {
 }
 
 func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, error) {
+	targets, failures, err := n.resolvePartial(ctx, job)
+	if err != nil {
+		return nil, err
+	}
+	if len(failures) > 0 {
+		failure := failures[0]
+		if failure.err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", failure.target, failure.err)
+		}
+		return nil, ConfigurationError(fmt.Errorf("resolve %s: no A or AAAA records", failure.target))
+	}
+	return targets, nil
+}
+
+// resolvePartial pins every target that can be resolved and separately records
+// DNS targets whose coverage is unknown. A lookup failure is non-fatal only
+// when at least one configured target still resolves; exclusions, expansion
+// limits, and cancellation remain fatal.
+func (n *Nmap) resolvePartial(ctx context.Context, job config.Job) ([]resolvedTarget, []targetResolutionFailure, error) {
 	var out []resolvedTarget
+	var failures []targetResolutionFailure
 	count := 0
 	for _, input := range job.Targets {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		raw := config.CanonicalTarget(input)
 		if ip := net.ParseIP(raw); ip != nil {
 			if exclusion := n.excludedNetwork(ip); exclusion != "" {
-				return nil, ConfigurationError(fmt.Errorf("target %s is excluded by scanner.target_exclusions (%s)", raw, exclusion))
+				return nil, nil, ConfigurationError(fmt.Errorf("target %s is excluded by scanner.target_exclusions (%s)", raw, exclusion))
 			}
 			count++
 			if count > job.MaxExpandedHosts {
-				return nil, ConfigurationError(fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts))
+				return nil, nil, ConfigurationError(fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts))
 			}
 			out = append(out, resolvedTarget{Name: ip.String(), ConfiguredTarget: raw, Addresses: []string{ip.String()}})
 			continue
@@ -570,14 +602,14 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 		if ip, network, err := net.ParseCIDR(raw); err == nil {
 			for current := ip.Mask(network.Mask); network.Contains(current); incrementIP(current) {
 				if err := ctx.Err(); err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 				if exclusion := n.excludedNetwork(current); exclusion != "" {
-					return nil, ConfigurationError(fmt.Errorf("target %s includes excluded address %s (%s)", raw, current.String(), exclusion))
+					return nil, nil, ConfigurationError(fmt.Errorf("target %s includes excluded address %s (%s)", raw, current.String(), exclusion))
 				}
 				count++
 				if count > job.MaxExpandedHosts {
-					return nil, ConfigurationError(fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts))
+					return nil, nil, ConfigurationError(fmt.Errorf("expanded targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts))
 				}
 				value := current.String()
 				out = append(out, resolvedTarget{Name: value, ConfiguredTarget: raw, Addresses: []string{value}})
@@ -586,13 +618,22 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 		}
 		ips, err := n.Resolver.LookupIP(ctx, "ip", raw)
 		if err != nil {
-			return nil, fmt.Errorf("resolve %s: %w", raw, err)
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			failures = append(failures, targetResolutionFailure{target: strings.ToLower(raw), reason: "lookup-failed", err: err})
+			if len(ips) == 0 {
+				continue
+			}
 		}
 		set := map[string]bool{}
 		var addresses []string
 		for _, ip := range ips {
+			if ip == nil || (ip.To4() == nil && ip.To16() == nil) {
+				continue
+			}
 			if exclusion := n.excludedNetwork(ip); exclusion != "" {
-				return nil, ConfigurationError(fmt.Errorf("target %s resolved to excluded address %s (%s)", raw, ip.String(), exclusion))
+				return nil, nil, ConfigurationError(fmt.Errorf("target %s resolved to excluded address %s (%s)", raw, ip.String(), exclusion))
 			}
 			value := ip.String()
 			if !set[value] {
@@ -601,16 +642,70 @@ func (n *Nmap) resolve(ctx context.Context, job config.Job) ([]resolvedTarget, e
 			}
 		}
 		if len(addresses) == 0 {
-			return nil, ConfigurationError(fmt.Errorf("resolve %s: no A or AAAA records", raw))
+			if err == nil {
+				failures = append(failures, targetResolutionFailure{target: strings.ToLower(raw), reason: "no-addresses"})
+			}
+			continue
 		}
 		count += len(addresses)
 		if count > job.MaxExpandedHosts {
-			return nil, ConfigurationError(fmt.Errorf("resolved targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts))
+			return nil, nil, ConfigurationError(fmt.Errorf("resolved targets exceed max_expanded_hosts=%d", job.MaxExpandedHosts))
 		}
 		sort.Strings(addresses)
 		out = append(out, resolvedTarget{Name: strings.ToLower(raw), ConfiguredTarget: strings.ToLower(raw), Addresses: addresses, Aggregate: true, Hostname: true})
 	}
-	return out, nil
+	if len(out) == 0 {
+		if len(failures) > 0 {
+			failure := failures[0]
+			if failure.err != nil {
+				return nil, failures, fmt.Errorf("no effective targets could be resolved: %s: %w", failure.target, failure.err)
+			}
+			return nil, failures, ConfigurationError(fmt.Errorf("resolve %s: no A or AAAA records", failure.target))
+		}
+		return nil, nil, ConfigurationError(errors.New("no effective targets"))
+	}
+	return out, failures, nil
+}
+
+func coverageFailures(failures []targetResolutionFailure) []model.TargetCoverageFailure {
+	if len(failures) == 0 {
+		return nil
+	}
+	snapshot := model.Snapshot{}
+	for _, failure := range failures {
+		snapshot.TargetFailures = append(snapshot.TargetFailures, model.TargetCoverageFailure{Target: failure.target, Reason: failure.reason})
+	}
+	snapshot.Normalize()
+	return snapshot.TargetFailures
+}
+
+func appendTargetFailureScopes(scopes []model.Scope, failures []model.TargetCoverageFailure, job config.Job) []model.Scope {
+	appendScope := func(target string, protocol *config.Protocol, name string) {
+		if protocol == nil {
+			return
+		}
+		for _, scope := range scopes {
+			if scope.Target == target && scope.Protocol == name {
+				return
+			}
+		}
+		scopes = append(scopes, model.Scope{Target: target, Protocol: name, Ports: protocol.Ports, ServiceDetection: protocol.ServiceDetection})
+	}
+	for _, failure := range failures {
+		appendScope(failure.Target, job.TCP, "tcp")
+		appendScope(failure.Target, job.UDP, "udp")
+	}
+	return scopes
+}
+
+func applyTargetResolutionFailures(snapshot *model.Snapshot, job config.Job, failures []targetResolutionFailure) {
+	if snapshot == nil || len(failures) == 0 {
+		return
+	}
+	evidence := coverageFailures(failures)
+	snapshot.TargetFailures = append(snapshot.TargetFailures, evidence...)
+	snapshot.Scopes = appendTargetFailureScopes(snapshot.Scopes, evidence, job)
+	snapshot.Normalize()
 }
 
 func incrementIP(ip net.IP) {

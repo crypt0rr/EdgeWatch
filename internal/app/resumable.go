@@ -164,7 +164,7 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, ts *store.Tenant
 		// single Naabu pipeline unit still represents a complete 1–65535 pass;
 		// persist it so timeouts/cancellation get the same checkpoint and retry
 		// semantics as multi-address plans.
-		if len(plan.Units) <= 1 && (len(plan.Units) == 0 || plan.Units[0].Engine != config.EngineNaabuNmap) {
+		if len(plan.TargetFailures) == 0 && len(plan.Units) <= 1 && (len(plan.Units) == 0 || plan.Units[0].Engine != config.EngineNaabuNmap) {
 			return false, model.Snapshot{}, nil
 		}
 		// A scanner may return only the resolved work units from Plan. Persist the

@@ -136,12 +136,21 @@ type HostState struct {
 	State   string `json:"state"`
 }
 
+// TargetCoverageFailure records a configured target that could not be fully
+// resolved before scanning. It is diagnostic/incomplete-coverage metadata,
+// not part of baseline identity.
+type TargetCoverageFailure struct {
+	Target string `json:"target"`
+	Reason string `json:"reason"`
+}
+
 type Snapshot struct {
-	Units      []Unit              `json:"units"`
-	Scopes     []Scope             `json:"scopes"`
-	DNS        map[string][]string `json:"dns,omitempty"`
-	Hosts      []HostObservation   `json:"hosts,omitempty"`
-	HostStates []HostState         `json:"host_states,omitempty"`
+	Units          []Unit                  `json:"units"`
+	Scopes         []Scope                 `json:"scopes"`
+	DNS            map[string][]string     `json:"dns,omitempty"`
+	Hosts          []HostObservation       `json:"hosts,omitempty"`
+	HostStates     []HostState             `json:"host_states,omitempty"`
+	TargetFailures []TargetCoverageFailure `json:"target_failures,omitempty"`
 }
 
 type Scan struct {
@@ -528,6 +537,25 @@ func (s *Snapshot) Normalize() {
 		}
 		return s.HostStates[i].Address < s.HostStates[j].Address
 	})
+	for i := range s.TargetFailures {
+		s.TargetFailures[i].Target = strings.ToLower(strings.TrimSpace(s.TargetFailures[i].Target))
+		s.TargetFailures[i].Reason = strings.ToLower(strings.TrimSpace(s.TargetFailures[i].Reason))
+	}
+	sort.Slice(s.TargetFailures, func(i, j int) bool {
+		if s.TargetFailures[i].Target == s.TargetFailures[j].Target {
+			return s.TargetFailures[i].Reason < s.TargetFailures[j].Reason
+		}
+		return s.TargetFailures[i].Target < s.TargetFailures[j].Target
+	})
+	if len(s.TargetFailures) > 1 {
+		unique := s.TargetFailures[:1]
+		for _, failure := range s.TargetFailures[1:] {
+			if failure != unique[len(unique)-1] {
+				unique = append(unique, failure)
+			}
+		}
+		s.TargetFailures = unique
+	}
 }
 
 func (s Snapshot) Hash() string {
@@ -546,6 +574,9 @@ func (s Snapshot) Hash() string {
 	// false change or forces a rebaseline. HostStates is intentionally separate:
 	// it contains only normalized reachability expectations that drive incidents.
 	stable.Hosts = nil
+	// Target resolution failures describe incomplete evidence for this scan;
+	// they never change the expected security surface or baseline convergence.
+	stable.TargetFailures = nil
 	stable.Normalize()
 	b, _ = json.Marshal(stable)
 	h := sha256.Sum256(b)

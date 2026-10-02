@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"reflect"
 	"testing"
 	"time"
 
@@ -90,6 +91,23 @@ func TestMergeWorkSnapshotsDeduplicatesChunkAddresses(t *testing.T) {
 	result := MergeWorkSnapshots(plan, []model.Snapshot{{Units: []model.Unit{{Target: "host", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 1, State: "open", Evidence: []string{"192.0.2.1"}}}}}}, {Units: []model.Unit{{Target: "host", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 2, State: "open", Evidence: []string{"192.0.2.1"}}}}}}})
 	if len(result.Units) != 1 || len(result.Units[0].Addresses) != 1 || len(result.Units[0].Ports) != 2 {
 		t.Fatalf("merged snapshot was not normalized: %#v", result)
+	}
+}
+
+func TestMergeWorkSnapshotsPreservesTargetResolutionFailures(t *testing.T) {
+	plan := WorkPlan{
+		Scopes: []model.Scope{
+			{Target: "good.example", Protocol: "tcp", Ports: "443"},
+			{Target: "missing.example", Protocol: "tcp", Ports: "443"},
+		},
+		TargetFailures: []model.TargetCoverageFailure{{Target: "missing.example", Reason: "lookup-failed"}},
+	}
+	merged := MergeWorkSnapshots(plan, []model.Snapshot{{Units: []model.Unit{{Target: "good.example", Protocol: "tcp", Addresses: []string{"192.0.2.1"}}}}})
+	if !reflect.DeepEqual(merged.TargetFailures, plan.TargetFailures) {
+		t.Fatalf("merged target failures = %#v, want %#v", merged.TargetFailures, plan.TargetFailures)
+	}
+	if len(merged.Scopes) != 2 {
+		t.Fatalf("merged scopes = %#v, want the pinned target scopes", merged.Scopes)
 	}
 }
 

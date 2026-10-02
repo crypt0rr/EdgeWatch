@@ -130,11 +130,13 @@ func (n *Nmap) scanNaabuPipeline(ctx context.Context, job config.Job, report Pro
 
 func (n *Nmap) scanNaabuPipelineWithBudget(ctx context.Context, job config.Job, report ProgressReporter, budgetCheck func(discoveryProbes, nmapProbes int64) error) (model.Snapshot, error) {
 	job = config.NormalizeJob(job)
-	targets, err := n.resolve(ctx, job)
+	targets, failures, err := n.resolvePartial(ctx, job)
 	if err != nil {
 		return model.Snapshot{}, err
 	}
-	return n.scanNaabuPipelineResolvedWithBudget(ctx, job, targets, report, budgetCheck)
+	snapshot, scanErr := n.scanNaabuPipelineResolvedWithBudget(ctx, job, targets, report, budgetCheck)
+	applyTargetResolutionFailures(&snapshot, job, failures)
+	return snapshot, scanErr
 }
 
 // scanNaabuDiscoveryResolved executes only the first, full-range phase of a

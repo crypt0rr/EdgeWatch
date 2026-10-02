@@ -447,11 +447,17 @@ func positivePortCount(snapshot model.Snapshot) int {
 }
 
 func snapshotHasUnreachableHost(snapshot model.Snapshot) bool {
-	return len(incompleteHostAddresses(snapshot)) > 0
+	return len(snapshot.TargetFailures) > 0 || len(incompleteHostAddresses(snapshot)) > 0
 }
 
 func incompleteScanError(snapshot model.Snapshot) string {
 	addresses := incompleteHostAddresses(snapshot)
+	for _, failure := range snapshot.TargetFailures {
+		if target := strings.TrimSpace(failure.Target); target != "" {
+			addresses = append(addresses, target)
+		}
+	}
+	addresses = sortedUniqueStrings(addresses)
 	if len(addresses) == 0 {
 		return "Scan incomplete: scan coverage did not complete"
 	}
@@ -856,6 +862,22 @@ func incompleteTargets(baseline *model.Snapshot, current model.Snapshot, coverag
 				}
 			}
 		}
+		for _, failure := range snapshot.TargetFailures {
+			if strings.TrimSpace(failure.Target) == "" {
+				continue
+			}
+			protectedTargets[failure.Target] = struct{}{}
+			for _, scope := range snapshot.Scopes {
+				if scope.Target == failure.Target {
+					addTarget(scope.Target, scope.Protocol)
+				}
+			}
+			for _, unit := range snapshot.Units {
+				if unit.Target == failure.Target {
+					addTarget(unit.Target, unit.Protocol)
+				}
+			}
+		}
 	}
 	for address := range coverage {
 		// Host-state changes use the effective address as their target, whereas
@@ -863,6 +885,20 @@ func incompleteTargets(baseline *model.Snapshot, current model.Snapshot, coverag
 		protectedTargets[address] = struct{}{}
 	}
 	return protectedProtocols, protectedTargets
+}
+
+func sortedUniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	sort.Strings(values)
+	unique := values[:1]
+	for _, value := range values[1:] {
+		if value != unique[len(unique)-1] {
+			unique = append(unique, value)
+		}
+	}
+	return unique
 }
 
 func incompleteChange(change model.Change, protocols, targets map[string]struct{}) bool {

@@ -46,14 +46,15 @@ type ResolvedTarget struct {
 
 // WorkPlan is an immutable execution plan for one complete scan cycle.
 type WorkPlan struct {
-	CreatedAt   time.Time           `json:"created_at"`
-	Job         config.Job          `json:"job"`
-	Targets     []ResolvedTarget    `json:"targets"`
-	DNS         map[string][]string `json:"dns,omitempty"`
-	Scopes      []model.Scope       `json:"scopes"`
-	Units       []WorkUnit          `json:"units"`
-	TotalProbes int64               `json:"total_probes"`
-	TotalUnits  int                 `json:"total_units"`
+	CreatedAt      time.Time                     `json:"created_at"`
+	Job            config.Job                    `json:"job"`
+	Targets        []ResolvedTarget              `json:"targets"`
+	DNS            map[string][]string           `json:"dns,omitempty"`
+	Scopes         []model.Scope                 `json:"scopes"`
+	TargetFailures []model.TargetCoverageFailure `json:"target_failures,omitempty"`
+	Units          []WorkUnit                    `json:"units"`
+	TotalProbes    int64                         `json:"total_probes"`
+	TotalUnits     int                           `json:"total_units"`
 }
 
 const (
@@ -93,14 +94,14 @@ type ResumableScanner interface {
 // pin the cycle's effective targets.
 func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 	job = config.NormalizeJob(job)
-	targets, err := n.resolve(ctx, job)
+	targets, failures, err := n.resolvePartial(ctx, job)
 	if err != nil {
 		return WorkPlan{}, err
 	}
 	if job.TCP != nil && job.TCP.Engine == config.EngineNaabuNmap {
-		return n.planNaabuPipeline(ctx, job, targets)
+		return n.planNaabuPipeline(ctx, job, targets, failures)
 	}
-	plan := WorkPlan{CreatedAt: time.Now().UTC(), Job: job, Targets: exportResolvedTargets(targets), DNS: map[string][]string{}}
+	plan := WorkPlan{CreatedAt: time.Now().UTC(), Job: job, Targets: exportResolvedTargets(targets), DNS: map[string][]string{}, TargetFailures: coverageFailures(failures)}
 	for _, target := range targets {
 		if target.Hostname {
 			plan.DNS[target.Name] = append([]string(nil), target.Addresses...)
@@ -187,6 +188,7 @@ func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 			}
 		}
 	}
+	plan.Scopes = appendTargetFailureScopes(plan.Scopes, plan.TargetFailures, job)
 	plan.TotalUnits = len(plan.Units)
 	return plan, nil
 }
@@ -197,7 +199,11 @@ func (n *Nmap) Plan(ctx context.Context, job config.Job) (WorkPlan, error) {
 // checkpoints are committed by the store; this keeps the persisted plan
 // phase-aware and makes a restart unable to repeat a completed full-range
 // discovery pass.
-func (n *Nmap) planNaabuPipeline(ctx context.Context, job config.Job, targets []resolvedTarget) (WorkPlan, error) {
+func (n *Nmap) planNaabuPipeline(ctx context.Context, job config.Job, targets []resolvedTarget, failureSets ...[]targetResolutionFailure) (WorkPlan, error) {
+	var failures []targetResolutionFailure
+	if len(failureSets) > 0 {
+		failures = failureSets[0]
+	}
 	if job.TCP == nil {
 		return WorkPlan{}, ConfigurationError(errors.New("naabu pipeline requires tcp"))
 	}
@@ -213,7 +219,7 @@ func (n *Nmap) planNaabuPipeline(ctx context.Context, job config.Job, targets []
 	if err := ctx.Err(); err != nil {
 		return WorkPlan{}, err
 	}
-	plan := WorkPlan{CreatedAt: time.Now().UTC(), Job: job, Targets: exportResolvedTargets(targets), DNS: map[string][]string{}}
+	plan := WorkPlan{CreatedAt: time.Now().UTC(), Job: job, Targets: exportResolvedTargets(targets), DNS: map[string][]string{}, TargetFailures: coverageFailures(failures)}
 	for _, target := range targets {
 		if target.Hostname {
 			plan.DNS[target.Name] = append([]string(nil), target.Addresses...)
@@ -223,6 +229,7 @@ func (n *Nmap) planNaabuPipeline(ctx context.Context, job config.Job, targets []
 			plan.Scopes = append(plan.Scopes, model.Scope{Target: target.Name, Protocol: "udp", Ports: job.UDP.Ports, ServiceDetection: job.UDP.ServiceDetection})
 		}
 	}
+	plan.Scopes = appendTargetFailureScopes(plan.Scopes, plan.TargetFailures, job)
 	batchSize := options.AddressBatchSize
 	if batchSize < 1 {
 		batchSize = 16
@@ -437,7 +444,11 @@ func MergeWorkSnapshots(plan WorkPlan, fragments []model.Snapshot) model.Snapsho
 	// on any later address and make the result depend on fragment order.
 	services := map[mergedPort]map[string]struct{}{}
 	hosts := map[string]model.HostObservation{}
-	result := model.Snapshot{Scopes: append([]model.Scope(nil), plan.Scopes...), DNS: map[string][]string{}}
+	result := model.Snapshot{
+		Scopes:         append([]model.Scope(nil), plan.Scopes...),
+		DNS:            map[string][]string{},
+		TargetFailures: append([]model.TargetCoverageFailure(nil), plan.TargetFailures...),
+	}
 	for name, addresses := range plan.DNS {
 		result.DNS[name] = append([]string(nil), addresses...)
 	}

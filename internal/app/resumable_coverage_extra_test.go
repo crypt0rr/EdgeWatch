@@ -436,6 +436,27 @@ func TestResumableAttemptPlanningAndTerminalGuards(t *testing.T) {
 	if summaries, err := defaultTenant(db).ListScanCycleUnitSummaries(ctx, blockedEpoch.ID); err != nil || len(summaries) != 2 {
 		t.Fatalf("failed discard removed cycle work: %#v, %v", summaries, err)
 	}
+
+	// A one-unit plan with partial target-resolution evidence must use the
+	// resumable path so the pinned failure metadata survives cycle persistence
+	// and snapshot merging instead of being lost by a second DNS lookup.
+	resolutionJob := job
+	resolutionJob.Name = "resumable-partial-dns"
+	resolutionJob.Targets = []string{"good.example", "missing.example"}
+	resolutionRecord, err := defaultTenant(db).CreateJob(ctx, resolutionJob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolutionPlan := scanner.WorkPlan{
+		Scopes:         []model.Scope{{Target: "good.example", Protocol: "tcp", Ports: "1"}, {Target: "missing.example", Protocol: "tcp", Ports: "1"}},
+		TargetFailures: []model.TargetCoverageFailure{{Target: "missing.example", Reason: "lookup-failed"}},
+		Units:          []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1", PortCount: 1, Probes: 1}},
+	}
+	var partialScan model.Scan
+	handled, partialSnapshot, partialErr := a.runResumableAttempt(ctx, ctx, defaultTenant(a.Store), resolutionRecord.Job, resolutionRecord.ID, &partialScan, nil, coverageResumableScanner{plan: resolutionPlan}, false)
+	if !handled || partialErr != nil || len(partialSnapshot.TargetFailures) != 1 || partialSnapshot.TargetFailures[0].Target != "missing.example" {
+		t.Fatalf("partial DNS work did not preserve its resumable evidence: handled=%t snapshot=%#v err=%v", handled, partialSnapshot, partialErr)
+	}
 }
 
 func TestResumableRecoveryAndFinishPersistenceFailures(t *testing.T) {

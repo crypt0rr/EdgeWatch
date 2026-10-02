@@ -418,10 +418,14 @@ to one requires a shorter name.
 
 Jobs accept individual IP addresses, CIDRs, and DNS names. DNS names remain
 logical targets while each resolved effective address is shown separately in
-host evidence. Schedules use five-field cron syntax in the selected IANA
-timezone. New jobs default to the deployment `timezone` from config.yaml, or to
-the browser's timezone when it is omitted. New jobs receive an optional 30-minute schedule-offset suggestion
-when another active job is nearby; the administrator can keep concurrent times.
+host evidence. If a DNS target cannot be resolved, EdgeWatch still scans other
+targets it could resolve, marks the overall scan incomplete, and protects the
+unresolved target's baseline from false removals until a complete scan succeeds.
+Schedules use five-field cron syntax in the selected IANA timezone. New jobs
+default to the deployment `timezone` from config.yaml, or to the browser's
+timezone when it is omitted. New jobs receive an optional 30-minute
+schedule-offset suggestion when another active job is nearby; the administrator
+can keep concurrent times.
 
 Choose how many successful samples establish a baseline and how many matching
 changes confirm an incident. When a security-impacting job setting changes,

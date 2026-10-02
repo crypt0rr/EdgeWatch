@@ -1135,6 +1135,107 @@ func TestIncompleteDNSScanKeepsHealthySiblingAdditions(t *testing.T) {
 	}
 }
 
+func TestUnresolvedDNSKeepsOtherTargetsActiveAndProtectsMissingTarget(t *testing.T) {
+	ctx := context.Background()
+	db, err := store.Open(storetest.FreshPath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	e := Engine{Store: db}
+	job := config.Job{Name: "mixed-resolution", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
+	baseline := model.Snapshot{
+		Scopes: []model.Scope{
+			{Target: "edge.example", Protocol: "tcp", Ports: "443"},
+			{Target: "192.0.2.9", Protocol: "tcp", Ports: "22,80"},
+		},
+		DNS: map[string][]string{"edge.example": {"192.0.2.1"}},
+		Units: []model.Unit{
+			{Target: "edge.example", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []model.PortState{{Port: 443, State: "open", Evidence: []string{"192.0.2.1"}}}},
+			{Target: "192.0.2.9", Protocol: "tcp", Addresses: []string{"192.0.2.9"}, Ports: []model.PortState{{Port: 22, State: "open"}, {Port: 80, State: "open"}}},
+		},
+	}
+	if events, err := e.Success(ctx, job, scan("resolution-baseline", baseline)); err != nil || len(events) != 1 || events[0].Type != "baseline-complete" {
+		t.Fatalf("baseline setup: %#v, %v", events, err)
+	}
+
+	partial := model.Snapshot{
+		Scopes:         baseline.Scopes,
+		TargetFailures: []model.TargetCoverageFailure{{Target: "edge.example", Reason: "lookup-failed"}},
+		Units:          []model.Unit{{Target: "192.0.2.9", Protocol: "tcp", Addresses: []string{"192.0.2.9"}, Ports: []model.PortState{{Port: 80, State: "open"}, {Port: 443, State: "open"}}}},
+		Hosts:          []model.HostObservation{{Address: "192.0.2.9", Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}}},
+	}
+	partialScan := scan("resolution-partial", partial)
+	if !MarkIncompleteScan(&partialScan) || partialScan.Status != "incomplete" || !strings.Contains(partialScan.Error, "edge.example") {
+		t.Fatalf("unresolved DNS target was not retained as incomplete evidence: %#v", partialScan)
+	}
+	events, err := e.Success(ctx, job, partialScan)
+	if err != nil || len(events) != 2 || events[0].Type != "changes-detected" || events[1].Type != "scan-incomplete" {
+		t.Fatalf("mixed partial scan events: %#v, %v", events, err)
+	}
+	if len(events[0].Changes) != 2 {
+		t.Fatalf("resolvable target changes = %#v, want its port removal and addition", events[0].Changes)
+	}
+	state, err := defaultTenant(db).State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Incidents["port|edge.example|tcp|443"]; ok {
+		t.Fatal("unresolved DNS target created a false port-closure incident")
+	}
+	if _, ok := state.Incidents["port|192.0.2.9|tcp|22"]; !ok {
+		t.Fatal("fully scanned target's port closure was suppressed by another target's DNS failure")
+	}
+	if _, ok := state.Incidents["port|192.0.2.9|tcp|443"]; !ok {
+		t.Fatal("fully scanned target's port addition was not reported")
+	}
+	if state.Baseline == nil {
+		t.Fatal("incomplete scan removed the baseline")
+	}
+	var unresolvedBaselineRetained bool
+	for _, unit := range state.Baseline.Units {
+		if unit.Target == "edge.example" && len(unit.Ports) == 1 && unit.Ports[0].Port == 443 {
+			unresolvedBaselineRetained = true
+		}
+	}
+	if !unresolvedBaselineRetained {
+		t.Fatalf("incomplete scan changed the unresolved target baseline: %#v", state.Baseline)
+	}
+
+	recovered := model.Snapshot{
+		Scopes: baseline.Scopes,
+		DNS:    map[string][]string{"edge.example": {"192.0.2.1"}},
+		Units: []model.Unit{
+			{Target: "edge.example", Protocol: "tcp", Addresses: []string{"192.0.2.1"}},
+			{Target: "192.0.2.9", Protocol: "tcp", Addresses: []string{"192.0.2.9"}, Ports: []model.PortState{{Port: 80, State: "open"}, {Port: 443, State: "open"}}},
+		},
+		Hosts: []model.HostObservation{
+			{Address: "192.0.2.1", Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}},
+			{Address: "192.0.2.9", Status: "up", Protocols: []model.ProtocolObservation{{Protocol: "tcp", Status: "up", DiscoveryState: "up"}}},
+		},
+	}
+	recoveredScan := scan("resolution-recovered", recovered)
+	if MarkIncompleteScan(&recoveredScan) {
+		t.Fatalf("resolved DNS scan remained incomplete: %s", recoveredScan.Error)
+	}
+	events, err = e.Success(ctx, job, recoveredScan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err = defaultTenant(db).State(ctx, job.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := state.Incidents["port|edge.example|tcp|443"]; !ok {
+		t.Fatal("a later complete scan did not compare the recovered DNS target")
+	}
+	for _, event := range events {
+		if event.Type == "scan-incomplete" {
+			t.Fatalf("recovered scan still emitted incomplete event: %#v", events)
+		}
+	}
+}
+
 func TestIncompleteDNSScanPreservesPendingHealthyAdditionUntilCompleteConfirmation(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))

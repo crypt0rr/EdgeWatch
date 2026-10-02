@@ -143,6 +143,11 @@ func TestSnapshotHashExcludesDescriptiveHostEvidence(t *testing.T) {
 	if base.Hash() != withDiscoveryMetadata.Hash() {
 		t.Fatal("discovery metadata changed the snapshot hash")
 	}
+	withResolutionFailure := base
+	withResolutionFailure.TargetFailures = []TargetCoverageFailure{{Target: " Example.COM ", Reason: " LOOKUP-FAILED "}}
+	if base.Hash() != withResolutionFailure.Hash() {
+		t.Fatal("incomplete target-resolution metadata changed the snapshot hash")
+	}
 	withExpectedDown := base
 	withExpectedDown.HostStates = []HostState{{Address: "192.0.2.1", State: "down"}}
 	if base.Hash() == withExpectedDown.Hash() {
@@ -151,6 +156,27 @@ func TestSnapshotHashExcludesDescriptiveHostEvidence(t *testing.T) {
 	changed := Snapshot{Units: []Unit{{Target: "host", Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: []PortState{{Port: 443, State: "closed", Service: "https"}}}}}
 	if base.Hash() == changed.Hash() {
 		t.Fatal("meaningful port state did not change the snapshot hash")
+	}
+}
+
+func TestSnapshotNormalizeSortsAndDeduplicatesTargetFailures(t *testing.T) {
+	snapshot := Snapshot{TargetFailures: []TargetCoverageFailure{
+		{Target: " Z.example ", Reason: " LOOKUP-FAILED "},
+		{Target: "a.example", Reason: "no-addresses"},
+		{Target: "z.EXAMPLE", Reason: "lookup-failed"},
+	}}
+	snapshot.Normalize()
+	want := []TargetCoverageFailure{
+		{Target: "a.example", Reason: "no-addresses"},
+		{Target: "z.example", Reason: "lookup-failed"},
+	}
+	if len(snapshot.TargetFailures) != len(want) {
+		t.Fatalf("normalized target failures = %#v, want %#v", snapshot.TargetFailures, want)
+	}
+	for i := range want {
+		if snapshot.TargetFailures[i] != want[i] {
+			t.Fatalf("normalized target failures = %#v, want %#v", snapshot.TargetFailures, want)
+		}
 	}
 }
 

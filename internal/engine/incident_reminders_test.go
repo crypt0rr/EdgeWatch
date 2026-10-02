@@ -95,6 +95,36 @@ func TestIncidentReminderCadenceEnforcesIntervalsAndBoundaries(t *testing.T) {
 	}
 }
 
+func TestIncidentReminderDueSupportsEveryCadenceAndFallsBack(t *testing.T) {
+	last := time.Date(2026, 10, 2, 10, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name       string
+		cadence    string
+		elapsed    time.Duration
+		noPrevious bool
+		want       bool
+	}{
+		{name: "first reminder", cadence: store.IncidentReminderCadenceDaily, noPrevious: true, want: true},
+		{name: "every scan", cadence: store.IncidentReminderCadenceEveryScan, elapsed: time.Minute, want: true},
+		{name: "hourly before boundary", cadence: store.IncidentReminderCadenceHourly, elapsed: time.Hour - time.Second, want: false},
+		{name: "hourly at boundary", cadence: store.IncidentReminderCadenceHourly, elapsed: time.Hour, want: true},
+		{name: "six hours before boundary", cadence: store.IncidentReminderCadenceSixHours, elapsed: 6*time.Hour - time.Second, want: false},
+		{name: "six hours at boundary", cadence: store.IncidentReminderCadenceSixHours, elapsed: 6 * time.Hour, want: true},
+		{name: "unknown persisted cadence falls back", cadence: "future_value", elapsed: time.Minute, want: true},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			var previous *time.Time
+			if !test.noPrevious {
+				previous = &last
+			}
+			if got := incidentReminderDue(previous, test.cadence, last.Add(test.elapsed)); got != test.want {
+				t.Fatalf("incidentReminderDue(%v, %q)=%t, want %t", test.elapsed, test.cadence, got, test.want)
+			}
+		})
+	}
+}
+
 func TestManagedIncidentRemindersFollowSavedSetting(t *testing.T) {
 	ctx := context.Background()
 	db, err := store.Open(storetest.FreshPath(t))

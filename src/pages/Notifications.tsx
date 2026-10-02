@@ -12,6 +12,7 @@ import {
   testNotificationDestination,
   toggleNotificationUpdateAlert,
   updateNotificationDestination,
+  updateIncidentReminders,
   getSession,
 } from '../api'
 import { ActionDialog } from '../components/ActionDialog'
@@ -55,6 +56,8 @@ export type NotificationScope = {
   eyebrow: string
   description: ReactNode
   listDescription: ReactNode
+  /** Only business units have job incidents; the platform has no reminder setting. */
+  incidentReminders?: (enabled: boolean, password: string) => Promise<{ enabled: boolean }>
 }
 
 // A unit's own destinations, including the deployment URLs of the default
@@ -72,6 +75,7 @@ const unitNotifications: NotificationScope = {
   eyebrow: 'Delivery',
   description: 'Manage named Shoutrrr destinations without exposing their credentials.',
   listDescription: 'Deployment-managed URLs remain read-only here. Web-managed URLs are identified by name and provider. Use each destination’s Update alerts toggle to control release and upgrade notifications.',
+  incidentReminders: (enabled, password) => updateIncidentReminders(enabled, password),
 }
 
 export function Notifications() {
@@ -91,6 +95,8 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
   const [passwordPrompt, setPasswordPrompt] = useState<PasswordPromptState | null>(null)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
+  const [reminderError, setReminderError] = useState('')
+  const [reminderFeedback, setReminderFeedback] = useState('')
   const [busy, setBusy] = useState('')
   const [rowFeedback, setRowFeedback] = useState<Record<string, DestinationFeedback>>({})
   const [listFeedback, setListFeedback] = useState('')
@@ -269,6 +275,25 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
     }
   }
 
+  async function toggleIncidentReminders(checked: boolean) {
+    if (!scope.incidentReminders || busy || passwordPrompt) return
+    setReminderError('')
+    setReminderFeedback('')
+    const confirmation = await askPassword('Confirm incident reminders', `Enter your account password to ${checked ? 'enable' : 'disable'} reminders for incidents that remain open after a successful scan.`, checked ? 'Enable reminders' : 'Disable reminders')
+    if (confirmation === null) return
+    setBusy('incident-reminders')
+    try {
+      const result = await scope.incidentReminders(checked, confirmation)
+      client.setQueryData<NotificationDestinationsResponse>(scope.queryKey, current => current && { ...current, incident_reminders_enabled: result.enabled })
+      setReminderFeedback(`Incident reminders ${result.enabled ? 'enabled' : 'disabled'}.`)
+      await client.invalidateQueries({ queryKey: scope.queryKey })
+    } catch (err) {
+      setReminderError(destinationErrorText(err, 'Could not change incident reminders.'))
+    } finally {
+      setBusy('')
+    }
+  }
+
   const status = destinations.data?.status
   const selectedUpdateDestinations = selectedUpdateDestinationIds(destinations.data, scope.routingDefaultsToEnabled)
   const updateRoutingBusy = busy.startsWith('update-routing:') || passwordPrompt !== null
@@ -277,6 +302,22 @@ export function NotificationsView({ scope, canManage }: { scope: NotificationSco
     {status && <div className={status.key_state === 'ready' || status.key_state === 'not_required' ? 'notice notification-status' : 'notice warning notification-status'}><KeyRound size={17} /><span><strong>{status.key_state === 'ready' ? 'Encrypted destinations are available.' : status.key_state === 'not_required' ? 'No web-managed destinations yet.' : 'Managed destination key needs attention.'}</strong> {status.locked ? `${status.locked} destination${status.locked === 1 ? '' : 's'} locked; deployment URLs continue independently.` : 'Credentials are write-only and encrypted at rest.'}</span><button className="icon-button" type="button" onClick={() => destinations.refetch()} aria-label="Refresh notification status"><RefreshCw size={15} /></button></div>}
     {scope.configImport && status?.config_import === 'imported' && <div className="notice warning notification-config-import" role="status"><AlertTriangle size={17} /><span><strong>Notification URLs in config.yaml were imported.</strong> They are now web-managed destinations below and are no longer read from config.yaml. Remove <code>notifications.urls</code> and <code>notifications.urls_file</code> from config.yaml; a later release refuses to start while they are set.</span></div>}
     {scope.configImport && status?.config_import === 'failed' && <div className="notice warning notification-config-import" role="status"><AlertTriangle size={17} /><span><strong>Notification URLs in config.yaml could not be imported.</strong> EdgeWatch still delivers to them from config.yaml. Check the daemon log or <code>edgewatch health</code>, fix the cause, and restart EdgeWatch.</span></div>}
+
+    {scope.incidentReminders && <div className="panel notification-reminder-settings">
+      <div className="panel-heading">
+        <div>
+          <h2>Incident reminders</h2>
+          <p className="muted">Send a reminder through each job’s selected destinations after every successful scan that still confirms an open incident. This setting does not affect initial incident alerts.</p>
+        </div>
+        <Bell className="muted-icon" size={20} />
+      </div>
+      <label className="switch-row notification-check">
+        <input type="checkbox" checked={destinations.data?.incident_reminders_enabled ?? true} disabled={!canManage || destinations.isLoading || !!destinations.error || !!busy || passwordPrompt !== null} onChange={event => toggleIncidentReminders(event.currentTarget.checked)} aria-label="Send reminders for incidents that remain open" />
+        <span><strong>{destinations.data?.incident_reminders_enabled === false ? 'Reminders off' : 'Reminders on'}</strong><small>Incomplete, failed, cancelled, and timed-out scans do not send reminders.</small></span>
+      </label>
+      {reminderError && <div className="form-error save-feedback" role="alert"><AlertTriangle size={17} />{reminderError}</div>}
+      {reminderFeedback && <div className="success-banner notification-panel-feedback" role="status"><Check size={17} />{reminderFeedback}</div>}
+    </div>}
 
     {canManage && <div className="panel notification-create">
       <div className="panel-heading"><div><h2>Add destination</h2><p className="muted">Paste one complete Shoutrrr URL. It is never returned by the API.</p></div><ShieldCheck className="green-icon" size={20} /></div>

@@ -8,6 +8,7 @@ import {
   getSession,
   listNotificationDestinations,
   toggleNotificationUpdateAlert,
+  updateIncidentReminders,
 } from '../api'
 import { Notifications } from './Notifications'
 import { defaultUnitScope } from '../test/test-utils'
@@ -23,6 +24,7 @@ vi.mock('../api', () => ({
   testNotificationDestination: vi.fn(),
   updateNotificationDestination: vi.fn(),
   toggleNotificationUpdateAlert: vi.fn(),
+  updateIncidentReminders: vi.fn(),
 }))
 
 ;(globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true
@@ -37,6 +39,7 @@ function response(configured: boolean, selected: string[]) {
     destinations,
     status: { deployment: 0, managed: 2, active: 1, locked: 0, key_state: 'ready' },
     update_routing: { configured, destinations: selected },
+    incident_reminders_enabled: true,
   }
 }
 
@@ -61,6 +64,7 @@ describe('notification update-alert routing', () => {
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(listNotificationDestinations).mockResolvedValue(response(false, []))
     vi.mocked(toggleNotificationUpdateAlert).mockResolvedValue({ configured: true, destinations: [] })
+    vi.mocked(updateIncidentReminders).mockResolvedValue({ enabled: false })
   })
 
   afterEach(() => {
@@ -87,6 +91,60 @@ describe('notification update-alert routing', () => {
     await renderPage()
     expect(container.querySelector('input[aria-label="Disable update alerts for Operations"]')).toBeTruthy()
     expect(container.querySelector('input[aria-label="Enable update alerts for Backup"]')).toBeTruthy()
+  })
+
+  it('keeps the default-on reminder switch unchanged until password confirmation succeeds', async () => {
+    await renderPage()
+    const reminder = container.querySelector('input[aria-label="Send reminders for incidents that remain open"]') as HTMLInputElement
+    expect(reminder.checked).toBe(true)
+    act(() => reminder.click())
+    expect(reminder.checked).toBe(true)
+    expect(document.body.querySelector('[role="dialog"]')?.textContent).toContain('Confirm incident reminders')
+    const dialog = document.body.querySelector('[role="dialog"]') as HTMLElement
+    act(() => (dialog.querySelector('button[type="button"]') as HTMLButtonElement).click())
+    expect(updateIncidentReminders).not.toHaveBeenCalled()
+    expect(reminder.checked).toBe(true)
+  })
+
+  it('shows the reminder setting read-only without notification management permission', async () => {
+    vi.mocked(getSession).mockResolvedValue({ role: 'viewer', user_id: 'viewer', username: 'viewer', permissions: ['notifications.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><Notifications /></QueryClientProvider>)
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.querySelector('input[aria-label="Send reminders for incidents that remain open"]')).toBeTruthy())
+    const reminder = container.querySelector('input[aria-label="Send reminders for incidents that remain open"]') as HTMLInputElement
+    expect(reminder.disabled).toBe(true)
+    expect(reminder.checked).toBe(true)
+  })
+
+  it('saves a disabled reminder setting and rolls back a failed change', async () => {
+    vi.mocked(listNotificationDestinations).mockResolvedValue({ ...response(true, []), incident_reminders_enabled: false })
+    vi.mocked(updateIncidentReminders).mockRejectedValueOnce(new Error('setting unavailable'))
+    await renderPage()
+    const reminder = container.querySelector('input[aria-label="Send reminders for incidents that remain open"]') as HTMLInputElement
+    expect(reminder.checked).toBe(false)
+    act(() => reminder.click())
+    let dialog = document.body.querySelector('[role="dialog"]') as HTMLElement
+    setInputValue(dialog.querySelector('input[type="password"]') as HTMLInputElement, 'fixture-password')
+    await act(async () => {
+      ;(dialog.querySelector('button[type="submit"]') as HTMLButtonElement).click()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(container.querySelector('.notification-reminder-settings [role="alert"]')?.textContent).toContain('setting unavailable'))
+    expect(reminder.checked).toBe(false)
+    vi.mocked(updateIncidentReminders).mockResolvedValue({ enabled: true })
+    vi.mocked(listNotificationDestinations).mockResolvedValue({ ...response(true, []), incident_reminders_enabled: true })
+    act(() => reminder.click())
+    dialog = document.body.querySelector('[role="dialog"]') as HTMLElement
+    setInputValue(dialog.querySelector('input[type="password"]') as HTMLInputElement, 'fixture-password')
+    await act(async () => {
+      ;(dialog.querySelector('button[type="submit"]') as HTMLButtonElement).click()
+      await Promise.resolve()
+    })
+    await vi.waitFor(() => expect(reminder.checked).toBe(true))
+    expect(container.querySelector('.notification-reminder-settings [role="status"]')?.textContent).toContain('Incident reminders enabled.')
+    expect(updateIncidentReminders).toHaveBeenNthCalledWith(2, true, 'fixture-password')
   })
 
   it('preserves an explicitly empty update-alert selection', async () => {

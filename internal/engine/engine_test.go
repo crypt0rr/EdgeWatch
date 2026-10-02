@@ -1365,7 +1365,7 @@ func TestNewPortServiceIncidentsAcceptInEitherOrder(t *testing.T) {
 				// A scan between the two decisions must keep the reported service
 				// incident open rather than relearning it and emitting a false
 				// recovery for a fingerprint that never changed.
-				if events := run(observe(ssh, http)); len(events) != 0 {
+				if events := run(observe(ssh, http)); len(events) != 1 || events[0].Type != "changes-reminder" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != serviceKey {
 					t.Fatalf("scan between acceptances emitted events: %#v", events)
 				}
 				state, err := defaultTenant(db).RuntimeState(ctx, record.ID)
@@ -1496,7 +1496,7 @@ func TestAcceptedPortServiceIsNotLearnedAfterSuppressionOrRecovery(t *testing.T)
 				}
 				expect("fingerprint reported again", run(ssh, http), reported)
 				for i := 0; i < 2; i++ {
-					expect("unchanged observation", run(ssh, http))
+					expect("unchanged observation", run(ssh, http), "changes-reminder "+serviceKey+" not-open->http")
 				}
 				if got := baseline8080(); got != "" {
 					t.Fatalf("service of the accepted port entered the baseline without a decision: %q", got)

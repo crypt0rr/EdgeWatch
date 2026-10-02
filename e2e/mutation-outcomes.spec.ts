@@ -64,6 +64,30 @@ test('inline update notification toggles expose failure and success outcomes', a
   ])
 })
 
+test('incident reminder toggle saves only after password confirmation', async ({ page }, testInfo) => {
+  test.skip(!desktopOnly(testInfo), 'Mutation journeys run once on desktop; responsive behavior is covered separately.')
+  const controls = await mockConsole(page)
+  await page.goto('/notifications')
+  const toggle = page.getByRole('checkbox', { name: 'Send reminders for incidents that remain open' })
+  await expect(toggle).toBeChecked()
+
+  controls.failNext('incident-reminders')
+  await toggle.click()
+  let dialog = page.getByRole('dialog', { name: 'Confirm incident reminders' })
+  await dialog.getByLabel('Account password').fill('fixture-password')
+  await dialog.getByRole('button', { name: 'Disable reminders' }).click()
+  await expect(page.getByRole('alert')).toContainText('fixture incident-reminders failed')
+  await expect(toggle).toBeChecked()
+
+  await toggle.click()
+  dialog = page.getByRole('dialog', { name: 'Confirm incident reminders' })
+  await dialog.getByLabel('Account password').fill('fixture-password')
+  await dialog.getByRole('button', { name: 'Disable reminders' }).click()
+  await expect(toggle).not.toBeChecked()
+  expect(controls.payloads['incident-reminders']).toHaveLength(2)
+  expect(controls.payloads['incident-reminders'][1]).toEqual({ enabled: false, password: 'fixture-password' })
+})
+
 test('scanner profile validation exposes failure and success outcomes', async ({ page }, testInfo) => {
   test.skip(!desktopOnly(testInfo), 'Mutation journeys run once on desktop; responsive behavior is covered separately.')
   const controls = await mockConsole(page)

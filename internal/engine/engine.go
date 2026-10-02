@@ -47,7 +47,7 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 	if scan == nil {
 		return nil, fmt.Errorf("scan is required")
 	}
-	return e.Store.System().FinalizeManagedScan(ctx, scan, jobID, scan.ConfigHash, destinations, func(state *model.JobState, current *model.Scan) ([]model.Event, error) {
+	return e.Store.System().FinalizeManagedScanWithReminderSetting(ctx, scan, jobID, scan.ConfigHash, destinations, func(state *model.JobState, current *model.Scan, remindersEnabled bool) ([]model.Event, error) {
 		if current.Status == "success" {
 			MarkIncompleteScan(current)
 		}
@@ -56,7 +56,7 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 				current.BaselineScanID = state.BaselineScanID
 				current.BaselineConfigHash = state.BaselineConfigHash
 			}
-			events, changes, err := processSuccessWithChanges(state, job, *current)
+			events, changes, err := processSuccessWithChangesAndReminders(state, job, *current, remindersEnabled)
 			if err != nil {
 				return nil, err
 			}
@@ -96,6 +96,15 @@ func processSuccess(state *model.JobState, job config.Job, scan model.Scan) ([]m
 // events prevents immutable scan history from diverging when service
 // fingerprints are learned as part of the same transaction.
 func processSuccessWithChanges(state *model.JobState, job config.Job, scan model.Scan) ([]model.Event, []model.Change, error) {
+	// This legacy entry point also serves config-only scans, which have no
+	// business-unit notification menu. Managed scans pass the stored preference.
+	return processSuccessWithChangesAndReminders(state, job, scan, false)
+}
+
+func processSuccessWithChangesAndReminders(state *model.JobState, job config.Job, scan model.Scan, remindersEnabled bool) ([]model.Event, []model.Change, error) {
+	// A partial or explicitly incomplete result may be retained for diagnosis,
+	// but it must never trigger a recurring reminder.
+	remindersEnabled = remindersEnabled && scan.Status == "success"
 	// Port-expression normalization changes the representation but not the
 	// effective monitored set. When a persisted legacy job still matches its
 	// old raw-expression hash, advance only the baseline's scope marker to the
@@ -147,7 +156,27 @@ func processSuccessWithChanges(state *model.JobState, job config.Job, scan model
 		}
 		changes = filtered
 	}
+	previous := make(map[string]model.Incident, len(state.Incidents))
+	if remindersEnabled {
+		for key, incident := range state.Incidents {
+			previous[key] = incident
+		}
+	}
 	events := applyChanges(state, job.Name, scan.ID, changes, job.Change.Confirmations, now)
+	if remindersEnabled {
+		var reminded []model.Change
+		for _, change := range changes {
+			old, wasOpen := previous[change.Key]
+			current, stillOpen := state.Incidents[change.Key]
+			if wasOpen && stillOpen && old.Change.New == change.New && current.Change.New == change.New && current.LastSeenAt.Equal(now) {
+				reminded = append(reminded, current.Change)
+			}
+		}
+		if len(reminded) > 0 {
+			sort.Slice(reminded, func(i, j int) bool { return reminded[i].Key < reminded[j].Key })
+			events = append(events, model.Event{Type: "changes-reminder", Job: job.Name, ScanID: scan.ID, Message: fmt.Sprintf("Reminder: %d baseline change(s) remain open", len(reminded)), Changes: reminded, CreatedAt: now})
+		}
+	}
 	if state.BaselineConfigHash != scan.ConfigHash {
 		candidateEvents := advanceCandidate(state, scan, job.Baseline.Samples, true)
 		events = append(events, candidateEvents...)
@@ -1248,7 +1277,7 @@ func FormatEvent(e model.Event) string {
 		b.WriteString("🟢 ")
 	case e.Type == "scan-anomaly" || e.Type == "scan-incomplete":
 		b.WriteString("⚠️ ")
-	case e.Type == "changes-detected" && hasCriticalChange(e.Changes):
+	case (e.Type == "changes-detected" || e.Type == "changes-reminder") && hasCriticalChange(e.Changes):
 		b.WriteString("🔴 ")
 	}
 	b.WriteString("EdgeWatch: ")

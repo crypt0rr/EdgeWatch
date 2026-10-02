@@ -122,6 +122,7 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
             }
             break
           case 'changes-detected':
+          case 'changes-reminder':
           case 'incident-opened':
           case 'incident-closed':
           case 'incident-accepted':

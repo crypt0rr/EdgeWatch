@@ -23,8 +23,8 @@ type notificationPayload struct {
 }
 
 // listNotificationDestinations lists the destinations of the session's
-// tenant, their status, and the tenant's update alert routing. Another
-// tenant's destinations and routing are never shown.
+// tenant, their status, update alert routing, and incident reminder setting.
+// Another tenant's notification settings are never shown.
 func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Request, ts *store.TenantStore) {
 	w.Header().Set("Cache-Control", "no-store")
 	notifier := s.App.Notifier.Tenant(ts)
@@ -59,7 +59,46 @@ func (s *Server) listNotificationDestinations(w http.ResponseWriter, r *http.Req
 		destinations = []string{}
 	}
 	routing := map[string]any{"configured": current.Configured, "destinations": destinations}
-	writeJSON(w, http.StatusOK, map[string]any{"destinations": views, "status": status, "update_routing": routing})
+	remindersEnabled, err := ts.IncidentRemindersEnabled(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "notification_failed", "incident reminder setting could not be loaded", nil)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"destinations": views, "status": status, "update_routing": routing, "incident_reminders_enabled": remindersEnabled})
+}
+
+type incidentReminderPayload struct {
+	Enabled  *bool  `json:"enabled"`
+	Password string `json:"password"`
+}
+
+func (s *Server) updateIncidentReminders(w http.ResponseWriter, r *http.Request, session store.Session, ts *store.TenantStore) {
+	w.Header().Set("Cache-Control", "no-store")
+	var input incidentReminderPayload
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "validation_failed", "enabled must be a boolean", map[string]string{"enabled": "choose whether incident reminders are enabled"})
+		return
+	}
+	if strings.TrimSpace(input.Password) == "" {
+		writeError(w, http.StatusBadRequest, "password_required", "account password confirmation is required", map[string]string{"password": "password confirmation is required"})
+		return
+	}
+	if err := s.Auth.ConfirmPasswordForUser(r.Context(), r, session.UserID, input.Password); err != nil {
+		s.writeNotificationAuthError(w, err)
+		return
+	}
+	if err := ts.SetIncidentRemindersEnabled(r.Context(), *input.Enabled, store.AuditEntry{Action: "notifications.incident_reminders_changed", Detail: "incident reminder setting changed", ActorUserID: session.UserID, ActorUsername: session.Username}); err != nil {
+		if s.writeAuditUnavailable(w, err, "notifications.incident_reminders_changed") {
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "notification", "incident reminder setting could not be saved", nil)
+		return
+	}
+	s.broadcastTo(context.WithoutCancel(r.Context()), audienceTenant(ts), map[string]any{"type": "notification.changed"})
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": *input.Enabled})
 }
 
 type updateNotificationRoutingPayload struct {

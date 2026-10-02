@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 58
+const schemaVersion = 59
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -67,6 +67,9 @@ var conditionalMigrationStatements = map[int]func(*sql.Tx) ([]string, error){
 	// Schema 54 swaps the latest host projection for a tenant-keyed table
 	// while it is still keyed by address.
 	54: migration54ConditionalStatements,
+	// Schema 59's column may already be present in tests that reconstruct an
+	// older migration from a newer template.
+	59: migration59ConditionalStatements,
 }
 
 // newerSchemaError is the refusal for a database that a newer release has
@@ -1279,6 +1282,8 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 		// remain searchable after the prioritized index format change. See
 		// migration58.go.
 		58: migration58Statements(),
+		// Per-business-unit incident reminders default on for existing and new installations.
+		59: {},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an

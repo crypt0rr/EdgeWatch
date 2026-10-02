@@ -4,9 +4,10 @@ import { mockConsole } from './mock-console'
 const timestamp = '2026-09-29T10:00:00Z'
 const longValue = `gateway-${'customer-facing-api-cluster-'.repeat(7)}example.internal`
 
-async function expectNoHorizontalScroll(page: Page) {
+async function expectNoHorizontalScroll(page: Page, context = '') {
   const widths = await page.evaluate(() => ({ client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }))
-  expect(widths.scroll, `page scroll width ${widths.scroll} exceeds viewport ${widths.client}`).toBeLessThanOrEqual(widths.client)
+  const location = context ? ` on ${context}` : ''
+  expect(widths.scroll, `page scroll width ${widths.scroll} exceeds viewport ${widths.client}${location}`).toBeLessThanOrEqual(widths.client)
 }
 
 test.describe('responsive issue regressions', () => {
@@ -295,7 +296,7 @@ test.describe('responsive issue regressions', () => {
       for (const width of [320, 375, 414, 768, 844, 1280, 1920]) {
         await page.setViewportSize({ width, height: 1024 })
         await page.goto(path)
-        await expectNoHorizontalScroll(page)
+        await expectNoHorizontalScroll(page, `${path} at ${width}px`)
       }
     }
 

@@ -75,6 +75,10 @@ func requiredPermission(path, method string) string {
 		if method == http.MethodPut || method == http.MethodPatch {
 			return auth.PermissionNotificationsManage
 		}
+	case path == "/notifications/incident-reminders":
+		if method == http.MethodPut {
+			return auth.PermissionNotificationsManage
+		}
 	case isUsersPath(path):
 		return requiredUsersPermission(path, method)
 	case path == "/public-dashboard":
@@ -519,6 +523,7 @@ var apiRoutes = []apiRoute{
 	{Method: http.MethodGet, Template: "/notifications/options", Permission: auth.PermissionNotificationOptions, Example: "/notifications/options"},
 	{Method: http.MethodPut, Template: "/notifications/update-routing", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/update-routing"},
 	{Method: http.MethodPatch, Template: "/notifications/update-routing", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/update-routing"},
+	{Method: http.MethodPut, Template: "/notifications/incident-reminders", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/incident-reminders"},
 	{Method: http.MethodGet, Template: "/notifications/destinations", Permission: auth.PermissionNotificationOptions, Example: "/notifications/destinations"},
 	{Method: http.MethodPost, Template: "/notifications/destinations", Permission: auth.PermissionNotificationsManage, Mutates: true, Example: "/notifications/destinations"},
 	{Method: http.MethodGet, Template: "/notifications/destinations/{id}", Permission: auth.PermissionNotificationOptions, Example: "/notifications/destinations/destination-1"},

@@ -69,8 +69,8 @@ func TestMigration58RebuildsPrioritizedHostSearchIndexes(t *testing.T) {
 		t.Fatalf("upgrade from schema 57: %v", err)
 	}
 	t.Cleanup(func() { _ = upgraded.Close() })
-	if version := countRows(t, upgraded.DB, `PRAGMA user_version`); version != 58 {
-		t.Fatalf("schema version = %d, want 58", version)
+	if version := countRows(t, upgraded.DB, `PRAGMA user_version`); version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
 	}
 
 	latest, err := defaultTenant(upgraded).ListLatestScanHostsPage(ctx, "lateuniqueservice", "", nil, 10, 0)

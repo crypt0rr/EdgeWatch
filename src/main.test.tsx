@@ -144,7 +144,7 @@ describe('application shell', () => {
     act(() => stream.emit('application.update_status'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['admin-status'] })
     act(() => {
-      for (const type of ['changes-detected', 'incident-opened', 'incident-closed', 'incident-accepted', 'incident-suppressed']) stream.emit(type, 'job-9')
+      for (const type of ['changes-detected', 'changes-reminder', 'incident-opened', 'incident-closed', 'incident-accepted', 'incident-suppressed']) stream.emit(type, 'job-9')
       for (const type of ['job.created', 'job.updated', 'job.archived', 'job.restored', 'job.deleted']) stream.emit(type, 'job-9')
       stream.emit('notification.changed')
       stream.emit('stream_limit')

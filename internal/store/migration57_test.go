@@ -60,6 +60,9 @@ func TestMigration57TakesTheAutomaticCeilingAway(t *testing.T) {
 	if _, err := s.DB.Exec(`ALTER TABLE tenants DROP COLUMN high_cost_granted`); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := s.DB.Exec(`ALTER TABLE tenants DROP COLUMN incident_reminders_enabled`); err != nil {
+		t.Fatal(err)
+	}
 	stamp := sqliteTimestamp(time.Now())
 	insertAudit := func(tenant any, action string) {
 		t.Helper()

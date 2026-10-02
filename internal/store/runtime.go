@@ -612,6 +612,18 @@ func migrateLegacyScopeHashTx(ctx context.Context, tx *sql.Tx, jobID, legacyHash
 // transaction, so a disable either commits first and is seen here, or
 // commits after this scan.
 func (ss *SystemStore) FinalizeManagedScan(ctx context.Context, scan *model.Scan, jobID, securityHash string, destinations []string, fn func(*model.JobState, *model.Scan) ([]model.Event, error)) ([]model.Event, error) {
+	if fn == nil {
+		return nil, errors.New("scan finalizer is required")
+	}
+	return ss.FinalizeManagedScanWithReminderSetting(ctx, scan, jobID, securityHash, destinations, func(state *model.JobState, current *model.Scan, _ bool) ([]model.Event, error) {
+		return fn(state, current)
+	})
+}
+
+// FinalizeManagedScanWithReminderSetting reads the unit's current preference
+// inside the same transaction that records the scan and its notification
+// outbox, so a settings change and scan completion have a definite order.
+func (ss *SystemStore) FinalizeManagedScanWithReminderSetting(ctx context.Context, scan *model.Scan, jobID, securityHash string, destinations []string, fn func(*model.JobState, *model.Scan, bool) ([]model.Event, error)) ([]model.Event, error) {
 	if scan == nil {
 		return nil, errors.New("scan is required")
 	}
@@ -629,7 +641,8 @@ func (ss *SystemStore) FinalizeManagedScan(ctx context.Context, scan *model.Scan
 
 	var raw []byte
 	var tenantState string
-	if err := tx.QueryRowContext(ctx, `SELECT j.definition_json,t.state FROM jobs AS j JOIN tenants AS t ON t.id=j.tenant_id WHERE j.id=?`, jobID).Scan(&raw, &tenantState); err != nil {
+	var reminderEnabled bool
+	if err := tx.QueryRowContext(ctx, `SELECT j.definition_json,t.state,t.incident_reminders_enabled FROM jobs AS j JOIN tenants AS t ON t.id=j.tenant_id WHERE j.id=?`, jobID).Scan(&raw, &tenantState, &reminderEnabled); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("%w: job %s", ErrNotFound, jobID)
 		}
@@ -701,7 +714,7 @@ func (ss *SystemStore) FinalizeManagedScan(ctx context.Context, scan *model.Scan
 	if err != nil {
 		return nil, err
 	}
-	events, err := fn(&state, scan)
+	events, err := fn(&state, scan, reminderEnabled)
 	if err != nil {
 		return nil, err
 	}

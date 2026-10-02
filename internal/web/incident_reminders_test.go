@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/crypt0rr/edgewatch/internal/auth"
 )
@@ -63,5 +65,28 @@ func TestIncidentReminderSettingRequiresAdministratorPassword(t *testing.T) {
 	var audits int
 	if err := db.DB.QueryRow(`SELECT COUNT(*) FROM security_audit WHERE action='notifications.incident_reminders_changed'`).Scan(&audits); err != nil || audits != 1 {
 		t.Fatalf("audit count=%d, %v", audits, err)
+	}
+}
+
+func TestIncidentReminderSettingAPIIsRouted(t *testing.T) {
+	server, db, admin := newUsersTestServer(t)
+	ctx := context.Background()
+	const raw, csrf = "incident-reminder-route-session", "incident-reminder-route-csrf"
+	now := time.Now().UTC()
+	if err := db.CreateSessionForUserWithAudit(ctx, admin.UserID, digest(raw), csrf, now, now.Add(time.Hour), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPut, "/api/v1/notifications/incident-reminders", strings.NewReader(`{"enabled":false,"password":"administrator password"}`))
+	request.RemoteAddr = "127.0.0.1:9100"
+	request.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: raw})
+	request.Header.Set("X-CSRF-Token", csrf)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	server.api(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("incident reminder route status = %d: %s", response.Code, response.Body.String())
+	}
+	if enabled, err := defaultTenantStore(server).IncidentRemindersEnabled(ctx); err != nil || enabled {
+		t.Fatalf("routed setting = %t, %v; want disabled", enabled, err)
 	}
 }

@@ -58,6 +58,18 @@ func TestIncidentRemindersDefaultEnabledAndAudited(t *testing.T) {
 	}
 }
 
+func TestIncidentRemindersMissingTenantReturnsNotFound(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	ts := s.Tenant(TenantScope{id: "00000000-0000-4000-8000-000000000099"})
+	if _, err := ts.IncidentRemindersEnabled(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing tenant reminder read error = %v, want ErrNotFound", err)
+	}
+	if err := ts.SetIncidentRemindersEnabled(ctx, false, AuditEntry{}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing tenant reminder write error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestMigration59EnablesReminders(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()

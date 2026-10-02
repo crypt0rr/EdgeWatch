@@ -14,7 +14,7 @@ import (
 
 func TestIncidentReminderOnEverySuccessfulRepeat(t *testing.T) {
 	job := config.Job{Name: "reminders", Baseline: config.Baseline{Samples: 1}, Change: config.Change{Confirmations: 1}}
-	baseline := snapshotWithOpenPorts(80, 443)
+	baseline := snapshotWithOpenPorts(80, 443, 587)
 	state := model.JobState{Baseline: &baseline, Pending: map[string]model.Pending{}, Incidents: map[string]model.Incident{}, Suppressed: map[string]int{}}
 	observed := snapshotWithOpenPorts(80)
 	run := func(id string, enabled bool) []model.Event {
@@ -30,7 +30,7 @@ func TestIncidentReminderOnEverySuccessfulRepeat(t *testing.T) {
 	}
 	for _, id := range []string{"second", "third"} {
 		events := run(id, true)
-		if len(events) != 1 || events[0].Type != "changes-reminder" || events[0].ScanID != id || len(events[0].Changes) != 1 || events[0].Changes[0].Port != 443 {
+		if len(events) != 1 || events[0].Type != "changes-reminder" || events[0].ScanID != id || len(events[0].Changes) != 2 || events[0].Changes[0].Port != 443 || events[0].Changes[1].Port != 587 {
 			t.Fatalf("repeat scan %s: %#v", id, events)
 		}
 	}

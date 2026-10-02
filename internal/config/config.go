@@ -1481,6 +1481,9 @@ func validateTarget(target string) error {
 	if len(target) > 253 || strings.ContainsAny(target, " /\\\t\n\r") {
 		return fmt.Errorf("invalid target %q", target)
 	}
+	if isDottedNumericTarget(target) {
+		return fmt.Errorf("malformed IP target %q", target)
+	}
 	for _, label := range strings.Split(target, ".") {
 		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
 			return fmt.Errorf("invalid target %q", target)
@@ -1492,6 +1495,24 @@ func validateTarget(target string) error {
 		}
 	}
 	return nil
+}
+
+func isDottedNumericTarget(target string) bool {
+	labels := strings.Split(target, ".")
+	if len(labels) < 2 {
+		return false
+	}
+	for _, label := range labels {
+		if label == "" {
+			return false
+		}
+		for _, char := range label {
+			if char < '0' || char > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // ParseTargetExclusions validates and parses deployment target exclusions.

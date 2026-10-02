@@ -11,6 +11,14 @@ describe('target helpers', () => {
     expect(targetKind('not a target')).toBe('Target')
   })
 
+  it('does not label malformed dotted numeric targets as IP or DNS', () => {
+    expect(targetKind('192.168.1.300')).toBe('Target')
+    expect(targetKind('256.1.1.1')).toBe('Target')
+    expect(targetKind('10.0.0')).toBe('Target')
+    expect(targetKind('001.2.3.4')).toBe('Target')
+    expect(targetKind('255.255.255.255')).toBe('IP')
+  })
+
   it('warns about broad and invalid CIDRs', () => {
     expect(cidrWarning('10.0.0.0/8')).toContain('many hosts')
     expect(cidrWarning('10.0.0.0/not-a-prefix')).toContain('Check the CIDR')

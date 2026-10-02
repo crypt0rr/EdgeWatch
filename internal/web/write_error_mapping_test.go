@@ -286,6 +286,25 @@ func TestScannerProfileWritesMapStorageFailuresAndMissingProfiles(t *testing.T) 
 	}
 }
 
+func TestCreateJobRejectsMalformedDottedNumericTarget(t *testing.T) {
+	ctx := context.Background()
+	server, db, admin := newUsersTestServer(t)
+	request := jobWriteRequest(http.MethodPost, "/api/v1/jobs", `{"name":"invalid-target","schedule":"0 * * * *","timezone":"UTC","targets":["192.168.1.300"],"tcp":{"ports":"22","mode":"connect","engine":"nmap"}}`, "invalid-target")
+	recorder := httptest.NewRecorder()
+	server.createJob(recorder, request, admin, defaultTenantStore(server))
+	body := decodeAPIError(t, recorder)
+	if recorder.Code != http.StatusBadRequest || body.Error.Code != "validation_failed" {
+		t.Fatalf("malformed target create = %d %#v", recorder.Code, body.Error)
+	}
+	jobs, err := defaultTenant(db).ListJobs(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 0 {
+		t.Fatalf("malformed target created a job: %#v", jobs)
+	}
+}
+
 func TestJobNamesAreBoundedAndRejectControlCharacters(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)

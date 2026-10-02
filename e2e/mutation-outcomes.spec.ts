@@ -88,6 +88,31 @@ test('incident reminder toggle saves only after password confirmation', async ({
   expect(controls.payloads['incident-reminders'][1]).toEqual({ enabled: false, password: 'fixture-password' })
 })
 
+test('incident reminder cadence saves only after password confirmation', async ({ page }, testInfo) => {
+  test.skip(!desktopOnly(testInfo), 'Mutation journeys run once on desktop; responsive behavior is covered separately.')
+  const controls = await mockConsole(page)
+  await page.goto('/notifications')
+  const cadence = page.getByRole('combobox', { name: 'Reminder cadence' })
+  await expect(cadence).toHaveValue('every_scan')
+  controls.failNext('incident-reminders')
+  await cadence.selectOption('daily')
+  let dialog = page.getByRole('dialog', { name: 'Confirm reminder cadence' })
+  await dialog.getByLabel('Account password').fill('fixture-password')
+  await dialog.getByRole('button', { name: 'Save cadence' }).click()
+  await expect(page.getByRole('alert')).toContainText('fixture incident-reminders failed')
+  await expect(cadence).toHaveValue('every_scan')
+
+  await cadence.selectOption('daily')
+  dialog = page.getByRole('dialog', { name: 'Confirm reminder cadence' })
+  await dialog.getByLabel('Account password').fill('fixture-password')
+  await dialog.getByRole('button', { name: 'Save cadence' }).click()
+  await expect(cadence).toHaveValue('daily')
+  expect(controls.payloads['incident-reminders']).toEqual([
+    { cadence: 'daily', password: 'fixture-password' },
+    { cadence: 'daily', password: 'fixture-password' },
+  ])
+})
+
 test('scanner profile validation exposes failure and success outcomes', async ({ page }, testInfo) => {
   test.skip(!desktopOnly(testInfo), 'Mutation journeys run once on desktop; responsive behavior is covered separately.')
   const controls = await mockConsole(page)

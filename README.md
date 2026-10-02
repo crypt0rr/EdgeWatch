@@ -471,12 +471,14 @@ Each job can select its own destinations. On the **Notifications** page,
 - password confirmation is required for every routing or credential change.
 
 **Incident reminders** is a separate business-unit setting on the same page,
-enabled by default. After each fully successful scan that still confirms an
-open incident, EdgeWatch sends one reminder listing the persistent changes to
-that job's selected destinations. New incidents continue to get their initial
-alert; suppressed incidents and incomplete, failed, cancelled, or timed-out
-scans do not generate reminders. An administrator can turn reminders off or on
-with password confirmation without changing incident detection or job routing.
+enabled by default. After a fully successful scan that still confirms an open
+incident, EdgeWatch sends a grouped reminder to that job's selected
+destinations. New incidents continue to get their initial alert; suppressed
+incidents and incomplete, failed, cancelled, or timed-out scans do not generate
+reminders. Administrators can turn reminders off or choose a minimum cadence
+per job: every successful scan (the default), hourly, every six hours, or daily.
+The cadence survives restarts and does not change incident detection or job
+routing.
 
 Deleting a destination removes it from every job and from the update-alert
 routing in the same change. Each affected job gets a new revision and an
@@ -930,7 +932,7 @@ needs one. Print a new platform setup token with `edgewatch admin
 platform-setup-token`; while no administrator exists, the daemon prints a new
 setup token when it starts.
 
-The current schema is version 59. Database migrations are forward-only. An
+The current schema is version 60. Database migrations are forward-only. An
 older image must not be pointed at a database already upgraded by a newer
 image; restore the matching pre-upgrade ./data backup if a rollback is
 required. The daemon and the commands that write to the database (admin, scan,

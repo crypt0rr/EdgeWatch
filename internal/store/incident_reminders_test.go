@@ -34,6 +34,35 @@ func init() {
 			t.Fatalf("tenant B's reminders were not disabled: %t, %v", got, err)
 		}
 	}}
+	tenantStoreLeakCases["IncidentReminderSettings"] = tenantLeakCase{run: func(t *testing.T, f tenantFixture) {
+		ctx := context.Background()
+		cadence := IncidentReminderCadenceDaily
+		if _, err := f.store.Tenant(f.a).SetIncidentReminderSettings(ctx, nil, &cadence, AuditEntry{}); err != nil {
+			t.Fatal(err)
+		}
+		for _, check := range []struct {
+			scope   TenantScope
+			cadence string
+		}{{f.a, IncidentReminderCadenceDaily}, {f.b, IncidentReminderCadenceEveryScan}} {
+			got, err := f.store.Tenant(check.scope).IncidentReminderSettings(ctx)
+			if err != nil || got.Cadence != check.cadence {
+				t.Errorf("tenant %s: cadence=%q, %v; want %q", check.scope.ID(), got.Cadence, err, check.cadence)
+			}
+		}
+	}}
+	tenantStoreLeakCases["SetIncidentReminderSettings"] = tenantLeakCase{writes: true, run: func(t *testing.T, f tenantFixture) {
+		ctx := context.Background()
+		cadence := IncidentReminderCadenceHourly
+		if _, err := f.store.Tenant(f.b).SetIncidentReminderSettings(ctx, nil, &cadence, AuditEntry{}); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := f.store.Tenant(f.a).IncidentReminderSettings(ctx); err != nil || got.Cadence != IncidentReminderCadenceEveryScan {
+			t.Fatalf("tenant B changed A's cadence: %q, %v", got.Cadence, err)
+		}
+		if got, err := f.store.Tenant(f.b).IncidentReminderSettings(ctx); err != nil || got.Cadence != cadence {
+			t.Fatalf("tenant B cadence=%q, %v; want %q", got.Cadence, err, cadence)
+		}
+	}}
 }
 
 func TestIncidentRemindersDefaultEnabledAndAudited(t *testing.T) {
@@ -42,6 +71,9 @@ func TestIncidentRemindersDefaultEnabledAndAudited(t *testing.T) {
 	ts := defaultTenant(s)
 	if enabled, err := ts.IncidentRemindersEnabled(ctx); err != nil || !enabled {
 		t.Fatalf("default reminders=%t, %v", enabled, err)
+	}
+	if settings, err := ts.IncidentReminderSettings(ctx); err != nil || !settings.Enabled || settings.Cadence != IncidentReminderCadenceEveryScan {
+		t.Fatalf("default reminder settings=%+v, %v", settings, err)
 	}
 	if err := ts.SetIncidentRemindersEnabled(ctx, false, AuditEntry{Action: "notifications.incident_reminders_changed", Detail: "disabled"}); err != nil {
 		t.Fatal(err)
@@ -56,6 +88,17 @@ func TestIncidentRemindersDefaultEnabledAndAudited(t *testing.T) {
 	if err := s.Tenant(TenantScope{}).SetIncidentRemindersEnabled(ctx, true, AuditEntry{}); !errors.Is(err, ErrNoTenantScope) {
 		t.Fatalf("empty scope changed reminders: %v", err)
 	}
+	cadence := IncidentReminderCadenceDaily
+	if _, err := ts.SetIncidentReminderSettings(ctx, nil, &cadence, AuditEntry{}); err != nil {
+		t.Fatal(err)
+	}
+	if settings, err := ts.IncidentReminderSettings(ctx); err != nil || settings.Enabled || settings.Cadence != cadence {
+		t.Fatalf("partial update settings=%+v, %v; want disabled, %q", settings, err, cadence)
+	}
+	invalid := "weekly"
+	if _, err := ts.SetIncidentReminderSettings(ctx, nil, &invalid, AuditEntry{}); err == nil {
+		t.Fatal("invalid reminder cadence was accepted")
+	}
 }
 
 func TestIncidentRemindersMissingTenantReturnsNotFound(t *testing.T) {
@@ -67,6 +110,36 @@ func TestIncidentRemindersMissingTenantReturnsNotFound(t *testing.T) {
 	}
 	if err := ts.SetIncidentRemindersEnabled(ctx, false, AuditEntry{}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing tenant reminder write error = %v, want ErrNotFound", err)
+	}
+	if _, err := ts.IncidentReminderSettings(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing tenant reminder settings error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestMigration60DefaultsReminderCadenceToEveryScan(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if _, err := s.DB.ExecContext(ctx, `ALTER TABLE tenants DROP COLUMN incident_reminder_cadence`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `PRAGMA user_version=59`); err != nil {
+		t.Fatal(err)
+	}
+	path := s.Path
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer upgraded.Close()
+	settings, err := defaultTenant(upgraded).IncidentReminderSettings(ctx)
+	if err != nil || !settings.Enabled || settings.Cadence != IncidentReminderCadenceEveryScan {
+		t.Fatalf("upgraded reminder settings=%+v, %v", settings, err)
+	}
+	if version := countRows(t, upgraded.DB, `PRAGMA user_version`); version != schemaVersion {
+		t.Fatalf("upgraded schema=%d, want %d", version, schemaVersion)
 	}
 }
 

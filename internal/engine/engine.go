@@ -48,7 +48,7 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 	if scan == nil {
 		return nil, fmt.Errorf("scan is required")
 	}
-	return e.Store.System().FinalizeManagedScanWithReminderSetting(ctx, scan, jobID, scan.ConfigHash, destinations, func(state *model.JobState, current *model.Scan, remindersEnabled bool) ([]model.Event, error) {
+	return e.Store.System().FinalizeManagedScanWithReminderSettings(ctx, scan, jobID, scan.ConfigHash, destinations, func(state *model.JobState, current *model.Scan, reminderSettings store.IncidentReminderSettings) ([]model.Event, error) {
 		if current.Status == "success" {
 			MarkIncompleteScan(current)
 		}
@@ -57,7 +57,7 @@ func (e *Engine) FinalizeManagedScan(ctx context.Context, jobID string, job conf
 				current.BaselineScanID = state.BaselineScanID
 				current.BaselineConfigHash = state.BaselineConfigHash
 			}
-			events, changes, err := processSuccessWithChangesAndReminders(state, job, *current, remindersEnabled)
+			events, changes, err := processSuccessWithReminderSettings(state, job, *current, reminderSettings)
 			if err != nil {
 				return nil, err
 			}
@@ -103,10 +103,14 @@ func processSuccessWithChanges(state *model.JobState, job config.Job, scan model
 }
 
 func processSuccessWithChangesAndReminders(state *model.JobState, job config.Job, scan model.Scan, remindersEnabled bool) ([]model.Event, []model.Change, error) {
+	return processSuccessWithReminderSettings(state, job, scan, store.IncidentReminderSettings{Enabled: remindersEnabled, Cadence: store.IncidentReminderCadenceEveryScan})
+}
+
+func processSuccessWithReminderSettings(state *model.JobState, job config.Job, scan model.Scan, reminderSettings store.IncidentReminderSettings) ([]model.Event, []model.Change, error) {
 	completeHostDiscoveryStates(&scan.Snapshot)
 	// A partial or explicitly incomplete result may be retained for diagnosis,
 	// but it must never trigger a recurring reminder.
-	remindersEnabled = remindersEnabled && scan.Status == "success"
+	remindersEnabled := reminderSettings.Enabled && scan.Status == "success"
 	// Port-expression normalization changes the representation but not the
 	// effective monitored set. When a persisted legacy job still matches its
 	// old raw-expression hash, advance only the baseline's scope marker to the
@@ -173,13 +177,14 @@ func processSuccessWithChangesAndReminders(state *model.JobState, job config.Job
 		changes = filtered
 	}
 	previous := make(map[string]model.Incident, len(state.Incidents))
-	if remindersEnabled {
+	sendRemindersNow := remindersEnabled && incidentReminderDue(state.LastIncidentReminderAt, reminderSettings.Cadence, now)
+	if sendRemindersNow {
 		for key, incident := range state.Incidents {
 			previous[key] = incident
 		}
 	}
 	events := applyChanges(state, job.Name, scan.ID, changes, job.Change.Confirmations, now)
-	if remindersEnabled {
+	if sendRemindersNow {
 		var reminded []model.Change
 		for _, change := range changes {
 			old, wasOpen := previous[change.Key]
@@ -191,6 +196,8 @@ func processSuccessWithChangesAndReminders(state *model.JobState, job config.Job
 		if len(reminded) > 0 {
 			sort.Slice(reminded, func(i, j int) bool { return reminded[i].Key < reminded[j].Key })
 			events = append(events, model.Event{Type: "changes-reminder", Job: job.Name, ScanID: scan.ID, Message: fmt.Sprintf("Reminder: %d baseline change(s) remain open", len(reminded)), Changes: reminded, CreatedAt: now})
+			remindedAt := now
+			state.LastIncidentReminderAt = &remindedAt
 		}
 	}
 	if state.BaselineConfigHash != scan.ConfigHash {
@@ -198,6 +205,26 @@ func processSuccessWithChangesAndReminders(state *model.JobState, job config.Job
 		events = append(events, candidateEvents...)
 	}
 	return events, changes, nil
+}
+
+func incidentReminderDue(last *time.Time, cadence string, now time.Time) bool {
+	if last == nil || cadence == store.IncidentReminderCadenceEveryScan {
+		return true
+	}
+	var interval time.Duration
+	switch cadence {
+	case store.IncidentReminderCadenceHourly:
+		interval = time.Hour
+	case store.IncidentReminderCadenceSixHours:
+		interval = 6 * time.Hour
+	case store.IncidentReminderCadenceDaily:
+		interval = 24 * time.Hour
+	default:
+		// Persisted values are constrained by the schema. Treat a value from a
+		// future or corrupted database like the historical every-scan default.
+		return true
+	}
+	return !now.Before(last.Add(interval))
 }
 
 // baselineSurfaceIsExplicitlyDown reports whether every effective address

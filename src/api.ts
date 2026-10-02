@@ -40,11 +40,13 @@ export type NotificationUpdateRouting = {
   configured: boolean
   destinations: string[]
 }
+export type IncidentReminderCadence = 'every_scan' | 'hourly' | 'every_6_hours' | 'daily'
 export type NotificationDestinationsResponse = {
   destinations: NotificationDestination[]
   status: NotificationStatus
   update_routing?: NotificationUpdateRouting
   incident_reminders_enabled?: boolean
+  incident_reminder_cadence?: IncidentReminderCadence
 }
 export type ApplicationUpdateStatus = {
   enabled: boolean
@@ -263,7 +265,7 @@ export const notificationTest = () => api<{ sent: number }>('/notifications/test
 export const listNotificationDestinations = () => api<NotificationDestinationsResponse>('/notifications/destinations')
 export const updateNotificationRouting = (destinations: string[], password: string) => api<NotificationUpdateRouting>('/notifications/update-routing', { method: 'PUT', body: JSON.stringify({ destinations, password }) })
 export const toggleNotificationUpdateAlert = (destinationID: string, enabled: boolean, password: string) => api<NotificationUpdateRouting>('/notifications/update-routing', { method: 'PATCH', body: JSON.stringify({ destination_id: destinationID, enabled, password }) })
-export const updateIncidentReminders = (enabled: boolean, password: string) => api<{ enabled: boolean }>('/notifications/incident-reminders', { method: 'PUT', body: JSON.stringify({ enabled, password }) })
+export const updateIncidentReminders = (settings: { enabled?: boolean; cadence?: IncidentReminderCadence }, password: string) => api<{ enabled: boolean; cadence: IncidentReminderCadence }>('/notifications/incident-reminders', { method: 'PUT', body: JSON.stringify({ ...settings, password }) })
 export const getNotificationDestination = (id: string) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`)
 export const createNotificationDestination = (name: string, url: string, password: string, enabled = true) => api<NotificationDestination>('/notifications/destinations', { method: 'POST', body: JSON.stringify({ name, url, password, enabled }) })
 export const updateNotificationDestination = (id: string, revision: number, name: string, password: string, options: { url?: string; enabled?: boolean } = {}) => api<NotificationDestination>(`/notifications/destinations/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ name, revision, password, ...options }) })

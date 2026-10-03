@@ -845,6 +845,9 @@ func (s *Server) acceptIncident(w http.ResponseWriter, r *http.Request, session 
 		s.writeIncidentActionErrorWithRequest(w, r, err, "incident.accepted")
 		return
 	}
+	if s.App != nil {
+		s.App.WakeDelivery()
+	}
 	s.broadcastIncidentEvents(context.WithoutCancel(r.Context()), audienceTenant(ts), id, events)
 	writeJSON(w, http.StatusNoContent, nil)
 }
@@ -864,6 +867,9 @@ func (s *Server) suppressIncident(w http.ResponseWriter, r *http.Request, sessio
 	if err != nil {
 		s.writeIncidentActionErrorWithRequest(w, r, err, "incident.suppressed")
 		return
+	}
+	if s.App != nil {
+		s.App.WakeDelivery()
 	}
 	s.broadcastIncidentEvents(context.WithoutCancel(r.Context()), audienceTenant(ts), id, events)
 	writeJSON(w, http.StatusNoContent, nil)

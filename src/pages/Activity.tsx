@@ -113,7 +113,7 @@ export function Activity() {
   })
   const jobs = useQuery({ queryKey: ['jobs', true], queryFn: () => listJobs(true) })
   const incidents = useQuery({ queryKey: ['incidents', 'activity'], queryFn: () => listIncidents(0, 5) })
-  const pendingJobs = (jobs.data?.jobs ?? []).filter(job => (job.baseline.pending ?? 0) > 0).sort((left, right) => left.job.name.localeCompare(right.job.name) || left.id.localeCompare(right.id))
+  const pendingJobs = (jobs.data?.jobs ?? []).filter(job => !job.archived && (job.baseline.pending ?? 0) > 0).sort((left, right) => left.job.name.localeCompare(right.job.name) || left.id.localeCompare(right.id))
   const pendingJobsPage = { limit: 10, offset: pendingOffset, total: pendingJobs.length, has_more: pendingOffset + 10 < pendingJobs.length, next_offset: pendingOffset + 10 < pendingJobs.length ? pendingOffset + 10 : null }
   const changeJob = (jobID: string) => {
     const next = new URLSearchParams(search)

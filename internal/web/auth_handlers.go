@@ -92,9 +92,6 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 		writeJSON(w, http.StatusOK, viewerStatus)
 		return
 	}
-	if reloadErr := s.App.Notifier.Reload(r.Context()); reloadErr != nil {
-		s.Log.Warn("notification state refresh failed", "error", reloadErr)
-	}
 	status := map[string]any{
 		"configured":   true,
 		"username":     user.Username,
@@ -118,6 +115,9 @@ func (s *Server) adminStatus(w http.ResponseWriter, r *http.Request, session sto
 	}
 	// The destination counts and delivery totals are the tenant's own. Like
 	// the telemetry below, they are left out when they cannot be read.
+	// Tenant.Status reads only this tenant's destinations and opens them for
+	// the status response. A global Reload here would decrypt every tenant's
+	// credentials on every status poll without improving this response.
 	if notificationStatus, notificationErr := s.App.Notifier.Tenant(ts).Status(r.Context()); notificationErr != nil {
 		s.Log.Warn("notification status refresh failed", "error", notificationErr)
 	} else {

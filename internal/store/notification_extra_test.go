@@ -32,6 +32,10 @@ func TestManagedNotificationStoreCRUDAndLegacySelectionMaterialization(t *testin
 	if err != nil || loaded.Name != "Ops" || loaded.Provider != "generic" {
 		t.Fatalf("loaded destination = %#v, %v", loaded, err)
 	}
+	systemLoaded, err := s.System().GetManagedNotification(ctx, created.ID)
+	if err != nil || systemLoaded.ID != created.ID || systemLoaded.TenantID != DefaultTenantID {
+		t.Fatalf("system-scoped destination lookup = %#v, %v", systemLoaded, err)
+	}
 	if _, err := defaultTenant(s).GetManagedNotification(ctx, "missing"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing destination error = %v", err)
 	}
@@ -73,6 +77,9 @@ func TestManagedNotificationStoreCRUDAndLegacySelectionMaterialization(t *testin
 	}
 	if _, err := defaultTenant(s).GetManagedNotification(ctx, created.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted destination = %v", err)
+	}
+	if _, err := s.System().GetManagedNotification(ctx, created.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted system-scoped destination = %v", err)
 	}
 
 	second, err := defaultTenant(s).CreateJob(ctx, testJob("second-legacy"))

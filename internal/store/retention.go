@@ -267,6 +267,23 @@ func (ss *SystemStore) deleteScanRetentionBatches(ctx context.Context, cutoff st
 		// predicates, so a json_valid filter alone is not sufficient protection.
 		"INSERT OR IGNORE INTO " + retentionProtectedScans + "(scan_id) SELECT json_extract(incident.value,'$.scan_id') FROM job_runtime AS active, json_each(CASE WHEN json_valid(active.state_json) THEN active.state_json ELSE '{}' END,'$.incidents') AS incident WHERE json_extract(incident.value,'$.scan_id') <> ''",
 		"INSERT OR IGNORE INTO " + retentionProtectedScans + "(scan_id) SELECT json_extract(incident.value,'$.scan_id') FROM job_states AS legacy, json_each(CASE WHEN json_valid(legacy.state_json) THEN legacy.state_json ELSE '{}' END,'$.incidents') AS incident WHERE json_extract(incident.value,'$.scan_id') <> ''",
+		// Keep one successful history entry per logical job even when no
+		// baseline or open incident references it. This preserves the scan that
+		// drives the Hosts page and published status view for paused/archived jobs.
+		`INSERT OR IGNORE INTO ` + retentionProtectedScans + `(scan_id)
+		SELECT current.id FROM scans AS current
+		WHERE current.status='success'
+		AND current.tenant_id IN (SELECT id FROM tenants WHERE state IN ('active','disabled'))
+		AND (
+			(COALESCE(current.job_id,'')<>'' AND NOT EXISTS (
+				SELECT 1 FROM scans AS newer WHERE newer.tenant_id=current.tenant_id AND newer.job_id=current.job_id AND newer.status='success'
+				AND (newer.finished_at>current.finished_at OR (newer.finished_at=current.finished_at AND newer.id>current.id))
+			))
+			OR (COALESCE(current.job_id,'')='' AND NOT EXISTS (
+				SELECT 1 FROM scans AS newer WHERE newer.tenant_id=current.tenant_id AND COALESCE(newer.job_id,'')='' AND newer.job=current.job AND newer.status='success'
+				AND (newer.finished_at>current.finished_at OR (newer.finished_at=current.finished_at AND newer.id>current.id))
+			))
+		)`,
 	}
 	for _, query := range protectionQueries {
 		if _, err := ss.store.DB.ExecContext(ctx, query); err != nil {

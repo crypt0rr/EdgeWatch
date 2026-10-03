@@ -1546,6 +1546,45 @@ func TestPrunePreservesLegacyAndManagedBaselines(t *testing.T) {
 	}
 }
 
+func TestPrunePreservesLatestSuccessfulScanForArchivedJob(t *testing.T) {
+	ctx := context.Background()
+	s := openTestStore(t)
+	job, err := defaultTenant(s).CreateJob(ctx, testJob("archived-history"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-72 * time.Hour)
+	latest := old.Add(12 * time.Hour)
+	newestAttempt := latest.Add(12 * time.Hour)
+	for _, scan := range []model.Scan{
+		{ID: "old-success", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: old, FinishedAt: old, Status: "success", ConfigHash: job.Job.SecurityHash()},
+		{ID: "latest-success", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: latest, FinishedAt: latest, Status: "success", ConfigHash: job.Job.SecurityHash()},
+		{ID: "newer-failed", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: newestAttempt, FinishedAt: newestAttempt, Status: "failed", ConfigHash: job.Job.SecurityHash()},
+	} {
+		if err := s.System().SaveScan(ctx, scan); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := defaultTenant(s).SetJobArchived(ctx, job.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := s.System().PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Scans != 2 {
+		t.Fatalf("pruned scans = %d, want the older success and newer failed attempt pruned: %#v", stats.Scans, stats)
+	}
+	if _, err := defaultTenant(s).GetScan(ctx, "latest-success"); err != nil {
+		t.Fatalf("latest successful scan of archived job was removed: %v", err)
+	}
+	for _, id := range []string{"old-success", "newer-failed"} {
+		if _, err := defaultTenant(s).GetScan(ctx, id); err == nil {
+			t.Errorf("non-latest scan %s unexpectedly survived retention", id)
+		}
+	}
+}
+
 func TestPruneSkipsProtectedBatchEntriesAndContinuesToEligibleHistory(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
@@ -1562,7 +1601,7 @@ func TestPruneSkipsProtectedBatchEntriesAndContinuesToEligibleHistory(t *testing
 		}
 	}
 	eligibleID := "zz-eligible-after-protected-batch"
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?)`, eligibleID, "retention-eligible", oldText, oldText, "success", "", "", "hash", []byte(`{}`)); err != nil {
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO scans(id,job,started_at,finished_at,status,error,nmap_version,config_hash,snapshot_json) VALUES(?,?,?,?,?,?,?,?,?)`, eligibleID, "retention-eligible", oldText, oldText, "failed", "scan failed", "", "hash", []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
 	stats, err := s.System().PruneWithStats(ctx, old.Add(24*time.Hour))
@@ -1594,6 +1633,10 @@ func TestPrunePreservesScansReferencedByOpenIncidents(t *testing.T) {
 	if err := s.System().SaveScan(ctx, model.Scan{ID: "incident-retained", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: old, FinishedAt: old, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
 		t.Fatal(err)
 	}
+	newer := old.Add(12 * time.Hour)
+	if err := s.System().SaveScan(ctx, model.Scan{ID: "latest-success", JobID: job.ID, JobRevision: job.Revision, Job: job.Job.Name, StartedAt: newer, FinishedAt: newer, Status: "success", ConfigHash: job.Job.SecurityHash(), Snapshot: model.Snapshot{}}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.System().UpdateRuntime(ctx, job.ID, func(state *model.JobState) ([]model.Event, error) {
 		state.Incidents["port|198.51.100.10|tcp|443"] = model.Incident{
 			Change:     model.Change{Key: "port|198.51.100.10|tcp|443", Kind: "port", Target: "198.51.100.10", Protocol: "tcp", Port: 443, New: "open"},
@@ -1621,15 +1664,22 @@ func TestPrunePreservesScansReferencedByOpenIncidents(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.System().PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour)); err != nil {
+	stats, err = s.System().PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour))
+	if err != nil {
 		t.Fatal(err)
+	}
+	if stats.Scans != 1 {
+		t.Fatalf("pruned scans after incident recovery = %d, want only the scan no longer referenced pruned", stats.Scans)
 	}
 	if _, err := defaultTenant(s).GetScan(ctx, "incident-retained"); err == nil {
 		t.Fatal("scan without an open incident reference was not pruned")
 	}
+	if _, err := defaultTenant(s).GetScan(ctx, "latest-success"); err != nil {
+		t.Fatalf("latest successful scan was removed: %v", err)
+	}
 }
 
-func TestPruneRepairsLatestHostProjectionForProtectedOlderScan(t *testing.T) {
+func TestPrunePreservesLatestSuccessfulHostProjection(t *testing.T) {
 	ctx := context.Background()
 	s := openTestStore(t)
 	job, err := defaultTenant(s).CreateJob(ctx, testJob("projection-repair"))
@@ -1654,14 +1704,14 @@ func TestPruneRepairsLatestHostProjectionForProtectedOlderScan(t *testing.T) {
 	}
 	if stats, err := s.System().PruneWithStats(ctx, time.Now().UTC().Add(-24*time.Hour)); err != nil {
 		t.Fatal(err)
-	} else if stats.Scans != 1 {
-		t.Fatalf("pruned scans = %d, want newer projection source only", stats.Scans)
+	} else if stats.Scans != 0 {
+		t.Fatalf("pruned scans = %d, want baseline and latest successful result both protected", stats.Scans)
 	}
 	page, err := defaultTenant(s).ListLatestScanHostsPage(ctx, "198.51.100.77", "", nil, 50, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].ScanID != "projection-baseline" {
+	if page.Total != 1 || len(page.Items) != 1 || page.Items[0].ScanID != "projection-newer" {
 		t.Fatalf("repaired projection = %#v (total %d)", page.Items, page.Total)
 	}
 }

@@ -29,11 +29,8 @@ func TestAppUtilityMethodsAndLifecycleBinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := a.Job("configured"); err != nil || got.Name != job.Name {
-		t.Fatalf("configured job = %#v, %v", got, err)
-	}
-	if _, err := a.Job("missing"); err == nil || !strings.Contains(err.Error(), "unknown job") {
-		t.Fatalf("missing job error = %v", err)
+	if len(a.Config.Jobs) != 1 || a.Config.Jobs[0].Name != job.Name {
+		t.Fatalf("legacy config job warning context = %#v", a.Config.Jobs)
 	}
 
 	budgetErr := &ScanWorkBudgetError{Estimate: config.WorkEstimate{Probes: 42}, Budget: 10}
@@ -94,7 +91,7 @@ func TestDaemonProcessOwnerUsesUniqueInstanceToken(t *testing.T) {
 	}
 }
 
-func TestAppRunJobAndScheduledWrappers(t *testing.T) {
+func TestAppManagedJobAndScheduledWrappers(t *testing.T) {
 	ctx := context.Background()
 	s, err := store.Open(storetest.FreshPath(t))
 	if err != nil {
@@ -108,11 +105,12 @@ func TestAppRunJobAndScheduledWrappers(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.Scanner = schedulerFake{}
-	if scan, _, err := a.RunJob(ctx, job); err != nil || scan.Status != "success" {
-		t.Fatalf("unmanaged RunJob = %#v, %v", scan, err)
-	}
-	if _, err := defaultTenant(s).CreateJob(ctx, job); err != nil {
+	record, err := defaultTenant(s).CreateJob(ctx, job)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if scan, _, err := a.RunJobRecord(ctx, record); err != nil || scan.Status != "success" {
+		t.Fatalf("managed RunJobRecord = %#v, %v", scan, err)
 	}
 	bound, owner := a.BeginRun(ctx)
 	if !owner {

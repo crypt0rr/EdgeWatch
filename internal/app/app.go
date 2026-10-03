@@ -491,21 +491,6 @@ func reportMissingNotificationDestinations(ctx context.Context, s *store.Store, 
 	}
 }
 
-func (a *App) Job(name string) (config.Job, error) {
-	for _, j := range a.Config.Jobs {
-		if j.Name == name {
-			return j, nil
-		}
-	}
-	return config.Job{}, fmt.Errorf("unknown job %q", name)
-}
-
-// RunJob executes a config.yaml job. Those jobs belong to the default
-// tenant.
-func (a *App) RunJob(ctx context.Context, job config.Job) (model.Scan, []model.Event, error) {
-	return a.runJob(ctx, store.DefaultTenantScope(), job, "", 0, false, false)
-}
-
 // RunJobRecord executes a web-managed job revision. The record is passed by
 // value so a concurrent edit cannot change the configuration of an in-flight
 // scan. If the job is edited while the run waits for a scan slot, the run
@@ -527,7 +512,7 @@ func (a *App) runJobRecord(ctx context.Context, record store.JobRecord, manual b
 	if err != nil {
 		return model.Scan{}, nil, err
 	}
-	return a.runJob(ctx, scope, record.Job, record.ID, record.Revision, true, manual)
+	return a.runJob(ctx, scope, record.Job, record.ID, record.Revision, manual)
 }
 
 // queuedManagedJob returns the job definition a managed run starts with once
@@ -698,12 +683,9 @@ func (a *App) StartManagedRun(ts *store.TenantStore, id string, done func(model.
 // its cycles and its notification destinations through that tenant's store,
 // and writes leases, cycles and results through the system store. The
 // tenant's ID keys its scan slot.
-func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Job, jobID string, revision int64, managed, manual bool) (model.Scan, []model.Event, error) {
-	key := job.Name
-	if managed {
-		key = jobID
-	}
-	if managed && !manual {
+func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Job, jobID string, revision int64, manual bool) (model.Scan, []model.Event, error) {
+	key := jobID
+	if !manual {
 		if _, reserved := a.managedReservations.Load(key); reserved {
 			return model.Scan{}, nil, scanner.ErrBusy
 		}
@@ -718,11 +700,9 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	}
 	defer releaseSlot()
 	ts, system := a.Store.Tenant(scope), a.Store.System()
-	if managed {
-		var queuedErr error
-		if job, revision, queuedErr = a.queuedManagedJob(ctx, ts, job, jobID, revision, manual); queuedErr != nil {
-			return model.Scan{}, nil, queuedErr
-		}
+	var queuedErr error
+	if job, revision, queuedErr = a.queuedManagedJob(ctx, ts, job, jobID, revision, manual); queuedErr != nil {
+		return model.Scan{}, nil, queuedErr
 	}
 	estimate, err := config.EstimateJobWork(job)
 	if err != nil {
@@ -738,7 +718,7 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	if err := checkEstimatedProbeBudget(budget, job, estimate); err != nil {
 		return model.Scan{}, nil, err
 	}
-	if managed && !manual {
+	if !manual {
 		if cycle, cycleErr := ts.GetActiveScanCycle(ctx, jobID); cycleErr == nil && cycle.Status == "stalled" && !cycleResumeWindowElapsed(cycle, time.Now().UTC()) {
 			return model.Scan{}, nil, ErrScanCycleStalled
 		}
@@ -756,25 +736,14 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	if engineName == config.EngineNaabuNmap {
 		scan.NaabuVersion = a.naabuVersion
 	}
-	leaseKey := job.Name
-	if managed {
-		leaseKey = jobID
-	}
+	leaseKey := jobID
 	leaseOwner := scan.ID
-	if managed {
-		if daemonOwner := a.currentDaemonOwner(); daemonOwner != "" {
-			leaseOwner = "daemon/" + daemonOwner + "/" + scan.ID
-		}
+	if daemonOwner := a.currentDaemonOwner(); daemonOwner != "" {
+		leaseOwner = "daemon/" + daemonOwner + "/" + scan.ID
 	}
-	var leaseErr error
-	if managed {
-		// The lease also refuses a job whose tenant is not active, so a paused
-		// tenant starts no scan, whether scheduled or manual.
-		leaseErr = system.AcquireJobLeaseForRevision(ctx, leaseKey, leaseOwner, revision, started.Add(job.Timeout.Value()+time.Minute))
-	} else {
-		leaseErr = system.AcquireJobLease(ctx, leaseKey, leaseOwner, started.Add(job.Timeout.Value()+time.Minute))
-	}
-	if err := leaseErr; err != nil {
+	// The lease also refuses a job whose tenant is not active, so a paused
+	// tenant starts no scan, whether scheduled or manual.
+	if err := system.AcquireJobLeaseForRevision(ctx, leaseKey, leaseOwner, revision, started.Add(job.Timeout.Value()+time.Minute)); err != nil {
 		if errors.Is(err, store.ErrJobBusy) {
 			return model.Scan{}, nil, scanner.ErrBusy
 		}
@@ -796,7 +765,7 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	// so a nil selection never reaches another tenant's destinations.
 	var legacyNotificationSelection []string
 	legacySelectionCaptured := false
-	if managed && job.NotificationDestinations == nil {
+	if job.NotificationDestinations == nil {
 		if selection, selectionErr := a.Notifier.Tenant(ts).LegacySelection(ctx); selectionErr != nil {
 			a.Logger.Warn("legacy notification selection snapshot failed", "job", job.Name, "error", selectionErr)
 		} else {
@@ -851,37 +820,19 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	// batches. Naabu units checkpoint a pinned address batch after discovery and
 	// enrichment, so a paused cycle can resume without replaying completed
 	// batches or bypassing the discovery phase.
-	useResumable := managed
-	if useResumable {
-		if resumableScanner, ok := a.Scanner.(scanner.ResumableScanner); ok {
-			var handled bool
-			handled, snapshot, scanErr = a.runResumableAttempt(ctx, scanCtx, ts, job, jobID, &scan, run, resumableScanner, manual)
-			resumableRun = handled
-			if errors.Is(scanErr, ErrScanCycleStalled) {
-				// A scheduled trigger that races with a newly stalled cycle must
-				// not create a synthetic failed scan or notification. The cycle's
-				// original stall attempt already recorded the actionable alert.
-				lifecycleExitMessage = "Scan attempt stopped because its resumable cycle became stalled"
-				return model.Scan{}, nil, scanErr
-			}
+	if resumableScanner, ok := a.Scanner.(scanner.ResumableScanner); ok {
+		var handled bool
+		handled, snapshot, scanErr = a.runResumableAttempt(ctx, scanCtx, ts, job, jobID, &scan, run, resumableScanner, manual)
+		resumableRun = handled
+		if errors.Is(scanErr, ErrScanCycleStalled) {
+			// A scheduled trigger that races with a newly stalled cycle must
+			// not create a synthetic failed scan or notification. The cycle's
+			// original stall attempt already recorded the actionable alert.
+			lifecycleExitMessage = "Scan attempt stopped because its resumable cycle became stalled"
+			return model.Scan{}, nil, scanErr
 		}
 	}
 	if !resumableRun {
-		// File-managed jobs do not persist resumable cycles, but production
-		// scanners still expose a planner. Validate its resolved work before the
-		// ordinary scan path so DNS expansion cannot bypass probe budgets merely
-		// because the job is not web-managed.
-		if !managed {
-			if resumableScanner, ok := a.Scanner.(scanner.ResumableScanner); ok {
-				plan, planErr := resumableScanner.Plan(scanCtx, job)
-				if planErr != nil {
-					scanErr = planErr
-				} else {
-					discoveryProbes, nmapProbes := resolvedPlanProbeTotals(plan)
-					scanErr = checkResolvedProbeBudget(budget, job, discoveryProbes, nmapProbes)
-				}
-			}
-		}
 		if scanErr == nil {
 			// The direct scanner path resolves DNS again. A budgeted scanner
 			// checks the work of that resolution before it starts, so a DNS
@@ -945,59 +896,42 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 	defer persistCancel()
 	var destinations []string
-	if managed {
-		var destinationErr error
-		notifier := a.Notifier.Tenant(ts)
-		if legacySelectionCaptured {
-			destinations, destinationErr = notifier.QueueDestinationsForSelection(persistCtx, legacyNotificationSelection)
-		} else {
-			destinations, destinationErr = notifier.QueueDestinationsForJob(persistCtx, job)
-		}
-		if destinationErr != nil {
-			// Preserve the completed scan even when notification configuration
-			// cannot be read. Runtime state is deliberately left unchanged,
-			// matching the pre-transaction behavior.
-			if saveErr := system.SaveScan(persistCtx, scan); saveErr != nil {
-				lifecycleExitMessage = "Scan attempt could not be finalized because its result could not be saved"
-				return scan, nil, saveErr
-			}
-			lifecycleExitMessage = "Scan attempt could not be finalized because notification destinations were unavailable"
-			return scan, nil, destinationErr
-		}
-	}
-	if managed {
-		// Keep the scan lease live while the immutable result and runtime state are
-		// committed. This prevents cycle expiry housekeeping from racing the final
-		// promotion of a broad resumable scan.
-		leaseUntil := time.Now().UTC().Add(persistTimeout + time.Minute)
-		leaseCtx, leaseCancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
-		defer leaseCancel()
-		if err := system.RenewJobLease(leaseCtx, leaseKey, leaseOwner, leaseUntil); err != nil && a.Logger != nil {
-			a.Logger.Warn("scan lease renewal before finalization failed", "job", job.Name, "scan_id", scan.ID, "error", err)
-		}
-	}
-	var events []model.Event
-	var finalizeErr error
-	if managed {
-		events, finalizeErr = a.Engine.FinalizeManagedScan(persistCtx, jobID, job, &scan, destinations)
+	var destinationErr error
+	notifier := a.Notifier.Tenant(ts)
+	if legacySelectionCaptured {
+		destinations, destinationErr = notifier.QueueDestinationsForSelection(persistCtx, legacyNotificationSelection)
 	} else {
-		if err := system.SaveScan(persistCtx, scan); err != nil {
-			return scan, nil, err
-		}
-		if scan.Status != "success" && scan.Status != "incomplete" {
-			events, finalizeErr = a.Engine.Failure(persistCtx, job.Name, scan)
-		} else {
-			events, finalizeErr = a.Engine.Success(persistCtx, job, scan)
-		}
+		destinations, destinationErr = notifier.QueueDestinationsForJob(persistCtx, job)
 	}
-	if managed && errors.Is(finalizeErr, store.ErrJobRevisionChanged) {
+	if destinationErr != nil {
+		// Preserve the completed scan even when notification configuration
+		// cannot be read. Runtime state is deliberately left unchanged,
+		// matching the pre-transaction behavior.
+		if saveErr := system.SaveScan(persistCtx, scan); saveErr != nil {
+			lifecycleExitMessage = "Scan attempt could not be finalized because its result could not be saved"
+			return scan, nil, saveErr
+		}
+		lifecycleExitMessage = "Scan attempt could not be finalized because notification destinations were unavailable"
+		return scan, nil, destinationErr
+	}
+	// Keep the scan lease live while the immutable result and runtime state are
+	// committed. This prevents cycle expiry housekeeping from racing the final
+	// promotion of a broad resumable scan.
+	leaseUntil := time.Now().UTC().Add(persistTimeout + time.Minute)
+	leaseCtx, leaseCancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
+	defer leaseCancel()
+	if err := system.RenewJobLease(leaseCtx, leaseKey, leaseOwner, leaseUntil); err != nil && a.Logger != nil {
+		a.Logger.Warn("scan lease renewal before finalization failed", "job", job.Name, "scan_id", scan.ID, "error", err)
+	}
+	events, finalizeErr := a.Engine.FinalizeManagedScan(persistCtx, jobID, job, &scan, destinations)
+	if errors.Is(finalizeErr, store.ErrJobRevisionChanged) {
 		// Keep the scan in immutable history, but do not let a result from a
 		// superseded security scope seed or mutate the current baseline. A
 		// lifecycle-only revision retains the same hash and is still accepted.
 		a.Logger.Info("scan completed for superseded security scope; runtime state unchanged", "job", job.Name, "scan_id", scan.ID)
 		events, finalizeErr = nil, nil
 	}
-	if managed && errors.Is(finalizeErr, store.ErrTenantNotActive) {
+	if errors.Is(finalizeErr, store.ErrTenantNotActive) {
 		// The job's business unit was paused while the scan ran, whether this
 		// process cancelled the scan or another one, such as a host command,
 		// ran it. The store recorded the scan as the pause cancelled it and
@@ -1012,11 +946,6 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	}
 	a.emitTenantEvents(scope, events)
 	publishCompletion("Scan " + scan.Status)
-	if !managed {
-		if err := a.Notifier.Queue(persistCtx, events); err != nil {
-			return scan, events, err
-		}
-	}
 	a.wakeDelivery()
 	if scanErr != nil {
 		return scan, events, scanErr

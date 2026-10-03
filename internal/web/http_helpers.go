@@ -19,6 +19,9 @@ import (
 
 const maxPaginationOffset = 10_000_000
 
+var errPaginationOffsetTooLarge = errors.New("offset must not exceed 10000000")
+var errPaginationOffsetInvalid = errors.New("offset must be a non-negative integer")
+
 func queryLimit(r *http.Request) int {
 	n, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	if n <= 0 {
@@ -30,17 +33,28 @@ func queryLimit(r *http.Request) int {
 	return n
 }
 
-func queryOffset(r *http.Request) int {
-	n, _ := strconv.Atoi(r.URL.Query().Get("offset"))
-	if n < 0 {
-		return 0
+func queryOffset(r *http.Request) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get("offset"))
+	if raw == "" {
+		return 0, nil
 	}
-	// Keep offsets bounded so an accidental huge value cannot turn into an
-	// expensive SQLite scan. Clients can continue walking pages from zero.
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		return 0, errPaginationOffsetInvalid
+	}
 	if n > maxPaginationOffset {
-		return maxPaginationOffset
+		return 0, errPaginationOffsetTooLarge
 	}
-	return n
+	return n, nil
+}
+
+func requestOffset(w http.ResponseWriter, r *http.Request) (int, bool) {
+	offset, err := queryOffset(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_pagination", err.Error(), nil)
+		return 0, false
+	}
+	return offset, true
 }
 
 func paginationJSON(offset, limit, total int) map[string]any {

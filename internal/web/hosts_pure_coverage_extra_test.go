@@ -104,7 +104,7 @@ func TestHostFiltersAndScopeFallbackBranches(t *testing.T) {
 		t.Fatal("invalid protocol accepted")
 	}
 
-	for _, query := range []string{"?limit=1&offset=2", "?limit=100&offset=999999999"} {
+	for _, query := range []string{"?limit=1&offset=2", "?limit=100&offset=9999999"} {
 		r := httptest.NewRequest("GET", "/api/v1/hosts"+query, nil)
 		limit, offset, err := parseHostPagination(r)
 		if err != nil || limit < 1 || offset < 0 {

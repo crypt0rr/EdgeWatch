@@ -137,6 +137,10 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		events := advanceCandidate(state, scan, job.Baseline.Samples, false)
 		return events, nil, nil
 	}
+	scopeChanged := state.BaselineConfigHash != scan.ConfigHash
+	if scopeChanged {
+		retireOutOfScopeChanges(state, scan.Snapshot)
+	}
 	// A complete scan that suddenly reports no positive ports across a
 	// previously non-empty baseline is usually a degraded discovery result
 	// (for example, a transient firewall or scanner-capability problem). Do
@@ -162,8 +166,15 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		}
 		return event, nil, nil
 	}
-	learningServices := learnMissingFingerprints(state, scan.Snapshot, job.Baseline.Samples)
-	changes := Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+	var learningServices map[string]struct{}
+	if !scopeChanged {
+		// A scope migration uses the candidate-convergence path to decide when
+		// replacement service fingerprints are stable. Running the ordinary
+		// missing-fingerprint learner here would clear that candidate for every
+		// scan because the old baseline already has a fingerprint.
+		learningServices = learnMissingFingerprints(state, scan.Snapshot, job.Baseline.Samples)
+	}
+	changes := Diff(*state.Baseline, scan.Snapshot, scopeChanged)
 	if len(learningServices) > 0 {
 		filtered := changes[:0]
 		for _, change := range changes {
@@ -200,7 +211,7 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 			state.LastIncidentReminderAt = &remindedAt
 		}
 	}
-	if state.BaselineConfigHash != scan.ConfigHash {
+	if scopeChanged {
 		candidateEvents := advanceCandidate(state, scan, job.Baseline.Samples, true)
 		events = append(events, candidateEvents...)
 	}
@@ -1586,6 +1597,9 @@ func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
 		ports := map[int]model.PortState{}
 		for _, p := range cu.Ports {
 			if scopeAllows(candidate, target, protocol, p.Port, false) {
+				if !scopeAllows(candidate, target, protocol, p.Port, true) {
+					p.Service = ""
+				}
 				ports[p.Port] = p
 			}
 		}
@@ -1595,7 +1609,16 @@ func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
 					if !scopeAllows(candidate, target, protocol, p.Port, true) {
 						p.Service = ""
 					}
-					if _, exists := ports[p.Port]; !exists {
+					if current, exists := ports[p.Port]; exists {
+						// A scope candidate can omit a service because the scanner
+						// did not return one or because a replacement fingerprint has
+						// not reached its sample threshold. Keep the last expected
+						// fingerprint until a stable replacement is available.
+						if current.Service == "" && p.Service != "" && scopeAllows(candidate, target, protocol, p.Port, true) {
+							current.Service = p.Service
+							ports[p.Port] = current
+						}
+					} else {
 						ports[p.Port] = p
 					}
 				}
@@ -1641,6 +1664,43 @@ func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
 	}
 	result.Normalize()
 	return result
+}
+
+// retireOutOfScopeChanges drops runtime findings that the new complete scan
+// can no longer observe. They are not recoveries: no scan established that
+// the old state changed back to baseline.
+func retireOutOfScopeChanges(state *model.JobState, snapshot model.Snapshot) {
+	for key, pending := range state.Pending {
+		if !changeWithinScope(snapshot, pending.Change) {
+			delete(state.Pending, key)
+		}
+	}
+	for key, incident := range state.Incidents {
+		if !changeWithinScope(snapshot, incident.Change) {
+			delete(state.Incidents, key)
+		}
+	}
+	for key, change := range state.SuppressedChanges {
+		if !changeWithinScope(snapshot, change) {
+			delete(state.SuppressedChanges, key)
+			delete(state.Suppressed, key)
+		}
+	}
+}
+
+func changeWithinScope(snapshot model.Snapshot, change model.Change) bool {
+	switch change.Kind {
+	case "port":
+		return scopeAllows(snapshot, change.Target, change.Protocol, change.Port, false)
+	case "service":
+		return scopeAllows(snapshot, change.Target, change.Protocol, change.Port, true)
+	case "host":
+		return hostInScope(snapshot, change.Target)
+	case "dns", "dns-added", "dns-removed":
+		return hasTarget(snapshot, change.Target)
+	default:
+		return false
+	}
 }
 
 func scopeAllowsProtocol(snapshot model.Snapshot, target, protocol string) bool {

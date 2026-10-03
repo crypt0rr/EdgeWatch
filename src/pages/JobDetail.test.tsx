@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  activeScans,
   getJob,
   getSession,
   jobBaseline,
@@ -21,6 +22,7 @@ import { JobDetail } from './JobDetail'
 import { defaultUnitScope } from '../test/test-utils'
 
 vi.mock('../api', () => ({
+  activeScans: vi.fn(),
   approveBaseline: vi.fn(),
   archiveJob: vi.fn(),
   deleteJob: vi.fn(),
@@ -30,6 +32,7 @@ vi.mock('../api', () => ({
   jobScans: vi.fn(),
   latestSuccessfulScan: vi.fn(),
   resetBaseline: vi.fn(),
+  cancelScan: vi.fn(),
   restoreJob: vi.fn(),
   runJob: vi.fn(),
   scanCycle: vi.fn(),
@@ -107,6 +110,7 @@ describe('job surface overview', () => {
     document.body.appendChild(container)
     root = createRoot(container)
     queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    vi.mocked(activeScans).mockResolvedValue({ scans: [] })
     vi.mocked(getJob).mockResolvedValue(job)
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'user-1', username: 'admin', permissions: ['jobs.write', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(jobBaseline).mockResolvedValue(baselineResponse)

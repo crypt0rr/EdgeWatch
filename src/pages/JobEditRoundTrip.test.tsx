@@ -3,7 +3,7 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { archiveJob, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, listNotificationDestinations, listScannerProfiles, scanCycle, scannerCapabilities, updateJob } from '../api'
+import { activeScans, archiveJob, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, listNotificationDestinations, listScannerProfiles, scanCycle, scannerCapabilities, updateJob } from '../api'
 import { createQueryClient } from '../main'
 import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
 import type { Job } from '../types'
@@ -12,7 +12,7 @@ import { JobEditor } from './JobEditor'
 
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
-  return { ...actual, archiveJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), jobBaseline: vi.fn(), jobScans: vi.fn(), latestSuccessfulScan: vi.fn(), listNotificationDestinations: vi.fn(), listScannerProfiles: vi.fn(), scanCycle: vi.fn(), scannerCapabilities: vi.fn(), updateJob: vi.fn() }
+  return { ...actual, activeScans: vi.fn(), archiveJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), jobBaseline: vi.fn(), jobScans: vi.fn(), latestSuccessfulScan: vi.fn(), listNotificationDestinations: vi.fn(), listScannerProfiles: vi.fn(), scanCycle: vi.fn(), scannerCapabilities: vi.fn(), updateJob: vi.fn() }
 })
 
 const saved: Job = {
@@ -27,6 +27,7 @@ describe('job edit round trip without live updates', () => {
 
   beforeEach(() => {
     current = saved
+    vi.mocked(activeScans).mockResolvedValue({ scans: [] })
     vi.mocked(getJob).mockImplementation(async () => current)
     vi.mocked(updateJob).mockImplementation(async (_id, revision, value) => {
       current = { ...current, revision: revision + 1, enabled: value.enabled ?? current.enabled, updated_at: '2026-09-01T00:00:05Z', job: { ...current.job, ...value } }

@@ -3,13 +3,13 @@
 import { fireEvent, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Route, Routes } from 'react-router-dom'
-import { APIError, approveBaseline, archiveJob, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, resetBaseline, restoreJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
+import { APIError, activeScans, approveBaseline, archiveJob, cancelScan, deleteJob, discardScanCycle, getJob, getSession, jobBaseline, jobScans, latestSuccessfulScan, resetBaseline, restoreJob, runJob, scanCycle, scanDetail, scanHosts, scanResults } from '../api'
 import { renderWithProviders, defaultUnitScope } from '../test/test-utils'
 import { JobDetail } from './JobDetail'
 
 vi.mock('../api', async () => {
   const actual = await vi.importActual<typeof import('../api')>('../api')
-  return { ...actual, approveBaseline: vi.fn(), archiveJob: vi.fn(), deleteJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), jobBaseline: vi.fn(), jobScans: vi.fn(), latestSuccessfulScan: vi.fn(), resetBaseline: vi.fn(), restoreJob: vi.fn(), runJob: vi.fn(), scanCycle: vi.fn(), discardScanCycle: vi.fn(), scanDetail: vi.fn(), scanHosts: vi.fn(), scanResults: vi.fn() }
+  return { ...actual, activeScans: vi.fn(), approveBaseline: vi.fn(), archiveJob: vi.fn(), cancelScan: vi.fn(), deleteJob: vi.fn(), getJob: vi.fn(), getSession: vi.fn(), jobBaseline: vi.fn(), jobScans: vi.fn(), latestSuccessfulScan: vi.fn(), resetBaseline: vi.fn(), restoreJob: vi.fn(), runJob: vi.fn(), scanCycle: vi.fn(), discardScanCycle: vi.fn(), scanDetail: vi.fn(), scanHosts: vi.fn(), scanResults: vi.fn() }
 })
 
 const job = {
@@ -21,9 +21,15 @@ const scan = { id: 'scan-1', job_id: 'job-1', job: 'Production', started_at: '20
 const page = { limit: 10, offset: 0, total: 1, has_more: false, next_offset: null }
 const administrator = { role: 'administrator' as const, user_id: 'admin', username: 'admin', permissions: ['jobs.write', 'jobs.delete', 'scans.read', 'baselines.read'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope }
 const operator = { ...administrator, role: 'operator' as const, user_id: 'operator', username: 'operator', permissions: ['jobs.write', 'scans.read', 'baselines.read'] }
+const activeScan = {
+  id: 'active-scan-1', job_id: 'job-1', job: 'Production', started_at: '2026-01-01T00:00:00Z',
+  progress_percent: 42, completed_probes: 42, total_probes: 100, phase: 'tcp discovery', protocol: 'tcp',
+  elapsed_seconds: 17, process_alive: true, scanner: 'naabu_nmap', cycle_id: 'cycle-1', cycle_completed_units: 1, cycle_total_units: 3,
+}
 
 describe('job detail actions', () => {
   beforeEach(() => {
+    vi.mocked(activeScans).mockResolvedValue({ scans: [] })
     vi.mocked(getJob).mockResolvedValue(job as never)
     vi.mocked(getSession).mockResolvedValue(administrator)
     vi.mocked(jobBaseline).mockResolvedValue({ job_id: 'job-1', job: 'Production', revision: 7, security_hash: 'scope', baseline: job.baseline, snapshot: { units: [], scopes: [] }, pagination: page } as never)
@@ -33,7 +39,8 @@ describe('job detail actions', () => {
     vi.mocked(scanHosts).mockResolvedValue({ hosts: [], pagination: page } as never)
     vi.mocked(scanResults).mockResolvedValue({ results: [], pagination: page } as never)
     vi.mocked(scanCycle).mockResolvedValue({ cycle: null })
-    vi.mocked(runJob).mockResolvedValue({ status: 'started', job_id: 'job-1' })
+    vi.mocked(runJob).mockResolvedValue({ status: 'accepted', job_id: 'job-1' })
+    vi.mocked(cancelScan).mockResolvedValue({ status: 'cancelling', scan_id: 'active-scan-1' })
     vi.mocked(resetBaseline).mockResolvedValue(undefined)
     vi.mocked(approveBaseline).mockResolvedValue(undefined)
     vi.mocked(archiveJob).mockResolvedValue(undefined)
@@ -53,6 +60,50 @@ describe('job detail actions', () => {
     fireEvent.click(screen.getByRole('button', { name: /Scan now/ }))
     await waitFor(() => expect(runJob).toHaveBeenCalledWith('job-1'))
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['latest-successful-scan', 'job-1'] })
+  })
+
+  it('keeps an accepted scan visible while queued and prevents a duplicate start', async () => {
+    renderPage()
+    fireEvent.click(await screen.findByRole('button', { name: 'Scan now' }))
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Your scan request was accepted and is waiting for an available scan slot.')
+    const queued = screen.getByRole('button', { name: 'Queued…' })
+    expect(queued).toBeDisabled()
+    fireEvent.click(queued)
+    expect(runJob).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows the active phase and progress and allows cancellation from the job page', async () => {
+    vi.mocked(activeScans).mockResolvedValueOnce({ scans: [] }).mockResolvedValue({ scans: [activeScan] } as never)
+    vi.mocked(cancelScan).mockImplementation(async (id) => {
+      vi.mocked(activeScans).mockResolvedValueOnce({ scans: [{ ...activeScan, phase: 'cancelling' }] } as never)
+      return { status: 'cancelling', scan_id: id }
+    })
+    renderPage()
+
+    await screen.findByRole('button', { name: 'Scan now' })
+    await waitFor(() => expect(activeScans).toHaveBeenCalledTimes(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Scan now' }))
+
+    expect(await screen.findByRole('heading', { name: 'Scan in progress' })).toBeInTheDocument()
+    expect(screen.getByText('Naabu → Nmap · tcp discovery · TCP')).toBeInTheDocument()
+    expect(screen.getByText('42 of 100 probes · elapsed 17s · Cycle 1/3 units')).toBeInTheDocument()
+    expect(screen.getByRole('progressbar', { name: 'Progress for Production' })).toHaveValue(42)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel scan' }))
+    await waitFor(() => expect(cancelScan).toHaveBeenCalledWith('active-scan-1'))
+    expect(await screen.findByText('Cancellation requested')).toBeInTheDocument()
+  })
+
+  it('clears the accepted state after the completed scan appears in history', async () => {
+    const { client } = renderPage()
+    await screen.findByRole('button', { name: /scan-1/i })
+    fireEvent.click(screen.getByRole('button', { name: 'Scan now' }))
+    expect(await screen.findByRole('heading', { name: 'Scan queued' })).toBeInTheDocument()
+
+    client.setQueryData(['job-scans', 'job-1', 0], { scans: [{ ...scan, id: 'scan-2' }, scan], pagination: { ...page, total: 2 } })
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Scan queued' })).not.toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Scan now' })).toBeEnabled()
   })
 
   it('resets and approves baseline evidence through guarded dialogs', async () => {
@@ -85,6 +136,8 @@ describe('job detail actions', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: /Scan now/ })).toBeInTheDocument())
     fireEvent.click(screen.getByRole('button', { name: /Scan now/ }))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('scanner unavailable'))
+    expect(screen.queryByRole('heading', { name: 'Scan queued' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Scan now' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: 'Archive job' }))
     fireEvent.click(screen.getByRole('dialog').querySelector('button[type="submit"]')!)
     await waitFor(() => expect(archiveJob).toHaveBeenCalledWith('job-1', 7))

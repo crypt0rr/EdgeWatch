@@ -17,6 +17,8 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
   const session = useQuery({ queryKey: ['session'], queryFn: async () => { const value = await getSession(); setCSRF(value.csrf_token); return value } })
   const [current, setCurrent] = useState('')
   const [next, setNext] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [passwordBusy, setPasswordBusy] = useState(false)
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [totp, setTotp] = useState<{ secret: string; otpauth: string } | null>(null)
@@ -24,6 +26,7 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
   const [currentFactor, setCurrentFactor] = useState('')
   const [recovery, setRecovery] = useState<string[]>([])
   const [recoveryAcknowledged, setRecoveryAcknowledged] = useState(false)
+  const [recoveryRequiresSignIn, setRecoveryRequiresSignIn] = useState(false)
   const [disablePrompt, setDisablePrompt] = useState(false)
   const [recoveryPrompt, setRecoveryPrompt] = useState(false)
   const [replacePrompt, setReplacePrompt] = useState(false)
@@ -66,6 +69,11 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
     event.preventDefault()
     setMessage('')
     setError('')
+    if (next !== confirmation) {
+      setError('The new passwords do not match.')
+      return
+    }
+    setPasswordBusy(true)
     try {
       await api('/auth/password', { method: 'PUT', body: JSON.stringify({ current_password: current, new_password: next }) })
       setCSRF('')
@@ -73,6 +81,8 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
       navigate('/login')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Password update failed')
+    } finally {
+      setPasswordBusy(false)
     }
   }
 
@@ -125,6 +135,7 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
       const value = await api<{ recovery_codes: string[] }>('/auth/totp/enable', { method: 'POST', body: JSON.stringify({ code }) })
       setRecovery(value.recovery_codes)
       setRecoveryAcknowledged(false)
+      setRecoveryRequiresSignIn(true)
       setTotp(null)
       setCode('')
       setCurrentFactor('')
@@ -175,7 +186,8 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
 
   function factorPayload(factor: string) {
     const value = factor.trim()
-    return { code: /^\d{6}$/.test(value) ? value : '', recovery_code: /^\d{6}$/.test(value) ? '' : value }
+    const code = value.replace(/\s+/g, '')
+    return /^\d{6}$/.test(code) ? { code, recovery_code: '' } : { code: '', recovery_code: value }
   }
 
   async function disableTotp(password: string, factor = '') {
@@ -199,11 +211,18 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
       const value = await api<{ recovery_codes: string[] }>('/auth/totp/recovery-codes', { method: 'POST', body: JSON.stringify({ password, ...factorPayload(factor) }) })
       setRecovery(value.recovery_codes)
       setRecoveryAcknowledged(false)
+      setRecoveryRequiresSignIn(false)
       setRecoveryPrompt(false)
       setMessage('Recovery codes regenerated. Save the new codes before leaving this page.')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not regenerate recovery codes')
     }
+  }
+
+  function dismissRecoveryCodes() {
+    setRecovery([])
+    setRecoveryAcknowledged(false)
+    setMessage('Recovery codes saved. Your session remains active.')
   }
 
   const accountLabel = session.data?.role === 'administrator' ? 'Administrator' : session.data?.role === 'operator' ? 'Operator' : session.data?.role === 'platform_admin' ? 'Platform administrator' : 'Viewer'
@@ -212,7 +231,7 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
       ? <div className="page-heading"><div><p className="eyebrow">Required setup</p><h1>Set up an authenticator</h1><p className="muted">This EdgeWatch deployment has more than one business unit, so every administrator signs in with an authenticator app (TOTP).</p></div></div>
       : <div className="page-heading"><div><p className="eyebrow">{accountLabel} account</p><h1>Security</h1><p className="muted">Protect the local console and keep recovery under your control.</p></div></div>}
     {enrollment && <div className="notice warning totp-enrollment-notice" role="status"><ShieldCheck size={17} /><span><strong>Set up TOTP to continue.</strong> Until you do, you can only set up an authenticator, change your password, or sign out.</span></div>}
-    {message && <div className="success-banner"><Check size={17} />{message}</div>}
+    {message && <div className="success-banner" role="status"><Check size={17} />{message}</div>}
     {error && <div className="form-error banner" role="alert">{error}</div>}
     <div className="settings-grid">
       {!enrollment && <div className="panel">
@@ -227,7 +246,8 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
         <form className="settings-form" onSubmit={change}>
           <label>Current password<input type="password" value={current} onChange={(event) => setCurrent(event.target.value)} autoComplete="current-password" required /></label>
           <label>New password<input type="password" value={next} onChange={(event) => setNext(event.target.value)} minLength={12} autoComplete="new-password" required /><small>At least 12 characters.</small></label>
-          <button className="button primary" type="submit">Update password</button>
+          <label>Confirm new password<input type="password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} minLength={12} autoComplete="new-password" required /></label>
+          <button className="button primary" type="submit" disabled={passwordBusy}>{passwordBusy ? 'Updating…' : 'Update password'}</button>
         </form>
         {!enrollment && <button className="button secondary" type="button" onClick={() => { setError(''); setRevokePrompt(true) }}><LogOut size={16} /> Log out all sessions</button>}
       </div>
@@ -246,7 +266,7 @@ export function Security({ enrollment = false }: { enrollment?: boolean } = {}) 
         </div> : session.data?.totp_enabled ? <div className="settings-form"><div className="status-line"><span className="pill green">Enabled</span><span className="muted">Recovery codes are single-use.</span></div>{!enrollment && <div className="heading-actions"><button className="button secondary" type="button" onClick={() => { setError(''); setRecoveryPrompt(true) }}>Regenerate recovery codes</button><button className="button secondary" type="button" onClick={() => { setError(''); setReplacePrompt(true) }}>Replace authenticator</button><button className="button secondary" type="button" onClick={() => { setError(''); setDisablePrompt(true) }}>Disable TOTP</button></div>}</div> : enrollment ? <form className="settings-form" onSubmit={event => { event.preventDefault(); void beginTotp(enrollmentPassword) }}><label>Account password<input type="password" value={enrollmentPassword} onChange={(event) => setEnrollmentPassword(event.target.value)} autoComplete="current-password" required /><small>Confirm your password, then scan the secret with your authenticator app.</small></label><button className="button primary" type="submit">Set up authenticator</button></form> : <div className="settings-form"><p className="muted">Confirm your account password to set up an authenticator app.</p><button className="button secondary" type="button" onClick={() => { setCurrent(''); setError(''); setSetupPrompt(true) }}>Set up authenticator</button></div>}
       </div>
     </div>
-    {recovery.length > 0 && <div className="panel recovery"><h2>Save your recovery codes</h2><p className="muted">These are shown once. Store them somewhere offline before leaving this page.</p><div className="code-grid">{recovery.map((value) => <code key={value}>{value}</code>)}</div><label className="checkbox-label recovery-ack"><input type="checkbox" checked={recoveryAcknowledged} onChange={(event) => setRecoveryAcknowledged(event.target.checked)} /><span>I saved these recovery codes in a secure place.</span></label><div className="heading-actions"><button className="button secondary" type="button" onClick={() => navigator.clipboard?.writeText(recovery.join('\n'))}><Copy size={16} /> Copy codes</button><button className="button primary" type="button" onClick={finishTotpSetup} disabled={recoveryBusy || !recoveryAcknowledged}>{recoveryBusy ? 'Signing out…' : 'Continue to sign in'}</button></div></div>}
+    {recovery.length > 0 && <div className="panel recovery"><h2>Save your recovery codes</h2><p className="muted">These are shown once. Store them somewhere offline before leaving this page.</p><div className="code-grid">{recovery.map((value) => <code key={value}>{value}</code>)}</div><label className="checkbox-label recovery-ack"><input type="checkbox" checked={recoveryAcknowledged} onChange={(event) => setRecoveryAcknowledged(event.target.checked)} /><span>I saved these recovery codes in a secure place.</span></label><div className="heading-actions"><button className="button secondary" type="button" onClick={() => navigator.clipboard?.writeText(recovery.join('\n'))}><Copy size={16} /> Copy codes</button><button className="button primary" type="button" onClick={recoveryRequiresSignIn ? finishTotpSetup : dismissRecoveryCodes} disabled={recoveryBusy || !recoveryAcknowledged}>{recoveryBusy ? 'Signing out…' : recoveryRequiresSignIn ? 'Continue to sign in' : 'Done'}</button></div></div>}
     {setupPrompt && <ActionDialog title="Set up authenticator?" description="Confirm your account password to begin setting up an authenticator app." confirmLabel="Start setup" valueLabel="Account password" valueType="password" valueRequired autoComplete="current-password" onConfirm={password => beginTotp(password)} onCancel={() => { setSetupPrompt(false); setError('') }} error={error} />}
     {disablePrompt && <ActionDialog title="Disable authenticator protection?" description="Enter your account password and current authenticator code (or a recovery code) to disable TOTP. Existing browser sessions will be signed out." confirmLabel="Disable TOTP" destructive valueLabel="Account password" valueType="password" valueRequired autoComplete="current-password" secondaryValueLabel="Current authenticator code or recovery code" secondaryValueRequired secondaryAutoComplete="one-time-code" onConfirm={(password, factor) => disableTotp(password, factor)} onCancel={() => setDisablePrompt(false)} error={error} />}
     {recoveryPrompt && <ActionDialog title="Regenerate recovery codes?" description="Enter your account password and current authenticator code (or a recovery code). Existing recovery codes will stop working immediately." confirmLabel="Regenerate codes" destructive valueLabel="Account password" valueType="password" valueRequired autoComplete="current-password" secondaryValueLabel="Current authenticator code or recovery code" secondaryValueRequired secondaryAutoComplete="one-time-code" onConfirm={(password, factor) => regenerateRecoveryCodes(password, factor)} onCancel={() => setRecoveryPrompt(false)} error={error} />}

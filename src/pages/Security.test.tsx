@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 
-import { fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { api, APIError, getSession, logout, logoutAllSessions, setCSRF, updateDisplayName } from '../api'
@@ -57,12 +57,31 @@ describe('security settings', () => {
     await waitFor(() => expect(screen.getByRole('heading', { name: 'Security' })).toBeInTheDocument())
     const currentPassword = screen.getByLabelText('Current password')
     const newPassword = screen.getByLabelText(/New password/)
+    const confirmation = screen.getByLabelText('Confirm new password')
     fireEvent.change(currentPassword, { target: { value: 'old-password' } })
     fireEvent.change(newPassword, { target: { value: 'new-password-123' } })
-    fireEvent.submit(currentPassword.closest('form')!)
+    fireEvent.change(confirmation, { target: { value: 'new-password-123' } })
+    let finishRequest: (() => void) | undefined
+    vi.mocked(api).mockImplementationOnce(() => new Promise<void>(resolve => { finishRequest = resolve }) as never)
+    fireEvent.click(screen.getByRole('button', { name: 'Update password' }))
+    await waitFor(() => expect(api).toHaveBeenCalledWith('/auth/password', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ current_password: 'old-password', new_password: 'new-password-123' }) })))
+    expect(screen.getByRole('button', { name: 'Updating…' })).toBeDisabled()
+    await act(async () => finishRequest?.())
     await waitFor(() => expect(api).toHaveBeenCalledWith('/auth/password', expect.objectContaining({ method: 'PUT', body: JSON.stringify({ current_password: 'old-password', new_password: 'new-password-123' }) })))
     expect(setCSRF).toHaveBeenCalledWith('')
     expect(container.textContent).toContain('Security')
+  })
+
+  it('rejects mismatched new-password confirmation without contacting the server', async () => {
+    renderPage()
+    await waitFor(() => expect(screen.getByRole('heading', { name: 'Security' })).toBeInTheDocument())
+    fireEvent.change(screen.getByLabelText('Current password'), { target: { value: 'old-password' } })
+    fireEvent.change(screen.getByLabelText(/New password/), { target: { value: 'new-password-123' } })
+    fireEvent.change(screen.getByLabelText('Confirm new password'), { target: { value: 'different-password-123' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Update password' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The new passwords do not match.')
+    expect(api).not.toHaveBeenCalled()
   })
 
   it('covers TOTP enrollment, recovery acknowledgement, and logout', async () => {
@@ -83,6 +102,7 @@ describe('security settings', () => {
     expect(acknowledgement.closest('label')).toHaveClass('checkbox-label', 'recovery-ack')
     expect(acknowledgement.closest('label')?.querySelector('span')).toHaveTextContent('I saved these recovery codes in a secure place.')
     fireEvent.click(acknowledgement)
+    expect(screen.getByRole('button', { name: 'Continue to sign in' })).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Continue to sign in' }))
     await waitFor(() => expect(logout).toHaveBeenCalledOnce())
   })
@@ -151,7 +171,7 @@ describe('security settings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Replace authenticator' }))
     const dialog = screen.getByRole('dialog')
     fireEvent.change(screen.getByLabelText('Account password'), { target: { value: 'correct-password' } })
-    fireEvent.change(screen.getByLabelText('Current authenticator code or recovery code'), { target: { value: '123456' } })
+    fireEvent.change(screen.getByLabelText('Current authenticator code or recovery code'), { target: { value: '123 456' } })
     fireEvent.click(dialog.querySelector('button[type="submit"]')!)
     await waitFor(() => expect(screen.getByLabelText('Authenticator secret').textContent?.replaceAll(' ', '')).toBe('REPLACEMENTSECRET'))
 
@@ -194,7 +214,7 @@ describe('security settings', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Replace authenticator' }))
     const dialog = screen.getByRole('dialog')
     fireEvent.change(screen.getByLabelText('Account password'), { target: { value: 'correct-password' } })
-    fireEvent.change(screen.getByLabelText('Current authenticator code or recovery code'), { target: { value: '123456' } })
+    fireEvent.change(screen.getByLabelText('Current authenticator code or recovery code'), { target: { value: '123 456' } })
     fireEvent.click(dialog.querySelector('button[type="submit"]')!)
     await waitFor(() => expect(screen.getByLabelText('Authenticator secret').textContent?.replaceAll(' ', '')).toBe('REPLACEMENTSECRET'))
     expect(api).toHaveBeenCalledWith('/auth/totp/setup', expect.objectContaining({ body: JSON.stringify({ password: 'correct-password', code: '123456', recovery_code: '' }) }))
@@ -224,5 +244,12 @@ describe('security settings', () => {
     await waitFor(() => expect(screen.getByText('new-one')).toBeInTheDocument())
     expect(screen.getByText('Recovery codes regenerated. Save the new codes before leaving this page.')).toBeInTheDocument()
     expect(api).toHaveBeenLastCalledWith('/auth/totp/recovery-codes', expect.objectContaining({ body: JSON.stringify({ password: 'correct-password', code: '654321', recovery_code: '' }) }))
+    const acknowledge = screen.getByRole('checkbox', { name: /I saved these recovery codes/ })
+    expect(screen.getByRole('button', { name: 'Done' })).toBeDisabled()
+    fireEvent.click(acknowledge)
+    fireEvent.click(screen.getByRole('button', { name: 'Done' }))
+    await waitFor(() => expect(screen.queryByRole('heading', { name: 'Save your recovery codes' })).not.toBeInTheDocument())
+    expect(screen.getByRole('status')).toHaveTextContent('Recovery codes saved. Your session remains active.')
+    expect(logout).not.toHaveBeenCalled()
   })
 })

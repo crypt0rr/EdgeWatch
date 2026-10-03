@@ -1968,6 +1968,7 @@ label small,
 .status-dot.connecting i { background: var(--amber); box-shadow: 0 0 0 4px #f1bd6a1c; }
 .status-dot.live i { background: var(--green); box-shadow: 0 0 0 4px #5bd4a01c; }
 .status-dot.reconnecting i { background: var(--red); box-shadow: 0 0 0 4px #f37d831c; }
+.status-dot.limited i { background: var(--amber); box-shadow: 0 0 0 4px #f1bd6a1c; }
 .status-dot.unavailable i { background: #8296ae; box-shadow: 0 0 0 4px #8296ae1c; }
 .platform-update-notice { margin-bottom: 16px; }
 

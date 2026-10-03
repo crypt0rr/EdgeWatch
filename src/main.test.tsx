@@ -147,7 +147,6 @@ describe('application shell', () => {
       for (const type of ['changes-detected', 'changes-reminder', 'incident-opened', 'incident-closed', 'incident-accepted', 'incident-suppressed']) stream.emit(type, 'job-9')
       for (const type of ['job.created', 'job.updated', 'job.archived', 'job.restored', 'job.deleted']) stream.emit(type, 'job-9')
       stream.emit('notification.changed')
-      stream.emit('stream_limit')
       stream.emit('refresh_required')
       stream.emit('unrecognised-event')
       stream.onopen?.()
@@ -155,6 +154,26 @@ describe('application shell', () => {
     await waitFor(() => expect(screen.getByRole('status', { name: 'Live updates' })).toHaveClass('live'))
     act(() => stream.onerror?.())
     await waitFor(() => expect(screen.getByRole('status', { name: 'Reconnecting…' })).toHaveClass('reconnecting'))
+  })
+
+  it('stops reconnecting and explains when the account stream limit is reached', async () => {
+    renderWithProviders(<Shell displayName="Admin" role="administrator" permissions={['jobs.read', 'stream.read']} onLogout={vi.fn()} />)
+    await waitFor(() => expect(EventSourceStub.instances).toHaveLength(1))
+    const stream = EventSourceStub.instances[0]
+
+    act(() => stream.emit('stream_limit'))
+
+    const status = screen.getByRole('status', { name: 'Live updates limited' })
+    expect(stream.close).toHaveBeenCalledOnce()
+    expect(status).toHaveClass('limited')
+    expect(status).toHaveAttribute('title', 'Live updates are limited for this account. Close another EdgeWatch tab, then reload this page to reconnect.')
+
+    act(() => {
+      stream.onerror?.()
+      stream.onopen?.()
+    })
+    expect(screen.getByRole('status', { name: 'Live updates limited' })).toBeInTheDocument()
+    expect(EventSourceStub.instances).toHaveLength(1)
   })
 
   it('shows the version as plain text when the build has no published release', async () => {

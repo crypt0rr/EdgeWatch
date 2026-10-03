@@ -233,6 +233,61 @@ func TestJobProfileSelectionErrorsRemainFieldValidation(t *testing.T) {
 	assertRedactedInternalError(t, "update with a closed store", recorder, "closed-store", "database is closed", &logs)
 }
 
+func TestJobValidationUsesTypedFieldsInsteadOfSearchingJobName(t *testing.T) {
+	server, _, admin := newUsersTestServer(t)
+	cases := []struct {
+		name  string
+		field string
+		edit  func(*jobPayload)
+	}{
+		{
+			name:  "UDP rate name",
+			field: "schedule",
+			edit:  func(payload *jobPayload) { payload.Schedule = "not a schedule" },
+		},
+		{
+			name:  "schedule target",
+			field: "timezone",
+			edit:  func(payload *jobPayload) { payload.Timezone = "Not/A_Timezone" },
+		},
+		{
+			name:  "tcp udp rate",
+			field: "ports",
+			edit:  func(payload *jobPayload) { payload.TCP.Ports = "http" },
+		},
+		{
+			name:  "target timeout schedule",
+			field: "timeout",
+			edit:  func(payload *jobPayload) { payload.Timeout = "not-a-duration" },
+		},
+	}
+	for _, test := range cases {
+		t.Run(test.field, func(t *testing.T) {
+			payload := jobPayload{
+				Name: test.name, Schedule: "0 * * * *", Timezone: "UTC",
+				Targets: []string{"192.0.2.56"}, MaxExpandedHosts: 100,
+				TCP:    &protocolPayload{Ports: "443", Mode: "connect", Engine: config.EngineNmap},
+				Timing: "balanced", Timeout: "1h", ResumeWindow: "8d",
+				BaselineSamples: 1, ChangeConfirmations: 1,
+			}
+			test.edit(&payload)
+			raw, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			recorder := httptest.NewRecorder()
+			server.createJob(recorder, jobWriteRequest(http.MethodPost, "/api/v1/jobs", string(raw), "typed-field-"+test.field), admin, defaultTenantStore(server))
+			body := decodeAPIError(t, recorder)
+			if recorder.Code != http.StatusBadRequest || body.Error.Code != "validation_failed" {
+				t.Fatalf("validation response = %d %#v", recorder.Code, body.Error)
+			}
+			if len(body.Error.Details) != 1 || body.Error.Details[test.field] == "" {
+				t.Fatalf("details for job name %q = %#v, want only field %q", test.name, body.Error.Details, test.field)
+			}
+		})
+	}
+}
+
 func TestScannerProfileWritesMapStorageFailuresAndMissingProfiles(t *testing.T) {
 	ctx := context.Background()
 	server, db, admin := newUsersTestServer(t)

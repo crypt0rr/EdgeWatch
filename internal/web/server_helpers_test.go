@@ -256,6 +256,9 @@ func TestServerHelpersValidateJSONPaginationAndHeaders(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("generic validation status = %d", rec.Code)
 	}
+	if body := decodeAPIError(t, rec); len(body.Error.Details) != 1 || body.Error.Details["job"] != "something else failed" {
+		t.Fatalf("unclassified validation details = %#v, want only the form-level job fallback", body.Error.Details)
+	}
 
 	wrapped := securityHeaders(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
 	headerRecorder := httptest.NewRecorder()

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
@@ -160,20 +161,14 @@ func (s *Server) prunePendingTOTPLocked(now time.Time) {
 }
 func writeValidationError(w http.ResponseWriter, err error) {
 	message := err.Error()
-	details := map[string]string{}
-	lower := strings.ToLower(message)
-	// Keep validation responses useful to form clients without exposing an
-	// implementation-specific error type. The API returns a stable field name
-	// when the validator can identify one, while preserving the full message.
-	fields := []string{"schedule", "timezone", "target", "tcp", "udp", "ports", "timeout", "resume_window", "timing", "baseline", "confirmations", "max_expanded_hosts", "name", "engine", "profile", "naabu", "scan_type", "rate", "workers", "retries", "warm_up_seconds", "address_batch_size", "operator_adjustable", "operator_bounds", "nse"}
-	for _, field := range fields {
-		if strings.Contains(lower, field) {
-			details[field] = message
-		}
+	field := "job"
+	var fieldError *config.FieldValidationError
+	if errors.As(err, &fieldError) && strings.TrimSpace(fieldError.Field) != "" {
+		field = fieldError.Field
 	}
-	if len(details) == 0 {
-		details["job"] = message
-	}
+	// Unclassified validation failures retain the useful form-level fallback.
+	// Never infer a field by searching the message: it may include user input.
+	details := map[string]string{field: message}
 	writeError(w, http.StatusBadRequest, "validation_failed", message, details)
 }
 

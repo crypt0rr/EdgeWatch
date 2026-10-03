@@ -778,50 +778,50 @@ func (c Config) Validate() error {
 		j := NormalizeJob(rawJob)
 		// Check the bound before any message below quotes the name.
 		if err := validateJobName(j.Name); err != nil {
-			return err
+			return NewFieldValidationError("name", err)
 		}
 		if j.Name == "" || seen[j.Name] {
-			return fmt.Errorf("job names must be non-empty and unique: %q", j.Name)
+			return NewFieldValidationError("name", fmt.Errorf("job names must be non-empty and unique: %q", j.Name))
 		}
 		seen[j.Name] = true
 		location, err := time.LoadLocation(j.Timezone)
 		if err != nil {
-			return fmt.Errorf("job %s: invalid timezone: %w", j.Name, err)
+			return NewFieldValidationError("timezone", fmt.Errorf("job %s: invalid timezone: %w", j.Name, err))
 		}
 		schedule := strings.TrimSpace(j.Schedule)
 		if strings.HasPrefix(schedule, "TZ=") || strings.HasPrefix(schedule, "CRON_TZ=") {
-			return fmt.Errorf("job %s: schedule must contain five cron fields; set timezone in the timezone field", j.Name)
+			return NewFieldValidationError("schedule", fmt.Errorf("job %s: schedule must contain five cron fields; set timezone in the timezone field", j.Name))
 		}
 		parsed, err := parser.Parse(schedule)
 		if err != nil {
-			return fmt.Errorf("job %s: invalid schedule: %w", j.Name, err)
+			return NewFieldValidationError("schedule", fmt.Errorf("job %s: invalid schedule: %w", j.Name, err))
 		}
 		if parsed.Next(time.Now().UTC().In(location)).IsZero() {
-			return fmt.Errorf("job %s: schedule never fires", j.Name)
+			return NewFieldValidationError("schedule", fmt.Errorf("job %s: schedule never fires", j.Name))
 		}
 		if len(j.Targets) == 0 {
-			return fmt.Errorf("job %s: at least one target is required", j.Name)
+			return NewFieldValidationError("targets", fmt.Errorf("job %s: at least one target is required", j.Name))
 		}
 		if j.TCP == nil && j.UDP == nil {
-			return fmt.Errorf("job %s: tcp or udp must be configured", j.Name)
+			return NewFieldValidationError("protocols", fmt.Errorf("job %s: tcp or udp must be configured", j.Name))
 		}
 		if j.MaxExpandedHosts < 1 || j.MaxExpandedHosts > 1_000_000 {
-			return fmt.Errorf("job %s: max_expanded_hosts out of range", j.Name)
+			return NewFieldValidationError("max_expanded_hosts", fmt.Errorf("job %s: max_expanded_hosts out of range", j.Name))
 		}
 		if j.Baseline.Samples < 1 || j.Baseline.Samples > 100 {
-			return fmt.Errorf("job %s: baseline samples must be 1..100", j.Name)
+			return NewFieldValidationError("baseline", fmt.Errorf("job %s: baseline samples must be 1..100", j.Name))
 		}
 		if j.Change.Confirmations < 1 || j.Change.Confirmations > 100 {
-			return fmt.Errorf("job %s: change confirmations must be 1..100", j.Name)
+			return NewFieldValidationError("confirmations", fmt.Errorf("job %s: change confirmations must be 1..100", j.Name))
 		}
 		if j.Timeout.Value() < time.Second || j.Timeout.Value() > 30*24*time.Hour {
-			return fmt.Errorf("job %s: timeout must be between 1s and 30d", j.Name)
+			return NewFieldValidationError("timeout", fmt.Errorf("job %s: timeout must be between 1s and 30d", j.Name))
 		}
 		if j.ResumeWindow.Value() < time.Hour || j.ResumeWindow.Value() > 30*24*time.Hour {
-			return fmt.Errorf("job %s: resume_window must be between 1h and 30d", j.Name)
+			return NewFieldValidationError("resume_window", fmt.Errorf("job %s: resume_window must be between 1h and 30d", j.Name))
 		}
 		if j.Timing != "conservative" && j.Timing != "balanced" && j.Timing != "fast" {
-			return fmt.Errorf("job %s: timing must be conservative, balanced, or fast", j.Name)
+			return NewFieldValidationError("timing", fmt.Errorf("job %s: timing must be conservative, balanced, or fast", j.Name))
 		}
 		targets := map[string]bool{}
 		for _, target := range j.Targets {
@@ -832,33 +832,33 @@ func (c Config) Validate() error {
 				targetErr = validateTarget(target)
 			}
 			if targetErr != nil {
-				return fmt.Errorf("job %s: %w", j.Name, targetErr)
+				return NewFieldValidationError("targets", fmt.Errorf("job %s: %w", j.Name, targetErr))
 			}
 			canonical := CanonicalTarget(target)
 			if targets[canonical] {
-				return fmt.Errorf("job %s: duplicate target %q", j.Name, target)
+				return NewFieldValidationError("targets", fmt.Errorf("job %s: duplicate target %q", j.Name, target))
 			}
 			targets[canonical] = true
 		}
 		if j.TCP != nil {
 			if _, err := ParsePorts(j.TCP.Ports); err != nil {
-				return fmt.Errorf("job %s tcp: %w", j.Name, err)
+				return NewFieldValidationError("ports", fmt.Errorf("job %s tcp: %w", j.Name, err))
 			}
 			if j.TCP.Mode != "syn" && j.TCP.Mode != "connect" {
-				return fmt.Errorf("job %s: tcp mode must be syn or connect", j.Name)
+				return NewFieldValidationError("tcp", fmt.Errorf("job %s: tcp mode must be syn or connect", j.Name))
 			}
 			if j.TCP.Engine != "" && j.TCP.Engine != EngineNmap && j.TCP.Engine != EngineNaabuNmap {
-				return fmt.Errorf("job %s: tcp engine must be nmap or naabu_nmap", j.Name)
+				return NewFieldValidationError("tcp", fmt.Errorf("job %s: tcp engine must be nmap or naabu_nmap", j.Name))
 			}
 			if j.TCP.Engine == EngineNaabuNmap {
 				if j.TCP.Naabu == nil {
-					return fmt.Errorf("job %s: naabu options are required for naabu_nmap", j.Name)
+					return NewFieldValidationError("tcp", fmt.Errorf("job %s: naabu options are required for naabu_nmap", j.Name))
 				}
 				if err := ValidateNaabuOptions(*j.TCP.Naabu); err != nil {
 					return fmt.Errorf("job %s tcp naabu: %w", j.Name, err)
 				}
 				if j.TCP.Mode != "syn" && j.TCP.Mode != "connect" {
-					return fmt.Errorf("job %s: tcp mode must be syn or connect", j.Name)
+					return NewFieldValidationError("tcp", fmt.Errorf("job %s: tcp mode must be syn or connect", j.Name))
 				}
 			}
 			profile := ScannerProfile{Engine: j.TCP.Engine, NaabuArgs: j.TCP.NaabuArgs, NmapArgs: j.TCP.NmapArgs, EnrichmentArgs: j.TCP.EnrichmentArgs, NSEProfile: j.TCP.NSEProfile, NSEArgs: j.TCP.NSEArgs}
@@ -871,13 +871,13 @@ func (c Config) Validate() error {
 		}
 		if j.UDP != nil {
 			if _, err := ParsePorts(j.UDP.Ports); err != nil {
-				return fmt.Errorf("job %s udp: %w", j.Name, err)
+				return NewFieldValidationError("ports", fmt.Errorf("job %s udp: %w", j.Name, err))
 			}
 			if j.UDP.Mode != "" {
-				return fmt.Errorf("job %s: udp mode is not configurable", j.Name)
+				return NewFieldValidationError("udp", fmt.Errorf("job %s: udp mode is not configurable", j.Name))
 			}
 			if j.UDP.Engine != "" && j.UDP.Engine != EngineNmap {
-				return fmt.Errorf("job %s: udp engine must be nmap", j.Name)
+				return NewFieldValidationError("udp", fmt.Errorf("job %s: udp engine must be nmap", j.Name))
 			}
 			if err := ValidateScannerProfile(ScannerProfile{Engine: EngineNmap, NmapArgs: j.UDP.NmapArgs, EnrichmentArgs: j.UDP.EnrichmentArgs, NSEProfile: j.UDP.NSEProfile, NSEArgs: j.UDP.NSEArgs}); err != nil {
 				return fmt.Errorf("job %s udp scanner profile: %w", j.Name, err)
@@ -892,25 +892,25 @@ func (c Config) Validate() error {
 // cancel, and resume safely; arbitrary Naabu flags remain unavailable.
 func ValidateNaabuOptions(options NaabuOptions) error {
 	if options.ScanType != "connect" && options.ScanType != "syn" {
-		return fmt.Errorf("scan_type must be connect or syn")
+		return NewFieldValidationError("scan_type", fmt.Errorf("scan_type must be connect or syn"))
 	}
 	if options.Rate < 1 || options.Rate > 100_000 {
-		return fmt.Errorf("rate must be between 1 and 100000")
+		return NewFieldValidationError("rate", fmt.Errorf("rate must be between 1 and 100000"))
 	}
 	if options.Workers < 1 || options.Workers > 1024 {
-		return fmt.Errorf("workers must be between 1 and 1024")
+		return NewFieldValidationError("workers", fmt.Errorf("workers must be between 1 and 1024"))
 	}
 	if options.Retries < 0 || options.Retries > 10 {
-		return fmt.Errorf("retries must be between 0 and 10")
+		return NewFieldValidationError("retries", fmt.Errorf("retries must be between 0 and 10"))
 	}
 	if options.TimeoutMS < 100 || options.TimeoutMS > 60_000 {
-		return fmt.Errorf("timeout_ms must be between 100 and 60000")
+		return NewFieldValidationError("timeout_ms", fmt.Errorf("timeout_ms must be between 100 and 60000"))
 	}
 	if options.WarmUpSeconds < 0 || options.WarmUpSeconds > 60 {
-		return fmt.Errorf("warm_up_seconds must be between 0 and 60")
+		return NewFieldValidationError("warm_up_seconds", fmt.Errorf("warm_up_seconds must be between 0 and 60"))
 	}
 	if options.AddressBatchSize < 1 || options.AddressBatchSize > 256 {
-		return fmt.Errorf("address_batch_size must be between 1 and 256")
+		return NewFieldValidationError("address_batch_size", fmt.Errorf("address_batch_size must be between 1 and 256"))
 	}
 	return nil
 }

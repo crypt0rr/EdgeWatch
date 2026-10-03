@@ -92,7 +92,7 @@ func NormalizeScannerProfile(profile ScannerProfile) ScannerProfile {
 // profiles created by older databases.
 func ValidateScannerProfile(profile ScannerProfile) error {
 	if profile.Engine != EngineNmap && profile.Engine != EngineNaabuNmap {
-		return fmt.Errorf("engine must be nmap or naabu_nmap")
+		return NewFieldValidationError("engine", fmt.Errorf("engine must be nmap or naabu_nmap"))
 	}
 	if profile.Engine == EngineNaabuNmap {
 		options := profile.Naabu
@@ -102,16 +102,16 @@ func ValidateScannerProfile(profile ScannerProfile) error {
 		}
 	}
 	if err := validateArgTemplate(profile.NmapArgs, "nmap"); err != nil {
-		return err
+		return NewFieldValidationError("nmap_args", err)
 	}
 	if profile.Engine != EngineNaabuNmap && len(profile.NaabuArgs) > 0 {
-		return fmt.Errorf("naabu arguments require the naabu_nmap engine")
+		return NewFieldValidationError("naabu_args", fmt.Errorf("naabu arguments require the naabu_nmap engine"))
 	}
 	if err := validateArgTemplate(profile.NaabuArgs, "naabu"); err != nil {
-		return err
+		return NewFieldValidationError("naabu_args", err)
 	}
 	if err := validateArgTemplate(profile.EnrichmentArgs, "nmap enrichment"); err != nil {
-		return err
+		return NewFieldValidationError("enrichment_args", err)
 	}
 	// Runtime-owned target, port, and structured-output arguments must be
 	// declared explicitly by a managed template. The built-ins intentionally
@@ -119,66 +119,71 @@ func ValidateScannerProfile(profile ScannerProfile) error {
 	// argv itself; an empty set is therefore the only compatibility exception.
 	if profile.Engine == EngineNaabuNmap && len(profile.NaabuArgs) > 0 {
 		if err := requirePlaceholders(profile.NaabuArgs, "naabu", PlaceholderTargetsFile, PlaceholderPorts, PlaceholderStructuredOutput); err != nil {
-			return err
+			return NewFieldValidationError("naabu_args", err)
 		}
 	}
 	if len(profile.NmapArgs) > 0 {
 		if err := requireAddressPlaceholder(profile.NmapArgs, "nmap"); err != nil {
-			return err
+			return NewFieldValidationError("nmap_args", err)
 		}
 		if err := requirePlaceholders(profile.NmapArgs, "nmap", PlaceholderPorts, PlaceholderStructuredOutput); err != nil {
-			return err
+			return NewFieldValidationError("nmap_args", err)
 		}
 	}
 	if len(profile.EnrichmentArgs) > 0 {
 		if err := requireAddressPlaceholder(profile.EnrichmentArgs, "nmap enrichment"); err != nil {
-			return err
+			return NewFieldValidationError("enrichment_args", err)
 		}
 		if err := requirePlaceholders(profile.EnrichmentArgs, "nmap enrichment", PlaceholderPorts, PlaceholderStructuredOutput); err != nil {
-			return err
+			return NewFieldValidationError("enrichment_args", err)
 		}
 	}
 	if strings.TrimSpace(profile.NSEProfile) != "" {
 		if err := validateNSEName(profile.NSEProfile); err != nil {
-			return err
+			return NewFieldValidationError("nse_profile", err)
 		}
 	} else if len(profile.NSEArgs) > 0 {
-		return fmt.Errorf("nse_args requires an approved nse_profile")
+		return NewFieldValidationError("nse_args", fmt.Errorf("nse_args requires an approved nse_profile"))
 	}
 	if err := validateNSEArgs(profile.NSEArgs); err != nil {
-		return err
+		return NewFieldValidationError("nse_args", err)
 	}
 	seen := map[string]struct{}{}
 	for _, field := range profile.OperatorAdjustable {
 		field = strings.TrimSpace(field)
 		if field == "" {
-			return fmt.Errorf("operator_adjustable contains an empty field")
+			return NewFieldValidationError("operator_adjustable", fmt.Errorf("operator_adjustable contains an empty field"))
 		}
 		if _, ok := seen[field]; ok {
-			return fmt.Errorf("operator_adjustable contains duplicate field %q", field)
+			return NewFieldValidationError("operator_adjustable", fmt.Errorf("operator_adjustable contains duplicate field %q", field))
 		}
 		seen[field] = struct{}{}
 		if _, ok := operatorBoundFields[field]; ok {
 			bound, boundOK := profile.OperatorBounds[field]
 			if !boundOK {
-				return fmt.Errorf("operator_adjustable field %q requires an operator bound", field)
+				return NewFieldValidationError("operator_bounds", fmt.Errorf("operator_adjustable field %q requires an operator bound", field))
 			}
 			if err := validateOperatorBound(field, bound); err != nil {
-				return err
+				return NewFieldValidationError("operator_bounds", err)
 			}
 			continue
 		}
 		if _, ok := operatorTypedFields[field]; ok {
 			if _, hasBound := profile.OperatorBounds[field]; hasBound {
-				return fmt.Errorf("operator-adjustable field %q does not accept a numeric bound", field)
+				return NewFieldValidationError("operator_bounds", fmt.Errorf("operator-adjustable field %q does not accept a numeric bound", field))
 			}
 			continue
 		}
-		return fmt.Errorf("operator_adjustable field %q is not supported", field)
+		return NewFieldValidationError("operator_adjustable", fmt.Errorf("operator_adjustable field %q is not supported", field))
 	}
+	fields := make([]string, 0, len(profile.OperatorBounds))
 	for field := range profile.OperatorBounds {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+	for _, field := range fields {
 		if _, ok := seen[field]; !ok {
-			return fmt.Errorf("operator bound %q is not marked operator-adjustable", field)
+			return NewFieldValidationError("operator_bounds", fmt.Errorf("operator bound %q is not marked operator-adjustable", field))
 		}
 	}
 	return nil
@@ -199,7 +204,7 @@ var operatorTypedFields = map[string]struct{}{
 
 func validateOperatorBound(field string, bound NumericBound) error {
 	if bound.Min > bound.Max {
-		return fmt.Errorf("operator bound %q has min greater than max", field)
+		return NewFieldValidationError("operator_bounds", fmt.Errorf("operator bound %q has min greater than max", field))
 	}
 	limits := map[string]NumericBound{
 		"rate": {Min: 1, Max: 100_000}, "workers": {Min: 1, Max: 1024},
@@ -208,7 +213,7 @@ func validateOperatorBound(field string, bound NumericBound) error {
 	}
 	limit := limits[field]
 	if bound.Min < limit.Min || bound.Max > limit.Max {
-		return fmt.Errorf("operator bound %q must stay within %d..%d", field, limit.Min, limit.Max)
+		return NewFieldValidationError("operator_bounds", fmt.Errorf("operator bound %q must stay within %d..%d", field, limit.Min, limit.Max))
 	}
 	return nil
 }

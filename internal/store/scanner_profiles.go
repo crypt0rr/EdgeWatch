@@ -195,10 +195,10 @@ func insertBuiltinProfileRevisionTx(ctx context.Context, tx *sql.Tx, id string, 
 func validateScannerProfileRecord(name string, definition config.ScannerProfile) error {
 	name = strings.TrimSpace(name)
 	if name == "" || len(name) > 100 {
-		return NewValidationError(errors.New("scanner profile name must be 1..100 characters"))
+		return NewValidationError(config.NewFieldValidationError("name", errors.New("scanner profile name must be 1..100 characters")))
 	}
 	if strings.ContainsAny(name, "\x00\n\r") {
-		return NewValidationError(errors.New("scanner profile name contains invalid characters"))
+		return NewValidationError(config.NewFieldValidationError("name", errors.New("scanner profile name contains invalid characters")))
 	}
 	definition = config.NormalizeScannerProfile(definition)
 	return NewValidationError(config.ValidateScannerProfile(definition))

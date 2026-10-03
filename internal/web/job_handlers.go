@@ -77,7 +77,7 @@ func validateManagedScannerInput(protocol *protocolPayload, label string) error 
 	// boundary and smuggle Naabu/NSE or custom argv into a UDP job payload.
 	if label == "udp" {
 		if strings.TrimSpace(protocol.ProfileID) != "" || len(protocol.NaabuArgs) > 0 || len(protocol.NmapArgs) > 0 || len(protocol.EnrichmentArgs) > 0 || strings.TrimSpace(protocol.NSEProfile) != "" || len(protocol.NSEArgs) > 0 || protocol.Naabu != nil {
-			return errors.New("udp scanner profiles and custom scanner arguments are not supported; UDP uses Nmap defaults")
+			return config.NewFieldValidationError("udp", errors.New("udp scanner profiles and custom scanner arguments are not supported; UDP uses Nmap defaults"))
 		}
 		return nil
 	}
@@ -85,10 +85,10 @@ func validateManagedScannerInput(protocol *protocolPayload, label string) error 
 		return nil
 	}
 	if len(protocol.NaabuArgs) > 0 || len(protocol.NmapArgs) > 0 || len(protocol.EnrichmentArgs) > 0 || strings.TrimSpace(protocol.NSEProfile) != "" || len(protocol.NSEArgs) > 0 || protocol.Naabu != nil {
-		return fmt.Errorf("%s scanner arguments and Naabu tuning require an administrator-managed profile", label)
+		return config.NewFieldValidationError("tcp", fmt.Errorf("%s scanner arguments and Naabu tuning require an administrator-managed profile", label))
 	}
 	if strings.TrimSpace(protocol.Engine) == config.EngineNaabuNmap {
-		return fmt.Errorf("%s naabu_nmap jobs must select an administrator-managed scanner profile", label)
+		return config.NewFieldValidationError("tcp", fmt.Errorf("%s naabu_nmap jobs must select an administrator-managed scanner profile", label))
 	}
 	return nil
 }
@@ -105,14 +105,14 @@ func (p jobPayload) config() (config.Job, error) {
 	if p.Timeout != "" {
 		d, err := parseDuration(p.Timeout)
 		if err != nil {
-			return job, fmt.Errorf("timeout: %w", err)
+			return job, config.NewFieldValidationError("timeout", fmt.Errorf("timeout: %w", err))
 		}
 		job.Timeout = config.Duration(d)
 	}
 	if p.ResumeWindow != "" {
 		d, err := parseDuration(p.ResumeWindow)
 		if err != nil {
-			return job, fmt.Errorf("resume_window: %w", err)
+			return job, config.NewFieldValidationError("resume_window", fmt.Errorf("resume_window: %w", err))
 		}
 		job.ResumeWindow = config.Duration(d)
 	}

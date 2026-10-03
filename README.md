@@ -421,6 +421,14 @@ logical targets while each resolved effective address is shown separately in
 host evidence. If a DNS target cannot be resolved, EdgeWatch still scans other
 targets it could resolve, marks the overall scan incomplete, and protects the
 unresolved target's baseline from false removals until a complete scan succeeds.
+By default, DNS answer membership and each resolved host's reachability are
+part of the monitored baseline. Jobs can opt into **Aggregate port and service
+surface** in the job editor when DNS answers rotate routinely. Aggregate mode
+continues comparing the logical DNS target's positive ports and service
+fingerprints, but intentionally ignores answer additions/removals and individual
+backend reachability; IP and CIDR targets remain address-sensitive. Per-IP scan
+evidence is retained for investigation. This is a security-relevant change and
+requires an explicit new baseline.
 Schedules use five-field cron syntax in the selected IANA timezone. New jobs
 default to the deployment `timezone` from config.yaml, or to the browser's
 timezone when it is omitted. New jobs receive an optional 30-minute

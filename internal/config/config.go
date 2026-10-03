@@ -195,21 +195,22 @@ type Notifications struct {
 	EncryptionKeyFile string   `yaml:"encryption_key_file"`
 }
 type Job struct {
-	Name             string    `yaml:"name"`
-	Schedule         string    `yaml:"schedule"`
-	Timezone         string    `yaml:"timezone"`
-	RunOnStart       *bool     `yaml:"run_on_start"`
-	AssumeAlive      *bool     `yaml:"assume_alive"`
-	Targets          []string  `yaml:"targets"`
-	MaxExpandedHosts int       `yaml:"max_expanded_hosts"`
-	TCP              *Protocol `yaml:"tcp"`
-	UDP              *Protocol `yaml:"udp"`
-	Timing           string    `yaml:"timing"`
-	Timeout          Duration  `yaml:"timeout"`
-	ResumeWindow     Duration  `yaml:"resume_window"`
-	Baseline         Baseline  `yaml:"baseline"`
-	Change           Change    `yaml:"change"`
-	AllowHighCost    bool      `yaml:"allow_high_cost,omitempty"`
+	Name              string    `yaml:"name"`
+	Schedule          string    `yaml:"schedule"`
+	Timezone          string    `yaml:"timezone"`
+	RunOnStart        *bool     `yaml:"run_on_start"`
+	AssumeAlive       *bool     `yaml:"assume_alive"`
+	Targets           []string  `yaml:"targets"`
+	DNSComparisonMode string    `yaml:"dns_comparison_mode,omitempty" json:"dns_comparison_mode,omitempty"`
+	MaxExpandedHosts  int       `yaml:"max_expanded_hosts"`
+	TCP               *Protocol `yaml:"tcp"`
+	UDP               *Protocol `yaml:"udp"`
+	Timing            string    `yaml:"timing"`
+	Timeout           Duration  `yaml:"timeout"`
+	ResumeWindow      Duration  `yaml:"resume_window"`
+	Baseline          Baseline  `yaml:"baseline"`
+	Change            Change    `yaml:"change"`
+	AllowHighCost     bool      `yaml:"allow_high_cost,omitempty"`
 	// NotificationDestinations contains stable destination identifiers selected
 	// for this job. A nil value preserves the legacy behavior of delivering to
 	// every globally enabled destination; an explicit empty list disables
@@ -591,6 +592,9 @@ func applyDefaults(c *Config) {
 	}
 	for i := range c.Jobs {
 		j := &c.Jobs[i]
+		if j.DNSComparisonMode == "" {
+			j.DNSComparisonMode = DNSComparisonAddressSensitive
+		}
 		if j.RunOnStart == nil {
 			runOnStart := false
 			j.RunOnStart = &runOnStart
@@ -651,6 +655,13 @@ func applyDefaults(c *Config) {
 const (
 	EngineNmap      = "nmap"
 	EngineNaabuNmap = "naabu_nmap"
+	// DNSComparisonAddressSensitive retains the historical behavior: resolved
+	// answer membership and effective-host state are part of the comparison.
+	DNSComparisonAddressSensitive = "address_sensitive"
+	// DNSComparisonAggregate compares the logical target's aggregate port and
+	// service surface without treating individual DNS answers as monitored
+	// identities.
+	DNSComparisonAggregate = "aggregate"
 	// Naabu always owns a complete TCP discovery pass. The Nmap port
 	// expression on a Naabu job is normalized to this value so persisted jobs,
 	// API responses, estimates, and security hashes cannot imply a partial
@@ -801,6 +812,9 @@ func (c Config) Validate() error {
 		}
 		if len(j.Targets) == 0 {
 			return NewFieldValidationError("targets", fmt.Errorf("job %s: at least one target is required", j.Name))
+		}
+		if j.DNSComparisonMode != DNSComparisonAddressSensitive && j.DNSComparisonMode != DNSComparisonAggregate {
+			return NewFieldValidationError("dns_comparison_mode", fmt.Errorf("job %s: dns_comparison_mode must be %q or %q", j.Name, DNSComparisonAddressSensitive, DNSComparisonAggregate))
 		}
 		if j.TCP == nil && j.UDP == nil {
 			return NewFieldValidationError("protocols", fmt.Errorf("job %s: tcp or udp must be configured", j.Name))
@@ -1760,10 +1774,11 @@ func (j Job) securityHashBeforePortCanonicalization() string {
 
 func (j Job) securityHashNormalized() string {
 	type securityJob struct {
-		Targets     []string
-		Max         int
-		AssumeAlive bool
-		TCP, UDP    *securityProtocol
+		Targets           []string
+		Max               int
+		AssumeAlive       bool
+		DNSComparisonMode *string `yaml:"dns_comparison_mode,omitempty"`
+		TCP, UDP          *securityProtocol
 	}
 	toSecurity := func(protocol *Protocol) *securityProtocol {
 		if protocol == nil {
@@ -1783,7 +1798,12 @@ func (j Job) securityHashNormalized() string {
 		}
 		return value
 	}
-	v := securityJob{append([]string(nil), j.Targets...), j.MaxExpandedHosts, j.AssumesAlive(), toSecurity(j.TCP), toSecurity(j.UDP)}
+	var dnsComparisonMode *string
+	if j.DNSComparisonMode == DNSComparisonAggregate {
+		mode := j.DNSComparisonMode
+		dnsComparisonMode = &mode
+	}
+	v := securityJob{Targets: append([]string(nil), j.Targets...), Max: j.MaxExpandedHosts, AssumeAlive: j.AssumesAlive(), DNSComparisonMode: dnsComparisonMode, TCP: toSecurity(j.TCP), UDP: toSecurity(j.UDP)}
 	sort.Strings(v.Targets)
 	b, _ := yaml.Marshal(v)
 	h := sha256.Sum256(b)

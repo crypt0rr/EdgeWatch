@@ -1,10 +1,13 @@
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -394,6 +397,69 @@ func TestSecurityHashIncludesAssumeAlive(t *testing.T) {
 	withoutField.AssumeAlive = nil
 	if base.SecurityHash() != withoutField.SecurityHash() {
 		t.Fatal("omitted assume_alive does not resolve to the default")
+	}
+}
+
+func TestDNSComparisonModeDefaultsSafelyAndChangesSecurityScope(t *testing.T) {
+	base := Job{
+		Name: "dns-monitor", Schedule: "0 * * * *", Timezone: "UTC",
+		Targets: []string{"edge.example"}, TCP: &Protocol{Ports: "443", Mode: "connect"},
+	}
+	defaultMode := NormalizeJob(base)
+	if defaultMode.DNSComparisonMode != DNSComparisonAddressSensitive {
+		t.Fatalf("default DNS comparison mode = %q, want %q", defaultMode.DNSComparisonMode, DNSComparisonAddressSensitive)
+	}
+	explicitDefault := base
+	explicitDefault.DNSComparisonMode = DNSComparisonAddressSensitive
+	if defaultMode.SecurityHash() != explicitDefault.SecurityHash() {
+		t.Fatal("explicit historical DNS mode changed the default security hash")
+	}
+	aggregate := base
+	aggregate.DNSComparisonMode = DNSComparisonAggregate
+	if defaultMode.SecurityHash() == aggregate.SecurityHash() {
+		t.Fatal("aggregate DNS comparison did not change the security hash")
+	}
+	if err := ValidateJob(aggregate); err != nil {
+		t.Fatalf("aggregate DNS mode was rejected: %v", err)
+	}
+	invalid := base
+	invalid.DNSComparisonMode = "ignore-everything"
+	if err := ValidateJob(invalid); err == nil || !strings.Contains(err.Error(), "dns_comparison_mode") {
+		t.Fatalf("invalid DNS comparison mode error = %v, want field validation", err)
+	}
+}
+
+func TestAddressSensitiveModePreservesLegacySecurityHash(t *testing.T) {
+	job := NormalizeJob(Job{
+		Targets: []string{"edge.example"},
+		TCP:     &Protocol{Ports: "443", Mode: "connect"},
+	})
+	type legacySecurityJob struct {
+		Targets     []string
+		Max         int
+		AssumeAlive bool
+		TCP, UDP    *securityProtocol
+	}
+	var legacyTCP *securityProtocol
+	if job.TCP != nil {
+		legacyTCP = &securityProtocol{
+			Ports: job.TCP.Ports, Mode: job.TCP.Mode,
+			ServiceDetection: job.TCP.ServiceDetection, Engine: job.TCP.Engine,
+			NSEProfile: job.TCP.NSEProfile, NSEArgs: job.TCP.NSEArgs,
+		}
+	}
+	legacy := legacySecurityJob{
+		Targets: append([]string(nil), job.Targets...), Max: job.MaxExpandedHosts,
+		AssumeAlive: job.AssumesAlive(), TCP: legacyTCP,
+	}
+	sort.Strings(legacy.Targets)
+	encoded, err := yaml.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := sha256.Sum256(encoded)
+	if got, want := job.SecurityHash(), hex.EncodeToString(expected[:]); got != want {
+		t.Fatalf("address-sensitive hash = %s, want pre-feature hash %s", got, want)
 	}
 }
 

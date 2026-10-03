@@ -134,12 +134,12 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 	now := scan.FinishedAt
 	if state.Baseline == nil {
 		clearTotalLossCandidate(state)
-		events := advanceCandidate(state, scan, job.Baseline.Samples, false)
+		events := advanceCandidateWithDNSMode(state, scan, job.Baseline.Samples, false, job.DNSComparisonMode)
 		return events, nil, nil
 	}
 	scopeChanged := state.BaselineConfigHash != scan.ConfigHash
 	if scopeChanged {
-		retireOutOfScopeChanges(state, scan.Snapshot)
+		retireOutOfScopeChanges(state, scan.Snapshot, job)
 	}
 	// A complete scan that suddenly reports no positive ports across a
 	// previously non-empty baseline is usually a degraded discovery result
@@ -159,7 +159,7 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		// An explicit host-discovery transition is useful even while the
 		// zero-positive-port guard waits for confirmation of the port loss. It
 		// does not confirm individual ports as closed.
-		hostChanges := hostStateChanges(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+		hostChanges := filterDNSAggregateChanges(*state.Baseline, scan.Snapshot, hostStateChanges(*state.Baseline, scan.Snapshot, scopeChanged), job)
 		if len(hostChanges) > 0 {
 			events := append(event, applyChanges(state, job.Name, scan.ID, hostChanges, job.Change.Confirmations, now)...)
 			return events, hostChanges, nil
@@ -174,7 +174,7 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		// scan because the old baseline already has a fingerprint.
 		learningServices = learnMissingFingerprints(state, scan.Snapshot, job.Baseline.Samples)
 	}
-	changes := Diff(*state.Baseline, scan.Snapshot, scopeChanged)
+	changes := diffForJob(*state.Baseline, scan.Snapshot, scopeChanged, job)
 	if len(learningServices) > 0 {
 		filtered := changes[:0]
 		for _, change := range changes {
@@ -212,7 +212,7 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		}
 	}
 	if scopeChanged {
-		candidateEvents := advanceCandidate(state, scan, job.Baseline.Samples, true)
+		candidateEvents := advanceCandidateWithDNSMode(state, scan, job.Baseline.Samples, true, job.DNSComparisonMode)
 		events = append(events, candidateEvents...)
 	}
 	return events, changes, nil
@@ -310,7 +310,7 @@ func processIncompleteSuccess(state *model.JobState, job config.Job, scan model.
 		// A partial scan with some positive evidence can still compare reachable
 		// targets, but it must never carry a stale total-loss candidate forward.
 		clearTotalLossCandidate(state)
-		changes = Diff(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash)
+		changes = diffForJob(*state.Baseline, scan.Snapshot, state.BaselineConfigHash != scan.ConfigHash, job)
 		filtered := changes[:0]
 		allowedIncompleteAdditions := make(map[string]struct{})
 		deferredLearning := make(map[string]struct{})
@@ -979,13 +979,22 @@ func protectedChangeKeys(state *model.JobState, baseline, current model.Snapshot
 }
 
 func advanceCandidate(state *model.JobState, scan model.Scan, required int, merge bool) []model.Event {
+	return advanceCandidateWithDNSMode(state, scan, required, merge, config.DNSComparisonAddressSensitive)
+}
+
+func advanceCandidateWithDNSMode(state *model.JobState, scan model.Scan, required int, merge bool, dnsMode string) []model.Event {
 	updateFingerprintCandidates(state, scan.Snapshot)
-	hash := scan.Snapshot.Hash()
+	hash := snapshotHashForDNSMode(scan.Snapshot, dnsMode)
 	state.CandidateAttempts++
+	candidate := cloneSnapshot(scan.Snapshot)
 	if state.CandidateHash == hash {
 		state.CandidateCount++
+		// The convergence identity may intentionally omit descriptive or
+		// volatile address evidence. Keep the candidate snapshot current even
+		// when that normalized identity is unchanged, so the accepted baseline
+		// reflects the latest successful sample rather than the first one.
+		state.Candidate = &candidate
 	} else {
-		candidate := cloneSnapshot(scan.Snapshot)
 		state.Candidate = &candidate
 		state.CandidateHash = hash
 		state.CandidateCount = 1
@@ -1026,6 +1035,41 @@ func advanceCandidate(state *model.JobState, scan model.Scan, required int, merg
 		return []model.Event{{Type: "baseline-stalled", Job: scan.Job, ScanID: scan.ID, Message: fmt.Sprintf("Baseline has not converged after %d scans", state.CandidateAttempts), CreatedAt: scan.FinishedAt}}
 	}
 	return nil
+}
+
+func snapshotHashForDNSMode(snapshot model.Snapshot, dnsMode string) string {
+	if dnsMode != config.DNSComparisonAggregate {
+		return snapshot.Hash()
+	}
+	stable := cloneSnapshot(snapshot)
+	dnsTargets := dnsTargetsInSnapshot(stable)
+	dnsAddresses := dnsAddressesInSnapshot(stable)
+	if len(dnsTargets) > 0 {
+		stable.DNS = make(map[string][]string, len(dnsTargets))
+		for target := range dnsTargets {
+			stable.DNS[target] = []string{}
+		}
+		for index := range stable.Units {
+			unit := &stable.Units[index]
+			if _, isDNS := dnsTargets[unit.Target]; !isDNS {
+				continue
+			}
+			unit.Addresses = nil
+			for portIndex := range unit.Ports {
+				unit.Ports[portIndex].Evidence = nil
+			}
+		}
+		states := stable.HostStates[:0]
+		for _, host := range stable.HostStates {
+			if _, dnsAddress := dnsAddresses[host.Address]; dnsAddress && !snapshotHasNonDNSAddressScope(stable, host.Address) {
+				continue
+			}
+			states = append(states, host)
+		}
+		stable.HostStates = states
+	}
+	stable.Normalize()
+	return stable.Hash()
 }
 
 func fingerprintKey(target, protocol string, port int) string {
@@ -1669,38 +1713,152 @@ func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
 // retireOutOfScopeChanges drops runtime findings that the new complete scan
 // can no longer observe. They are not recoveries: no scan established that
 // the old state changed back to baseline.
-func retireOutOfScopeChanges(state *model.JobState, snapshot model.Snapshot) {
+func retireOutOfScopeChanges(state *model.JobState, snapshot model.Snapshot, job config.Job) {
+	dnsAddresses := dnsAddressesInSnapshot(snapshot)
 	for key, pending := range state.Pending {
-		if !changeWithinScope(snapshot, pending.Change) {
+		if !changeWithinScopeWithDNSAddresses(snapshot, pending.Change, job, dnsAddresses) {
 			delete(state.Pending, key)
 		}
 	}
 	for key, incident := range state.Incidents {
-		if !changeWithinScope(snapshot, incident.Change) {
+		if !changeWithinScopeWithDNSAddresses(snapshot, incident.Change, job, dnsAddresses) {
 			delete(state.Incidents, key)
 		}
 	}
 	for key, change := range state.SuppressedChanges {
-		if !changeWithinScope(snapshot, change) {
+		if !changeWithinScopeWithDNSAddresses(snapshot, change, job, dnsAddresses) {
 			delete(state.SuppressedChanges, key)
 			delete(state.Suppressed, key)
 		}
 	}
 }
 
-func changeWithinScope(snapshot model.Snapshot, change model.Change) bool {
+func changeWithinScopeWithDNSAddresses(snapshot model.Snapshot, change model.Change, job config.Job, dnsAddresses map[string]struct{}) bool {
 	switch change.Kind {
 	case "port":
 		return scopeAllows(snapshot, change.Target, change.Protocol, change.Port, false)
 	case "service":
 		return scopeAllows(snapshot, change.Target, change.Protocol, change.Port, true)
 	case "host":
+		if job.DNSComparisonMode == config.DNSComparisonAggregate && dnsOnlyAddressInSnapshot(change.Target, dnsAddresses, snapshot) {
+			return false
+		}
 		return hostInScope(snapshot, change.Target)
 	case "dns", "dns-added", "dns-removed":
+		if job.DNSComparisonMode == config.DNSComparisonAggregate {
+			return false
+		}
 		return hasTarget(snapshot, change.Target)
 	default:
 		return false
 	}
+}
+
+func dnsTargetsInSnapshot(snapshot model.Snapshot) map[string]struct{} {
+	// Use one input for the capacity hint rather than summing both lengths,
+	// which could overflow before map allocation for an extremely large
+	// untrusted snapshot.
+	targets := make(map[string]struct{}, len(snapshot.Scopes))
+	for _, scope := range snapshot.Scopes {
+		if isDNSComparisonTarget(scope.Target) {
+			targets[strings.TrimSpace(scope.Target)] = struct{}{}
+		}
+	}
+	for target := range snapshot.DNS {
+		targets[strings.TrimSpace(target)] = struct{}{}
+	}
+	return targets
+}
+
+func dnsAddressesInSnapshot(snapshot model.Snapshot) map[string]struct{} {
+	addresses := map[string]struct{}{}
+	for _, resolved := range snapshot.DNS {
+		for _, address := range resolved {
+			address = strings.TrimSpace(address)
+			if ip := net.ParseIP(address); ip != nil {
+				address = ip.String()
+			}
+			if address != "" {
+				addresses[address] = struct{}{}
+			}
+		}
+	}
+	return addresses
+}
+
+func isDNSComparisonTarget(target string) bool {
+	target = strings.TrimSpace(target)
+	if target == "" || net.ParseIP(target) != nil {
+		return false
+	}
+	if _, _, err := net.ParseCIDR(target); err == nil {
+		return false
+	}
+	return true
+}
+
+func snapshotHasNonDNSAddressScope(snapshot model.Snapshot, address string) bool {
+	ip := net.ParseIP(strings.TrimSpace(address))
+	if ip == nil {
+		return false
+	}
+	for _, scope := range snapshot.Scopes {
+		target := strings.TrimSpace(scope.Target)
+		if isDNSComparisonTarget(target) {
+			continue
+		}
+		if targetIP := net.ParseIP(target); targetIP != nil && targetIP.Equal(ip) {
+			return true
+		}
+		if _, network, err := net.ParseCIDR(target); err == nil && network.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+func dnsOnlyAddressInSnapshot(address string, dnsAddresses map[string]struct{}, snapshot model.Snapshot) bool {
+	address = strings.TrimSpace(address)
+	if ip := net.ParseIP(address); ip != nil {
+		address = ip.String()
+	}
+	if _, seenAsDNS := dnsAddresses[address]; !seenAsDNS {
+		return false
+	}
+	return !snapshotHasNonDNSAddressScope(snapshot, address)
+}
+
+func filterDNSAggregateChanges(old, current model.Snapshot, changes []model.Change, job config.Job) []model.Change {
+	if job.DNSComparisonMode != config.DNSComparisonAggregate || len(changes) == 0 {
+		return changes
+	}
+	dnsTargets := dnsTargetsInSnapshot(old)
+	for target := range dnsTargetsInSnapshot(current) {
+		dnsTargets[target] = struct{}{}
+	}
+	dnsAddresses := dnsAddressesInSnapshot(old)
+	for address := range dnsAddressesInSnapshot(current) {
+		dnsAddresses[address] = struct{}{}
+	}
+	filtered := changes[:0]
+	for _, change := range changes {
+		switch change.Kind {
+		case "dns-added", "dns-removed":
+			if _, dnsTarget := dnsTargets[change.Target]; dnsTarget {
+				continue
+			}
+		case "host":
+			if dnsOnlyAddressInSnapshot(change.Target, dnsAddresses, old) && !snapshotHasNonDNSAddressScope(current, change.Target) {
+				continue
+			}
+		}
+		filtered = append(filtered, change)
+	}
+	return filtered
+}
+
+func diffForJob(old, current model.Snapshot, intersectionOnly bool, job config.Job) []model.Change {
+	return filterDNSAggregateChanges(old, current, Diff(old, current, intersectionOnly), job)
 }
 
 func scopeAllowsProtocol(snapshot model.Snapshot, target, protocol string) bool {

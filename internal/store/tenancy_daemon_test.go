@@ -316,8 +316,8 @@ func TestRetentionLeavesATenantBeingDeletedToThePurge(t *testing.T) {
 			t.Errorf("retention kept disabled tenant B's %s: %v", table, afterB[table])
 		}
 	}
-	if want := []string{cyclesOf(f, f.b).active}; !reflect.DeepEqual(afterB["scan_cycles"], want) {
-		t.Errorf("disabled tenant B's cycles = %v, want only the active one %v", afterB["scan_cycles"], want)
+	if want := []string{cyclesOf(f, f.b).active, cyclesOf(f, f.b).promoted}; !reflect.DeepEqual(afterB["scan_cycles"], want) {
+		t.Errorf("disabled tenant B's cycles = %v, want the active cycle and the latest-success history cycle %v", afterB["scan_cycles"], want)
 	}
 }
 

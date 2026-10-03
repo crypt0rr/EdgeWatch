@@ -63,15 +63,15 @@ func TestPruneOptimizesFTSAndReclaimsPages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.Scans != 24 || !stats.FTSOptimized {
-		t.Fatalf("retention stats = %#v, want all scans removed and FTS optimized", stats)
+	if stats.Scans != 23 || !stats.FTSOptimized {
+		t.Fatalf("retention stats = %#v, want 23 old scans removed and FTS optimized", stats)
 	}
 	var indexed int
 	if err := s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM scan_host_search").Scan(&indexed); err != nil {
 		t.Fatal(err)
 	}
-	if indexed != 0 {
-		t.Fatalf("expired FTS rows = %d, want 0", indexed)
+	if indexed != 1 {
+		t.Fatalf("retained latest FTS rows = %d, want 1", indexed)
 	}
 	var afterPages int64
 	if err := s.DB.QueryRowContext(ctx, "PRAGMA page_count").Scan(&afterPages); err != nil {

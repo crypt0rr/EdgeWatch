@@ -246,9 +246,9 @@ test('the users and notifications pages fit a phone, with every account action o
   await page.emulateMedia({ reducedMotion: 'reduce' })
   await mockConsole(page, 'administrator')
   await page.goto('/users')
-  // An enabled account that is not the signed-in one offers all three actions.
+  // An enabled account that is not the signed-in one offers each management action.
   const actions = page.locator('.user-row').filter({ hasText: 'Operator' }).getByRole('button')
-  await expect(actions).toHaveText(['Disable', 'Reset activation', 'Revoke link'])
+  await expect(actions).toHaveText(['Disable', 'Create password reset link', 'Revoke password reset link', 'Edit account'])
   const width = await page.evaluate(() => document.documentElement.clientWidth)
   for (const action of await actions.all()) {
     const box = await action.boundingBox()

@@ -2020,3 +2020,27 @@ label small,
 .public-picker-archived { justify-self: start; margin-left: 0; }
 
 .legacy-banner-recheck { flex: 0 0 auto; white-space: nowrap; }
+
+.job-scan-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin: -12px 0 20px;
+  padding: 16px 18px;
+  border-color: #315c83;
+  background: #0c2035;
+}
+
+.job-scan-status h2 { margin: 0; font-size: 15px; }
+.job-scan-status .panel-heading { margin: 0; }
+.job-scan-status-copy { flex: 1; min-width: 0; }
+.job-scan-progress-copy { margin: 8px 0; }
+.job-scan-status progress { display: block; width: 100%; height: 7px; accent-color: var(--blue); }
+
+@media (max-width: 620px) {
+  .job-scan-status { align-items: stretch; flex-direction: column; gap: 13px; padding: 14px; }
+  .job-scan-status > .button { width: 100%; }
+  .job-scan-status .panel-heading { align-items: flex-start; }
+  .job-scan-status .panel-heading > .pill { flex: 0 0 auto; }
+}

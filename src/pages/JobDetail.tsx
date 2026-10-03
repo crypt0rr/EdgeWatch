@@ -14,8 +14,10 @@ import {
 } from 'lucide-react'
 import {
   APIError,
+  activeScans,
   approveBaseline,
   archiveJob,
+  cancelScan,
   deleteJob,
   getJob,
   jobScans,
@@ -36,12 +38,13 @@ import { ActionDialog } from '../components/ActionDialog'
 import { ErrorNotice } from '../components/ErrorNotice'
 import { PortScopeDetails } from '../components/PortScopeDetails'
 import { SurfaceUnitList } from '../components/SurfaceUnitList'
-import type { WorkEstimate } from '../types'
+import type { ActiveScan, WorkEstimate } from '../types'
 import { baselinePresentation } from '../baseline'
 import { formatDateTime } from '../format'
 import { changeKindLabel, jobStatePresentation, scanOutcomeTone } from '../status'
 
 type JobDialog = 'reset' | 'approve' | 'archive' | 'delete' | 'discard-cycle'
+type PendingScanRequest = { requestedAt: number; previousScanIDs: string[] | null; observedActive: boolean }
 
 export function JobDetail() {
   const { id = '', scanId: routeScanID } = useParams()
@@ -56,6 +59,8 @@ export function JobDetail() {
   const [showResults, setShowResults] = useState(false)
   const [actionError, setActionError] = useState('')
   const [actionBusy, setActionBusy] = useState('')
+  const [cancelBusyScan, setCancelBusyScan] = useState('')
+  const [pendingScanRequest, setPendingScanRequest] = useState<PendingScanRequest | null>(null)
   const [dialog, setDialog] = useState<JobDialog | null>(null)
   const job = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id) })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
@@ -67,6 +72,13 @@ export function JobDetail() {
   // archive and restore, but the API rejects their delete requests.
   const canDelete = session.data?.permissions.includes('jobs.delete') ?? false
   const canReadScans = session.data?.permissions.includes('scans.read') ?? false
+  const active = useQuery({
+    queryKey: ['active-scans'],
+    queryFn: activeScans,
+    enabled: !!id && canOperate && canReadScans,
+    refetchInterval: 2000,
+  })
+  const activeJobScan = active.data?.scans.find((scan) => scan.job_id === id)
   // "updating" is an active baseline whose stored scope hash is being
   // re-keyed; its expected results remain available.
   const baselineActive = !!job.data && baselinePresentation(job.data.baseline).status === 'complete'
@@ -74,7 +86,7 @@ export function JobDetail() {
     queryKey: ['job-scans', id, scanOffset],
     queryFn: () => jobScans(id, scanOffset),
     enabled: !!id && canReadScans,
-    refetchInterval: 10000,
+    refetchInterval: pendingScanRequest ? 2000 : 10000,
   })
   const baseline = useQuery({
     queryKey: ['job-baseline-overview', id, baselineOffset],
@@ -115,6 +127,26 @@ export function JobDetail() {
   useEffect(() => {
     setLatestResultsOffset(0)
   }, [latestScanID])
+
+  useEffect(() => {
+    if (!pendingScanRequest) return
+    if (activeJobScan) {
+      if (!pendingScanRequest.observedActive) {
+        setPendingScanRequest({ ...pendingScanRequest, observedActive: true })
+      }
+      return
+    }
+    const previousScanIDs = pendingScanRequest.previousScanIDs
+    if (previousScanIDs === null) {
+      if (!scans.data) return
+      const alreadyFinished = scans.data.scans.some((scan) => Date.parse(scan.started_at) >= pendingScanRequest.requestedAt)
+      if (alreadyFinished) setPendingScanRequest(null)
+      else setPendingScanRequest({ ...pendingScanRequest, previousScanIDs: scans.data.scans.map((scan) => scan.id) })
+      return
+    }
+    const scanStarted = scans.data?.scans.some((scan) => !previousScanIDs.includes(scan.id))
+    if (pendingScanRequest.observedActive || scanStarted) setPendingScanRequest(null)
+  }, [activeJobScan?.id, pendingScanRequest, scans.data?.scans])
 
   useEffect(() => {
     // A reset or a newly converged baseline can change the number of result
@@ -160,16 +192,34 @@ export function JobDetail() {
   async function run() {
     setActionError('')
     setActionBusy('run')
+    const requestedAt = Date.now()
+    const previousScanIDs = scans.data?.scans.map((scan) => scan.id) ?? null
     try {
       await runJob(id)
-      await client.invalidateQueries({ queryKey: ['job-scans', id] })
-      await client.invalidateQueries({ queryKey: ['latest-successful-scan', id] })
-      await client.invalidateQueries({ queryKey: ['latest-successful-results', id] })
-      await client.invalidateQueries({ queryKey: ['jobs'] })
+      setPendingScanRequest({ requestedAt, previousScanIDs, observedActive: false })
+      await Promise.all([
+        client.invalidateQueries({ queryKey: ['active-scans'] }),
+        client.invalidateQueries({ queryKey: ['job-scans', id] }),
+        client.invalidateQueries({ queryKey: ['latest-successful-scan', id] }),
+        client.invalidateQueries({ queryKey: ['latest-successful-results', id] }),
+        client.invalidateQueries({ queryKey: ['jobs'] }),
+      ])
     } catch (err) {
       reportActionError(err, 'Could not start the scan.')
     } finally {
       setActionBusy('')
+    }
+  }
+  async function cancelActiveScan(scanID: string) {
+    setActionError('')
+    setCancelBusyScan(scanID)
+    try {
+      await cancelScan(scanID)
+      await active.refetch()
+    } catch (err) {
+      reportActionError(err, 'Could not cancel the scan.')
+    } finally {
+      setCancelBusyScan('')
     }
   }
   async function reset() {
@@ -355,8 +405,8 @@ export function JobDetail() {
           <p className="muted">Revision {value.revision} · Updated {formatDateTime(value.updated_at)}</p>
         </div>
         {canOperate && <div className="heading-actions">
-          <button className="button secondary" onClick={run} disabled={value.archived || !!actionBusy}>
-            <Play size={16} /> {actionBusy === 'run' ? 'Starting…' : 'Scan now'}
+          <button className="button secondary" onClick={run} disabled={value.archived || !!actionBusy || !!pendingScanRequest || !!activeJobScan}>
+            <Play size={16} /> {actionBusy === 'run' ? 'Starting…' : activeJobScan ? (activeJobScan.phase === 'cancelling' ? 'Cancelling…' : 'Scanning…') : pendingScanRequest ? 'Queued…' : 'Scan now'}
           </button>
           <button className="button secondary" onClick={() => navigate(`/jobs/${id}/edit`)} disabled={!!actionBusy}>
             <Edit3 size={16} /> Edit
@@ -365,6 +415,12 @@ export function JobDetail() {
         </div>}
       </div>
       {actionError && <div className="form-error banner" role="alert">{actionError}</div>}
+      {canOperate && canReadScans && active.error && <ErrorNotice message="Could not load live scan status." onRetry={() => active.refetch()} />}
+      {canOperate && canReadScans && (activeJobScan || pendingScanRequest) && <JobScanStatus
+        scan={activeJobScan}
+        cancelBusy={cancelBusyScan}
+        onCancel={cancelActiveScan}
+      />}
 
       <div className="detail-summary">
         <div className="summary-card">
@@ -534,6 +590,57 @@ export function JobDetail() {
       {dialog === 'discard-cycle' && <ActionDialog title="Discard saved broad-scan progress?" description="The next trigger will start a fresh full-range scan. Existing attempt history remains available." confirmLabel="Discard progress" destructive onConfirm={() => discardCycle()} onCancel={() => { setDialog(null); setActionError('') }} error={actionError} />}
     </section>
   )
+}
+
+function JobScanStatus({ scan, cancelBusy, onCancel }: {
+  scan?: ActiveScan
+  cancelBusy: string
+  onCancel: (scanID: string) => void
+}) {
+  if (!scan) return <section className="panel job-scan-status" aria-labelledby="job-scan-status-title">
+    <div>
+      <h2 id="job-scan-status-title">Scan queued</h2>
+      <p className="muted" role="status">Your scan request was accepted and is waiting for an available scan slot.</p>
+    </div>
+    <span className="pill amber">Queued</span>
+  </section>
+
+  const phase = scan.phase || 'Working'
+  const scanner = scan.scanner === 'naabu_nmap' ? 'Naabu → Nmap' : 'Nmap'
+  const total = scan.total_probes || scan.estimated_probes || 0
+  const completed = scan.completed_probes ?? 0
+  const progress = Math.max(0, Math.min(100, scan.progress_percent ?? 0))
+  const cancelling = scan.phase === 'cancelling'
+
+  return <section className="panel job-scan-status" aria-labelledby="job-scan-status-title">
+    <div className="job-scan-status-copy">
+      <div className="panel-heading">
+        <div>
+          <h2 id="job-scan-status-title">Scan in progress</h2>
+          <p className="muted" role="status">{scanner} · {phase}{scan.protocol ? ` · ${scan.protocol.toUpperCase()}` : ''}</p>
+        </div>
+        <span className="pill blue">{progress}%</span>
+      </div>
+      <p className="muted job-scan-progress-copy">
+        {completed.toLocaleString()} of {total ? total.toLocaleString() : 'an unknown number of'} probes · elapsed {formatElapsedSeconds(scan.elapsed_seconds ?? 0)}
+        {scan.cycle_id ? ` · Cycle ${scan.cycle_completed_units ?? 0}/${scan.cycle_total_units ?? '?'} units` : ''}
+      </p>
+      <progress max={100} value={progress} aria-label={`Progress for ${scan.job}`} />
+    </div>
+    {cancelling
+      ? <span className="pill amber">Cancellation requested</span>
+      : <button type="button" className="button danger" onClick={() => onCancel(scan.id)} disabled={cancelBusy === scan.id}>
+        {cancelBusy === scan.id ? 'Cancelling…' : 'Cancel scan'}
+      </button>}
+  </section>
+}
+
+function formatElapsedSeconds(seconds: number) {
+  const safe = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(safe / 3600)
+  const minutes = Math.floor((safe % 3600) / 60)
+  const remaining = safe % 60
+  return hours ? `${hours}h ${minutes}m` : minutes ? `${minutes}m ${remaining}s` : `${remaining}s`
 }
 
 function formatEstimateProcesses(estimate: WorkEstimate) {

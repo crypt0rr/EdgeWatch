@@ -650,8 +650,10 @@ func TestUnreadableProbeBudgetStopsTheRun(t *testing.T) {
 	}
 	_, err := f.app.CheckScanWorkBudget(ctx, b, f.jobB.Job)
 	unavailable("estimate", err)
-	_, _, err = f.app.runJob(ctx, f.b, lifecycleJob("unmanaged"), "", 0, false, false)
-	unavailable("run", err)
+	_, _, err = f.app.RunJobRecord(ctx, f.jobB)
+	if !errors.Is(err, store.ErrNoTenantScope) {
+		t.Errorf("run for deleted tenant: %v, want ErrNoTenantScope", err)
+	}
 	var scan model.Scan
 	plan := scanner.WorkPlan{Units: []scanner.WorkUnit{{Sequence: 0, Protocol: "tcp", Addresses: []string{"192.0.2.1"}, Ports: "1", Probes: 1}}}
 	_, _, err = f.app.runResumableAttempt(ctx, ctx, b, f.jobB.Job, f.jobB.ID, &scan, nil, coverageResumableScanner{plan: plan}, false)

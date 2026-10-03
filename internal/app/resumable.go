@@ -386,11 +386,10 @@ func (a *App) runResumableAttempt(ctx, scanCtx context.Context, ts *store.Tenant
 		canceled := errors.Is(scanCtx.Err(), context.Canceled) || errors.Is(scanErr, context.Canceled)
 		if timedOut || canceled {
 			lastError := "scan canceled"
-			if timedOut {
-				lastError = "scan timed out"
-			}
 			if scanErr != nil {
 				lastError = scanErr.Error()
+			} else if timedOut {
+				lastError = "scan timed out"
 			}
 			if first, second, split := scanner.SplitWorkUnit(claimed.Unit); timedOut && split {
 				if splitErr := system.SplitScanCycleUnit(stateCtx, cycle.ID, claimed.Sequence, first, second, lastError); splitErr != nil {

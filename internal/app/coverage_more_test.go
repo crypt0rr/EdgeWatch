@@ -244,7 +244,7 @@ func TestManagedRunReservationsRejectDuplicateAndScheduledStarts(t *testing.T) {
 	}
 	a.active.Delete(record.ID)
 	a.managedReservations.Store(record.ID, "scheduled-reservation")
-	if _, _, err := a.runJob(ctx, store.DefaultTenantScope(), record.Job, record.ID, record.Revision, true, false); !errors.Is(err, scanner.ErrBusy) {
+	if _, _, err := a.runJob(ctx, store.DefaultTenantScope(), record.Job, record.ID, record.Revision, false); !errors.Is(err, scanner.ErrBusy) {
 		t.Fatalf("scheduled reservation error = %v, want ErrBusy", err)
 	}
 }

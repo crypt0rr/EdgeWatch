@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS job_leases (
 
 // schemaVersion is deliberately independent from the configuration version.
 // The former describes on-disk compatibility; the latter describes YAML.
-const schemaVersion = 60
+const schemaVersion = 61
 
 // foreignKeysOffMigrations lists the schema versions that must run through
 // applyMigrationForeignKeysOff because they rebuild a table that other tables
@@ -72,6 +72,9 @@ var conditionalMigrationStatements = map[int]func(*sql.Tx) ([]string, error){
 	59: migration59ConditionalStatements,
 	// Schema 60's cadence column may already exist in a reconstructed test DB.
 	60: migration60ConditionalStatements,
+	// Schema 61 distinguishes inherited cadence defaults from saved cadence
+	// preferences while migrating legacy every-scan defaults safely.
+	61: migration61ConditionalStatements,
 }
 
 // newerSchemaError is the refusal for a database that a newer release has
@@ -1286,8 +1289,11 @@ ON CONFLICT(table_name) DO UPDATE SET last_rowid=0,processed_rows=0,initialized=
 		58: migration58Statements(),
 		// Per-business-unit incident reminders default on for existing and new installations.
 		59: {},
-		// Units can bound persistent-incident reminders while preserving every-scan behavior by default.
+		// Units can bound persistent-incident reminders while preserving legacy every-scan defaults.
 		60: {},
+		// Inherited every-scan reminder cadence becomes hourly unless a prior
+		// settings audit record indicates an administrator may have saved it.
+		61: {},
 	}
 	// Mark the complete startup reconciliation as active, not only the DDL
 	// steps. FTS and other resumable backfills can be the longest part of an

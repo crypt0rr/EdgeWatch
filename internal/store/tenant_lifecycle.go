@@ -222,7 +222,7 @@ func (ps *PlatformStore) CreateTenant(ctx context.Context, name, slug string, au
 	id := uuid.NewString()
 	capacity := InitialTenantCapacity()
 	ceiling, granted := capacity.highCostColumns()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,state,is_default,update_destinations_json,revision,created_at,updated_at,state_changed_at,state_changed_by,`+tenantCapacityColumns+`) VALUES(?,?,?,?,0,?,1,?,?,?,?,?,?,?,?,?)`, id, name, slug, TenantStateActive, noUpdateDestinations, stamp, stamp, stamp, tenantStateActor(audit),
+	if _, err := tx.ExecContext(ctx, `INSERT INTO tenants(id,name,slug,state,is_default,update_destinations_json,revision,created_at,updated_at,incident_reminder_cadence,state_changed_at,state_changed_by,`+tenantCapacityColumns+`) VALUES(?,?,?,?,0,?,1,?,?,?,?,?,?,?,?,?,?)`, id, name, slug, TenantStateActive, noUpdateDestinations, stamp, stamp, IncidentReminderCadenceHourly, stamp, tenantStateActor(audit),
 		nullableInt(capacity.MaxConcurrentScans), nullableInt64(capacity.MaxProbeCount), nullableInt64(capacity.MaxNaabuProbeCount), ceiling, granted); err != nil {
 		return TenantRecord{}, tenantUniqueError(err)
 	}

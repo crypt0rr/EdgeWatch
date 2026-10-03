@@ -138,9 +138,9 @@ func TestManagedIncidentRemindersFollowSavedSetting(t *testing.T) {
 		t.Fatal(err)
 	}
 	engine := Engine{Store: db}
-	run := func(id string, ports ...int) []model.Event {
+	start := time.Date(2026, 10, 2, 10, 0, 0, 0, time.UTC)
+	run := func(id string, at time.Time, ports ...int) []model.Event {
 		t.Helper()
-		at := time.Now().UTC()
 		scan := model.Scan{ID: id, JobID: record.ID, Job: job.Name, JobRevision: record.Revision, StartedAt: at, FinishedAt: at, Status: "success", ConfigHash: job.SecurityHash(), Snapshot: snapshotWithOpenPorts(ports...)}
 		events, err := engine.FinalizeManagedScan(ctx, record.ID, job, &scan, []string{"file:test-reminders"})
 		if err != nil {
@@ -148,34 +148,40 @@ func TestManagedIncidentRemindersFollowSavedSetting(t *testing.T) {
 		}
 		return events
 	}
-	if events := run("baseline", 80, 443); len(events) != 1 || events[0].Type != "baseline-complete" {
+	if events := run("baseline", start, 80, 443); len(events) != 1 || events[0].Type != "baseline-complete" {
 		t.Fatalf("baseline events: %#v", events)
 	}
-	if events := run("opened", 80); len(events) != 1 || events[0].Type != "changes-detected" {
+	if events := run("opened", start.Add(time.Minute), 80); len(events) != 1 || events[0].Type != "changes-detected" {
 		t.Fatalf("opened events: %#v", events)
 	}
-	if events := run("reminded", 80); len(events) != 1 || events[0].Type != "changes-reminder" {
+	if events := run("first-reminder", start.Add(2*time.Minute), 80); len(events) != 1 || events[0].Type != "changes-reminder" {
+		t.Fatalf("first follow-up reminder events: %#v", events)
+	}
+	if events := run("too-soon", start.Add(3*time.Minute), 80); hasEventType(events, "changes-reminder") {
+		t.Fatalf("default hourly cadence sent another early reminder: %#v", events)
+	}
+	if events := run("reminded", start.Add(time.Hour+2*time.Minute), 80); len(events) != 1 || events[0].Type != "changes-reminder" {
 		t.Fatalf("reminder events: %#v", events)
 	}
 	if err := defaultTenant(db).SetIncidentRemindersEnabled(ctx, false, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	if events := run("disabled", 80); len(events) != 0 {
+	if events := run("disabled", start.Add(time.Hour+3*time.Minute), 80); len(events) != 0 {
 		t.Fatalf("disabled events: %#v", events)
 	}
 	if err := defaultTenant(db).SetIncidentRemindersEnabled(ctx, true, store.AuditEntry{}); err != nil {
 		t.Fatal(err)
 	}
-	if events := run("enabled-again", 80); len(events) != 1 || events[0].Type != "changes-reminder" {
+	if events := run("enabled-again", start.Add(2*time.Hour+2*time.Minute), 80); len(events) != 1 || events[0].Type != "changes-reminder" {
 		t.Fatalf("re-enabled events: %#v", events)
 	}
 	var reminders int
-	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE job_id=? AND type='changes-reminder'`, record.ID).Scan(&reminders); err != nil || reminders != 2 {
-		t.Fatalf("persisted reminders=%d, %v", reminders, err)
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE job_id=? AND type='changes-reminder'`, record.ID).Scan(&reminders); err != nil || reminders != 3 {
+		t.Fatalf("persisted reminders=%d, %v; want 3", reminders, err)
 	}
 	var queued int
-	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE tenant_id=? AND destination='file:test-reminders' AND json_extract(payload_json,'$.type')='changes-reminder'`, store.DefaultTenantID).Scan(&queued); err != nil || queued != 2 {
-		t.Fatalf("queued reminders=%d, %v", queued, err)
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM outbox WHERE tenant_id=? AND destination='file:test-reminders' AND json_extract(payload_json,'$.type')='changes-reminder'`, store.DefaultTenantID).Scan(&queued); err != nil || queued != 3 {
+		t.Fatalf("queued reminders=%d, %v; want 3", queued, err)
 	}
 }
 

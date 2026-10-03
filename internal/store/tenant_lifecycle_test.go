@@ -88,6 +88,10 @@ func TestCreateRenameAndListTenants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reminders, err := f.store.Tenant(scope).IncidentReminderSettings(ctx)
+	if err != nil || !reminders.Enabled || reminders.Cadence != IncidentReminderCadenceHourly {
+		t.Fatalf("new tenant reminder settings=%+v, %v; want enabled/hourly", reminders, err)
+	}
 	capacity, err := f.store.Tenant(scope).Capacity(ctx)
 	if err != nil {
 		t.Fatal(err)

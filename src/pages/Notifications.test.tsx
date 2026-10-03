@@ -40,7 +40,7 @@ function response(configured: boolean, selected: string[]) {
     status: { deployment: 0, managed: 2, active: 1, locked: 0, key_state: 'ready' },
     update_routing: { configured, destinations: selected },
     incident_reminders_enabled: true,
-    incident_reminder_cadence: 'every_scan' as const,
+    incident_reminder_cadence: 'hourly' as const,
   }
 }
 
@@ -65,7 +65,7 @@ describe('notification update-alert routing', () => {
     vi.mocked(getSession).mockResolvedValue({ role: 'administrator', user_id: 'admin', username: 'admin', permissions: ['notifications.manage'], csrf_token: '', totp_enabled: false, password_requirements: { minimum_length: 12 }, ...defaultUnitScope })
     vi.mocked(listNotificationDestinations).mockResolvedValue(response(false, []))
     vi.mocked(toggleNotificationUpdateAlert).mockResolvedValue({ configured: true, destinations: [] })
-    vi.mocked(updateIncidentReminders).mockResolvedValue({ enabled: false, cadence: 'every_scan' })
+    vi.mocked(updateIncidentReminders).mockResolvedValue({ enabled: false, cadence: 'hourly' })
   })
 
   afterEach(() => {
@@ -134,7 +134,7 @@ describe('notification update-alert routing', () => {
     })
     await vi.waitFor(() => expect(container.querySelector('.notification-reminder-settings [role="alert"]')?.textContent).toContain('setting unavailable'))
     expect(reminder.checked).toBe(false)
-    vi.mocked(updateIncidentReminders).mockResolvedValue({ enabled: true, cadence: 'every_scan' })
+    vi.mocked(updateIncidentReminders).mockResolvedValue({ enabled: true, cadence: 'hourly' })
     vi.mocked(listNotificationDestinations).mockResolvedValue({ ...response(true, []), incident_reminders_enabled: true })
     act(() => reminder.click())
     dialog = document.body.querySelector('[role="dialog"]') as HTMLElement
@@ -153,7 +153,8 @@ describe('notification update-alert routing', () => {
     vi.mocked(listNotificationDestinations).mockResolvedValueOnce(response(true, [])).mockResolvedValue({ ...response(true, []), incident_reminder_cadence: 'daily' })
     await renderPage()
     const cadence = container.querySelector('select[aria-label="Reminder cadence"]') as HTMLSelectElement
-    expect(cadence.value).toBe('every_scan')
+    expect(cadence.value).toBe('hourly')
+    expect(container.querySelector('.notification-reminder-settings')?.textContent).toContain('first successful follow-up may remind immediately')
     act(() => {
       Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value')?.set?.call(cadence, 'daily')
       cadence.dispatchEvent(new Event('change', { bubbles: true }))

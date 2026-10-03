@@ -692,14 +692,14 @@ func TestMigration52IsANoOpWhenRepeated(t *testing.T) {
 	assertForeignKeysClean(t, repeated.DB)
 }
 
-// secondTenantID is a tenant that the tests create directly in SQL, because
-// no product API creates one yet.
+// secondTenantID is a tenant that tests seed directly in SQL to keep a stable
+// identifier across the shared tenant-isolation fixture.
 const secondTenantID = "00000000-0000-0000-0000-000000000200"
 
 func insertSecondTenant(t *testing.T, s *Store) {
 	t.Helper()
 	stamp := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := s.DB.Exec(`INSERT INTO tenants(id,name,slug,created_at,updated_at) VALUES(?,'Second','second',?,?)`, secondTenantID, stamp, stamp); err != nil {
+	if _, err := s.DB.Exec(`INSERT INTO tenants(id,name,slug,incident_reminder_cadence,created_at,updated_at) VALUES(?,'Second','second','hourly',?,?)`, secondTenantID, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
 }

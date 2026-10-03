@@ -81,7 +81,7 @@ func (ts *TenantStore) SetIncidentReminderSettings(ctx context.Context, enabled 
 		return IncidentReminderSettings{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	result, err := tx.ExecContext(ctx, `UPDATE tenants SET incident_reminders_enabled=COALESCE(?,incident_reminders_enabled),incident_reminder_cadence=COALESCE(?,incident_reminder_cadence) WHERE id=? AND state='active'`, enabled, cadence, ts.scope.id)
+	result, err := tx.ExecContext(ctx, `UPDATE tenants SET incident_reminders_enabled=COALESCE(?,incident_reminders_enabled),incident_reminder_cadence=COALESCE(?,incident_reminder_cadence),incident_reminder_cadence_explicit=CASE WHEN ? IS NULL THEN incident_reminder_cadence_explicit ELSE 1 END WHERE id=? AND state='active'`, enabled, cadence, cadence, ts.scope.id)
 	if err != nil {
 		return IncidentReminderSettings{}, err
 	}

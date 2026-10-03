@@ -26,8 +26,8 @@ func TestIncidentReminderSettingRequiresAdministratorPassword(t *testing.T) {
 		}
 		return settings.Enabled, settings.Cadence
 	}
-	if enabled, cadence := get(); !enabled || cadence != "every_scan" {
-		t.Fatalf("reminders must default to on/every_scan, got enabled=%t cadence=%q", enabled, cadence)
+	if enabled, cadence := get(); !enabled || cadence != "hourly" {
+		t.Fatalf("reminders must default to on/hourly, got enabled=%t cadence=%q", enabled, cadence)
 	}
 	for _, test := range []struct {
 		body string
@@ -43,7 +43,7 @@ func TestIncidentReminderSettingRequiresAdministratorPassword(t *testing.T) {
 		if rec.Code != test.want {
 			t.Fatalf("body %s: status=%d response=%s", test.body, rec.Code, rec.Body.String())
 		}
-		if enabled, cadence := get(); !enabled || cadence != "every_scan" {
+		if enabled, cadence := get(); !enabled || cadence != "hourly" {
 			t.Fatalf("body %s changed settings: enabled=%t cadence=%q", test.body, enabled, cadence)
 		}
 	}
@@ -52,14 +52,14 @@ func TestIncidentReminderSettingRequiresAdministratorPassword(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("disable reminder: %d %s", rec.Code, rec.Body.String())
 	}
-	if enabled, cadence := get(); enabled || cadence != "every_scan" {
+	if enabled, cadence := get(); enabled || cadence != "hourly" {
 		t.Fatalf("disable changed to enabled=%t cadence=%q", enabled, cadence)
 	}
 	var result struct {
 		Enabled bool   `json:"enabled"`
 		Cadence string `json:"cadence"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil || result.Enabled || result.Cadence != "every_scan" {
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil || result.Enabled || result.Cadence != "hourly" {
 		t.Fatalf("response=%s, %v", rec.Body.String(), err)
 	}
 	setCadence := httptest.NewRecorder()
@@ -107,7 +107,7 @@ func TestIncidentReminderSettingAPIIsRouted(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("incident reminder route status = %d: %s", response.Code, response.Body.String())
 	}
-	if settings, err := defaultTenantStore(server).IncidentReminderSettings(ctx); err != nil || settings.Enabled || settings.Cadence != "every_scan" {
-		t.Fatalf("routed settings = %+v, %v; want disabled/every_scan", settings, err)
+	if settings, err := defaultTenantStore(server).IncidentReminderSettings(ctx); err != nil || settings.Enabled || settings.Cadence != "hourly" {
+		t.Fatalf("routed settings = %+v, %v; want disabled/hourly", settings, err)
 	}
 }

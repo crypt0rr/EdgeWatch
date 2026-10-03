@@ -1029,7 +1029,7 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 	id := record.ID
 	state, stateErr := ts.RuntimeState(r.Context(), id)
 	if stateErr != nil {
-		writeError(w, http.StatusInternalServerError, "store", "baseline state could not be loaded", nil)
+		s.writeInternalError(w, r, "store", stateErr)
 		return
 	}
 	expected := store.BaselineExpectation{ScanID: state.BaselineScanID, ScanIDSet: true, Modified: state.BaselineModified, ModifiedSet: true}
@@ -1040,13 +1040,21 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 		expected.Modified, expected.ModifiedSet = *input.ExpectedBaselineModified, true
 	}
 	scan, err := ts.GetScan(r.Context(), input.ScanID)
-	if err != nil || scan.JobID != id || scan.ConfigHash != record.Job.SecurityHash() {
-		writeError(w, 400, "invalid_scan", "scan does not belong to this job or current scope", nil)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusBadRequest, "invalid_scan", "scan must be successful and belong to this job's current scope", nil)
+		} else {
+			s.writeInternalError(w, r, "scan_read", err)
+		}
+		return
+	}
+	if scan.JobID != id || scan.ConfigHash != record.Job.SecurityHash() || scan.Status != "success" {
+		writeError(w, http.StatusBadRequest, "invalid_scan", "scan must be successful and belong to this job's current scope", nil)
 		return
 	}
 	destinations, err := s.App.Notifier.Tenant(ts).QueueDestinationsForJob(r.Context(), record.Job)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "notification", "unable to prepare notification delivery", nil)
+		s.writeInternalError(w, r, "notification", err)
 		return
 	}
 	events, err := ts.ApproveRuntimeWithExpectationAndAudit(r.Context(), id, record.Job.Name, scan, destinations, actorAudit(session, "baseline.approved", id), expected)
@@ -1062,7 +1070,19 @@ func (s *Server) approveBaseline(w http.ResponseWriter, r *http.Request, session
 			s.writeBaselineConflict(w, r, ts, id)
 			return
 		}
-		writeError(w, 400, "approve_failed", "baseline approval could not be completed", nil)
+		if errors.Is(err, store.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "not_found", "job or scan was not found", nil)
+			return
+		}
+		if errors.Is(err, store.ErrBaselineNotReady) {
+			writeError(w, http.StatusConflict, "baseline_not_ready", "the job does not have an active baseline", nil)
+			return
+		}
+		if errors.Is(err, store.ErrValidation) {
+			writeValidationError(w, err)
+			return
+		}
+		s.writeInternalError(w, r, "baseline_approval", err)
 		return
 	}
 	s.App.WakeDelivery()

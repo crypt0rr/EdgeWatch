@@ -3,7 +3,7 @@
 import { act } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { activeScans, adminStatus, cancelScan, getSession, listIncidents, listJobs, listScans, notificationTest, runJob } from '../api'
 import type { AdminStatus, SessionUser } from '../api'
@@ -104,6 +104,11 @@ const session = (role: SessionUser['role']): SessionUser => ({
 
 const pagination = { limit: 20, offset: 0, total: 1, has_more: false, next_offset: null }
 
+function LocationProbe() {
+  const location = useLocation()
+  return <output data-testid="current-path">{location.pathname}</output>
+}
+
 describe('dashboard', () => {
   let root: Root
   let container: HTMLDivElement
@@ -129,12 +134,12 @@ describe('dashboard', () => {
     act(() => root.unmount())
     queryClient.clear()
     container.remove()
-    vi.clearAllMocks()
+    vi.resetAllMocks()
   })
 
   async function renderDashboard() {
     await act(async () => {
-      root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Dashboard /></MemoryRouter></QueryClientProvider>)
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Dashboard /><LocationProbe /></MemoryRouter></QueryClientProvider>)
     })
     await vi.waitFor(() => expect(container.textContent).toContain('Scans in progress'), { timeout: 1000 })
   }
@@ -150,7 +155,7 @@ describe('dashboard', () => {
 
   it('shows operational metrics, detailed active progress, and actionable links', async () => {
     await renderDashboard()
-    expect(container.textContent).toContain('Good afternoon, Alice')
+    expect(container.textContent).toContain('Good day, Alice')
     expect(container.textContent).toContain('Deployment footprint')
     expect(container.textContent).toContain('1.5 KB')
     expect(container.textContent).toContain('Naabu → Nmap · tcp discovery · TCP')
@@ -185,6 +190,13 @@ describe('dashboard', () => {
     expect(container.textContent).toContain('1 destination tested')
   })
 
+  it('navigates to job setup from the dashboard action', async () => {
+    await renderDashboard()
+    const configure = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Configure job')) as HTMLButtonElement
+    await act(async () => configure.click())
+    expect(container.querySelector('[data-testid="current-path"]')?.textContent).toBe('/jobs/new')
+  })
+
   it('labels the legacy-job action as a status check and refreshes the status', async () => {
     vi.mocked(adminStatus).mockResolvedValue({ ...status, legacy_yaml_jobs: ['office'] })
     await renderDashboard()
@@ -207,6 +219,16 @@ describe('dashboard', () => {
     expect(dots[0]).not.toHaveClass('fail')
     expect(dots[0]).not.toHaveClass('success')
     expect(dots[1]).toHaveClass('fail')
+  })
+
+  it('shows the total retained scan count and a date for older activity', async () => {
+    vi.mocked(listScans).mockResolvedValue({ scans: [scan], pagination: { ...pagination, total: 17 } })
+    await renderDashboard()
+    const historyMetric = Array.from(container.querySelectorAll('.stat-card')).find(card => card.querySelector('.stat-label')?.textContent === 'Scan history')
+    expect(historyMetric?.querySelector('.stat-value')?.textContent).toBe('17')
+    const activityTime = container.querySelector('.activity-row time')
+    expect(activityTime?.getAttribute('dateTime')).toBe(scan.finished_at)
+    expect(activityTime?.textContent).toContain('2026')
   })
 
   it('warns about a proxy that web.trusted_proxies does not list, only when the status reports one', async () => {
@@ -303,10 +325,10 @@ describe('dashboard', () => {
   })
 
   it('keeps failed metric queries unavailable instead of showing zero', async () => {
-    vi.mocked(listJobs).mockRejectedValue(new Error('jobs unavailable'))
-    vi.mocked(listScans).mockRejectedValue(new Error('scans unavailable'))
-    vi.mocked(activeScans).mockRejectedValue(new Error('active scans unavailable'))
-    vi.mocked(listIncidents).mockRejectedValue(new Error('incidents unavailable'))
+    vi.mocked(listJobs).mockRejectedValueOnce(new Error('jobs unavailable'))
+    vi.mocked(listScans).mockRejectedValueOnce(new Error('scans unavailable'))
+    vi.mocked(activeScans).mockRejectedValueOnce(new Error('active scans unavailable'))
+    vi.mocked(listIncidents).mockRejectedValueOnce(new Error('incidents unavailable'))
 
     await act(async () => {
       root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Dashboard /></MemoryRouter></QueryClientProvider>)
@@ -318,38 +340,85 @@ describe('dashboard', () => {
     expect(container.textContent).not.toContain('No scans running')
     expect(container.querySelectorAll('.stat-retry')).toHaveLength(4)
 
+    const metricRetries = Array.from(container.querySelectorAll('.stat-retry')) as HTMLButtonElement[]
     await act(async () => {
-      ;(container.querySelector('.stat-retry') as HTMLButtonElement).click()
+      metricRetries.forEach(button => button.click())
       await Promise.resolve()
     })
     expect(listJobs).toHaveBeenCalledTimes(2)
+    expect(listScans).toHaveBeenCalledTimes(2)
+    expect(listIncidents).toHaveBeenCalledTimes(2)
   })
 
-  it('keeps the last live scan count visible as stale and recovers it on retry', async () => {
+  it('keeps the retained scan count visible as stale and recovers it on retry', async () => {
     await renderDashboard()
     vi.mocked(activeScans).mockRejectedValueOnce(new Error('temporary polling failure'))
-    const recentScansMetric = Array.from(container.querySelectorAll('.stat-card')).find(card => card.querySelector('.stat-label')?.textContent === 'Recent scans')
+    const scanHistoryMetric = Array.from(container.querySelectorAll('.stat-card')).find(card => card.querySelector('.stat-label')?.textContent === 'Scan history')
 
     await act(async () => {
-      await queryClient.refetchQueries({ queryKey: ['active-scans'], exact: true })
+      vi.mocked(listScans).mockRejectedValueOnce(new Error('temporary scan-history polling failure'))
+      await queryClient.refetchQueries({ queryKey: ['scans'], exact: true })
     })
-    await vi.waitFor(() => expect(recentScansMetric?.querySelector('.stat-detail')?.textContent).toContain('1 in progress · stale'))
+    await vi.waitFor(() => expect(scanHistoryMetric?.querySelector('.stat-detail')?.textContent).toContain('Retained scan records · stale'))
 
-    const retry = recentScansMetric?.querySelector('.stat-detail .stat-retry') as HTMLButtonElement
+    const retry = scanHistoryMetric?.querySelector('.stat-detail .stat-retry') as HTMLButtonElement
     expect(retry).toBeEnabled()
     await act(async () => {
       retry.click()
       await Promise.resolve()
     })
-    await vi.waitFor(() => expect(recentScansMetric?.querySelector('.stat-detail')?.textContent).not.toContain('stale'))
-    expect(recentScansMetric?.querySelector('.stat-detail')?.textContent).toContain('1 in progress')
+    await vi.waitFor(() => expect(scanHistoryMetric?.querySelector('.stat-detail')?.textContent).not.toContain('stale'))
+    expect(scanHistoryMetric?.querySelector('.stat-detail')?.textContent).toContain('Retained scan records')
   })
 
   it('explains when no notification destination is configured', async () => {
+    vi.mocked(activeScans).mockResolvedValueOnce({ scans: [activeScan] })
     vi.mocked(adminStatus).mockResolvedValue({ ...status, notification_destinations: 0 })
     await renderDashboard()
 
     expect(container.querySelector('.page-heading')?.textContent).toContain('Notifications are configured by an administrator.')
     expect(container.querySelector('.page-heading')?.textContent).not.toContain('notification destination configured')
+  })
+
+  it('does not report notification testing as successful when no destination was tested', async () => {
+    vi.mocked(notificationTest).mockResolvedValueOnce({ sent: 0 })
+    await renderDashboard()
+    const notify = Array.from(container.querySelectorAll('button')).find(button => button.textContent?.includes('Test notifications')) as HTMLButtonElement
+    await act(async () => {
+      notify.click()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const feedback = container.querySelector('[role="status"].notice.warning')
+    expect(feedback?.textContent).toContain('No enabled notification destinations were tested.')
+    expect(container.querySelector('.success-banner')).toBeNull()
+  })
+
+  it('retries operational incident and live-scan errors', async () => {
+    vi.mocked(adminStatus).mockRejectedValueOnce(new Error('status unavailable'))
+    vi.mocked(activeScans).mockRejectedValueOnce(new Error('active status unavailable'))
+    vi.mocked(listIncidents).mockRejectedValueOnce(new Error('incidents unavailable'))
+    await act(async () => {
+      root.render(<QueryClientProvider client={queryClient}><MemoryRouter><Dashboard /></MemoryRouter></QueryClientProvider>)
+    })
+    await vi.waitFor(() => {
+      expect(container.textContent).toContain('Operational status could not be loaded.')
+      expect(container.textContent).toContain('Could not load scans in progress.')
+      expect(container.textContent).toContain('Could not load the incident count.')
+    }, { timeout: 1000 })
+
+    const alerts = Array.from(container.querySelectorAll('.query-error'))
+    for (const message of ['Operational status could not be loaded.', 'Could not load scans in progress.', 'Could not load the incident count.']) {
+      const alert = alerts.find(item => item.textContent?.includes(message))
+      const retry = alert?.querySelector('button') as HTMLButtonElement
+      await act(async () => { retry.click(); await Promise.resolve() })
+    }
+    await vi.waitFor(() => expect(container.textContent).not.toContain('Operational status could not be loaded.'), { timeout: 1000 })
+    await vi.waitFor(() => expect(container.textContent).not.toContain('Could not load scans in progress.'), { timeout: 1000 })
+    await vi.waitFor(() => expect(container.textContent).not.toContain('Could not load the incident count.'), { timeout: 1000 })
+    expect(adminStatus).toHaveBeenCalledTimes(2)
+    expect(activeScans).toHaveBeenCalledTimes(2)
+    expect(listIncidents).toHaveBeenCalledTimes(2)
   })
 })

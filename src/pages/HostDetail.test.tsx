@@ -136,6 +136,51 @@ describe('host detail', () => {
     expect(serviceSort.textContent).toContain('↑')
   })
 
+  it('renders bounded NSE script identity and output as safe text', async () => {
+    const tcpProtocol = host.protocols?.[0]
+    if (!tcpProtocol) throw new Error('test host is missing TCP evidence')
+    const untrusted = '<img src=x onerror=alert(1)>'
+    const outputs = [
+      `http-title: ${untrusted}`,
+      'ssl-cert: Subject: CN=host.example\nIssuer: Example CA',
+      `long-output: ${'x'.repeat(600)}`,
+      ...Array.from({ length: 31 }, (_, index) => `script-${index}: result ${index}`),
+    ]
+    const withScripts: HostObservation = {
+      ...host,
+      protocols: [{ ...tcpProtocol, nse_output: outputs }],
+    }
+    vi.mocked(baselineHost).mockResolvedValue({ ...detail, host: withScripts })
+
+    await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')
+
+    const panel = container.querySelector('[aria-label="TCP Nmap script results"]')
+    expect(panel).toBeTruthy()
+    expect(panel?.querySelectorAll('.nse-output-item')).toHaveLength(32)
+    expect(panel?.textContent).toContain('http-title')
+    expect(panel?.querySelector('img')).toBeNull()
+    expect(panel?.querySelector('.nse-output-item pre')?.textContent).toBe(untrusted)
+    expect(panel?.textContent).toContain('ssl-cert')
+    expect(panel?.querySelectorAll('.nse-output-item')[1]?.querySelector('pre')?.textContent).toBe('Subject: CN=host.example\nIssuer: Example CA')
+    expect(panel?.textContent).toContain('Output truncated for display.')
+    expect(panel?.textContent).toContain('Showing the first 32 of 34 script results.')
+    expect(panel?.textContent).toContain('script-28')
+    expect(panel?.textContent).not.toContain('script-29')
+  })
+
+  it('omits the NSE evidence panel when no script output was recorded', async () => {
+    const tcpProtocol = host.protocols?.[0]
+    if (!tcpProtocol) throw new Error('test host is missing TCP evidence')
+    vi.mocked(baselineHost).mockResolvedValue({
+      ...detail,
+      host: { ...host, protocols: [{ ...tcpProtocol, nse_output: [] }] },
+    })
+
+    await renderRoute('/jobs/job-1/baseline/hosts/198.51.100.10', '/jobs/:id/baseline/hosts/:address')
+
+    expect(container.querySelector('[aria-label="TCP Nmap script results"]')).toBeNull()
+  })
+
   it('shows baseline expectations and special-use RDAP state for historical hosts', async () => {
     await renderRoute('/scans/scan-1/hosts/198.51.100.10', '/scans/:scanId/hosts/:address')
     expect(historicalScanHost).toHaveBeenCalledWith('scan-1', '198.51.100.10')

@@ -389,7 +389,7 @@ test.describe('responsive issue regressions', () => {
     const fingerprint = `${'Apache httpd OpenSSL mod_wsgi Python mod_perl '.repeat(5)}2.4.62`
     const host = {
       address, address_family: 'IPv6', source_targets: [longValue], status: 'up',
-      protocols: [{ protocol: 'tcp', scanned_ports: '443', scanned_port_count: 1, service_detection: true, ports: [{ port: 443, state: 'open', service: { name: 'https', product: fingerprint, version: '2.4.62', extra_info: fingerprint } }], state_summaries: [] }],
+      protocols: [{ protocol: 'tcp', scanned_ports: '443', scanned_port_count: 1, service_detection: true, ports: [{ port: 443, state: 'open', service: { name: 'https', product: fingerprint, version: '2.4.62', extra_info: fingerprint } }], state_summaries: [], nse_output: ['http-title: <img src=x onerror=alert(1)>', `ssl-cert: ${longValue}\nIssuer: Example CA`] }],
     }
     await page.route('**/api/v1/scans/scan-1/hosts/**', async route => {
       const pathname = new URL(route.request().url()).pathname
@@ -404,6 +404,12 @@ test.describe('responsive issue regressions', () => {
     const protocolBox = (await protocol.boundingBox())!
     expect(protocolBox.x + protocolBox.width).toBeLessThanOrEqual(768)
     expect(await page.locator('.port-table-wrap').evaluate(element => getComputedStyle(element).overflowX)).toBe('auto')
+    const nseResults = page.getByRole('region', { name: 'TCP Nmap script results' })
+    await expect(nseResults).toContainText('http-title')
+    await expect(nseResults).toContainText('<img src=x onerror=alert(1)>')
+    await expect(nseResults.locator('img')).toHaveCount(0)
+    await expect(nseResults.locator('pre').nth(1)).toContainText('Issuer: Example CA')
+    await expectNoHorizontalScroll(page)
   })
 
   test('scan diff wraps changes and shows the complete failure reason (#974)', async ({ page }) => {

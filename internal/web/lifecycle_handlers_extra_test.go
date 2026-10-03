@@ -144,8 +144,11 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	failedDeleteRequest.Header.Set("Content-Type", "application/json")
 	failedDelete := httptest.NewRecorder()
 	server.jobRoute(failedDelete, failedDeleteRequest, admin, defaultTenantStore(server), second.ID)
-	if failedDelete.Code != http.StatusInternalServerError {
+	if failedDelete.Code != http.StatusInternalServerError || !strings.Contains(failedDelete.Body.String(), `"code":"job_delete"`) {
 		t.Fatalf("permanent delete when history cleanup fails = %d: %s", failedDelete.Code, failedDelete.Body.String())
+	}
+	if strings.Contains(failedDelete.Body.String(), "event cleanup unavailable") {
+		t.Fatalf("permanent delete response disclosed storage error: %s", failedDelete.Body.String())
 	}
 	if _, err := defaultTenant(db).GetJob(ctx, second.ID); err != nil {
 		t.Fatalf("job after rolled-back delete = %v", err)

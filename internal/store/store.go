@@ -658,6 +658,7 @@ var (
 	ErrConflict           = errors.New("resource was modified by another request")
 	ErrRebaselineRequired = errors.New("security-relevant job changes require rebaseline confirmation")
 	ErrJobScanActive      = errors.New("job has an active scan")
+	ErrJobNotArchived     = errors.New("job must be archived before permanent deletion")
 	ErrLastAdministrator  = errors.New("at least one enabled administrator is required")
 	ErrIncidentNotFound   = errors.New("incident not found")
 	// ErrIncidentConflict indicates that an incident changed after the

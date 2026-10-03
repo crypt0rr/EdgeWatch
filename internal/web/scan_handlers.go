@@ -400,14 +400,18 @@ func (s *Server) permanentDelete(w http.ResponseWriter, r *http.Request, session
 		writeError(w, http.StatusConflict, "archive_required", "archive the job before permanently deleting it", nil)
 		return
 	}
-	if err := ts.DeleteJobWithAudit(r.Context(), id, actorAudit(session, "job.deleted", id)); err != nil {
+	if err := ts.DeleteJobWithAuditAtRevision(r.Context(), id, record.Revision, actorAudit(session, "job.deleted", id)); err != nil {
 		if s.writeAuditUnavailable(w, err, "job.deleted") {
 			return
 		}
 		if errors.Is(err, store.ErrJobScanActive) {
 			writeError(w, http.StatusConflict, "job_active", "job is still active", nil)
+		} else if errors.Is(err, store.ErrConflict) {
+			writeError(w, http.StatusConflict, "conflict", "job was modified; reload before deleting it", nil)
+		} else if errors.Is(err, store.ErrJobNotArchived) {
+			writeError(w, http.StatusConflict, "archive_required", "archive the job before permanently deleting it", nil)
 		} else {
-			writeError(w, http.StatusConflict, "delete_blocked", "job cannot be deleted while it is in use or retained history refers to it", nil)
+			s.writeInternalError(w, r, "job_delete", err)
 		}
 		return
 	}

@@ -120,12 +120,57 @@ func TestBaselineCycleLifecycleAndJobArchiveHandlers(t *testing.T) {
 	if archiveSecond.Code != http.StatusNoContent {
 		t.Fatalf("second archive = %d: %s", archiveSecond.Code, archiveSecond.Body.String())
 	}
+	finished := time.Now().UTC()
+	if err := db.System().SaveScan(ctx, model.Scan{
+		ID: "delete-me-retained-scan", JobID: second.ID, JobRevision: 2, Job: "delete-me",
+		StartedAt: finished, FinishedAt: finished, Status: "success",
+		Snapshot: model.Snapshot{Units: []model.Unit{{Target: "192.0.2.2", Protocol: "tcp", Addresses: []string{"192.0.2.2"}, Ports: []model.PortState{{Port: 443, State: "open"}}}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.System().QueueEvent(ctx, "test-destination", model.Event{
+		Type: "test-event", JobID: second.ID, Job: "delete-me", ScanID: "delete-me-retained-scan", CreatedAt: finished,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `INSERT INTO events(type,job,job_id,scan_id,payload_json,created_at) VALUES(?,?,?,?,?,?)`, "test-event", "delete-me", second.ID, "delete-me-retained-scan", []byte(`{"type":"test-event"}`), finished.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `CREATE TRIGGER reject_job_delete_events BEFORE DELETE ON events
+		BEGIN SELECT RAISE(ABORT,'event cleanup unavailable'); END`); err != nil {
+		t.Fatal(err)
+	}
+	failedDeleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID+"?permanent=true", strings.NewReader(`{"confirm_name":"delete-me"}`))
+	failedDeleteRequest.Header.Set("Content-Type", "application/json")
+	failedDelete := httptest.NewRecorder()
+	server.jobRoute(failedDelete, failedDeleteRequest, admin, defaultTenantStore(server), second.ID)
+	if failedDelete.Code != http.StatusInternalServerError {
+		t.Fatalf("permanent delete when history cleanup fails = %d: %s", failedDelete.Code, failedDelete.Body.String())
+	}
+	if _, err := defaultTenant(db).GetJob(ctx, second.ID); err != nil {
+		t.Fatalf("job after rolled-back delete = %v", err)
+	}
+	var retainedAfterFailure int
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, second.ID).Scan(&retainedAfterFailure); err != nil || retainedAfterFailure != 1 {
+		t.Fatalf("scan count after rolled-back delete = %d, %v; want 1", retainedAfterFailure, err)
+	}
+	var retainedEvents int
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM events WHERE job_id=?`, second.ID).Scan(&retainedEvents); err != nil || retainedEvents != 1 {
+		t.Fatalf("event count after rolled-back delete = %d, %v; want 1", retainedEvents, err)
+	}
+	if _, err := db.DB.ExecContext(ctx, `DROP TRIGGER reject_job_delete_events`); err != nil {
+		t.Fatal(err)
+	}
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/jobs/"+second.ID+"?permanent=true", strings.NewReader(`{"confirm_name":"delete-me"}`))
 	deleteRequest.Header.Set("Content-Type", "application/json")
 	deleted := httptest.NewRecorder()
 	server.jobRoute(deleted, deleteRequest, admin, defaultTenantStore(server), second.ID)
 	if deleted.Code != http.StatusNoContent {
 		t.Fatalf("permanent delete = %d: %s", deleted.Code, deleted.Body.String())
+	}
+	var retainedScans int
+	if err := db.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM scans WHERE job_id=?`, second.ID).Scan(&retainedScans); err != nil || retainedScans != 0 {
+		t.Fatalf("retained scans after permanent delete = %d, %v; want 0", retainedScans, err)
 	}
 }
 

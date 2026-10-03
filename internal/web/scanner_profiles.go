@@ -76,10 +76,10 @@ func (s *Server) applySelectedScannerProfile(ctx context.Context, ts *store.Tena
 		definition = historical.Definition
 	}
 	if profile.Archived && !allowArchived {
-		return invalidProfileSelection("selected scanner profile is archived")
+		return invalidProfileSelection("profile", "selected scanner profile is archived")
 	}
 	if definition.Engine != config.EngineNmap && definition.Engine != config.EngineNaabuNmap {
-		return invalidProfileSelection("selected scanner profile has an invalid engine")
+		return invalidProfileSelection("profile", "selected scanner profile has an invalid engine")
 	}
 	job.TCP.Engine = definition.Engine
 	job.TCP.ProfileRevision = requestedRevision
@@ -108,7 +108,7 @@ func (s *Server) applySelectedScannerProfile(ctx context.Context, ts *store.Tena
 			case "scan_type":
 				if requested.ScanType != "" {
 					if requested.ScanType != "connect" && requested.ScanType != "syn" {
-						return invalidProfileSelection("naabu scan_type must be connect or syn")
+						return invalidProfileSelection("scan_type", "naabu scan_type must be connect or syn")
 					}
 					options.ScanType = requested.ScanType
 				}
@@ -129,7 +129,7 @@ func (s *Server) applySelectedScannerProfile(ctx context.Context, ts *store.Tena
 			}
 			value := naabuOptionValue(requested, field)
 			if value < bound.Min || value > bound.Max {
-				return invalidProfileSelection(fmt.Sprintf("naabu %s must be between %d and %d", field, bound.Min, bound.Max))
+				return invalidProfileSelection(field, fmt.Sprintf("naabu %s must be between %d and %d", field, bound.Min, bound.Max))
 			}
 			setNaabuOptionValue(&options, field, value)
 		}
@@ -146,8 +146,8 @@ func (s *Server) applySelectedScannerProfile(ctx context.Context, ts *store.Tena
 	return nil
 }
 
-func invalidProfileSelection(message string) error {
-	return store.NewValidationError(errors.New(message))
+func invalidProfileSelection(field, message string) error {
+	return store.NewValidationError(config.NewFieldValidationError(field, errors.New(message)))
 }
 
 func naabuOptionValue(options config.NaabuOptions, field string) int {

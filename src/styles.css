@@ -886,6 +886,15 @@
 .evidence-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 9px; }
 .evidence-heading h4 { margin: 0; color: #dcecff; font-size: 12px; }
 .evidence-heading .muted { margin-top: 4px; font-size: 10px; line-height: 1.45; }
+.nse-output-panel { display: grid; gap: 9px; margin-top: 15px; padding: 12px; border: 1px solid #203b59; border-radius: 8px; background: #091827; }
+.nse-output-panel .evidence-heading { margin-bottom: 0; }
+.nse-output-list { display: grid; gap: 8px; min-width: 0; }
+.nse-output-item { min-width: 0; padding: 9px 10px; border: 1px solid #1d3047; border-radius: 6px; background: #071321; }
+.nse-output-item h5 { margin: 0 0 6px; font-size: 10px; }
+.nse-output-item h5 code { color: #82c4ff; overflow-wrap: anywhere; }
+.nse-output-text { margin: 0; color: #c1d4e8; font: 10px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.nse-output-item small, .nse-output-note { margin: 5px 0 0; color: #829bb5; font-size: 9px; line-height: 1.5; }
+.nse-output-note { margin-top: 0; }
 .evidence-port-list { display: grid; gap: 0; }
 .evidence-port-row { display: grid; grid-template-columns: 70px auto minmax(0, 1fr) minmax(180px, 1.4fr); align-items: center; gap: 9px; border-top: 1px solid #1d3047; padding: 8px 0; font-size: 10px; }
 .evidence-port-row:first-child { border-top: 0; }

@@ -37,6 +37,45 @@ function EvidencePorts({ title, description, ports, tone = 'muted' }: { title: s
   return <section className={`evidence-section ${tone === 'warning' ? 'warning' : ''}`} aria-label={title}><div className="evidence-heading"><div><h4>{title}</h4><p className="muted">{description}</p></div><span className="pill gray">{ports.length} {ports.length === 1 ? 'port' : 'ports'}</span></div><div className="evidence-port-list">{ports.map(port => <div className="evidence-port-row" key={`${port.port}-${port.state}-${port.verification ?? ''}`}><code>{port.port}</code><span className={port.state === 'open' ? 'pill green' : 'pill amber'}>{port.state}</span><span className="muted">{port.reason || 'No reason reported'}{port.reason_ttl ? ` · TTL ${port.reason_ttl}` : ''}</span><ServiceText port={port} /></div>)}</div></section>
 }
 
+const maxNSEOutputCount = 32
+const maxNSEOutputLength = 512
+
+function parseNSESummary(summary: string) {
+  const separator = summary.indexOf(': ')
+  if (separator <= 0) return { script: 'Nmap script output', output: summary }
+  return { script: summary.slice(0, separator), output: summary.slice(separator + 2) }
+}
+
+function NSEOutputPanel({ protocol, outputs }: { protocol: string; outputs?: string[] }) {
+  const allEntries = (outputs ?? []).filter(output => output.trim())
+  const entries = allEntries.slice(0, maxNSEOutputCount)
+  if (!entries.length) return null
+
+  const label = `${protocol.toUpperCase()} Nmap script results`
+  return <section className="nse-output-panel" aria-label={label}>
+    <div className="evidence-heading">
+      <div>
+        <h4>Nmap script results</h4>
+        <p className="muted">Script names and captured output for this {protocol.toUpperCase()} scan.</p>
+      </div>
+      <span className="pill gray">{entries.length}{allEntries.length > entries.length ? ` of ${allEntries.length}` : ''}</span>
+    </div>
+    <div className="nse-output-list">
+      {entries.map((summary, index) => {
+        const parsed = parseNSESummary(summary)
+        const truncated = parsed.output.length > maxNSEOutputLength
+        const output = parsed.output.slice(0, maxNSEOutputLength)
+        return <article className="nse-output-item" key={`${protocol}-${index}`}>
+          <h5><code>{parsed.script}</code></h5>
+          <pre className="nse-output-text">{output || 'No output reported'}{truncated ? '…' : ''}</pre>
+          {truncated && <small>Output truncated for display.</small>}
+        </article>
+      })}
+    </div>
+    {allEntries.length > maxNSEOutputCount && <p className="nse-output-note" role="note">Showing the first {maxNSEOutputCount} of {allEntries.length} script results.</p>}
+  </section>
+}
+
 function ProtocolCard({ protocol }: { protocol: ProtocolObservation }) {
   const [sortKey, setSortKey] = useState<PortSortKey>('port')
   const [descending, setDescending] = useState(false)
@@ -61,7 +100,72 @@ function ProtocolCard({ protocol }: { protocol: ProtocolObservation }) {
   const discovered = protocol.discovered_ports ?? []
   const unconfirmed = protocol.unconfirmed_ports ?? []
   const completedFullRange = protocol.status === 'unknown' && protocol.status_reason === 'scan-complete'
-  return <div className="protocol-card"><div className="protocol-heading"><div><h3>{protocol.protocol.toUpperCase()}</h3><p className="muted">{protocol.scan_type || protocol.protocol} · {protocol.scanned_port_count.toLocaleString()} ports</p></div><span className="pill blue">{protocol.service_detection ? 'Service detection' : 'Port scan'}</span></div>{protocol.status && protocol.status !== 'up' && !completedFullRange && <div className="evidence-section warning" role="status"><strong>{protocol.protocol.toUpperCase()} scan coverage: {protocol.status}</strong>{protocol.status_reason && <span> · {displayStatusReason(protocol.status_reason)}</span>}</div>}{completedFullRange && <div className="evidence-section" role="status"><strong>{protocol.protocol.toUpperCase()} scan coverage: complete</strong><span> · full-range scan completed with no positive ports</span></div>}{protocol.discovery_engine && <div className="scanner-provenance"><strong>{protocol.discovery_engine === 'naabu' ? 'Naabu discovery → Nmap confirmation' : protocol.discovery_engine}</strong><span className="muted">Only Nmap-confirmed positive ports affect the baseline.</span></div>}<PortScopeDetails items={[{ protocol: protocol.protocol, ports: protocol.scanned_ports, portCount: protocol.scanned_port_count }]} /><div className="state-summary">{protocol.state_summaries?.map(summary => <div key={summary.state} className="state-summary-item"><strong>{summary.count.toLocaleString()}</strong><span>{summary.state}</span>{summary.reasons?.map(reason => <small key={reason.reason}>{reason.reason} · {reason.count}</small>)}</div>)}</div>{ports.length ? <><div className="port-table-wrap" role="region" aria-label={evidenceLabel} tabIndex={0}><table className="port-table"><thead><tr><th scope="col" aria-sort={sortKey === 'port' ? (descending ? 'descending' : 'ascending') : 'none'}>{sortLabel('port', 'Port')}</th><th scope="col" aria-sort={sortKey === 'state' ? (descending ? 'descending' : 'ascending') : 'none'}>{sortLabel('state', 'State')}</th><th scope="col" aria-sort={sortKey === 'reason' ? (descending ? 'descending' : 'ascending') : 'none'}>{sortLabel('reason', 'Reason')}</th><th scope="col" aria-sort={sortKey === 'service' ? (descending ? 'descending' : 'ascending') : 'none'}>{sortLabel('service', 'Service and evidence')}</th></tr></thead><tbody>{ports.map(port => <tr key={port.port}><td><code>{port.port}/{protocol.protocol}</code></td><td><span className={port.state === 'open' ? 'pill green' : 'pill amber'}>{port.state}</span></td><td>{port.reason || '—'}{port.reason_ttl ? <small className="table-sub">TTL {port.reason_ttl}</small> : null}</td><td><ServiceText port={port} /></td></tr>)}</tbody></table></div><div className="mobile-port-list" aria-label={evidenceLabel}><div className="mobile-port-sort" role="group" aria-label={`Sort ${protocol.protocol.toUpperCase()} ports`}><span>Sort:</span>{sortLabel('port', 'Port')}{sortLabel('state', 'State')}{sortLabel('reason', 'Reason')}{sortLabel('service', 'Service')}</div>{ports.map(port => <article className="mobile-port-card" key={port.port}><div className="mobile-port-heading"><code>{port.port}/{protocol.protocol}</code><span className={port.state === 'open' ? 'pill green' : 'pill amber'}>{port.state}</span></div><dl className="mobile-port-facts"><div><dt>Reason</dt><dd>{port.reason || '—'}{port.reason_ttl ? <small className="table-sub">TTL {port.reason_ttl}</small> : null}</dd></div><div><dt>Service and evidence</dt><dd><ServiceText port={port} /></dd></div></dl></article>)}</div></> : <div className="inline-empty">No open or open|filtered ports were recorded.</div>}<EvidencePorts title="Naabu discoveries" description="Ports found by fast TCP discovery. These are retained for diagnostics and are not baseline evidence until Nmap confirms them." ports={discovered} /><EvidencePorts title="Nmap disagreements" description="Naabu found these ports but Nmap did not confirm an open state; they are excluded from change detection." ports={unconfirmed} tone="warning" /><p className="nonopen-note"><Info size={14} /> Closed, filtered, and other non-open ports are summarized above rather than stored individually, even for a 65,535-port scope.</p></div>
+  return <div className="protocol-card">
+    <div className="protocol-heading">
+      <div>
+        <h3>{protocol.protocol.toUpperCase()}</h3>
+        <p className="muted">{protocol.scan_type || protocol.protocol} · {protocol.scanned_port_count.toLocaleString()} ports</p>
+      </div>
+      <span className="pill blue">{protocol.service_detection ? 'Service detection' : 'Port scan'}</span>
+    </div>
+    {protocol.status && protocol.status !== 'up' && !completedFullRange && <div className="evidence-section warning" role="status">
+      <strong>{protocol.protocol.toUpperCase()} scan coverage: {protocol.status}</strong>
+      {protocol.status_reason && <span> · {displayStatusReason(protocol.status_reason)}</span>}
+    </div>}
+    {completedFullRange && <div className="evidence-section" role="status">
+      <strong>{protocol.protocol.toUpperCase()} scan coverage: complete</strong>
+      <span> · full-range scan completed with no positive ports</span>
+    </div>}
+    {protocol.discovery_engine && <div className="scanner-provenance">
+      <strong>{protocol.discovery_engine === 'naabu' ? 'Naabu discovery → Nmap confirmation' : protocol.discovery_engine}</strong>
+      <span className="muted">Only Nmap-confirmed positive ports affect the baseline.</span>
+    </div>}
+    <PortScopeDetails items={[{ protocol: protocol.protocol, ports: protocol.scanned_ports, portCount: protocol.scanned_port_count }]} />
+    <div className="state-summary">
+      {protocol.state_summaries?.map(summary => <div key={summary.state} className="state-summary-item">
+        <strong>{summary.count.toLocaleString()}</strong>
+        <span>{summary.state}</span>
+        {summary.reasons?.map(reason => <small key={reason.reason}>{reason.reason} · {reason.count}</small>)}
+      </div>)}
+    </div>
+    <NSEOutputPanel protocol={protocol.protocol} outputs={protocol.nse_output} />
+    {ports.length ? <>
+      <div className="port-table-wrap" role="region" aria-label={evidenceLabel} tabIndex={0}>
+        <table className="port-table">
+          <thead><tr>
+            <th scope="col" aria-sort={sortKey === 'port' ? (descending ? 'descending' : 'ascending') : 'none'}>{sortLabel('port', 'Port')}</th>
+            <th scope="col" aria-sort={sortKey === 'state' ? (descending ? 'descending' : 'ascending') : 'none'}>{sortLabel('state', 'State')}</th>
+            <th scope="col" aria-sort={sortKey === 'reason' ? (descending ? 'descending' : 'ascending') : 'none'}>{sortLabel('reason', 'Reason')}</th>
+            <th scope="col" aria-sort={sortKey === 'service' ? (descending ? 'descending' : 'ascending') : 'none'}>{sortLabel('service', 'Service and evidence')}</th>
+          </tr></thead>
+          <tbody>{ports.map(port => <tr key={port.port}>
+            <td><code>{port.port}/{protocol.protocol}</code></td>
+            <td><span className={port.state === 'open' ? 'pill green' : 'pill amber'}>{port.state}</span></td>
+            <td>{port.reason || '—'}{port.reason_ttl ? <small className="table-sub">TTL {port.reason_ttl}</small> : null}</td>
+            <td><ServiceText port={port} /></td>
+          </tr>)}</tbody>
+        </table>
+      </div>
+      <div className="mobile-port-list" aria-label={evidenceLabel}>
+        <div className="mobile-port-sort" role="group" aria-label={`Sort ${protocol.protocol.toUpperCase()} ports`}>
+          <span>Sort:</span>{sortLabel('port', 'Port')}{sortLabel('state', 'State')}{sortLabel('reason', 'Reason')}{sortLabel('service', 'Service')}
+        </div>
+        {ports.map(port => <article className="mobile-port-card" key={port.port}>
+          <div className="mobile-port-heading">
+            <code>{port.port}/{protocol.protocol}</code>
+            <span className={port.state === 'open' ? 'pill green' : 'pill amber'}>{port.state}</span>
+          </div>
+          <dl className="mobile-port-facts">
+            <div><dt>Reason</dt><dd>{port.reason || '—'}{port.reason_ttl ? <small className="table-sub">TTL {port.reason_ttl}</small> : null}</dd></div>
+            <div><dt>Service and evidence</dt><dd><ServiceText port={port} /></dd></div>
+          </dl>
+        </article>)}
+      </div>
+    </> : <div className="inline-empty">No open or open|filtered ports were recorded.</div>}
+    <EvidencePorts title="Naabu discoveries" description="Ports found by fast TCP discovery. These are retained for diagnostics and are not baseline evidence until Nmap confirms them." ports={discovered} />
+    <EvidencePorts title="Nmap disagreements" description="Naabu found these ports but Nmap did not confirm an open state; they are excluded from change detection." ports={unconfirmed} tone="warning" />
+    <p className="nonopen-note"><Info size={14} /> Closed, filtered, and other non-open ports are summarized above rather than stored individually, even for a 65,535-port scope.</p>
+  </div>
 }
 
 function RdapPanel({ result, loading, error }: { result?: RdapResult; loading: boolean; error?: Error | null }) {

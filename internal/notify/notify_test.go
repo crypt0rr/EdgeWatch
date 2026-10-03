@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -25,8 +26,18 @@ import (
 
 func TestQueueAndDeliverGenericWebhook(t *testing.T) {
 	var calls atomic.Int32
+	payloads := make(chan string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read request body", http.StatusBadRequest)
+			return
+		}
+		select {
+		case payloads <- string(body):
+		default:
+		}
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
@@ -44,7 +55,7 @@ func TestQueueAndDeliverGenericWebhook(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	event := model.Event{Type: "changes-detected", Job: "public", ScanID: "scan-1", Message: "one change", CreatedAt: time.Now(), Changes: []model.Change{{Target: "example.com", Protocol: "tcp", Port: 443, Old: "not-open", New: "open", Severity: "critical"}}}
+	event := model.Event{Type: "changes-detected", Job: "edge_[prod]", ScanID: "scan-1", Message: "1 baseline change confirmed", CreatedAt: time.Now(), Changes: []model.Change{{Target: "example.com", Protocol: "tcp", Port: 443, Old: "open|filtered", New: "open", Severity: "critical"}}}
 	if err := notifier.Queue(context.Background(), []model.Event{event}); err != nil {
 		t.Fatal(err)
 	}
@@ -53,6 +64,18 @@ func TestQueueAndDeliverGenericWebhook(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("received %d webhook calls", calls.Load())
+	}
+	payload := <-payloads
+	var genericMessage struct {
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(payload), &genericMessage); err != nil {
+		t.Fatalf("decode generic webhook payload %q: %v", payload, err)
+	}
+	for _, expected := range []string{"1 baseline change confirmed", "Job: edge_[prod]", "open|filtered -> open"} {
+		if !strings.Contains(genericMessage.Message, expected) {
+			t.Errorf("generic webhook message %q does not preserve %q", genericMessage.Message, expected)
+		}
 	}
 	due, err := db.System().DueDeliveries(context.Background(), 10)
 	if err != nil || len(due) != 0 {

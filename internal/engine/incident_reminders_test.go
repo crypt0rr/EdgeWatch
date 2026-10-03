@@ -56,7 +56,7 @@ func hasEventType(events []model.Event, kind string) bool {
 }
 
 func TestCriticalReminderFormatIdentifiesPersistentChange(t *testing.T) {
-	message := FormatEvent(model.Event{Type: "changes-reminder", Job: "edge", ScanID: "scan-repeat", Message: "Reminder: 1 baseline change(s) remain open", Changes: []model.Change{{Target: "192.0.2.1", Protocol: "tcp", Port: 443, Old: "not-open", New: "open", Severity: "critical"}}})
+	message := FormatEvent(model.Event{Type: "changes-reminder", Job: "edge", ScanID: "scan-repeat", Message: "Reminder: 1 baseline change remains open", Changes: []model.Change{{Target: "192.0.2.1", Protocol: "tcp", Port: 443, Old: "not-open", New: "open", Severity: "critical"}}})
 	if !strings.HasPrefix(message, "🔴 EdgeWatch: Reminder:") || !strings.Contains(message, "Scan: scan-repeat") || !strings.Contains(message, "tcp/443") {
 		t.Fatalf("reminder notification=%q", message)
 	}

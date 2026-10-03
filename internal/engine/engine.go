@@ -195,7 +195,7 @@ func processSuccessWithReminderSettings(state *model.JobState, job config.Job, s
 		}
 		if len(reminded) > 0 {
 			sort.Slice(reminded, func(i, j int) bool { return reminded[i].Key < reminded[j].Key })
-			events = append(events, model.Event{Type: "changes-reminder", Job: job.Name, ScanID: scan.ID, Message: fmt.Sprintf("Reminder: %d baseline change(s) remain open", len(reminded)), Changes: reminded, CreatedAt: now})
+			events = append(events, model.Event{Type: "changes-reminder", Job: job.Name, ScanID: scan.ID, Message: persistentIncidentReminderMessage(len(reminded)), Changes: reminded, CreatedAt: now})
 			remindedAt := now
 			state.LastIncidentReminderAt = &remindedAt
 		}
@@ -1223,7 +1223,7 @@ func scanOutcomeMessage(scan model.Scan) string {
 	}
 	message := "Scan " + label
 	if reason := strings.TrimSpace(scan.Error); reason != "" {
-		message += ": " + reason
+		message += ": " + sanitizeNotificationText(reason)
 	}
 	return message
 }
@@ -1544,12 +1544,32 @@ func applyChangesWithIncomplete(state *model.JobState, job, scanID string, curre
 	sort.Slice(recovered, func(i, j int) bool { return recovered[i].Key < recovered[j].Key })
 	var events []model.Event
 	if len(opened) > 0 {
-		events = append(events, model.Event{Type: "changes-detected", Job: job, ScanID: scanID, Message: fmt.Sprintf("%d baseline change(s) confirmed", len(opened)), Changes: opened, CreatedAt: now})
+		events = append(events, model.Event{Type: "changes-detected", Job: job, ScanID: scanID, Message: baselineChangeMessage(len(opened), "confirmed"), Changes: opened, CreatedAt: now})
 	}
 	if len(recovered) > 0 {
-		events = append(events, model.Event{Type: "changes-recovered", Job: job, ScanID: scanID, Message: fmt.Sprintf("%d baseline change(s) recovered", len(recovered)), Changes: recovered, CreatedAt: now})
+		events = append(events, model.Event{Type: "changes-recovered", Job: job, ScanID: scanID, Message: baselineChangeMessage(len(recovered), "recovered"), Changes: recovered, CreatedAt: now})
 	}
 	return events
+}
+
+func baselineChangeCount(count int) string {
+	noun := "changes"
+	if count == 1 {
+		noun = "change"
+	}
+	return fmt.Sprintf("%d baseline %s", count, noun)
+}
+
+func baselineChangeMessage(count int, action string) string {
+	return baselineChangeCount(count) + " " + action
+}
+
+func persistentIncidentReminderMessage(count int) string {
+	verb := "remain"
+	if count == 1 {
+		verb = "remains"
+	}
+	return fmt.Sprintf("Reminder: %s %s open", baselineChangeCount(count), verb)
 }
 
 func mergeForScopeChange(old, candidate model.Snapshot) model.Snapshot {
@@ -1697,36 +1717,80 @@ func FormatEvent(e model.Event) string {
 		b.WriteString("🔴 ")
 	}
 	b.WriteString("EdgeWatch: ")
-	b.WriteString(sanitizeNotificationText(e.Message))
+	b.WriteString(notificationField(notificationEventMessage(e)))
 	if e.Job != "" {
 		b.WriteString("\nJob: ")
-		b.WriteString(sanitizeNotificationText(e.Job))
+		b.WriteString(notificationField(e.Job))
 	}
 	if e.ScanID != "" {
 		b.WriteString("\nScan: ")
-		b.WriteString(sanitizeNotificationText(e.ScanID))
+		b.WriteString(notificationField(e.ScanID))
 	}
 	for _, c := range e.Changes {
 		b.WriteString("\n- [")
-		b.WriteString(sanitizeNotificationText(c.Severity))
+		b.WriteString(notificationField(c.Severity))
 		b.WriteString("] ")
 		b.WriteString(safeChangeSummary(c))
 	}
 	return b.String()
 }
 
+// notificationEventMessage regenerates the fixed change summaries from their
+// structured event data. Besides keeping new notifications grammatical, this
+// also fixes queued legacy events whose persisted Message used "change(s)".
+func notificationEventMessage(event model.Event) string {
+	count := event.ChangesCount
+	if count <= 0 {
+		count = len(event.Changes)
+	}
+	if count <= 0 {
+		return event.Message
+	}
+	switch event.Type {
+	case "changes-detected":
+		return baselineChangeMessage(count, "confirmed")
+	case "changes-recovered":
+		return baselineChangeMessage(count, "recovered")
+	case "changes-reminder":
+		return persistentIncidentReminderMessage(count)
+	default:
+		return event.Message
+	}
+}
+
 const maxNotificationFieldRunes = 512
 
-// sanitizeNotificationText keeps scan-derived banners from becoming active
-// markup in chat providers. Nmap service strings and target banners are
-// untrusted; control characters are flattened and common HTML/Markdown
-// delimiters are replaced with visually similar, non-parsing characters.
+// notificationField preserves trusted notification wording while flattening
+// control and Unicode formatting characters and bounding the rendered field.
+func notificationField(value string) string {
+	value = strings.Map(func(r rune) rune {
+		if notificationControl(r) {
+			return ' '
+		}
+		return r
+	}, value)
+	return limitNotificationField(value)
+}
+
+func notificationControl(r rune) bool {
+	return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029'
+}
+
+func limitNotificationField(value string) string {
+	runes := []rune(value)
+	if len(runes) <= maxNotificationFieldRunes {
+		return value
+	}
+	return string(runes[:maxNotificationFieldRunes-1]) + "…"
+}
+
+// sanitizeNotificationText neutralizes untrusted scan-derived text before it
+// is sent through chat providers that may interpret HTML or Markdown. Keep it
+// scoped to Nmap service values and scanner error details; generated wording,
+// job names, and fixed state vocabulary retain their ordinary characters.
 func sanitizeNotificationText(value string) string {
 	value = strings.Map(func(r rune) rune {
-		// Unicode format characters include bidi overrides and isolates. They
-		// can reorder or hide notification text even though they are not ASCII
-		// controls; flatten them along with line separators.
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
+		if notificationControl(r) {
 			return ' '
 		}
 		switch r {
@@ -1760,22 +1824,19 @@ func sanitizeNotificationText(value string) string {
 			return r
 		}
 	}, value)
-	runes := []rune(value)
-	if len(runes) <= maxNotificationFieldRunes {
-		return value
-	}
-	return string(runes[:maxNotificationFieldRunes-1]) + "…"
+	return limitNotificationField(value)
 }
 
 func safeChangeSummary(change model.Change) string {
-	// Sanitize only values supplied by a scanned host or configuration. The
-	// separators generated by ChangeSummary (for example " -> ") remain
-	// readable and cannot be interpreted as provider markup.
-	change.Kind = sanitizeNotificationText(change.Kind)
-	change.Target = sanitizeNotificationText(change.Target)
-	change.Protocol = sanitizeNotificationText(change.Protocol)
-	change.Old = sanitizeNotificationText(change.Old)
-	change.New = sanitizeNotificationText(change.New)
+	// Service fingerprints can include arbitrary scanner-reported product and
+	// banner text, so neutralize those values. Port and host states, targets,
+	// protocols, kinds, and the summary separators are fixed or validated
+	// application values; in particular, preserve the literal open|filtered
+	// state used by both operators and downstream text searches.
+	if change.Kind == "service" {
+		change.Old = sanitizeNotificationText(change.Old)
+		change.New = sanitizeNotificationText(change.New)
+	}
 	return model.ChangeSummary(change)
 }
 

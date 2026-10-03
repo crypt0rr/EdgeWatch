@@ -1,8 +1,10 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"github.com/crypt0rr/edgewatch/internal/auth"
 	"github.com/crypt0rr/edgewatch/internal/config"
 	"github.com/crypt0rr/edgewatch/internal/model"
+	"github.com/crypt0rr/edgewatch/internal/store"
 )
 
 func TestJobPendingChangesAreSortedAndBoundToTheJob(t *testing.T) {
@@ -123,6 +126,53 @@ func TestJobPendingChangesWithoutRuntimeStateReturnsAnEmptyArray(t *testing.T) {
 	permission, ok := authPermissionForRoute(http.MethodGet, "/jobs/{id}/pending-changes")
 	if !ok || permission != auth.PermissionScansRead {
 		t.Fatalf("pending changes route permission = %q, found = %v", permission, ok)
+	}
+}
+
+func TestPendingChangeViewsSortTiesByProtocolPortKindAndKey(t *testing.T) {
+	items := pendingChangeViews(map[string]model.Pending{
+		"z":       {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 80, Kind: "port"}},
+		"a":       {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 80, Kind: "port"}},
+		"udp":     {Change: model.Change{Target: "192.0.2.30", Protocol: "udp", Port: 80, Kind: "port"}},
+		"443":     {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 443, Kind: "port"}},
+		"service": {Change: model.Change{Target: "192.0.2.30", Protocol: "tcp", Port: 80, Kind: "service"}},
+	})
+	want := []string{"a", "z", "service", "443", "udp"}
+	if len(items) != len(want) {
+		t.Fatalf("sorted pending changes = %#v", items)
+	}
+	for index, key := range want {
+		if items[index].Key != key {
+			t.Fatalf("sorted pending change %d = %q, want %q; all items: %#v", index, items[index].Key, key, items)
+		}
+	}
+}
+
+func TestJobPendingChangesReturnsSanitizedStoreFailure(t *testing.T) {
+	server, db, _ := newUsersTestServer(t)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	server.Log = slog.New(slog.NewTextHandler(&logs, nil))
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/job-1/pending-changes", nil)
+	server.jobPendingChanges(response, request, defaultTenantStore(server), store.JobRecord{ID: "job-1"})
+	assertRedactedInternalError(t, "pending changes with a closed store", response, "", "database is closed", &logs)
+}
+
+func TestJobPendingChangesRejectsInvalidOffsets(t *testing.T) {
+	server, _, _ := newUsersTestServer(t)
+	for _, offset := range []string{"-1", "10000001"} {
+		t.Run(offset, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/jobs/job-1/pending-changes?offset="+offset, nil)
+			server.jobPendingChanges(response, request, defaultTenantStore(server), store.JobRecord{ID: "job-1"})
+			apiErr := decodeAPIError(t, response)
+			if response.Code != http.StatusBadRequest || apiErr.Error.Code != "invalid_pagination" {
+				t.Fatalf("pending changes offset %q = %d %#v", offset, response.Code, apiErr.Error)
+			}
+		})
 	}
 }
 

@@ -204,12 +204,16 @@ func pendingChangeViews(pending map[string]model.Pending) []pendingChangeView {
 }
 
 func (s *Server) jobPendingChanges(w http.ResponseWriter, r *http.Request, ts *store.TenantStore, record store.JobRecord) {
+	offset, ok := requestOffset(w, r)
+	if !ok {
+		return
+	}
+	limit := queryLimit(r)
 	state, err := ts.RuntimeState(r.Context(), record.ID)
 	if err != nil {
 		s.writeInternalError(w, r, "store", err)
 		return
 	}
-	offset, limit := queryOffset(r), queryLimit(r)
 	items := pendingChangeViews(state.Pending)
 	start := min(offset, len(items))
 	end := min(start+limit, len(items))

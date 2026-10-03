@@ -93,7 +93,7 @@ test.describe('load and save error recovery (#982)', () => {
     await page.goto('/login')
     await expect(page.getByRole('heading', { name: 'EdgeWatch is not responding' })).toBeVisible()
     await expect(page.getByRole('button', { name: 'Reload status' })).toBeVisible()
-    await expect(page.getByRole('heading', { name: 'Good afternoon, administrator' })).toBeVisible({ timeout: 10_000 })
+    await expect(page.getByRole('heading', { name: 'Good day, administrator' })).toBeVisible({ timeout: 10_000 })
     expect(statusRequests).toBeGreaterThanOrEqual(2)
   })
 })

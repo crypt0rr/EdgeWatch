@@ -180,7 +180,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
 
   await page.locator('input[autocomplete="current-password"]').fill('correct horse battery staple')
   await page.getByRole('button', { name: 'Sign in' }).click()
-  await expect(page.getByRole('heading', { name: 'Good afternoon, admin' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Good day, admin' })).toBeVisible()
   await expect(page.getByText('EdgeWatch v0.7.0')).toBeVisible()
   await navigateFromShell(page, 'Security')
   await expect(page.getByLabel('Display name')).toHaveValue('admin')
@@ -188,7 +188,7 @@ test('setup, login, and build a TCP/UDP job in the console', async ({ page }) =>
   await page.getByRole('button', { name: 'Save display name' }).click()
   await expect(page.locator('.user-chip strong')).toHaveText('Edge operator')
   await navigateFromShell(page, 'Overview')
-  await expect(page.getByRole('heading', { name: 'Good afternoon, Edge operator' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Good day, Edge operator' })).toBeVisible()
   await openMobileNavigation(page)
   await expect(page.getByRole('link', { name: 'Incidents' })).toHaveClass(/nav-link-alert/)
   await expect(page.locator('#active-incident-count')).toHaveText('1')

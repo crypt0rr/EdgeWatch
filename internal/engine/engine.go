@@ -1316,6 +1316,14 @@ func items(s model.Snapshot) map[string]item {
 
 func Diff(old, new model.Snapshot, intersectionOnly bool) []model.Change {
 	a, b := items(old), items(new)
+	newPositivePorts := make(map[string]struct{})
+	for _, unit := range new.Units {
+		for _, port := range unit.Ports {
+			if isPositivePortState(port.State) {
+				newPositivePorts[fmt.Sprintf("port|%s|%s|%d", unit.Target, unit.Protocol, port.Port)] = struct{}{}
+			}
+		}
+	}
 	downByProtocol := completedDownAddressesByProtocol(new)
 	keys := map[string]bool{}
 	for k := range a {
@@ -1334,6 +1342,15 @@ func Diff(old, new model.Snapshot, intersectionOnly bool) []model.Change {
 		}
 		if intersectionOnly && !inBothScopes(old, new, probe) {
 			continue
+		}
+		// A service fingerprint is evidence about a positively observed port,
+		// not an independent service removal when that port has closed. The
+		// port change below represents the single operator-facing transition.
+		if probe.Kind == "service" {
+			portKey := fmt.Sprintf("port|%s|%s|%d", probe.Target, probe.Protocol, probe.Port)
+			if _, positive := newPositivePorts[portKey]; !positive {
+				continue
+			}
 		}
 		if xok && yok && x.Value == y.Value {
 			continue

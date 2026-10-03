@@ -1739,6 +1739,125 @@ func TestNewPortServiceIncidentsAcceptInEitherOrder(t *testing.T) {
 	}
 }
 
+func TestClosedFingerprintedPortProducesSingleIncidentAndAction(t *testing.T) {
+	for _, action := range []string{"accept", "suppress"} {
+		t.Run(action, func(t *testing.T) {
+			ctx := context.Background()
+			db, err := store.Open(storetest.FreshPath(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			tenant := defaultTenant(db)
+			record, err := tenant.CreateJob(ctx, config.NormalizeJob(config.Job{
+				Name: "closed-fingerprinted-port-" + action, Schedule: "0 * * * *", Timezone: "UTC", Targets: []string{"192.0.2.1"},
+				TCP: &config.Protocol{Ports: "22,443", Mode: "connect", ServiceDetection: true}, Timeout: config.Duration(time.Minute),
+				Baseline: config.Baseline{Samples: 2}, Change: config.Change{Confirmations: 1},
+			}))
+			if err != nil {
+				t.Fatal(err)
+			}
+			engine := Engine{Store: db}
+			sequence := 0
+			ssh := model.PortState{Port: 22, State: "open", Service: "ssh"}
+			https := model.PortState{Port: 443, State: "open", Service: "https"}
+			observe := func(ports ...model.PortState) model.Snapshot {
+				snapshot := model.Snapshot{
+					Scopes: []model.Scope{{Target: "192.0.2.1", Protocol: "tcp", Ports: "22,443", ServiceDetection: true}},
+					Units:  []model.Unit{{Target: "192.0.2.1", Protocol: "tcp", Ports: ports}},
+				}
+				snapshot.Normalize()
+				return snapshot
+			}
+			run := func(snapshot model.Snapshot) []model.Event {
+				t.Helper()
+				sequence++
+				scan := model.Scan{
+					ID: fmt.Sprintf("%s-%d", action, sequence), JobID: record.ID, JobRevision: record.Revision,
+					Job: record.Job.Name, Status: "success", ConfigHash: record.Job.SecurityHash(),
+					Snapshot: snapshot, FinishedAt: time.Now().UTC(),
+				}
+				events, err := engine.FinalizeManagedScan(ctx, record.ID, record.Job, &scan, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return events
+			}
+			portKey := "port|192.0.2.1|tcp|443"
+			serviceKey := "service|192.0.2.1|tcp|443"
+			for i := 0; i < 2; i++ {
+				events := run(observe(ssh, https))
+				if i == 0 && len(events) != 0 {
+					t.Fatalf("first baseline sample emitted events: %#v", events)
+				}
+				if i == 1 && (len(events) != 1 || events[0].Type != "baseline-complete") {
+					t.Fatalf("baseline completion = %#v", events)
+				}
+			}
+			if events := run(observe(ssh)); len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != portKey {
+				t.Fatalf("closing a fingerprinted port should open only one port incident, got %#v (service key %s)", events, serviceKey)
+			}
+			state, err := tenant.RuntimeState(ctx, record.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(state.Incidents) != 1 {
+				t.Fatalf("closing one port opened %d incidents: %#v", len(state.Incidents), state.Incidents)
+			}
+			if _, ok := state.Incidents[portKey]; !ok {
+				t.Fatalf("port incident missing: %#v", state.Incidents)
+			}
+			if _, ok := state.Incidents[serviceKey]; ok {
+				t.Fatalf("closed port also opened a service incident: %#v", state.Incidents)
+			}
+
+			audit := store.AuditEntry{Action: "incident.action", Detail: "closed fingerprinted port"}
+			switch action {
+			case "accept":
+				events, err := tenant.AcceptIncidentWithAudit(ctx, record.ID, record.Job.Name, portKey, audit)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(events) != 1 || events[0].Type != "incident-accepted" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != portKey {
+					t.Fatalf("accepting the port closure affected unrelated evidence: %#v", events)
+				}
+				state, err = tenant.RuntimeState(ctx, record.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(state.Incidents) != 0 || baselineService(*state.Baseline, "192.0.2.1", "tcp", 443) != "" {
+					t.Fatalf("accepted port closure left stale incident or service baseline: %#v", state)
+				}
+				if events := run(observe(ssh)); len(events) != 0 {
+					t.Fatalf("accepted closed-port observation re-alerted: %#v", events)
+				}
+			case "suppress":
+				events, err := tenant.SuppressIncidentWithAudit(ctx, record.ID, record.Job.Name, portKey, audit)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(events) != 1 || events[0].Type != "incident-suppressed" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != portKey {
+					t.Fatalf("suppressing the port closure affected unrelated evidence: %#v", events)
+				}
+				if events := run(observe(ssh)); len(events) != 0 {
+					t.Fatalf("one-scan suppression did not hide the next scan: %#v", events)
+				}
+				events = run(observe(ssh))
+				if len(events) != 1 || events[0].Type != "changes-detected" || len(events[0].Changes) != 1 || events[0].Changes[0].Key != portKey {
+					t.Fatalf("suppressed port closure did not reopen by itself: %#v", events)
+				}
+				state, err = tenant.RuntimeState(ctx, record.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if len(state.Incidents) != 1 {
+					t.Fatalf("suppressed closure reopened unrelated incidents: %#v", state.Incidents)
+				}
+			}
+		})
+	}
+}
+
 // Accepting a new port alone leaves its service for a separate decision.
 // Suppressing the service incident, or one scan that recovers it because
 // service detection returned no fingerprint, must not let fingerprint

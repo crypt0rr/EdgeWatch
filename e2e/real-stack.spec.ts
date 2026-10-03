@@ -17,7 +17,7 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
 
     await page.locator('input[autocomplete="current-password"]').fill(password)
     await page.getByRole('button', { name: 'Sign in' }).click()
-    await expect(page.getByRole('heading', { name: /Good afternoon, admin/ })).toBeVisible()
+    await expect(page.getByRole('heading', { name: /Good day, admin/ })).toBeVisible()
     const session = await callAPI(page, '/auth/session', 'GET')
     expect(session.status).toBe(200)
     const csrf = session.body.csrf_token as string
@@ -83,7 +83,7 @@ test('real EdgeWatch setup, baseline, change detection, and restart persistence'
     // Reload after the process restart so the SPA establishes a fresh session
     // and EventSource connection instead of retaining a half-closed stream.
     await page.goto(`${harness.url}/`, { waitUntil: 'domcontentloaded' })
-    await expect(page.getByRole('heading', { name: /Good afternoon, admin/ })).toBeVisible({ timeout: 15_000 })
+    await expect(page.getByRole('heading', { name: /Good day, admin/ })).toBeVisible({ timeout: 15_000 })
     await navigateFromShell(page, 'Incidents')
     await expect(page.getByRole('heading', { name: 'Incidents' })).toBeVisible()
     await expect(page.getByRole('row', { name: /real-stack-fixture/ }).or(page.getByRole('article', { name: /real-stack-fixture/ })).first()).toBeVisible()
@@ -113,7 +113,7 @@ test('real public status page is unauthenticated and follows publication state',
     await expect(page.getByRole('heading', { name: 'Sign in to EdgeWatch' })).toBeVisible()
     await page.locator('input[autocomplete="current-password"]').fill(password)
     await page.getByRole('button', { name: 'Sign in' }).click()
-    await expect(page.getByRole('heading', { name: /Good afternoon, admin/ })).toBeVisible()
+    await expect(page.getByRole('heading', { name: /Good day, admin/ })).toBeVisible()
 
     const session = await callAPI(page, '/auth/session', 'GET')
     expect(session.status).toBe(200)

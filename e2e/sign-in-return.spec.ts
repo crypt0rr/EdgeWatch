@@ -53,7 +53,7 @@ test('signing in again after the session ends returns to the page that was open'
 
   await page.goto('/')
   await signIn(page)
-  await expect(page.getByRole('heading', { name: /Good afternoon, administrator/ })).toBeVisible()
+  await expect(page.getByRole('heading', { name: /Good day, administrator/ })).toBeVisible()
   await page.getByRole('link', { name: 'Hosts', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Hosts', level: 1 })).toBeVisible()
 

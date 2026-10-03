@@ -38,7 +38,7 @@ describe('user administration', () => {
     vi.mocked(revokeUserActivation).mockResolvedValue(undefined)
     vi.mocked(updateUser).mockResolvedValue({ ...user, enabled: false, revision: 5 })
   })
-  afterEach(() => vi.clearAllMocks())
+  afterEach(() => vi.resetAllMocks())
 
   it('creates an invitation, exposes the token once, and clears the form', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
@@ -110,17 +110,17 @@ describe('user administration', () => {
 
   it('renews and revokes pending activation links', async () => {
     renderWithProviders(<Users />)
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Renew activation' })).toBeInTheDocument())
-    fireEvent.click(screen.getByRole('button', { name: 'Renew activation' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Renew activation link' })).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Renew activation link' }))
     fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => expect(issueUserActivation).toHaveBeenCalledWith('user-3', 'administrator-password'))
     expect(screen.getByLabelText('Activation link for new-user')).toHaveTextContent('/activate#token=renewed-token')
-    fireEvent.click(within(row('New User')).getByRole('button', { name: 'Revoke link' }))
+    fireEvent.click(within(row('New User')).getByRole('button', { name: 'Revoke activation link' }))
     fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => expect(revokeUserActivation).toHaveBeenCalledWith('user-3', 'administrator-password'))
-    expect(screen.getByText('The outstanding activation link was revoked.')).toBeInTheDocument()
+    expect(screen.getByText('The link for new-user was revoked.')).toBeInTheDocument()
   })
 
   it('offers each account only the actions the server allows', async () => {
@@ -130,10 +130,10 @@ describe('user administration', () => {
     // An administrator cannot disable its own account, and a disabled
     // account receives no link until it is enabled again, so it has none to
     // revoke either.
-    await waitFor(() => expect(actions('Site Admin')).toEqual(['Reset activation', 'Revoke link']))
-    expect(actions('Operator')).toEqual(['Disable', 'Reset activation', 'Revoke link'])
-    expect(actions('Former Viewer')).toEqual(['Enable'])
-    expect(actions('New User')).toEqual(['Renew activation', 'Revoke link'])
+    await waitFor(() => expect(actions('Site Admin')).toEqual(['Create password reset link', 'Revoke password reset link', 'Edit account']))
+    expect(actions('Operator')).toEqual(['Disable', 'Create password reset link', 'Revoke password reset link', 'Edit account'])
+    expect(actions('Former Viewer')).toEqual(['Enable', 'Edit account'])
+    expect(actions('New User')).toEqual(['Renew activation link', 'Revoke activation link', 'Edit account'])
   })
 
   it('does not offer to disable an account before it knows which account is signed in', async () => {
@@ -141,24 +141,24 @@ describe('user administration', () => {
     vi.mocked(listUsers).mockResolvedValue({ users: [self, disabled] })
     renderWithProviders(<Users />)
     await waitFor(() => expect(screen.getByText('Former Viewer')).toBeInTheDocument())
-    expect(actions('Site Admin')).toEqual(['Reset activation', 'Revoke link'])
-    expect(actions('Former Viewer')).toEqual(['Enable'])
+    expect(actions('Site Admin')).toEqual(['Create password reset link', 'Revoke password reset link', 'Edit account'])
+    expect(actions('Former Viewer')).toEqual(['Enable', 'Edit account'])
   })
 
   it('revokes a password-reset link from the account row that the notice points to', async () => {
     renderWithProviders(<Users />)
     await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
-    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Reset activation' }))
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Create password reset link' }))
     fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => expect(issueUserActivation).toHaveBeenCalledWith('user-2', 'administrator-password'))
     expect(screen.getByLabelText('Activation link for operator')).toHaveTextContent('/activate#token=renewed-token')
     expect(screen.getByText(/You can revoke it from this account row/)).toBeInTheDocument()
-    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Revoke link' }))
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Revoke password reset link' }))
     fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     await waitFor(() => expect(revokeUserActivation).toHaveBeenCalledWith('user-2', 'administrator-password'))
-    expect(screen.getByText('The outstanding activation link was revoked.')).toBeInTheDocument()
+    expect(screen.getByText('The link for operator was revoked.')).toBeInTheDocument()
   })
 
   it('stops showing a token once its link is revoked or its account is disabled, and keeps it for another account', async () => {
@@ -179,19 +179,19 @@ describe('user administration', () => {
     fireEvent.change(screen.getByLabelText(/^Administrator password/), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Create activation link' }))
     expect(await screen.findByLabelText('Activation link for new-user')).toHaveTextContent('/activate#token=invite-token')
-    fireEvent.click(within(row('New User')).getByRole('button', { name: 'Revoke link' }))
+    fireEvent.click(within(row('New User')).getByRole('button', { name: 'Revoke activation link' }))
     await confirm()
     expect(revokeUserActivation).toHaveBeenCalledWith('user-3', 'administrator-password')
-    expect(screen.getByText('The outstanding activation link was revoked.')).toBeInTheDocument()
+    expect(screen.getByText('The link for new-user was revoked.')).toBeInTheDocument()
     expect(screen.queryByLabelText('Activation link for new-user')).not.toBeInTheDocument()
     expect(screen.queryByText('/activate#token=invite-token')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Copy link' })).not.toBeInTheDocument()
 
     // Revoking another account's link keeps the token on the page.
-    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Reset activation' }))
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Create password reset link' }))
     await confirm()
     expect(screen.getByLabelText('Activation link for operator')).toHaveTextContent('/activate#token=renewed-token')
-    fireEvent.click(within(row('New User')).getByRole('button', { name: 'Revoke link' }))
+    fireEvent.click(within(row('New User')).getByRole('button', { name: 'Revoke activation link' }))
     await confirm()
     await waitFor(() => expect(revokeUserActivation).toHaveBeenCalledTimes(2))
     expect(screen.getByLabelText('Activation link for operator')).toHaveTextContent('/activate#token=renewed-token')
@@ -211,7 +211,7 @@ describe('user administration', () => {
     vi.mocked(updateUser).mockResolvedValue({ ...disabled, enabled: true, revision: 7 })
     renderWithProviders(<Users />)
     await waitFor(() => expect(screen.getByText('Former Viewer')).toBeInTheDocument())
-    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Reset activation' }))
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Create password reset link' }))
     fireEvent.change(screen.getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
     fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
     expect(await screen.findByLabelText('Activation link for operator')).toHaveTextContent('/activate#token=renewed-token')
@@ -221,6 +221,91 @@ describe('user administration', () => {
     await waitFor(() => expect(updateUser).toHaveBeenCalledWith('user-4', { enabled: true, revision: 6, password: 'administrator-password' }))
     expect(await screen.findByText('former enabled.')).toBeInTheDocument()
     expect(screen.getByLabelText('Activation link for operator')).toHaveTextContent('/activate#token=renewed-token')
+  })
+
+  it('edits a display name without asking for a password and uses the captured revision', async () => {
+    vi.mocked(updateUser).mockResolvedValue({ ...user, display_name: 'Operations Lead', revision: 5 })
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Edit account' }))
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveTextContent('Edit account for operator')
+    expect(dialog).toHaveTextContent('Review the display name and role for operator.')
+    fireEvent.change(within(dialog).getByLabelText('Display name'), { target: { value: 'Operations Lead' } })
+    expect(within(dialog).queryByLabelText('Administrator password')).not.toBeInTheDocument()
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(updateUser).toHaveBeenCalledWith('user-2', { display_name: 'Operations Lead', role: 'operator', revision: 4, password: '' }))
+    expect(await screen.findByText('Updated operator.')).toBeInTheDocument()
+  })
+
+  it('requires administrator confirmation when changing a role', async () => {
+    vi.mocked(updateUser).mockResolvedValue({ ...user, role: 'viewer', revision: 5 })
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Edit account' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Role'), { target: { value: 'viewer' } })
+    const password = within(dialog).getByLabelText('Administrator password')
+    expect(password).toBeRequired()
+    fireEvent.change(password, { target: { value: 'administrator-password' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+    await waitFor(() => expect(updateUser).toHaveBeenCalledWith('user-2', { display_name: 'Operator', role: 'viewer', revision: 4, password: 'administrator-password' }))
+    expect(await screen.findByText('Updated operator.')).toBeInTheDocument()
+  })
+
+  it('closes a stale role editor and requires review of the refreshed account', async () => {
+    vi.mocked(listUsers)
+      .mockResolvedValueOnce({ users: [user, pending] })
+      .mockResolvedValue({ users: [{ ...user, display_name: 'Operations Lead', revision: 5 }, pending] })
+    vi.mocked(updateUser).mockRejectedValueOnce(new APIError('stale', 'conflict', { current: { ...user, revision: 5 } }))
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Edit account' }))
+    const dialog = screen.getByRole('dialog')
+    fireEvent.change(within(dialog).getByLabelText('Role'), { target: { value: 'viewer' } })
+    fireEvent.change(within(dialog).getByLabelText('Administrator password'), { target: { value: 'administrator-password' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Save changes' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('latest details are loaded; review them and reopen Edit account')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText('Operations Lead')).toBeInTheDocument())
+    fireEvent.click(within(row('Operations Lead')).getByRole('button', { name: 'Edit account' }))
+    expect(within(screen.getByRole('dialog')).getByLabelText('Display name')).toHaveValue('Operations Lead')
+  })
+
+  it('clears an old action error when the dialog is cancelled and another account is opened', async () => {
+    vi.mocked(updateUser).mockRejectedValueOnce(new Error('Incorrect administrator password.'))
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Operator')).toBeInTheDocument())
+
+    fireEvent.click(within(row('Operator')).getByRole('button', { name: 'Disable' }))
+    const firstDialog = screen.getByRole('dialog')
+    fireEvent.change(within(firstDialog).getByLabelText('Administrator password'), { target: { value: 'wrong-password' } })
+    fireEvent.click(within(firstDialog).getByRole('button', { name: 'Confirm' }))
+    expect(await within(firstDialog).findByRole('alert')).toHaveTextContent('Incorrect administrator password.')
+    fireEvent.click(within(firstDialog).getByRole('button', { name: 'Cancel' }))
+
+    fireEvent.click(within(row('New User')).getByRole('button', { name: 'Renew activation link' }))
+    const nextDialog = screen.getByRole('dialog')
+    expect(nextDialog).toHaveTextContent('Renew activation link for new-user')
+    expect(within(nextDialog).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('prevents an administrator from selecting a lower role for their own account', async () => {
+    vi.mocked(listUsers).mockResolvedValue({ users: [self, user] })
+    renderWithProviders(<Users />)
+    await waitFor(() => expect(screen.getByText('Site Admin')).toBeInTheDocument())
+
+    fireEvent.click(within(row('Site Admin')).getByRole('button', { name: 'Edit account' }))
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByRole('option', { name: 'Viewer · read only' })).toBeDisabled()
+    expect(within(dialog).getByRole('option', { name: 'Operator · manage scans' })).toBeDisabled()
+    expect(within(dialog).getByRole('option', { name: 'Administrator · full access' })).toBeEnabled()
   })
 
   it('renders API failures without hiding the account list', async () => {

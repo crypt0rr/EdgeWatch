@@ -2,7 +2,7 @@ import { StrictMode, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query'
 import { BrowserRouter, Link, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { Activity, ArrowUp, Bell, Boxes, Building2, ClipboardList, Code2, Gauge, Globe2, LogOut, Menu, ScrollText, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
+import { Activity, ArrowUp, Bell, Boxes, Building2, ClipboardList, Code2, Gauge, Globe2, History, LogOut, Menu, ScrollText, Server, ShieldCheck, UserRound, Wifi, X } from 'lucide-react'
 import { acceptIncident, adminStatus, APIError, getSession, listIncidents, listJobs, setCSRF, setForbiddenHandler, setupStatus, suppressIncident, logout as apiLogout } from './api'
 import type { SessionUser, UnitRef } from './api'
 import { useActivityHeartbeat, useNavigationDrawer } from './components/navigation'
@@ -11,6 +11,7 @@ import { Audit } from './pages/Audit'
 import { PlatformShell } from './pages/platform/PlatformShell'
 import { TotpEnrollmentShell } from './pages/TotpEnrollment'
 import { Dashboard } from './pages/Dashboard'
+import { Activity as ActivityPage } from './pages/Activity'
 import { JobEditor } from './pages/JobEditor'
 import { JobDetail } from './pages/JobDetail'
 import { Activate, activationTokenFromLocation, Login, Setup, SignedInActivation, signInReturnPath } from './pages/Auth'
@@ -113,6 +114,7 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
             void client.invalidateQueries({ queryKey: ['active-scans'] })
             void client.invalidateQueries({ queryKey: ['scans'] })
             void client.invalidateQueries({ queryKey: ['hosts'] })
+            void client.invalidateQueries({ queryKey: ['activity-events'] })
             if (event.job_id) {
               void client.invalidateQueries({ queryKey: ['job-scans', event.job_id] })
               void client.invalidateQueries({ queryKey: ['job-baseline-overview', event.job_id] })
@@ -120,16 +122,22 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
               void client.invalidateQueries({ queryKey: ['latest-successful-results', event.job_id] })
               void client.invalidateQueries({ queryKey: ['scan-cycle', event.job_id] })
               void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+              void client.invalidateQueries({ queryKey: ['job-pending-changes', event.job_id] })
             }
             break
           case 'changes-detected':
           case 'changes-reminder':
+          case 'changes-recovered':
           case 'incident-opened':
           case 'incident-closed':
           case 'incident-accepted':
           case 'incident-suppressed':
             void client.invalidateQueries({ queryKey: ['incidents'] })
-            if (event.job_id) void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+            void client.invalidateQueries({ queryKey: ['activity-events'] })
+            if (event.job_id) {
+              void client.invalidateQueries({ queryKey: ['job', event.job_id] })
+              void client.invalidateQueries({ queryKey: ['job-pending-changes', event.job_id] })
+            }
             if (event.type === 'incident-accepted') {
               void client.invalidateQueries({ queryKey: ['job-baseline-overview', event.job_id] })
               void client.invalidateQueries({ queryKey: ['baseline-hosts', event.job_id] })
@@ -142,6 +150,7 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
           case 'job.restored':
           case 'job.deleted':
             void client.invalidateQueries({ queryKey: ['jobs'] })
+            void client.invalidateQueries({ queryKey: ['activity-events'] })
             if (event.job_id) void client.invalidateQueries({ queryKey: ['job', event.job_id] })
             break
           case 'notification.changed':
@@ -152,6 +161,7 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
           case 'application-updated':
           case 'application-update-available':
             void client.invalidateQueries({ queryKey: ['admin-status'] })
+            if (event.type !== 'application.update_status') void client.invalidateQueries({ queryKey: ['activity-events'] })
             break
           case 'stream_limit':
             // EventSource otherwise reconnects after the server closes a
@@ -178,6 +188,7 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
     ...(hasPermission('jobs.read') ? [{ to: '/jobs', label: 'Jobs', icon: Boxes }] : []),
     ...(hasPermission('hosts.read') ? [{ to: '/hosts', label: 'Hosts', icon: Server }] : []),
     ...(hasPermission('incidents.read') ? [{ to: '/incidents', label: 'Incidents', icon: Activity }] : []),
+    ...(hasPermission('scans.read') ? [{ to: '/activity', label: 'Activity', icon: History }] : []),
     ...(hasPermission('notifications.manage') ? [{ to: '/notifications', label: 'Notifications', icon: Bell }] : []),
     ...(hasPermission('users.manage') ? [{ to: '/users', label: 'Users', icon: UserRound }] : []),
     ...(hasPermission('audit.read') ? [{ to: '/audit', label: 'Audit', icon: ScrollText }] : []),
@@ -211,7 +222,7 @@ export function Shell({ displayName, role, permissions, onLogout, unit }: { disp
       <div className="sidebar-bottom"><div className="user-chip"><span className="avatar">{displayName.trim().charAt(0).toUpperCase() || 'A'}</span><span><small className="app-version">{versionReleaseURL ? <a className="version-link" href={versionReleaseURL} target="_blank" rel="noopener noreferrer" aria-label={`Release notes for EdgeWatch ${version}`} title={`Release notes for EdgeWatch ${version}`}>EdgeWatch {version}</a> : <>EdgeWatch {version}</>}{updateAvailable && update.release_url && <a className="version-update" href={update.release_url} target="_blank" rel="noopener noreferrer" aria-label={`Update available: ${version} to ${update.latest_version ?? 'new release'}`} title={`Update available: ${version} to ${update.latest_version ?? 'new release'}`}><ArrowUp size={13} aria-hidden="true" /></a>}</small><strong>{displayName}</strong><small>{role === 'administrator' ? 'Administrator' : role === 'operator' ? 'Operator' : 'Viewer · read only'}</small></span></div><button className="nav-link quiet" onClick={onLogout}><LogOut size={17} />Sign out</button></div>
     </aside>
     {open && isMobile && <button type="button" aria-label="Close navigation" tabIndex={-1} className="backdrop" onClick={() => setOpen(false)} />}
-    <main ref={mainRef} id="main-content" tabIndex={-1} className="main" inert={isMobile && open ? true : undefined} aria-hidden={isMobile && open ? true : undefined}><header className="topbar"><button ref={menuButtonRef} type="button" aria-label={open ? 'Close navigation' : 'Open navigation'} aria-controls="primary-navigation" aria-expanded={isMobile ? open : false} className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><nav className="breadcrumb" title={breadcrumb} aria-label={`Breadcrumb: ${breadcrumb}`}>{breadcrumb}</nav><div className="topbar-actions"><span className={`status-dot ${visibleLiveState}`} role="status" aria-label={liveLabel} title={liveDescription}><i aria-hidden="true" /><span className="status-dot-label" aria-hidden="true">{liveLabel}</span></span></div></header><div className="content"><Routes><Route path="/" element={hasPermission('overview.read') ? <Dashboard /> : <Navigate to={fallback} replace />} /><Route path="/highlights" element={hasPermission('overview.read') ? <PublicDashboard slug={unit?.slug} /> : <Navigate to={fallback} replace />} /><Route path="/jobs" element={hasPermission('jobs.read') ? <Jobs /> : <Navigate to={fallback} replace />} /><Route path="/jobs/new" element={hasPermission('jobs.write') ? <JobEditor /> : <Navigate to={fallback} replace />} /><Route path="/jobs/:id/scans/:scanId" element={hasPermission('scans.read') ? <JobDetail /> : <Navigate to={fallback} replace />} /><Route path="/jobs/:id" element={hasPermission('jobs.read') ? <JobDetail /> : <Navigate to={fallback} replace />} /><Route path="/jobs/:id/edit" element={hasPermission('jobs.write') ? <JobEditor /> : <Navigate to={fallback} replace />} /><Route path="/jobs/:id/baseline" element={hasPermission('baselines.read') ? <BaselineHosts /> : <Navigate to={fallback} replace />} /><Route path="/jobs/:id/baseline/hosts/:address" element={hasPermission('baselines.read') ? <HostDetail /> : <Navigate to={fallback} replace />} /><Route path="/jobs/:id/scans/:scanId/hosts/:address" element={hasPermission('scans.read') ? <HostDetail /> : <Navigate to={fallback} replace />} /><Route path="/hosts" element={hasPermission('hosts.read') ? <Hosts /> : <Navigate to={fallback} replace />} /><Route path="/scans/:scanId" element={hasPermission('scans.read') ? <ScanDetail /> : <Navigate to={fallback} replace />} /><Route path="/scans/:scanId/hosts/:address" element={hasPermission('scans.read') ? <HostDetail /> : <Navigate to={fallback} replace />} /><Route path="/incidents" element={hasPermission('incidents.read') ? <Incidents /> : <Navigate to={fallback} replace />} /><Route path="/notifications" element={hasPermission('notifications.manage') ? <Notifications /> : <Navigate to={fallback} replace />} /><Route path="/users" element={hasPermission('users.manage') ? <Users /> : <Navigate to={fallback} replace />} /><Route path="/audit" element={hasPermission('audit.read') ? <Audit /> : <Navigate to={home} replace />} /><Route path="/public-dashboard" element={hasPermission('public_dashboard.manage') ? <PublicDashboardAdmin publicSlug={unit?.slug} /> : <Navigate to={fallback} replace />} /><Route path="/scanner-profiles" element={hasPermission('scanner_profiles.read') ? <ScannerProfiles /> : <Navigate to={fallback} replace />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to={home} replace />} /></Routes></div></main>
+    <main ref={mainRef} id="main-content" tabIndex={-1} className="main" inert={isMobile && open ? true : undefined} aria-hidden={isMobile && open ? true : undefined}><header className="topbar"><button ref={menuButtonRef} type="button" aria-label={open ? 'Close navigation' : 'Open navigation'} aria-controls="primary-navigation" aria-expanded={isMobile ? open : false} className="menu-button" onClick={() => setOpen(true)}><Menu size={21} /></button><nav className="breadcrumb" title={breadcrumb} aria-label={`Breadcrumb: ${breadcrumb}`}>{breadcrumb}</nav><div className="topbar-actions"><span className={`status-dot ${visibleLiveState}`} role="status" aria-label={liveLabel} title={liveDescription}><i aria-hidden="true" /><span className="status-dot-label" aria-hidden="true">{liveLabel}</span></span></div></header><div className="content"><Routes><Route path="/" element={hasPermission('overview.read') ? <Dashboard /> : <Navigate to={fallback} replace />} /><Route path="/highlights" element={hasPermission('overview.read') ? <PublicDashboard slug={unit?.slug} /> : <Navigate to={fallback} replace />} /><Route path="/jobs" element={hasPermission('jobs.read') ? <Jobs /> : <Navigate to={fallback} replace />} /><Route path="/jobs/new" element={hasPermission('jobs.write') ? <JobEditor /> : <Navigate to={fallback} replace />} /><Route path="/jobs/:id/scans/:scanId" element={hasPermission('scans.read') ? <JobDetail /> : <Navigate to={fallback} replace />} /><Route path="/jobs/:id" element={hasPermission('jobs.read') ? <JobDetail /> : <Navigate to={fallback} replace />} /><Route path="/jobs/:id/edit" element={hasPermission('jobs.write') ? <JobEditor /> : <Navigate to={fallback} replace />} /><Route path="/jobs/:id/baseline" element={hasPermission('baselines.read') ? <BaselineHosts /> : <Navigate to={fallback} replace />} /><Route path="/jobs/:id/baseline/hosts/:address" element={hasPermission('baselines.read') ? <HostDetail /> : <Navigate to={fallback} replace />} /><Route path="/jobs/:id/scans/:scanId/hosts/:address" element={hasPermission('scans.read') ? <HostDetail /> : <Navigate to={fallback} replace />} /><Route path="/hosts" element={hasPermission('hosts.read') ? <Hosts /> : <Navigate to={fallback} replace />} /><Route path="/scans/:scanId" element={hasPermission('scans.read') ? <ScanDetail /> : <Navigate to={fallback} replace />} /><Route path="/scans/:scanId/hosts/:address" element={hasPermission('scans.read') ? <HostDetail /> : <Navigate to={fallback} replace />} /><Route path="/incidents" element={hasPermission('incidents.read') ? <Incidents /> : <Navigate to={fallback} replace />} /><Route path="/activity" element={hasPermission('scans.read') ? <ActivityPage /> : <Navigate to={fallback} replace />} /><Route path="/notifications" element={hasPermission('notifications.manage') ? <Notifications /> : <Navigate to={fallback} replace />} /><Route path="/users" element={hasPermission('users.manage') ? <Users /> : <Navigate to={fallback} replace />} /><Route path="/audit" element={hasPermission('audit.read') ? <Audit /> : <Navigate to={home} replace />} /><Route path="/public-dashboard" element={hasPermission('public_dashboard.manage') ? <PublicDashboardAdmin publicSlug={unit?.slug} /> : <Navigate to={fallback} replace />} /><Route path="/scanner-profiles" element={hasPermission('scanner_profiles.read') ? <ScannerProfiles /> : <Navigate to={fallback} replace />} /><Route path="/security" element={<Security />} /><Route path="*" element={<Navigate to={home} replace />} /></Routes></div></main>
   </div>
 }
 

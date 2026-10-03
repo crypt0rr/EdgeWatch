@@ -373,6 +373,13 @@ describe('session timezone contract', () => {
 })
 
 describe('API route helpers', () => {
+	it('builds the paginated per-job pending changes endpoint', async () => {
+		const fetchMock = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify({ job_id: 'job/1', job: 'Production', pending_changes: [], pagination: { limit: 10, offset: 20, total: 20, has_more: false, next_offset: null } }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
+		vi.stubGlobal('fetch', fetchMock)
+		await apiRoutes.jobPendingChanges('job/1', 20, 10)
+		expect(String(fetchMock.mock.calls[0][0])).toBe('/api/v1/jobs/job%2F1/pending-changes?limit=10&offset=20')
+	})
+
 	it('builds the latest successful scan endpoint', async () => {
 		const fetchMock = vi.fn(async (input: RequestInfo | URL) => new Response(JSON.stringify({ scan: null }), { status: 200, headers: { 'Content-Type': 'application/json' } }))
 		vi.stubGlobal('fetch', fetchMock)
@@ -407,6 +414,7 @@ describe('API route helpers', () => {
 		await apiRoutes.resetBaseline('job/1')
 		await apiRoutes.approveBaseline('job/1', 'scan/1')
 		await apiRoutes.jobScans('job/1')
+		await apiRoutes.jobPendingChanges('job/1')
 		await apiRoutes.latestSuccessfulScan('job/1')
 		await apiRoutes.jobBaseline('job/1')
 		await apiRoutes.baselineHostRDAP('job/1', '192.0.2.1')

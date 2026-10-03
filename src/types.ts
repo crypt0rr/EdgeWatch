@@ -32,6 +32,22 @@ export type Unit = { target: string; protocol: string; addresses?: string[]; por
 export type Scope = { target: string; protocol: string; ports: string; service_detection: boolean }
 export type Incident = { job_id: string; job: string; incident: { change: { key?: string; kind: string; target: string; protocol?: string; port?: number; old?: string; new?: string; severity: string }; scan_id?: string; opened_at: string; last_seen_at: string; recovery_count?: number } }
 export type Change = { key?: string; kind: string; target: string; protocol?: string; port?: number; old?: string; new?: string; severity: string }
+export type ActivityEvent = {
+  type: string
+  job_id?: string
+  job: string
+  scan_id?: string
+  message: string
+  changes?: Change[]
+  changes_count?: number
+  changes_truncated?: boolean
+  created_at: string
+  previous_version?: string
+  current_version?: string
+  latest_version?: string
+  release_url?: string
+}
+export type PendingChange = { key: string; change: Change; count: number }
 
 export type StateReason = { reason: string; count: number }
 export type StateSummary = { state: string; count: number; reasons?: StateReason[] }

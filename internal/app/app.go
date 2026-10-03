@@ -804,17 +804,48 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 			legacySelectionCaptured = true
 		}
 	}
+	var scanErr error
+	completionEvent := model.Event{Type: "scan.completed", JobID: jobID, Job: job.Name, ScanID: scan.ID}
+	completionPublished := false
+	lifecycleExitMessage := ""
+	publishCompletion := func(message string) {
+		if completionPublished {
+			return
+		}
+		completionPublished = true
+		completionEvent.Message = message
+		completionEvent.CreatedAt = scan.FinishedAt
+		if completionEvent.CreatedAt.IsZero() {
+			completionEvent.CreatedAt = time.Now().UTC()
+		}
+		a.emitTenantEvents(scope, []model.Event{completionEvent})
+	}
 	// Publish lifecycle updates to the web console without persisting them as
 	// alert events. This keeps SSE subscribers responsive even when a scan has
 	// no baseline or incident event to emit.
 	a.emitTenantEvents(scope, []model.Event{{Type: "scan.started", JobID: jobID, Job: job.Name, ScanID: scan.ID, Message: "Scan started", CreatedAt: started}})
+	defer func() {
+		if completionPublished {
+			return
+		}
+		if lifecycleExitMessage == "" {
+			switch {
+			case errors.Is(scanErr, ErrScanCycleStalled):
+				lifecycleExitMessage = "Scan attempt stopped because its resumable cycle is stalled"
+			case scanErr != nil:
+				lifecycleExitMessage = "Scan attempt stopped before finalization"
+			default:
+				lifecycleExitMessage = "Scan attempt ended before finalization"
+			}
+		}
+		publishCompletion(lifecycleExitMessage)
+	}()
 	defer func() {
 		releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer releaseCancel()
 		_ = system.ReleaseJobLease(releaseCtx, leaseKey, leaseOwner)
 	}()
 	var snapshot model.Snapshot
-	var scanErr error
 	resumableRun := false
 	// The scanner planner owns both ordinary Nmap units and Naabu pipeline
 	// batches. Naabu units checkpoint a pinned address batch after discovery and
@@ -830,6 +861,7 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 				// A scheduled trigger that races with a newly stalled cycle must
 				// not create a synthetic failed scan or notification. The cycle's
 				// original stall attempt already recorded the actionable alert.
+				lifecycleExitMessage = "Scan attempt stopped because its resumable cycle became stalled"
 				return model.Scan{}, nil, scanErr
 			}
 		}
@@ -912,7 +944,6 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 	// persistence context keeps ctx's values but not its cancellation.
 	persistCtx, persistCancel := context.WithTimeout(context.WithoutCancel(ctx), persistTimeout)
 	defer persistCancel()
-	completionEvent := model.Event{Type: "scan.completed", JobID: jobID, Job: job.Name, ScanID: scan.ID, Message: "Scan " + scan.Status, CreatedAt: scan.FinishedAt}
 	var destinations []string
 	if managed {
 		var destinationErr error
@@ -927,8 +958,10 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 			// cannot be read. Runtime state is deliberately left unchanged,
 			// matching the pre-transaction behavior.
 			if saveErr := system.SaveScan(persistCtx, scan); saveErr != nil {
+				lifecycleExitMessage = "Scan attempt could not be finalized because its result could not be saved"
 				return scan, nil, saveErr
 			}
+			lifecycleExitMessage = "Scan attempt could not be finalized because notification destinations were unavailable"
 			return scan, nil, destinationErr
 		}
 	}
@@ -970,16 +1003,15 @@ func (a *App) runJob(ctx context.Context, scope store.TenantScope, job config.Jo
 		// ran it. The store recorded the scan as the pause cancelled it and
 		// changed no baseline, incident or alert, so there are no events.
 		a.Logger.Info("scan finished after its business unit was paused; runtime state unchanged", "job", job.Name, "scan_id", scan.ID, "status", scan.Status)
-		completionEvent.Message = "Scan " + scan.Status
-		a.emitTenantEvents(scope, []model.Event{completionEvent})
+		publishCompletion("Scan " + scan.Status)
 		return scan, nil, errors.Join(finalizeErr, scanErr)
 	}
 	if finalizeErr != nil {
-		a.emitTenantEvents(scope, []model.Event{completionEvent})
+		publishCompletion("Scan " + scan.Status)
 		return scan, nil, finalizeErr
 	}
 	a.emitTenantEvents(scope, events)
-	a.emitTenantEvents(scope, []model.Event{completionEvent})
+	publishCompletion("Scan " + scan.Status)
 	if !managed {
 		if err := a.Notifier.Queue(persistCtx, events); err != nil {
 			return scan, events, err

@@ -4,7 +4,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, Bell, ChevronDown, Info, Plus, Save, Trash2, TriangleAlert } from 'lucide-react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { APIError, BUILTIN_NAABU_PROFILE_ID, createJob, getJob, getSession, listNotificationDestinations, listScannerProfiles, scannerCapabilities, scheduleSuggestion, updateJob } from '../api'
 import type { JobForm, Protocol } from '../types'
 import type { ScannerCapabilities, ScannerProfile } from '../api'
@@ -68,6 +68,7 @@ export function JobEditor() {
   const { id } = useParams()
   const edit = !!id
   const navigate = useNavigate()
+  const location = useLocation()
   const client = useQueryClient()
   const existing = useQuery({ queryKey: ['job', id], queryFn: () => getJob(id!), enabled: edit })
   const session = useQuery({ queryKey: ['session'], queryFn: getSession })
@@ -89,11 +90,14 @@ export function JobEditor() {
   const [dismissedSuggestion, setDismissedSuggestion] = useState('')
   const [remoteRevision, setRemoteRevision] = useState<number | null>(null)
   const [rebaselinePrompt, setRebaselinePrompt] = useState<{ values: JobFormFields; changes: string[] } | null>(null)
+  const [discardNavigation, setDiscardNavigation] = useState<string | null>(null)
   const loadedRevision = useRef<{ id?: string; revision: number } | null>(null)
+  const cronInputRef = useRef<HTMLInputElement | null>(null)
   const { register, handleSubmit, reset, watch, setValue, formState: { errors: formErrors, isDirty } } = useForm<JobFormFields>({
     defaultValues: defaults,
     resolver: zodResolver(jobFormSchema),
   })
+  const scheduleRegister = register('schedule')
   const schedule = watch('schedule')
   const timezone = watch('timezone')
   const timing = watch('timing')
@@ -124,6 +128,43 @@ export function JobEditor() {
   const showSuggestion = !!currentSuggestion?.suggested && suggestionKey !== dismissedSuggestion
 
   const hasDraftChanges = isDirty || draftDirty
+  const requestNavigation = (destination: string) => {
+    if (saving) return
+    if (hasDraftChanges) {
+      setDiscardNavigation(destination)
+      return
+    }
+    navigate(destination)
+  }
+
+  useEffect(() => {
+    if (!hasDraftChanges || saving) return
+    const currentPath = `${location.pathname}${location.search}${location.hash}`
+    const onInternalLinkClick = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+      const target = event.target
+      if (!(target instanceof Element)) return
+      const anchor = target.closest<HTMLAnchorElement>('a[href]')
+      if (!anchor || anchor.hasAttribute('download') || (anchor.target && anchor.target !== '_self')) return
+      const destination = new URL(anchor.href, window.location.href)
+      if (destination.origin !== window.location.origin) return
+      const nextPath = `${destination.pathname}${destination.search}${destination.hash}`
+      if (nextPath === currentPath) return
+      event.preventDefault()
+      event.stopPropagation()
+      setDiscardNavigation(nextPath)
+    }
+    const onBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+    document.addEventListener('click', onInternalLinkClick, true)
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => {
+      document.removeEventListener('click', onInternalLinkClick, true)
+      window.removeEventListener('beforeunload', onBeforeUnload)
+    }
+  }, [hasDraftChanges, location.hash, location.pathname, location.search, saving])
   const applyServerJob = (data: NonNullable<typeof existing.data>) => {
     reset({ ...data.job, dns_comparison_mode: data.job.dns_comparison_mode || 'address_sensitive' })
     setTargets(data.job.targets)
@@ -360,8 +401,15 @@ export function JobEditor() {
         <aside className="editor-side">
           <div className="panel form-panel sticky">
             <div className="panel-heading"><div><h2>Schedule</h2><p className="muted">When should this job run?</p></div><ChevronDown size={17} className="muted-icon" /></div>
-            <label>Preset<select value={presetFor(schedule)} onChange={(event) => { if (event.target.value !== 'custom') { setDraftDirty(true); setValue('schedule', event.target.value, { shouldDirty: true }) } }}><option value="0 */6 * * *">Every 6 hours</option><option value="0 * * * *">Every hour</option><option value="0 3 * * *">Daily at 03:00</option><option value="0 3 * * 0">Weekly on Sunday</option><option value="custom">Custom cron</option></select></label>
-            <label>Five-field cron<input {...register('schedule')} placeholder="minute hour day month weekday" />{(formErrors.schedule?.message || fieldErrors.schedule) && <small className="field-error">{formErrors.schedule?.message || fieldErrors.schedule}</small>}<small>Uses the server’s standard cron parser.</small></label>
+            <label>Preset<select value={presetFor(schedule)} onChange={(event) => {
+              if (event.target.value === 'custom') {
+                cronInputRef.current?.focus()
+                return
+              }
+              setDraftDirty(true)
+              setValue('schedule', event.target.value, { shouldDirty: true })
+            }}><option value="0 */6 * * *">Every 6 hours</option><option value="0 * * * *">Every hour</option><option value="0 3 * * *">Daily at 03:00</option><option value="0 3 * * 0">Weekly on Sunday</option><option value="custom">Custom cron</option></select></label>
+            <label>Five-field cron<input {...scheduleRegister} ref={node => { scheduleRegister.ref(node); cronInputRef.current = node }} id="job-schedule" placeholder="minute hour day month weekday" />{(formErrors.schedule?.message || fieldErrors.schedule) && <small className="field-error">{formErrors.schedule?.message || fieldErrors.schedule}</small>}<small>Uses the server’s standard cron parser.</small></label>
             <label>Timezone<input {...register('timezone')} placeholder="Europe/Amsterdam" />{(formErrors.timezone?.message || fieldErrors.timezone) && <small className="field-error">{formErrors.timezone?.message || fieldErrors.timezone}</small>}<small className="helper">Daylight-saving transitions follow standard cron rules: skipped local times do not run, while repeated fall-back times may run twice. Choose a time outside transition hours when exact cadence matters.</small></label>
             {showSuggestion && currentSuggestion?.nearest && <div className="notice schedule-suggestion" role="status"><Info size={16} /><div className="schedule-suggestion-copy"><strong>Stagger scheduled scans</strong><span>{currentSuggestion.nearest.name} is next at {nearestRun?.time} ({nearestRun?.zone}; {formatGap(currentSuggestion.gap_minutes)}). Starting 30 minutes {currentSuggestion.offset_minutes && currentSuggestion.offset_minutes < 0 ? 'earlier' : 'later'} keeps scheduled work apart.</span><small>You can keep this schedule when overlapping runs are intentional.</small></div>{currentSuggestion.suggested_schedule && <button type="button" className="button secondary" onClick={() => { setDraftDirty(true); setDismissedSuggestion(suggestionKey); setValue('schedule', currentSuggestion.suggested_schedule!, { shouldDirty: true, shouldValidate: true }) }}>Use {currentSuggestion.offset_minutes && currentSuggestion.offset_minutes < 0 ? 'earlier' : 'later'} time</button>}</div>}
             <label className="switch-row"><input type="checkbox" checked={scheduleEnabled} onChange={(event) => { setDraftDirty(true); setScheduleEnabled(event.target.checked) }} /><span><strong>Schedule enabled</strong><small>Pause future scheduled runs without archiving this job.</small></span></label>
@@ -377,10 +425,11 @@ export function JobEditor() {
         <div className="editor-actions">
           {error && <div className="form-error" role="alert">{error}</div>}
           <button disabled={saving} className="button primary" type="submit"><Save size={16} />{saving ? 'Saving…' : edit ? 'Save changes' : 'Create job'}</button>
-          <button type="button" className="button ghost" onClick={() => navigate(edit ? `/jobs/${id}` : '/jobs')}>Cancel</button>
+          <button type="button" className="button ghost" onClick={() => requestNavigation(edit ? `/jobs/${id}` : '/jobs')}>Cancel</button>
         </div>
       </form>
       {rebaselinePrompt && <ActionDialog title="Confirm scan-scope change" description="This changes the scan scope. The current baseline and active incidents will be cleared, and a new baseline will be learned." confirmLabel="Reset baseline and save" destructive onConfirm={async () => { await save(rebaselinePrompt.values, true) }} onCancel={() => { setRebaselinePrompt(null); setError('Scope change cancelled.') }} error={error}>{rebaselinePrompt.changes.length > 0 && <ul className="scope-change-list">{rebaselinePrompt.changes.map(change => <li key={change}>{change}</li>)}</ul>}</ActionDialog>}
+      {discardNavigation && <ActionDialog title="Discard unsaved changes?" description="Your job configuration changes have not been saved. Leave this page and discard the draft?" confirmLabel="Discard changes" destructive onConfirm={() => { const destination = discardNavigation; setDiscardNavigation(null); navigate(destination) }} onCancel={() => setDiscardNavigation(null)} />}
     </section>
   )
 }
@@ -397,7 +446,7 @@ function ProtocolCard({ label, enabled, onToggle, protocol, setProtocol, profile
   const naabu = { ...defaults, ...(selectedProfile?.definition.naabu ?? {}), ...(protocol?.naabu ?? {}) }
   const adjustable = selectedProfile?.definition.operator_adjustable ?? []
   const canTune = (field: string) => !selectedProfile || adjustable.includes(field)
-  const updateNaabu = (field: string, value: number | string | boolean) => setProtocol({ ...protocol!, naabu: { ...naabu, [field]: value } })
+  const updateNaabu = (field: string, value: number | string | boolean | undefined) => setProtocol({ ...protocol!, naabu: { ...naabu, [field]: value } })
   const profileValues = (profile?: ScannerProfile, fallbackEngine = engine) => ({
     profile_id: profile?.id,
     profile_revision: profile?.revision,
@@ -449,14 +498,15 @@ function ProtocolCard({ label, enabled, onToggle, protocol, setProtocol, profile
       {label === 'TCP' && <label>Connection mode<select value={protocol.mode ?? 'syn'} onChange={(event) => setProtocol({ ...protocol, mode: event.target.value })}><option value="syn">SYN (requires NET_RAW)</option><option value="connect">TCP connect</option></select></label>}
       <label className="switch-row"><input type="checkbox" checked={protocol.service_detection} onChange={(event) => setProtocol({ ...protocol, service_detection: event.target.checked })} /><span><strong>Service detection</strong><small>Identify likely services on open ports.</small></span></label>
       {engine === 'naabu_nmap' && <>
+        <p className="helper">Leave a number blank to use the selected scanner profile’s default.</p>
         <div className="two-fields">
           <label>Discovery type<select value={naabu.scan_type} disabled={!canTune('scan_type')} onChange={(event) => updateNaabu('scan_type', event.target.value)}><option value="connect">Connect</option><option value="syn">SYN</option></select></label>
-          <label>Rate<input type="number" min={1} max={100000} value={naabu.rate} disabled={!canTune('rate')} onChange={(event) => updateNaabu('rate', Number(event.target.value))} /></label>
-          <label>Workers<input type="number" min={1} max={1024} value={naabu.workers} disabled={!canTune('workers')} onChange={(event) => updateNaabu('workers', Number(event.target.value))} /></label>
-          <label>Retries<input type="number" min={0} max={10} value={naabu.retries} disabled={!canTune('retries')} onChange={(event) => updateNaabu('retries', Number(event.target.value))} /></label>
-          <label>Probe timeout (ms)<input type="number" min={100} max={60000} value={naabu.timeout_ms} disabled={!canTune('timeout_ms')} onChange={(event) => updateNaabu('timeout_ms', Number(event.target.value))} /></label>
-          <label>Warm-up (seconds)<input type="number" min={0} max={60} value={naabu.warm_up_seconds} disabled={!canTune('warm_up_seconds')} onChange={(event) => updateNaabu('warm_up_seconds', Number(event.target.value))} /></label>
-          <label>Address batch size<input type="number" min={1} max={256} value={naabu.address_batch_size} disabled={!canTune('address_batch_size')} onChange={(event) => updateNaabu('address_batch_size', Number(event.target.value))} /></label>
+          <label>Rate<input type="number" min={1} max={100000} value={naabu.rate ?? ''} disabled={!canTune('rate')} onChange={(event) => updateNaabu('rate', optionalNumber(event.target.value))} /></label>
+          <label>Workers<input type="number" min={1} max={1024} value={naabu.workers ?? ''} disabled={!canTune('workers')} onChange={(event) => updateNaabu('workers', optionalNumber(event.target.value))} /></label>
+          <label>Retries<input type="number" min={0} max={10} value={naabu.retries ?? ''} disabled={!canTune('retries')} onChange={(event) => updateNaabu('retries', optionalNumber(event.target.value))} /></label>
+          <label>Probe timeout (ms)<input type="number" min={100} max={60000} value={naabu.timeout_ms ?? ''} disabled={!canTune('timeout_ms')} onChange={(event) => updateNaabu('timeout_ms', optionalNumber(event.target.value))} /></label>
+          <label>Warm-up (seconds)<input type="number" min={0} max={60} value={naabu.warm_up_seconds ?? ''} disabled={!canTune('warm_up_seconds')} onChange={(event) => updateNaabu('warm_up_seconds', optionalNumber(event.target.value))} /></label>
+          <label>Address batch size<input type="number" min={1} max={256} value={naabu.address_batch_size ?? ''} disabled={!canTune('address_batch_size')} onChange={(event) => updateNaabu('address_batch_size', optionalNumber(event.target.value))} /></label>
           <label className="switch-row"><input type="checkbox" checked={naabu.verify} disabled={!canTune('verify')} onChange={(event) => updateNaabu('verify', event.target.checked)} /><span><strong>Verify discoveries</strong><small>Ask Naabu to re-check discovered ports.</small></span></label>
         </div>
         {protocol.nse_profile && <div className="helper">Approved NSE profile: <strong>{protocol.nse_profile}</strong>{protocol.nse_args && Object.keys(protocol.nse_args).length ? ` · ${Object.keys(protocol.nse_args).length} structured argument${Object.keys(protocol.nse_args).length === 1 ? '' : 's'}` : ''}</div>}
@@ -468,6 +518,10 @@ function ProtocolCard({ label, enabled, onToggle, protocol, setProtocol, profile
 
 function presetFor(schedule: string) {
   return ['0 */6 * * *', '0 * * * *', '0 3 * * *', '0 3 * * 0'].includes(schedule) ? schedule : 'custom'
+}
+
+function optionalNumber(value: string): number | undefined {
+  return value.trim() === '' ? undefined : Number(value)
 }
 
 // Show the neighbouring job's next run in the timezone the notice names: its
